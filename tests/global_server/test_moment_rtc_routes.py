@@ -125,7 +125,6 @@ async def client(tmp_dir, keypair):
                 instance_id="inst-author",
                 display_name="Author",
                 public_key=pk_hex,
-                inbox_url="http://author/wh",
                 status="active",
             )
         )
@@ -316,7 +315,6 @@ async def test_answer_from_wrong_instance_returns_403(client):
             instance_id="inst-other",
             display_name="Other",
             public_key=other_pk,
-            inbox_url="http://other/wh",
             status="active",
         )
     )
@@ -402,7 +400,6 @@ async def test_relay_upload_wrong_instance_returns_403(client):
             instance_id="inst-other",
             display_name="Other",
             public_key=other_pk,
-            inbox_url="http://other/wh",
             status="active",
         )
     )
@@ -455,7 +452,6 @@ async def test_author_ice_wrong_instance_returns_403(client):
             instance_id="inst-other",
             display_name="Other",
             public_key=other_pk,
-            inbox_url="http://other/wh",
             status="active",
         )
     )

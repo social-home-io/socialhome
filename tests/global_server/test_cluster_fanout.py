@@ -146,7 +146,6 @@ async def test_two_node_sync_end_to_end(tmp_dir, tmp_path_factory, fast_sync_ret
             instance_id="owner.home",
             display_name="Owner",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
         await a.app[gfs_fed_repo_key].upsert_instance(owner)
@@ -291,7 +290,6 @@ async def test_post_to_peer_raises_on_non_2xx(
                 instance_id="x",
                 display_name="X",
                 public_key="aa" * 32,
-                inbox_url="http://x",
                 status="active",
             )
         )
@@ -420,7 +418,6 @@ async def test_cluster_disabled_noops(disabled_app):
             instance_id="x",
             display_name="X",
             public_key="aa" * 32,
-            inbox_url="http://x",
         )
     )
     await svc.sync_space(GlobalSpace(space_id="s", owning_instance="o"))
@@ -465,7 +462,6 @@ async def test_apply_sync_client_banned_wins_lww(started_app):
         {
             "instance_id": "x",
             "public_key": "aa" * 32,
-            "inbox_url": "http://x",
             "status": "banned",
         },
     )
@@ -474,7 +470,6 @@ async def test_apply_sync_client_banned_wins_lww(started_app):
         {
             "instance_id": "x",
             "public_key": "aa" * 32,
-            "inbox_url": "http://x",
             "status": "active",
         },
     )
@@ -491,7 +486,6 @@ async def test_apply_sync_space_banned_wins_lww(started_app):
         {
             "instance_id": "o",
             "public_key": "aa" * 32,
-            "inbox_url": "http://o",
             "status": "active",
         },
     )
@@ -525,7 +519,6 @@ async def test_apply_sync_space_withdrawn_wins_lww(started_app):
         {
             "instance_id": "o",
             "public_key": "aa" * 32,
-            "inbox_url": "http://o",
             "status": "active",
         },
     )
@@ -561,7 +554,6 @@ async def test_apply_sync_space_preserves_pin_icon_and_colour(started_app):
         {
             "instance_id": "o",
             "public_key": "aa" * 32,
-            "inbox_url": "http://o",
             "status": "active",
         },
     )
@@ -617,12 +609,16 @@ async def test_wire_helpers_roundtrip_client_space_report():
         instance_id="x",
         display_name="X",
         public_key="aa" * 32,
-        inbox_url="http://x",
         status="active",
         auto_accept=True,
         connected_at="2026-01-01T00:00:00",
     )
-    assert _wire_to_client(cluster_mod._client_to_wire(c)) == c
+    wire = cluster_mod._client_to_wire(c)
+    assert _wire_to_client(wire) == c
+    # The GFS keeps no household address: a replicated client row never
+    # carries one, and one from a not-yet-upgraded node is ignored.
+    assert "inbox_url" not in wire
+    assert _wire_to_client({**wire, "inbox_url": "http://x/wh"}) == c
 
     s = GlobalSpace(
         space_id="s",
@@ -680,7 +676,6 @@ async def _cert_world(started_app):
         {
             "instance_id": owner_id,
             "public_key": owner.public_key.hex(),
-            "inbox_url": "http://o",
             "status": "active",
         },
     )
@@ -756,7 +751,6 @@ async def test_cluster_sync_new_row_drops_an_invalid_cert(started_app):
         {
             "instance_id": owner_id,
             "public_key": owner.public_key.hex(),
-            "inbox_url": "http://o",
             "status": "active",
         },
     )

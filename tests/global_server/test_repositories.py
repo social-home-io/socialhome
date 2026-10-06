@@ -46,7 +46,6 @@ async def test_list_instances_filtered_by_status(fed):
             instance_id="a",
             display_name="A",
             public_key="aa" * 32,
-            inbox_url="http://a",
             status="pending",
         )
     )
@@ -55,7 +54,6 @@ async def test_list_instances_filtered_by_status(fed):
             instance_id="b",
             display_name="B",
             public_key="bb" * 32,
-            inbox_url="http://b",
             status="active",
         )
     )
@@ -71,7 +69,6 @@ async def test_upsert_instance_round_trips_keywrap_fields(fed):
             instance_id="kw",
             display_name="KW",
             public_key="aa" * 32,
-            inbox_url="http://kw",
             keywrap_public_key="dd" * 32,
             kem_suite="x25519",
         )
@@ -88,7 +85,6 @@ async def test_get_instance_legacy_row_without_keywrap_is_empty(fed):
             instance_id="legacy",
             display_name="L",
             public_key="aa" * 32,
-            inbox_url="http://l",
         )
     )
     got = await fed.get_instance("legacy")
@@ -104,7 +100,6 @@ async def test_upsert_instance_round_trips_keywrap_sig(fed):
             instance_id="kws",
             display_name="KWS",
             public_key="aa" * 32,
-            inbox_url="http://kws",
             keywrap_public_key="dd" * 32,
             kem_suite="x25519",
             keywrap_sig="c2ln",
@@ -121,7 +116,6 @@ async def test_set_instance_display_name_updates_only_name(fed):
             instance_id="rn",
             display_name="Old",
             public_key="cc" * 32,
-            inbox_url="http://rn",
             status="active",
         )
     )
@@ -140,7 +134,6 @@ async def test_list_spaces_for_instance(fed):
             instance_id="owner",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o",
             status="active",
         )
     )
@@ -168,7 +161,6 @@ async def test_remove_subscriber_updates_count(fed):
             instance_id="o",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o",
             status="active",
         )
     )
@@ -177,7 +169,6 @@ async def test_remove_subscriber_updates_count(fed):
             instance_id="sub",
             display_name="S",
             public_key="bb" * 32,
-            inbox_url="http://s",
             status="active",
         )
     )
@@ -206,7 +197,6 @@ async def test_purge_subscribers_drops_every_seat_and_zeroes_the_count(fed):
                 instance_id=iid,
                 display_name=iid,
                 public_key="aa" * 32,
-                inbox_url=f"http://{iid}",
                 status="active",
             )
         )
@@ -231,7 +221,6 @@ async def test_upsert_space_round_trips_join_mode(fed):
             instance_id="o",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o",
             status="active",
         )
     )
@@ -263,7 +252,6 @@ async def test_upsert_space_round_trips_allow_subscribers(fed):
             instance_id="o2",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o",
             status="active",
         )
     )
@@ -300,7 +288,6 @@ async def test_list_subscribers_with_keys_joins_client_instances(fed):
             instance_id="o",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o",
             status="active",
         )
     )
@@ -309,7 +296,6 @@ async def test_list_subscribers_with_keys_joins_client_instances(fed):
             instance_id="sub-kw",
             display_name="WithKeywrap",
             public_key="bb" * 32,
-            inbox_url="http://kw",
             status="active",
             keywrap_public_key="cc" * 32,
             kem_suite="x25519",
@@ -321,7 +307,6 @@ async def test_list_subscribers_with_keys_joins_client_instances(fed):
             instance_id="sub-bare",
             display_name="NoKeywrap",
             public_key="dd" * 32,
-            inbox_url="http://bare",
             status="active",
         )
     )
@@ -504,7 +489,6 @@ async def _owner(fed, instance_id: str = "o") -> None:
             instance_id=instance_id,
             display_name=instance_id,
             public_key="aa" * 32,
-            inbox_url="http://o",
             status="active",
         )
     )
@@ -629,7 +613,6 @@ async def test_list_subscribed_spaces_returns_only_subscriptions(fed):
                 instance_id=iid,
                 display_name=iid,
                 public_key="aa" * 32,
-                inbox_url=f"http://{iid}",
                 status="active",
             )
         )
@@ -668,7 +651,6 @@ async def _listed_space(fed, space_id: str = "inv-sp") -> None:
             instance_id="inv-owner",
             display_name="Owner",
             public_key="aa" * 32,
-            inbox_url="http://owner",
             status="active",
         )
     )
@@ -800,7 +782,6 @@ async def _owner_row(repo) -> None:
             instance_id="o",
             display_name="O",
             public_key="ee" * 32,
-            inbox_url="http://o",
             status="active",
         )
     )
@@ -1085,7 +1066,6 @@ async def test_recently_seen_subscribers_need_a_held_ws_session(gfs_db):
                 instance_id=iid,
                 display_name=iid,
                 public_key="ab" * 32,
-                inbox_url="http://x",
                 status=status,
             )
         )

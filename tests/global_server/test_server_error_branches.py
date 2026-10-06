@@ -8,7 +8,6 @@ unknown-NODE_* branches that the success-path tests skip — plus
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import os
@@ -17,7 +16,8 @@ import time
 from dataclasses import replace
 
 import pytest
-from aiohttp import FormData, web
+import aiohttp
+from aiohttp import FormData
 from PIL import Image
 from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
@@ -86,7 +86,6 @@ def _sign_canonical(body: dict, seed: bytes) -> tuple[bytes, str]:
 
 #: A closed loopback port — a delivery attempt is refused immediately, with no
 #: DNS lookup and nothing leaving the host.
-_UNREACHABLE_INBOX = "http://127.0.0.1:1/wh"
 
 
 @pytest.fixture
@@ -99,16 +98,13 @@ async def client(tmp_dir):
             hash_password("admin-pw"),
         )
         await tc.post("/admin/login", json={"password": "admin-pw"})
-        # Pre-register a single active peer for signature-aware tests. Its
-        # inbox is a closed loopback port: a fan-out to it fails at once with
-        # no DNS lookup (``peer.home`` used to leave the process to resolve).
+        # Pre-register a single active peer for signature-aware tests.
         seed, pub_hex = _gen_ed25519()
         await app[gfs_fed_repo_key].upsert_instance(
             ClientInstance(
                 instance_id="peer.home",
                 display_name="Peer",
                 public_key=pub_hex,
-                inbox_url=_UNREACHABLE_INBOX,
                 status="active",
             )
         )
@@ -717,115 +713,102 @@ async def test_header_image_upload_rejects_non_image(client):
     assert resp.status == 415
 
 
-# ─── Federation _fan_out via a real subscriber HTTPS inbox ──────────────
+# ─── Federation _fan_out never POSTs to a household ────────────────────
 
 
-async def test_fan_out_delivers_to_real_subscriber_inbox(
+async def test_publish_never_posts_to_a_subscriber_without_a_socket(
     tmp_dir,
     tmp_path_factory,
+    monkeypatch,
 ):
-    """A real subscriber HTTPS inbox receives the published event over HTTP.
-
-    Spins up a mini aiohttp app that records every POST to ``/wh``,
-    registers it as a GFS subscriber, then publishes an event — the
-    federation service's ``_fan_out`` -> HTTPS-inbox path must deliver.
+    """A subscriber whose ``/gfs/ws`` socket is down is not reached, and the
+    GFS opens no outbound HTTP connection to it: the connection server holds
+    no household address since the HTTPS-inbox fallback was removed.
     """
-    received = []
+    posted: list[str] = []
+    real_post = aiohttp.ClientSession.post
 
-    async def _wh_handler(request: web.Request) -> web.Response:
-        received.append(await request.json())
-        return web.json_response({"ok": True})
+    def _spy_post(self, url, *a, **kw):
+        posted.append(str(url))
+        return real_post(self, url, *a, **kw)
 
-    sub_app = web.Application()
-    sub_app.router.add_post("/wh", _wh_handler)
-    sub_server = TestServer(sub_app)
-    await sub_server.start_server()
-    try:
-        sub_url = str(sub_server.make_url("/wh"))
-        gfs_app = create_gfs_app(_config(tmp_path_factory.mktemp("gfs-pub")))
-        async with TestClient(TestServer(gfs_app)) as tc:
-            sub_seed, sub_pub = _gen_ed25519()
-            pub_seed, pub_pub = _gen_ed25519()
-            # Seed the subscriber + publisher into the fed repo with real keys.
-            await gfs_app[gfs_fed_repo_key].upsert_instance(
-                ClientInstance(
-                    instance_id="sub.home",
-                    display_name="Sub",
-                    public_key=sub_pub,
-                    inbox_url=sub_url,
-                    status="active",
-                )
+    monkeypatch.setattr(aiohttp.ClientSession, "post", _spy_post)
+    gfs_app = create_gfs_app(_config(tmp_path_factory.mktemp("gfs-pub")))
+    async with TestClient(TestServer(gfs_app)) as tc:
+        sub_seed, sub_pub = _gen_ed25519()
+        pub_seed, pub_pub = _gen_ed25519()
+        # Seed the subscriber + publisher into the fed repo with real keys.
+        await gfs_app[gfs_fed_repo_key].upsert_instance(
+            ClientInstance(
+                instance_id="sub.home",
+                display_name="Sub",
+                public_key=sub_pub,
+                status="active",
             )
-            await gfs_app[gfs_fed_repo_key].upsert_instance(
-                ClientInstance(
-                    instance_id="pub.home",
-                    display_name="Pub",
-                    public_key=pub_pub,
-                    inbox_url="http://pub",
-                    status="active",
-                )
+        )
+        await gfs_app[gfs_fed_repo_key].upsert_instance(
+            ClientInstance(
+                instance_id="pub.home",
+                display_name="Pub",
+                public_key=pub_pub,
+                status="active",
             )
-            # pub.home publishes the space so it's a real subscribe target.
-            pub_body = {
-                "owning_instance": "pub.home",
-                "name": "XYZ",
-                "description": "",
-                "about_markdown": "",
-                "cover_url": "",
-                "icon_url": "",
-                "min_age": 0,
-                "category": "general",
-                "join_mode": "open",
-                # Subscribable ⇒ publicly readable; this flag says so.
-                "allow_subscribers": True,
-                "accent_color": "#D2542A",
-                "primary_color": "#D2542A",
-            }
-            space_seed, space_pub = _gen_ed25519()
-            pub_body["identity_public_key"] = space_pub
-            signed_pub = _sign({**pub_body, "space_id": "sp-xyz"}, pub_seed)
-            resp = await tc.post(
-                "/gfs/spaces/sp-xyz/publish",
-                json={**pub_body, "signature": signed_pub["signature"]},
-            )
-            assert resp.status == 200
-            ts = _now_iso()
-            signed_sub = _sign(
-                {
-                    "action": "subscribe",
-                    "instance_id": "sub.home",
-                    "space_id": "sp-xyz",
-                    "ts": ts,
-                },
-                sub_seed,
-            )
-            resp = await tc.post(
-                "/gfs/subscribe",
-                json={
-                    "instance_id": "sub.home",
-                    "space_id": "sp-xyz",
-                    "ts": ts,
-                    "signature": signed_sub["signature"],
-                },
-            )
-            assert resp.status == 200
-            event_body = {
+        )
+        # pub.home publishes the space so it's a real subscribe target.
+        pub_body = {
+            "owning_instance": "pub.home",
+            "name": "XYZ",
+            "description": "",
+            "about_markdown": "",
+            "cover_url": "",
+            "icon_url": "",
+            "min_age": 0,
+            "category": "general",
+            "join_mode": "open",
+            # Subscribable ⇒ publicly readable; this flag says so.
+            "allow_subscribers": True,
+            "accent_color": "#D2542A",
+            "primary_color": "#D2542A",
+        }
+        space_seed, space_pub = _gen_ed25519()
+        pub_body["identity_public_key"] = space_pub
+        signed_pub = _sign({**pub_body, "space_id": "sp-xyz"}, pub_seed)
+        resp = await tc.post(
+            "/gfs/spaces/sp-xyz/publish",
+            json={**pub_body, "signature": signed_pub["signature"]},
+        )
+        assert resp.status == 200
+        ts = _now_iso()
+        signed_sub = _sign(
+            {
+                "action": "subscribe",
+                "instance_id": "sub.home",
                 "space_id": "sp-xyz",
-                "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-                "payload": _authority_payload(space_seed, space_id="sp-xyz"),
-            }
-            resp = await tc.post("/gfs/publish", json=event_body)
-            assert resp.status == 200
-            assert (await resp.json())["delivered_to"] == 1
-        # Wait for the HTTPS inbox to capture the event.
-        await asyncio.sleep(0.05)
-        assert received
-        assert received[0]["event_type"] == AUTHORITY_EVENT_SPACE_POST_PUBLIC
-        # The HTTPS-inbox body is identity-free too.
-        assert set(received[0]) == {"space_id", "event_type", "payload"}
-        assert "pub.home" not in json.dumps(received[0])
-    finally:
-        await sub_server.close()
+                "ts": ts,
+            },
+            sub_seed,
+        )
+        resp = await tc.post(
+            "/gfs/subscribe",
+            json={
+                "instance_id": "sub.home",
+                "space_id": "sp-xyz",
+                "ts": ts,
+                "signature": signed_sub["signature"],
+            },
+        )
+        assert resp.status == 200
+        event_body = {
+            "space_id": "sp-xyz",
+            "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
+            "payload": _authority_payload(space_seed, space_id="sp-xyz"),
+        }
+        resp = await tc.post("/gfs/publish", json=event_body)
+        assert resp.status == 200
+        # Nobody reached: the frame waits for the household to reconnect.
+        assert (await resp.json())["delivered_to"] == 0
+    # The GFS's own HTTP client posted nothing — there is no address to post to.
+    assert posted == []
 
 
 # ─── CLI entry points — main / _cli_init / _cli_set_password ────────
@@ -1033,7 +1016,6 @@ async def test_admin_audit_ip_ignores_forwarded_for_from_untrusted_peer(tmp_dir)
                 instance_id="peer.home",
                 display_name="Peer",
                 public_key=pub_hex,
-                inbox_url="http://peer.home/wh",
                 status="active",
             )
         )

@@ -312,9 +312,14 @@ The Social Home ↔ GFS link is split by direction:
   happens — **four keys, no `from_instance` and no GFS-added target id**.
   The frame goes to **every** subscriber: having never learned who
   published, the GFS can no longer exclude the publisher, and a household
-  that gets its own post back drops it on the self-echo guard. When no
-  WebSocket is open the GFS falls back to an HTTPS POST callback to the
-  instance's registered `inbox_url` with the same body minus `type`. The GFS also pushes a `{type:"new_subscriber", space_id,
+  that gets its own post back drops it on the self-echo guard. That socket
+  is the **only** delivery path: the GFS holds no household address (GFS
+  migration `0018` dropped the `inbox_url` it once registered, together with
+  an HTTPS-inbox fallback that could never succeed), so a frame for a
+  household whose socket is down is not delivered and waits for the
+  household to reconnect (Phase 5b-d below re-triggers the key handoff; a
+  missed post is recovered by the subscriber-side refresh, never by the
+  GFS). The GFS also pushes a `{type:"new_subscriber", space_id,
   subscriber:{instance_id, identity_public_key, keywrap_public_key,
   kem_suite, keywrap_sig}}` frame to a space **owner** when a household
   subscribes, so a seed-holder can hand the new subscriber the content key
@@ -339,8 +344,9 @@ token** (10-minute TTL). There are two ways to get one:
 
 The onboarding step is **opt-in and unchecked**: nothing is sent to any GFS
 unless an admin ticks it and confirms (`tests/protocol/
-test_gfs_onboarding_opt_in.py`). It needs the External URL (the inbox the GFS
-relays to); without one the step explains that and offers nothing. The
+test_gfs_onboarding_opt_in.py`). It needs the External URL (a household-side
+prerequisite for federating at all — the address itself is never sent to the
+GFS); without one the step explains that and offers nothing. The
 household learns whether to offer the step from local facts only
 (`GET /api/gfs/connections/default`) — it never probes the GFS to decide.
 
@@ -359,7 +365,7 @@ sequenceDiagram
     Note over H: verify signed capabilities against the key<br/>in this response (TOFU) — require open_signup
     H->>G: POST /gfs/signup-token (no body)
     G-->>H: {token, expires_in}
-    H->>G: POST /gfs/register {token, instance_id, public_key,<br/>inbox_url, display_name, keywrap_*}
+    H->>G: POST /gfs/register {token, instance_id, public_key,<br/>display_name, keywrap_*}
     G-->>H: {status: registered | pending}
     H-->>SPA: 201 {status: active | pending}
 ```
@@ -387,8 +393,10 @@ What the household checks and sends:
   one: there is no second descriptor fetch to swap.
 - **Nothing new reaches the GFS.** The token request has no body. The
   registration body is built by the same code as QR pairing: instance id,
-  public key, inbox URL, display name, and the key-wrap public key + its
-  self-signature — what any paired household already sends.
+  public key, display name, and the key-wrap public key + its
+  self-signature — what any paired household already sends. No household
+  address: the GFS keeps none (an `inbox_url` an older household still
+  sends is ignored — never validated, stored or echoed).
 - **Approval still applies.** With `auto_accept_clients = false` the
   registration lands `pending` and onboarding says "waiting for the GFS to
   approve"; the connection turns active once the operator approves.
@@ -702,9 +710,10 @@ household's authenticated GFS calls cannot link them. The queue is in
 memory and bounded (`services/gfs_publish_retry.py`); see
 [`architecture.md`](../architecture.md#outbox-and-retries).
 
-The HTTPS-inbox fallback for relayed `space_post_public` events is a
-follow-up; today the consumer is wired on the WebSocket path (mirroring
-the public-moments inbound).
+Relay delivery is WebSocket-only — there is no HTTPS-inbox path for a
+relayed `space_post_public` (the GFS holds no household address); the
+consumer is wired on the WebSocket path (mirroring the public-moments
+inbound).
 
 **Receiver rules for an identity-free relay.** Since the frame no longer
 names anybody, receivers derive everything from the sealed inner:
@@ -857,7 +866,7 @@ delivers the key while the owner is offline**:
    `identity_public_key` (the same key that authorizes relay) and a ±300 s
    replay guard, then returns each subscriber's already-registered
    `{instance_id, identity_public_key, keywrap_public_key, keywrap_sig}` — no
-   inbox URL, no private data. A forged / stale / unknown-suite signature, an
+   household address (the GFS holds none), no private data. A forged / stale / unknown-suite signature, an
    unknown space, or a space with no pinned pubkey → **403** (fail-closed).
 4. **Re-seal per subscriber.** For each subscriber it runs the **identical**
    verified-seal+relay as 5b-b (`verify_keywrap_binding` anti-substitution gate
@@ -901,13 +910,13 @@ the key is simply **lost** — the subscriber stays keyless for the epoch and
 silently drops every relayed post. Nothing retries, and 5b-c does not cover it:
 that reconcile fires when a **seed-holder** reconnects, not the subscriber.
 
-The HTTPS-inbox fallback does **not** cover relay frames today. A household
-registers `inbox_url` as `<base>/federation/inbox`, but its actual route is
-`/federation/inbox/{inbox_id}` (no match), and the fallback posts a bare relay
-frame rather than a signed §24.11 envelope, which `FederationInboxView` would
-reject anyway. So a relay frame to an offline household is structurally
-undeliverable — the GFS logs it at DEBUG, not WARNING. Fixing the URL/envelope
-mismatch is a separate design change.
+There is no other delivery path. The GFS holds no household address: GFS
+migration `0018` dropped the `inbox_url` a household once registered, together
+with the HTTPS-inbox fallback that used it (it could never succeed — the
+registered URL was `<base>/federation/inbox` while the household's route is
+`/federation/inbox/{inbox_id}`, and it posted a bare relay frame rather than a
+signed §24.11 envelope). So a relay frame to an offline household is
+undeliverable by design and simply waits for the socket to come back.
 
 Phase 5b-d closes the gap from the subscriber's side: when a household's
 `/gfs/ws` socket connects — **after** the hello is verified and the socket

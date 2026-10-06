@@ -161,7 +161,6 @@ async def rtc_client(tmp_dir):
                 instance_id="peer.home",
                 display_name="Peer",
                 public_key=pub_hex,
-                inbox_url="http://peer.home/wh",
                 status="active",
             )
         )

@@ -1,0 +1,43 @@
+-- 0018 — drop ``client_instances.inbox_url``: the GFS keeps no household address.
+--
+-- A household registered its public HTTPS federation inbox with the
+-- connection server at pairing time. The GFS used that address for exactly
+-- one thing: an HTTPS POST fallback in the relay fan-out when the household's
+-- ``/gfs/ws`` socket was down. That fallback could never succeed — the
+-- registered URL is ``<base>/federation/inbox`` while the household's route
+-- is ``/federation/inbox/{inbox_id}``, and the body was a bare relay frame
+-- rather than a signed §24.11 envelope — so the server held a network
+-- address it had no working use for. The fallback is removed; delivery is
+-- WebSocket-only and an undelivered frame waits for the household to
+-- reconnect, exactly as it did after the fallback failed.
+--
+-- This migration is the privacy purge: the column goes, so the stored
+-- addresses are removed from the file rather than merely no longer written.
+-- (``DROP COLUMN`` rewrites the table content; a later ``VACUUM`` reclaims
+-- any freed pages. The admin portal shows the instance id instead.)
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every path that touches ``inbox_url``:
+--       ``SqliteGfsFederationRepo.upsert_instance`` (register + cluster
+--       sync, the only writers), ``list_subscribers`` (the only reader —
+--       fed the fallback), ``_row_to_instance`` (``SELECT *`` mapping),
+--       ``RegisterView`` (validate + store), ``_deliver_one`` (the
+--       fallback), ``cluster._client_to_wire`` / ``_wire_to_client``
+--       (replication), ``AdminService.list_clients`` (``asdict`` → the
+--       portal's Endpoint column). No index, trigger, view, FK or generated
+--       column references it, so ``DROP COLUMN`` is permitted (SQLite ≥
+--       3.35); nothing updates it after registration.
+--   (2) Non-migration alternatives rejected: leaving the column and writing
+--       ``''`` keeps every address already registered on disk — the point
+--       is to purge them. A one-off ``UPDATE … SET inbox_url=''`` purges
+--       but leaves a NOT NULL column every INSERT must still fill, i.e. a
+--       dead field in the schema forever.
+--   (3) Smallest change: one ``DROP COLUMN``; no table rebuild, no other
+--       column or row touched. Breaking for a rolling upgrade: a node still
+--       on the previous release names ``inbox_url`` in its INSERT and in the
+--       subscriber SELECT, so against the shared, migrated ``gfs.db`` its
+--       ``/gfs/register`` and relay fan-out fail until it is upgraded —
+--       upgrade every cluster node together.
+
+ALTER TABLE client_instances DROP COLUMN inbox_url;

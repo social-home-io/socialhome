@@ -996,7 +996,6 @@ def cmd_gfs_cluster() -> None:
                 "token": tokens[i],
                 "instance_id": iid,
                 "public_key": kp.public_key.hex(),
-                "inbox_url": f"http://127.0.0.1:9/inbox/{iid}",
                 "display_name": f"cluster-client-{i}",
             },
             timeout=15.0,

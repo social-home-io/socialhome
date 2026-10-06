@@ -184,14 +184,13 @@ class SqliteGfsFederationRepo:
         await self._db.enqueue(
             """
             INSERT INTO client_instances(
-                instance_id, display_name, public_key, inbox_url,
+                instance_id, display_name, public_key,
                 status, auto_accept, connected_at,
                 keywrap_public_key, kem_suite, keywrap_sig
-            ) VALUES(?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, COALESCE(?, datetime('now')), ?, ?, ?)
             ON CONFLICT(instance_id) DO UPDATE SET
                 display_name = excluded.display_name,
                 public_key   = excluded.public_key,
-                inbox_url = excluded.inbox_url,
                 status       = excluded.status,
                 auto_accept  = excluded.auto_accept,
                 keywrap_public_key = excluded.keywrap_public_key,
@@ -202,7 +201,6 @@ class SqliteGfsFederationRepo:
                 instance.instance_id,
                 instance.display_name,
                 instance.public_key,
-                instance.inbox_url,
                 instance.status,
                 int(instance.auto_accept),
                 instance.connected_at or None,
@@ -556,20 +554,14 @@ class SqliteGfsFederationRepo:
     async def list_subscribers(self, space_id: str) -> list[GfsSubscriber]:
         rows = await self._db.fetchall(
             """
-            SELECT ci.instance_id, ci.inbox_url
+            SELECT ci.instance_id
             FROM space_subscribers ss
             JOIN client_instances ci USING (instance_id)
             WHERE ss.space_id = ? AND ci.status = 'active'
             """,
             (space_id,),
         )
-        return [
-            GfsSubscriber(
-                instance_id=r["instance_id"],
-                inbox_url=r["inbox_url"],
-            )
-            for r in rows
-        ]
+        return [GfsSubscriber(instance_id=r["instance_id"]) for r in rows]
 
     async def list_recently_seen_subscribers(
         self, space_id: str, *, within_s: int
@@ -1412,7 +1404,6 @@ def _row_to_instance(row: dict | None) -> ClientInstance | None:
         instance_id=row["instance_id"],
         display_name=row.get("display_name", ""),
         public_key=row.get("public_key", ""),
-        inbox_url=row.get("inbox_url", ""),
         status=row.get("status", "pending"),
         auto_accept=bool(row.get("auto_accept", 0)),
         connected_at=row.get("connected_at", ""),

@@ -87,7 +87,6 @@ async def client(tmp_dir, keypair):
                 instance_id="inst-author",
                 display_name="Author",
                 public_key=pk_hex,
-                inbox_url="http://author/wh",
                 status="active",
             )
         )

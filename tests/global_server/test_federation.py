@@ -10,8 +10,6 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -68,15 +66,15 @@ async def svc(gfs_db):
 
 async def test_register_instance_succeeds(svc):
     """register_instance() persists the instance without raising."""
-    await svc.register_instance("inst-1", "aa" * 32, "http://example.com/wh")
+    await svc.register_instance("inst-1", "aa" * 32)
     spaces = await svc.list_spaces()
     assert isinstance(spaces, list)
 
 
 async def test_register_instance_idempotent(svc):
     """Calling register_instance() twice with the same id updates the record."""
-    await svc.register_instance("inst-dup", "aa" * 32, "http://old.example.com/wh")
-    await svc.register_instance("inst-dup", "bb" * 32, "http://new.example.com/wh")
+    await svc.register_instance("inst-dup", "aa" * 32)
+    await svc.register_instance("inst-dup", "bb" * 32)
 
 
 async def test_register_instance_persists_keywrap_pubkey(svc):
@@ -84,7 +82,6 @@ async def test_register_instance_persists_keywrap_pubkey(svc):
     await svc.register_instance(
         "inst-kw",
         "aa" * 32,
-        "http://kw.example.com/wh",
         keywrap_public_key="cc" * 32,
         kem_suite="x25519",
     )
@@ -96,7 +93,7 @@ async def test_register_instance_persists_keywrap_pubkey(svc):
 
 async def test_register_instance_without_keywrap_defaults_empty(svc):
     """An older HFS that ships no key-wrap pubkey → empty fields, no crash."""
-    await svc.register_instance("inst-old", "aa" * 32, "http://old.example.com/wh")
+    await svc.register_instance("inst-old", "aa" * 32)
     inst = await svc._repo.get_instance("inst-old")
     assert inst is not None
     assert inst.keywrap_public_key == ""
@@ -109,7 +106,6 @@ async def test_register_instance_persists_keywrap_sig(svc):
     await svc.register_instance(
         "inst-kws",
         "aa" * 32,
-        "http://kws.example.com/wh",
         keywrap_public_key="cc" * 32,
         kem_suite="x25519",
         keywrap_sig="c2lnbmF0dXJl",
@@ -182,9 +178,7 @@ async def _publish_known_space(
 async def test_subscribe_self_signed_known_space_succeeds(svc):
     """subscribe() accepts a self-signed request for an already-published space."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-a", pk.hex(), "http://a.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-a", pk.hex(), auto_accept=True)
     await _publish_known_space(svc, seed, owning_instance="inst-a", space_id="space-1")
     ts = _now_iso()
     sig = _sign(
@@ -211,7 +205,7 @@ async def test_subscribe_unknown_instance_rejected(svc):
 async def test_subscribe_no_signature_rejected(svc):
     """The signature is mandatory — an empty signature is a PermissionError."""
     _, pk = _make_keypair()
-    await svc.register_instance("inst-nos", pk.hex(), "http://n.example.com/wh")
+    await svc.register_instance("inst-nos", pk.hex())
     ts = _now_iso()
     with pytest.raises(PermissionError):
         await svc.subscribe("inst-nos", "space-1", ts, "")
@@ -221,9 +215,7 @@ async def test_subscribe_signature_from_other_instance_rejected(svc):
     """A signature produced by a different key fails verification."""
     seed_a, pk_a = _make_keypair()
     other_seed, _ = _make_keypair()
-    await svc.register_instance(
-        "inst-x", pk_a.hex(), "http://x.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-x", pk_a.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed_a, owning_instance="inst-x", space_id="space-x"
     )
@@ -248,10 +240,8 @@ async def test_subscribe_cannot_sign_for_another_instance(svc):
     instance_id in the body (inst-b's registered key)."""
     seed_a, pk_a = _make_keypair()
     seed_b, pk_b = _make_keypair()
-    await svc.register_instance(
-        "inst-a2", pk_a.hex(), "http://a.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance("inst-b2", pk_b.hex(), "http://b.example.com/wh")
+    await svc.register_instance("inst-a2", pk_a.hex(), auto_accept=True)
+    await svc.register_instance("inst-b2", pk_b.hex())
     await _publish_known_space(
         svc, seed_a, owning_instance="inst-a2", space_id="space-ab"
     )
@@ -274,9 +264,7 @@ async def test_subscribe_cannot_sign_for_another_instance(svc):
 async def test_subscribe_stale_timestamp_rejected(svc):
     """A ts outside the ±300 s replay window is rejected."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-stale-sub", pk.hex(), "http://s.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-stale-sub", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-stale-sub", space_id="space-stale"
     )
@@ -298,7 +286,7 @@ async def test_subscribe_unknown_space_rejected(svc):
     """A subscribe to a space the GFS has never seen is rejected — no
     auto-create of a pending row from an unauthenticated demand signal."""
     seed, pk = _make_keypair()
-    await svc.register_instance("inst-d", pk.hex(), "http://d.example.com/wh")
+    await svc.register_instance("inst-d", pk.hex())
     ts = _now_iso()
     sig = _sign(
         seed,
@@ -318,9 +306,7 @@ async def test_subscribe_unknown_space_rejected(svc):
 async def test_subscribe_and_unsubscribe(svc):
     """subscribe() then unsubscribe() removes the subscription row."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-b", pk.hex(), "http://b.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-b", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-b", space_id="space-unsub"
     )
@@ -362,9 +348,7 @@ async def test_subscribe_and_unsubscribe(svc):
 async def test_subscribe_idempotent(svc):
     """subscribe() called twice for the same (instance, space) does not raise."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-c", pk.hex(), "http://c.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-c", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-c", space_id="space-idem"
     )
@@ -405,9 +389,7 @@ async def test_publish_with_no_subscribers_returns_empty_list(svc):
     """publish_event() with zero subscribers returns an empty delivered list."""
     seed, pk = _make_keypair()
     space_seed, space_pk = _make_keypair()
-    await svc.register_instance(
-        "inst-pub", pk.hex(), "http://pub.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-pub", pk.hex(), auto_accept=True)
     # The space must exist and carry a pinned authority key.
     await _publish_known_space(
         svc,
@@ -432,9 +414,7 @@ async def test_publish_event_unknown_space_rejected(svc):
     """publish_event() rejects an event for a space the GFS never saw — no
     auto-creation of an ownership row from an event (mirrors subscribe)."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-unk", pk.hex(), "http://unk.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-unk", pk.hex(), auto_accept=True)
     sig = _sign(
         seed,
         {
@@ -456,12 +436,8 @@ async def test_publish_event_from_non_owner_rejected(svc):
     signature, and ``post.created`` isn't even a relayable event type."""
     owner_seed, owner_pk = _make_keypair()
     other_seed, other_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-e", owner_pk.hex(), "http://owner.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "other-e", other_pk.hex(), "http://other.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-e", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("other-e", other_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, owner_seed, owning_instance="owner-e", space_id="space-owned"
     )
@@ -485,9 +461,7 @@ async def test_publish_event_from_owner_arbitrary_type_rejected(svc):
     """The owner path is GONE: the owning instance can no longer relay an
     arbitrary event type for its own space on its household signature alone."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "owner-ok", pk.hex(), "http://ok.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-ok", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="owner-ok", space_id="space-ok"
     )
@@ -509,7 +483,7 @@ async def test_publish_event_from_owner_arbitrary_type_rejected(svc):
 async def test_publish_invalid_signature_raises_permission_error(svc):
     """publish_event() rejects a bad signature with PermissionError."""
     _, pk = _make_keypair()
-    await svc.register_instance("inst-badsig", pk.hex(), "http://badsig.example.com/wh")
+    await svc.register_instance("inst-badsig", pk.hex())
     with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
         await svc.publish_event(
             "space-sig",
@@ -523,7 +497,7 @@ async def test_publish_invalid_signature_raises_permission_error(svc):
 async def test_publish_event_empty_signature_rejected(svc):
     """publish_event() now REQUIRES a signature — empty is a PermissionError."""
     _, pk = _make_keypair()
-    await svc.register_instance("inst-nosig", pk.hex(), "http://nosig.example.com/wh")
+    await svc.register_instance("inst-nosig", pk.hex())
     with pytest.raises(PermissionError):
         await svc.publish_event(
             "space-nosig",
@@ -537,7 +511,7 @@ async def test_publish_event_empty_signature_rejected(svc):
 async def test_publish_event_malformed_signature_rejected(svc):
     """A signature that isn't valid base64url is rejected with PermissionError."""
     _, pk = _make_keypair()
-    await svc.register_instance("inst-mal", pk.hex(), "http://mal.example.com/wh")
+    await svc.register_instance("inst-mal", pk.hex())
     with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
         await svc.publish_event(
             "space-mal",
@@ -573,9 +547,7 @@ def _publish_space_args(
 async def test_publish_space_valid_signature_succeeds(svc):
     """publish_space() persists the row when the signature verifies."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-ps", pk.hex(), "http://ps.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-ps", pk.hex(), auto_accept=True)
     sig = _sign(seed, _publish_space_args("inst-ps", "space-ps"))
     space = await svc.publish_space(
         space_id="space-ps",
@@ -590,7 +562,7 @@ async def test_publish_space_valid_signature_succeeds(svc):
 async def test_publish_space_empty_signature_rejected(svc):
     """publish_space() now REQUIRES a signature — empty is a PermissionError."""
     _, pk = _make_keypair()
-    await svc.register_instance("inst-ps2", pk.hex(), "http://ps2.example.com/wh")
+    await svc.register_instance("inst-ps2", pk.hex())
     with pytest.raises(PermissionError):
         await svc.publish_space(
             space_id="space-ps2",
@@ -604,7 +576,7 @@ async def test_publish_space_invalid_signature_rejected(svc):
     """A forged signature is rejected with PermissionError."""
     _, pk = _make_keypair()
     other_seed, _ = _make_keypair()
-    await svc.register_instance("inst-ps3", pk.hex(), "http://ps3.example.com/wh")
+    await svc.register_instance("inst-ps3", pk.hex())
     sig = _sign(other_seed, _publish_space_args("inst-ps3", "space-ps3"))
     with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
         await svc.publish_space(
@@ -618,7 +590,7 @@ async def test_publish_space_invalid_signature_rejected(svc):
 async def test_publish_space_malformed_signature_rejected(svc):
     """A signature that isn't valid base64url is rejected with PermissionError."""
     _, pk = _make_keypair()
-    await svc.register_instance("inst-ps4", pk.hex(), "http://ps4.example.com/wh")
+    await svc.register_instance("inst-ps4", pk.hex())
     with pytest.raises(PermissionError, match="Invalid Ed25519 signature"):
         await svc.publish_space(
             space_id="space-ps4",
@@ -640,13 +612,10 @@ async def test_publish_space_cannot_hijack_another_owners_space(svc):
     """
     owner_seed, owner_pk = _make_keypair()
     attacker_seed, attacker_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-inst", owner_pk.hex(), "http://owner.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-inst", owner_pk.hex(), auto_accept=True)
     await svc.register_instance(
         "attacker-inst",
         attacker_pk.hex(),
-        "http://attacker.example.com/wh",
         auto_accept=True,
     )
     # Legit owner establishes the space.
@@ -676,9 +645,7 @@ async def test_publish_space_cannot_hijack_another_owners_space(svc):
 async def test_publish_space_owner_can_refresh_own_space(svc):
     """The established owner can re-publish its own space (idempotent refresh)."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "owner2-inst", pk.hex(), "http://owner2.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner2-inst", pk.hex(), auto_accept=True)
     sig = _sign(seed, _publish_space_args("owner2-inst", "refresh-space"))
     await svc.publish_space(
         space_id="refresh-space",
@@ -706,9 +673,7 @@ async def test_publish_space_pins_identity_public_key_on_first_publish(svc):
     seed, pk = _make_keypair()
     _, space_pk = _make_keypair()
     space_pk_hex = space_pk.hex()
-    await svc.register_instance(
-        "inst-pin", pk.hex(), "http://pin.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-pin", pk.hex(), auto_accept=True)
     args = _publish_space_args(
         "inst-pin", "space-pin", identity_public_key=space_pk_hex
     )
@@ -732,9 +697,7 @@ async def test_publish_space_does_not_change_pinned_pubkey(svc):
     _, other_space_pk = _make_keypair()
     pinned_hex = space_pk.hex()
     other_hex = other_space_pk.hex()
-    await svc.register_instance(
-        "inst-pin2", pk.hex(), "http://pin2.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-pin2", pk.hex(), auto_accept=True)
     args1 = _publish_space_args(
         "inst-pin2", "space-pin2", identity_public_key=pinned_hex
     )
@@ -766,9 +729,7 @@ async def test_publish_space_same_pubkey_refresh_ok(svc):
     seed, pk = _make_keypair()
     _, space_pk = _make_keypair()
     pinned_hex = space_pk.hex()
-    await svc.register_instance(
-        "inst-pin3", pk.hex(), "http://pin3.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-pin3", pk.hex(), auto_accept=True)
     args = _publish_space_args(
         "inst-pin3", "space-pin3", identity_public_key=pinned_hex
     )
@@ -860,15 +821,9 @@ async def _setup_authority_relay(svc, *, space_id: str):
     space_seed, space_pk = _make_keypair()
     admin_seed, admin_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-a", owner_pk.hex(), "http://owner-a.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "admin-a", admin_pk.hex(), "http://admin-a.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-a", sub_pk.hex(), "http://sub-a.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-a", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("admin-a", admin_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-a", sub_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc,
         owner_seed,
@@ -1035,12 +990,8 @@ async def test_publish_event_owner_no_authority_sig_no_fan_out(gfs_db):
     owner_seed, owner_pk = _make_keypair()
     _space_seed, space_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-bc", owner_pk.hex(), "http://owner-bc.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-bc", sub_pk.hex(), "http://sub-bc.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-bc", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-bc", sub_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc,
         owner_seed,
@@ -1091,13 +1042,11 @@ async def test_publish_event_null_pinned_pubkey_non_owner_rejected(svc):
     await svc.register_instance(
         "owner-null",
         owner_pk.hex(),
-        "http://owner-null.example.com/wh",
         auto_accept=True,
     )
     await svc.register_instance(
         "admin-null",
         admin_pk.hex(),
-        "http://admin-null.example.com/wh",
         auto_accept=True,
     )
     # First publish ships NO pubkey (older HFS) → row.identity_public_key NULL.
@@ -1138,13 +1087,11 @@ async def test_publish_event_non_hex_pinned_pubkey_rejected(svc):
     await svc.register_instance(
         "owner-badhex",
         owner_pk.hex(),
-        "http://owner-badhex.example.com/wh",
         auto_accept=True,
     )
     await svc.register_instance(
         "admin-badhex",
         admin_pk.hex(),
-        "http://admin-badhex.example.com/wh",
         auto_accept=True,
     )
     await _publish_known_space(
@@ -1183,7 +1130,6 @@ async def test_list_subscribers_non_hex_pinned_pubkey_rejected(svc):
     await svc.register_instance(
         "owner-badhex2",
         owner_pk.hex(),
-        "http://owner-badhex2.example.com/wh",
         auto_accept=True,
     )
     await _publish_known_space(
@@ -1278,13 +1224,10 @@ async def test_subscribe_notifies_owner_with_subscriber_keywrap(gfs_db):
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-ns", owner_pk.hex(), "http://owner-ns.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-ns", owner_pk.hex(), auto_accept=True)
     await svc.register_instance(
         "sub-ns",
         sub_pk.hex(),
-        "http://sub-ns.example.com/wh",
         auto_accept=True,
         keywrap_public_key="cc" * 32,
         kem_suite="x25519",
@@ -1330,12 +1273,8 @@ async def test_subscribe_owner_offline_no_crash(gfs_db):
     )
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-off", owner_pk.hex(), "http://owner-off.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-off", sub_pk.hex(), "http://sub-off.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-off", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-off", sub_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, owner_seed, owning_instance="owner-off", space_id="sp-off"
     )
@@ -1357,9 +1296,7 @@ async def test_subscribe_owner_offline_no_crash(gfs_db):
 async def test_subscribe_no_ws_registry_no_crash(svc):
     """A GFS built without a ws_registry simply skips the notify."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-nows", pk.hex(), "http://nows.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-nows", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-nows", space_id="sp-nows"
     )
@@ -1454,9 +1391,7 @@ async def test_update_instance_renames_with_valid_signature(svc):
     """update_instance() persists a new display_name when the signature
     verifies against the registered public key and the ts is fresh."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-rename", pk.hex(), "http://r.example.com/wh", display_name="Old"
-    )
+    await svc.register_instance("inst-rename", pk.hex(), display_name="Old")
     ts = _now_iso()
     sig = _sign(
         seed,
@@ -1479,7 +1414,7 @@ async def test_update_instance_unknown_raises_permission_error(svc):
 async def test_update_instance_bad_signature_raises_permission_error(svc):
     """A forged / mismatched signature is rejected with PermissionError."""
     _, pk = _make_keypair()
-    await svc.register_instance("inst-badsig2", pk.hex(), "http://b.example.com/wh")
+    await svc.register_instance("inst-badsig2", pk.hex())
     other_seed, _ = _make_keypair()
     ts = _now_iso()
     sig = _sign(
@@ -1493,7 +1428,7 @@ async def test_update_instance_bad_signature_raises_permission_error(svc):
 async def test_update_instance_empty_signature_raises_permission_error(svc):
     """The signature is REQUIRED (unlike publish_space's optional branch)."""
     _, pk = _make_keypair()
-    await svc.register_instance("inst-nosig2", pk.hex(), "http://n.example.com/wh")
+    await svc.register_instance("inst-nosig2", pk.hex())
     ts = _now_iso()
     with pytest.raises(PermissionError):
         await svc.update_instance("inst-nosig2", "Name", ts, "")
@@ -1502,7 +1437,7 @@ async def test_update_instance_empty_signature_raises_permission_error(svc):
 async def test_update_instance_stale_timestamp_raises_permission_error(svc):
     """A ts older than the 300s replay window is rejected."""
     seed, pk = _make_keypair()
-    await svc.register_instance("inst-stale", pk.hex(), "http://s.example.com/wh")
+    await svc.register_instance("inst-stale", pk.hex())
     ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     sig = _sign(
         seed,
@@ -1515,7 +1450,7 @@ async def test_update_instance_stale_timestamp_raises_permission_error(svc):
 async def test_update_instance_unparseable_timestamp_raises_permission_error(svc):
     """A ts that isn't ISO 8601 is rejected (treated as stale/invalid)."""
     seed, pk = _make_keypair()
-    await svc.register_instance("inst-badts", pk.hex(), "http://t.example.com/wh")
+    await svc.register_instance("inst-badts", pk.hex())
     ts = "not-a-timestamp"
     sig = _sign(
         seed,
@@ -1528,7 +1463,7 @@ async def test_update_instance_unparseable_timestamp_raises_permission_error(svc
 async def test_update_instance_empty_name_raises_value_error(svc):
     """An empty (after-strip) display_name is rejected with ValueError."""
     seed, pk = _make_keypair()
-    await svc.register_instance("inst-empty", pk.hex(), "http://e.example.com/wh")
+    await svc.register_instance("inst-empty", pk.hex())
     ts = _now_iso()
     sig = _sign(
         seed,
@@ -1541,7 +1476,7 @@ async def test_update_instance_empty_name_raises_value_error(svc):
 async def test_update_instance_overlong_name_raises_value_error(svc):
     """A >80-char display_name is rejected with ValueError."""
     seed, pk = _make_keypair()
-    await svc.register_instance("inst-long", pk.hex(), "http://l.example.com/wh")
+    await svc.register_instance("inst-long", pk.hex())
     ts = _now_iso()
     name = "y" * 81
     sig = _sign(
@@ -1563,9 +1498,7 @@ async def _subscribed(svc, space_id: str, instance_id: str) -> bool:
 async def test_unsubscribe_signed_removes_subscriber(svc):
     """A correctly-signed unsubscribe drops the subscription row."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-u1", pk.hex(), "http://u1.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-u1", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-u1", space_id="space-u1"
     )
@@ -1599,9 +1532,7 @@ async def test_unsubscribe_signed_removes_subscriber(svc):
 async def test_unsubscribe_unsigned_rejected_and_row_survives(svc):
     """SECURITY: an unsigned unsubscribe cannot evict a subscriber."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-u2", pk.hex(), "http://u2.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-u2", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-u2", space_id="space-u2"
     )
@@ -1626,10 +1557,8 @@ async def test_unsubscribe_cannot_sign_for_another_instance(svc):
     """Signing with household B's key while naming household A is rejected."""
     seed_a, pk_a = _make_keypair()
     seed_b, pk_b = _make_keypair()
-    await svc.register_instance(
-        "inst-u3a", pk_a.hex(), "http://u3a.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance("inst-u3b", pk_b.hex(), "http://u3b.example.com/wh")
+    await svc.register_instance("inst-u3a", pk_a.hex(), auto_accept=True)
+    await svc.register_instance("inst-u3b", pk_b.hex())
     await _publish_known_space(
         svc, seed_a, owning_instance="inst-u3a", space_id="space-u3"
     )
@@ -1665,9 +1594,7 @@ async def test_unsubscribe_stale_timestamp_rejected_and_row_survives(svc):
     """A ts outside the ±300 s replay window is rejected — and the
     existing subscription is left intact."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-u4", pk.hex(), "http://u4.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-u4", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-u4", space_id="space-u4"
     )
@@ -1706,9 +1633,7 @@ async def test_unsubscribe_naive_timestamp_rejected_and_row_survives(svc):
     """A tz-less timestamp is untrusted and rejected — the existing
     subscription survives."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-u5", pk.hex(), "http://u5.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-u5", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-u5", space_id="space-u5"
     )
@@ -1752,9 +1677,7 @@ async def test_unsubscribe_unknown_instance_rejected(svc):
 async def test_unsubscribe_unknown_space_still_succeeds(svc):
     """Unsubscribing from a never-published space stays idempotent."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-u7", pk.hex(), "http://u7.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-u7", pk.hex(), auto_accept=True)
     ts = _now_iso()
     sig = _sign(
         seed,
@@ -1787,9 +1710,7 @@ async def test_hide_space_signed_by_owner_withdraws_without_banning(svc):
     """A signed owner withdrawal sets ``withdrawn`` and leaves ``status``
     alone — a ban is the moderator's state, not the owner's."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-h1", pk.hex(), "http://h1.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-h1", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-h1", space_id="space-h1"
     )
@@ -1811,9 +1732,7 @@ async def test_hide_space_unsigned_rejected_and_space_stays_listed(svc):
     """SECURITY REGRESSION: unpublish used to be completely unauthenticated,
     so any caller could delist any space."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-h2", pk.hex(), "http://h2.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-h2", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-h2", space_id="space-h2"
     )
@@ -1829,12 +1748,8 @@ async def test_hide_space_by_registered_non_owner_rejected(svc):
     registered household must not delist someone else's space."""
     owner_seed, owner_pk = _make_keypair()
     other_seed, other_pk = _make_keypair()
-    await svc.register_instance(
-        "inst-h3", owner_pk.hex(), "http://h3.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "inst-evil", other_pk.hex(), "http://evil.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-h3", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("inst-evil", other_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, owner_seed, owning_instance="inst-h3", space_id="space-h3"
     )
@@ -1856,9 +1771,7 @@ async def test_hide_space_by_registered_non_owner_rejected(svc):
 async def test_hide_space_stale_timestamp_rejected(svc):
     """The ±300 s replay guard applies to a captured withdrawal too."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-h4", pk.hex(), "http://h4.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-h4", pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, seed, owning_instance="inst-h4", space_id="space-h4"
     )
@@ -1887,9 +1800,7 @@ async def test_hide_space_unknown_space_is_a_signed_noop(svc):
     """An unknown space stays a silent no-op — but only AFTER the signature
     verifies, so an unsigned caller can't probe for space existence."""
     seed, pk = _make_keypair()
-    await svc.register_instance(
-        "inst-h6", pk.hex(), "http://h6.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("inst-h6", pk.hex(), auto_accept=True)
     ts = _now_iso()
     await svc.hide_space(
         "space-ghost-h6",
@@ -1950,13 +1861,10 @@ async def test_subscriber_reconnect_renotifies_owner(gfs_db):
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-rc", owner_pk.hex(), "http://owner-rc/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-rc", owner_pk.hex(), auto_accept=True)
     await svc.register_instance(
         "sub-rc",
         sub_pk.hex(),
-        "http://sub-rc/wh",
         auto_accept=True,
         keywrap_public_key="cc" * 32,
         kem_suite="x25519",
@@ -1992,9 +1900,7 @@ async def test_subscriber_reconnect_without_subscriptions_notifies_nothing(gfs_d
     ws = _RecordingWsRegistry()
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
     _seed, pk = _make_keypair()
-    await svc.register_instance(
-        "lonely", pk.hex(), "http://lonely/wh", auto_accept=True
-    )
+    await svc.register_instance("lonely", pk.hex(), auto_accept=True)
     await svc.on_subscriber_connected("lonely")
     assert ws.sent == []
 
@@ -2004,7 +1910,7 @@ async def test_subscriber_reconnect_skips_self_owned_space(gfs_db):
     ws = _RecordingWsRegistry()
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
     seed, pk = _make_keypair()
-    await svc.register_instance("solo", pk.hex(), "http://solo/wh", auto_accept=True)
+    await svc.register_instance("solo", pk.hex(), auto_accept=True)
     await _register_and_subscribe(
         svc,
         owner="solo",
@@ -2030,12 +1936,8 @@ async def test_subscriber_reconnect_owner_offline_is_fail_soft(gfs_db):
     )
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-fs", owner_pk.hex(), "http://owner-fs/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-fs", sub_pk.hex(), "http://sub-fs/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-fs", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-fs", sub_pk.hex(), auto_accept=True)
     await _register_and_subscribe(
         svc,
         owner="owner-fs",
@@ -2057,7 +1959,7 @@ async def test_subscriber_reconnect_repo_failure_is_swallowed(gfs_db):
     ws = _RecordingWsRegistry()
     svc = GfsFederationService(_BoomRepo(gfs_db), ws_registry=ws)
     _seed, pk = _make_keypair()
-    await svc.register_instance("boom", pk.hex(), "http://boom/wh", auto_accept=True)
+    await svc.register_instance("boom", pk.hex(), auto_accept=True)
     await svc.on_subscriber_connected("boom")  # must not raise
     assert ws.sent == []
 
@@ -2081,12 +1983,8 @@ async def test_subscriber_reconnect_notifies_are_capped(gfs_db, monkeypatch):
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-cap", owner_pk.hex(), "http://owner-cap/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-cap", sub_pk.hex(), "http://sub-cap/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-cap", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-cap", sub_pk.hex(), auto_accept=True)
     for n in range(4):
         await _register_and_subscribe(
             svc,
@@ -2108,12 +2006,8 @@ async def test_schedule_subscriber_connected_runs_in_background(gfs_db):
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-bg", owner_pk.hex(), "http://owner-bg/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-bg", sub_pk.hex(), "http://sub-bg/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-bg", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-bg", sub_pk.hex(), auto_accept=True)
     await _register_and_subscribe(
         svc,
         owner="owner-bg",
@@ -2240,9 +2134,7 @@ async def test_publish_event_owner_without_authority_sig_rejected(gfs_db):
     )
     # Re-register owner-a with a key we hold so we can sign AS the owner.
     owner_seed, owner_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-a", owner_pk.hex(), "http://owner-a.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-a", owner_pk.hex(), auto_accept=True)
     payload = {"ciphertext": "opaque-blob"}  # no authority_sig fields
     sig = _legacy_transport_sig(
         owner_seed,
@@ -2266,9 +2158,7 @@ async def test_publish_event_owner_disallowed_event_type_rejected(gfs_db):
         gfs_db, space_id="sp-owner-type"
     )
     owner_seed, owner_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-a", owner_pk.hex(), "http://owner-a.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-a", owner_pk.hex(), auto_accept=True)
     payload = _authority_payload(space_seed, space_id="sp-owner-type")
     sig = _legacy_transport_sig(
         owner_seed,
@@ -2386,9 +2276,7 @@ async def test_publish_event_no_pinned_key_rejected(gfs_db):
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
     owner_seed, owner_pk = _make_keypair()
     space_seed, _space_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-np", owner_pk.hex(), "http://owner-np/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-np", owner_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, owner_seed, owning_instance="owner-np", space_id="sp-nopin"
     )
@@ -2501,12 +2389,9 @@ async def test_fan_out_is_bounded_concurrent(gfs_db):
     open unbounded sockets."""
     ws = _SlowWsRegistry(delay=0.05)
     svc = GfsFederationService(SqliteGfsFederationRepo(gfs_db), ws_registry=ws)
-    subs = [
-        GfsSubscriber(instance_id=f"sub-{i}", inbox_url=f"http://s{i}/inbox")
-        for i in range(24)
-    ]
+    subs = [GfsSubscriber(instance_id=f"sub-{i}") for i in range(24)]
     started = asyncio.get_running_loop().time()
-    delivered = await svc._fan_out(subs, {"space_id": "sp", "event_type": "e"}, None)
+    delivered = await svc._fan_out(subs, {"space_id": "sp", "event_type": "e"})
     elapsed = asyncio.get_running_loop().time() - started
 
     assert delivered == [s.instance_id for s in subs]
@@ -2601,12 +2486,8 @@ async def test_publish_event_rejected_payload_is_not_recorded(gfs_db):
     owner_seed, owner_pk = _make_keypair()
     space_seed, space_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-h", owner_pk.hex(), "http://owner-h.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-h", sub_pk.hex(), "http://sub-h.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-h", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-h", sub_pk.hex(), auto_accept=True)
     # Published with NO pinned authority key -> every relay is rejected.
     await _publish_known_space(
         svc, owner_seed, owning_instance="owner-h", space_id="sp-heal"
@@ -2645,21 +2526,18 @@ async def test_publish_event_rejected_payload_is_not_recorded(gfs_db):
 
 
 async def test_fan_out_returns_within_the_deadline_with_a_partial_list(monkeypatch):
-    """Without the deadline a fan-out to N unreachable subscribers pins the
-    request handler for ``ceil(N / FAN_OUT_CONCURRENCY) x FAN_OUT_TIMEOUT``.
-    With it the handler returns what it delivered and the stragglers are
-    cancelled."""
+    """Without the deadline a fan-out to N subscribers whose sockets stall
+    pins the request handler for ``ceil(N / FAN_OUT_CONCURRENCY)`` rounds of
+    the slowest send. With it the handler returns what it delivered and the
+    stragglers are cancelled."""
     monkeypatch.setattr(federation_mod, "FAN_OUT_DEADLINE_SECONDS", 2.0)
     ws = _SlowWsRegistry(delay=1.0)
     svc = GfsFederationService(object(), ws_registry=ws)
-    subscribers = [
-        GfsSubscriber(instance_id=f"sub-{i}", inbox_url=f"http://s{i}.invalid/wh")
-        for i in range(33)
-    ]
+    subscribers = [GfsSubscriber(instance_id=f"sub-{i}") for i in range(33)]
 
     loop = asyncio.get_running_loop()
     started = loop.time()
-    delivered = await svc._fan_out(subscribers, {"space_id": "sp", "payload": {}}, None)
+    delivered = await svc._fan_out(subscribers, {"space_id": "sp", "payload": {}})
     elapsed = loop.time() - started
 
     # 33 subscribers / concurrency 8 = 5 rounds x 1 s ~= 5 s without the bound.
@@ -2687,11 +2565,8 @@ async def test_fan_out_under_the_deadline_delivers_everything():
     unaffected and still returns every subscriber, in order."""
     ws = _SlowWsRegistry(delay=0.0)
     svc = GfsFederationService(object(), ws_registry=ws)
-    subscribers = [
-        GfsSubscriber(instance_id=f"sub-{i}", inbox_url=f"http://s{i}.invalid/wh")
-        for i in range(20)
-    ]
-    delivered = await svc._fan_out(subscribers, {"space_id": "sp", "payload": {}}, None)
+    subscribers = [GfsSubscriber(instance_id=f"sub-{i}") for i in range(20)]
+    delivered = await svc._fan_out(subscribers, {"space_id": "sp", "payload": {}})
     assert delivered == [s.instance_id for s in subscribers]
 
 
@@ -2774,9 +2649,7 @@ async def test_non_dict_payload_burns_a_dummy_verify(gfs_db, verify_calls):
 async def test_unpinned_key_burns_a_dummy_verify(svc, verify_calls):
     owner_seed, owner_pk = _make_keypair()
     space_seed, _space_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-nopin-t", owner_pk.hex(), "http://nopin.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-nopin-t", owner_pk.hex(), auto_accept=True)
     # Published with NO ``identity_public_key`` → nothing to verify against.
     await _publish_known_space(
         svc, owner_seed, owning_instance="owner-nopin-t", space_id="sp-nopin-t"
@@ -2803,9 +2676,7 @@ async def test_unknown_suite_burns_a_dummy_verify(gfs_db, verify_calls):
 async def test_malformed_pinned_key_burns_a_dummy_verify(svc, verify_calls):
     owner_seed, owner_pk = _make_keypair()
     space_seed, _space_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-hex-t", owner_pk.hex(), "http://hex.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-hex-t", owner_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc,
         owner_seed,
@@ -2840,12 +2711,8 @@ async def _subscribe(svc, seed: bytes, *, instance_id: str, space_id: str) -> No
 async def _two_instances(svc, tag: str):
     owner_seed, owner_pk = _make_keypair()
     sub_seed, sub_pk = _make_keypair()
-    await svc.register_instance(
-        f"owner-{tag}", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        f"sub-{tag}", sub_pk.hex(), "http://s.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance(f"owner-{tag}", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance(f"sub-{tag}", sub_pk.hex(), auto_accept=True)
     return owner_seed, sub_seed
 
 
@@ -2956,15 +2823,9 @@ async def test_publishing_with_subscribers_off_purges_existing_subscribers(svc, 
     owner_seed, owner_pk = _make_keypair()
     a_seed, a_pk = _make_keypair()
     b_seed, b_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-purge", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-a", a_pk.hex(), "http://a.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-b", b_pk.hex(), "http://b.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-purge", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-a", a_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-b", b_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, owner_seed, owning_instance="owner-purge", space_id="sp-purge"
     )
@@ -3000,15 +2861,9 @@ async def test_publishing_without_the_key_gates_but_does_not_purge(svc):
     owner_seed, owner_pk = _make_keypair()
     a_seed, a_pk = _make_keypair()
     b_seed, b_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-absent", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-absent-a", a_pk.hex(), "http://a.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "sub-absent-b", b_pk.hex(), "http://b.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-absent", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-absent-a", a_pk.hex(), auto_accept=True)
+    await svc.register_instance("sub-absent-b", b_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, owner_seed, owning_instance="owner-absent", space_id="sp-absent"
     )
@@ -3037,15 +2892,9 @@ async def test_republishing_a_readable_space_keeps_subscribers(svc):
     owner_seed, owner_pk = _make_keypair()
     a_seed, a_pk = _make_keypair()
     b_seed, b_pk = _make_keypair()
-    await svc.register_instance(
-        "owner-keep", owner_pk.hex(), "http://o.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "keep-a", a_pk.hex(), "http://a.example.com/wh", auto_accept=True
-    )
-    await svc.register_instance(
-        "keep-b", b_pk.hex(), "http://b.example.com/wh", auto_accept=True
-    )
+    await svc.register_instance("owner-keep", owner_pk.hex(), auto_accept=True)
+    await svc.register_instance("keep-a", a_pk.hex(), auto_accept=True)
+    await svc.register_instance("keep-b", b_pk.hex(), auto_accept=True)
     await _publish_known_space(
         svc, owner_seed, owning_instance="owner-keep", space_id="sp-keep"
     )
@@ -3058,40 +2907,25 @@ async def test_republishing_a_readable_space_keeps_subscribers(svc):
     assert sorted(s.instance_id for s in subs) == ["keep-a", "keep-b"]
 
 
-# ── HTTPS-inbox fallback: redirects ────────────────────────────────────────────
+# ── WebSocket-only delivery: no HTTPS egress to a household ───────────────────
 
 
-async def test_fan_out_inbox_fallback_does_not_follow_a_redirect_elsewhere():
-    """A subscriber's registered inbox answering 3xx to another host is NOT
-    a delivery — and the relay frame never goes to that host."""
-    hits: list[str] = []
+async def test_fan_out_without_a_socket_is_not_delivered_and_opens_no_connection(
+    monkeypatch,
+):
+    """The GFS holds no household address: a subscriber whose ``/gfs/ws``
+    socket is down is simply not reached — the GFS never opens an outbound
+    HTTP connection to a household (the old HTTPS-inbox fallback is gone)."""
 
-    async def elsewhere(request: web.Request) -> web.Response:
-        hits.append("elsewhere")
-        return web.Response(status=202)
+    class _NoSession:
+        def __init__(self, *a, **kw):
+            raise AssertionError("fan-out must not open an HTTP session")
 
-    async def registered(request: web.Request) -> web.Response:
-        hits.append("registered")
-        raise web.HTTPTemporaryRedirect(f"http://localhost:{request.url.port}/x")
-
-    app = web.Application()
-    app.router.add_post("/x", elsewhere)
-    app.router.add_post("/wh", registered)
-    srv = TestServer(app, host="127.0.0.1")
-    await srv.start_server()
-    try:
-        svc = GfsFederationService(object(), ws_registry=None)
-        sub = GfsSubscriber(
-            instance_id="sub-r", inbox_url=f"http://127.0.0.1:{srv.port}/wh"
-        )
-        async with aiohttp.ClientSession() as session:
-            delivered = await svc._fan_out(
-                [sub], {"space_id": "sp", "payload": {}}, session
-            )
-    finally:
-        await srv.close()
+    monkeypatch.setattr(aiohttp, "ClientSession", _NoSession)
+    svc = GfsFederationService(object(), ws_registry=None)
+    subs = [GfsSubscriber(instance_id="sub-offline")]
+    delivered = await svc._fan_out(subs, {"space_id": "sp", "payload": {}})
     assert delivered == []
-    assert hits == ["registered"]
 
 
 # ── v_44: owner-certified re-pin of the space authority key ────────────────────
@@ -3158,9 +2992,7 @@ async def _publish_with_cert(
 
 async def _rotation_world(svc, space_id: str = "sp-rot"):
     seed, pk, owner_id = _owner_identity()
-    await svc.register_instance(
-        owner_id, pk.hex(), "http://o.example/wh", auto_accept=True
-    )
+    await svc.register_instance(owner_id, pk.hex(), auto_accept=True)
     k1_seed, k1_pk = _make_keypair()
     await _publish_with_cert(
         svc,
@@ -3382,9 +3214,7 @@ async def test_first_publish_with_a_cert_stores_it(svc):
     """A GFS that first meets the space after a rotation stores the cert,
     so a replay of the older one is refused here too."""
     seed, pk, owner_id = _owner_identity()
-    await svc.register_instance(
-        owner_id, pk.hex(), "http://o.example/wh", auto_accept=True
-    )
+    await svc.register_instance(owner_id, pk.hex(), auto_accept=True)
     _k2s, k2_pk = _make_keypair()
     cert = _rot_cert(
         seed, pk, owner_id, space_id="sp-new", authority_pk_hex=k2_pk.hex(), epoch=3

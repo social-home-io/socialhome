@@ -162,7 +162,7 @@ def register_routes(
     # ``/gfs/info`` is the public-key descriptor HFS clients fetch after
     # scanning the QR (which only ships ``{base_url, token}``); they
     # then POST to ``/gfs/register`` with ``{token, instance_id,
-    # public_key, inbox_url}``.
+    # public_key}``.
     app.router.add_view("/gfs/info", GfsInfoView)
     app.router.add_view("/gfs/register", RegisterView)
     # Open sign-up (operator opt-in): a fresh pairing token over JSON, so

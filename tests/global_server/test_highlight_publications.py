@@ -20,9 +20,9 @@ from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 
 async def _seed_instance(gfs_db, instance_id: str = "inst-author") -> None:
     await gfs_db.enqueue(
-        "INSERT INTO client_instances(instance_id, public_key, inbox_url, status) "
-        "VALUES(?, ?, ?, 'active')",
-        (instance_id, "deadbeef" * 8, f"https://{instance_id}.example/inbox"),
+        "INSERT INTO client_instances(instance_id, public_key, status) "
+        "VALUES(?, ?, 'active')",
+        (instance_id, "deadbeef" * 8),
     )
 
 

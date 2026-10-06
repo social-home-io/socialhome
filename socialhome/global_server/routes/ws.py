@@ -1,8 +1,11 @@
 """SH↔GFS WebSocket push route (``GET /gfs/ws``, spec §24.12).
 
 A paired Social Home household opens one persistent WebSocket against
-this endpoint so the GFS can push relay events to it without an HTTPS
-callback to ``inbox_url``. The WS is **one-way (GFS → SH)**: after the
+this endpoint so the GFS can push relay events to it. It is the ONLY
+delivery path — the GFS holds no household address, so a frame for a
+household whose socket is down waits for it to reconnect (queued where the
+feature queues, dropped where it does not). The WS is **one-way (GFS →
+SH)**: after the
 signed hello frame the SH never sends application frames. Heartbeat is
 WebSocket-protocol-level via aiohttp's ``heartbeat=30.0``.
 
@@ -89,8 +92,8 @@ class GfsWebSocketView(web.View):
 
         # Phase 5b-d — now that this household's socket is up, ask the owner of
         # every space it subscribes to to re-run the content-key handoff: a
-        # handoff fanned out while this socket was down was lost outright (the
-        # HTTPS-inbox fallback can't carry a relay frame). Strictly AFTER the
+        # handoff fanned out while this socket was down was lost outright
+        # (delivery is WebSocket-only). Strictly AFTER the
         # hello verified and the socket registered — an unauthenticated caller
         # must never be able to trigger a fan-out. Dispatched as a background
         # task so the handshake never waits on it, and fail-soft throughout.
