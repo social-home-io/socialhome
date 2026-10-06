@@ -1064,3 +1064,16 @@ async def test_gfs_public_page_carries_the_public_page_csp(gfs_client):
     assert r.headers["Content-Security-Policy"] == build_public_page_csp([css])
     assert r.headers["Content-Security-Policy"] != build_spa_csp()
     assert "<script>" not in body
+
+
+def test_cluster_service_advertises_the_cluster_self_url(tmp_path):
+    """The cluster announces ``[cluster] advertise_url`` (not ``base_url``)
+    so sibling frames reach THIS node rather than a random one behind the
+    load balancer."""
+    cfg = GfsConfig(
+        base_url="https://gfs.example.com",
+        cluster_advertise_url="http://10.0.0.5:28467",
+        data_dir=str(tmp_path),
+    )
+    app = create_gfs_app(cfg)
+    assert app[gfs_cluster_key]._self_url == "http://10.0.0.5:28467"

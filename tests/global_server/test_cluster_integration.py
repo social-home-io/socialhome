@@ -1444,9 +1444,82 @@ async def test_an_unsafe_hello_url_is_never_stored_or_echoed(client, url):
     assert resp.status == 200
     health = await (await client.get("/cluster/health")).text()
     peers = {p["node_id"]: p for p in json.loads(health)["peers"]}
-    assert peers["sibling"]["url"] == ""
+    assert "url" not in peers["sibling"]
     for needle in ("X-Inj", "evil", "\\u202e", "\\r", "\\n", "\\u0000"):
         assert needle not in health
+
+
+@pytest.mark.security
+async def test_cluster_health_never_lists_peer_urls(client):
+    """The public health page lists who is in the cluster, not where: with
+    ``advertise_url`` a peer row holds an internal node address + port, so
+    publishing it would expose the cluster's internal topology. URLs are
+    admin-only (``GET /admin/api/cluster``)."""
+    own_seed = client._app[gfs_cluster_key]._signing_key
+    own_key = client._app[gfs_cluster_key].own_public_key_hex
+    await _register_peer(client)
+    resp = await _sync(
+        client,
+        from_node="sibling",
+        seed=own_seed,
+        ip=GENUINE_IP,
+        type_=NODE_HELLO,
+        payload={
+            "node_id": "sibling",
+            "url": "http://10.0.0.5:28467",
+            "public_key": own_key,
+        },
+    )
+    assert resp.status == 200
+    health = await (await client.get("/cluster/health")).text()
+    peers = json.loads(health)["peers"]
+    assert {p["node_id"] for p in peers} == {PEER, "sibling"}
+    for peer in peers:
+        assert set(peer) == {"node_id", "status", "last_seen"}
+    for needle in ("10.0.0.5", "28467", f"{PEER}.test"):
+        assert needle not in health
+    admin = await (await client.get("/admin/api/cluster")).json()
+    urls = {n["node_id"]: n["url"] for n in admin["nodes"]}
+    assert urls["sibling"] == "http://10.0.0.5:28467"
+
+
+@pytest.mark.security
+async def test_own_key_hello_moves_a_sibling_url_a_foreign_key_cannot(client):
+    """A sibling redeployed on a new port re-HELLOs under our shared seed and
+    its row follows; a HELLO for the same node id under any other key is
+    refused and the URL stays put."""
+    svc = client._app[gfs_cluster_key]
+    own_seed = svc._signing_key
+    own_key = svc.own_public_key_hex
+    for url in ("http://10.0.0.5:1111", "http://10.0.0.5:2222"):
+        resp = await _sync(
+            client,
+            from_node="sibling",
+            seed=own_seed,
+            ip=GENUINE_IP,
+            type_=NODE_HELLO,
+            payload={"node_id": "sibling", "url": url, "public_key": own_key},
+        )
+        assert resp.status == 200
+    repo = client._app[gfs_cluster_repo_key]
+    (row,) = [n for n in await repo.list_nodes() if n.node_id == "sibling"]
+    assert row.url == "http://10.0.0.5:2222"
+    seed, pub_hex = _keypair()
+    resp = await _sync(
+        client,
+        from_node="sibling",
+        seed=seed,
+        ip=ATTACKER_IP,
+        type_=NODE_HELLO,
+        payload={
+            "node_id": "sibling",
+            "url": "http://evil.test",
+            "public_key": pub_hex,
+        },
+    )
+    assert resp.status == 403
+    (row,) = [n for n in await repo.list_nodes() if n.node_id == "sibling"]
+    assert row.url == "http://10.0.0.5:2222"
 
 
 @pytest.mark.security

@@ -341,7 +341,7 @@ class GfsApp:
             admin_repo=repos.admin,
             fed_repo=repos.federation,
             node_id=config.cluster_node_id or config.instance_id,
-            self_url=config.base_url,
+            self_url=config.cluster_self_url,
             peers=config.cluster_peers,
             signing_key=signing_key,
             own_public_key_hex=own_pk_hex,

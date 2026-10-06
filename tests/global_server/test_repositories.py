@@ -1311,23 +1311,51 @@ async def test_cluster_touch_node_updates_only_an_existing_row(gfs_db):
         ClusterNode(node_id="b", url="http://b", public_key="aa" * 32)
     )
     await repo.touch_node(
-        "b", status="online", last_seen="2026-01-02 00:00:00", url_if_empty="http://x"
+        "b", status="online", last_seen="2026-01-02 00:00:00", sibling_url="http://x"
     )
     (row,) = await repo.list_nodes()
     assert (row.url, row.public_key, row.status, row.last_seen) == (
-        "http://b",
+        "http://x",
         "aa" * 32,
         "online",
         "2026-01-02 00:00:00",
     )
 
 
-async def test_cluster_touch_node_fills_only_an_empty_url(gfs_db):
+async def test_cluster_touch_node_sibling_url_replaces_an_unapproved_url(gfs_db):
+    """A shared-seed sibling redeployed on a new port: its URL follows."""
     repo = SqliteClusterRepo(gfs_db)
-    await repo.insert_node(ClusterNode(node_id="b", url=""))
-    await repo.touch_node(
-        "b", status="online", last_seen=None, url_if_empty="http://b.test"
+    await repo.insert_node(
+        ClusterNode(node_id="b", url="http://b.test:1111", public_key="aa" * 32)
     )
+    await repo.touch_node(
+        "b", status="online", last_seen=None, sibling_url="http://b.test:2222"
+    )
+    assert (await repo.list_nodes())[0].url == "http://b.test:2222"
+
+
+@pytest.mark.security
+async def test_cluster_touch_node_sibling_url_never_moves_an_approved_row(gfs_db):
+    """An approved node's URL never moves in-band — enforced in the UPDATE,
+    so an approval racing the caller's read still wins."""
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.approve_node("b", "http://b", "aa" * 32)
+    await repo.touch_node(
+        "b", status="online", last_seen=None, sibling_url="http://evil"
+    )
+    (row,) = await repo.list_nodes()
+    assert (row.url, row.approved_url, row.status) == (
+        "http://b",
+        "http://b",
+        "online",
+    )
+
+
+async def test_cluster_touch_node_empty_sibling_url_keeps_the_url(gfs_db):
+    repo = SqliteClusterRepo(gfs_db)
+    await repo.insert_node(ClusterNode(node_id="b", url="http://b.test"))
+    await repo.touch_node("b", status="online", last_seen=None)
+    await repo.touch_node("b", status="online", last_seen=None, sibling_url="")
     assert (await repo.list_nodes())[0].url == "http://b.test"
 
 
@@ -1374,7 +1402,7 @@ async def test_cluster_approve_writes_the_approved_url_alone(gfs_db):
     HELLO or a liveness refresh does moves it."""
     repo = SqliteClusterRepo(gfs_db)
     await repo.approve_node("b", "http://b", "aa" * 32)
-    await repo.touch_node("b", status="online", last_seen=None, url_if_empty="http://x")
+    await repo.touch_node("b", status="online", last_seen=None, sibling_url="http://x")
     await repo.reclaim_node(
         "b", url="http://evil", public_key="ee" * 32, status="online", last_seen=""
     )

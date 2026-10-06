@@ -81,12 +81,16 @@ class _Roster:
         self.rows.setdefault(node.node_id, node)
 
     async def touch_node(
-        self, node_id: str, *, status: str, last_seen: str | None, url_if_empty=""
+        self, node_id: str, *, status: str, last_seen: str | None, sibling_url=""
     ) -> None:
         row = self.rows.get(node_id)
         if row is not None:
+            moves = bool(sibling_url) and not row.approved_key
             self.rows[node_id] = replace(
-                row, status=status, last_seen=last_seen, url=row.url or url_if_empty
+                row,
+                status=status,
+                last_seen=last_seen,
+                url=sibling_url if moves else row.url,
             )
 
     async def reclaim_node(
@@ -686,10 +690,8 @@ async def test_an_old_version_url_rewrite_does_not_redirect_an_approved_node(
     await svc._heartbeat_tick()
     assert real.types() == ["NODE_SYNC_REPORT", NODE_HEARTBEAT]
     assert attacker_listener.hits == []
-    async with ClientSession() as http:
-        async with http.get(f"{_url(gfs)}/cluster/health") as resp:
-            body = await resp.json()
-    assert [p["url"] for p in body["peers"]] == [real.url]
+    nodes = (await svc.admin_cluster())["nodes"]
+    assert [n["url"] for n in nodes if n["node_id"] == "node-c"] == [real.url]
     assert await _post(
         gfs, *_frame(attacker, type_=NODE_HEARTBEAT, from_node="node-c", payload={})
     ) == (401, {"error": "invalid_signature"})

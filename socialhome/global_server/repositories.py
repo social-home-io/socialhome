@@ -1168,7 +1168,7 @@ class AbstractClusterRepo(Protocol):
         *,
         status: str,
         last_seen: str | None,
-        url_if_empty: str = "",
+        sibling_url: str = "",
     ) -> None: ...
     async def reclaim_node(
         self,
@@ -1266,24 +1266,28 @@ class SqliteClusterRepo:
         *,
         status: str,
         last_seen: str | None,
-        url_if_empty: str = "",
+        sibling_url: str = "",
     ) -> None:
         """Refresh an EXISTING row's liveness — UPDATE only.
 
-        Writes ``status`` + ``last_seen`` (and fills an empty ``url`` with
-        *url_if_empty*); never inserts and never touches a key. A row an
-        admin removed while the caller was pinging or verifying stays
-        removed, and a re-added row keeps its new key.
+        Writes ``status`` + ``last_seen``; never inserts and never touches
+        a key. A non-empty *sibling_url* — the URL a shared-seed sibling's
+        HELLO verified under our own key carried — replaces ``url``, but
+        only on a row with no ``approved_key``: an approved node's URL never
+        moves in-band, and the check sits in the UPDATE itself so an admin
+        approval racing the caller's read still wins. A row an admin
+        removed while the caller was pinging or verifying stays removed,
+        and a re-added row keeps its new key.
         """
         await self._db.enqueue(
             """
             UPDATE cluster_nodes SET
                 status=?,
                 last_seen=?,
-                url=CASE WHEN url='' THEN ? ELSE url END
+                url=CASE WHEN ?<>'' AND approved_key='' THEN ? ELSE url END
             WHERE node_id=?
             """,
-            (status, last_seen, url_if_empty, node_id),
+            (status, last_seen, sibling_url, sibling_url, node_id),
         )
 
     async def reclaim_node(

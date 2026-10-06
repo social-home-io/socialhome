@@ -138,6 +138,7 @@ class GfsConfig:
     cluster_enabled: bool = False
     cluster_node_id: str = ""
     cluster_peers: tuple[str, ...] = ()
+    cluster_advertise_url: str = ""
 
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
@@ -199,6 +200,9 @@ class GfsConfig:
             cluster_enabled=bool(cluster.get("enabled", False)),
             cluster_node_id=str(cluster.get("node_id") or ""),
             cluster_peers=_normalized_peers(cluster.get("peers") or ()),
+            cluster_advertise_url=_normalized_advertise_url(
+                cluster.get("advertise_url"), f"GFS config at {p}"
+            ),
             write_batch_window_ms=_window_ms(
                 server.get("write_batch_window_ms", DEFAULT_WRITE_BATCH_WINDOW_MS)
             ),
@@ -211,14 +215,28 @@ class GfsConfig:
             )
         return cfg
 
+    @property
+    def cluster_self_url(self) -> str:
+        """The URL this node tells cluster peers to reach it at.
+
+        It is the HELLO / heartbeat / fan-out target peers dial. Defaults
+        to ``base_url`` for a single-node or directly reachable
+        deployment; set ``[cluster] advertise_url`` when ``base_url`` is a
+        load balancer in front of every node.
+        """
+        return self.cluster_advertise_url or self.base_url
+
     def _with_env_overrides(self) -> "GfsConfig":
         """Return a copy with ``GFS_*`` env vars layered on top.
 
         Env wins over the file/defaults this instance was built from
         (env > file > defaults), matching :class:`socialhome.config.Config`.
-        Only the ``[server]`` scalars have env bindings; an unset var
-        leaves its field untouched so a single override (e.g. a
-        per-instance ``GFS_PORT``) doesn't disturb the rest of the file.
+        Only the ``[server]`` scalars have env bindings, plus one
+        exception: ``GFS_CLUSTER_ADVERTISE_URL`` (a per-alloc value is
+        what env is for; an empty or whitespace-only value counts as
+        unset). An unset var leaves its field untouched so a single
+        override (e.g. a per-instance ``GFS_PORT``) doesn't disturb the
+        rest of the file.
         """
         env = os.environ
         data_dir = env.get("GFS_DATA_DIR", self.data_dir)
@@ -235,8 +253,18 @@ class GfsConfig:
                 for part in env["GFS_TRUSTED_PROXIES"].split(",")
                 if part.strip()
             )
+        # An empty / whitespace-only value is "unset", not "clear": a
+        # deploy template that rendered nothing must not drop the file's
+        # advertise_url and fall back to base_url (the load balancer).
+        advertise_url = self.cluster_advertise_url
+        raw_advertise = env.get("GFS_CLUSTER_ADVERTISE_URL", "")
+        if raw_advertise.strip():
+            advertise_url = _normalized_advertise_url(
+                raw_advertise, "GFS_CLUSTER_ADVERTISE_URL env"
+            )
         return replace(
             self,
+            cluster_advertise_url=advertise_url,
             host=env.get("GFS_HOST", self.host),
             port=int(env["GFS_PORT"]) if "GFS_PORT" in env else self.port,
             base_url=env.get("GFS_BASE_URL", self.base_url),
@@ -317,6 +345,25 @@ def _normalized_peers(raw: object) -> tuple[str, ...]:
         elif url not in peers:
             peers.append(url)
     return tuple(peers)
+
+
+def _normalized_advertise_url(raw: object, origin: str) -> str:
+    """``[cluster] advertise_url`` through the peer-URL normaliser.
+
+    Empty / unset means "use ``base_url``". A non-empty value that does
+    not normalise is a config error (fail-safe): silently falling back
+    would advertise the load balancer and reintroduce ``wrong_recipient``.
+    """
+    if raw is None or raw == "":
+        return ""
+    url = normalized_peer_url(raw)
+    if not url:
+        raise ValueError(
+            f"{origin} has an unusable [cluster] advertise_url {raw!r} — it "
+            "must be an http(s) base URL (scheme + host [+ port, path "
+            "prefix]; no query, fragment or credentials)"
+        )
+    return url
 
 
 def _window_ms(raw: int | str) -> int:
@@ -423,6 +470,13 @@ turn_secret = ""
 # that passes the client's header through needs trusted_proxies = [].
 enabled = false
 node_id = ""
+# The URL the OTHER nodes reach THIS node at, for heartbeats and fan-out.
+# Leave empty to use [server] base_url. Set it when base_url points at a
+# load balancer in front of all nodes (e.g. several Nomad allocs behind one
+# hostname): frames would then be routed to a random node and refused as
+# wrong_recipient. Render each node's own address and port instead, e.g.
+# "http://10.0.0.5:28467".
+advertise_url = ""
 peers   = []
 """
 
