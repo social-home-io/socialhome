@@ -26,7 +26,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -42,6 +41,7 @@ from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .federation import certified_authority_repin
+from .peer_url import normalized_peer_url
 from .public import SlidingWindowCounter
 
 if TYPE_CHECKING:
@@ -201,34 +201,6 @@ class InvalidClusterPeer(ValueError):
 
 class ClusterPeerKeyMismatch(Exception):
     """Admin add-peer named a node already approved under a different key."""
-
-
-def normalized_peer_url(url: object) -> str:
-    """A peer node's base URL, normalised, or ``""`` if unusable.
-
-    ``http``/``https`` with a host; no userinfo, query or fragment (none
-    has a meaning for a base URL, and userinfo would ship credentials in
-    every sync POST). A trailing ``/`` is dropped.
-    """
-    if not isinstance(url, str):
-        return ""
-    url = url.strip().rstrip("/")
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname
-    except ValueError:
-        return ""
-    if (
-        parts.scheme not in ("http", "https")
-        or not host
-        or "@" in parts.netloc
-        or parts.query
-        or parts.fragment
-        or "?" in url
-        or "#" in url
-    ):
-        return ""
-    return url
 
 
 def _validated_peer(

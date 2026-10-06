@@ -1363,3 +1363,49 @@ async def test_frame_without_a_recipient_is_accepted_from_an_older_sender(client
         seed,
     )
     assert (await _post_raw(client, canonical, sig, GENUINE_IP)).status == 200
+
+
+# ─── Peer URL hygiene (admin add-peer, HELLO, /cluster/health) ────────
+
+_UNSAFE_PEER_URLS = [
+    "http://ex\nample.com",
+    "http://h:80\r\nX-Inj: 1",
+    "http://h/\x00",
+    "http://a b.com",
+    "http://h:99999",
+    "http://‮evil.com",
+    "http://q.test/‮evil\r\nX: 1",
+]
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("url", _UNSAFE_PEER_URLS)
+async def test_admin_add_peer_refuses_an_unsafe_url(client, url):
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={"node_id": "c", "url": url, "public_key": _VALID_KEY},
+    )
+    assert (resp.status, await resp.json()) == (422, {"error": "invalid_url"})
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("url", _UNSAFE_PEER_URLS)
+async def test_an_unsafe_hello_url_is_never_stored_or_echoed(client, url):
+    """A shared-seed sibling's first HELLO carries its URL; an unsafe one is
+    dropped, so the public ``/cluster/health`` never echoes it."""
+    own_seed = client._app[gfs_cluster_key]._signing_key
+    own_key = client._app[gfs_cluster_key].own_public_key_hex
+    resp = await _sync(
+        client,
+        from_node="sibling",
+        seed=own_seed,
+        ip=GENUINE_IP,
+        type_=NODE_HELLO,
+        payload={"node_id": "sibling", "url": url, "public_key": own_key},
+    )
+    assert resp.status == 200
+    health = await (await client.get("/cluster/health")).text()
+    peers = {p["node_id"]: p for p in json.loads(health)["peers"]}
+    assert peers["sibling"]["url"] == ""
+    for needle in ("X-Inj", "evil", "\\u202e", "\\r", "\\n", "\\u0000"):
+        assert needle not in health
