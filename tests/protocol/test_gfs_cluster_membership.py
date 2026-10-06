@@ -16,7 +16,10 @@ The rule these tests pin, end to end over a real GFS server with real
 * an unknown HELLO is refused and writes nothing;
 * a pinned key is never overwritten in-band;
 * a replayed or stale frame is refused;
-* a peer that was already syncing before the upgrade keeps syncing.
+* every pin from before the upgrade is cleared (GFS migration 0017): a
+  shared-seed sibling re-pins on its next HELLO, a distinct-key peer must be
+  re-added by an operator;
+* an approved peer still on the old frame shape keeps syncing.
 """
 
 from __future__ import annotations
@@ -198,6 +201,39 @@ async def test_unknown_hello_is_refused_and_writes_nothing(gfs):
     assert (status, body) == (403, {"error": "unknown_node"})
 
 
+async def test_after_upgrade_only_the_shared_seed_sibling_rejoins(gfs):
+    """Migration 0017 left every row without a pin. The shared-seed sibling
+    re-pins under our own key on its next HELLO; a peer whose distinct key
+    was pinned by TOFU before the upgrade is refused until re-added."""
+    foreign_seed = secrets.token_bytes(32)
+    repo = gfs.app[gfs_cluster_repo_key]
+    for node_id in ("node-b", "old-peer"):
+        await repo.upsert_node(
+            ClusterNode(
+                node_id=node_id,
+                url=_UNREACHABLE,
+                public_key="",
+                status="online",
+                last_seen="2026-01-01 00:00:00",
+            )
+        )
+    sibling = _sender("node-b", _own_seed(gfs))
+    await sibling.add_peer("node-a", _url(gfs), _own_key(gfs))
+    assert (await _roster(gfs))["node-b"].public_key == _own_key(gfs)
+    foreign_key = ed25519_public_key(foreign_seed).hex()
+    status, body = await _post(
+        gfs,
+        *_frame(
+            foreign_seed,
+            type_=NODE_HELLO,
+            from_node="old-peer",
+            payload={"node_id": "old-peer", "url": "", "public_key": foreign_key},
+        ),
+    )
+    assert (status, body) == (403, {"error": "unapproved_node"})
+    assert (await _roster(gfs))["old-peer"].public_key == ""
+
+
 async def test_shared_seed_node_joins(gfs):
     """A node the operator gave this GFS's identity seed is a member."""
     sibling = _sender("node-b", _own_seed(gfs))
@@ -284,20 +320,15 @@ async def test_a_stale_frame_is_refused(gfs, offset):
     assert (status, body) == (401, {"error": "stale_timestamp"})
 
 
-async def test_an_existing_peer_still_works(gfs):
-    """A row first-contact TOFU pinned before the upgrade keeps syncing —
-    from a current sender and from one still on the old frame shape."""
+async def test_an_approved_peer_on_the_old_frame_shape_still_works(gfs):
+    """An admin-approved peer syncs from a current sender and from one
+    still on the old frame shape (no ``nonce`` / ``sig_suite``)."""
     seed = secrets.token_bytes(32)
     key = ed25519_public_key(seed).hex()
-    await gfs.app[gfs_cluster_repo_key].upsert_node(
-        ClusterNode(
-            node_id="old-peer",
-            url=_UNREACHABLE,
-            public_key=key,
-            status="online",
-            last_seen="2026-01-01 00:00:00",
-        )
+    status, _ = await _admin_add_peer(
+        gfs, {"node_id": "old-peer", "url": _UNREACHABLE, "public_key": key}
     )
+    assert status == 201
     old_peer = _sender("old-peer", seed)
     await old_peer._post_to_peer(
         _url(gfs),

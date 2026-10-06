@@ -716,10 +716,14 @@ sig_suite, payload}`: the sender id is the signed `from` only, `ts` must sit
 within ±300 s of the receiver's wall clock and not before the receiving
 process started, and an accepted frame's digest is remembered for 600 s so a
 byte-identical resend is a 409. Every refusal is charged to the source
-address, never to the node it names. Rows pinned by first-contact TOFU before
-this rule are grandfathered: they keep syncing, and the GFS lists them at
-startup as a WARNING (`key_source: "pinned"` in the admin cluster view) for
-the operator to confirm. **Residual risks:** a frame names no recipient, so
+address, never to the node it names. **Upgrade (breaking):** every pin
+written before this rule came from first-contact TOFU or from a pre-#677 key
+derived from the public instance id, so GFS migration
+`0017_cluster_pin_reset.sql` clears them all once. A shared-seed sibling's
+frames verify under our own key meanwhile and its next HELLO re-pins it; a
+peer with its own distinct key must be re-added by an operator. Afterwards
+`key_source` in the admin cluster view is `own` (our key), `pinned` (only
+ever admin-added) or `none` (no pin yet). **Residual risks:** a frame names no recipient, so
 inside its 300 s window a captured frame can be replayed once to each other
 node (the replay cache is per process); clock skew above 300 s partitions
 the cluster (run NTP); two nodes sharing a `node_id` are indistinguishable;

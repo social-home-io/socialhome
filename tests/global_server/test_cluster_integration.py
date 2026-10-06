@@ -7,14 +7,18 @@ admin /admin/api/cluster endpoints. Uses an in-process aiohttp
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
+import sqlite3
 import time
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
+from socialhome.db.migrations import discover_migrations
 from socialhome.global_server.admin import hash_password
 from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
@@ -37,7 +41,12 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.public import RATE_LIMIT_MAX_TRACKED_IPS
 from socialhome.global_server.repositories import SqliteClusterRepo
-from socialhome.global_server.server import create_gfs_app
+from socialhome.global_server.server import SIGNING_SEED_FILENAME, create_gfs_app
+
+_GFS_MIGRATIONS_DIR = (
+    Path(__file__).resolve().parent.parent.parent
+    / "socialhome/global_server/migrations"
+)
 
 
 def _config(tmp_dir, *, cluster=True):
@@ -1009,35 +1018,123 @@ async def test_old_shape_frame_without_nonce_or_suite_still_syncs(client):
 # ─── Upgrade compatibility ────────────────────────────────────────────
 
 
+def _pre_upgrade_gfs(tmp_dir, own_seed: bytes, rows: list[tuple[str, str]]) -> None:
+    """A GFS data dir as the previous release left it: migrated through
+    0016, holding *rows* ``(node_id, public_key)`` and our identity seed."""
+    (tmp_dir / SIGNING_SEED_FILENAME).write_bytes(own_seed)
+    conn = sqlite3.connect(tmp_dir / "gfs.db", isolation_level=None)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version ("
+            " version INTEGER PRIMARY KEY, description TEXT,"
+            " applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        for mig in discover_migrations(_GFS_MIGRATIONS_DIR):
+            if mig.version > 16:
+                break
+            mig.apply(conn)
+            conn.execute(
+                "INSERT INTO schema_version(version, description) VALUES (?,?)",
+                (mig.version, mig.description),
+            )
+        for node_id, key in rows:
+            conn.execute(
+                "INSERT INTO cluster_nodes(node_id, url, public_key, status,"
+                " last_seen) VALUES(?, ?, ?, 'online', '2026-01-01 00:00:00')",
+                (node_id, f"http://{node_id}.test", key),
+            )
+    finally:
+        conn.close()
+
+
 @pytest.mark.security
-async def test_grandfathered_tofu_row_keeps_syncing(client, outbound_hellos):
-    """A row a first-contact HELLO pinned before this release (a key that is
-    not ours, never approved through the admin API) is kept: its HELLO and
-    its sync frames verify under the pin, so an upgrade never partitions a
-    working cluster."""
+async def test_upgrade_clears_every_pin_and_only_shared_seed_siblings_rejoin(
+    tmp_dir, outbound_hellos
+):
+    """Pins from before operator approval may be TOFU intruders or legacy
+    DERIVED keys anyone can compute. The upgrade clears them all: a
+    shared-seed sibling re-pins on its next HELLO, while a distinct-key peer
+    — and a forger holding a derived key — must be re-added by an admin."""
+    own_seed = secrets.token_bytes(32)
+    own_key = ed25519_public_key(own_seed).hex()
+    foreign_seed, foreign_key = _keypair()
+    derived_seed = hashlib.sha256(b"gfs-cluster-legacy-node").digest()
+    derived_key = ed25519_public_key(derived_seed).hex()
+    _pre_upgrade_gfs(
+        tmp_dir,
+        own_seed,
+        [("sibling", own_key), ("old-peer", foreign_key), ("legacy-node", derived_key)],
+    )
+    app = create_gfs_app(_config(tmp_dir))
+    async with TestClient(TestServer(app)) as tc:
+        repo = app[gfs_cluster_repo_key]
+        assert {n.node_id: n.public_key for n in await repo.list_nodes()} == {
+            "sibling": "",
+            "old-peer": "",
+            "legacy-node": "",
+        }
+
+        async def hello(node_id: str, seed: bytes, key: str):
+            return await _sync(
+                tc,
+                from_node=node_id,
+                seed=seed,
+                ip=GENUINE_IP,
+                type_=NODE_HELLO,
+                payload={"node_id": node_id, "url": "", "public_key": key},
+            )
+
+        # The shared-seed sibling re-pins under our own key.
+        assert (await hello("sibling", own_seed, own_key)).status == 200
+        pins = {n.node_id: n.public_key for n in await repo.list_nodes()}
+        assert pins["sibling"] == own_key
+        assert (
+            await _sync(tc, from_node="sibling", seed=own_seed, ip=GENUINE_IP)
+        ).status == 200
+
+        # The foreign (TOFU) peer lost membership: re-add it to come back.
+        resp = await hello("old-peer", foreign_seed, foreign_key)
+        assert (resp.status, await resp.json()) == (403, {"error": "unapproved_node"})
+        resp = await _sync(tc, from_node="old-peer", seed=foreign_seed, ip=GENUINE_IP)
+        assert (resp.status, await resp.json()) == (401, {"error": "invalid_signature"})
+
+        # A forger holding the legacy derived key gets nowhere either.
+        resp = await hello("legacy-node", derived_seed, derived_key)
+        assert (resp.status, await resp.json()) == (403, {"error": "unapproved_node"})
+        resp = await _sync(
+            tc, from_node="legacy-node", seed=derived_seed, ip=GENUINE_IP
+        )
+        assert (resp.status, await resp.json()) == (401, {"error": "invalid_signature"})
+        pins = {n.node_id: n.public_key for n in await repo.list_nodes()}
+        assert pins["old-peer"] == pins["legacy-node"] == ""
+
+
+@pytest.mark.security
+async def test_a_foreign_peer_rejoins_once_an_admin_re_adds_it(client, outbound_hellos):
+    """After the upgrade a distinct-key peer's row has no pin; the operator
+    re-adds it with its key, and from then on it syncs under that pin."""
     seed, pub_hex = _keypair()
-    await client._app[gfs_cluster_repo_key].upsert_node(
+    repo = client._app[gfs_cluster_repo_key]
+    await repo.upsert_node(
         ClusterNode(
             node_id="old-peer",
             url="http://old-peer.test",
-            public_key=pub_hex,
+            public_key="",
             status="online",
             last_seen="2026-01-01 00:00:00",
         )
     )
-    resp = await _sync(
-        client,
-        from_node="old-peer",
-        seed=seed,
-        ip=GENUINE_IP,
-        type_=NODE_HELLO,
-        payload={
+    resp = await _sync(client, from_node="old-peer", seed=seed, ip=GENUINE_IP)
+    assert resp.status == 401
+    resp = await client.post(
+        "/admin/api/cluster/peers",
+        json={
             "node_id": "old-peer",
             "url": "http://old-peer.test",
             "public_key": pub_hex,
         },
     )
-    assert resp.status == 200
+    assert resp.status == 201
     resp = await _sync(client, from_node="old-peer", seed=seed, ip=GENUINE_IP)
     assert resp.status == 200
     body = await (await client.get("/admin/api/cluster")).json()
