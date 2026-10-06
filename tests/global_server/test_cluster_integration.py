@@ -543,3 +543,24 @@ async def test_cluster_limiters_are_capped_lrus(gfs_db):
         for i in range(RATE_LIMIT_MAX_TRACKED_IPS + 500):
             limiter.allow(f"k{i}", now=1000.0)
         assert len(limiter) == RATE_LIMIT_MAX_TRACKED_IPS
+
+
+@pytest.mark.security
+async def test_sender_id_comes_only_from_the_signed_body(client):
+    """``from`` is inside the signed body; the unsigned ``X-Node-Id`` header
+    must never stand in for it — a body without ``from`` is malformed."""
+    seed = await _register_peer(client)
+    body = {"type": NODE_HEARTBEAT, "ts": 1700000000, "payload": {}}
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    resp = await client.post(
+        "/cluster/sync",
+        data=canonical,
+        headers={
+            "Content-Type": "application/json",
+            "X-Node-Signature": b64url_encode(sign_ed25519(seed, canonical)),
+            "X-Node-Id": PEER,
+            "X-Forwarded-For": GENUINE_IP,
+        },
+    )
+    assert resp.status == 400
+    assert (await resp.json())["error"] == "invalid_message"

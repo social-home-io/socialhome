@@ -1130,7 +1130,6 @@ class ClusterService:
                 headers={
                     "Content-Type": "application/json",
                     "X-Node-Signature": sig,
-                    "X-Node-Id": self._node_id,
                 },
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:

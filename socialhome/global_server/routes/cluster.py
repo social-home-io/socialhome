@@ -46,7 +46,8 @@ class ClusterSyncView(GfsBaseView):
     """``POST /cluster/sync`` — NODE_* dispatch with signature + rate limit.
 
     Body is the raw canonical JSON ``{type, from, ts, payload}``; the
-    ``X-Node-Signature`` header carries the Ed25519 signature.
+    ``X-Node-Signature`` header carries the Ed25519 signature. The sender
+    id is the signed ``from`` — there is no header fallback.
 
     Order matters (spec §24.10.4):
 
@@ -85,12 +86,18 @@ class ClusterSyncView(GfsBaseView):
                 web.json_response({"error": "invalid_json"}, status=400),
             )
 
-        from_node = str(
-            body.get("from") or self.request.headers.get("X-Node-Id") or "",
-        )
-        msg_type = str(body.get("type") or "")
+        # The sender id comes from the SIGNED body only — never from an
+        # unsigned header a forger fully controls.
+        from_node = body.get("from")
+        msg_type = body.get("type")
         payload = body.get("payload") or {}
-        if not from_node or not msg_type or not isinstance(payload, dict):
+        if (
+            not isinstance(from_node, str)
+            or not from_node
+            or not isinstance(msg_type, str)
+            or not msg_type
+            or not isinstance(payload, dict)
+        ):
             return _reject(
                 web.json_response({"error": "invalid_message"}, status=400),
             )
