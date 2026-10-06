@@ -137,3 +137,20 @@ describe('renderMarkdown — @mentions', () => {
     expect(doc.querySelectorAll('span.sh-mention')).toHaveLength(1)
   })
 })
+
+describe('renderMarkdown — no Referer to third parties', () => {
+  test('links open in a new tab with rel="noopener noreferrer"', () => {
+    const html = renderMarkdown('[site](https://example.org/x)')
+    expect(html).toContain('target="_blank"')
+    expect(html).toContain('rel="noopener noreferrer"')
+  })
+
+  test('image syntax never produces an <img> (no third-party fetch on view)', () => {
+    // This renderer has no image grammar; ``![alt](url)`` stays a link the
+    // viewer must click, so a post can't make the browser fetch from a
+    // third party (and leak the household origin) just by being shown.
+    const html = renderMarkdown('![cat](https://img.example.net/cat.png)')
+    expect(html).not.toMatch(/<img\b/i)
+    expect(html).toContain('rel="noopener noreferrer"')
+  })
+})

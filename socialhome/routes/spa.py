@@ -11,7 +11,9 @@ What we mount:
 * ``GET /``               → ``static/index.html``
 * ``GET /manifest.json``  → ``static/manifest.json``
 * ``GET /sw.js``          → ``static/sw.js``
-* ``GET /assets/{file}``  → ``static/assets/{file}`` (content-hashed)
+* ``GET /assets/{file}``  → ``static/assets/{file}`` (content-hashed bundle,
+  plus the unhashed ``client/public/assets/`` files: the manifest's install
+  icons and ``theme-boot.js`` — public, so they load before login)
 
 The SPA's own router (preact-iso) handles every in-app route, so the
 backend doesn't need a catchall for ``/feed`` / ``/spaces/abc`` /
@@ -28,8 +30,10 @@ relative URL the SPA constructs (fetch, WebSocket, navigation)
 resolves against the ingress-prefixed document URL. The header is
 honoured only when the platform adapter advertises
 ``Capability.INGRESS`` (a Supervisor sits in front and sets it) and it
-matches :data:`_INGRESS_PATH_RE`; otherwise — standalone / HA-Core-direct,
-where any client could forge it — the base stays ``/``.
+matches the ingress-path regex (both rules live in
+:func:`socialhome.routes.ingress_path.trusted_ingress_path`); otherwise —
+standalone / HA-Core-direct, where any client could forge it — the base
+stays ``/``.
 """
 
 from __future__ import annotations
@@ -43,10 +47,9 @@ import aiofiles
 import aiofiles.os
 from aiohttp import web
 
-from ..app_keys import platform_adapter_key
 from ..csp import build_spa_csp
-from ..platform.adapter import Capability
 from .base import BaseView
+from .ingress_path import trusted_ingress_path
 
 log = logging.getLogger(__name__)
 
@@ -54,15 +57,6 @@ log = logging.getLogger(__name__)
 # ``client/index.html``. The trailing ``/`` is required — relative URLs
 # in HTML resolve against ``<base>`` as a directory, not as a file.
 _BASE_HREF_RE = re.compile(r'<base href="[^"]*"\s*/?>')
-
-#: The only ``X-Ingress-Path`` shape honoured. HA Core's hassio ingress
-#: proxy stamps ``f"/api/hassio_ingress/{token}"``
-#: (``homeassistant/components/hassio/ingress.py``), and Supervisor mints
-#: the token with ``secrets.token_urlsafe()``
-#: (``supervisor/apps/validate.py``) — base64url, so ``[A-Za-z0-9_-]``.
-#: A trailing ``/`` is tolerated. Used with ``fullmatch`` so a trailing
-#: newline can't slip past ``$``.
-_INGRESS_PATH_RE = re.compile(r"/api/hassio_ingress/[A-Za-z0-9_-]+/?")
 
 #: Vite content-hashes the entry bundle as ``assets/index-{hash}.js``.
 #: We surface ``{hash}`` so the SPA's open tabs can poll for changes
@@ -159,7 +153,7 @@ class SpaIndexView(_SpaFileView):
         target = static_dir / self._filename
         if not await aiofiles.os.path.isfile(target):
             raise web.HTTPNotFound()
-        ingress_path = self._ingress_path()
+        ingress_path = trusted_ingress_path(self.request)
         # Attribute-escape anyway (defence in depth — the regex already
         # rules out ``"``): an unescaped ``"`` would break out of
         # ``<base href>``.
@@ -205,24 +199,6 @@ class SpaIndexView(_SpaFileView):
                 "Vary": "X-Ingress-Path",
             },
         )
-
-    def _ingress_path(self) -> str:
-        """The validated ingress prefix without trailing ``/``, or ``""``.
-
-        Only behind an adapter advertising ``Capability.INGRESS`` (the
-        Supervisor proxy sets the header); elsewhere it is any client's
-        to forge, so it is ignored. A value not shaped like
-        :data:`_INGRESS_PATH_RE` is ignored too.
-        """
-        adapter = self.request.app.get(platform_adapter_key)
-        if adapter is None or Capability.INGRESS not in adapter.capabilities:
-            return ""
-        header = self.request.headers.get("X-Ingress-Path", "")
-        if not _INGRESS_PATH_RE.fullmatch(header):
-            if header:
-                log.debug("ignoring malformed X-Ingress-Path header")
-            return ""
-        return header.rstrip("/")
 
 
 class SpaManifestView(_SpaFileView):

@@ -17,11 +17,13 @@ GFS only relays SDP/ICE later.
 
 from __future__ import annotations
 
+import html as html_lib
 import logging
 
 from aiohttp import web
 
 from .. import app_keys as K
+from ..html_page import html_response
 from ..safe_embed import script_json
 from .base import GfsBaseView
 from .rtc import _rtc_authenticate
@@ -195,44 +197,48 @@ class HighlightPublicLandingView(GfsBaseView):
             "<title>Highlight</title>"
             "<meta property='og:title' content='A highlight shared with you'>"
             "<meta property='og:type' content='website'>"
-            "<style>"
-            "html,body{margin:0;padding:0;background:#111;color:#eee;"
-            "font-family:system-ui,sans-serif;height:100%;}"
-            "#root{height:100vh;display:flex;}"
-            ".highlight-viewer{display:flex;flex-direction:column;width:100%;}"
-            ".progress{display:flex;gap:4px;padding:12px;}"
-            ".progress .seg{flex:1;height:3px;background:rgba(255,255,255,.2);border-radius:2px;}"
-            ".progress .seg.done{background:rgba(255,255,255,.6);}"
-            ".progress .seg.active{background:#fff;}"
-            ".stage{flex:1;display:flex;align-items:center;justify-content:center;"
-            "padding:0 12px;position:relative;}"
-            ".stage img,.stage video{max-width:100%;max-height:100%;border-radius:8px;}"
-            ".caption{position:absolute;bottom:24px;padding:8px 14px;"
-            "background:rgba(0,0,0,.5);border-radius:8px;max-width:80%;}"
-            ".highlight-error,.highlight-end{padding:24px;text-align:center;width:100%;}"
-            ".status{color:#aaa;font-size:.9em;text-align:center;}"
-            "</style>"
+            f"<style>{_VIEWER_CSS}</style>"
             "</head><body>"
             "<div id='root'></div>"
             f"<script id='boot' type='application/json'>{boot}</script>"
             "<script type='module' src='static/highlight_public_viewer.js'></script>"
             "</body></html>"
         )
-        return web.Response(text=body, content_type="text/html", status=200)
+        return html_response(body, inline_styles=[_VIEWER_CSS])
 
 
 # ─── Internal helpers ────────────────────────────────────────────────────
 
 
-#: Fallback style used by the gone/unavailable HTML responses.
+#: The viewer page's inline ``<style>`` — admitted by its sha256 in the
+#: public-page CSP (``html_page.html_response``).
+_VIEWER_CSS = (
+    "html,body{margin:0;padding:0;background:#111;color:#eee;"
+    "font-family:system-ui,sans-serif;height:100%;}"
+    "#root{height:100vh;display:flex;}"
+    ".highlight-viewer{display:flex;flex-direction:column;width:100%;}"
+    ".progress{display:flex;gap:4px;padding:12px;}"
+    ".progress .seg{flex:1;height:3px;background:rgba(255,255,255,.2);border-radius:2px;}"
+    ".progress .seg.done{background:rgba(255,255,255,.6);}"
+    ".progress .seg.active{background:#fff;}"
+    ".stage{flex:1;display:flex;align-items:center;justify-content:center;"
+    "padding:0 12px;position:relative;}"
+    ".stage img,.stage video{max-width:100%;max-height:100%;border-radius:8px;}"
+    ".caption{position:absolute;bottom:24px;padding:8px 14px;"
+    "background:rgba(0,0,0,.5);border-radius:8px;max-width:80%;}"
+    ".highlight-error,.highlight-end{padding:24px;text-align:center;width:100%;}"
+    ".status{color:#aaa;font-size:.9em;text-align:center;}"
+)
+
+#: Fallback style used by the gone/unavailable HTML responses (inline
+#: ``<style>``, admitted by its sha256 like :data:`_VIEWER_CSS`).
 #: Token values mirror ``--sh-*`` from ``client/src/styles/tokens.css`` —
 #: paper / ink / hairline / hearth — so the failure pages read as
 #: part of the SH product family rather than a stark federation
 #: error screen. We don't try to load the Manrope/Fraunces webfont
 #: here (failure path; no preconnect handshake to spend) — system
 #: fallbacks are fine for two short paragraphs.
-_FALLBACK_STYLE = (
-    "<style>"
+_FALLBACK_CSS = (
     "html,body{margin:0;padding:0;background:#F4ECE0;color:#1A1814;"
     "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
     "system-ui,sans-serif;min-height:100%;line-height:1.55;}"
@@ -244,7 +250,6 @@ _FALLBACK_STYLE = (
     "small{color:#A8A090;font-size:11px;}"
     ".accent-bar{height:6px;background:#D2542A;border-radius:3px;"
     "max-width:120px;margin:0 auto 24px;}"
-    "</style>"
 )
 
 
@@ -254,16 +259,18 @@ def _gone_html(instance_id: str, highlight_id: str) -> web.Response:
         "<meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>Highlight expired</title>"
-        f"{_FALLBACK_STYLE}"
+        f"<style>{_FALLBACK_CSS}</style>"
         "</head><body><main>"
         "<div class='accent-bar'></div>"
         "<h1>This highlight has ended</h1>"
         "<p>The link is no longer valid — the author may have "
         "unpublished it, the highlight expired, or this token was revoked.</p>"
-        f"<p><small>{instance_id}/{highlight_id}</small></p>"
+        # Both come from the URL path (router-decoded) — escape.
+        f"<p><small>{html_lib.escape(instance_id)}/"
+        f"{html_lib.escape(highlight_id)}</small></p>"
         "</main></body></html>"
     )
-    return web.Response(text=body, content_type="text/html", status=410)
+    return html_response(body, inline_styles=[_FALLBACK_CSS], status=410)
 
 
 def _unavailable_html(instance_id: str, highlight_id: str) -> web.Response:
@@ -273,13 +280,15 @@ def _unavailable_html(instance_id: str, highlight_id: str) -> web.Response:
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>Highlight unavailable</title>"
         "<meta http-equiv='refresh' content='10'>"
-        f"{_FALLBACK_STYLE}"
+        f"<style>{_FALLBACK_CSS}</style>"
         "</head><body><main>"
         "<div class='accent-bar'></div>"
         "<h1>Currently unavailable</h1>"
         "<p>The author's instance is offline. This page will retry "
         "automatically in 10 seconds.</p>"
-        f"<p><small>{instance_id}/{highlight_id}</small></p>"
+        # Both come from the URL path (router-decoded) — escape.
+        f"<p><small>{html_lib.escape(instance_id)}/"
+        f"{html_lib.escape(highlight_id)}</small></p>"
         "</main></body></html>"
     )
-    return web.Response(text=body, content_type="text/html", status=503)
+    return html_response(body, inline_styles=[_FALLBACK_CSS], status=503)

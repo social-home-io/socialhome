@@ -23,6 +23,8 @@ from socialhome.global_server.public import (
 )
 from socialhome.global_server.server import create_gfs_app
 
+from .conftest import assert_strict_public_page
+
 
 def _config(tmp_dir):
     return GfsConfig(
@@ -744,3 +746,140 @@ async def test_publish_limiter_buckets_per_client_behind_a_trusted_proxy(
             headers={"X-Forwarded-For": "1.1.1.1, 198.51.100.1"},
         )
         assert resp.status == 429
+
+
+# ─── Strict CSP on every public page ──────────────────────────────────
+
+
+async def _seed_listed_space(app, **space) -> None:
+    fed_repo = app[gfs_fed_repo_key]
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="csp.home",
+            display_name="CSP",
+            public_key="cc" * 32,
+            inbox_url="http://csp/wh",
+            status="active",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(owning_instance="csp.home", status="active", **space)
+    )
+
+
+async def test_landing_has_strict_csp(client):
+    await _seed_listed_space(
+        client._app, space_id="sp-csp", name="CSP", accent_color="#123456"
+    )
+    resp = await client.get("/")
+    text = await resp.text()
+    assert resp.status == 200
+    assert "sp-csp" in text
+    assert_strict_public_page(resp, text)
+
+
+async def test_landing_space_accent_survives_without_style_attribute(client):
+    """The per-card accent moved from ``style=`` into the hashed ``<style>``."""
+    await _seed_listed_space(
+        client._app, space_id="sp-acc", name="Acc", accent_color="#a1b2c3"
+    )
+    text = await (await client.get("/")).text()
+    assert "border-left: 6px solid #a1b2c3" in text
+
+
+async def test_space_page_has_strict_csp(client):
+    await _seed_listed_space(
+        client._app,
+        space_id="sp-csp2",
+        name="CSP2",
+        about_markdown="# Hi\n\n**bold** <script>alert(1)</script>",
+        cover_url="data:image/webp;base64,Y292ZXI=",
+        icon_url="data:image/webp;base64,aWNvbg==",
+        primary_color="#112233",
+    )
+    resp = await client.get("/spaces/sp-csp2")
+    text = await resp.text()
+    assert resp.status == 200
+    assert_strict_public_page(resp, text)
+
+
+@pytest.mark.parametrize(
+    "evil",
+    [
+        "red;} body{background:url(https://evil.example/t)} a{",
+        "#123456</style><script>alert(1)</script>",
+        "expression(alert(1))",
+    ],
+)
+async def test_space_colours_must_be_hex(client, evil):
+    """Owner-supplied colours land inside a hashed ``<style>``; anything that
+    is not a plain hex colour falls back to the default, so it can't smuggle
+    CSS (a tracking ``url()``) in under the hash."""
+    await _seed_listed_space(
+        client._app,
+        space_id="sp-evil",
+        name="Evil",
+        accent_color=evil,
+        primary_color=evil,
+    )
+    for path in ("/", "/spaces/sp-evil"):
+        resp = await client.get(path)
+        text = await resp.text()
+        assert "evil.example" not in text
+        assert "expression(" not in text
+        assert "alert(1)" not in text
+        assert_strict_public_page(resp, text)
+
+
+async def _seed_invite(app, token: str = "invtok-csp") -> None:
+    await _seed_listed_space(
+        app, space_id="inv-csp", name="Inv", accent_color="#aabbcc"
+    )
+    await app[gfs_admin_repo_key]._db.enqueue(
+        "INSERT INTO gfs_invite_tokens(gfs_token, space_id, "
+        "source_instance_id, blob, expires_at) VALUES(?, ?, ?, ?, ?)",
+        (token, "inv-csp", "csp.home", "eyJ0IjoieCJ9", int(time.time()) + 3600),
+    )
+
+
+async def test_invite_page_has_strict_csp(client):
+    await _seed_invite(client._app)
+    resp = await client.get("/join/invtok-csp")
+    text = await resp.text()
+    assert resp.status == 200
+    assert_strict_public_page(resp, text)
+
+
+async def test_dead_invite_page_has_strict_csp(client):
+    resp = await client.get("/join/no-such-token")
+    text = await resp.text()
+    assert resp.status == 404
+    assert_strict_public_page(resp, text)
+
+
+async def test_copy_buttons_load_the_static_script(client):
+    """The copy button is wired by ``/static/copy_button.js`` (``script-src
+    'self'``), not an inline script — on the landing and the invite page."""
+    await _seed_invite(client._app)
+    for path in ("/", "/join/invtok-csp"):
+        text = await (await client.get(path)).text()
+        assert 'src="/static/copy_button.js"' in text
+        assert "data-copy-target=" in text
+    js = await client.get("/static/copy_button.js")
+    assert js.status == 200
+    assert "javascript" in js.content_type
+    body = await js.text()
+    assert "data-copy-target" in body
+    assert "clipboard" in body
+
+
+async def test_landing_header_image_is_same_origin(client):
+    """``img-src 'self'`` must cover the operator's header image whatever
+    ``base_url`` says (a proxy may serve the page under another host), so
+    the src is root-relative."""
+    await client._app[gfs_admin_repo_key].set_config("header_image_file", "hero.webp")
+    resp = await client.get("/")
+    text = await resp.text()
+    assert 'src="/media/hero.webp"' in text
+    assert "http://gfs.test/media/" not in text
+    assert_strict_public_page(resp, text)

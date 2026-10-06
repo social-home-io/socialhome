@@ -430,10 +430,10 @@ class GfsApp:
         app = web.Application(middlewares=middlewares)
         # ``nosniff``, ``X-Frame-Options: SAMEORIGIN``, ``Referrer-Policy``
         # and ``Permissions-Policy`` on every response — the same hook as
-        # the household app. It sets no Content-Security-Policy, so the
-        # public pages' inline ``<style>`` / ``<script>`` keep working;
-        # ``setdefault`` keeps the stricter policy the picture proxy sets
-        # (``csp.media_response_headers``).
+        # the household app. It sets no Content-Security-Policy itself:
+        # the public HTML pages carry the strict public-page policy
+        # (``html_page.html_response``) and the picture proxy the media
+        # one (``csp.media_response_headers``); ``setdefault`` keeps both.
         install_security_headers(app)
         return app
 

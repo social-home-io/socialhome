@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from aiohttp.test_utils import TestClient, TestServer
 
+from socialhome.csp import build_public_page_csp, build_spa_csp
 from socialhome.global_server import create_gfs_app, server
 from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
@@ -1052,13 +1053,14 @@ async def test_gfs_responses_carry_security_headers(gfs_client, path):
     assert "Permissions-Policy" in r.headers
 
 
-async def test_gfs_public_page_still_renders_without_spa_csp(gfs_client):
-    """The landing page keeps its inline ``<style>`` / ``<script>``: the
-    hook adds no Content-Security-Policy, so nothing blocks them."""
+async def test_gfs_public_page_carries_the_public_page_csp(gfs_client):
+    """The landing page carries the strict public-page policy (not the
+    SPA's), and its one inline ``<style>`` is admitted by hash."""
     r = await gfs_client.get("/")
     assert r.status == 200
     assert r.headers["Content-Type"].startswith("text/html")
     body = await r.text()
-    assert "<style>" in body
-    assert "<script>" in body
-    assert "Content-Security-Policy" not in r.headers
+    css = body.split("<style>", 1)[1].split("</style>", 1)[0]
+    assert r.headers["Content-Security-Policy"] == build_public_page_csp([css])
+    assert r.headers["Content-Security-Policy"] != build_spa_csp()
+    assert "<script>" not in body

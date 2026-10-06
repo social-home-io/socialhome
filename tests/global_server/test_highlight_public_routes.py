@@ -27,6 +27,8 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
 
+from .conftest import assert_strict_public_page
+
 
 def _config(tmp_dir):
     return GfsConfig(
@@ -337,3 +339,64 @@ async def test_unpublish_unknown_returns_404(client):
         json=unpublish,
     )
     assert resp.status == 404
+
+
+# ── Strict CSP on the viewer + its fallback pages ───────────────────────
+
+
+async def test_viewer_and_fallback_pages_have_strict_csp(client):
+    app = client._app
+    registry = app[gfs_highlight_pub_service_key]
+    tok, _url = await registry.record_publish(
+        highlight_id="s-csp",
+        instance_id="inst-author",
+        expires_at=10_000_000_000,
+        publish_signature="",
+    )
+    path = f"/highlight/inst-author/s-csp/{tok.token}"
+    # 503 — author offline.
+    resp = await client.get(path)
+    assert resp.status == 503
+    assert_strict_public_page(resp, await resp.text())
+    # 200 — the viewer.
+    _mark_author_online(app)
+    resp = await client.get(path)
+    assert resp.status == 200
+    assert_strict_public_page(resp, await resp.text())
+    # 410 — unknown token.
+    resp = await client.get("/highlight/inst-author/s-csp/nope")
+    assert resp.status == 410
+    assert_strict_public_page(resp, await resp.text())
+
+
+async def test_gone_page_escapes_the_url_segments(client):
+    """The 410 page echoes ``instance_id`` / ``highlight_id`` from the URL
+    path — percent-decoded by the router, so attacker-chosen. They must be
+    HTML-escaped (reflected markup on the GFS origin otherwise)."""
+    resp = await client.get(
+        "/highlight/%3Cimg%20src%3Dx%3E/%3Cb%3Ehl%3C%2Fb%3E/no-such-token"
+    )
+    assert resp.status == 410
+    text = await resp.text()
+    assert "<img src=x>" not in text
+    assert "<b>hl</b>" not in text
+    assert "&lt;img src=x&gt;" in text
+    assert_strict_public_page(resp, text)
+
+
+async def test_unavailable_page_escapes_the_url_segments(client):
+    app = client._app
+    registry = app[gfs_highlight_pub_service_key]
+    # A publication whose ids carry markup reaches the 503 branch (author
+    # offline) with those ids echoed into the body.
+    tok, _url = await registry.record_publish(
+        highlight_id="<b>hl</b>",
+        instance_id="inst-author",
+        expires_at=10_000_000_000,
+        publish_signature="",
+    )
+    resp = await client.get(f"/highlight/inst-author/%3Cb%3Ehl%3C%2Fb%3E/{tok.token}")
+    assert resp.status == 503
+    text = await resp.text()
+    assert "<b>hl</b>" not in text
+    assert "&lt;b&gt;hl&lt;/b&gt;" in text

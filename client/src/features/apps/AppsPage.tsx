@@ -44,18 +44,7 @@ import { showToast } from '@/components/Toast'
 import { TabHeader } from '@/components/TabHeader'
 import { ApiError } from '@/api'
 import { addBase } from '@/baseUrl'
-
-/**
- * Only render an icon `<img>` for a self-contained `data:` URI or an absolute
- * `https?:` URL. A relative path (e.g. `"icon.svg"`) would resolve against the
- * SPA origin and 404 — render the placeholder instead of a broken image.
- * (App bundles are served from a sandboxed opaque origin, so a relative bundle
- * path is never loadable from a host card anyway.)
- */
-export function safeIconSrc(icon: string | null | undefined): string | null {
-  if (!icon) return null
-  return /^(data:|https?:\/\/)/i.test(icon) ? icon : null
-}
+import { safeIconSrc } from '@/utils/appIcon'
 
 type AppsTab = 'installed' | 'catalog'
 const tabLabels = (): Record<AppsTab, string> => ({

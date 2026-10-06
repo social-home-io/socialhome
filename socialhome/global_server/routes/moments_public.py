@@ -31,6 +31,7 @@ from aiohttp import web
 from ...csp import media_response_headers
 from .. import app_keys as K
 from ..domain import GfsUserPicture
+from ..html_page import html_response
 from ..safe_embed import script_json
 from .base import GfsBaseView
 from .rtc import _rtc_authenticate
@@ -398,7 +399,7 @@ class GfsUserDirectoryHtmlView(GfsBaseView):
     """``GET /moments`` — anon-browseable directory SPA shell."""
 
     async def get(self) -> web.Response:
-        return web.Response(text=_DIRECTORY_HTML, content_type="text/html")
+        return html_response(_DIRECTORY_HTML)
 
 
 class GfsUserDetailHtmlView(GfsBaseView):
@@ -433,7 +434,7 @@ class GfsUserDetailHtmlView(GfsBaseView):
             # <script> block — stored XSS on this anonymous page.
             boot_json=script_json({"userId": user_id, "instanceId": reg.instance_id}),
         )
-        return web.Response(text=body, content_type="text/html")
+        return html_response(body)
 
 
 def _user_dict(r) -> dict:

@@ -587,7 +587,7 @@
   "pages.md.italic": "cursiva",
   "pages.md.link": "un enlace a una dirección web",
   "pages.md.lists": "listas",
-  "pages.md.image": "una imagen",
+  "pages.md.image": "las imágenes que subes se muestran, las de otras webs se convierten en enlaces",
   "pages.md.page_link": "un enlace a otra página",
   "post.edit": "Editar",
   "post.edit.label": "Editar el texto de la publicación",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import mimetypes
 
 import pytest
@@ -13,10 +15,12 @@ from socialhome.csp import (
     PLAYABLE_MEDIA_CSP,
     PLAYABLE_MEDIA_TYPES,
     SPA_CSP_DIRECTIVES,
+    build_public_page_csp,
     build_spa_csp,
     media_response_headers,
     media_type_for,
     render_csp,
+    style_hash,
 )
 from socialhome.routes.map_tiles import TILE_URL_TEMPLATE
 
@@ -109,11 +113,24 @@ def test_spa_csp_allows_google_fonts():
 
 def test_spa_csp_media_and_previews():
     d = _parse(build_spa_csp())
-    assert {"'self'", "data:", "blob:"} <= set(d["img-src"])
+    assert d["img-src"] == ["'self'", "data:", "blob:"]
     assert d["media-src"] == ["'self'", "blob:"]
     assert d["connect-src"] == ["'self'"]
     assert d["worker-src"] == ["'self'"]
     assert d["frame-src"] == ["'self'"]
+
+
+def test_spa_csp_loads_no_third_party_images():
+    """Owner decision 2026-10-05: an external picture in user content is a
+    tracking pixel (every viewer's IP + view time to the image host), so
+    the SPA renders it as a link and the CSP refuses to load it at all —
+    no scheme or host source in ``img-src`` besides ``'self'``."""
+    d = _parse(build_spa_csp())
+    for src in d["img-src"]:
+        assert src in {"'self'", "data:", "blob:"}, src
+    assert "https:" not in d["img-src"]
+    assert "http:" not in d["img-src"]
+    assert "*" not in d["img-src"]
 
 
 def test_tile_template_is_relative_so_self_covers_it():
@@ -252,3 +269,43 @@ def test_media_type_for_ignores_the_hosts_mime_database(monkeypatch, name, expec
     )
     monkeypatch.setattr(mimetypes, "guess_type", lambda *_a, **_k: ("audio/mpeg", None))
     assert media_type_for(name) == expected
+
+
+# ── Server-rendered public pages (GFS landing / space / invite / viewers) ──
+
+
+def test_public_page_csp_is_strict():
+    """No inline script, no plugins, no framing, no third-party images —
+    only Google Fonts as an external host."""
+    d = _parse(build_public_page_csp())
+    assert d["default-src"] == ["'self'"]
+    assert d["script-src"] == ["'self'"]
+    assert d["object-src"] == ["'none'"]
+    assert d["frame-ancestors"] == ["'none'"]
+    assert d["base-uri"] == ["'self'"]
+    assert d["form-action"] == ["'self'"]
+    assert d["img-src"] == ["'self'", "data:", "blob:"]
+    assert d["style-src"] == ["'self'", "https://fonts.googleapis.com"]
+    assert d["font-src"] == ["https://fonts.gstatic.com"]
+    header = build_public_page_csp()
+    assert "'unsafe-inline'" not in header
+    assert "'unsafe-eval'" not in header
+    assert "style-src-attr" not in header
+
+
+def test_style_hash_is_csp_sha256_of_the_exact_text():
+    css = "body{color:red}"
+    digest = base64.b64encode(hashlib.sha256(css.encode()).digest()).decode()
+    assert style_hash(css) == f"'sha256-{digest}'"
+
+
+def test_public_page_csp_admits_exactly_the_given_inline_styles():
+    a, b = "body{color:red}", ":root{--p:#123456}"
+    d = _parse(build_public_page_csp([a, b, a]))
+    assert d["style-src"] == [
+        "'self'",
+        "https://fonts.googleapis.com",
+        style_hash(a),
+        style_hash(b),
+    ]
+    assert d["script-src"] == ["'self'"]

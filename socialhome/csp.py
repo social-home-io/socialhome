@@ -31,13 +31,21 @@ Directive notes (what each allowance is for):
   blocked. (Preact's ``style={{…}}`` goes through the CSSOM, which CSP
   does not govern.)
 * ``font-src`` — bundled Nunito + ``fonts.gstatic.com`` (Google Fonts).
-* ``img-src`` — ``data:`` (QR codes, Leaflet CSS sprites), ``blob:``
-  (local upload previews) and ``https:`` because Pages / event markdown
-  may embed external ``https`` images (``client/src/utils/markdown.ts``).
-  Map tiles need no host: the backend proxies them
-  (``routes/map_tiles.py``) whatever ``map_tile_url`` is configured, and
-  hands Leaflet a relative template. Link-preview thumbnails are local
-  media too (``services/link_preview_service.py``).
+* ``img-src 'self' data: blob:`` — ``data:`` (QR codes, Leaflet CSS
+  sprites, app catalog icons), ``blob:`` (local upload previews). **No
+  third-party image host, ever** (owner decision 2026-10-05): an external
+  picture in user content works as a tracking pixel, leaking every
+  viewer's IP and view time to the image host — including through
+  content from other households. The markdown renderer turns an external
+  image into a plain link (``client/src/utils/markdown.ts``), federated
+  media fields are local-only on receipt
+  (``services/inbound_media_store.local_media_ref``), app icons render
+  only as ``data:image/…`` (``client/src/utils/appIcon.ts``), and this
+  directive refuses whatever slips past. Map tiles need no host: the
+  backend proxies them (``routes/map_tiles.py``) whatever
+  ``map_tile_url`` is configured, and hands Leaflet a relative template.
+  Link-preview thumbnails are local media too
+  (``services/link_preview_service.py``).
 * ``media-src 'self' blob:`` — signed media + local voice-note /
   video previews. Call streams use ``srcObject``, which CSP ignores.
 * ``connect-src 'self'`` — every fetch and WebSocket is same-origin
@@ -61,14 +69,20 @@ Directive notes (what each allowance is for):
   only accepts the ``/api/hassio_ingress/<token>`` shape under
   ``Capability.INGRESS``; a base smuggling ``//evil.example`` past it
   would still be refused by the browser.
+
+Server-rendered public pages (the GFS landing, per-space, invite,
+highlight-viewer and Momentum directory pages) get their own, stricter
+policy — :func:`build_public_page_csp`, see "Public pages" below.
 """
 
 from __future__ import annotations
 
+import base64
 import functools
+import hashlib
 import mimetypes
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 #: Directive → sources of the SPA shell's policy. Order is kept in the
 #: header.
@@ -78,7 +92,7 @@ SPA_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
     "style-src": ("'self'", "https://fonts.googleapis.com"),
     "style-src-attr": ("'unsafe-inline'",),
     "font-src": ("'self'", "https://fonts.gstatic.com"),
-    "img-src": ("'self'", "data:", "blob:", "https:"),
+    "img-src": ("'self'", "data:", "blob:"),
     "media-src": ("'self'", "blob:"),
     "connect-src": ("'self'",),
     "worker-src": ("'self'",),
@@ -116,6 +130,63 @@ def build_spa_csp() -> str:
     The same in every platform mode.
     """
     return render_csp(SPA_CSP_DIRECTIVES)
+
+
+# ── Public pages ─────────────────────────────────────────────────────────
+
+#: Directive → sources for the anonymous, server-rendered public pages:
+#: the GFS landing (``/``), ``/spaces/{id}``, ``/join/{token}``, the
+#: highlight viewer (``/highlight/…``) and the Momentum directory
+#: (``/moments``, ``/moments/{user}``).
+#:
+#: * ``script-src 'self'`` — only ``/static/*.js`` files (the copy-button
+#:   shim, the viewer bundles). ``<script type="application/json">`` boot
+#:   blocks are inert data and need no allowance.
+#: * ``style-src`` — ``/static/*.css``, the Google Fonts stylesheet and,
+#:   per response, the sha256 of each inline ``<style>`` the page renders
+#:   (:func:`build_public_page_csp`). No ``'unsafe-inline'``, so
+#:   ``style="…"`` attributes are refused — the pages carry none.
+#: * ``img-src 'self' data: blob:`` — QR codes and the space cover / icon
+#:   are ``data:`` URIs (a household publishes them inline), avatars are
+#:   same-origin, the viewers render WebRTC-received bytes as ``blob:``.
+#:   No third-party image hosts: an anonymous visitor's browser never
+#:   reaches a host the page author picked.
+#: * ``media-src 'self' blob:`` — highlight / moment videos (``blob:``).
+#: * ``frame-ancestors 'none'`` — nothing frames these pages.
+#: * ``base-uri 'self'`` — the viewer pages set ``<base href='/'>``.
+PUBLIC_PAGE_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
+    "default-src": ("'self'",),
+    "script-src": ("'self'",),
+    "style-src": ("'self'", "https://fonts.googleapis.com"),
+    "font-src": ("https://fonts.gstatic.com",),
+    "img-src": ("'self'", "data:", "blob:"),
+    "media-src": ("'self'", "blob:"),
+    "connect-src": ("'self'",),
+    "object-src": ("'none'",),
+    "base-uri": ("'self'",),
+    "form-action": ("'self'",),
+    "frame-ancestors": ("'none'",),
+}
+
+
+def style_hash(css: str) -> str:
+    """The CSP source (``'sha256-…'``) admitting a ``<style>`` whose text
+    content is exactly ``css``."""
+    digest = base64.b64encode(hashlib.sha256(css.encode("utf-8")).digest())
+    return f"'sha256-{digest.decode('ascii')}'"
+
+
+def build_public_page_csp(inline_styles: Iterable[str] = ()) -> str:
+    """The public-page policy, admitting exactly ``inline_styles``.
+
+    Pass the text of every ``<style>`` element the page renders, as
+    rendered — a hash covers one exact string, so the same value must go
+    into the page and into this call.
+    """
+    hashes = tuple(dict.fromkeys(style_hash(css) for css in inline_styles))
+    directives = dict(PUBLIC_PAGE_CSP_DIRECTIVES)
+    directives["style-src"] = (*directives["style-src"], *hashes)
+    return render_csp(directives)
 
 
 # ── Stored media ─────────────────────────────────────────────────────────

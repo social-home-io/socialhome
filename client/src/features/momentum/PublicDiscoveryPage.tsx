@@ -198,17 +198,20 @@ export default function PublicDiscoveryPage() {
   )
 }
 
-function discoveryAvatarUrl(u: MomentPublicDirectoryUser): string | null {
-  // Prefer the GFS-mirrored avatar when we have a digest; falls back
-  // to the per-instance picture_url (only reachable when the home
-  // instance is publicly addressable).
-  if (u.picture_digest) {
-    const gfs = selectedGfs.value
-    if (gfs) {
-      return `/api/gfs/${encodeURIComponent(gfs)}/moments/users/${encodeURIComponent(
-        u.user_id,
-      )}/picture?v=${encodeURIComponent(u.picture_digest)}`
-    }
-  }
-  return u.picture_url
+/** Our own picture-proxy path, as the backend emits it (signed). */
+const PROXY_PICTURE_RE =
+  /^api\/gfs\/[A-Za-z0-9_-][A-Za-z0-9._:-]*\/moments\/users\/[A-Za-z0-9_-][A-Za-z0-9._:-]*\/picture\?/
+
+/** Avatar for a directory row: only the GFS-mirrored picture, fetched
+ *  through our own backend. The backend replaces the household's
+ *  self-reported ``picture_url`` (a third-party tracker, or a path that
+ *  resolves against our origin) with its signed picture-proxy URL — an
+ *  ``<img>`` carries no bearer, so the signature is what lets it load.
+ *  Anything else is refused here too, so a stale backend can't leak the
+ *  viewer's IP. No URL → the initials fallback. The path is relative so
+ *  it resolves under the ingress ``<base href>``. */
+export function discoveryAvatarUrl(u: MomentPublicDirectoryUser): string | null {
+  const url = u.picture_url
+  if (!url || !PROXY_PICTURE_RE.test(url)) return null
+  return url
 }

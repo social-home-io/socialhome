@@ -53,7 +53,7 @@ def test_blockquote():
 def test_safe_link_renders_anchor_with_rel_guard():
     out = render_markdown("[home](https://example.com)")
     assert '<a href="https://example.com"' in out
-    assert 'rel="noopener nofollow ugc"' in out
+    assert 'rel="noopener noreferrer nofollow ugc"' in out
     assert 'target="_blank"' in out
     assert ">home</a>" in out
 
@@ -116,3 +116,11 @@ def test_oversize_source_is_truncated():
     # to the (much larger) input.
     assert "…" in out
     assert len(out) < MAX_SOURCE_CHARS * 6
+
+
+def test_link_sends_no_referrer():
+    """A click on a link in a public GFS page must not tell the target
+    site which page (and so which space) the reader came from."""
+    out = render_markdown("[home](https://example.com)")
+    rel = out.split('rel="', 1)[1].split('"', 1)[0].split()
+    assert "noreferrer" in rel
