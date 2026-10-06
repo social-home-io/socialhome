@@ -37,10 +37,12 @@ def _conn_dict(conn, health: dict | None = None) -> dict:
     return d
 
 
-#: ``GfsSignupError.reason`` → ``(HTTP status, error code, plain message)``.
+#: ``GfsSignupError.reason`` → ``(HTTP status, error code, plain message)``,
+#: shared by both ways of connecting to a GFS — a scanned / pasted pairing
+#: code and open sign-up — so the same cause answers the same code on each.
 #: The SPA shows its own translated copy keyed on the code; the message is
 #: the English fallback. Never the GFS's own words (see ``_remote_detail``).
-_SIGNUP_ERRORS: dict[str, tuple[int, str, str]] = {
+_CONNECT_ERRORS: dict[str, tuple[int, str, str]] = {
     "invalid_url": (
         422,
         "GFS_PAIRING_FAILED",
@@ -59,7 +61,7 @@ _SIGNUP_ERRORS: dict[str, tuple[int, str, str]] = {
     "identity_mismatch": (
         422,
         "GFS_IDENTITY_MISMATCH",
-        "This doesn't look like the Social Home GFS. Check the address in settings.",
+        "This doesn't look like the Social Home GFS. Check the address.",
     ),
     "closed": (
         409,
@@ -78,6 +80,12 @@ _SIGNUP_ERRORS: dict[str, tuple[int, str, str]] = {
         "The GFS didn't accept this household.",
     ),
 }
+
+
+def _connect_error(exc: GfsSignupError) -> web.Response:
+    """The classified connect failure as its error response."""
+    status, code, message = _CONNECT_ERRORS.get(exc.reason, _CONNECT_ERRORS["refused"])
+    return error_response(status, code, message)
 
 
 def _own_registration_identity(view: BaseView) -> dict:
@@ -114,7 +122,15 @@ def _pub_dict(pub) -> dict:
 
 class GfsConnectionCollectionView(BaseView):
     """``GET /api/gfs/connections`` — list.
-    ``POST /api/gfs/connections`` — pair via QR payload.
+
+    ``POST /api/gfs/connections`` — connect with a scanned / pasted GFS
+    pairing code ``{gfs_url, token}``. ``201`` with the connection
+    (``status`` ``active`` or ``pending``), or the same codes the open
+    sign-up step answers for the same causes: ``ALREADY_CONNECTED`` (409),
+    ``GFS_UNREACHABLE`` (502 — no answer, or a 5xx), ``GFS_IDENTITY_MISMATCH``
+    (422 — the address answers, but not as a GFS) or ``GFS_PAIRING_FAILED``
+    (422 — a missing field, an unusable URL, or the GFS refused the token).
+    Details are the household's own sentences, never the GFS's words.
     """
 
     async def get(self) -> web.Response:
@@ -147,7 +163,11 @@ class GfsConnectionCollectionView(BaseView):
         svc = self.svc(K.gfs_connection_service_key)
         try:
             conn = await svc.pair(body, **own)
+        except GfsSignupError as exc:
+            return _connect_error(exc)
         except GfsConnectionError as exc:
+            # Only a malformed call gets here (missing payload / identity
+            # fields) — the household's own words, nothing from a GFS.
             return error_response(422, "GFS_PAIRING_FAILED", str(exc))
         return web.json_response(_conn_dict(conn), status=201)
 
@@ -228,10 +248,7 @@ class GfsDefaultConnectionView(BaseView):
                 url, **own, expect_instance_id=pin_id, expect_public_key=pin_key
             )
         except GfsSignupError as exc:
-            status, code, message = _SIGNUP_ERRORS.get(
-                exc.reason, _SIGNUP_ERRORS["refused"]
-            )
-            return error_response(status, code, message)
+            return _connect_error(exc)
         return web.json_response(_conn_dict(conn), status=201)
 
 

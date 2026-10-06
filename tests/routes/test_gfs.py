@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
+import aiohttp
+
 from socialhome.app import create_app
 from socialhome.app_keys import (
     db_key,
@@ -17,10 +21,21 @@ from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from .conftest import _auth
 
 
+class _StubContent:
+    """``resp.content`` — what ``_remote_detail`` reads an error body from."""
+
+    def __init__(self, body: dict):
+        self._raw = json.dumps(body).encode()
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._raw if n < 0 else self._raw[:n]
+
+
 class _StubResp:
     def __init__(self, status: int, body: dict | None = None):
         self.status = status
         self._body = body or {}
+        self.content = _StubContent(self._body)
 
     async def __aenter__(self):
         return self
@@ -39,8 +54,9 @@ class _StubSession:
     """Minimal aiohttp-session stub for the publish round-trip.
 
     ``get_body`` answers ``GET`` (the ``/gfs/info`` descriptor at pair
-    time); ``posted`` records every JSON body handed to ``post`` so a test
-    can assert what left for the GFS.
+    time) with ``get_status``, or ``get`` raises ``get_error`` instead (a
+    GFS that never answers); ``posted`` records every JSON body handed to
+    ``post`` so a test can assert what left for the GFS.
     """
 
     def __init__(
@@ -49,14 +65,20 @@ class _StubSession:
         status: int = 200,
         body: dict | None = None,
         get_body: dict | None = None,
+        get_status: int = 200,
+        get_error: Exception | None = None,
     ):
         self._status = status
         self._body = body or {}
         self._get_body = get_body or {}
+        self._get_status = get_status
+        self._get_error = get_error
         self.posted: list[dict] = []
 
     def get(self, url, **kw):
-        return _StubResp(200, self._get_body)
+        if self._get_error is not None:
+            raise self._get_error
+        return _StubResp(self._get_status, self._get_body)
 
     def post(self, url, **kw):
         if "json" in kw:
@@ -295,6 +317,105 @@ async def test_pair_registration_body_carries_no_inbox_url(client):
     assert "inbox_url" not in register_body
     assert register_body["token"] == "tok"
     assert register_body["display_name"]
+
+
+async def _pair(client, session: _StubSession, *, gfs_url="https://gfs.example.com"):
+    """``POST /api/gfs/connections`` with the GFS's HTTP answered by *session*."""
+    client.app[gfs_connection_service_key]._http_client = session
+    return await client.post(
+        "/api/gfs/connections",
+        json={"gfs_url": gfs_url, "token": "tok"},
+        headers=_auth(client._tok),
+    )
+
+
+# The pasted / scanned pairing code answers the SAME codes as the open
+# sign-up path (``/default``) for the same causes, so the SPA can tell
+# "couldn't reach it" from "it said no" instead of blaming the GFS for a
+# network problem. The detail is the household's own sentence — never the
+# GFS's words.
+
+
+async def test_pair_answers_502_gfs_unreachable_when_the_gfs_never_answers(
+    client,
+):
+    session = _StubSession(get_error=aiohttp.ClientConnectionError("refused"))
+    r = await _pair(client, session)
+    assert r.status == 502, await r.text()
+    assert (await r.json())["error"]["code"] == "GFS_UNREACHABLE"
+    assert session.posted == []
+
+
+async def test_pair_answers_502_gfs_unreachable_when_the_gfs_fails_after_contact(
+    client,
+):
+    """A 5xx from ``/gfs/register`` is the GFS having trouble, not refusing."""
+    session = _StubSession(get_body=_GFS_INFO, status=503, body={"error": "db down"})
+    r = await _pair(client, session)
+    assert r.status == 502, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "GFS_UNREACHABLE"
+    assert "db down" not in json.dumps(body)
+
+
+async def test_pair_answers_422_gfs_identity_mismatch_when_the_address_is_not_a_gfs(
+    client,
+):
+    """``/gfs/info`` answered, but not with a GFS descriptor: the address in
+    the pairing code doesn't point at a Social Home GFS."""
+    session = _StubSession(get_body={"hello": "world"})
+    r = await _pair(client, session)
+    assert r.status == 422, await r.text()
+    assert (await r.json())["error"]["code"] == "GFS_IDENTITY_MISMATCH"
+    assert session.posted == []
+
+
+async def test_pair_answers_422_gfs_identity_mismatch_when_info_is_404(client):
+    """A web server with no ``/gfs/info`` at all is not a GFS either — and
+    retrying later (what UNREACHABLE suggests) won't change that."""
+    session = _StubSession(get_status=404, get_body={"error": "no such page"})
+    r = await _pair(client, session)
+    assert r.status == 422, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "GFS_IDENTITY_MISMATCH"
+    assert "no such page" not in json.dumps(body)
+
+
+async def test_pair_answers_409_already_connected(client):
+    """The pairing code names a GFS this household already has: say so
+    before anything leaves the household (no second registration)."""
+    await _seed_gfs(client, "gfs-1")  # inbox_url https://gfs.example.com
+    session = _StubSession(get_body=_GFS_INFO, body={"status": "registered"})
+    r = await _pair(client, session, gfs_url="https://gfs.example.com/")
+    assert r.status == 409, await r.text()
+    assert (await r.json())["error"]["code"] == "ALREADY_CONNECTED"
+    assert session.posted == []
+
+
+async def test_pair_answers_422_gfs_pairing_failed_when_the_gfs_refuses_the_token(
+    client,
+):
+    """The GFS answered ``/gfs/register`` with a 4xx (stale / used token):
+    that IS "the GFS didn't accept this household" — in our words."""
+    session = _StubSession(
+        get_body=_GFS_INFO, status=401, body={"error": "token already used"}
+    )
+    r = await _pair(client, session)
+    assert r.status == 422, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "GFS_PAIRING_FAILED"
+    assert "token already used" not in json.dumps(body)
+
+
+async def test_pair_answers_422_gfs_pairing_failed_for_an_insecure_url(client):
+    """Plain ``http://`` on the public internet never leaves the household."""
+    session = _StubSession(get_body=_GFS_INFO, body={"status": "registered"})
+    r = await _pair(client, session, gfs_url="http://gfs.example.com")
+    assert r.status == 422, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "GFS_PAIRING_FAILED"
+    assert "https://" in body["error"]["detail"]
+    assert session.posted == []
 
 
 # ─── GET /api/gfs/connections/{id} ──────────────────────────────────

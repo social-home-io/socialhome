@@ -307,7 +307,6 @@ async def world(tmp_dir, caplog):
                     instance_id=h.instance_id,
                     display_name="h",
                     public_key=h.pk.hex(),
-                    inbox_url="http://h.home/wh",
                     status="active",
                 )
             )

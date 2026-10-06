@@ -172,16 +172,20 @@ def _require_secure_url(url: str, *, field: str) -> None:
 
 
 class GfsSignupError(GfsConnectionError):
-    """Open sign-up (:meth:`GfsConnectionService.pair_open_signup`) failed.
+    """Connecting to a GFS failed — a scanned / pasted pairing code
+    (:meth:`GfsConnectionService.pair`) or open sign-up
+    (:meth:`GfsConnectionService.pair_open_signup`).
 
-    ``reason`` is the machine-readable cause the onboarding route maps to a
-    plain message — never the GFS's own words:
+    ``reason`` is the machine-readable cause the routes map to a plain
+    message — never the GFS's own words:
 
     * ``invalid_url`` — the GFS URL fails the transport rules;
     * ``already_connected`` — this household already has that GFS;
     * ``unreachable`` — no answer, or a 5xx;
     * ``identity_mismatch`` — ``/gfs/info`` names another id / key than the
-      pinned default GFS;
+      pinned default GFS (open sign-up), or the pairing code's address
+      answers but not as a GFS at all (QR: a 4xx, or a 200 that is no
+      descriptor — retrying won't help, so not ``unreachable``);
     * ``closed`` — no verified ``open_signup`` capability, or the token
       endpoint said no (403/404);
     * ``busy`` — the GFS rate-limited the token request (429);
@@ -194,6 +198,18 @@ class GfsSignupError(GfsConnectionError):
     def __init__(self, message: str, *, reason: str, status: int | None = None) -> None:
         super().__init__(message, status=status)
         self.reason = reason
+
+
+def _contact_reason(exc: GfsConnectionError, *, answered: str) -> str:
+    """Why a GFS call failed, as a :class:`GfsSignupError` reason.
+
+    ``unreachable`` when the GFS never answered or answered 5xx — it may be
+    back later; otherwise *answered*: what a 4xx (or a 200 of the wrong
+    shape) means for that particular call.
+    """
+    if exc.status is None or exc.status >= 500:
+        return "unreachable"
+    return answered
 
 
 def _descriptor_offers_open_signup(info: dict) -> bool:
@@ -433,6 +449,13 @@ class GfsConnectionService:
         any client can pull from ``GET /gfs/info``). The own-identity
         fields come from the calling SH adapter so the GFS sees the
         registering household, not a generic blob.
+
+        A malformed call (missing payload / identity fields) raises a plain
+        :class:`GfsConnectionError`; everything past that raises
+        :class:`GfsSignupError` with the same ``reason`` vocabulary as
+        :meth:`pair_open_signup` (``invalid_url``, ``already_connected``,
+        ``unreachable``, ``identity_mismatch``, ``refused``), so the two
+        connect paths answer the same codes for the same causes.
         """
         gfs_url = str(qr_payload.get("gfs_url") or "").rstrip("/")
         token = str(qr_payload.get("token") or "")
@@ -445,14 +468,18 @@ class GfsConnectionService:
                 "own_instance_id and own_public_key_hex"
                 " are required for GFS registration",
             )
-        # Transport check BEFORE the first byte leaves: over public plain
-        # HTTP the signed capability block below can be stripped on-path and
-        # the TOFU key swapped, so there is nothing to pin. LAN / loopback is
-        # still fine (the demo harness pairs ``http://127.0.0.1:<port>``).
-        _require_secure_url(gfs_url, field="gfs_url")
-
-        info = await self._fetch_descriptor(gfs_url)
-        return await self._register(
+        await self._require_new_gfs_url(gfs_url)
+        try:
+            info = await self._fetch_descriptor(gfs_url)
+        except GfsConnectionError as exc:
+            # Answered, but not as a GFS (a 4xx, or a 200 that is no
+            # descriptor): the code's address doesn't point at one.
+            raise GfsSignupError(
+                str(exc),
+                reason=_contact_reason(exc, answered="identity_mismatch"),
+                status=exc.status,
+            ) from exc
+        return await self._register_classified(
             gfs_url,
             info,
             token,
@@ -462,6 +489,62 @@ class GfsConnectionService:
             own_keywrap_public_key_hex=own_keywrap_public_key_hex,
             own_keywrap_sig=own_keywrap_sig,
         )
+
+    async def _require_new_gfs_url(self, gfs_url: str) -> None:
+        """The checks both pairing paths run BEFORE the first byte leaves.
+
+        Transport first: over public plain HTTP the signed capability block
+        on ``/gfs/info`` can be stripped on-path and the TOFU key swapped,
+        so there is nothing to pin. LAN / loopback is still fine (the demo
+        harness pairs ``http://127.0.0.1:<port>``). Then: a GFS this
+        household already has is not registered with twice.
+
+        Raises :class:`GfsSignupError` (``invalid_url`` /
+        ``already_connected``).
+        """
+        try:
+            _require_secure_url(gfs_url, field="gfs_url")
+        except GfsConnectionError as exc:
+            raise GfsSignupError(str(exc), reason="invalid_url") from exc
+        for existing in await self._repo.list_all():
+            if existing.inbox_url.rstrip("/") == gfs_url:
+                raise GfsSignupError(
+                    "This household is already connected to that GFS",
+                    reason="already_connected",
+                )
+
+    async def _register_classified(
+        self,
+        gfs_url: str,
+        info: dict,
+        token: str,
+        *,
+        own_instance_id: str,
+        own_public_key_hex: str,
+        own_display_name: str,
+        own_keywrap_public_key_hex: str,
+        own_keywrap_sig: str,
+    ) -> GfsConnection:
+        """:meth:`_register`, with its failure classified for the routes."""
+        try:
+            return await self._register(
+                gfs_url,
+                info,
+                token,
+                own_instance_id=own_instance_id,
+                own_public_key_hex=own_public_key_hex,
+                own_display_name=own_display_name,
+                own_keywrap_public_key_hex=own_keywrap_public_key_hex,
+                own_keywrap_sig=own_keywrap_sig,
+            )
+        except GfsConnectionError as exc:
+            # No status = never answered; a 5xx = the GFS is having trouble.
+            # Anything else is the GFS saying no to this registration.
+            raise GfsSignupError(
+                str(exc),
+                reason=_contact_reason(exc, answered="refused"),
+                status=exc.status,
+            ) from exc
 
     async def pair_open_signup(
         self,
@@ -507,16 +590,7 @@ class GfsConnectionService:
                 " are required for GFS registration",
                 reason="refused",
             )
-        try:
-            _require_secure_url(gfs_url, field="gfs_url")
-        except GfsConnectionError as exc:
-            raise GfsSignupError(str(exc), reason="invalid_url") from exc
-        for existing in await self._repo.list_all():
-            if existing.inbox_url.rstrip("/") == gfs_url:
-                raise GfsSignupError(
-                    "This household is already connected to that GFS",
-                    reason="already_connected",
-                )
+        await self._require_new_gfs_url(gfs_url)
 
         try:
             info = await self._fetch_descriptor(gfs_url)
@@ -549,26 +623,16 @@ class GfsConnectionService:
                 reason="closed",
             )
         token = await self._request_signup_token(gfs_url)
-        try:
-            return await self._register(
-                gfs_url,
-                info,
-                token,
-                own_instance_id=own_instance_id,
-                own_public_key_hex=own_public_key_hex,
-                own_display_name=own_display_name,
-                own_keywrap_public_key_hex=own_keywrap_public_key_hex,
-                own_keywrap_sig=own_keywrap_sig,
-            )
-        except GfsConnectionError as exc:
-            # No status = never answered; a 5xx = the GFS is having trouble.
-            # Anything else is the GFS saying no to this registration.
-            unreachable = exc.status is None or exc.status >= 500
-            raise GfsSignupError(
-                str(exc),
-                reason="unreachable" if unreachable else "refused",
-                status=exc.status,
-            ) from exc
+        return await self._register_classified(
+            gfs_url,
+            info,
+            token,
+            own_instance_id=own_instance_id,
+            own_public_key_hex=own_public_key_hex,
+            own_display_name=own_display_name,
+            own_keywrap_public_key_hex=own_keywrap_public_key_hex,
+            own_keywrap_sig=own_keywrap_sig,
+        )
 
     async def _request_signup_token(self, gfs_url: str) -> str:
         """``POST {gfs_url}/gfs/signup-token`` → the single-use token.
@@ -618,9 +682,10 @@ class GfsConnectionService:
     async def _fetch_descriptor(self, gfs_url: str) -> dict:
         """``GET {gfs_url}/gfs/info`` for pairing — the key to pin + caps.
 
-        Raises :class:`GfsConnectionError` (``status`` set when the GFS
-        answered) on any failure or when the descriptor lacks
-        ``gfs_instance_id`` / ``public_key``.
+        Raises :class:`GfsConnectionError` on any failure, with ``status``
+        set whenever the GFS answered — including a 200 that is no
+        descriptor (not an object, or lacking ``gfs_instance_id`` /
+        ``public_key``), so ``status is None`` strictly means "no answer".
         """
         client = self._client()
         info_url = f"{gfs_url}/gfs/info"
@@ -636,18 +701,29 @@ class GfsConnectionService:
                         f"GFS /gfs/info failed (HTTP {resp.status}): {detail}",
                         status=resp.status,
                     )
-                info = await resp.json()
+                try:
+                    info = await resp.json()
+                except (aiohttp.ContentTypeError, ValueError) as exc:
+                    # A web page (or garbage) where the descriptor should be:
+                    # the address answered, it just isn't a GFS.
+                    raise GfsConnectionError(
+                        f"GFS /gfs/info did not return JSON: {exc}",
+                        status=resp.status,
+                    ) from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise GfsConnectionError(
                 f"GFS unreachable while fetching /gfs/info: {exc}",
             ) from exc
         if not isinstance(info, dict):
-            raise GfsConnectionError("GFS /gfs/info did not return an object")
+            raise GfsConnectionError(
+                "GFS /gfs/info did not return an object", status=200
+            )
         if not str(info.get("gfs_instance_id") or "") or not str(
             info.get("public_key") or ""
         ):
             raise GfsConnectionError(
                 "GFS /gfs/info did not return gfs_instance_id and public_key",
+                status=200,
             )
         return info
 

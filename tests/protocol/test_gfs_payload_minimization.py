@@ -345,7 +345,6 @@ async def gfs(tmp_dir, household):
             instance_id=PUBLISHER_INSTANCE,
             display_name="Publisher",
             public_key=generate_identity_keypair().public_key.hex(),
-            inbox_url="https://pub.example/federation/inbox/x",
             status="active",
             auto_accept=True,
         )
@@ -355,7 +354,6 @@ async def gfs(tmp_dir, household):
             instance_id=SUBSCRIBER_INSTANCE_NAME,
             display_name="Sub",
             public_key=generate_identity_keypair().public_key.hex(),
-            inbox_url="https://sub.example/federation/inbox/x",
             status="active",
             auto_accept=True,
         )
