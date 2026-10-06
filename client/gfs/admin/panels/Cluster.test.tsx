@@ -203,10 +203,14 @@ describe('ClusterPanel — peer list', () => {
     stubApi()
     const { container, findByText } = render(<ClusterPanel />)
     await findByText('node-b')
-    expect(rowFor(container, 'node-d').textContent).toContain('Add it again with its public key')
-    expect(rowFor(container, 'node-c').textContent).not.toContain('Add it again')
+    const hint = rowFor(container, 'node-d').querySelector('.key-hint')?.textContent ?? ''
+    // Leads with the condition, points at the form below, and reassures a
+    // shared-key sibling that it needs nothing.
+    expect(hint).toMatch(/^If it has its own key, approve it again below with that key\./)
+    expect(hint).toMatch(/rejoins by itself/)
+    expect(rowFor(container, 'node-c').querySelector('.key-hint')).toBeNull()
     expect(rowFor(container, 'node-c').textContent).not.toContain('Make sure you added')
-    expect(rowFor(container, 'node-b').textContent).not.toContain('Add it again')
+    expect(rowFor(container, 'node-b').querySelector('.key-hint')).toBeNull()
   })
 
   it('shows no Ping/Remove on the self row but does on a peer row', async () => {
@@ -266,6 +270,19 @@ describe('ClusterPanel — remove', () => {
     const dialog = await findByRole('alertdialog')
     expect(dialog.textContent).toMatch(/join again by itself/i)
     expect(dialog.textContent).not.toMatch(/until you add it again/i)
+  })
+
+  it('tells both cases apart for a node that is not approved', async () => {
+    stubApi()
+    const { container, findByText, findByRole } = render(<ClusterPanel />)
+    await findByText('node-b')
+    fireEvent.click(Array.from(rowFor(container, 'node-d').querySelectorAll('button'))
+      .find((b) => b.textContent === 'Remove')!)
+    const dialog = await findByRole('alertdialog')
+    // Same message as the row hint: a shared-key sibling comes back by
+    // itself, so the confirmation mustn't claim it needs re-adding.
+    expect(dialog.textContent).toMatch(/shares this server's key, it joins again by itself/i)
+    expect(dialog.textContent).toMatch(/has its own key, it can't sync .* until you approve it again/i)
   })
 
   it('moves focus to Cancel and closes on Escape', async () => {
@@ -421,6 +438,10 @@ describe('ClusterPanel — add peer', () => {
     const alert = await findByRole('alert')
     if (typeof expected === 'string') expect(alert.textContent).toBe(expected)
     else expect(alert.textContent).toMatch(expected)
+    // The message sits under the field it is about and describes it.
+    const input = alert.closest('.field')?.querySelector('input')
+    expect(input?.getAttribute('aria-invalid')).toBe('true')
+    expect(input?.getAttribute('aria-describedby')).toBe(alert.id)
     // The form keeps what the operator typed so they can fix it.
     expect((container.querySelector('[aria-label="Peer node id"]') as HTMLInputElement).value)
       .toBe('node-z')

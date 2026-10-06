@@ -116,8 +116,8 @@ function KeyCell({ node }: { node: ClusterNode }) {
       </div>
       {!node.is_self && node.key_source === 'none' && (
         <div class="muted key-hint">
-          Add it again with its public key if it has its own key. Nodes that share
-          this server's key rejoin by themselves.
+          If it has its own key, approve it again below with that key. If it
+          shares this server's key, there's nothing to do: it rejoins by itself.
         </div>
       )}
     </td>
@@ -190,9 +190,13 @@ function RemoveConfirm({ node, onConfirm, onCancel }: {
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null)
   useEffect(() => { cancelRef.current?.focus() }, [node.node_id])
+  /* A ``none`` row may be a shared-key sibling (comes back by itself) or a
+     node with its own key (needs approving) — say both, as the row does. */
   const warning = node.key_source === 'own'
     ? "It shares this server's signing key, so it will join again by itself the next time it contacts this server."
-    : "It can't sync with this server until you add it again with its public key."
+    : node.key_source === 'none'
+      ? "If it shares this server's key, it joins again by itself. If it has its own key, it can't sync with this server until you approve it again with that key."
+      : "It can't sync with this server until you add it again with its public key."
   return (
     <div
       class="confirm-box"
@@ -255,7 +259,11 @@ function AddPeerForm({ onAdded }: { onAdded: () => Promise<void> }) {
     extra: Record<string, string>,
   ) => {
     const err = fieldErrs[field]
-    const invalid = !!err || serverErr?.field === field
+    // A server complaint about this field is shown under it (not at the
+    // bottom of the form) and describes the input like a local one.
+    const srvErr = serverErr?.field === field ? serverErr.msg : null
+    const invalid = !!err || !!srvErr
+    const describedBy = err ? `peer-${field}-err` : srvErr ? `peer-${field}-srv-err` : undefined
     return (
       <div class="field">
         <label for={`peer-${field}`}>{label}</label>
@@ -264,7 +272,7 @@ function AddPeerForm({ onAdded }: { onAdded: () => Promise<void> }) {
           type="text"
           aria-label={ariaLabel}
           aria-invalid={invalid ? 'true' : 'false'}
-          aria-describedby={err ? `peer-${field}-err` : undefined}
+          aria-describedby={describedBy}
           autocomplete="off"
           autocapitalize="off"
           spellcheck={false}
@@ -279,6 +287,9 @@ function AddPeerForm({ onAdded }: { onAdded: () => Promise<void> }) {
           {...extra}
         />
         {err && <p id={`peer-${field}-err`} class="error field-error">{err}</p>}
+        {srvErr && (
+          <p id={`peer-${field}-srv-err`} class="error field-error" role="alert">{srvErr}</p>
+        )}
       </div>
     )
   }
@@ -296,7 +307,7 @@ function AddPeerForm({ onAdded }: { onAdded: () => Promise<void> }) {
         { placeholder: 'https://gfs-2.example', inputMode: 'url' })}
       {input('public_key', 'Public key', 'Peer public key', key, setKey,
         { placeholder: '64 hex characters', class: 'mono' })}
-      {serverErr && <p class="error" role="alert">{serverErr.msg}</p>}
+      {serverErr && !serverErr.field && <p class="error" role="alert">{serverErr.msg}</p>}
       <button class="primary" type="submit" disabled={busy}>Approve node</button>
     </form>
   )

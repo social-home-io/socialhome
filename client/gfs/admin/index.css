@@ -315,7 +315,9 @@ textarea { min-height: 110px; font-family: inherit; }
 .cluster-panel .key-source { font-size: 12px; margin-top: 2px; }
 .cluster-panel .key-source-own { color: var(--sh-success); }
 .cluster-panel .key-source-approved { color: var(--sh-text); }
-.cluster-panel .key-source-none { color: color-mix(in srgb, var(--sh-warning) 75%, var(--sh-text)); }
+/* 55% honey keeps the amber cue at >= 4.5:1 (5.0:1) for 12px text on the
+ * card surface; 75% measured 3.4:1. */
+.cluster-panel .key-source-none { color: color-mix(in srgb, var(--sh-warning) 55%, var(--sh-text)); }
 .cluster-panel .key-hint { font-size: 12px; }
 .cluster-panel .row-actions { white-space: nowrap; }
 
