@@ -327,6 +327,24 @@ The Social Home ↔ GFS link is split by direction:
   (Phase 5b-b, below). This frame is best-effort — dropped if the owner has
   no socket; the 5b-c reconcile backstops an offline owner, and the
   subscriber's own (re)connect re-triggers the notify (Phase 5b-d).
+- **A rejected hello names no reason that leaks registration.** An unknown
+  or inactive `instance_id` and a bad (or undecodable) signature for a
+  registered one both close `4401` with the single reason `auth-failed`, and
+  the unknown branch still runs one Ed25519 verify (against a fixed dummy key
+  nothing signs with), so neither the close reason nor the time to it tells a
+  prober whether an id is registered. Older GFS builds sent `unknown-instance`
+  / `bad-signature`; households treat all three as "re-pair needed".
+  Freshness and shape failures (`ts-skew`, `hello-timeout`, `missing-fields`
+  …) keep their own reasons — they are about the caller's bytes, not the id.
+- **Queued frames reach a household on any cluster node.** Cluster nodes
+  share one database — so one `gfs_envelope_queue` — but each knows only its
+  own sockets. A node that queues an envelope or member item for a household
+  it holds no socket for sends one coalesced, fire-and-forget
+  `NODE_DRAIN_HINT {instances:[…]}` (ids only; ≤ 0.5 s of batching, ≤ 256 ids
+  a frame) to its member peers; the node that does hold the household's
+  socket drains its queue right away instead of on the next reconnect.
+  Drains are serialised per household, so a hello drain and a hint drain
+  never deliver a row twice.
 
 ### Connecting a household: QR code or open sign-up
 
@@ -757,7 +775,14 @@ State this precisely; do not soften it:
 3. **Per-instance GFS bans cannot gate an anonymous relay.** The
    space-level ban (`status='banned'`) is the only moderation lever left on
    the relay path.
-4. **The GFS still sees `space_id`, `event_type`, payload size and timing**,
+4. **Nobody learns from the GFS which households use it, or are online.**
+   `POST /gfs/envelope` answers every well-formed request with the same
+   `202` body, and answers it before the recipient is even looked up (the
+   lookup / push / enqueue runs in the background), so neither the response
+   nor its latency separates online, offline and unregistered recipients.
+   The `/gfs/ws` hello fails with one `auth-failed` reason after the same
+   verify work whether the id is unknown or the signature is wrong.
+5. **The GFS still sees `space_id`, `event_type`, payload size and timing**,
    plus the subscriber set — it is the directory. Payload size is a bucket:
    every host-relay plaintext is padded to `ITEM_SIZE_BUCKETS`, and removal
    notices and approved posts ride the same `space_post_public` type, so a
@@ -1024,7 +1049,8 @@ POST /gfs/member-publish
   so its items go out in publish order, and one space may hold only a
   bounded share of the backlog. An offline subscriber's frame waits in the
   GFS queue for 24 h (shared with `/gfs/envelope`, separately capped) and is
-  drained on its next hello — but only for a subscriber that held a WS
+  drained on its next hello, or at once by the cluster node holding its
+  socket (`NODE_DRAIN_HINT`, see Transport above) — but only for a subscriber that held a WS
   session for at least 60 s within those 24 h (a bare hello earns nothing).
   Room is made by fair-share eviction: a recipient's own oldest item at its
   per-recipient cap, the largest holder's oldest item at the server-wide

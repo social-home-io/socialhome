@@ -21,16 +21,20 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.global_server.app_keys import (
+    gfs_cluster_key,
     gfs_db_key,
     gfs_envelope_queue_repo_key,
+    gfs_envelope_relay_key,
     gfs_fed_repo_key,
     gfs_ws_registry_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server import envelope_relay as envelope_relay_mod
 from socialhome.global_server.envelope_relay import (
     ENVELOPE_MAX_BODY_BYTES,
     ENVELOPE_MAX_PER_MINUTE,
+    GfsEnvelopeRelay,
 )
 from socialhome.global_server.server import create_gfs_app
 
@@ -102,6 +106,16 @@ async def gfs(tmp_dir):
         yield tc
 
 
+async def _settle(app) -> None:
+    """Wait until every background ``accept`` the route handed off is done."""
+    relay = app[gfs_envelope_relay_key]
+    for _ in range(500):
+        if relay.in_flight == 0:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("background envelope work never settled")
+
+
 async def _wait_connected(app, instance_id: str) -> None:
     registry = app[gfs_ws_registry_key]
     for _ in range(200):
@@ -137,6 +151,7 @@ async def test_offline_recipient_is_queued_then_drained_in_order_on_hello(gfs):
         )
         assert resp.status == 202
 
+    await _settle(gfs._app)
     queue_repo = gfs._app[gfs_envelope_queue_repo_key]
     assert await queue_repo.count_for("recipient2home2222222222222222aa") == 3
 
@@ -158,6 +173,7 @@ async def test_unknown_recipient_is_accepted_and_stores_nothing(gfs):
     )
     assert resp.status == 202
 
+    await _settle(gfs._app)
     rows = await gfs._app[gfs_db_key].fetchall("SELECT * FROM gfs_envelope_queue", ())
     assert rows == []
 
@@ -191,6 +207,80 @@ async def test_response_is_byte_identical_online_offline_and_unknown(gfs):
     assert online.status == offline.status == unknown.status == 202
     assert online_body == offline_body == unknown_body
     assert json.loads(online_body) == {"status": "accepted"}
+
+
+@pytest.mark.security
+async def test_response_does_not_wait_for_the_recipient_lookup(gfs, monkeypatch):
+    """Timing is part of the uniform answer: the 202 goes out before the
+    lookup / push / enqueue runs, so how long that takes (unknown → fast
+    drop, online → socket write, offline → DB insert) never shows up in the
+    response latency."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _blocked(self, to_instance, sealed):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(GfsEnvelopeRelay, "accept", _blocked)
+    resp = await asyncio.wait_for(
+        gfs.post("/gfs/envelope", json=_envelope("recipient2home2222222222222222aa")),
+        timeout=2,
+    )
+    assert resp.status == 202
+    assert await resp.json() == {"status": "accepted"}
+    await asyncio.wait_for(started.wait(), timeout=2)
+    assert gfs._app[gfs_envelope_relay_key].in_flight == 1
+    release.set()
+    await _settle(gfs._app)
+
+
+@pytest.mark.security
+async def test_a_saturated_relay_still_answers_the_uniform_202(gfs, monkeypatch):
+    relay = gfs._app[gfs_envelope_relay_key]
+    monkeypatch.setattr(relay, "_max_inflight", 0)
+    resp = await gfs.post(
+        "/gfs/envelope", json=_envelope("recipient2home2222222222222222aa")
+    )
+    assert resp.status == 202
+    assert await resp.json() == {"status": "accepted"}
+    await _settle(gfs._app)
+    queue_repo = gfs._app[gfs_envelope_queue_repo_key]
+    assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
+
+
+async def test_the_relay_and_the_cluster_are_wired_both_ways(gfs):
+    relay = gfs._app[gfs_envelope_relay_key]
+    cluster = gfs._app[gfs_cluster_key]
+    assert relay._cluster is cluster
+    assert cluster._drain_cb == relay.drain
+
+
+async def test_shutdown_settles_in_flight_envelope_work(tmp_dir, monkeypatch):
+    cfg = GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url="http://gfs.test",
+        data_dir=str(tmp_dir),
+        instance_id="gfs-node-a",
+        cluster_enabled=False,
+        cluster_node_id="gfs-node-a",
+        cluster_peers=(),
+    )
+
+    async def _forever(self, to_instance, sealed):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(GfsEnvelopeRelay, "accept", _forever)
+    monkeypatch.setattr(envelope_relay_mod, "ENVELOPE_CLOSE_TIMEOUT_S", 0.05)
+    app = create_gfs_app(cfg)
+    async with TestClient(TestServer(app)) as tc:
+        resp = await tc.post(
+            "/gfs/envelope", json=_envelope("recipient2home2222222222222222aa")
+        )
+        assert resp.status == 202
+        assert app[gfs_envelope_relay_key].in_flight == 1
+    assert app[gfs_envelope_relay_key].in_flight == 0
 
 
 # ── Rejections ───────────────────────────────────────────────────────────
@@ -273,6 +363,7 @@ async def test_no_log_record_carries_the_sealed_material(gfs, caplog):
         await gfs.post(
             "/gfs/envelope", json=_envelope("stranger2home2222222222222222abc")
         )
+        await _settle(gfs._app)
         async with gfs.ws_connect("/gfs/ws") as ws:
             await ws.send_json(_hello("recipient2home2222222222222222aa", gfs._seed))
             await asyncio.wait_for(ws.receive_json(), timeout=5)

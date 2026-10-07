@@ -429,6 +429,20 @@ describe('ConnectionsPage', () => {
       expect(await findByText('gfs.status_repair_needed')).toBeTruthy()
     })
 
+    it('shows "re-pair needed" for an auth-failed WS close (current GFS)', async () => {
+      apiMock.get.mockImplementation((url: string) => {
+        if (url === '/api/gfs/connections')
+          return Promise.resolve([
+            makeGfs({ status: 'active', connected: false, last_error: 'auth-failed' }),
+          ])
+        return Promise.resolve([])
+      })
+
+      const { findByText, queryByText } = render(<ConnectionsPage />)
+      expect(await findByText('gfs.status_repair_needed')).toBeTruthy()
+      expect(queryByText('gfs.status_connected')).toBeNull()
+    })
+
     it('shows "clock out of sync" for a ts-skew WS close', async () => {
       apiMock.get.mockImplementation((url: string) => {
         if (url === '/api/gfs/connections')

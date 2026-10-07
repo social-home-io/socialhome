@@ -66,8 +66,10 @@ const disconnectTarget = signal<GfsConnection | null>(null)
 
 
 /** Re-pair-class auth failures: the GFS no longer recognizes this home,
- *  so reconnecting can never succeed without re-pairing. */
-const GFS_REPAIR_ERRORS = new Set(['unknown-instance', 'bad-signature'])
+ *  so reconnecting can never succeed without re-pairing. Current GFS builds
+ *  close with one ``auth-failed`` reason (an unknown id must not be told
+ *  apart from a bad signature); older ones still send the two split reasons. */
+const GFS_REPAIR_ERRORS = new Set(['auth-failed', 'unknown-instance', 'bad-signature'])
 
 interface GfsLiveState {
   /** Full ``sh-status-dot …`` class for the leading dot. */

@@ -11,6 +11,7 @@ from aiohttp import web
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
 from ..cluster import (
+    NODE_DRAIN_HINT,
     NODE_HEARTBEAT,
     NODE_HELLO,
     NODE_PARTITION_CATCHUP,
@@ -299,6 +300,8 @@ class ClusterSyncView(GfsBaseView):
             )
         elif msg_type == NODE_PARTITION_GAP:
             await svc.apply_partition_gap(payload)
+        elif msg_type == NODE_DRAIN_HINT:
+            await svc.apply_drain_hint(payload.get("instances"))
         else:
             log.debug(
                 "cluster: unknown NODE_* type %r from %r",

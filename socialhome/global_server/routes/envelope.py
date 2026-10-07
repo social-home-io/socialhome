@@ -38,12 +38,17 @@ class EnvelopeRelayView(GfsBaseView):
     limiter (``build_envelope_rate_limit``) is the accountability handle, as
     it is for the equally anonymous ``/gfs/publish``.
 
-    **Uniform response.** Every well-formed request gets ``202
-    {"status": "accepted"}`` — byte-identical whether the recipient was
-    online, offline, or is not a client of this server at all. Any variation
-    would turn the endpoint into a presence/existence oracle for anyone
-    willing to walk instance ids. Malformed → 400, over the cap → 413,
-    rate-limited → 429 (from the middleware).
+    **Uniform response — status, body AND timing.** Every well-formed
+    request gets ``202 {"status": "accepted"}`` — byte-identical whether the
+    recipient was online, offline, or is not a client of this server at all.
+    The answer is also sent before any of that is looked up: the view only
+    validates the outer shape and hands the envelope to
+    ``GfsEnvelopeRelay.submit``, which runs the lookup / push / enqueue as a
+    background task (or drops it when the relay is saturated). Any variation
+    — in what comes back or in how long it takes — would turn the endpoint
+    into a presence/existence oracle for anyone willing to walk instance ids.
+    Malformed → 400, over the cap → 413, rate-limited → 429 (from the
+    middleware).
     """
 
     async def post(self) -> web.Response:
@@ -57,7 +62,8 @@ class EnvelopeRelayView(GfsBaseView):
             to_instance, sealed = validate_envelope(parsed)
         except InvalidEnvelope as exc:
             raise web.HTTPBadRequest(reason=str(exc)) from exc
-        # ``accept`` returns nothing: online / offline / unknown all end here
-        # with the same response, and there is no outcome to branch on.
-        await relay.accept(to_instance, sealed)
+        # ``submit`` returns nothing and awaits nothing: online / offline /
+        # unknown / saturated all end here with the same response after the
+        # same work, and there is no outcome to branch on.
+        relay.submit(to_instance, sealed)
         return web.json_response(_ACCEPTED_BODY, status=202)

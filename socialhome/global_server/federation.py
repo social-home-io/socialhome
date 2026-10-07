@@ -119,12 +119,12 @@ PUBLISH_REPLAY_TTL_S: float = 300.0
 PUBLISH_REPLAY_MAX_ENTRIES: int = 10_000
 
 #: Verify key used on the unknown-instance branch of the LEGACY transport-
-#: signature check so that branch does the same Ed25519 verification work as
+#: signature check (and of the ``/gfs/ws`` hello, :mod:`.routes.ws`) so that branch does the same Ed25519 verification work as
 #: the registered-instance branch — otherwise an unknown instance returns
 #: measurably sooner and the endpoint becomes a timing oracle for "is this
 #: household registered here?". The Ed25519 public key for the all-zero seed;
 #: nothing is ever signed with it, and a signature can never verify under it.
-_TIMING_UNIFORM_DUMMY_KEY_HEX: str = (
+TIMING_UNIFORM_DUMMY_KEY_HEX: str = (
     "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
 )
 
@@ -133,7 +133,7 @@ _TIMING_UNIFORM_DUMMY_KEY_HEX: str = (
 #: signature fails on the length check and costs nothing, so the burn has to
 #: use a full-length value to match the work a genuine bad-signature rejection
 #: does. It can never verify under any key.
-_TIMING_UNIFORM_DUMMY_SIG: bytes = bytes(64)
+TIMING_UNIFORM_DUMMY_SIG: bytes = bytes(64)
 
 #: Freshness window for the signed instance-update timestamp (seconds). A
 #: ``ts`` further than this from now is treated as a replay and rejected —
@@ -186,7 +186,7 @@ def _burn_dummy_verify(event_type: str, space_id: str, payload: object) -> None:
 
     So each early reject burns one verification over the bytes it WOULD have
     verified, against the same fixed dummy key the legacy branch uses
-    (:data:`_TIMING_UNIFORM_DUMMY_KEY_HEX`) and a fixed full-length signature.
+    (:data:`TIMING_UNIFORM_DUMMY_KEY_HEX`) and a fixed full-length signature.
     The result is discarded — the caller raises regardless.
     """
     bare = strip_authority_sig_fields(payload) if isinstance(payload, dict) else {}
@@ -196,9 +196,9 @@ def _burn_dummy_verify(event_type: str, space_id: str, payload: object) -> None:
         payload=bare,
     )
     verify_ed25519(
-        bytes.fromhex(_TIMING_UNIFORM_DUMMY_KEY_HEX),
+        bytes.fromhex(TIMING_UNIFORM_DUMMY_KEY_HEX),
         message,
-        _TIMING_UNIFORM_DUMMY_SIG,
+        TIMING_UNIFORM_DUMMY_SIG,
     )
 
 
@@ -575,7 +575,7 @@ class GfsFederationService:
         endpoint is not an instance-existence oracle by MESSAGE. It is not an
         oracle by TIMING either: the unknown / banned-instance branch verifies
         the supplied signature against a fixed dummy key
-        (:data:`_TIMING_UNIFORM_DUMMY_KEY_HEX`) so it performs the same one DB
+        (:data:`TIMING_UNIFORM_DUMMY_KEY_HEX`) so it performs the same one DB
         read plus one Ed25519 verification as the registered-instance branch,
         instead of returning as soon as the lookup misses.
         """
@@ -596,7 +596,7 @@ class GfsFederationService:
         key_hex = (
             inst.public_key
             if known and inst is not None
-            else _TIMING_UNIFORM_DUMMY_KEY_HEX
+            else TIMING_UNIFORM_DUMMY_KEY_HEX
         )
         try:
             # A malformed stored pubkey is unverifiable — fail closed as a

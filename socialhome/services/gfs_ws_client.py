@@ -139,7 +139,8 @@ class GfsWebSocketClient:
         # until ``stop()``'s 5 s wait ran out and it cancelled the task.
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         # Last GFS-supplied reason for an auth-related close (e.g.
-        # "unknown-instance", "bad-signature"). ``None`` while the link is
+        # "auth-failed"; GFS builds before the oracle fix sent the split
+        # "unknown-instance" / "bad-signature"). ``None`` while the link is
         # healthy; set on a 4401/4408/4400 close so the supervisor/UI can
         # surface "re-pair may be required" instead of a silent reconnect
         # hammer. Cleared once a session is confirmed live.
@@ -542,8 +543,8 @@ class _GfsWsAuthFailure(Exception):
     """Raised when the GFS closes the connection with an auth-related code.
 
     Carries the close ``code`` (one of :data:`_AUTH_CLOSE_CODES`) and the
-    GFS-supplied ``reason`` string (e.g. ``"unknown-instance"``,
-    ``"bad-signature"``) so the loop can surface it on ``last_auth_error``.
+    GFS-supplied ``reason`` string (e.g. ``"auth-failed"``, or the older
+    ``"unknown-instance"`` / ``"bad-signature"``) so the loop can surface it on ``last_auth_error``.
     """
 
     def __init__(self, code: int | None, reason: str | None) -> None:

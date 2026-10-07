@@ -23,6 +23,15 @@ be within ±300 s of the GFS clock — same convention as §24.11. On
 verification failure the GFS closes with WebSocket close code ``4401``;
 on hello timeout, ``4408``.
 
+An unregistered (or inactive) ``instance_id`` and a bad signature for a
+registered one close with the SAME reason, ``auth-failed``, after the SAME
+work — the unknown branch verifies the signature against a fixed dummy key
+(:data:`..federation.TIMING_UNIFORM_DUMMY_KEY_HEX`). Distinct reasons, or an
+unknown id answered before any Ed25519 verify, would let anyone learn which
+instance ids are registered here. (Households older than this release
+reported ``unknown-instance`` / ``bad-signature``; their UI treats all three
+as "re-pair needed".)
+
 Push frames (sent by :class:`GfsFederationService._fan_out`)::
 
     {"type": "relay", "space_id": ..., "event_type": ..., "payload": ...}
@@ -52,6 +61,7 @@ from aiohttp import WSMsgType, web
 from ... import crypto
 from .. import app_keys as K
 from ..envelope_relay import RELAY_SEEN_MIN_SESSION_S
+from ..federation import TIMING_UNIFORM_DUMMY_KEY_HEX
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +72,10 @@ TIMESTAMP_WINDOW_SECONDS = 300
 WS_CLOSE_AUTH_FAILED = 4401
 WS_CLOSE_HELLO_TIMEOUT = 4408
 WS_CLOSE_PROTOCOL_VIOLATION = 4400
+
+#: The one close reason for "this hello does not authenticate": unknown
+#: instance, inactive instance, undecodable or wrong signature alike.
+WS_AUTH_FAILED_REASON = b"auth-failed"
 
 
 async def _mark_seen_after(
@@ -209,20 +223,25 @@ class GfsWebSocketView(web.View):
 
         fed_repo = self.request.app[K.gfs_fed_repo_key]
         instance = await fed_repo.get_instance(instance_id)
-        if instance is None or instance.status != "active":
-            await ws.close(code=WS_CLOSE_AUTH_FAILED, message=b"unknown-instance")
-            return None
-
+        known = instance is not None and instance.status == "active"
+        # An unknown id still runs the full verify, against a key nothing
+        # signs with, so it answers no sooner than a wrong signature does.
+        key_hex = (
+            instance.public_key
+            if known and instance is not None
+            else TIMING_UNIFORM_DUMMY_KEY_HEX
+        )
         try:
-            raw_key = bytes.fromhex(instance.public_key)
+            raw_key = bytes.fromhex(key_hex)
             raw_sig = crypto.b64url_decode(sig)
         except ValueError, TypeError:
-            await ws.close(code=WS_CLOSE_AUTH_FAILED, message=b"bad-signature")
+            await ws.close(code=WS_CLOSE_AUTH_FAILED, message=WS_AUTH_FAILED_REASON)
             return None
 
         message = f"{instance_id}|{ts}".encode("utf-8")
-        if not crypto.verify_ed25519(raw_key, message, raw_sig):
-            await ws.close(code=WS_CLOSE_AUTH_FAILED, message=b"bad-signature")
+        verified = crypto.verify_ed25519(raw_key, message, raw_sig)
+        if not (known and verified):
+            await ws.close(code=WS_CLOSE_AUTH_FAILED, message=WS_AUTH_FAILED_REASON)
             return None
 
         log.info("gfs.ws.hello accepted: instance=%s", instance_id)
