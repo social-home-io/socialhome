@@ -3,10 +3,11 @@
 Business logic only — all SQL lives in :mod:`.repositories`. Crypto
 helpers are reused from :mod:`socialhome.crypto` (no duplication).
 
-Fan-out delivery is **WebSocket-primary, HTTPS-fallback** (spec §24.12):
-if a paired SH instance has an open ``/gfs/ws`` WebSocket, the event is
-pushed over that connection; otherwise it falls back to an HTTPS POST
-to the subscriber's inbox URL.
+Fan-out delivery is **WebSocket-only** (spec §24.12): if a paired SH
+instance has an open ``/gfs/ws`` WebSocket, the event is pushed over that
+connection; otherwise it is not delivered and waits for the household to
+reconnect. The GFS holds no household address (migration 0018 dropped
+``inbox_url`` with the HTTPS-inbox fallback that could never succeed).
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-import aiohttp
 
 from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -39,7 +39,6 @@ from ..authority_cert import (
     verify_authority_cert,
 )
 from ..crypto import b64url_decode, verify_ed25519
-from ..peer_http import post_to_peer
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH
 from ..domain.space import (
@@ -73,29 +72,23 @@ MAX_DISPLAY_NAME_CHARS: int = 80
 
 #: Max simultaneous in-flight subscriber deliveries for ONE relayed event.
 #: Sequential fan-out let a single accepted (and anonymously replayable)
-#: publish pin a request handler for ``len(subscribers) ×
-#: FAN_OUT_TIMEOUT_SECONDS``; unbounded concurrency would instead let it open a
-#: socket per subscriber. 8 keeps a large space's fan-out an order of magnitude
-#: faster than sequential while capping the sockets and memory one publish can
-#: claim.
+#: publish pin a request handler for the sum of every subscriber's send time;
+#: unbounded concurrency would instead let it push to every subscriber at
+#: once. 8 keeps a large space's fan-out an order of magnitude faster than
+#: sequential while capping the memory one publish can claim.
 FAN_OUT_CONCURRENCY: int = 8
 
-#: Per-target delivery timeout for the HTTPS-inbox fallback (seconds).
-FAN_OUT_TIMEOUT_SECONDS: int = 10
-
-#: Wall-clock ceiling on ONE relay's whole fan-out (seconds). Bounded
-#: concurrency alone still lets an accepted publish pin the request handler for
-#: ``ceil(len(subscribers) / FAN_OUT_CONCURRENCY) × FAN_OUT_TIMEOUT_SECONDS``
-#: when every target blackholes — minutes for a space with a few hundred
-#: subscribers, and the caller of ``/gfs/publish`` is anonymous, so an attacker
-#: who registers N instances and subscribes them with blackhole inbox URLs can
-#: hold hundreds of handlers at the per-IP publish limit. With the deadline the
-#: handler returns whatever was delivered by then and the stragglers are
-#: cancelled: the relay is at-least-once and subscribers dedupe by the post id
-#: inside the payload, so a cancelled HTTPS-inbox delivery is indistinguishable
-#: from one that was simply lost. 8 s leaves a healthy fan-out (a WS push is
-#: sub-millisecond; a live inbox answers well inside the per-target timeout)
-#: entirely untouched.
+#: Wall-clock ceiling on ONE relay's whole fan-out (seconds). Delivery is
+#: WebSocket-only (the GFS holds no household address), and a WS push is
+#: sub-millisecond — but a socket whose peer stopped reading can stall a send
+#: until aiohttp's heartbeat evicts it, and the caller of ``/gfs/publish`` is
+#: anonymous, so an attacker who registers N instances and subscribes them with
+#: stalled sockets could hold hundreds of handlers at the per-IP publish limit.
+#: With the deadline the handler returns whatever was delivered by then and the
+#: stragglers are cancelled: the relay is at-least-once and subscribers dedupe
+#: by the post id inside the payload, so a cancelled push is indistinguishable
+#: from one that was simply lost. 8 s leaves a healthy fan-out entirely
+#: untouched.
 #:
 #: It MUST stay below the household's publish client timeout — the relay POST
 #: in ``socialhome.services.gfs_connection_service`` runs under
@@ -342,7 +335,7 @@ class GfsFederationService:
     Responsible for:
     * Registering/updating client household instances.
     * Verifying Ed25519 signatures on inbound publish requests.
-    * Fanning out events to all subscribers (WS push, HTTPS fallback).
+    * Fanning out events to all subscribers (WS push only).
     * Managing space subscription lists.
     * Listing all known global spaces.
     """
@@ -383,7 +376,6 @@ class GfsFederationService:
         self,
         instance_id: str,
         public_key: str,
-        inbox_url: str,
         *,
         display_name: str = "",
         auto_accept: bool = False,
@@ -406,7 +398,6 @@ class GfsFederationService:
                 instance_id=instance_id,
                 display_name=display_name,
                 public_key=public_key,
-                inbox_url=inbox_url,
                 status="active" if auto_accept else "pending",
                 auto_accept=auto_accept,
                 keywrap_public_key=keywrap_public_key,
@@ -414,7 +405,7 @@ class GfsFederationService:
                 keywrap_sig=keywrap_sig,
             )
         )
-        log.debug("GFS: registered instance %s inbox=%s", instance_id, inbox_url)
+        log.debug("GFS: registered instance %s", instance_id)
 
     async def publish_event(
         self,
@@ -423,8 +414,6 @@ class GfsFederationService:
         payload: object,
         from_instance: str = "",
         signature: str = "",
-        *,
-        session: aiohttp.ClientSession | None = None,
     ) -> list[str]:
         """Relay an event to all subscribers of *space_id* — **anonymously**.
 
@@ -533,7 +522,7 @@ class GfsFederationService:
             len(subscribers),
         )
 
-        return await self._fan_out(subscribers, event_body, session)
+        return await self._fan_out(subscribers, event_body)
 
     async def _learn_epoch(
         self, space_id: str, event_type: str, payload: object
@@ -961,9 +950,9 @@ class GfsFederationService:
 
         The 5b-b handoff is relayed back to the subscriber over ITS OWN GFS
         socket. If that socket was down when the seal was fanned out, the key
-        is simply lost: the HTTPS-inbox fallback cannot deliver a relay frame
-        to a household (wrong path shape + unsigned body — see ``_fan_out``),
-        nothing retries, and the 5b-c reconcile only fires when a SEED-HOLDER
+        is simply lost: delivery is WebSocket-only (the GFS holds no household
+        address — see ``_fan_out``), nothing retries, and the 5b-c reconcile
+        only fires when a SEED-HOLDER
         reconnects, not the subscriber. So when the subscriber's own socket
         comes up we ask each space owner to run the exact same verified
         seal-and-relay again — this time with the socket up to receive it.
@@ -1538,34 +1527,25 @@ class GfsFederationService:
         self,
         subscribers: list[GfsSubscriber],
         event_body: dict,
-        session: aiohttp.ClientSession | None,
     ) -> list[str]:
-        """Deliver *event_body* to each subscriber.
+        """Deliver *event_body* to each subscriber over its SH↔GFS WebSocket
+        (push frame ``{type:"relay", ...}``).
 
-        Tries the SH↔GFS WebSocket first (push frame ``{type:"relay", ...}``).
-        If no socket is registered for the subscriber or the send fails,
-        falls back to an HTTPS POST to the subscriber's inbox URL.
+        That socket is the ONLY delivery path: the GFS holds no household
+        address (migration 0018 dropped ``inbox_url`` together with the
+        HTTPS-inbox fallback, which could never succeed). A subscriber with no
+        registered socket, or whose send fails, is simply not reached — the
+        frame waits for the household to reconnect, exactly as it did after
+        the fallback failed. Returns the ids actually reached, in subscriber
+        order.
 
-        Delivery is CONCURRENT but bounded by :data:`FAN_OUT_CONCURRENCY`.
-        Sequentially, one accepted publish held its request handler for up to
-        ``len(subscribers) × FAN_OUT_TIMEOUT_SECONDS`` — an amplification
-        handle for an anonymous caller — while unbounded concurrency would let
-        one publish open a socket per subscriber. Returns the ids actually
-        reached, in subscriber order.
-
-        Bounded concurrency caps the sockets, not the WALL CLOCK: with every
-        target blackholed the handler is still pinned for
-        ``ceil(N / FAN_OUT_CONCURRENCY) × FAN_OUT_TIMEOUT_SECONDS``. So the
-        whole fan-out also runs under a :data:`FAN_OUT_DEADLINE_SECONDS`
+        Delivery is CONCURRENT but bounded by :data:`FAN_OUT_CONCURRENCY`, and
+        the whole fan-out runs under a :data:`FAN_OUT_DEADLINE_SECONDS`
         deadline — on expiry the stragglers are cancelled and the PARTIAL list
-        of ids reached so far is returned. Cancelling an in-flight HTTPS-inbox
-        POST is equivalent to that delivery being lost, which the at-least-once
-        relay (plus subscriber-side dedupe by post id) already tolerates.
+        of ids reached so far is returned. Cancelling an in-flight push is
+        equivalent to that delivery being lost, which the at-least-once relay
+        (plus subscriber-side dedupe by post id) already tolerates.
         """
-        own_session = session is None
-        active: aiohttp.ClientSession = (
-            session if session is not None else aiohttp.ClientSession()
-        )
         push_frame = {"type": "relay", **event_body}
         limit = asyncio.Semaphore(FAN_OUT_CONCURRENCY)
         # Slot-per-subscriber rather than gather()'s return value: on the
@@ -1576,9 +1556,7 @@ class GfsFederationService:
 
         async def _deliver(index: int, sub: GfsSubscriber) -> None:
             async with limit:
-                reached[index] = await self._deliver_one(
-                    sub, push_frame, event_body, active
-                )
+                reached[index] = await self._deliver_one(sub, push_frame)
 
         tasks = [
             asyncio.create_task(_deliver(i, sub)) for i, sub in enumerate(subscribers)
@@ -1601,59 +1579,15 @@ class GfsFederationService:
             for task in pending:
                 task.cancel()
             if pending:
-                # Await the cancellations so no delivery is still touching the
-                # session when it closes below.
+                # Await the cancellations so no delivery outlives the handler.
                 await asyncio.gather(*pending, return_exceptions=True)
-            if own_session:
-                await active.close()
         return [instance_id for instance_id in reached if instance_id is not None]
 
-    async def _deliver_one(
-        self,
-        sub: GfsSubscriber,
-        push_frame: dict,
-        event_body: dict,
-        session: aiohttp.ClientSession,
-    ) -> str | None:
-        """Deliver to ONE subscriber; return its id iff it was reached."""
-        # WebSocket push first.
+    async def _deliver_one(self, sub: GfsSubscriber, push_frame: dict) -> str | None:
+        """Push to ONE subscriber's WebSocket; return its id iff it was reached."""
         if self._ws_registry is not None and await self._ws_registry.send(
             sub.instance_id,
             push_frame,
         ):
             return sub.instance_id
-
-        # HTTPS-inbox fallback.
-        try:
-            async with post_to_peer(
-                session,
-                sub.inbox_url,
-                json=event_body,
-                timeout=aiohttp.ClientTimeout(total=FAN_OUT_TIMEOUT_SECONDS),
-            ) as resp:
-                # 2xx only: a redirect is not followed off the registered
-                # address (``socialhome.peer_http``), so a 3xx is not delivery.
-                if 200 <= resp.status < 300:
-                    return sub.instance_id
-                # DEBUG, not WARNING, on purpose: a household's registered
-                # ``inbox_url`` is ``<base>/federation/inbox`` while its actual
-                # route is ``/federation/inbox/{inbox_id}``, and the body posted
-                # here is a bare relay frame rather than a signed §24.11
-                # envelope — so this fallback is STRUCTURALLY guaranteed to
-                # 401/404 for an offline subscriber. Keeping it at WARNING
-                # spammed operator logs with a non-actionable error on every
-                # offline peer. The fallback itself stays (other inbox shapes do
-                # accept it); fixing the URL / envelope mismatch is a separate
-                # design change.
-                log.debug(
-                    "GFS fan-out: %s returned HTTP %s (subscriber likely offline)",
-                    sub.inbox_url,
-                    resp.status,
-                )
-        except Exception as exc:
-            log.warning(
-                "GFS fan-out: failed to deliver to %s: %s",
-                sub.inbox_url,
-                exc,
-            )
         return None

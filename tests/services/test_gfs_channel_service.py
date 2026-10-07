@@ -299,7 +299,6 @@ async def env(tmp_dir):
                     instance_id=h.instance_id,
                     display_name="H",
                     public_key=h.pk.hex(),
-                    inbox_url="http://x",
                     status="active",
                 )
             )

@@ -75,7 +75,6 @@ async def test_landing_lists_active_spaces_only(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -111,7 +110,6 @@ async def test_landing_search_filters(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -145,7 +143,6 @@ async def test_landing_category_filter(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -182,7 +179,6 @@ async def test_landing_shows_category_label(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -208,7 +204,6 @@ async def test_landing_no_filter_shows_all_active(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -258,7 +253,6 @@ async def test_landing_unknown_category_shows_all_with_all_tab_active(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -310,7 +304,6 @@ async def test_space_page_renders_connect_cta(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -347,7 +340,6 @@ async def test_space_page_renders_icon_and_brand_colors(client):
             instance_id="o2.home",
             display_name="O2",
             public_key="bb" * 32,
-            inbox_url="http://o2/wh",
             status="active",
         )
     )
@@ -381,7 +373,6 @@ async def test_space_page_404_for_pending_or_banned(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -409,7 +400,6 @@ async def test_invite_page_known_token(client):
             instance_id="o.home",
             display_name="O",
             public_key="aa" * 32,
-            inbox_url="http://o/wh",
             status="active",
         )
     )
@@ -758,7 +748,6 @@ async def _seed_listed_space(app, **space) -> None:
             instance_id="csp.home",
             display_name="CSP",
             public_key="cc" * 32,
-            inbox_url="http://csp/wh",
             status="active",
         )
     )

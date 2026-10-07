@@ -1934,7 +1934,6 @@ def _client_to_wire(c: ClientInstance) -> dict:
         "instance_id": c.instance_id,
         "display_name": c.display_name,
         "public_key": c.public_key,
-        "inbox_url": c.inbox_url,
         "status": c.status,
         "auto_accept": c.auto_accept,
         "connected_at": c.connected_at,
@@ -1942,11 +1941,12 @@ def _client_to_wire(c: ClientInstance) -> dict:
 
 
 def _wire_to_client(d: dict) -> ClientInstance:
+    """Only the fields the row has; an ``inbox_url`` sent by a node still on
+    the release before migration 0018 is ignored."""
     return ClientInstance(
         instance_id=str(d["instance_id"]),
         display_name=str(d.get("display_name") or ""),
         public_key=str(d.get("public_key") or ""),
-        inbox_url=str(d.get("inbox_url") or ""),
         status=str(d.get("status") or "pending"),
         auto_accept=bool(d.get("auto_accept") or False),
         connected_at=str(d.get("connected_at") or ""),

@@ -122,7 +122,6 @@ async def test_register_instance_returns_registered(gfs_client):
             "token": token,
             "instance_id": "inst-abc",
             "public_key": "aa" * 32,
-            "inbox_url": "http://example.com/inbox",
         },
     )
     assert resp.status == 200
@@ -149,7 +148,6 @@ async def test_register_missing_token_returns_400(gfs_client):
         json={
             "instance_id": "inst-no-tok",
             "public_key": "aa" * 32,
-            "inbox_url": "http://example.com/inbox",
         },
     )
     assert resp.status == 400
@@ -162,7 +160,6 @@ async def test_register_invalid_token_returns_401(gfs_client):
             "token": "this-was-never-minted",
             "instance_id": "inst-bad-tok",
             "public_key": "aa" * 32,
-            "inbox_url": "http://example.com/inbox",
         },
     )
     assert resp.status == 401
@@ -177,7 +174,6 @@ async def test_register_token_is_single_use(gfs_client):
         "token": token,
         "instance_id": "inst-replay",
         "public_key": "aa" * 32,
-        "inbox_url": "http://example.com/inbox",
     }
     first = await gfs_client.post("/gfs/register", json=body)
     assert first.status == 200
@@ -198,7 +194,6 @@ async def test_register_returns_pending_when_auto_accept_off(gfs_client):
             "token": token,
             "instance_id": "new-pending.home",
             "public_key": "aa" * 32,
-            "inbox_url": "http://p/wh",
         },
     )
     assert resp.status == 200
@@ -206,45 +201,35 @@ async def test_register_returns_pending_when_auto_accept_off(gfs_client):
     assert body["status"] == "pending"
 
 
-@pytest.mark.parametrize(
-    "bad_url",
-    [
-        "file:///etc/passwd",
-        "gopher://inbox.example/x",
-        "http://user:secret@inbox.example/x",
-        "https://",
-        "http://inbox.example/x y",
-        "",
-        12345,
-    ],
-)
-async def test_register_rejects_unusable_inbox_url(gfs_client, bad_url):
-    """The connection server later POSTs to the registered inbox URL, so an
-    unusable one is refused up front: 422, nothing stored, the URL is not
-    echoed back, and the single-use token is not burned."""
+@pytest.mark.parametrize("legacy_url", ["https://inbox.example/federation/inbox", ""])
+async def test_register_ignores_a_legacy_inbox_url(gfs_client, legacy_url):
+    """An older household still sends ``inbox_url``. The connection server
+    keeps no household address any more, so the field is dropped on the
+    floor — never validated, never stored, never echoed — and the
+    registration goes through like any other."""
     app = gfs_client.server.app
     token = await _fresh_pair_token(app, "127.0.0.14")
-    body = {
-        "token": token,
-        "instance_id": "inst-bad-url",
-        "public_key": "aa" * 32,
-        "inbox_url": bad_url,
-    }
-    resp = await gfs_client.post("/gfs/register", json=body)
-    assert resp.status == 422
-    text = await resp.text()
-    if isinstance(bad_url, str) and bad_url:
-        assert bad_url not in text
-    assert await app[gfs_fed_repo_key].get_instance("inst-bad-url") is None
-    # Token survives: the household can fix its address and retry.
-    retry = await gfs_client.post(
+    resp = await gfs_client.post(
         "/gfs/register",
-        json={**body, "inbox_url": "https://inbox.example/federation/inbox"},
+        json={
+            "token": token,
+            "instance_id": "inst-legacy",
+            "public_key": "aa" * 32,
+            "inbox_url": legacy_url,
+        },
     )
-    assert retry.status == 200
-    stored = await app[gfs_fed_repo_key].get_instance("inst-bad-url")
+    assert resp.status == 200
+    assert legacy_url not in await resp.text() or not legacy_url
+    stored = await app[gfs_fed_repo_key].get_instance("inst-legacy")
     assert stored is not None
-    assert stored.inbox_url == "https://inbox.example/federation/inbox"
+    assert not hasattr(stored, "inbox_url")
+    columns = {
+        r["name"]
+        for r in await app[gfs_fed_repo_key]._db.fetchall(
+            "PRAGMA table_info(client_instances)"
+        )
+    }
+    assert "inbox_url" not in columns
 
 
 async def test_gfs_info_returns_public_key(gfs_client):
@@ -440,7 +425,6 @@ async def _register_and_publish(
             "token": token,
             "instance_id": instance_id,
             "public_key": pk.hex(),
-            "inbox_url": "http://example.com/wh",
         },
     )
     assert reg.status == 200
@@ -799,7 +783,6 @@ async def test_subscribe_with_non_hex_public_key_is_403(gfs_client):
             instance_id="inst-badkey",
             display_name="",
             public_key="not-hex!!",
-            inbox_url="http://badkey.example/wh",
             status="active",
             auto_accept=True,
         )
@@ -830,7 +813,6 @@ async def test_publish_space_with_non_hex_public_key_is_403(gfs_client):
             instance_id="inst-badkey-pub",
             display_name="",
             public_key="not-hex!!",
-            inbox_url="http://badkey.example/wh",
             status="active",
             auto_accept=True,
         )

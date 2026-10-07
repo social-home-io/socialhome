@@ -97,7 +97,6 @@ async def ws_client(tmp_dir):
                 instance_id="peer.home",
                 display_name="Peer",
                 public_key=pub_hex,
-                inbox_url="http://peer.home/wh",
                 status="active",
             )
         )
@@ -148,7 +147,6 @@ async def test_ws_push_via_fanout_reaches_client(ws_client):
                 instance_id="other.home",
                 display_name="Other",
                 public_key=other_pub,
-                inbox_url="http://other.home/wh",
                 status="active",
             )
         )
@@ -385,7 +383,6 @@ async def test_ws_connect_renotifies_owner_of_existing_subscriptions(ws_client):
             instance_id="owner.home",
             display_name="Owner",
             public_key=owner_pub,
-            inbox_url="http://owner.home/wh",
             status="active",
         )
     )

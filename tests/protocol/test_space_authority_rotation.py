@@ -854,9 +854,7 @@ async def _gfs_publish(gfs, owner, owner_id, space_id, pk_hex, cert=None):
 async def _gfs_world(gfs):
     owner = generate_identity_keypair()
     owner_id = derive_instance_id(owner.public_key)
-    await gfs.register_instance(
-        owner_id, owner.public_key.hex(), "https://o.invalid/wh", auto_accept=True
-    )
+    await gfs.register_instance(owner_id, owner.public_key.hex(), auto_accept=True)
     k1 = generate_identity_keypair()
     await _gfs_publish(gfs, owner, owner_id, "sp-g", k1.public_key.hex())
     k2 = generate_identity_keypair()

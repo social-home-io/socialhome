@@ -39,13 +39,13 @@ async def gfs_setup(gfs_db):
     # Seed two paired instances on the GFS — the author and the follower.
     await gfs_db.enqueue(
         "INSERT INTO client_instances("
-        "instance_id, display_name, public_key, inbox_url, status) "
-        "VALUES('inst-author','Author','aa'*32,'https://author.example','active')"
+        "instance_id, display_name, public_key, status) "
+        "VALUES('inst-author','Author','aa'*32,'active')"
     )
     await gfs_db.enqueue(
         "INSERT INTO client_instances("
-        "instance_id, display_name, public_key, inbox_url, status) "
-        "VALUES('inst-follower','Follower','bb'*32,'https://follower.example','active')"
+        "instance_id, display_name, public_key, status) "
+        "VALUES('inst-follower','Follower','bb'*32,'active')"
     )
     ws_registry = GfsWebSocketRegistry()
     return {

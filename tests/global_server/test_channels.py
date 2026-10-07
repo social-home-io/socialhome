@@ -78,7 +78,6 @@ class _Household:
             instance_id=self.instance_id,
             display_name="H",
             public_key=self.pk.hex(),
-            inbox_url=f"http://{self.instance_id}.home/wh",
             status="active",
         )
 

@@ -59,7 +59,6 @@ async def signed_caller(tmp_dir):
                 instance_id="caller.home",
                 display_name="Caller",
                 public_key=kp.public_key.hex(),
-                inbox_url="http://caller.home/wh",
                 status="active",
                 auto_accept=True,
             )
@@ -184,7 +183,6 @@ async def test_signaling_session_single_node_returns_null(tmp_dir):
                 instance_id="caller.home",
                 display_name="Caller",
                 public_key=kp.public_key.hex(),
-                inbox_url="http://caller.home/wh",
                 status="active",
                 auto_accept=True,
             )

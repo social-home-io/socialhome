@@ -174,7 +174,6 @@ async def gfs(tmp_dir):
                     instance_id=h.instance_id,
                     display_name="H",
                     public_key=h.pk.hex(),
-                    inbox_url="http://h.home/wh",
                     status="active",
                 )
             )

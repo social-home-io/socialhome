@@ -35,6 +35,7 @@ import { Spinner } from './Spinner'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
 import { isHomeAssistant, isSupervisorAddon } from '@/platform'
+import { gfsConnectErrorText } from '@/features/connections/gfsErrors'
 import { ShareHomeToggle } from './ShareHomeToggle'
 import { QrCodeImg } from './QrCodeImg'
 import { QrScanner } from './QrScanner'
@@ -649,7 +650,9 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
       if (onGfsConnectedCb.value) onGfsConnectedCb.value()
     } catch (err: unknown) {
       step.value = 'failed'
-      peerHint.value = friendlyPairError(err)
+      // GFS words, not the household-pairing table: a 422 here is the
+      // GFS refusing, never "the pairing code looks malformed".
+      peerHint.value = gfsConnectErrorText(err)
     }
   }
 
@@ -786,10 +789,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
               setScanMethod(m)
             }} />
             {scanMethod === 'qr' && (
-              <QrScanner
-                onPayload={onPayload}
-                onError={(msg) => { scanError.value = msg }}
-              />
+              <QrScanner onPayload={onPayload} />
             )}
             {scanMethod === 'paste' && (
               <PastePanel
@@ -799,7 +799,10 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
                 mode={mode.value}
               />
             )}
-            {scanMethod === 'paste' && scanError.value && (
+            {/* The flow's own decode verdict ("not a GFS code", "wrong
+                kind of code") — shown whichever way the code came in.
+                The scanner panel renders only its camera / image errors. */}
+            {scanError.value && (
               <p class="sh-scan-error-inline" role="alert">
                 {scanError.value}
               </p>
@@ -876,7 +879,9 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
         {step.value === 'failed' && (
           <div class="sh-pairing-failed">
             <div class="sh-pairing-fail-mark" aria-hidden="true">⚠</div>
-            <h3 style={{ margin: 0 }}>{t('pairing.failed')}</h3>
+            <h3 style={{ margin: 0 }}>
+              {mode.value === 'gfs' ? t('gfs.pair_failed') : t('pairing.failed')}
+            </h3>
             <p class="sh-muted">
               {peerHint.value ?? t('pairing.failed_message')}
             </p>

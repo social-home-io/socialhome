@@ -4,7 +4,6 @@ import { api, pillClass } from '../api'
 interface Client {
   instance_id: string
   display_name: string
-  inbox_url: string
   status: string
 }
 
@@ -58,22 +57,18 @@ export function ClientsPanel() {
           <tr>
             <th>Display</th>
             <th>Instance ID</th>
-            <th>Endpoint</th>
             <th>Status</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {list.length === 0 && (
-            <tr><td colSpan={5} class="muted">No clients.</td></tr>
+            <tr><td colSpan={4} class="muted">No clients.</td></tr>
           )}
           {list.map((c) => (
             <tr key={c.instance_id}>
               <td>{c.display_name || '—'}</td>
               <td style={{ fontFamily: 'monospace' }}>{c.instance_id}</td>
-              <td>
-                <a href={c.inbox_url} rel="noopener">{c.inbox_url}</a>
-              </td>
               <td><span class={pillClass(c.status)}>{c.status}</span></td>
               <td class="row-actions">
                 {c.status === 'pending' && (

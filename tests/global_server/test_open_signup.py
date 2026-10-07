@@ -58,7 +58,6 @@ def _register_body(token: str, instance_id: str = "inst-signup") -> dict:
         "token": token,
         "instance_id": instance_id,
         "public_key": "aa" * 32,
-        "inbox_url": "https://home.example.com/federation/inbox",
         "display_name": "Home",
     }
 

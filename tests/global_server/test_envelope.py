@@ -94,7 +94,6 @@ async def gfs(tmp_dir):
                 instance_id="recipient2home2222222222222222aa",
                 display_name="Recipient",
                 public_key=pub_hex,
-                inbox_url="http://recipient.home/wh",
                 status="active",
             )
         )

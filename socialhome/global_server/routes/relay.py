@@ -7,7 +7,6 @@ from dataclasses import asdict
 
 from aiohttp import web
 
-from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
 from ..public import (
@@ -190,8 +189,8 @@ class SignupTokenView(GfsBaseView):
 class RegisterView(GfsBaseView):
     """``POST /gfs/register`` — register or update a client instance.
 
-    Body shape: ``{token, instance_id, public_key, inbox_url,
-    display_name?, keywrap_public_key?, kem_suite?, keywrap_sig?}``. The
+    Body shape: ``{token, instance_id, public_key, display_name?,
+    keywrap_public_key?, kem_suite?, keywrap_sig?}``. The
     ``token`` is the single-use pairing token from the QR
     (``PairingTokenService.consume``); the rest is the HFS's own identity.
     ``keywrap_public_key`` + ``kem_suite`` publish the household's X25519
@@ -200,9 +199,9 @@ class RegisterView(GfsBaseView):
     household identity end-to-end and never trust the GFS-served value — all
     omitted by older HFS, in which case that household can't be sealed-to yet.
     Requests without a valid token are rejected with ``401`` so a stale QR
-    can't be replayed. An ``inbox_url`` that is not a usable household
-    address (:func:`socialhome.peer_url.validate_peer_url`) is rejected with
-    ``422 invalid_inbox_url`` before the token is consumed.
+    can't be replayed. The GFS keeps no household address: an ``inbox_url``
+    an older household still sends is ignored — never validated, stored or
+    echoed (delivery is WebSocket-only; migration 0018 dropped the column).
     """
 
     async def post(self) -> web.Response:
@@ -213,24 +212,11 @@ class RegisterView(GfsBaseView):
         try:
             instance_id = body["instance_id"]
             public_key = body["public_key"]
-            inbox_url = body["inbox_url"]
         except KeyError as exc:
             raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
         token = str(body.get("token") or "")
         if not token:
             raise web.HTTPBadRequest(reason="Missing field: token")
-        # Every relay fan-out later POSTs to this URL, so refuse an unusable
-        # one here with the household-address rules the household itself
-        # applies to a scanned pairing code. Checked BEFORE the single-use
-        # token is consumed, so a household can fix its address and retry;
-        # the error names the rule, never the URL.
-        try:
-            validate_peer_url(inbox_url, field="inbox_url")
-        except InvalidPeerUrlError as exc:
-            return web.json_response(
-                {"error": "invalid_inbox_url", "detail": str(exc)},
-                status=422,
-            )
         if not await token_svc.consume(token):
             return web.json_response(
                 {"error": "invalid_or_expired_token"},
@@ -244,7 +230,6 @@ class RegisterView(GfsBaseView):
         await svc.register_instance(
             instance_id,
             public_key,
-            inbox_url,
             display_name=display_name,
             auto_accept=auto_accept,
             keywrap_public_key=keywrap_public_key,
@@ -337,7 +322,6 @@ class PublishView(GfsBaseView):
 
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_federation_key)
-        session = self.request.app.get(K.gfs_http_session_key)
         # Unauthenticated until the authority signature inside the payload
         # verifies, so the bytes are bounded BEFORE they are buffered.
         body = await self.bounded_json(PUBLISH_MAX_BODY_BYTES)
@@ -359,7 +343,6 @@ class PublishView(GfsBaseView):
                 payload,
                 from_instance,
                 signature,
-                session=session,
             )
         except PermissionError as exc:
             # DEBUG only, and never the legacy ``from_instance``: the caller

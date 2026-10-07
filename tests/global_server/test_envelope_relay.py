@@ -80,7 +80,6 @@ async def wiring(gfs_db):
             instance_id="recipient2home2222222222222222aa",
             display_name="Recipient",
             public_key="aa" * 32,
-            inbox_url="http://recipient.home/wh",
             status="active",
         )
     )
@@ -256,7 +255,6 @@ async def test_non_active_recipient_is_dropped_and_stores_nothing(
             instance_id="quiet.home",
             display_name="Quiet",
             public_key="bb" * 32,
-            inbox_url="http://quiet.home/wh",
             status=status,
         )
     )

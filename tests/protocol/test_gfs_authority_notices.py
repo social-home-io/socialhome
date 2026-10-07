@@ -239,7 +239,6 @@ async def world(tmp_dir):
                 instance_id=iid,
                 display_name=iid,
                 public_key=generate_identity_keypair().public_key.hex(),
-                inbox_url=f"https://{iid}/federation/inbox/x",
                 status="active",
                 auto_accept=True,
             )

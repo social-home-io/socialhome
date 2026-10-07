@@ -41,7 +41,6 @@ async def author(client):
             instance_id="inst-author",
             display_name="Author",
             public_key=kp.public_key.hex(),
-            inbox_url="http://author.example/wh",
             status="active",
         )
     )
@@ -56,7 +55,6 @@ async def follower(client):
             instance_id="inst-follower",
             display_name="Follower",
             public_key=kp.public_key.hex(),
-            inbox_url="http://follower.example/wh",
             status="active",
         )
     )

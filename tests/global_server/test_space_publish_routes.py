@@ -60,7 +60,6 @@ async def _register_owner(
             instance_id=instance_id,
             display_name=instance_id,
             public_key=kp.public_key.hex(),
-            inbox_url="https://owner.example/federation/inbox/x",
             status="active",
             auto_accept=auto_accept,
         )
@@ -1308,7 +1307,6 @@ async def test_publish_route_repins_and_detail_serves_only_key_and_seq(
             instance_id=owner_id,
             display_name="o",
             public_key=owner.public_key.hex(),
-            inbox_url="https://owner.example/federation/inbox/x",
             status="active",
             auto_accept=True,
         )

@@ -14,8 +14,9 @@ from types import SimpleNamespace
 
 import aiohttp
 import pytest
-from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
@@ -23,14 +24,16 @@ from socialhome.authority_sig import (
 )
 from socialhome.crypto import (
     b64url_decode,
+    b64url_encode,
     derive_instance_id,
     generate_identity_keypair,
+    sign_ed25519,
     verify_ed25519,
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.global_server import create_gfs_app
-from socialhome.global_server.app_keys import gfs_fed_repo_key
+from socialhome.global_server.app_keys import gfs_fed_repo_key, gfs_ws_registry_key
 from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     sign_capabilities,
@@ -43,6 +46,7 @@ from socialhome.services.gfs_connection_service import (
     MAX_REMOTE_DETAIL_CHARS,
     GfsConnectionError,
     GfsConnectionService,
+    GfsSignupError,
     _remote_detail,
 )
 
@@ -661,7 +665,6 @@ async def test_count_published_spaces(env):
 _OWN_PAIR_KW = {
     "own_instance_id": "alpha.home",
     "own_public_key_hex": "aa" * 32,
-    "own_inbox_url": "https://alpha.example/federation/inbox",
     "own_display_name": "Alpha House",
 }
 
@@ -804,7 +807,6 @@ async def test_pair_missing_own_identity(env):
             {"gfs_url": "https://x.com", "token": "tok"},
             own_instance_id="",
             own_public_key_hex="ab",
-            own_inbox_url="https://x",
         )
 
 
@@ -889,19 +891,36 @@ async def test_pair_rejects_a_malformed_gfs_url(env, gfs_url):
     assert await repo.list_all() == []
 
 
-async def test_pair_rejects_a_public_plain_http_own_inbox_url(env):
-    """The household's own federation base travels to the GFS as the address
-    peers will POST to — a public plain-http inbox is the same downgrade
-    surface from the other side."""
+async def test_pair_registration_body_has_no_inbox_url(env):
+    """The GFS never needed the household's address (its relay runs over the
+    household-opened WebSocket), and on the Home Assistant add-on the address
+    doesn't exist at onboarding time. The register body is exactly the
+    identity + display name — no ``inbox_url`` key at all."""
     _, repo = env
-    session = _StubSession(method_responses={"GET": (200, {})})
+    session = _StubSession(
+        method_responses={
+            "GET": (
+                200,
+                {
+                    "gfs_instance_id": "remote",
+                    "public_key": "bb" * 32,
+                    "server_name": "GFS",
+                },
+            ),
+            "POST": (200, {"status": "registered"}),
+        },
+    )
     svc = GfsConnectionService(repo, http_client=session, publish_client=session)
-    with pytest.raises(GfsConnectionError, match="https"):
-        await svc.pair(
-            {"gfs_url": "https://gfs.example.com", "token": "tok"},
-            **{**_OWN_PAIR_KW, "own_inbox_url": "http://alpha.example/federation"},
-        )
-    assert session.calls == []
+    await svc.pair(
+        {"gfs_url": "https://gfs.example.com", "token": "tok"}, **_OWN_PAIR_KW
+    )
+    body = session._last_body
+    assert body == {
+        "token": "tok",
+        "instance_id": "alpha.home",
+        "public_key": "aa" * 32,
+        "display_name": "Alpha House",
+    }
 
 
 async def test_pair_gfs_info_unreachable(env):
@@ -960,6 +979,158 @@ async def test_pair_no_public_key_in_info(env):
             {"gfs_url": "https://gfs.example.com", "token": "tok"},
             **_OWN_PAIR_KW,
         )
+
+
+class _UnreachableSession:
+    """A GFS that never answers: every call raises at the transport."""
+
+    def get(self, *a, **kw):
+        raise aiohttp.ClientConnectionError("connection refused")
+
+    def post(self, *a, **kw):
+        raise aiohttp.ClientConnectionError("connection refused")
+
+
+_PAIR_INFO = {
+    "gfs_instance_id": "remote",
+    "public_key": "cc" * 32,
+    "server_name": "GFS",
+}
+
+
+async def _pair_reason(
+    repo, session, *, gfs_url="https://gfs.example.com"
+) -> GfsSignupError:
+    """Run :meth:`pair` and hand back the classified failure."""
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    with pytest.raises(GfsSignupError) as excinfo:
+        await svc.pair({"gfs_url": gfs_url, "token": "tok"}, **_OWN_PAIR_KW)
+    return excinfo.value
+
+
+# ``pair`` classifies its failures exactly as ``pair_open_signup`` does, so
+# the route can answer the same codes for the same causes on both paths.
+
+
+async def test_pair_classifies_an_insecure_url(env):
+    _, repo = env
+    session = _StubSession(method_responses={"GET": (200, _PAIR_INFO)})
+    exc = await _pair_reason(repo, session, gfs_url="http://gfs.example.com")
+    assert exc.reason == "invalid_url"
+    assert session.calls == []
+
+
+async def test_pair_classifies_an_already_connected_gfs(env):
+    """Nothing leaves the household for a GFS it already has."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-1", inbox_url="https://gfs.example.com"))
+    session = _StubSession(method_responses={"GET": (200, _PAIR_INFO)})
+    exc = await _pair_reason(repo, session, gfs_url="https://gfs.example.com/")
+    assert exc.reason == "already_connected"
+    assert session.calls == []
+
+
+async def test_pair_classifies_a_gfs_that_never_answers_as_unreachable(env):
+    _, repo = env
+    exc = await _pair_reason(repo, _UnreachableSession())
+    assert exc.reason == "unreachable"
+    assert exc.status is None
+
+
+async def test_pair_classifies_a_5xx_descriptor_as_unreachable(env):
+    _, repo = env
+    session = _StubSession(method_responses={"GET": (503, {})})
+    exc = await _pair_reason(repo, session)
+    assert exc.reason == "unreachable"
+    assert exc.status == 503
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (200, {"hello": "world"}),
+        (200, {"gfs_instance_id": "remote", "public_key": ""}),
+        (404, {}),
+    ],
+    ids=["not-a-descriptor", "no-key", "no-such-page"],
+)
+async def test_pair_classifies_a_non_gfs_answer_as_identity_mismatch(env, answer):
+    """The address answered, but not as a GFS — retrying won't help, so
+    this is not ``unreachable``."""
+    _, repo = env
+    session = _StubSession(method_responses={"GET": answer})
+    exc = await _pair_reason(repo, session)
+    assert exc.reason == "identity_mismatch"
+    assert exc.status == answer[0]
+    assert [m for m, _ in session.calls] == ["GET"]
+
+
+class _HtmlSession:
+    """A plain web server at the pairing code's address: 200, text/html."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def get(self, url, **kw):
+        self.calls.append("GET")
+        return _HtmlResp()
+
+    def post(self, url, **kw):
+        self.calls.append("POST")
+        return _HtmlResp()
+
+
+class _HtmlResp(_StubResp):
+    def __init__(self):
+        super().__init__(200, {})
+
+    async def json(self):
+        url = URL("https://gfs.example.com/gfs/info")
+        raise aiohttp.ContentTypeError(
+            aiohttp.RequestInfo(url, "GET", CIMultiDictProxy(CIMultiDict()), url),
+            (),
+            message="Attempt to decode JSON with unexpected mimetype: text/html",
+        )
+
+
+async def test_pair_classifies_a_non_json_answer_as_identity_mismatch(env):
+    """A web page where ``/gfs/info`` should be is not a GFS either — and
+    not "unreachable": the address answered."""
+    _, repo = env
+    session = _HtmlSession()
+    exc = await _pair_reason(repo, session)
+    assert exc.reason == "identity_mismatch"
+    assert exc.status == 200
+    assert session.calls == ["GET"]
+
+
+async def test_pair_classifies_a_refused_token(env):
+    _, repo = env
+    session = _StubSession(
+        method_responses={"GET": (200, _PAIR_INFO), "POST": (401, {})}
+    )
+    exc = await _pair_reason(repo, session)
+    assert exc.reason == "refused"
+    assert exc.status == 401
+
+
+async def test_pair_classifies_a_5xx_registration_as_unreachable(env):
+    _, repo = env
+    session = _StubSession(
+        method_responses={"GET": (200, _PAIR_INFO), "POST": (502, {})}
+    )
+    exc = await _pair_reason(repo, session)
+    assert exc.reason == "unreachable"
+    assert exc.status == 502
+
+
+async def test_pair_saves_nothing_when_the_gfs_refuses(env):
+    _, repo = env
+    session = _StubSession(
+        method_responses={"GET": (200, _PAIR_INFO), "POST": (401, {})}
+    )
+    await _pair_reason(repo, session)
+    assert await repo.list_all() == []
 
 
 async def test_disconnect_success(env):
@@ -2545,19 +2716,16 @@ class _SeedSpaceRepo:
         return self._seed if space_id == self._space.id else None
 
 
-@pytest.fixture
-async def inbox_sink():
-    """A tiny HTTPS inbox recording the relay frames the GFS fans out."""
-    received: list[dict] = []
-
-    async def _handle(request: web.Request) -> web.Response:
-        received.append(await request.json())
-        return web.json_response({"status": "ok"})
-
-    app = web.Application()
-    app.router.add_post("/inbox", _handle)
-    async with TestClient(TestServer(app)) as tc:
-        yield tc, received
+def _ws_hello(instance_id: str, seed: bytes) -> dict:
+    """The signed ``hello`` a household opens its GFS push socket with."""
+    ts = int(time.time())
+    msg = f"{instance_id}|{ts}".encode("utf-8")
+    return {
+        "type": "hello",
+        "instance_id": instance_id,
+        "ts": ts,
+        "sig": b64url_encode(sign_ed25519(seed, msg)),
+    }
 
 
 @pytest.fixture
@@ -2568,20 +2736,21 @@ async def real_gfs(tmp_path):
 
 
 @pytest.fixture
-async def e2e_sender(tmp_dir, real_gfs, inbox_sink):
+async def e2e_sender(tmp_dir, real_gfs):
     """A real :class:`GfsConnectionService` wired against the real GFS.
 
     Registers the household + one subscriber on the GFS, publishes the space
     metadata through the REAL publish path (TOFU-pinning the space's authority
-    key), and subscribes the sink so a relay actually fans out. Yields
-    ``(svc, space_seed, received_frames)``.
+    key), subscribes the subscriber and holds its GFS push WebSocket open —
+    the GFS stores no household address, so that socket is the only way a
+    relay reaches it. Yields ``(svc, space_seed, subscriber_ws)``.
     """
     from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 
-    sink_client, received = inbox_sink
     fed_repo = real_gfs.server.app[gfs_fed_repo_key]
 
     household_kp = generate_identity_keypair()
+    subscriber_kp = generate_identity_keypair()
     space_kp = generate_identity_keypair()
 
     await fed_repo.upsert_instance(
@@ -2589,7 +2758,6 @@ async def e2e_sender(tmp_dir, real_gfs, inbox_sink):
             instance_id=_E2E_OWN_INSTANCE,
             display_name="Alpha",
             public_key=household_kp.public_key.hex(),
-            inbox_url="https://alpha.example/federation/inbox/x",
             status="active",
             auto_accept=True,
         )
@@ -2598,8 +2766,7 @@ async def e2e_sender(tmp_dir, real_gfs, inbox_sink):
         ClientInstance(
             instance_id=_E2E_SUB_INSTANCE,
             display_name="Sub",
-            public_key=generate_identity_keypair().public_key.hex(),
-            inbox_url=str(sink_client.make_url("/inbox")),
+            public_key=subscriber_kp.public_key.hex(),
             status="active",
             auto_accept=True,
         )
@@ -2647,7 +2814,19 @@ async def e2e_sender(tmp_dir, real_gfs, inbox_sink):
         await fed_repo.add_subscriber(
             space_id=_E2E_SPACE_ID, instance_id=_E2E_SUB_INSTANCE
         )
-        yield svc, space_kp.private_key, received
+        async with real_gfs.ws_connect("/gfs/ws") as sub_ws:
+            await sub_ws.send_json(
+                _ws_hello(_E2E_SUB_INSTANCE, subscriber_kp.private_key)
+            )
+            # The hello verifies asynchronously; wait until the GFS has the
+            # socket registered or the relay below has nowhere to go.
+            registry = real_gfs.server.app[gfs_ws_registry_key]
+            for _ in range(100):
+                if registry.is_connected(_E2E_SUB_INSTANCE):
+                    break
+                await asyncio.sleep(0.01)
+            assert registry.is_connected(_E2E_SUB_INSTANCE)
+            yield svc, space_kp.private_key, sub_ws
     await db.shutdown()
 
 
@@ -2673,7 +2852,7 @@ async def test_e2e_new_household_relays_identity_free_through_a_real_gfs(e2e_sen
     """Current sender + current GFS: the publish carries no household identity,
     the GFS accepts it on the space-authority signature alone, and the frame it
     fans out to subscribers is identity-free too."""
-    svc, seed, received = e2e_sender
+    svc, seed, sub_ws = e2e_sender
     svc._anon_publish["gfs-e2e"] = True  # noqa: SLF001 — pin the capability
     delivered = await svc.publish_space_event(
         space_id=_E2E_SPACE_ID,
@@ -2681,9 +2860,9 @@ async def test_e2e_new_household_relays_identity_free_through_a_real_gfs(e2e_sen
         payload=_authority_payload(seed, post_id="p-anon"),
     )
     assert delivered == 1
-    assert len(received) == 1
-    frame = received[0]
-    assert set(frame) == {"space_id", "event_type", "payload"}
+    frame = await sub_ws.receive_json(timeout=5)
+    assert set(frame) == {"type", "space_id", "event_type", "payload"}
+    assert frame["type"] == "relay"
     assert frame["payload"]["post_id"] == "p-anon"
     assert _E2E_OWN_INSTANCE not in json.dumps(frame)
 
@@ -2696,7 +2875,7 @@ async def test_e2e_a_gfs_without_the_capability_gets_nothing_from_this_sender(
     through that GFS until it proves ``anonymous_publish``. (The GFS still
     accepts, verifies and discards the legacy fields from OLDER households;
     that is covered in ``tests/global_server/``.)"""
-    svc, seed, received = e2e_sender
+    svc, seed, sub_ws = e2e_sender
     svc._anon_publish["gfs-e2e"] = False  # noqa: SLF001 — pin the capability
     delivered = await svc.publish_space_event(
         space_id=_E2E_SPACE_ID,
@@ -2704,7 +2883,8 @@ async def test_e2e_a_gfs_without_the_capability_gets_nothing_from_this_sender(
         payload=_authority_payload(seed, post_id="p-legacy"),
     )
     assert delivered == 0
-    assert received == []
+    with pytest.raises(TimeoutError):
+        await sub_ws.receive_json(timeout=0.3)
 
 
 async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
@@ -2734,7 +2914,6 @@ async def test_e2e_pair_learns_anonymous_publish_from_a_real_signed_block(
                 {"gfs_url": gfs_base, "token": token},
                 own_instance_id=_E2E_OWN_INSTANCE,
                 own_public_key_hex=generate_identity_keypair().public_key.hex(),
-                own_inbox_url="https://alpha.example/federation/inbox",
                 own_display_name="Alpha House",
             )
             # Learned from the signed block, not the bare flag: the pinned key

@@ -1,12 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent, waitFor, screen } from '@testing-library/preact'
 
-const { apiMock, platformMock, userMock } = vi.hoisted(() => ({
+const { apiMock, userMock } = vi.hoisted(() => ({
   apiMock: {
     get: vi.fn(),
     post: vi.fn(),
   },
-  platformMock: { addon: false },
   userMock: {
     value: {
       user_id: 'u1', username: 'admin', display_name: 'Admin',
@@ -20,7 +19,6 @@ vi.mock('@/api', async () => {
   return { ApiError: real.ApiError, api: apiMock }
 })
 vi.mock('@/store/auth', () => ({ currentUser: userMock }))
-vi.mock('@/platform', () => ({ isSupervisorAddon: () => platformMock.addon }))
 
 import { ApiError } from '@/api'
 import { setLocale } from '@/i18n/i18n'
@@ -64,7 +62,6 @@ beforeEach(() => {
   apiMock.get.mockReset()
   apiMock.post.mockReset()
   apiMock.post.mockResolvedValue({})
-  platformMock.addon = false
   userMock.value = {
     user_id: 'u1', username: 'admin', display_name: 'Admin',
     is_admin: true, is_new_member: true,
@@ -149,11 +146,15 @@ describe('OnboardingFlow — GFS step visibility', () => {
       available: false, reason: 'already_connected',
       connection: { id: 'c1', status: 'active' },
     })],
+    // Connecting no longer needs an External URL. An older backend that
+    // still answers with this reason gets no step and no URL hint.
+    ['an older backend says no_external_url', offer({ available: false, reason: 'no_external_url' })],
   ])('hides the step when %s', async (_label, body) => {
     apiMock.get.mockResolvedValue(body)
     render(<OnboardingFlow onComplete={() => {}} />)
     await waitFor(() => expect(apiMock.get).toHaveBeenCalled())
     expect(await stepCount()).toBe(4)
+    expect(screen.queryByText(/External URL/)).toBeNull()
   })
 
   it('hides the step when the household cannot tell (request failed)', async () => {
@@ -161,26 +162,6 @@ describe('OnboardingFlow — GFS step visibility', () => {
     render(<OnboardingFlow onComplete={() => {}} />)
     await waitFor(() => expect(apiMock.get).toHaveBeenCalled())
     expect(await stepCount()).toBe(4)
-  })
-
-  it('without an External URL the step is shown disabled, with the fix', async () => {
-    apiMock.get.mockResolvedValue(offer({ available: false, reason: 'no_external_url' }))
-    render(<OnboardingFlow onComplete={() => {}} />)
-    await waitFor(async () => expect(await stepCount()).toBe(5))
-    await goToGfsStep()
-    expect(gfsBox().disabled).toBe(true)
-    expect(screen.getByText(/needs its External URL/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: "Let's go" })).toBeTruthy()
-  })
-
-  it('under Home Assistant the hint points at Home Assistant, not a URL field', async () => {
-    platformMock.addon = true
-    apiMock.get.mockResolvedValue(offer({ available: false, reason: 'no_external_url' }))
-    render(<OnboardingFlow onComplete={() => {}} />)
-    await waitFor(async () => expect(await stepCount()).toBe(5))
-    await goToGfsStep()
-    expect(screen.getByText(/remote access in Home Assistant/)).toBeTruthy()
-    expect(screen.queryByText(/needs its External URL/)).toBeNull()
   })
 })
 
@@ -243,6 +224,10 @@ describe('OnboardingFlow — GFS step choice', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(await screen.findByRole('alert')).toBeTruthy()
     expect(screen.getByText(text)).toBeTruthy()
+    expect(screen.queryByText('server words')).toBeNull()
+    // The onboarding-only follow-up: the pairing modal in Settings is
+    // where they can pick this up again.
+    expect(screen.getByText(/connect later in Settings → Connections/)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
     expect(gfsBox().checked).toBe(false)
     expect(gfsBox().disabled).toBe(true)
@@ -255,7 +240,6 @@ describe('OnboardingFlow — GFS step choice', () => {
     ['GFS_UNREACHABLE', 502, /Couldn't reach the GFS/],
     ['GFS_BUSY', 503, /The GFS is busy/],
     ['GFS_PAIRING_FAILED', 422, /didn't accept this household/],
-    ['NOT_CONFIGURED', 422, /needs its External URL/],
   ])('maps %s to plain words and lets them try again', async (code, status, text) => {
     apiMock.post.mockImplementation(async (path: string) => {
       if (path === DEFAULT_PATH) {
@@ -269,6 +253,22 @@ describe('OnboardingFlow — GFS step choice', () => {
     expect(await screen.findByRole('alert')).toBeTruthy()
     expect(screen.getByText(text)).toBeTruthy()
     expect(screen.queryByText('server words')).toBeNull()
+    expect(screen.getByText(/connect later in Settings → Connections/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy()
+  })
+
+  it('a refusal it has no words for shows the server reason and lets them try again', async () => {
+    apiMock.post.mockImplementation(async (path: string) => {
+      if (path === DEFAULT_PATH) {
+        throw new ApiError(422, path, { code: 'GFS_TOKEN_EXPIRED', detail: 'That code has expired.' })
+      }
+      return {}
+    })
+    await open()
+    fireEvent.click(gfsBox())
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(screen.getByText('That code has expired.')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy()
   })
 

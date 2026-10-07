@@ -45,7 +45,6 @@ async def author(client):
             instance_id="inst-author",
             display_name="Author",
             public_key=kp.public_key.hex(),
-            inbox_url="http://author.example/wh",
             status="active",
         )
     )
@@ -111,7 +110,6 @@ async def test_directory_supports_search_query(client, author):
             instance_id="inst-bob",
             display_name="Bob",
             public_key=other_kp.public_key.hex(),
-            inbox_url="http://bob.example",
             status="active",
         )
     )
@@ -171,7 +169,6 @@ async def test_user_detail_html_escapes_boot_payload_xss(client):
             instance_id=evil,
             display_name="Evil",
             public_key=kp.public_key.hex(),
-            inbox_url="http://evil.example/wh",
             status="active",
         )
     )
@@ -246,7 +243,6 @@ async def test_picture_upload_rejects_other_instance(client, author):
             instance_id="inst-impersonator",
             display_name="X",
             public_key=other_kp.public_key.hex(),
-            inbox_url="http://x.example",
             status="active",
         )
     )

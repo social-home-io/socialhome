@@ -77,7 +77,6 @@ async def owner(client):
             instance_id=OWNER,
             display_name="Owner",
             public_key=kp.public_key.hex(),
-            inbox_url="https://owner.example/inbox",
             status="active",
         )
     )
@@ -216,7 +215,6 @@ async def test_mint_rejects_non_owner(client, owner):
             instance_id="stranger.home",
             display_name="Stranger",
             public_key=kp.public_key.hex(),
-            inbox_url="https://stranger.example/inbox",
             status="active",
         )
     )
@@ -340,7 +338,6 @@ async def test_revoke_rejects_non_owner(client, owner):
             instance_id="stranger.home",
             display_name="Stranger",
             public_key=kp.public_key.hex(),
-            inbox_url="https://stranger.example/inbox",
             status="active",
         )
     )

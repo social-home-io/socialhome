@@ -88,7 +88,6 @@ class _Household:
             public_key=self.pk.hex(),
             # A closed loopback port: an HTTPS-inbox fallback is refused at
             # once, never a real DNS lookup of ``<id>.home``.
-            inbox_url=f"http://127.0.0.1:1/{self.instance_id}/wh",
             status=status,
         )
 

@@ -3,20 +3,27 @@ import { render, fireEvent, screen, cleanup } from '@testing-library/preact'
 import en from '@/i18n/locales/en.json'
 
 const apiPost = vi.fn()
-vi.mock('@/api', () => ({
-  api: {
-    get: vi.fn(),
-    post: (...args: unknown[]) => apiPost(...args),
-    patch: vi.fn(),
-    delete: vi.fn(),
-  },
-  ApiError: class ApiError extends Error {
-    status: number
-    constructor(status: number, message: string) {
-      super(message)
-      this.status = status
-    }
-  },
+// The real ``ApiError``: its ``.code`` / ``.message`` drive which words a
+// failure gets, so a stand-in would only test the stand-in.
+vi.mock('@/api', async () => {
+  const real = await vi.importActual<typeof import('@/api')>('@/api')
+  return {
+    api: {
+      get: vi.fn(),
+      post: (...args: unknown[]) => apiPost(...args),
+      patch: vi.fn(),
+      delete: vi.fn(),
+    },
+    ApiError: real.ApiError,
+  }
+})
+
+// jsdom has no camera / BarcodeDetector. The stand-in hands the flow a
+// decoded "scan" on click, so QR-mode handling is testable.
+vi.mock('./QrScanner', () => ({
+  QrScanner: ({ onPayload }: { onPayload: (raw: string) => void }) => (
+    <button type="button" onClick={() => onPayload('not-a-code')}>mock-qr-scan</button>
+  ),
 }))
 
 // WS event handlers are captured so tests can fire synthetic events.
@@ -231,6 +238,94 @@ describe('PairingFlow — GFS paste decoding', () => {
   })
 })
 
+describe('PairingFlow — GFS connect failures', () => {
+  const GFS_PATH = '/api/gfs/connections'
+
+  async function startGfs() {
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('gfs')
+    fireEvent.click(await screen.findByText('gfs.add'))
+  }
+
+  async function pasteGfsCode() {
+    fireEvent.click(await screen.findByText('pairing.method_paste'))
+    const textarea = await screen.findByPlaceholderText('gfs.paste_placeholder')
+    fireEvent.input(textarea, {
+      target: { value: 'socialhome://gfs-pair/https://gfs.example.com/?token=tok-gfs' },
+    })
+    fireEvent.click(screen.getByText('pairing.paste_submit'))
+    await new Promise(r => setTimeout(r, 0))
+  }
+
+  // The i18n mock renders keys: each case pins which line the panel
+  // picked. ``ApiError.message`` comes from the real ``apiErrors`` table,
+  // so a GFS code resolves to its ``error.gfs_*`` key.
+  it('502 GFS_UNREACHABLE: a GFS heading and the GFS-unreachable line', async () => {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(502, GFS_PATH, {
+      code: 'GFS_UNREACHABLE', detail: "Couldn't reach the GFS. Try again later.",
+    }))
+    await startGfs()
+    await pasteGfsCode()
+    expect(await screen.findByText('gfs.pair_failed')).toBeTruthy()
+    expect(screen.getByText('error.gfs_unavailable')).toBeTruthy()
+    // Never the household-pairing words.
+    expect(screen.queryByText('pairing.failed')).toBeNull()
+    expect(screen.queryByText('pairing.error.server')).toBeNull()
+    expect(screen.queryByText('pairing.error.malformed')).toBeNull()
+  })
+
+  it.each([
+    ['GFS_IDENTITY_MISMATCH', 422, 'error.gfs_identity_mismatch'],
+    ['GFS_PAIRING_FAILED', 422, 'error.gfs_pairing_failed'],
+    ['GFS_SIGNUP_CLOSED', 409, 'error.gfs_signup_closed'],
+    ['ALREADY_CONNECTED', 409, 'error.gfs_already_connected'],
+    ['GFS_BUSY', 503, 'error.gfs_busy'],
+  ])('%s (%i): its own line, never "pairing code looks malformed"', async (code, status, key) => {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(status, GFS_PATH, { code, detail: 'server words' }))
+    await startGfs()
+    await pasteGfsCode()
+    expect(await screen.findByText('gfs.pair_failed')).toBeTruthy()
+    expect(screen.getByText(key)).toBeTruthy()
+    expect(screen.queryByText('pairing.error.malformed')).toBeNull()
+    expect(screen.queryByText('pairing.error.already_paired')).toBeNull()
+    expect(screen.queryByText('server words')).toBeNull()
+  })
+
+  it('an unknown refusal shows the server reason, and Retry goes back to the start', async () => {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(422, GFS_PATH, {
+      code: 'GFS_TOKEN_EXPIRED', detail: 'That code has expired.',
+    }))
+    await startGfs()
+    await pasteGfsCode()
+    expect(await screen.findByText('gfs.pair_failed')).toBeTruthy()
+    expect(screen.getByText('That code has expired.')).toBeTruthy()
+    fireEvent.click(screen.getByText('pairing.retry'))
+    expect(await screen.findByText('gfs.add')).toBeTruthy()
+  })
+
+  it('a QR scan that is not a GFS code shows gfs.invalid_code in QR mode', async () => {
+    await startGfs()
+    // QR is the default method — the scanner stand-in "decodes" junk.
+    fireEvent.click(await screen.findByText('mock-qr-scan'))
+    expect(await screen.findByText('gfs.invalid_code')).toBeTruthy()
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('household: a QR scan that is not a pairing code shows the error in QR mode too', async () => {
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')
+    fireEvent.click(await screen.findByLabelText('pairing.role_scan_aria'))
+    fireEvent.click(await screen.findByText('mock-qr-scan'))
+    expect(await screen.findByText('pairing.scan_invalid_code')).toBeTruthy()
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+})
+
 describe('PairingFlow — configure-sharing step', () => {
   it('household success Done advances to configure-sharing', async () => {
     const { PairingFlow, openPairing } = await import('./PairingFlow')
@@ -386,7 +481,9 @@ describe('PairingFlow — "external URL not configured" hint per platform', () =
           setup_required: false,
         }
     const { ApiError } = await import('@/api')
-    apiPost.mockRejectedValueOnce(new ApiError(422, 'API 422: /api/pairing/initiate'))
+    apiPost.mockRejectedValueOnce(new ApiError(422, '/api/pairing/initiate', {
+      code: 'NOT_CONFIGURED', detail: 'External URL is not configured.',
+    }))
 
     const { PairingFlow, openPairing } = await import('./PairingFlow')
     render(<PairingFlow />)

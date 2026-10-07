@@ -48,12 +48,16 @@ describe('OverviewPanel', () => {
 describe('ClientsPanel', () => {
   it('renders a row per client with the right action buttons', async () => {
     stubFetch(async () => [
-      { instance_id: 'i-1', display_name: 'Alice', inbox_url: 'https://a/wh', status: 'pending' },
-      { instance_id: 'i-2', display_name: 'Bob',   inbox_url: 'https://b/wh', status: 'active' },
+      { instance_id: 'i-1', display_name: 'Alice', status: 'pending' },
+      { instance_id: 'i-2', display_name: 'Bob',   status: 'active' },
     ])
     const { container, findByText } = render(<ClientsPanel />)
     await findByText('Alice')
     expect(container.querySelectorAll('tbody tr')).toHaveLength(2)
+    // The GFS keeps no household address: the row identifies a client by
+    // its instance id and there is no endpoint column.
+    expect(container.textContent).toContain('i-1')
+    expect(container.textContent).not.toContain('Endpoint')
     expect(container.textContent).toContain('Accept')
     expect(container.textContent).toContain('Ban')
   })

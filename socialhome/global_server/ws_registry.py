@@ -13,7 +13,7 @@ socket's TCP keepalive could detect).
 
 Send semantics: :meth:`send` returns ``True`` when delivery to the live
 socket succeeded and ``False`` if no socket is registered or the send
-failed; the caller (fan-out) then falls back to the HTTPS inbox path.
+failed; the caller (fan-out) then treats the household as unreachable.
 Dead sockets are evicted on send failure so a single broken peer cannot
 block fan-out. :meth:`send` never RAISES — a frame that cannot even be
 serialised also returns ``False`` (the socket is left registered, since
@@ -119,7 +119,7 @@ class GfsWebSocketRegistry:
 
         Returns ``True`` on successful send, ``False`` when no socket is
         registered or the send failed (in which case the dead socket is
-        evicted and the caller can fall back to the HTTPS inbox path).
+        evicted and the caller treats the household as unreachable).
         """
         ws = self._by_instance.get(instance_id)
         if ws is None or ws.closed:
@@ -129,7 +129,7 @@ class GfsWebSocketRegistry:
             # ``send`` as a TypeError, past ``_deliver_one``, past the fan-out
             # gather, and out of the relay handler as a 500. A frame we cannot
             # serialise is simply undeliverable — report it like any other
-            # failed push and let the caller fall back to the HTTPS inbox.
+            # failed push.
             msg = orjson.dumps(
                 payload, default=str, option=orjson.OPT_PASSTHROUGH_DATETIME
             ).decode()

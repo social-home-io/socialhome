@@ -16,7 +16,6 @@ class ClientInstance:
     instance_id: str
     display_name: str
     public_key: str  # Ed25519 verify key (hex)
-    inbox_url: str
     status: str = "pending"  # 'pending' | 'active' | 'banned'
     auto_accept: bool = False
     connected_at: str = ""  # ISO 8601
@@ -114,10 +113,13 @@ class GlobalSpace:
 
 @dataclass(slots=True, frozen=True)
 class GfsSubscriber:
-    """A subscriber row: instance + inbox URL for fan-out delivery."""
+    """A subscriber row: the instance to push a relay frame to.
+
+    Delivery is WebSocket-only — the GFS holds no household address (its
+    former ``inbox_url`` was dropped by migration 0018).
+    """
 
     instance_id: str
-    inbox_url: str
 
 
 @dataclass(slots=True, frozen=True)

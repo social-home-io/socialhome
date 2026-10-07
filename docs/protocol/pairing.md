@@ -122,9 +122,9 @@ with `422 INVALID_PEER_URL`; a peer-accept body that fails it gets `400`.
 
 Connection-server (GFS) URLs apply the same rules plus a TLS requirement:
 `https://`, or plain `http://` only on loopback / a private network. In the
-other direction, the connection server applies the household rules to the
-`inbox_url` a household registers with (`POST /gfs/register` → `422` on
-failure), since its relay fan-out POSTs there.
+other direction there is nothing to check: a household registers no address
+with a connection server (`POST /gfs/register` carries none — the GFS holds
+no household address and its relay fan-out is WebSocket-only).
 
 When `home_lat` / `home_lon` are present, A records them on B's newly-created
 `remote_instances` row immediately — the map pin is available as soon as the
@@ -393,7 +393,10 @@ What that string actually is depends on the platform adapter:
 
 Every adapter returns `None` until the URL is configured; the
 pairing route surfaces that as a 422 `NOT_CONFIGURED` so the admin
-knows to wire it up before issuing a QR.
+knows to wire it up before issuing a QR. This applies to
+household↔household pairing only — connecting to a GFS
+(`/api/gfs/connections*`) never consults the federation base, so a
+Home Assistant App can join the GFS before it has a public URL.
 
 ## URL rotation — `URL_UPDATED`
 

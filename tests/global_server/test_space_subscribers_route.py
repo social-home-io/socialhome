@@ -54,7 +54,6 @@ async def _seed_space(app, *, space_id="sp", with_pubkey=True):
             instance_id="owner.home",
             display_name="Owner",
             public_key="aa" * 32,
-            inbox_url="http://owner",
             status="active",
         )
     )
@@ -78,7 +77,6 @@ async def _add_subscriber(app, *, space_id, instance_id, with_keywrap):
             instance_id=instance_id,
             display_name=instance_id,
             public_key=kp.public_key.hex(),
-            inbox_url=f"http://{instance_id}",
             status="active",
             keywrap_public_key=("cc" * 32) if with_keywrap else "",
             kem_suite="x25519" if with_keywrap else "",

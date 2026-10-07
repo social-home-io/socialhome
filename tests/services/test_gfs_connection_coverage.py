@@ -118,7 +118,6 @@ class _StubSession:
 _OWN_PAIR_KW = {
     "own_instance_id": "alpha.home",
     "own_public_key_hex": "aa" * 32,
-    "own_inbox_url": "https://alpha.example/federation/inbox",
     "own_display_name": "Alpha House",
 }
 
