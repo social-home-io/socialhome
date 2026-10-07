@@ -483,7 +483,7 @@ minute with the drop count and no recipient id, never one per envelope)
 and the caller still gets the same `202`. The per-recipient bound means a
 flood aimed at one household — even one that stopped reading its socket —
 can never cost another recipient its envelope, so a canary's fate says
-nothing about a target's load. A live push that stalls for 2 s
+nothing about a target's load. A live push that stalls for 10 s
 (`WS_SEND_TIMEOUT_S`) evicts the socket and queues the envelope instead. One recipient's envelopes are processed in the order they
 were posted (a per-recipient lock), so the hand-off does not reorder a
 sender's stream.

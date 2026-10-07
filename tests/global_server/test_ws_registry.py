@@ -249,4 +249,4 @@ async def test_a_stalled_send_times_out_returns_false_and_evicts(registry, monke
 
 
 def test_send_timeout_is_the_documented_value():
-    assert ws_registry_mod.WS_SEND_TIMEOUT_S == 2.0
+    assert ws_registry_mod.WS_SEND_TIMEOUT_S == 10.0

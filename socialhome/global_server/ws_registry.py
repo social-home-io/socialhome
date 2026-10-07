@@ -50,9 +50,12 @@ _EVICT_REPLACED_CODE = 4409  # private-use range; "Replaced by newer connection"
 _EVICT_STALLED_CODE = 1013
 
 #: Longest one frame push may take before the socket counts as stalled.
-#: A healthy household drains its socket in milliseconds; 2 s is far above
-#: that and far below the heartbeat that would otherwise end the wait.
-WS_SEND_TIMEOUT_S: float = 2.0
+#: A healthy household drains a frame well within this even on a slow
+#: downlink (the largest relayed frame, ~320 KiB, takes ~2.6 s at 1 Mbit/s);
+#: 10 s leaves that margin and still ends a stalled push long before the
+#: heartbeat would. Starvation of OTHER recipients is bounded by the
+#: per-recipient in-flight cap, not by this timeout.
+WS_SEND_TIMEOUT_S: float = 10.0
 
 
 class GfsWebSocketRegistry:

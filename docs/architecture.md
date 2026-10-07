@@ -823,7 +823,7 @@ socket on the old node can in rare cases take a frame another node also
 delivers. Receivers tolerate it — a relayed §24.11 envelope is dropped by the
 pipeline's replay step (`msg_id`), an invite-bootstrap body by its
 `redeem_nonce` replay guard, a member item by its item-id dedupe. Every push
-to a `/gfs/ws` socket is bounded by `WS_SEND_TIMEOUT_S` (2 s,
+to a `/gfs/ws` socket is bounded by `WS_SEND_TIMEOUT_S` (10 s,
 `global_server/ws_registry.py`): a socket whose peer stopped reading is
 evicted and closed (1013) rather than holding an accept, a drain or a fan-out
 worker until the heartbeat notices; the envelope falls back to the queue.
