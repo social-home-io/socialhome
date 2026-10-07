@@ -544,7 +544,8 @@ class _GfsWsAuthFailure(Exception):
 
     Carries the close ``code`` (one of :data:`_AUTH_CLOSE_CODES`) and the
     GFS-supplied ``reason`` string (e.g. ``"auth-failed"``, or the older
-    ``"unknown-instance"`` / ``"bad-signature"``) so the loop can surface it on ``last_auth_error``.
+    ``"unknown-instance"`` / ``"bad-signature"``) so the loop can surface it
+    on ``last_auth_error``.
     """
 
     def __init__(self, code: int | None, reason: str | None) -> None:

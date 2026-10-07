@@ -34,10 +34,12 @@ from socialhome.global_server.envelope_relay import (
     InvalidEnvelope,
     validate_envelope,
 )
+from socialhome.global_server import ws_registry as ws_registry_mod
 from socialhome.global_server.repositories import (
     SqliteGfsEnvelopeQueueRepo,
     SqliteGfsFederationRepo,
 )
+from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 
 CIPHERTEXT = "bm9uY2U:Y2lwaGVydGV4dC1ieXRlcw"
 EPH_PK = "ZXBoZW1lcmFsLXB1YmxpYy1rZXktYnl0ZXM"
@@ -62,6 +64,9 @@ class _FakeRegistry:
             return False
         self.sent.append((instance_id, payload))
         return True
+
+    def is_connected(self, instance_id: str) -> bool:
+        return instance_id in self.online
 
 
 @pytest.fixture
@@ -975,3 +980,167 @@ async def test_keyed_locks_release_on_error():
     assert len(locks) == 0
     async with locks.hold("a"):
         pass
+
+
+# ── One recipient cannot exhaust the relay for everybody ─────────────────
+
+OTHER = "otherhome22222222222222222222bbb"
+
+
+async def _register(fed_repo, instance_id: str) -> None:
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id=instance_id,
+            display_name="Other",
+            public_key="cc" * 32,
+            status="active",
+        )
+    )
+
+
+async def test_the_per_recipient_cap_drops_only_that_recipients_overflow(
+    wiring, monkeypatch, caplog
+):
+    fed_repo, queue_repo, registry, _relay = wiring
+    relay = GfsEnvelopeRelay(
+        fed_repo=fed_repo,
+        queue_repo=queue_repo,
+        ws_registry=registry,
+        max_inflight=10,
+        max_inflight_per_recipient=2,
+    )
+    release = asyncio.Event()
+
+    async def _blocked(self, to_instance, sealed):
+        await release.wait()
+
+    monkeypatch.setattr(GfsEnvelopeRelay, "accept", _blocked)
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(5):
+            relay.submit(RECIPIENT, _sealed())
+        relay.submit(OTHER, _sealed())
+    assert relay.in_flight == 3
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "dropped" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    # Never a recipient id at WARNING: an operator log line, not a target list.
+    assert RECIPIENT not in warnings[0]
+    release.set()
+    await relay.close()
+    # The per-recipient counters go back to zero once the work is done.
+    assert relay.pending_recipients == 0
+
+
+def test_per_recipient_cap_is_the_documented_value():
+    assert envelope_relay_mod.ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT == 16
+    assert (
+        envelope_relay_mod.ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT
+        < envelope_relay_mod.ENVELOPE_MAX_INFLIGHT
+    )
+
+
+@pytest.mark.security
+async def test_a_flood_to_a_stalled_recipient_never_drops_another_recipients_envelope(
+    wiring,
+):
+    """The saturation oracle: a household that stops reading its socket and
+    is flooded must not make an envelope to ANYONE ELSE disappear — or
+    whether a canary survives would tell a prober how busy the target is."""
+    fed_repo, queue_repo, _registry, _relay = wiring
+    await _register(fed_repo, OTHER)
+
+    class _Stalled(_FakeRegistry):
+        async def send(self, instance_id, payload):
+            if instance_id == RECIPIENT:
+                await asyncio.Event().wait()  # never returns
+            return await super().send(instance_id, payload)
+
+    relay = GfsEnvelopeRelay(
+        fed_repo=fed_repo,
+        queue_repo=queue_repo,
+        ws_registry=_Stalled(online={RECIPIENT}),
+        max_inflight=envelope_relay_mod.ENVELOPE_MAX_INFLIGHT,
+    )
+    for _ in range(envelope_relay_mod.ENVELOPE_MAX_INFLIGHT * 2):
+        relay.submit(RECIPIENT, _sealed())
+    relay.submit(OTHER, _sealed("canary"))
+    for _ in range(200):
+        if await queue_repo.count_for(OTHER) == 1:
+            break
+        await asyncio.sleep(0.01)
+    await relay.close(timeout=0.05)
+    rows = await queue_repo.list_for(OTHER, now=0)
+    assert [r.sealed["ciphertext"] for r in rows] == ["canary"]
+
+
+class _StalledWS:
+    """A real-registry socket whose peer stopped reading."""
+
+    closed = False
+
+    async def send_str(self, msg: str) -> None:
+        await asyncio.Event().wait()
+
+    async def close(self, *, code: int = 1000, message: bytes = b"") -> None:
+        self.closed = True
+
+
+async def test_a_stalled_live_push_falls_back_to_the_queue(wiring, monkeypatch):
+    fed_repo, queue_repo, _registry, _relay = wiring
+    monkeypatch.setattr(ws_registry_mod, "WS_SEND_TIMEOUT_S", 0.02)
+    registry = GfsWebSocketRegistry()
+    await registry.register(RECIPIENT, _StalledWS())
+    relay = GfsEnvelopeRelay(
+        fed_repo=fed_repo, queue_repo=queue_repo, ws_registry=registry
+    )
+    await asyncio.wait_for(relay.accept(RECIPIENT, _sealed("kept")), timeout=2)
+    rows = await queue_repo.list_for(RECIPIENT, now=0)
+    assert [r.sealed["ciphertext"] for r in rows] == ["kept"]
+    await registry.close_all()
+
+
+async def test_a_stalled_socket_cannot_hold_the_drain_lock(wiring, monkeypatch):
+    fed_repo, queue_repo, _registry, _relay = wiring
+    monkeypatch.setattr(ws_registry_mod, "WS_SEND_TIMEOUT_S", 0.02)
+    registry = GfsWebSocketRegistry()
+    relay = GfsEnvelopeRelay(
+        fed_repo=fed_repo, queue_repo=queue_repo, ws_registry=registry
+    )
+    for i in range(3):
+        await relay.accept(RECIPIENT, _sealed(f"ct-{i}"))
+    await registry.register(RECIPIENT, _StalledWS())
+
+    assert await asyncio.wait_for(relay.drain(RECIPIENT), timeout=2) == 0
+    assert relay.lock_count == 0
+    # Nothing was lost: every row is still queued for the next hello.
+    assert await queue_repo.count_for(RECIPIENT) == 3
+    await registry.close_all()
+
+
+# ── Same-node connect race ───────────────────────────────────────────────
+
+
+async def test_a_recipient_that_connected_during_the_enqueue_is_drained(wiring):
+    """The household's hello can land between the failed live push and the
+    committed insert; its hello drain then listed before the row existed.
+    The enqueue path drains a locally connected recipient itself."""
+    fed_repo, queue_repo, _registry, _relay = wiring
+
+    class _ConnectsMidway(_FakeRegistry):
+        async def send(self, instance_id, payload):
+            if instance_id not in self.online:
+                self.online.add(instance_id)  # hello lands right after
+                return False
+            return await super().send(instance_id, payload)
+
+    registry = _ConnectsMidway()
+    relay = GfsEnvelopeRelay(
+        fed_repo=fed_repo, queue_repo=queue_repo, ws_registry=registry
+    )
+    await relay.accept(RECIPIENT, _sealed("raced"))
+
+    assert [f["sealed"]["ciphertext"] for _t, f in registry.sent] == ["raced"]
+    assert await queue_repo.count_for(RECIPIENT) == 0

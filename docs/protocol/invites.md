@@ -476,10 +476,15 @@ recipient is dropped server-side, logged at DEBUG, and stored nowhere.
 offline one a DB insert), so the route never waits for them: it validates
 the outer shape, hands the envelope to `GfsEnvelopeRelay.submit` — which
 schedules the lookup / push / enqueue as a background task — and answers.
-At most `ENVELOPE_MAX_INFLIGHT` (256) such tasks run at once; past that
-the envelope is dropped with a rate-limited WARNING (one line per minute
-with the drop count, never one per envelope) and the caller still gets
-the same `202`. One recipient's envelopes are processed in the order they
+At most `ENVELOPE_MAX_INFLIGHT` (256) such tasks run at once, and at most
+`ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT` (16) for any one recipient; past
+either the envelope is dropped with a rate-limited WARNING (one line per
+minute with the drop count and no recipient id, never one per envelope)
+and the caller still gets the same `202`. The per-recipient bound means a
+flood aimed at one household — even one that stopped reading its socket —
+can never cost another recipient its envelope, so a canary's fate says
+nothing about a target's load. A live push that stalls for 2 s
+(`WS_SEND_TIMEOUT_S`) evicts the socket and queues the envelope instead. One recipient's envelopes are processed in the order they
 were posted (a per-recipient lock), so the hand-off does not reorder a
 sender's stream.
 Malformed bodies are a 400 and anything over

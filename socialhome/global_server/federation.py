@@ -119,8 +119,9 @@ PUBLISH_REPLAY_TTL_S: float = 300.0
 PUBLISH_REPLAY_MAX_ENTRIES: int = 10_000
 
 #: Verify key used on the unknown-instance branch of the LEGACY transport-
-#: signature check (and of the ``/gfs/ws`` hello, :mod:`.routes.ws`) so that branch does the same Ed25519 verification work as
-#: the registered-instance branch — otherwise an unknown instance returns
+#: signature check (and of the ``/gfs/ws`` hello, :mod:`.routes.ws`) so that
+#: branch does the same Ed25519 verification work as the registered-instance
+#: branch — otherwise an unknown instance returns
 #: measurably sooner and the endpoint becomes a timing oracle for "is this
 #: household registered here?". The Ed25519 public key for the all-zero seed;
 #: nothing is ever signed with it, and a signature can never verify under it.

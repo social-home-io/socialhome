@@ -26,6 +26,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -529,7 +530,8 @@ class ClusterService:
         "_drain_hint_pending",
         "_drain_hint_task",
         "_drain_cb",
-        "_drain_tasks",
+        "_hint_drains",
+        "_hint_rerun",
     )
 
     def __init__(
@@ -631,8 +633,11 @@ class ClusterService:
         self._drain_hint_task: asyncio.Task | None = None
         #: ``GfsEnvelopeRelay.drain``, set by :meth:`attach_drain`.
         self._drain_cb: Callable[[str], Awaitable[int]] | None = None
-        #: Drains started by inbound hints, awaited / cancelled in ``stop``.
-        self._drain_tasks: set[asyncio.Task] = set()
+        #: Running hint-started drain per household, awaited / cancelled in
+        #: ``stop``. At most one per household: further hints coalesce.
+        self._hint_drains: dict[str, asyncio.Task] = {}
+        #: Households hinted again while their drain ran — drained once more.
+        self._hint_rerun: set[str] = set()
 
     # ─── /cluster/sync budgets ───────────────────────────────────────
 
@@ -837,8 +842,9 @@ class ClusterService:
                     pass
                 setattr(self, attr, None)
         self._drain_hint_pending.clear()
-        if self._drain_tasks:
-            pending = set(self._drain_tasks)
+        self._hint_rerun.clear()
+        if self._hint_drains:
+            pending = set(self._hint_drains.values())
             _done, still = await asyncio.wait(pending, timeout=5.0)
             for task in still:
                 task.cancel()
@@ -1171,24 +1177,38 @@ class ClusterService:
                 continue
             if not self._ws_registry.is_connected(raw):
                 continue
+            if raw in self._hint_drains:
+                # A drain for it is already running and may have listed the
+                # queue before the new row landed: run it once more after,
+                # however many hints arrive meanwhile.
+                self._hint_rerun.add(raw)
+                continue
             task = asyncio.get_running_loop().create_task(
                 self._run_hinted_drain(self._drain_cb, raw),
                 name="gfs-cluster-hint-drain",
             )
-            self._drain_tasks.add(task)
-            task.add_done_callback(self._drain_tasks.discard)
+            self._hint_drains[raw] = task
+            task.add_done_callback(partial(self._forget_hint_drain, raw))
             started += 1
         return started
+
+    def _forget_hint_drain(self, instance_id: str, task: asyncio.Task) -> None:
+        if self._hint_drains.get(instance_id) is task:
+            del self._hint_drains[instance_id]
 
     async def _run_hinted_drain(
         self, drain: Callable[[str], Awaitable[int]], instance_id: str
     ) -> None:
-        try:
-            await drain(instance_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.warning("cluster: hint drain failed for %s: %r", instance_id, exc)
+        while True:
+            self._hint_rerun.discard(instance_id)
+            try:
+                await drain(instance_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("cluster: hint drain failed for %s: %r", instance_id, exc)
+            if instance_id not in self._hint_rerun or self._stop.is_set():
+                return
 
     # ─── Admin-portal entry points ────────────────────────────────────
 

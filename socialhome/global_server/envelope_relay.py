@@ -29,11 +29,18 @@ an online one is a socket write, an offline one is a DB insert), so the route
 never awaits them: it validates the outer shape and hands the envelope to
 :meth:`GfsEnvelopeRelay.submit`, which schedules :meth:`GfsEnvelopeRelay.accept`
 as a background task and returns at once. At most
-:data:`ENVELOPE_MAX_INFLIGHT` such tasks run at a time; past that the envelope
-is dropped with a rate-limited WARNING and the caller still gets the same
-``202`` — a slower answer under load would be an oracle of its own. Tasks for
-one recipient run in submit order (a per-recipient lock), so one sender's
-envelopes are not reordered by the hand-off.
+:data:`ENVELOPE_MAX_INFLIGHT` such tasks run at a time, and at most
+:data:`ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT` for any one recipient; past either
+the envelope is dropped with a rate-limited WARNING and the caller still gets
+the same ``202`` — a slower answer under load would be an oracle of its own.
+The per-recipient bound is what keeps one household (say, one that stopped
+reading its socket and is being flooded) from using up the slots every other
+recipient needs, which would also make one envelope's fate depend on
+another household's load. A live push that stalls is bounded too
+(``ws_registry.WS_SEND_TIMEOUT_S``): the stalled socket is evicted and the
+envelope queued instead. Tasks for one recipient run in submit order (a
+per-recipient lock), so one sender's envelopes are not reordered by the
+hand-off.
 
 **Store and forward.** A live ``/gfs/ws`` socket takes the frame
 immediately. Otherwise the blob waits in ``gfs_envelope_queue`` (GFS
@@ -50,7 +57,14 @@ which coalesces recipient ids for a moment and broadcasts one
 ``NODE_DRAIN_HINT`` frame. Node B drains each hinted household it holds a
 socket for, so the envelope arrives now rather than on the household's next
 reconnect. Drains are serialised per household (a hello drain and a hint
-drain can otherwise race and deliver a row twice).
+drain can otherwise race and deliver a row twice). That lock is per process:
+during a reconnect that moves a household between nodes, a stale socket on
+the old node can in rare cases take a frame another node also delivers, and
+a send that timed out may still flush from the socket buffer after its row
+was queued. Receivers tolerate the duplicate — a relayed §24.11 envelope is
+dropped by the replay step of the inbound pipeline (its ``msg_id``), an
+invite-bootstrap body by its ``redeem_nonce`` replay guard, and a member
+item by its item-id dedupe.
 
 Ordering note: envelopes that arrive DURING a drain go straight to the
 now-live socket and can therefore overtake a queued one. The bootstrap
@@ -243,6 +257,17 @@ RELAY_FAN_OUT_CONCURRENCY: int = 8
 #: answer is still the uniform ``202``.
 ENVELOPE_MAX_INFLIGHT: int = 256
 
+#: Max background ``accept`` tasks pending for ONE recipient (their per-
+#: recipient lock serialises them, so the rest would only wait). The inner
+#: bound that keeps one household — one that stopped reading its socket and
+#: is being flooded, say — from occupying the slots everybody else needs:
+#: past it only that recipient's new envelopes are dropped (same ``202``,
+#: counted into the saturation warning). Well below
+#: :data:`ENVELOPE_MAX_INFLIGHT`, so a single recipient can never exhaust the
+#: global bound; it takes ``ENVELOPE_MAX_INFLIGHT / 16`` simultaneously
+#: flooded, stalled recipients to do that.
+ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT: int = 16
+
 #: Minimum seconds between two "relay saturated" WARNINGs. Each warning reports
 #: how many envelopes were dropped since the previous one — an operator signal,
 #: never a per-envelope log flood driven by an anonymous caller.
@@ -338,6 +363,8 @@ class GfsEnvelopeRelay:
         "_cluster",
         "_accept_locks",
         "_drain_locks",
+        "_max_inflight_per_recipient",
+        "_pending_by_recipient",
     )
 
     def __init__(
@@ -350,6 +377,7 @@ class GfsEnvelopeRelay:
         max_queued_per_recipient: int = ENVELOPE_QUEUE_MAX_PER_RECIPIENT,
         max_bytes_per_recipient: int = ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT,
         max_inflight: int = ENVELOPE_MAX_INFLIGHT,
+        max_inflight_per_recipient: int = ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._fed_repo = fed_repo
@@ -359,6 +387,9 @@ class GfsEnvelopeRelay:
         self._max_queued = max_queued_per_recipient
         self._max_bytes = max_bytes_per_recipient
         self._max_inflight = max_inflight
+        self._max_inflight_per_recipient = max_inflight_per_recipient
+        #: recipient → background accepts scheduled or running for it.
+        self._pending_by_recipient: dict[str, int] = {}
         self._inflight: set[asyncio.Task[None]] = set()
         self._clock = clock
         #: Envelopes dropped at saturation since the last WARNING.
@@ -395,15 +426,38 @@ class GfsEnvelopeRelay:
         response latency. At :data:`ENVELOPE_MAX_INFLIGHT` the envelope is
         dropped — still silently as far as the caller is concerned.
         """
+        pending = self._pending_by_recipient.get(to_instance, 0)
+        if pending >= self._max_inflight_per_recipient:
+            # One recipient's backlog — e.g. a household that stopped reading
+            # its socket and is being flooded — must never use up the slots
+            # every other recipient's envelopes need (that would also make
+            # one envelope's fate depend on another household's load).
+            log.debug("gfs.envelope: backlog cap reached for %s", to_instance)
+            self._note_saturated()
+            return
         if len(self._inflight) >= self._max_inflight:
             self._note_saturated()
             return
+        self._pending_by_recipient[to_instance] = pending + 1
         task = asyncio.get_running_loop().create_task(
             self._accept_in_background(to_instance, sealed),
             name="gfs-envelope-accept",
         )
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
+        task.add_done_callback(lambda _t: self._release_pending(to_instance))
+
+    def _release_pending(self, to_instance: str) -> None:
+        left = self._pending_by_recipient.get(to_instance, 0) - 1
+        if left > 0:
+            self._pending_by_recipient[to_instance] = left
+        else:
+            self._pending_by_recipient.pop(to_instance, None)
+
+    @property
+    def pending_recipients(self) -> int:
+        """Recipients with at least one background ``accept`` pending."""
+        return len(self._pending_by_recipient)
 
     def _note_saturated(self) -> None:
         """Count a saturation drop; WARN at most once per interval."""
@@ -412,9 +466,10 @@ class GfsEnvelopeRelay:
         if now - self._saturation_warned_at < ENVELOPE_SATURATION_WARN_INTERVAL_S:
             return
         log.warning(
-            "gfs.envelope: relay saturated (%d accepts in flight) — dropped "
-            "%d envelope(s) since the last warning; the database is slow or "
-            "the relay is being flooded",
+            "gfs.envelope: relay saturated (%d accepts in flight, or one "
+            "recipient at its backlog cap) — dropped %d envelope(s) since the "
+            "last warning; the database is slow, a recipient stopped reading, "
+            "or the relay is being flooded",
             len(self._inflight),
             self._saturated_drops,
         )
@@ -461,11 +516,20 @@ class GfsEnvelopeRelay:
         if still:
             await asyncio.gather(*still, return_exceptions=True)
 
-    def _hint_cluster(self, to_instance: str) -> None:
-        """Tell sibling nodes a row for *to_instance* just landed in the
-        shared queue — one of them may hold the recipient's socket."""
+    async def _after_enqueue(self, to_instance: str) -> None:
+        """A row for *to_instance* just landed in the shared queue.
+
+        Tell sibling nodes — one of them may hold the recipient's socket.
+        And close a same-node race: the recipient's hello can land between
+        the failed live push and the committed insert, in which case its
+        hello drain listed the queue before this row existed. If it is
+        connected HERE now, drain it (under the drain lock, so this never
+        double-sends with that hello drain).
+        """
         if self._cluster is not None:
             self._cluster.hint_drain(to_instance)
+        if self._ws_registry.is_connected(to_instance):
+            await self.drain(to_instance)
 
     async def accept(self, to_instance: str, sealed: dict[str, str]) -> None:
         """Push *sealed* to *to_instance*, or queue it for later.
@@ -514,7 +578,7 @@ class GfsEnvelopeRelay:
             )
             return
         log.debug("gfs.envelope: queued for offline recipient %s", to_instance)
-        self._hint_cluster(to_instance)
+        await self._after_enqueue(to_instance)
 
     async def fan_out_relay(
         self,
@@ -565,7 +629,7 @@ class GfsEnvelopeRelay:
             )
             if queued:
                 reached += 1
-                self._hint_cluster(target)
+                await self._after_enqueue(target)
             else:
                 log.warning(
                     "gfs.envelope: a space item for %s exceeds the relay "
