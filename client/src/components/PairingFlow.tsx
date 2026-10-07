@@ -482,6 +482,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
   const sasAutofilledRef = useRef(false)
   const [scanMethod, setScanMethod] = useState<ScanMethod>('qr')
   const failedPanelRef = useRef<HTMLDivElement | null>(null)
+  const startPanelRef = useRef<HTMLDivElement | null>(null)
 
   // ── Failure panel focus ───────────────────────────────────────────
   // The Modal focuses its first control on open only; when the flow
@@ -494,6 +495,27 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
     if (!isFailed) return
     failedPanelRef.current?.querySelector('button')?.focus()
   }, [isFailed])
+
+  // ── Start-step focus after Retry / Back / Cancel ───────────────────
+  // Those controls unmount the panel that held focus (the failure
+  // panel's Retry, the scanner's Back, the QR card's Cancel), so
+  // ``document.activeElement`` would fall to ``body`` — the trap still
+  // keeps Tab in the dialog, but a screen-reader user hears nothing.
+  // Land on the start step's first control instead: the "Add GFS"
+  // button, or the first role card in household mode. Only on a
+  // step → idle transition while the modal stays open — on a fresh
+  // open the Modal already focuses its first control and ``openPairing``
+  // resets the step at the same time, so the previous step is cleared
+  // whenever the modal is closed.
+  const isIdle = step.value === 'idle'
+  const isOpen = open.value
+  const prevStepRef = useRef<PairingStep | null>(null)
+  useEffect(() => {
+    const prev = prevStepRef.current
+    prevStepRef.current = isOpen ? step.value : null
+    if (!isOpen || !isIdle || prev === null || prev === 'idle') return
+    startPanelRef.current?.querySelector('button')?.focus()
+  }, [isIdle, isOpen])
 
   // ── Per-state timeout ─────────────────────────────────────────────
   // Watches ``step.value``; when the user enters one of the open-ended
@@ -711,7 +733,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
         )}
 
         {mode.value === 'household' && step.value === 'idle' && (
-          <div class="sh-pairing-start">
+          <div class="sh-pairing-start" ref={startPanelRef}>
             <div class="sh-pairing-hero" aria-hidden="true">🔗</div>
             <p class="sh-muted">{t('pairing.intro')}</p>
             <div class="sh-pairing-role-grid">
@@ -904,7 +926,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
 
         {/* ── GFS mode ─────────────────────────────────────────── */}
         {mode.value === 'gfs' && step.value === 'idle' && (
-          <div class="sh-pairing-start">
+          <div class="sh-pairing-start" ref={startPanelRef}>
             <p class="sh-gfs-url-intro sh-muted">{t('gfs.modal_intro')}</p>
             <div class="sh-pairing-actions">
               <Button onClick={startGfs}>{t('gfs.add')}</Button>

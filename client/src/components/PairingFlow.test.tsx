@@ -372,6 +372,95 @@ describe('PairingFlow — the failure panel is announced and focused', () => {
   })
 })
 
+describe('PairingFlow — leaving a step for the start puts focus on its first control', () => {
+  // Retry (and the Back / Cancel links) unmount the control that had
+  // focus, so ``document.activeElement`` would fall to ``body``: the
+  // focus trap keeps Tab inside the dialog, but a screen-reader user
+  // gets no announced landing spot. Focus must land on the first
+  // control of the start step — the GFS "Add" button, or the first
+  // role card in household mode.
+  async function failGfs() {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(502, '/api/gfs/connections', {
+      code: 'GFS_UNREACHABLE', detail: 'down',
+    }))
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('gfs')
+    fireEvent.click(await screen.findByText('gfs.add'))
+    fireEvent.click(await screen.findByText('pairing.method_paste'))
+    const textarea = await screen.findByPlaceholderText('gfs.paste_placeholder')
+    fireEvent.input(textarea, {
+      target: { value: 'socialhome://gfs-pair/https://gfs.example.com/?token=tok-gfs' },
+    })
+    fireEvent.click(screen.getByText('pairing.paste_submit'))
+    const retry = await screen.findByText('pairing.retry')
+    await waitFor(() => expect(document.activeElement).toBe(retry))
+    return openPairing
+  }
+
+  it('GFS mode: Retry after a failure focuses the "Add GFS" button', async () => {
+    await failGfs()
+    fireEvent.click(screen.getByText('pairing.retry'))
+    const add = await screen.findByText('gfs.add')
+    await waitFor(() => expect(document.activeElement).toBe(add))
+  })
+
+  it('household mode: Retry after a failure focuses the "Show my QR" role card', async () => {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(500, '/api/pairing/initiate', {
+      code: 'INTERNAL', detail: 'boom',
+    }))
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')
+    await screen.findByText('pairing.role_show')
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    const retry = await screen.findByText('pairing.retry')
+    await waitFor(() => expect(document.activeElement).toBe(retry))
+    fireEvent.click(retry)
+    const showCard = await screen.findByLabelText('pairing.role_show_aria')
+    await waitFor(() => expect(document.activeElement).toBe(showCard))
+  })
+
+  it('household mode: Back from the scanner focuses the "Show my QR" role card', async () => {
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')
+    fireEvent.click(await screen.findByLabelText('pairing.role_scan_aria'))
+    const back = await screen.findByText('pairing.back')
+    back.focus()
+    fireEvent.click(back)
+    const showCard = await screen.findByLabelText('pairing.role_show_aria')
+    await waitFor(() => expect(document.activeElement).toBe(showCard))
+  })
+
+  it('a fresh open leaves focus where the Modal put it — inside the dialog, never body', async () => {
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('gfs')
+    await screen.findByText('gfs.add')
+    const dialog = document.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+    await waitFor(() => {
+      expect(document.activeElement).not.toBe(document.body)
+      expect(dialog!.contains(document.activeElement)).toBe(true)
+    })
+    // The Modal's own open-focus picks the first focusable control (the
+    // close ✕ in the header); the start-step effect must not override it.
+    expect(document.activeElement).toBe(screen.getByLabelText('modal.close'))
+  })
+
+  it('closing on the failure panel and re-opening does not fight the Modal open-focus', async () => {
+    const openPairing = await failGfs()
+    fireEvent.click(screen.getByLabelText('modal.close'))
+    await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
+    openPairing('gfs')
+    await screen.findByText('gfs.add')
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('modal.close')))
+  })
+})
+
 describe('PairingFlow — configure-sharing step', () => {
   it('household success Done advances to configure-sharing', async () => {
     const { PairingFlow, openPairing } = await import('./PairingFlow')
