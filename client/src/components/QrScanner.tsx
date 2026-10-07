@@ -45,17 +45,25 @@ function createDetector(): BarcodeDetectorLike | null {
  * Camera preview + continuous QR decode loop. Calls ``onPayload`` once
  * with the decoded string. Stream + detection loop tear down cleanly
  * on unmount.
+ *
+ * Camera errors (permission denied, no camera, no detector) are this
+ * card's own: it renders them in place and nobody else repeats them.
+ * The camera starts once per mount — the parent re-renders on every
+ * state change and hands down fresh closures, so the effect reads the
+ * latest ``onPayload`` through a ref instead of listing it as a dep.
+ * Re-running the effect would restart (and re-fail) the camera on
+ * every keystroke elsewhere in the panel.
  */
 function QrCameraScanner({
   onPayload,
-  onCameraError,
 }: {
   onPayload: (raw: string) => void
-  onCameraError: (msg: string) => void
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [starting, setStarting] = useState(true)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const onPayloadRef = useRef(onPayload)
+  onPayloadRef.current = onPayload
 
   useEffect(() => {
     let cancelled = false
@@ -63,9 +71,7 @@ function QrCameraScanner({
     let stream: MediaStream | null = null
     const detector = createDetector()
     if (!detector) {
-      const msg = t('pairing.scan_no_detector')
-      setErrorMsg(msg)
-      onCameraError(msg)
+      setErrorMsg(t('pairing.scan_no_detector'))
       setStarting(false)
       return
     }
@@ -88,7 +94,7 @@ function QrCameraScanner({
             const match = results.find(r => !!r.rawValue)
             if (match) {
               cancelled = true
-              onPayload(match.rawValue)
+              onPayloadRef.current(match.rawValue)
               return
             }
           } catch {
@@ -108,7 +114,6 @@ function QrCameraScanner({
           msg = t('pairing.scan_failed')
         }
         setErrorMsg(msg)
-        onCameraError(msg)
         setStarting(false)
       }
     })()
@@ -117,7 +122,7 @@ function QrCameraScanner({
       if (rafId !== null) cancelAnimationFrame(rafId)
       if (stream) stream.getTracks().forEach(t => t.stop())
     }
-  }, [onPayload, onCameraError])
+  }, [])
 
   if (errorMsg) {
     return (
@@ -164,10 +169,12 @@ export interface QrScannerProps {
   /** Called once when the panel decodes a QR (camera or upload). */
   onPayload: (raw: string) => void
   /**
-   * Called whenever the panel raises a user-visible error (camera
-   * permission denial, no detector support, decode failure). Optional —
-   * the panel always renders the error inline; this callback is only
-   * for parent-side toast / analytics.
+   * Called when an uploaded image fails to decode (unreadable file, no
+   * QR in it). Optional — the panel always renders the error inline;
+   * this callback is only for parent-side toast / analytics. Camera
+   * errors (permission denial, no camera, no detector support) stay on
+   * the camera card and are NOT reported here, so a parent that mirrors
+   * ``onError`` into its own line never shows them twice.
    */
   onError?: (msg: string) => void
   /**
@@ -184,6 +191,9 @@ export interface QrScannerProps {
  */
 export function QrScanner({ onPayload, onError, onCancel }: QrScannerProps) {
   const [decoding, setDecoding] = useState(false)
+  // Upload / decode verdict only — camera errors render on the camera
+  // card, so a camera failure can never overwrite a more recent upload
+  // error here.
   const [scanError, setScanError] = useState<string | null>(null)
 
   const reportError = (msg: string) => {
@@ -215,7 +225,7 @@ export function QrScanner({ onPayload, onError, onCancel }: QrScannerProps) {
   return (
     <div class="sh-scan-options">
       {barcodeDetectorSupported() && (
-        <QrCameraScanner onPayload={onPayload} onCameraError={reportError} />
+        <QrCameraScanner onPayload={onPayload} />
       )}
       {!barcodeDetectorSupported() && (
         <div class="sh-scan-no-camera">

@@ -249,11 +249,13 @@ export function SpaceJoinByCodeDialog() {
 
         {method.value === 'qr' && (
           <>
+            {/* The scanner renders its own upload / camera errors inline;
+                ``errorMsg`` here is for ``submit()`` failures only, so a
+                decode error is never shown twice. */}
             <QrScanner
               onPayload={(raw) => {
                 void submit(raw)
               }}
-              onError={(msg) => { errorMsg.value = msg }}
             />
             {errorMsg.value && (
               <p class="sh-scan-error-inline" role="alert">
