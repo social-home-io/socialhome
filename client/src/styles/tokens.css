@@ -412,3 +412,20 @@
   font-size: var(--sh-font-size-sm);
 }
 .sh-install-prompt-text { font-weight: 600; }
+/* Narrow phones (the 390 px case): two buttons beside the copy squeeze
+ * the text column to one word per line. Let the banner wrap so the text
+ * takes the full first row and both buttons sit on a second row; the
+ * width cap keeps the fixed banner inside the viewport (no horizontal
+ * scroll). Desktop keeps the single row. */
+@media (max-width: 480px) {
+  .sh-install-prompt {
+    flex-wrap: wrap;
+    justify-content: center;
+    width: calc(100% - 2 * var(--sh-space-md));
+    max-width: 100%;
+  }
+  .sh-install-prompt-text {
+    flex: 1 0 100%;
+    text-align: center;
+  }
+}
