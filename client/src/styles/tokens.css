@@ -193,6 +193,9 @@
 
   /* ── Z-index layers ───────────────────────────────────────────── */
   --sh-z-dropdown: 100;
+  /* Page-level banners (PWA install prompt): above the sticky topbar
+   * and dropdowns, below modals so a dialog's overlay dims them too. */
+  --sh-z-banner:   150;
   --sh-z-modal:    200;
   --sh-z-toast:    300;
   --sh-z-lightbox: 400;
@@ -394,35 +397,65 @@
   outline-offset: 2px;
 }
 
-/* PWA install prompt banner (§23.114) */
+/* PWA install prompt banner (§23.114). In normal flow above the app
+ * grid (``App.tsx`` mounts it before ``.sh-layout``), so it pushes the
+ * page down instead of floating over it: a fixed banner covered the
+ * header search field at top: 0 and the page's first control row (the
+ * Settings tab strip on a phone) when hung under the topbar. The topbar
+ * is sticky, so once the banner scrolls away the header pins to the top
+ * as usual. ``z-index`` keeps it on the banner tier for anything that
+ * overlaps it (dropdowns open below, modals dim it). */
 .sh-install-prompt {
-  position: fixed;
-  top: 0;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 9000;
+  position: relative;
+  z-index: var(--sh-z-banner);
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: var(--sh-space-sm);
   padding: var(--sh-space-sm) var(--sh-space-md);
   background: var(--sh-primary-fill);
   color: #fff;
-  border-radius: 0 0 var(--sh-radius-md) var(--sh-radius-md);
   box-shadow: var(--sh-shadow);
   font-size: var(--sh-font-size-sm);
 }
 .sh-install-prompt-text { font-weight: 600; }
+/* On the terracotta fill the primary button vanished (same colour), so
+ * "Install" read as a label. Invert it, and outline "Not now" so the
+ * two still read as primary / secondary. */
+.sh-install-prompt .sh-btn--primary {
+  background: #fff;
+  color: var(--sh-primary-fill);
+  border-color: #fff;
+}
+.sh-install-prompt .sh-btn--secondary {
+  background: transparent;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+}
+/* The base hover rules outrank the two above (:not(:disabled):hover),
+ * so restate the inverted colours for hover or Install turns back into
+ * the banner colour under the pointer. */
+.sh-install-prompt .sh-btn--primary:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--sh-primary-fill);
+}
+.sh-install-prompt .sh-btn--secondary:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.8);
+}
+/* The terracotta focus ring is invisible on the terracotta banner; a
+ * white ring keeps keyboard focus visible on both buttons. */
+.sh-install-prompt .sh-btn:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
 /* Narrow phones (the 390 px case): two buttons beside the copy squeeze
  * the text column to one word per line. Let the banner wrap so the text
- * takes the full first row and both buttons sit on a second row; the
- * width cap keeps the fixed banner inside the viewport (no horizontal
- * scroll). Desktop keeps the single row. */
+ * takes the full first row and both buttons sit on a second row. */
 @media (max-width: 480px) {
   .sh-install-prompt {
     flex-wrap: wrap;
-    justify-content: center;
-    width: calc(100% - 2 * var(--sh-space-md));
-    max-width: 100%;
   }
   .sh-install-prompt-text {
     flex: 1 0 100%;
