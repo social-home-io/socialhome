@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent, screen, cleanup } from '@testing-library/preact'
+import { render, fireEvent, screen, cleanup, waitFor } from '@testing-library/preact'
 import en from '@/i18n/locales/en.json'
 
 const apiPost = vi.fn()
@@ -323,6 +323,52 @@ describe('PairingFlow — GFS connect failures', () => {
     fireEvent.click(await screen.findByText('mock-qr-scan'))
     expect(await screen.findByText('pairing.scan_invalid_code')).toBeTruthy()
     expect(apiPost).not.toHaveBeenCalled()
+  })
+})
+
+describe('PairingFlow — the failure panel is announced and focused', () => {
+  // The verdict ("Pairing failed" / "Couldn't connect to the GFS") must
+  // reach screen readers (role=alert) and keyboard focus must land on
+  // Retry, the panel's one control — not stay on the modal's close ✕.
+  async function expectAnnouncedAndFocused() {
+    const panel = document.querySelector('.sh-pairing-failed')
+    expect(panel).not.toBeNull()
+    expect(panel!.getAttribute('role')).toBe('alert')
+    const retry = screen.getByText('pairing.retry')
+    await waitFor(() => expect(document.activeElement).toBe(retry))
+  }
+
+  it('GFS mode: role=alert on the panel, focus on Retry', async () => {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(502, '/api/gfs/connections', {
+      code: 'GFS_UNREACHABLE', detail: 'down',
+    }))
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('gfs')
+    fireEvent.click(await screen.findByText('gfs.add'))
+    fireEvent.click(await screen.findByText('pairing.method_paste'))
+    const textarea = await screen.findByPlaceholderText('gfs.paste_placeholder')
+    fireEvent.input(textarea, {
+      target: { value: 'socialhome://gfs-pair/https://gfs.example.com/?token=tok-gfs' },
+    })
+    fireEvent.click(screen.getByText('pairing.paste_submit'))
+    expect(await screen.findByText('gfs.pair_failed')).toBeTruthy()
+    await expectAnnouncedAndFocused()
+  })
+
+  it('household mode: role=alert on the panel, focus on Retry', async () => {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(500, '/api/pairing/initiate', {
+      code: 'INTERNAL', detail: 'boom',
+    }))
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')
+    await screen.findByText('pairing.role_show')
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    expect(await screen.findByText('pairing.failed')).toBeTruthy()
+    await expectAnnouncedAndFocused()
   })
 })
 

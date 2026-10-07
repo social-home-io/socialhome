@@ -13144,7 +13144,11 @@ a.sh-welcome-card:hover {
 }
 .sh-scan-error-icon { font-size: 2rem; }
 .sh-scan-error-inline {
-  color: var(--sh-warning);
+  /* Error ink, not the honey warning tint: at 14 px on the sheet
+     surface the warning colour measured 2.2:1, below WCAG AA (4.5:1).
+     ``--sh-danger-on-soft`` is the darkened error text made for soft
+     surfaces and has a dark-theme value of its own. */
+  color: var(--sh-danger-on-soft);
   font-size: var(--sh-font-size-sm);
   text-align: center;
 }

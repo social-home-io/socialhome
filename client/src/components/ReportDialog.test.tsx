@@ -15,7 +15,7 @@ describe('ReportDialog', () => {
   it('names who receives the report', async () => {
     const { reportSentMessage } = await import('./ReportDialog')
     expect(reportSentMessage({ space_id: 'sp' })).toMatch(/space's moderators/)
-    expect(reportSentMessage({ space_id: null, forwarded_to_gfs: true })).toMatch(/Global Server/)
+    expect(reportSentMessage({ space_id: null, forwarded_to_gfs: true })).toMatch(/connected GFS\.$/)
     expect(reportSentMessage({ forwarded_to_gfs: false })).toMatch(/household admin\.$/)
   })
 

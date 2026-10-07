@@ -481,6 +481,19 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
   const loc = useLocation()
   const sasAutofilledRef = useRef(false)
   const [scanMethod, setScanMethod] = useState<ScanMethod>('qr')
+  const failedPanelRef = useRef<HTMLDivElement | null>(null)
+
+  // ── Failure panel focus ───────────────────────────────────────────
+  // The Modal focuses its first control on open only; when the flow
+  // flips to ``failed`` mid-way, focus would otherwise stay on the ✕.
+  // Move it to Retry — the panel's one control — so keyboard and
+  // screen-reader users land on the way out. The panel itself is
+  // ``role="alert"`` so the verdict is announced.
+  const isFailed = step.value === 'failed'
+  useEffect(() => {
+    if (!isFailed) return
+    failedPanelRef.current?.querySelector('button')?.focus()
+  }, [isFailed])
 
   // ── Per-state timeout ─────────────────────────────────────────────
   // Watches ``step.value``; when the user enters one of the open-ended
@@ -877,7 +890,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
         )}
 
         {step.value === 'failed' && (
-          <div class="sh-pairing-failed">
+          <div class="sh-pairing-failed" role="alert" ref={failedPanelRef}>
             <div class="sh-pairing-fail-mark" aria-hidden="true">⚠</div>
             <h3 style={{ margin: 0 }}>
               {mode.value === 'gfs' ? t('gfs.pair_failed') : t('pairing.failed')}
