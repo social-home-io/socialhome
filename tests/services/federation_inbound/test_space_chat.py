@@ -318,3 +318,165 @@ async def test_the_message_that_creates_the_chat_here_reads_as_unread(stack):
     timestamp read as already seen and the bell's unread pill stayed at 0."""
     await _create(stack, chat_id("u-rb"))
     assert (await stack.chat.summary(SP, "bob")).unread == 1
+
+
+# ── Deletions converge (tombstones) ───────────────────────────────────────
+
+
+async def _delete(stack, mid, *, actor, sender=HOUSE_B, author=None):
+    payload = {"message_id": mid, "actor_user_id": actor}
+    if author is not None:
+        payload["author_user_id"] = author
+    await stack.federation.deliver(
+        FET.SPACE_CHAT_MESSAGE_DELETED, payload, sender=sender
+    )
+
+
+async def _tombstones(stack) -> list[tuple]:
+    return [
+        (r["id"], r["sender_user_id"], r["deleted"])
+        for r in await stack.db.fetchall(
+            "SELECT id, sender_user_id, deleted FROM conversation_messages"
+            " WHERE type='tombstone'"
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("actor", "sender"),
+    [("u-rb", HOUSE_B), ("u-radm", HOUSE_B)],
+    ids=["the author", "a remote admin"],
+)
+async def test_a_delete_that_overtakes_its_create_leaves_a_tombstone(
+    stack, actor, sender
+):
+    mid = chat_id("u-rb")
+    await _delete(stack, mid, actor=actor, sender=sender, author="u-rb")
+    assert await _tombstones(stack) == [(mid, "u-rb", 1)]
+    await _create(stack, mid)
+    # The late create never brings it back; the tombstone is invisible.
+    assert await _tombstones(stack) == [(mid, "u-rb", 1)]
+    chat = await stack.chat.get_chat(SP)
+    assert chat is not None
+    assert await stack.convos.list_messages(chat.id) == []
+    assert (await stack.chat.summary(SP, "bob")).unread == 0
+    assert stack.events(DmMessageCreated) == []
+
+
+@pytest.mark.parametrize(
+    ("actor", "sender", "author"),
+    [
+        ("u-rb", HOUSE_F, "u-rb"),  # the author, named by another household
+        ("u-rf", HOUSE_F, "u-rf"),  # a follower claiming the id as theirs
+        ("u-rb", HOUSE_B, "u-radm"),  # the id is not bound to that author
+        ("u-rb", HOUSE_B, None),  # no author: nothing proves whose it was
+    ],
+)
+async def test_an_unauthorised_delete_of_an_unknown_id_records_nothing(
+    stack, actor, sender, author
+):
+    mid = chat_id("u-rb")
+    await _delete(stack, mid, actor=actor, sender=sender, author=author)
+    assert await _tombstones(stack) == []
+    await _create(stack, mid)
+    assert [r[0] for r in await _rows(stack)] == [mid]
+
+
+async def test_a_delete_lands_while_the_chat_is_off_here(stack):
+    mid = chat_id("u-rb")
+    await _create(stack, mid)
+    await stack.db.enqueue("UPDATE spaces SET feature_chat=0")
+    await _delete(stack, mid, actor="u-rb")
+    assert (await _rows(stack))[0][3] == 1
+    (deleted,) = stack.events(DmMessageDeleted)
+    assert set(deleted.recipient_user_ids) == set()  # nobody may read it now
+
+
+async def test_a_delete_reaches_the_local_readers(stack):
+    mid = chat_id("u-rb")
+    await _create(stack, mid)
+    await _delete(stack, mid, actor="u-rb")
+    (deleted,) = stack.events(DmMessageDeleted)
+    assert set(deleted.recipient_user_ids) == {"u-anna", "u-bob", "u-mod"}
+
+
+async def test_no_tombstone_where_nobody_writes_and_no_chat_exists(stack):
+    await stack.db.enqueue("UPDATE space_members SET role='subscriber'")
+    await _delete(stack, chat_id("u-rb"), actor="u-rb", author="u-rb")
+    assert await _tombstones(stack) == []
+    assert await stack.chat.get_chat(SP) is None
+
+
+async def test_catch_up_deletions_apply_and_tombstone(stack):
+    held = chat_id("u-rb")
+    await _create(stack, held)
+    unseen = chat_id("u-rb")
+    squatted = chat_id("u-rb")
+    await stack.inbound.apply_sync_tombstones(
+        SP,
+        [
+            {"id": held, "author_user_id": "u-rb"},
+            {"id": unseen, "author_user_id": "u-rb"},
+            # Claims u-rb's id for someone else: refused.
+            {"id": squatted, "author_user_id": "u-radm"},
+            {"author_user_id": "u-rb"},
+        ],
+        provider=HOUSE_B,
+    )
+    assert (await _rows(stack))[0][3] == 1
+    assert await _tombstones(stack) == [(unseen, "u-rb", 1)]
+    # A household that speaks for neither the author nor content authority
+    # cannot delete by catch-up.
+    other = chat_id("u-rb")
+    await _create(stack, other)
+    await stack.inbound.apply_sync_tombstones(
+        SP, [{"id": other, "author_user_id": "u-rb"}], provider=HOUSE_F
+    )
+    assert [r[3] for r in await _rows(stack) if r[0] == other] == [0]
+    # A catch-up of the tombstoned id never brings it back.
+    await stack.inbound.apply_sync_records(
+        SP,
+        [{"id": unseen, "author_user_id": "u-rb", "content": "back"}],
+        provider=HOUSE_B,
+    )
+    assert unseen not in [r[0] for r in await _rows(stack) if r[3] == 0]
+
+
+async def test_catch_up_deletions_need_a_roster_mirror(stack):
+    stack.inbound._authorship = None
+    await stack.inbound.apply_sync_tombstones(
+        SP, [{"id": chat_id("u-rb"), "author_user_id": "u-rb"}], provider=HOUSE_B
+    )
+    assert await _tombstones(stack) == []
+
+
+async def test_catch_up_inserts_are_quiet_and_leave_no_unread_backlog(stack):
+    mid = chat_id("u-rb")
+    await stack.inbound.apply_sync_records(
+        SP,
+        [{"id": mid, "author_user_id": "u-rb", "content": "@bob hi from before"}],
+        provider=HOUSE_B,
+    )
+    assert [r[0] for r in await _rows(stack)] == [mid]
+    # No bell / mention / WS per historical message…
+    assert stack.events(DmMessageCreated) == []
+    # …and the chat the catch-up created starts every reader at now.
+    assert (await stack.chat.summary(SP, "bob")).unread == 0
+
+
+async def test_a_banned_authors_edit_and_reaction_are_refused(stack):
+    mid = chat_id("u-rb")
+    await _create(stack, mid)
+    await stack.spaces.ban_member(SP, "u-rb", banned_by="u-anna")
+    await stack.federation.deliver(
+        FET.SPACE_CHAT_MESSAGE_UPDATED,
+        {"message_id": mid, "author_user_id": "u-rb", "content": "after the ban"},
+        sender=HOUSE_B,
+    )
+    await stack.federation.deliver(
+        FET.SPACE_CHAT_REACTION,
+        {"message_id": mid, "user_id": "u-rb", "emoji": "👍", "action": "add"},
+        sender=HOUSE_B,
+    )
+    assert (await _rows(stack))[0][2] == "hi"
+    assert await stack.convos.list_reactions(mid) == []

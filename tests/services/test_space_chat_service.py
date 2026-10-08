@@ -240,5 +240,7 @@ async def test_moderators_delete_anyones_message_members_do_not(stack):
         (by_bob.id, "u-mod", "u-bob")
     ]
     assert deleted[0].system_scope == "space"
+    # Every local reader's open thread — the moderator's other tabs too.
+    assert set(deleted[0].recipient_user_ids) == {"u-anna", "u-bob", "u-mod"}
     stored = await stack.convos.get_message(by_bob.id)
     assert stored is not None and stored.deleted

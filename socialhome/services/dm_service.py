@@ -1172,6 +1172,14 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                 message_id=msg.id,
                 sender_user_id=msg.sender_user_id,
                 actor_user_id=actor.user_id,
+                recipient_user_ids=await local_audience(
+                    self._convos,
+                    self._users,
+                    msg.conversation_id,
+                    actor_user_id=actor.user_id,
+                    include_actor=True,
+                    policy=self._system_chats,
+                ),
                 system_scope=(
                     conv.system_scope.value
                     if conv is not None and conv.system_scope is not None

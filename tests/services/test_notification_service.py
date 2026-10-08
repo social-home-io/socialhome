@@ -20,6 +20,7 @@ from socialhome.domain.events import (
     CommentAdded,
     CommentUpdated,
     DmMessageCreated,
+    DmMessageDeleted,
     DmMessageUpdated,
     PostEdited,
     SpacePostCreated,
@@ -2835,3 +2836,35 @@ async def test_space_chat_respects_the_mentions_level(stack):
     assert await stack.notif_repo.list(bob.user_id) == []
     await stack.bus.publish(_dm_event(chat_id, anna, [bob], mentions=[_m(bob)]))
     assert [n.type for n in await stack.notif_repo.list(bob.user_id)] == ["dm_mention"]
+
+
+async def test_a_deleted_message_clears_the_bell_once_nothing_is_unread(stack):
+    """``DmMessageDeleted``: a member with nothing left unread in the chat
+    has its bell row for it marked read; one with other unread messages
+    keeps it."""
+    anna = await stack.provision_user("anna-d")
+    bob = await stack.provision_user("bob-d")
+    carl = await stack.provision_user("carl-d")
+    chat_id = await _space_chat(stack, anna, bob, carl)
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl]))
+    assert await stack.notif_repo.count_unread(bob.user_id) == 1
+    # carl still has an unread message in the chat; bob has none.
+    await stack.db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, created_at) VALUES('m-left', ?, ?, 'still here', ?)",
+        (chat_id, anna.user_id, "2999-01-01T00:00:00+00:00"),
+    )
+    await stack.conv_repo.set_last_read(
+        chat_id, bob.username, at="2999-06-01T00:00:00+00:00"
+    )
+    await stack.bus.publish(
+        DmMessageDeleted(
+            conversation_id=chat_id,
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            actor_user_id=anna.user_id,
+            recipient_user_ids=(bob.user_id, carl.user_id, "u-remote"),
+        )
+    )
+    assert await stack.notif_repo.count_unread(bob.user_id) == 0
+    assert await stack.notif_repo.count_unread(carl.user_id) == 1

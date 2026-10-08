@@ -53,6 +53,7 @@ from ..domain.events import (
     EventReminderDue,
     DmContactRequested,
     DmMessageCreated,
+    DmMessageDeleted,
     DmMessageUpdated,
     MomentCreated,
     MomentReactionChanged,
@@ -405,6 +406,7 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(SpaceModerationExpired, self.on_moderation_decided)
         self._bus.subscribe(SpaceRemoteSeatLive, self.on_remote_seat_live)
         self._bus.subscribe(DmMessageCreated, self.on_dm_message_created)
+        self._bus.subscribe(DmMessageDeleted, self.on_dm_message_deleted)
         self._bus.subscribe(DmMessageUpdated, self.on_dm_message_updated)
         self._bus.subscribe(PostEdited, self.on_post_edited)
         self._bus.subscribe(CommentUpdated, self.on_comment_updated)
@@ -710,6 +712,22 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 dedupe_by_link=True,
             )
+
+    async def on_dm_message_deleted(self, event: DmMessageDeleted) -> None:
+        """A deleted message no longer rings: for each local member it went
+        to, once nothing in the conversation is unread for them any more,
+        the conversation's ``dm_message`` / ``dm_mention`` bell rows are
+        marked read (bell rows are collapsed per conversation, so this is
+        the row the deleted message bumped)."""
+        if self._convos is None:
+            return
+        for user_id in dict.fromkeys(event.recipient_user_ids):
+            local = await self._users.get_by_user_id(user_id)
+            if local is None:
+                continue
+            if await self._convos.count_unread(event.conversation_id, local.username):
+                continue
+            await self.mark_read_for_dm(user_id, event.conversation_id)
 
     def _chat_name(self, prefs: "_SeatPrefs", recipient) -> str | None:
         """The name a bell gives the conversation: the group's own, or for

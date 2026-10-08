@@ -879,3 +879,58 @@ async def test_upsert_seat_seats_reactivates_and_keeps_own_settings(env):
     assert seat.deleted_at is None
     assert seat.last_read_at == "2026-03-01T00:00:00+00:00"
     assert seat.notif_level == "mentions"
+
+
+async def test_a_tombstone_is_deleted_invisible_and_blocks_its_id(env):
+    await env.repo.create(_conv("c-tomb", ConversationType.GROUP_DM))
+    await env.repo.touch_last_message("c-tomb", at="2026-01-01T00:00:00+00:00")
+    assert await env.repo.insert_tombstone("c-tomb", "m-t", sender_user_id="u-x")
+    assert not await env.repo.insert_tombstone("c-tomb", "m-t", sender_user_id="u-y")
+    got = await env.repo.get_message("m-t")
+    assert got is not None and got.deleted and got.type == "tombstone"
+    assert got.sender_user_id == "u-x" and got.content == ""
+    assert await env.repo.list_messages("c-tomb") == []
+    assert await env.repo.list_messages("c-tomb", before="9999") == []
+    assert await env.repo.list_messages_since("c-tomb", None) == []
+    assert await env.repo.list_messages_since("c-tomb", "2000-01-01") == []
+    assert await env.repo.count_unread("c-tomb", "alice") == 0
+    # A late create of the id never lands.
+    assert not await env.repo.insert_message_if_absent(
+        ConversationMessage(
+            id="m-t",
+            conversation_id="c-tomb",
+            sender_user_id="u-x",
+            content="back",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    # It does not bump the conversation's last activity.
+    conv = await env.repo.get("c-tomb")
+    assert conv is not None and conv.last_message_at is not None
+    assert conv.last_message_at.year == 2026 and conv.last_message_at.month == 1
+    assert [m.id for m in await env.repo.list_recent_deleted_messages("c-tomb")] == [
+        "m-t"
+    ]
+
+
+async def test_prune_space_chat_messages_clears_only_expired_chat_rows(env):
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key, retention_days) VALUES('sp-r','S','h','a','ab',7)"
+    )
+    chat = await env.repo.create_system_chat(SystemChatScope.SPACE, space_id="sp-r")
+    now = datetime(2026, 6, 30, tzinfo=timezone.utc)
+    for mid, day in (("old", 1), ("new", 29)):
+        await env.repo.save_message(
+            ConversationMessage(
+                id=mid,
+                conversation_id=chat.id,
+                sender_user_id="uid-alice",
+                content="hi",
+                created_at=datetime(2026, 6, day, tzinfo=timezone.utc),
+            )
+        )
+    assert await env.repo.prune_space_chat_messages(now=now) == ["old"]
+    old = await env.repo.get_message("old")
+    assert old is not None and old.deleted and old.content == ""
+    assert await env.repo.prune_space_chat_messages(now=now) == []

@@ -242,3 +242,31 @@ async def test_empty_dm_message_not_indexed(env):
         )
     )
     assert await svc.search("x") == []
+
+
+async def test_a_deleted_or_pruned_message_leaves_the_index(env):
+    from socialhome.domain.events import DmMessageCreated, DmMessageDeleted
+
+    svc, bus, _ = env
+    for mid, text in (("m-1", "library at noon"), ("m-2", "library at night")):
+        await bus.publish(
+            DmMessageCreated(
+                conversation_id="c-1",
+                message_id=mid,
+                sender_user_id="u1",
+                sender_display_name="Anna",
+                recipient_user_ids=("u2",),
+                content=text,
+            )
+        )
+    await bus.publish(
+        DmMessageDeleted(
+            conversation_id="c-1",
+            message_id="m-1",
+            sender_user_id="u1",
+            actor_user_id="u1",
+        )
+    )
+    assert [h.ref_id for h in await svc.search("library")] == ["m-2"]
+    await svc.remove_messages(["m-2"])
+    assert await svc.search("library") == []

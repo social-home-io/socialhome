@@ -15,6 +15,7 @@ from PIL import Image as PILImage
 from socialhome.crypto import derive_user_id, generate_space_keypair
 from socialhome.domain.events import (
     SpaceFeaturesApplied,
+    DmMessageDeleted,
     CommentAdded,
     CommentUpdated,
     DmMessageCreated,
@@ -470,6 +471,37 @@ async def test_dm_message_deleted_soft_deletes(db, bus, inbound):
         ("m-1",),
     )
     assert row["deleted"] == 1
+
+
+async def test_dm_message_deleted_tells_open_threads(db, bus, inbound):
+    """An inbound DM delete publishes ``DmMessageDeleted`` (the
+    ``dm.message_deleted`` frame and the bell clean-up ride it)."""
+
+    seen: list = []
+
+    async def _rec(event) -> None:
+        seen.append(event)
+
+    bus.subscribe(DmMessageDeleted, _rec)
+    await _seed_dm(db, "conv-1")
+    await inbound._on_dm_message(
+        _event(
+            FederationEventType.DM_MESSAGE,
+            {
+                "conversation_id": "conv-1",
+                "message_id": "m-1",
+                "sender_user_id": "user-remote",
+                "content": "hi",
+            },
+        )
+    )
+    await inbound._on_dm_deleted(
+        _event(FederationEventType.DM_MESSAGE_DELETED, {"message_id": "m-1"})
+    )
+    (event,) = seen
+    assert (event.conversation_id, event.message_id) == ("conv-1", "m-1")
+    assert event.actor_user_id == event.sender_user_id == "user-remote"
+    assert event.origin_instance_id is not None
 
 
 # ─── Space posts ─────────────────────────────────────────────────────────

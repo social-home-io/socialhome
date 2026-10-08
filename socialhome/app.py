@@ -289,6 +289,7 @@ from .services.federation_inbound import (
 )
 from .federation.sync import (
     BansExporter,
+    ChatMessagesDeletedExporter,
     ChatMessagesExporter,
     BazaarExporter,
     CalendarExporter,
@@ -1519,6 +1520,9 @@ def _wire_federation_stack(
         "timetables": TimetablesExporter(space_timetable_repo),
         # v_55 — streamed only to a writer household (the chat gate is
         # attached with the space chat, ``_build_space_chat_federation``).
+        "chat_messages_deleted": ChatMessagesDeletedExporter(
+            conversation_repo, space_repo
+        ),
         "chat_messages": ChatMessagesExporter(conversation_repo, space_repo),
     }
     chunk_builder = ChunkBuilder(
@@ -4256,7 +4260,11 @@ def create_app(config: Config | None = None) -> web.Application:
         await page_lock_scheduler.start()
 
         space_retention_scheduler = SpaceRetentionScheduler(
-            db, own_instance_id=real_instance_id
+            db,
+            own_instance_id=real_instance_id,
+            # The space chats too (v_55); a pruned message leaves search.
+            conversation_repo=conversation_repo,
+            on_chat_pruned=app[K.search_service_key].remove_messages,
         )
         await space_retention_scheduler.start()
 

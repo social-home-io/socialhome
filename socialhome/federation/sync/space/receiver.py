@@ -126,6 +126,10 @@ class ChatSyncSink(Protocol):
         self, space_id: str, records: list[dict[str, Any]], *, provider: str
     ) -> None: ...
 
+    async def apply_sync_tombstones(
+        self, space_id: str, records: list[dict[str, Any]], *, provider: str
+    ) -> None: ...
+
 
 def _parse_iso(value: Any) -> datetime:
     if isinstance(value, str) and value:
@@ -786,6 +790,11 @@ class SpaceSyncReceiver:
 
         elif resource == "timetables":
             await self._persist_timetables(records, space_id, provider=provider)
+        elif resource == "chat_messages_deleted":
+            if self._chat_sink is not None:
+                await self._chat_sink.apply_sync_tombstones(
+                    space_id, records, provider=provider
+                )
         elif resource == "chat_messages":
             if self._chat_sink is None:
                 log.debug(
@@ -1529,7 +1538,7 @@ class SpaceSyncReceiver:
                 return await auth.may_author(
                     event, space_id, str(r.get("created_by") or "")
                 )
-            case "chat_messages":
+            case "chat_messages" | "chat_messages_deleted":
                 # Judged record by record by the chat sink with the live
                 # ``SPACE_CHAT_MESSAGE_CREATED`` rule (owner-bound id, the
                 # author a writer this provider speaks for, held already →
@@ -1670,6 +1679,7 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "stickies": (SPACE_STICKY_KIND, ("author", "created_by")),
     "timetables": (SPACE_TIMETABLE_KIND, ("created_by",)),
     "chat_messages": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
+    "chat_messages_deleted": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
 }
 
 

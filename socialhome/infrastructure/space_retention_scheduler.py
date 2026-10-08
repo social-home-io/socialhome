@@ -31,11 +31,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
 import orjson
 
 from ..db import AsyncDatabase
+from ..repositories.conversation_repo import AbstractConversationRepo
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +45,15 @@ log = logging.getLogger(__name__)
 class SpaceRetentionScheduler:
     """Background loop that prunes expired space content per space."""
 
-    __slots__ = ("_db", "_own_instance_id", "_interval", "_task", "_stop")
+    __slots__ = (
+        "_db",
+        "_own_instance_id",
+        "_interval",
+        "_task",
+        "_stop",
+        "_convos",
+        "_on_chat_pruned",
+    )
 
     def __init__(
         self,
@@ -51,8 +61,14 @@ class SpaceRetentionScheduler:
         *,
         own_instance_id: str,
         interval_seconds: float = 3600.0,
+        conversation_repo: AbstractConversationRepo | None = None,
+        on_chat_pruned: Callable[[list[str]], Awaitable[None]] | None = None,
     ) -> None:
         self._db = db
+        #: Where the space chats live; ``None`` prunes no chat.
+        self._convos = conversation_repo
+        #: Told the ids of pruned chat messages (drops them from search).
+        self._on_chat_pruned = on_chat_pruned
         self._own_instance_id = own_instance_id
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
@@ -163,30 +179,13 @@ class SpaceRetentionScheduler:
 
     async def _prune_chats(self) -> int:
         """Soft-delete space-chat messages past their space's retention
-        horizon, on every space this household holds a chat for."""
-        spaces = await self._db.fetchall(
-            "SELECT s.id, s.retention_days FROM spaces s"
-            " JOIN conversations c ON c.space_id = s.id"
-            " WHERE s.retention_days IS NOT NULL AND c.system_scope = 'space'"
+        horizon, on every space this household holds a chat for, and tell
+        ``on_chat_pruned`` (the search index) which ones went."""
+        if self._convos is None:
+            return 0
+        pruned = await self._convos.prune_space_chat_messages(
+            now=datetime.now(timezone.utc)
         )
-        total = 0
-        for s in spaces:
-            cutoff = (
-                datetime.now(timezone.utc) - timedelta(days=int(s["retention_days"]))
-            ).strftime("%Y-%m-%d %H:%M:%S")
-            total += await self._db.enqueue_rowcount(
-                """
-                UPDATE conversation_messages
-                   SET deleted=1, content='', media_url=NULL,
-                       file_name=NULL, mime_type=NULL, file_size_bytes=NULL,
-                       media_blob_id=NULL, media_sync_status=NULL
-                 WHERE deleted=0
-                   AND datetime(created_at) < datetime(?)
-                   AND conversation_id IN (
-                       SELECT id FROM conversations
-                        WHERE space_id=? AND system_scope='space'
-                   )
-                """,
-                (cutoff, s["id"]),
-            )
-        return total
+        if pruned and self._on_chat_pruned is not None:
+            await self._on_chat_pruned(pruned)
+        return len(pruned)

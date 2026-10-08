@@ -100,6 +100,35 @@ def _refuse(event: FederationEvent, what: str, row_id: str, reason: str) -> None
     )
 
 
+def _bound_to(message_id: str, space_id: str, author: str) -> bool:
+    """``message_id`` is owner-bound to ``author`` in ``space_id`` (the
+    space chat binds every id from its first release — no legacy window)."""
+    return (
+        check_owner_bound_id(
+            SPACE_CHAT_MESSAGE_KIND,
+            message_id,
+            space_id=space_id,
+            owner_user_id=author,
+        )
+        is OwnerBinding.VALID
+    )
+
+
+def _sync_event(
+    event_type: FederationEventType, space_id: str, payload: dict, *, provider: str
+) -> FederationEvent:
+    """A catch-up record dressed as the live event, the provider as sender."""
+    return FederationEvent(
+        msg_id=f"sync:{space_id}:{event_type.value}",
+        event_type=event_type,
+        from_instance=provider,
+        to_instance="",
+        timestamp="",
+        payload=payload,
+        space_id=space_id,
+    )
+
+
 def _str(payload: dict, key: str) -> str:
     value = payload.get(key)
     return value if isinstance(value, str) else ""
@@ -162,12 +191,21 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
     # ── Shared gates ───────────────────────────────────────────────────
 
     async def _chat_for(
-        self, event: FederationEvent, *, what: str, row_id: str
+        self,
+        event: FederationEvent,
+        *,
+        what: str,
+        row_id: str,
+        removal: bool = False,
     ) -> "tuple[str, Conversation | None, SpaceAuthorship] | None":
         """The space id, this household's chat for it (``None`` before it
         was first created) and the authorship binder — or ``None`` (logged)
         when the event must be dropped. Nothing is created here: a refused
-        event leaves no trace."""
+        event leaves no trace.
+
+        A ``removal`` (a delete) only needs the space held here: a delete
+        must reach every copy that may hold the message, even while the chat
+        is off here or nobody here writes any more."""
         space_id = resolve_space_id(event)
         if not space_id:
             return None
@@ -179,6 +217,8 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         if space is None or space.dissolved:
             log_not_applied(event, what=what, row_id=row_id, reason="space not held")
             return None
+        if removal:
+            return space_id, await self._chats.get_chat(space_id), authorship
         if not space.features.chat:
             log_not_applied(event, what=what, row_id=row_id, reason="chat is off here")
             return None
@@ -241,7 +281,13 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
 
     # ── Create ─────────────────────────────────────────────────────────
 
-    async def _on_created(self, event: FederationEvent) -> None:
+    async def _on_created(
+        self, event: FederationEvent, *, from_sync: bool = False
+    ) -> None:
+        """A new message. ``from_sync`` (the §25.6 catch-up): stored
+        quietly — no bell, no mention, no WS frame per historical message —
+        and a chat it creates seats its readers at *now*, so nobody inherits
+        the backlog as unread."""
         p = event.payload if isinstance(event.payload, dict) else {}
         message_id = _str(p, "message_id")
         author = _str(p, "author_user_id")
@@ -258,15 +304,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         if got is None:
             return
         space_id, chat, authorship = got
-        if (
-            check_owner_bound_id(
-                SPACE_CHAT_MESSAGE_KIND,
-                message_id,
-                space_id=space_id,
-                owner_user_id=author,
-            )
-            is not OwnerBinding.VALID
-        ):
+        if not _bound_to(message_id, space_id, author):
             # Bound from its first release: any other id — another
             # author's, another space's, a legacy uuid — is refused.
             _refuse(event, "chat message", message_id, f"id not bound to {author!r}")
@@ -281,6 +319,8 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             )
             return
         if await self._convos.get_message(message_id) is not None:
+            # Held already — or deleted before it arrived here (a
+            # tombstone): either way a create never brings it back.
             log_not_applied(
                 event, what="chat message", row_id=message_id, reason="already held"
             )
@@ -295,7 +335,11 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             # every local reader seated just before it, so it reads as new.
             chat = await self._chats.reconcile(
                 space_id,
-                seat_at=(created_at - timedelta(microseconds=1)).isoformat(),
+                seat_at=(
+                    None
+                    if from_sync
+                    else (created_at - timedelta(microseconds=1)).isoformat()
+                ),
             )
         reply_to_id: str | None = _str(p, "reply_to_id") or None
         if reply_to_id is not None:
@@ -310,7 +354,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             created_at=created_at,
             reply_to_id=reply_to_id,
         )
-        if not await self._convos.insert_message_if_absent(msg):
+        if not await self._convos.insert_message_if_absent(msg) or from_sync:
             return
         withheld = await self._guardian_block_counterparts(author)
         await self._bus.publish(
@@ -348,15 +392,61 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
                 "created_at": r.get("created_at"),
             }
             await self._on_created(
-                FederationEvent(
-                    msg_id=f"sync:{space_id}:chat_messages",
-                    event_type=FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
-                    from_instance=provider,
-                    to_instance="",
-                    timestamp="",
-                    payload=payload,
-                    space_id=space_id,
+                _sync_event(
+                    FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+                    space_id,
+                    payload,
+                    provider=provider,
+                ),
+                from_sync=True,
+            )
+
+    async def apply_sync_tombstones(
+        self, space_id: str, records: list[dict[str, Any]], *, provider: str
+    ) -> None:
+        """§25.6 catch-up deletions (``chat_messages_deleted``), applied
+        before the messages: each id must be owner-bound to the record's
+        ``author_user_id`` in this space, and the provider must speak for
+        that author (any seat) or hold content authority (the host, an
+        admin or moderator household). A held message is deleted; one never
+        held is recorded as a tombstone, so no later create or stream brings
+        it back."""
+        authorship = self._authorship
+        if authorship is None:
+            return
+        for r in records:
+            message_id = str(r.get("message_id") or r.get("id") or "")
+            author = str(r.get("author_user_id") or "")
+            event = _sync_event(
+                FederationEventType.SPACE_CHAT_MESSAGE_DELETED,
+                space_id,
+                {"space_id": space_id, "message_id": message_id},
+                provider=provider,
+            )
+            if (
+                not message_id
+                or not author
+                or not _bound_to(message_id, space_id, author)
+            ):
+                _refuse(
+                    event, "chat deletion", message_id, "id not bound to its author"
                 )
+                continue
+            if not await authorship.acts_for(
+                event, space_id, author, any_role=True
+            ) and not await authorship.has_content_authority(event, space_id):
+                _refuse(
+                    event, "chat deletion", message_id, "provider may not delete it"
+                )
+                continue
+            got = await self._chat_for(
+                event, what="chat deletion", row_id=message_id, removal=True
+            )
+            if got is None:
+                continue
+            _space, chat, _auth = got
+            await self._remove(
+                event, space_id, chat, message_id, author=author, actor=author
             )
 
     # ── Update ─────────────────────────────────────────────────────────
@@ -378,8 +468,10 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         if msg is None:
             return
         claimed = _str(p, "author_user_id")
-        if (claimed and claimed != msg.sender_user_id) or not await authorship.acts_for(
-            event, space_id, msg.sender_user_id
+        if (
+            (claimed and claimed != msg.sender_user_id)
+            or await self._spaces.is_banned(space_id, msg.sender_user_id)
+            or not await authorship.acts_for(event, space_id, msg.sender_user_id)
         ):
             _refuse(event, "chat edit", message_id, "not the author's household")
             return
@@ -412,14 +504,30 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         p = event.payload if isinstance(event.payload, dict) else {}
         message_id = _str(p, "message_id")
         actor = _str(p, "actor_user_id")
-        got = await self._chat_for(event, what="chat delete", row_id=message_id)
+        got = await self._chat_for(
+            event, what="chat delete", row_id=message_id, removal=True
+        )
         if got is None:
             return
         space_id, chat, authorship = got
-        msg = await self._message_in(event, chat, message_id, what="chat delete")
-        if msg is None:
-            return
-        own = actor == msg.sender_user_id and await authorship.acts_for(
+        held = await self._convos.get_message(message_id) if message_id else None
+        if held is not None:
+            if chat is None or held.conversation_id != chat.id:
+                _refuse(event, "chat delete", message_id, "not a message of this chat")
+                return
+            author = held.sender_user_id
+        else:
+            # Never held here: the delete overtook its create (or we were
+            # offline for it). The owner-bound id says whose it was.
+            author = _str(p, "author_user_id")
+            if (
+                not message_id
+                or not author
+                or not _bound_to(message_id, space_id, author)
+            ):
+                _refuse(event, "chat delete", message_id, "id not bound to its author")
+                return
+        own = actor == author and await authorship.acts_for(
             event, space_id, actor, any_role=True
         )
         if not own and not (
@@ -432,17 +540,65 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
                 "neither the author nor a moderator the sender speaks for",
             )
             return
-        await self._convos.soft_delete_message(message_id)
-        await self._bus.publish(
-            DmMessageDeleted(
-                conversation_id=msg.conversation_id,
-                message_id=message_id,
-                sender_user_id=msg.sender_user_id,
-                actor_user_id=actor,
-                system_scope=SystemChatScope.SPACE.value,
-                origin_instance_id=event.from_instance,
-            )
+        await self._remove(
+            event, space_id, chat, message_id, author=author, actor=actor
         )
+
+    async def _remove(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        chat: "Conversation | None",
+        message_id: str,
+        *,
+        author: str,
+        actor: str,
+    ) -> None:
+        """Apply an authorised deletion: soft-delete the held message (and
+        tell open threads), or — never held — record a tombstone so a late
+        create or catch-up of the id is refused. Nothing is recorded where
+        nobody may read the chat and no chat exists."""
+        held = await self._convos.get_message(message_id)
+        if held is not None:
+            if chat is None or held.conversation_id != chat.id:
+                _refuse(event, "chat delete", message_id, "not a message of this chat")
+                return
+            if held.deleted:
+                log_not_applied(
+                    event,
+                    what="chat delete",
+                    row_id=message_id,
+                    reason="already deleted",
+                )
+                return
+            await self._convos.soft_delete_message(message_id)
+            await self._bus.publish(
+                DmMessageDeleted(
+                    conversation_id=held.conversation_id,
+                    message_id=message_id,
+                    sender_user_id=held.sender_user_id,
+                    actor_user_id=actor,
+                    system_scope=SystemChatScope.SPACE.value,
+                    origin_instance_id=event.from_instance,
+                    recipient_user_ids=await local_audience(
+                        self._convos,
+                        self._users,
+                        held.conversation_id,
+                        actor_user_id=actor,
+                        include_actor=True,
+                        policy=self._policy,
+                    ),
+                )
+            )
+            return
+        if chat is None:
+            if not await self._has_local_writer(space_id):
+                log_not_applied(
+                    event, what="chat delete", row_id=message_id, reason="no chat here"
+                )
+                return
+            chat = await self._chats.reconcile(space_id)
+        await self._convos.insert_tombstone(chat.id, message_id, sender_user_id=author)
 
     # ── Reaction ───────────────────────────────────────────────────────
 
@@ -470,7 +626,9 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         msg = await self._message_in(event, chat, message_id, what="chat reaction")
         if msg is None:
             return
-        if not await authorship.acts_for(event, space_id, reactor):
+        if await self._spaces.is_banned(
+            space_id, reactor
+        ) or not await authorship.acts_for(event, space_id, reactor):
             _refuse(
                 event, "chat reaction", message_id, f"{reactor!r} is not its writer"
             )

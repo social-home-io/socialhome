@@ -165,7 +165,10 @@ class SpaceSyncService:
         one we cannot ask gets no exporter at all.
         """
         exporter = self._exporters.get(resource)
-        if exporter is not None and resource == "chat_messages":
+        if exporter is not None and resource in (
+            "chat_messages",
+            "chat_messages_deleted",
+        ):
             allowed = (
                 self._chat_gate is not None
                 and self._federation is not None

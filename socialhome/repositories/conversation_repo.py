@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -29,6 +29,7 @@ from ..domain.conversation import (
     MessageReaction,
     RemoteConversationMember,
     SystemChatScope,
+    TOMBSTONE_MESSAGE_TYPE,
 )
 from .base import bool_col, row_to_dict, rows_to_dicts
 from .cp_repo import guardian_block_counterparts_sql
@@ -146,6 +147,20 @@ class AbstractConversationRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[ConversationMessage]: ...
+    async def list_recent_deleted_messages(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 2000,
+    ) -> list[ConversationMessage]: ...
+    async def insert_tombstone(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        sender_user_id: str,
+    ) -> bool: ...
+    async def prune_space_chat_messages(self, *, now: datetime) -> list[str]: ...
     async def list_conversations_with_remote_member(
         self,
         instance_id: str,
@@ -966,7 +981,7 @@ class SqliteConversationRepo:
             rows = await self._db.fetchall(
                 """
                 SELECT * FROM conversation_messages
-                 WHERE conversation_id=?
+                 WHERE conversation_id=? AND type != 'tombstone'
                  ORDER BY created_at DESC LIMIT ?
                 """,
                 (conversation_id, int(limit)),
@@ -975,7 +990,8 @@ class SqliteConversationRepo:
             rows = await self._db.fetchall(
                 """
                 SELECT * FROM conversation_messages
-                 WHERE conversation_id=? AND created_at < ?
+                 WHERE conversation_id=? AND type != 'tombstone'
+                   AND created_at < ?
                  ORDER BY created_at DESC LIMIT ?
                 """,
                 (conversation_id, before, int(limit)),
@@ -1000,7 +1016,7 @@ class SqliteConversationRepo:
             rows = await self._db.fetchall(
                 """
                 SELECT * FROM conversation_messages
-                 WHERE conversation_id=? AND created_at > ?
+                 WHERE conversation_id=? AND created_at > ? AND type != 'tombstone'
                  ORDER BY created_at ASC LIMIT ?
                 """,
                 (conversation_id, since_iso, int(limit)),
@@ -1009,7 +1025,7 @@ class SqliteConversationRepo:
             rows = await self._db.fetchall(
                 """
                 SELECT * FROM conversation_messages
-                 WHERE conversation_id=?
+                 WHERE conversation_id=? AND type != 'tombstone'
                  ORDER BY created_at ASC LIMIT ?
                 """,
                 (conversation_id, int(limit)),
@@ -1035,6 +1051,81 @@ class SqliteConversationRepo:
             (conversation_id, int(limit)),
         )
         return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
+
+    async def list_recent_deleted_messages(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 2000,
+    ) -> list[ConversationMessage]:
+        """The newest ``limit`` deleted messages of a conversation —
+        tombstone rows included — newest first: the space chat's catch-up
+        deletions (``chat_messages_deleted``)."""
+        rows = await self._db.fetchall(
+            """
+            SELECT * FROM conversation_messages
+             WHERE conversation_id=? AND deleted=1
+             ORDER BY created_at DESC LIMIT ?
+            """,
+            (conversation_id, int(limit)),
+        )
+        return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
+
+    async def insert_tombstone(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        sender_user_id: str,
+    ) -> bool:
+        """Record a deleted message never held here (a space-chat delete
+        that overtook its create). A row with that id already present is
+        left alone (``False``). The row is deleted, empty and of type
+        :data:`TOMBSTONE_MESSAGE_TYPE`: never listed or counted, and it does
+        not bump the conversation's ``last_message_at``."""
+        return (
+            await self._db.enqueue_rowcount(
+                """
+                INSERT OR IGNORE INTO conversation_messages(
+                    id, conversation_id, sender_user_id, content, type,
+                    deleted, created_at
+                ) VALUES(?, ?, ?, '', ?, 1, ?)
+                """,
+                (
+                    message_id,
+                    conversation_id,
+                    sender_user_id,
+                    TOMBSTONE_MESSAGE_TYPE,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            == 1
+        )
+
+    async def prune_space_chat_messages(self, *, now: datetime) -> list[str]:
+        """Soft-delete every space-chat message older than its space's
+        ``retention_days`` (on every space this household holds a chat for);
+        return the ids cleared. Same clearing as :meth:`soft_delete_message`."""
+        spaces = await self._db.fetchall(
+            "SELECT c.id AS conversation_id, s.retention_days FROM spaces s"
+            " JOIN conversations c ON c.space_id = s.id"
+            " WHERE s.retention_days IS NOT NULL AND c.system_scope = 'space'"
+        )
+        pruned: list[str] = []
+        for s in rows_to_dicts(spaces):
+            cutoff = (now - timedelta(days=int(s["retention_days"]))).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            rows = await self._db.fetchall(
+                "SELECT id FROM conversation_messages WHERE conversation_id=?"
+                " AND deleted=0 AND datetime(created_at) < datetime(?)",
+                (s["conversation_id"], cutoff),
+            )
+            ids = [r["id"] for r in rows_to_dicts(rows)]
+            for message_id in ids:
+                await self.soft_delete_message(message_id)
+            pruned.extend(ids)
+        return pruned
 
     async def list_conversations_with_remote_member(
         self,

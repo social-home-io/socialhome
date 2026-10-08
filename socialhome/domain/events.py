@@ -1702,6 +1702,10 @@ class DmMessageDeleted(DomainEvent):
     system_scope: str | None = None
     #: Inbound: the household it came from (echo guard). ``None`` locally.
     origin_instance_id: str | None = None
+    #: Local members whose open threads drop the bubble (``dm.message_deleted``)
+    #: and whose bell clears when nothing unread is left — the actor's own
+    #: other sessions included.
+    recipient_user_ids: tuple[str, ...] = ()
     occurred_at: datetime = field(default_factory=_now)
 
 

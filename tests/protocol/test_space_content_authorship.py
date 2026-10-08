@@ -146,6 +146,7 @@ _CHAT_NEW_SUB = _chat_id("u-sub")
 _CHAT_NEW_FOR_O = _chat_id("u-o")
 _CHAT_ELSEWHERE = _chat_id("u-a", "sp-elsewhere")
 _CHAT_SYNC = _chat_id("u-a")
+_CHAT_TOMB = _chat_id("u-a")
 
 
 def _config(tmp_dir) -> Config:
@@ -2170,6 +2171,28 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         [timetable_wire(_TT_A, created_by="u-adm", updated_by="u-adm")],
         (ADMIN, HOST),
         (AUTHOR, OTHER),
+    ),
+    (
+        "chat_messages_deleted",
+        "delete u-a's held message",
+        [{"id": _CHAT_A, "message_id": _CHAT_A, "author_user_id": "u-a"}],
+        # The author's household, or content authority (host / admin / mod).
+        (AUTHOR, HOST, ADMIN, MOD),
+        (OTHER, THIRD),
+    ),
+    (
+        "chat_messages_deleted",
+        "tombstone an id of u-a never held here",
+        [{"id": _CHAT_TOMB, "message_id": _CHAT_TOMB, "author_user_id": "u-a"}],
+        (AUTHOR, HOST),
+        (OTHER, THIRD),
+    ),
+    (
+        "chat_messages_deleted",
+        "delete u-a's message claiming another author",
+        [{"id": _CHAT_A, "message_id": _CHAT_A, "author_user_id": "u-o"}],
+        (),
+        (HOST, OTHER, AUTHOR),
     ),
     (
         "chat_messages",

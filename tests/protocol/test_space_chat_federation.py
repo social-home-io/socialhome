@@ -45,6 +45,10 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.federation.space_authorship import SpaceAuthorship
+from socialhome.federation.sync.space.exporters import (
+    ChatMessagesDeletedExporter,
+    ChatMessagesExporter,
+)
 from socialhome.federation.transport import FederationTransport
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -96,10 +100,14 @@ class _LoopbackInbox:
         self._world = world
         self._me = me
         self.posted: list[tuple[str, dict]] = []
+        #: Households this one cannot reach right now (offline).
+        self.down: set[str] = set()
 
     async def send(self, *, instance, envelope_dict):
         peer = next(h for h in self._world.values() if h.iid == instance.id)
         me = self._world[self._me]
+        if peer.name in self.down:
+            return False, None
         self.posted.append((peer.name, envelope_dict))
         try:
             await peer.federation.handle_inbound_envelope(
@@ -189,6 +197,9 @@ async def _household(tmp_path, name: str, world: dict) -> SimpleNamespace:
         convos=convos,
         chat=chat,
         dm=dm,
+        inbound=inbound,
+        exports=ChatMessagesExporter(convos, spaces),
+        exports_deleted=ChatMessagesDeletedExporter(convos, spaces),
     )
     world[name] = h
     return h
@@ -473,3 +484,114 @@ async def test_an_older_peer_is_never_sent_a_chat_event(world):
     a_chat = await _chat_id(a, "anna")
     await a.dm.send_message(a_chat, sender_username="anna", content="hi")
     assert all(to != "d" for _frm, to, _env in _chat_traffic(world))
+
+
+# ── Deletions converge: a missed delete never outlives itself ────────────
+
+
+async def _joiner(tmp_path, world) -> SimpleNamespace:
+    """Household j: jo just joined the space (a member), holds the roster
+    mirror of a and b, and has received no chat yet."""
+    j = await _household(tmp_path, "j", {**vars(world)})
+    await j.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'Choir', ?, 'anna', ?)",
+        (SP, world.a.iid, "ab" * 32),
+    )
+    await j.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('jo','u-jo','Jo')"
+    )
+    await j.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,'u-jo','member')",
+        (SP,),
+    )
+    for house, uid, role in (
+        (world.a, "u-anna", "member"),
+        (world.a, "u-mia", "moderator"),
+        (world.b, "u-bob", "member"),
+    ):
+        await j.db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?,?,?,?)",
+            (SP, house.iid, uid, role),
+        )
+    return j
+
+
+async def _catch_up(receiver, provider) -> None:
+    """One §25.6 stream from ``provider`` into ``receiver``: deletions
+    first, then the messages (``RESOURCE_ORDER``)."""
+    await receiver.inbound.apply_sync_tombstones(
+        SP, await provider.exports_deleted.list_records(SP), provider=provider.iid
+    )
+    await receiver.inbound.apply_sync_records(
+        SP, await provider.exports.list_records(SP), provider=provider.iid
+    )
+
+
+async def _live(h, message_id: str) -> bool:
+    msg = await h.convos.get_message(message_id)
+    return msg is not None and not msg.deleted
+
+
+@pytest.mark.parametrize("order", ["stale host first", "author first"])
+async def test_a_delete_the_host_missed_never_reaches_a_joiner(tmp_path, world, order):
+    """bob deletes his message while the host is offline. The host still
+    holds it; a joiner catching up from the host AND from bob's household —
+    in either order — ends with it deleted, and once the host catches up
+    from b it is deleted there and never streamed again."""
+    a, b = world.a, world.b
+    b_chat = await _chat_id(b, "bob")
+    sent = await b.dm.send_message(b_chat, sender_username="bob", content=SECRET)
+    assert await _live(a, sent.id)
+    b.inbox.down = {"a"}
+    await b.dm.delete_message(sent.id, actor_username="bob")
+    assert await _live(a, sent.id)  # the host missed it
+    j = await _joiner(tmp_path, world)
+    try:
+        for provider in (a, b) if order == "stale host first" else (b, a):
+            await _catch_up(j, provider)
+        assert not await _live(j, sent.id)
+        assert all(r["id"] != sent.id for r in await j.exports.list_records(SP))
+        # The host heals from bob's household: deleted, never re-exported,
+        # and from now on it spreads the deletion itself.
+        await _catch_up(a, b)
+        assert not await _live(a, sent.id)
+        assert all(r["id"] != sent.id for r in await a.exports.list_records(SP))
+        assert sent.id in {r["id"] for r in await a.exports_deleted.list_records(SP)}
+    finally:
+        await j.db.shutdown()
+
+
+async def test_a_moderator_delete_that_overtakes_its_create_holds(world):
+    """b receives mia's delete of anna's message before the message
+    itself (a delayed create): a tombstone, so the late create — live or by
+    catch-up — is refused, and nothing is ever shown."""
+    a, b = world.a, world.b
+    a_chat = await _chat_id(a, "anna")
+    a.inbox.down = {"b"}
+    sent = await a.dm.send_message(a_chat, sender_username="anna", content=SECRET)
+    assert await b.convos.get_message(sent.id) is None
+    a.inbox.down = set()
+    await a.dm.delete_message(sent.id, actor_username="mia")
+    tomb = await b.convos.get_message(sent.id)
+    assert tomb is not None and tomb.deleted and tomb.content == ""
+    # The create arrives late (the outbox retry) — and a stale catch-up too.
+    await _forge(
+        a,
+        b,
+        {
+            "message_id": sent.id,
+            "author_user_id": "u-anna",
+            "content": SECRET,
+        },
+    )
+    await b.inbound.apply_sync_records(
+        SP,
+        [{"id": sent.id, "author_user_id": "u-anna", "content": SECRET}],
+        provider=a.iid,
+    )
+    assert not await _live(b, sent.id)
+    b_chat = await _chat_id(b, "bob")
+    assert [m.id for m in await b.convos.list_messages(b_chat)] == []
+    assert (await b.chat.summary(SP, "bob")).unread == 0

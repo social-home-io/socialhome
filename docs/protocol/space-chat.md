@@ -18,9 +18,13 @@ own transport. Federation capability **v_55**
   sent a chat event, live or by catch-up. If such a household sends one
   anyway, the §24.11 writer gate drops it, and so does every receiver's
   handler.
-- **GFS**: uninvolved. The chat never rides the GFS public relay. A
-  link-joined member household gets it through its `space_session` relay
-  seat like any other space content (end to end encrypted, see below).
+- **GFS**: never sees chat content. The chat is never published to a
+  GFS (no public relay, no `space_item`, no channel). It crosses a GFS in
+  exactly one case: to a link-joined member household
+  (`InstanceSource.SPACE_SESSION`), reached only through its relay seat.
+  There each event is a sealed per-peer envelope, encrypted under that
+  pair's session key exactly like a direct send, which the GFS forwards
+  opaquely.
 - **Older households** (below v_55): are skipped silently. They are never
   sent a chat event and never get the `chat_messages` catch-up, so their
   users simply see no chat.
@@ -77,7 +81,7 @@ included.
 
 | Write | Rule on every receiving household |
 |---|---|
-| create | The author holds a live **writer** seat on the sending household (`SpaceAuthorship.may_author_writer`). The space host may also relay a remote writer's message during catch-up. The author is never a local user of the receiver, a follower, a banned user or the bot identity. The id must be owner-bound to that author in that space. A redelivery is a no-op. |
+| create | The author holds a live **writer** seat on the sending household (`SpaceAuthorship.may_author_writer`). The space host may also relay a remote writer's message, live or during catch-up (the same host rule as posts). The author is never a local user of the receiver, a follower, a banned user or the bot identity. The id must be owner-bound to that author in that space. A redelivery is a no-op. |
 | edit | The author's own household only (`acts_for`, a writer seat). |
 | delete | The author (any live seat on the sender), or **content authority**: a moderator, an admin, or the host acting as a named `actor_user_id` (`moderates_as`). Locally, `DELETE /api/conversations/{id}/messages/{mid}` lets the owner, admins and moderators delete anyone's message in their space's chat. |
 | reaction | The reactor's own household, with a writer seat. |
@@ -150,15 +154,51 @@ The receiver runs each record through the live create rule
 household as the sender. That rule covers the owner-bound id, the author
 being a writer the provider speaks for (or one the host relays), and the
 idempotent insert. A record claiming another author's bound id is dropped
-before it reaches the handler.
+before it reaches the handler. Catch-up inserts are quiet: they ring no bell,
+resolve no mention and send no WS frame. A chat that a catch-up creates
+seats its readers at "now", so a joiner inherits no backlog as unread.
+
+**Deletions converge.** The `chat_messages_deleted` resource streams
+**before** the messages. It carries the provider's most recent 2000
+deletions as `{id, author_user_id}`, never content
+(`ChatMessagesDeletedExporter`), and is gated per requester like the
+messages. It is a removal resource, so it still lands in an archived copy.
+Each record must be owner-bound to its author in the space. The provider
+must also either speak for that author (any seat) or hold content
+authority (host, admin or moderator household). If the message is held
+here, it is deleted. If it is not, a **tombstone** is recorded: a deleted,
+empty row of type `tombstone`, never listed or counted. The tombstone
+means no later create or catch-up can bring the id back.
+
+A live `SPACE_CHAT_MESSAGE_DELETED` for an id never held here gets the same
+tombstone. That covers a delete that overtook its create, or one sent
+while this household was offline and later replayed. The author check
+reads the owner-bound id (the payload's `author_user_id`); a moderator
+delete is checked with `moderates_as`. A delete is applied while the chat
+is off here too, since a removal must reach every copy. So a household
+that missed a moderator's delete can no longer keep the message, and as a
+provider it never streams it on:
+
+- if the deletion reaches it first, the message is tombstoned there;
+- if the message reaches a joiner first, the joiner's own deletions stream
+  (or the next one it receives) removes it.
 
 ## Retention
 
 The space's `retention_days` also prunes its chat. Expired messages are
 soft-deleted (content cleared, row kept) on every household that holds a
-chat for the space (`SpaceRetentionScheduler`). This differs from posts,
-where only the host prunes: each household keeps its own copy of the
-chat.
+chat for the space (`SpaceRetentionScheduler`, via
+`AbstractConversationRepo.prune_space_chat_messages`). Like any deleted
+message, they also drop out of the search index. This differs from posts,
+where only the host prunes, because each household keeps its own copy of
+the chat.
+
+## Residual: in-flight writes after a demotion
+
+A member's seat is checked when an event arrives. A message sent just
+before that member was demoted to follower, or banned, can still land on a
+household where the roster change has not arrived yet. This is the same
+window every space write has; the roster gossip closes it.
 
 ## Version gate
 
