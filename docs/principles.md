@@ -162,6 +162,48 @@ GFS ban cannot gate an anonymous relay — the space-level ban is the
 moderation lever there. See
 [`protocol/discovery.md`](./protocol/discovery.md).
 
+### The GFS is not an author-presence oracle
+
+An outsider must not be able to ask the GFS whether a household is
+connected. `/gfs/envelope` and the `/gfs/ws` hello already answer
+uniformly whether the recipient is online or not. The **anonymous public
+viewer routes** follow the same rule:
+
+- **The highlight landing page** `GET /highlight/{instance}/{highlight}/{token}`
+  is the same viewer shell for every URL. It does not look up the token or
+  check the author's connection, so a live, revoked, expired, never-issued or
+  offline-author link all render the same page.
+- **The streaming entry points** — `POST /gfs/highlight_rtc/offer`,
+  `GET /gfs/highlight_rtc/relay/…`, `POST /gfs/moment_rtc/offer`,
+  `GET /gfs/moment_rtc/relay/{user_id}` — answer every non-success state
+  (unknown author, unknown / revoked / unpublished / expired item, deregistered
+  user, author's household not connected, relay capacity full, author never
+  started streaming) with one response: `503 {"error":"unavailable"}`,
+  `Cache-Control: no-store`. Status, body and headers are the same, and so is
+  the work: every branch runs the same lookup and the same connection check.
+  The viewers show it as "This isn't available right now."
+- **Timing.** The relay GETs answer every failure only when the 30 s
+  author-connect budget runs out. That budget is how long the
+  "online but never streamed" branch has to wait, so without the floor an
+  instant 503 would mean "offline". The offers get no floor. Their failure
+  branches do the same database lookup and the same in-memory check, and
+  what is left differs by microseconds, well below network jitter. A floor
+  there would hold anonymous requests open and hide nothing that success
+  doesn't reveal anyway (next item).
+
+**The residual we can't remove: success shows presence.** The content is
+streamed live from the author's household, and the GFS can only broker to a
+household that is connected. So a **successful** stream means the author's
+household was connected at that moment. That covers an offer accepted with
+`201`, even one that is never answered (the GFS only pushes offers to a
+connected household), and a relay that delivers bytes. The same goes for a
+viewer holding a valid share link or visiting a registered public-moments
+user. This is inherent to serving live content from the author's household
+rather than storing it on the GFS. No other public route adds to it. The
+public-moments directory itself lists opted-in users by design, so whether a
+user is *registered* is public, but whether they are *online* is not
+exposed beyond the success residual.
+
 ### Sign-off: the connection server learns the recipients of a link-joined pair
 
 Two households introduced by an invite link (§D2b) hold no address for

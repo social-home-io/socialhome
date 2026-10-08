@@ -34,6 +34,9 @@ GFS_SHARED_CHUNK_SAMPLES = [
     "socialhome/global_server/static/jsxRuntime.module-DdiM6-lp.js",
     "socialhome/global_server/static/hooks.module-abc12345.js",
     "socialhome/global_server/static/preact.module-0Z9aA1.js",
+    # The public viewers' shared error copy (``client/gfs/viewer_errors.ts``),
+    # named into this family by ``manualChunks`` in ``vite.gfs.config.ts``.
+    "socialhome/global_server/static/viewer.module-BjUB5M97.js",
 ]
 
 

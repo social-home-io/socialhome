@@ -254,6 +254,32 @@ ul.cards {
   padding: 16px 0;
 }
 
+.moments-error p {
+  margin: 0 0 12px;
+}
+
+/* "Try again" on the viewer's not-available state — the only recovery
+ * the neutral copy offers, so it gets a real tap target. */
+.viewer-retry {
+  min-height: 40px;
+  padding: 8px 18px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.viewer-retry:hover {
+  border-color: var(--hearth);
+}
+
+.viewer-retry:focus-visible {
+  outline: 2px solid var(--hearth);
+  outline-offset: 2px;
+}
+
 .moments-list {
   list-style: none;
   margin: 0;

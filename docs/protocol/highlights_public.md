@@ -50,14 +50,14 @@ Public (no signature):
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/highlight/{instance_id}/{highlight_id}/{token}` | SSR landing page. `200` (token active + author online), `410 Gone` (token revoked / publication missing / highlight expired / URL mismatch), `503 Unavailable` (author offline). |
+| GET | `/highlight/{instance_id}/{highlight_id}/{token}` | SSR landing page. Always `200` with the same viewer shell. The GFS does not look up the token or check whether the author is online here (see "Not a presence oracle" below). The viewer's offer call is the first point that consults state. |
 
 Public-viewer WebRTC signalling (added in PR2):
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/gfs/highlights/ice-servers` | Anonymous list of STUN/TURN URLs the browser bootstrap feeds into `RTCPeerConnection`. |
-| POST | `/gfs/highlight_rtc/offer` | Anonymous. Body: `{instance_id, highlight_id, token, sdp}`. GFS verifies the token, stores the offer in :class:`GfsRtcSession`, and pushes a `highlight_signal` WS frame to the author's instance. Returns `{session_id}`. |
+| POST | `/gfs/highlight_rtc/offer` | Anonymous. Body: `{instance_id, highlight_id, token, sdp}`. GFS verifies the token, stores the offer in :class:`GfsRtcSession`, and pushes a `highlight_signal` WS frame to the author's instance. Returns `201 {session_id}`. Every non-success state (unknown / revoked / expired token, URL mismatch, unpublished, author offline) gets the one uniform `503 {"error":"unavailable"}`. |
 | GET | `/gfs/highlight_rtc/session/{session_id}` | Anonymous. Browser polls until `answer_sdp` and any author-side ICE candidates land. |
 | POST | `/gfs/highlight_rtc/ice/viewer` | Anonymous. Body: `{session_id, candidate}`. Forwards to the author's WS as a `highlight_signal kind=ice` frame. |
 | POST | `/gfs/highlight_rtc/answer` | Author SH only (Ed25519-signed). Body: `{instance_id, session_id, sdp, signature}`. Authority guard: `session.initiator_id` must match the signing instance. |
@@ -68,7 +68,7 @@ GFS-relay fallback (used when the direct DataChannel can't connect — see
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anonymous, token-gated (same token as the offer flow). Chunked `application/octet-stream`: the GFS pushes a `highlight_signal kind=relay_offer` to the author and pipes the framed bytes the author streams back. `503` (author offline or never connects), `410` (bad / expired token), `422` (missing token). |
+| GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anonymous, token-gated (same token as the offer flow). Chunked `application/octet-stream`: the GFS pushes a `highlight_signal kind=relay_offer` to the author and pipes the framed bytes the author streams back. Every non-success state (bad / expired token, URL mismatch, author offline, relay capacity, author never connects) gets the uniform `503 {"error":"unavailable"}`, sent only once the 30 s author-connect budget has elapsed. `422` (missing token). |
 | POST | `/gfs/highlight_rtc/relay-stream/{relay_id}` | Author SH only. Header-auth: `X-SH-Instance` + `X-SH-Signature` (Ed25519 over canonical `{"instance_id","relay_id"}`); body is the raw framed byte stream. `403` (relay's target instance != signer), `404` (unknown relay), `401` (bad signature), `422` (missing headers). |
 
 The viewer DataChannel has label `highlight-public-v1` and uses the
@@ -88,13 +88,30 @@ GFS-relay fallback streams the **identical** framed bytes over HTTP.
 * No follower / viewer extension — the same retention rule that
   governs the in-mesh viewer governs the public viewer.
 
-## Author-online check
+## Not a presence oracle
 
-A publication is only servable while the author's instance has a
-live SH↔GFS WebSocket. The landing-page handler queries
-`GfsWebSocketRegistry.is_connected(instance_id)`; offline author →
-503 with a 10-second auto-refresh meta tag. PR2 needs the live WS
-anyway because it pushes the public viewer's WebRTC offer over it.
+A publication can only be streamed while the author's instance has a live
+SH↔GFS WebSocket, because the offer and the relay are pushed over it. The
+GFS must not let an outsider use that as an "is this household online?"
+probe ([`principles.md`](../principles.md#the-gfs-is-not-an-author-presence-oracle)):
+
+* The landing page is the same shell for every URL. It does no token lookup
+  and no `is_connected` check.
+* The offer and the relay GET fold token resolution and the author's
+  connection into one boolean
+  (`routes/highlight_rtc.py:_servable`). Both checks run on every branch,
+  and every failure gets `global_server/public_unavailable.py`'s uniform
+  `503 {"error":"unavailable"}` + `Cache-Control: no-store`. The relay
+  sends that reply only once `RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS` (30 s)
+  has elapsed, on every failure branch, so an offline author can't be told
+  from an online one that never streams.
+* The viewer renders it as "This isn't available right now." with a
+  *Try again* button. The 10 s auto-refresh of the old offline page is gone,
+  because that page itself was the oracle.
+
+**Residual:** success shows that the author's household was connected at
+that moment. That means a `201` offer (answered or not), or a relay that
+streams bytes. Live content from the author's household can't hide this.
 
 ## GFS-relay fallback
 
@@ -103,8 +120,8 @@ The direct DataChannel is always tried first. When WebRTC can't connect
 candidate) the viewer bootstrap falls back to a chunked HTTP GET against
 `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}`:
 
-1. The GFS resolves the token, confirms the author's SH↔GFS WS is live,
-   and registers a transient in-memory `RelayBridge` keyed by a fresh
+1. The GFS resolves the token, checks that the author's SH↔GFS WS is
+   live, and registers a transient in-memory `RelayBridge` keyed by a fresh
    `relay_id`.
 2. It pushes a `highlight_signal` WS frame `kind: "relay_offer"`
    (`{relay_id, highlight_id, token}`) to the author.
@@ -116,9 +133,10 @@ candidate) the viewer bootstrap falls back to a chunked HTTP GET against
 
 The GFS stores **zero** content bytes — the `RelayBridge` is purely an
 in-memory pipe between the inbound author POST and the outbound viewer
-GET. If the author is offline (no live WS) or never connects the
-relay-stream, the viewer GET returns `503` — author-offline still means
-"unavailable", exactly as the direct path does.
+GET. If the token doesn't resolve, the author is offline (no live WS),
+relay capacity is full, or the author never connects the relay-stream,
+the viewer GET returns the same uniform `503` once the 30 s budget has
+elapsed. See "Not a presence oracle" above.
 
 ## DataChannel framing
 
@@ -154,11 +172,12 @@ sequenceDiagram
     participant A as Author SH
 
     V->>G: GET /highlight/{i}/{s}/{t}
-    G->>G: resolve_token + author_online
-    G-->>V: 200 SSR landing + bootstrap.js
+    G-->>V: 200 SSR landing + bootstrap.js (same shell for every URL)
     V->>G: GET /gfs/highlights/ice-servers
     G-->>V: { servers: [...] }
     V->>G: POST /gfs/highlight_rtc/offer {sdp}
+    G->>G: resolve_token + author_online (both, every request)
+    Note over G,V: any failure → uniform 503 {"error":"unavailable"}
     G->>G: store offer in GfsRtcSession
     G->>A: WS push { type:"highlight_signal", kind:"offer", session_id, sdp }
     G-->>V: 201 { session_id }

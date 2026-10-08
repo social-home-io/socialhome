@@ -19,6 +19,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import socialhome.global_server.routes.highlight_rtc as hr
+from socialhome.global_server import relay_bridge
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
     gfs_relay_bridge_key,
@@ -166,40 +168,71 @@ async def test_offer_creates_session_and_pushes_to_author(client):
     assert sent[0]["highlight_id"] == "s-1"
 
 
-async def test_offer_with_unknown_token_returns_410(client):
-    body = {
+def _shape(resp, body: bytes) -> tuple:
+    """Status + body + every header except the per-request ``Date``."""
+    headers = sorted(
+        (k.lower(), v) for k, v in resp.headers.items() if k.lower() != "date"
+    )
+    return resp.status, body, headers
+
+
+async def _offline(client) -> None:
+    client._app[gfs_ws_registry_key]._by_instance.pop("inst-author", None)
+
+
+async def _revoke(client) -> None:
+    await client._app[gfs_highlight_pub_service_key].revoke_token(
+        client._token, "inst-author"
+    )
+
+
+async def _unpublish(client) -> None:
+    await client._app[gfs_highlight_pub_service_key].remove_publish(
+        "s-1", "inst-author"
+    )
+
+
+#: Every non-success state the anonymous viewer routes can hit, as
+#: ``(label, setup, overrides)``. They MUST be indistinguishable — an
+#: outsider must not learn whether the author's household is connected,
+#: nor whether the item exists.
+_FAILURE_STATES = [
+    ("unknown_token", None, {"token": "bogus"}),
+    ("unknown_author", None, {"instance_id": "inst-nope"}),
+    ("unknown_item", None, {"highlight_id": "s-OTHER"}),
+    ("revoked", _revoke, {}),
+    ("unpublished", _unpublish, {}),
+    ("author_offline", _offline, {}),
+]
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(("label", "setup", "override"), _FAILURE_STATES)
+async def test_offer_failure_is_uniform(client, label, setup, override):
+    """Each failure state returns the one uniform ``503 unavailable``,
+    byte-identical to the author-offline response (status, body, headers)."""
+    base = {
         "instance_id": "inst-author",
         "highlight_id": "s-1",
-        "token": "bogus",
-        "sdp": "v=0",
-    }
-    resp = await client.post("/gfs/highlight_rtc/offer", json=body)
-    assert resp.status == 410
-
-
-async def test_offer_with_mismatched_highlight_id_returns_410(client):
-    body = {
-        "instance_id": "inst-author",
-        "highlight_id": "s-OTHER",
         "token": client._token,
         "sdp": "v=0",
     }
-    resp = await client.post("/gfs/highlight_rtc/offer", json=body)
-    assert resp.status == 410
+    if setup is not None:
+        await setup(client)
+    resp = await client.post("/gfs/highlight_rtc/offer", json={**base, **override})
+    got = _shape(resp, await resp.read())
+    # Nothing reached the author's WS on any failure branch.
+    assert not [f for f in client._author_ws.sent if f.get("kind") == "offer"]
 
-
-async def test_offer_when_author_offline_returns_503(client):
-    # Drop the WS so author looks offline.
-    app = client._app
-    app[gfs_ws_registry_key]._by_instance.pop("inst-author", None)
-    body = {
-        "instance_id": "inst-author",
-        "highlight_id": "s-1",
-        "token": client._token,
-        "sdp": "v=0",
-    }
-    resp = await client.post("/gfs/highlight_rtc/offer", json=body)
-    assert resp.status == 503
+    # Reference: a never-issued token while the author is offline.
+    await _offline(client)
+    ref = await client.post(
+        "/gfs/highlight_rtc/offer", json={**base, "token": "never-issued"}
+    )
+    want = _shape(ref, await ref.read())
+    assert got == want, label
+    assert want[0] == 503
+    assert json.loads(want[1]) == {"error": "unavailable"}
 
 
 async def test_offer_missing_fields_returns_422(client):
@@ -494,29 +527,69 @@ async def test_relay_missing_token_returns_422(client):
     assert resp.status == 422
 
 
-async def test_relay_bad_token_returns_410(client):
-    resp = await client.get("/gfs/highlight_rtc/relay/inst-author/s-1?token=bogus")
-    assert resp.status == 410
+@pytest.mark.security
+@pytest.mark.parametrize(("label", "setup", "override"), _FAILURE_STATES)
+async def test_relay_failure_is_uniform_in_shape_and_latency(
+    client, monkeypatch, label, setup, override
+):
+    """Every relay failure — including the author-online-but-never-streams
+    branch — answers the same ``503 unavailable`` only after the same
+    author-connect budget, so neither the bytes nor the latency say
+    whether the author's household is connected."""
+
+    budget = 0.3
+    monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", budget)
+    instance_id = override.get("instance_id", "inst-author")
+    highlight_id = override.get("highlight_id", "s-1")
+    token = override.get("token", client._token)
+    if setup is not None:
+        await setup(client)
+
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    resp = await client.get(
+        f"/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token={token}",
+    )
+    elapsed = loop.time() - t0
+    got = _shape(resp, await resp.read())
+
+    # Reference: author online, valid token, author never starts streaming.
+    client._app[gfs_ws_registry_key]._by_instance["inst-author"] = client._author_ws
+    tok, _ = await client._app[gfs_highlight_pub_service_key].record_publish(
+        highlight_id="s-ref",
+        instance_id="inst-author",
+        expires_at=10_000_000_000,
+        publish_signature="",
+    )
+    t1 = loop.time()
+    ref = await client.get(
+        f"/gfs/highlight_rtc/relay/inst-author/s-ref?token={tok.token}"
+    )
+    ref_elapsed = loop.time() - t1
+    want = _shape(ref, await ref.read())
+
+    assert got == want, label
+    assert want[0] == 503
+    assert json.loads(want[1]) == {"error": "unavailable"}
+    assert elapsed >= budget, (label, elapsed)
+    assert ref_elapsed >= budget
 
 
-async def test_relay_author_offline_returns_503(client):
-    client._app[gfs_ws_registry_key]._by_instance.pop("inst-author", None)
+@pytest.mark.security
+async def test_relay_bridge_full_is_uniform(client, monkeypatch):
+    """The live-channel ceiling ("could not be brokered") is the same
+    response after the same budget."""
+
+    monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(relay_bridge, "MAX_LIVE_CHANNELS", 0)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
     resp = await client.get(
         f"/gfs/highlight_rtc/relay/inst-author/s-1?token={client._token}",
     )
+    assert loop.time() - t0 >= 0.2
     assert resp.status == 503
-
-
-async def test_relay_author_never_connects_times_out_503(client, monkeypatch):
-    # Shrink the author-connect budget so the test doesn't wait 30s. The
-    # author WS is "online" but no upload ever arrives.
-    import socialhome.global_server.routes.highlight_rtc as hr
-
-    monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", 0.1)
-    resp = await client.get(
-        f"/gfs/highlight_rtc/relay/inst-author/s-1?token={client._token}",
-    )
-    assert resp.status == 503
+    assert await resp.json() == {"error": "unavailable"}
 
 
 async def test_relay_upload_unknown_relay_id_returns_404(client):

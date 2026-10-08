@@ -50,6 +50,16 @@ export default defineConfig({
         // ``preact/hooks`` import.
         entryFileNames: '[name].js',
         chunkFileNames: '[name]-[hash].js',
+        // Code shared by the two public viewers (``gfs/viewer_errors.ts``)
+        // would otherwise land in its own ``viewer_errors-<hash>.js``
+        // chunk — a name neither ``.gitignore`` nor the wheel's
+        // ``[tool.hatch.build].artifacts`` covers, so the wheel would ship
+        // the viewers without it (import 404 → blank page). Name it into
+        // the ``*.module-*.js`` family both globs already cover.
+        manualChunks(id: string) {
+          if (id.includes('/gfs/viewer_errors')) return 'viewer.module'
+          return undefined
+        },
         assetFileNames: '[name][extname]',
       },
       preserveEntrySignatures: false,

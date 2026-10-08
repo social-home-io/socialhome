@@ -27,19 +27,41 @@ import logging
 from aiohttp import web
 
 from .. import app_keys as K
+from ..public_unavailable import unavailable_at, unavailable_response
 from .base import GfsBaseView
 from .rtc import _rtc_authenticate, authenticate_relay_stream
 
 log = logging.getLogger(__name__)
 
 #: How long the guest's relay GET waits for the author SH to start
-#: streaming before giving up with 503. Matches the viewer's WebRTC
-#: poll budget so the fallback doesn't hang far longer than the primary.
+#: streaming before giving up with the uniform 503. Matches the viewer's
+#: WebRTC poll budget so the fallback doesn't hang far longer than the
+#: primary. It is also the latency of EVERY relay failure (unknown, offline,
+#: never streamed, bridge full), so timing can't reveal author presence.
 RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS: float = 30.0
 
 #: Author body is read in chunks this size and piped straight to the
 #: guest — independent of the framing chunk size (pure byte passthrough).
 RELAY_READ_CHUNK_BYTES: int = 64 * 1024
+
+
+async def _servable_author(view: GfsBaseView, user_id: str) -> str | None:
+    """The author instance a guest may stream ``user_id`` from, or ``None``.
+
+    ``None`` folds every non-success state — unknown user, inactive
+    registration, author's household not connected — into one answer the
+    callers map to the uniform reply. The registry lookup AND the
+    connection check run on every branch (an unknown user checks the
+    empty id), so no branch skips work the others do.
+    """
+    registry = view.svc(K.gfs_moment_public_registry_key)
+    reg = await registry.get_registration(user_id)
+    active = reg is not None and reg.status == "active"
+    author_instance_id = reg.instance_id if reg is not None and active else ""
+    online = view.svc(K.gfs_ws_registry_key).is_connected(author_instance_id)
+    if not (active and online and author_instance_id):
+        return None
+    return author_instance_id
 
 
 # ─── Public viewer surface (anonymous) ───────────────────────────────────
@@ -60,15 +82,11 @@ class MomentRtcOfferView(GfsBaseView):
         sdp = str(body.get("sdp") or "")
         if not (user_id and sdp):
             return web.json_response({"error": "missing_fields"}, status=422)
-        registry = self.svc(K.gfs_moment_public_registry_key)
-        reg = await registry.get_registration(user_id)
-        if reg is None or reg.status != "active":
-            return web.json_response({"error": "not_found"}, status=404)
-        author_instance_id = reg.instance_id
-        ws_registry = self.svc(K.gfs_ws_registry_key)
-        if not ws_registry.is_connected(author_instance_id):
-            return web.json_response({"error": "unavailable"}, status=503)
+        author_instance_id = await _servable_author(self, user_id)
+        if author_instance_id is None:
+            return unavailable_response()
 
+        ws_registry = self.svc(K.gfs_ws_registry_key)
         rtc = self.svc(K.gfs_rtc_key)
         session_id = await rtc.offer(author_instance_id, sdp)
         gfs_id = self.svc(K.gfs_config_key).instance_id
@@ -150,23 +168,25 @@ class MomentRelayStreamView(GfsBaseView):
     """
 
     async def get(self) -> web.StreamResponse:
+        # Every failure answers only at this deadline — the same budget the
+        # online-but-never-streams branch waits — so latency can't tell an
+        # offline author from an online one (see :mod:`..public_unavailable`).
+        deadline = (
+            asyncio.get_running_loop().time() + RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS
+        )
         user_id = self.match("user_id")
-        registry = self.svc(K.gfs_moment_public_registry_key)
-        reg = await registry.get_registration(user_id)
-        if reg is None or reg.status != "active":
-            return web.json_response({"error": "not_found"}, status=404)
-        author_instance_id = reg.instance_id
-        ws_registry = self.svc(K.gfs_ws_registry_key)
-        if not ws_registry.is_connected(author_instance_id):
-            return web.json_response({"error": "unavailable"}, status=503)
+        author_instance_id = await _servable_author(self, user_id)
+        if author_instance_id is None:
+            return await unavailable_at(deadline)
 
         bridge = self.svc(K.gfs_relay_bridge_key)
         relay_id = bridge.create(target_instance_id=author_instance_id, scope=user_id)
         if relay_id is None:
-            return web.json_response({"error": "unavailable"}, status=503)
+            return await unavailable_at(deadline)
         channel = bridge.get(relay_id)
         assert channel is not None  # just created
 
+        ws_registry = self.svc(K.gfs_ws_registry_key)
         gfs_id = self.svc(K.gfs_config_key).instance_id
         await ws_registry.send(
             author_instance_id,
@@ -184,11 +204,11 @@ class MomentRelayStreamView(GfsBaseView):
         try:
             await asyncio.wait_for(
                 channel.connected.wait(),
-                timeout=RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS,
+                timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
             )
         except asyncio.TimeoutError, TimeoutError:
             bridge.close(relay_id)
-            return web.json_response({"error": "unavailable"}, status=503)
+            return await unavailable_at(deadline)
 
         resp = web.StreamResponse(
             status=200,

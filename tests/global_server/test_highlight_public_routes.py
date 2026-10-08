@@ -2,7 +2,7 @@
 
 Exercises both surfaces:
 
-* The public landing page (no auth) — 200 / 410 / 503 paths.
+* The public landing page (no auth) — one uniform viewer shell.
 * The Ed25519-signed wire endpoints (publish / mint / revoke /
   unpublish) — full sign + verify path, mirroring
   ``test_federation`` so the auth middleware is live.
@@ -132,7 +132,20 @@ async def test_landing_returns_200_when_token_active_and_author_online(client):
     assert "src='/static/highlight_public_viewer.js'" not in text
 
 
-async def test_landing_returns_410_when_token_revoked(client):
+def _page_shape(resp, text: str) -> tuple:
+    """Status + body + every header except the per-request ``Date``."""
+    headers = sorted(
+        (k.lower(), v) for k, v in resp.headers.items() if k.lower() != "date"
+    )
+    return resp.status, text, headers
+
+
+@pytest.mark.security
+async def test_landing_page_is_identical_for_every_publication_state(client):
+    """The landing page must not be an author-presence (or token-validity)
+    oracle: online, offline, revoked, unpublished, wrong highlight id and
+    never-issued tokens all get the byte-identical viewer shell for the
+    same URL. Only the streaming step can tell — and only on success."""
     app = client._app
     registry = app[gfs_highlight_pub_service_key]
     tok, _url = await registry.record_publish(
@@ -141,58 +154,48 @@ async def test_landing_returns_410_when_token_revoked(client):
         expires_at=10_000_000_000,
         publish_signature="",
     )
+    path = f"/highlight/inst-author/s-1/{tok.token}"
+    shapes = []
+
+    # Author offline, publication live.
+    resp = await client.get(path)
+    shapes.append(_page_shape(resp, await resp.text()))
+    # Author online, publication live.
+    _mark_author_online(app)
+    resp = await client.get(path)
+    shapes.append(_page_shape(resp, await resp.text()))
+    # Token revoked (author still online).
     await registry.revoke_token(tok.token, "inst-author")
-    _mark_author_online(app)
-    resp = await client.get(f"/highlight/inst-author/s-1/{tok.token}")
-    assert resp.status == 410
-
-
-async def test_landing_returns_410_when_unpublished(client):
-    app = client._app
-    registry = app[gfs_highlight_pub_service_key]
-    tok, _url = await registry.record_publish(
-        highlight_id="s-1",
-        instance_id="inst-author",
-        expires_at=10_000_000_000,
-        publish_signature="",
-    )
+    resp = await client.get(path)
+    shapes.append(_page_shape(resp, await resp.text()))
+    # Publication gone entirely, author offline.
     await registry.remove_publish("s-1", "inst-author")
-    resp = await client.get(f"/highlight/inst-author/s-1/{tok.token}")
-    assert resp.status == 410
+    app[gfs_ws_registry_key]._by_instance.pop("inst-author", None)
+    resp = await client.get(path)
+    shapes.append(_page_shape(resp, await resp.text()))
+
+    assert all(shape == shapes[0] for shape in shapes), shapes
+    status, text, _headers = shapes[0]
+    assert status == 200
+    assert "highlight_public_viewer.js" in text
+    assert "offline" not in text.lower()
 
 
-async def test_landing_returns_410_when_url_mixes_wrong_highlight_id(client):
-    app = client._app
-    registry = app[gfs_highlight_pub_service_key]
-    tok, _url = await registry.record_publish(
-        highlight_id="s-1",
-        instance_id="inst-author",
-        expires_at=10_000_000_000,
-        publish_signature="",
-    )
-    _mark_author_online(app)
-    # Same token, different highlight_id in the path — must not resolve.
-    resp = await client.get(f"/highlight/inst-author/s-OTHER/{tok.token}")
-    assert resp.status == 410
-
-
-async def test_landing_returns_503_when_author_offline(client):
-    app = client._app
-    registry = app[gfs_highlight_pub_service_key]
-    tok, _url = await registry.record_publish(
-        highlight_id="s-1",
-        instance_id="inst-author",
-        expires_at=10_000_000_000,
-        publish_signature="",
-    )
-    # Don't mark author online.
-    resp = await client.get(f"/highlight/inst-author/s-1/{tok.token}")
-    assert resp.status == 503
-
-
-async def test_landing_returns_410_for_unknown_token(client):
-    resp = await client.get("/highlight/inst-author/s-1/never-issued")
-    assert resp.status == 410
+@pytest.mark.security
+async def test_landing_page_never_names_author_presence(client):
+    """Never-issued token and mismatched highlight id render the same
+    neutral shell — no "offline" / "ended" wording the server could only
+    pick by looking at state."""
+    for path in (
+        "/highlight/inst-author/s-1/never-issued",
+        "/highlight/inst-nope/s-1/never-issued",
+    ):
+        resp = await client.get(path)
+        assert resp.status == 200
+        text = (await resp.text()).lower()
+        assert "offline" not in text
+        assert "has ended" not in text
+        assert "unavailable" not in text
 
 
 # ── Signed-wire endpoints ───────────────────────────────────────────────
@@ -343,59 +346,22 @@ async def test_unpublish_unknown_returns_404(client):
 # ── Strict CSP on the viewer + its fallback pages ───────────────────────
 
 
-async def test_viewer_and_fallback_pages_have_strict_csp(client):
-    app = client._app
-    registry = app[gfs_highlight_pub_service_key]
-    tok, _url = await registry.record_publish(
-        highlight_id="s-csp",
-        instance_id="inst-author",
-        expires_at=10_000_000_000,
-        publish_signature="",
-    )
-    path = f"/highlight/inst-author/s-csp/{tok.token}"
-    # 503 — author offline.
-    resp = await client.get(path)
-    assert resp.status == 503
-    assert_strict_public_page(resp, await resp.text())
-    # 200 — the viewer.
-    _mark_author_online(app)
-    resp = await client.get(path)
+async def test_viewer_page_has_strict_csp(client):
+    resp = await client.get("/highlight/inst-author/s-csp/nope")
     assert resp.status == 200
     assert_strict_public_page(resp, await resp.text())
-    # 410 — unknown token.
-    resp = await client.get("/highlight/inst-author/s-csp/nope")
-    assert resp.status == 410
-    assert_strict_public_page(resp, await resp.text())
 
 
-async def test_gone_page_escapes_the_url_segments(client):
-    """The 410 page echoes ``instance_id`` / ``highlight_id`` from the URL
-    path — percent-decoded by the router, so attacker-chosen. They must be
-    HTML-escaped (reflected markup on the GFS origin otherwise)."""
+async def test_viewer_page_escapes_the_url_segments(client):
+    """The shell echoes ``instance_id`` / ``highlight_id`` from the URL
+    path into its boot JSON — percent-decoded by the router, so
+    attacker-chosen. ``script_json`` must keep them from breaking out of
+    the inline ``<script>`` (reflected markup on the GFS origin)."""
     resp = await client.get(
-        "/highlight/%3Cimg%20src%3Dx%3E/%3Cb%3Ehl%3C%2Fb%3E/no-such-token"
+        "/highlight/%3C%2Fscript%3E%3Cimg%20src%3Dx%3E/%3Cb%3Ehl%3C%2Fb%3E/no-such-token"
     )
-    assert resp.status == 410
+    assert resp.status == 200
     text = await resp.text()
-    assert "<img src=x>" not in text
+    assert "</script><img src=x>" not in text
     assert "<b>hl</b>" not in text
-    assert "&lt;img src=x&gt;" in text
     assert_strict_public_page(resp, text)
-
-
-async def test_unavailable_page_escapes_the_url_segments(client):
-    app = client._app
-    registry = app[gfs_highlight_pub_service_key]
-    # A publication whose ids carry markup reaches the 503 branch (author
-    # offline) with those ids echoed into the body.
-    tok, _url = await registry.record_publish(
-        highlight_id="<b>hl</b>",
-        instance_id="inst-author",
-        expires_at=10_000_000_000,
-        publish_signature="",
-    )
-    resp = await client.get(f"/highlight/inst-author/%3Cb%3Ehl%3C%2Fb%3E/{tok.token}")
-    assert resp.status == 503
-    text = await resp.text()
-    assert "<b>hl</b>" not in text
-    assert "&lt;b&gt;hl&lt;/b&gt;" in text

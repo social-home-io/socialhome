@@ -19,6 +19,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import socialhome.global_server.routes.moment_rtc as mr
+from socialhome.global_server import relay_bridge
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
     gfs_moment_public_registry_key,
@@ -164,21 +166,61 @@ async def test_offer_creates_session_and_pushes_to_author(client):
     assert sent[0]["gfs_id"] == "gfs-test"
 
 
-async def test_offer_for_unregistered_user_returns_404(client):
-    resp = await client.post(
-        "/gfs/moment_rtc/offer",
-        json={"user_id": "u-nope", "sdp": "v=0"},
+def _shape(resp, body: bytes) -> tuple:
+    """Status + body + every header except the per-request ``Date``."""
+    headers = sorted(
+        (k.lower(), v) for k, v in resp.headers.items() if k.lower() != "date"
     )
-    assert resp.status == 404
+    return resp.status, body, headers
 
 
-async def test_offer_when_author_offline_returns_503(client):
+async def _offline(client) -> None:
     client._app[gfs_ws_registry_key]._by_instance.pop("inst-author", None)
+
+
+async def _deregister(client) -> None:
+    await client._app[gfs_moment_public_registry_key].deregister_user("u-1")
+
+
+#: Every non-success state of the anonymous viewer routes, as
+#: ``(label, setup, user_id)``. They MUST be indistinguishable — an
+#: outsider must not learn whether the author's household is connected.
+_FAILURE_STATES = [
+    ("unknown_user", None, "u-nope"),
+    ("deregistered", _deregister, "u-1"),
+    ("author_offline", _offline, "u-1"),
+]
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(("label", "setup", "user_id"), _FAILURE_STATES)
+async def test_offer_failure_is_uniform(client, label, setup, user_id):
+    """Each failure state returns the one uniform ``503 unavailable``,
+    byte-identical (status, body, headers) to the author-offline reply."""
+    if setup is not None:
+        await setup(client)
     resp = await client.post(
-        "/gfs/moment_rtc/offer",
-        json={"user_id": "u-1", "sdp": "v=0"},
+        "/gfs/moment_rtc/offer", json={"user_id": user_id, "sdp": "v=0"}
     )
-    assert resp.status == 503
+    got = _shape(resp, await resp.read())
+    assert not [f for f in client._author_ws.sent if f.get("kind") == "offer"]
+
+    # Reference: registered user, author offline.
+    await _offline(client)
+    await client._app[gfs_moment_public_registry_key].register_user(
+        user_id="u-ref",
+        instance_id="inst-author",
+        username="ref",
+        display_name="Ref",
+        home_instance_pk="00",
+    )
+    ref = await client.post(
+        "/gfs/moment_rtc/offer", json={"user_id": "u-ref", "sdp": "v=0"}
+    )
+    want = _shape(ref, await ref.read())
+    assert got == want, label
+    assert want[0] == 503
+    assert json.loads(want[1]) == {"error": "unavailable"}
 
 
 async def test_offer_missing_fields_returns_422(client):
@@ -362,23 +404,58 @@ async def test_relay_round_trip_pipes_author_bytes_to_guest(client):
     assert body == framed
 
 
-async def test_relay_unregistered_user_returns_404(client):
-    resp = await client.get("/gfs/moment_rtc/relay/u-nope")
-    assert resp.status == 404
+@pytest.mark.security
+@pytest.mark.parametrize(("label", "setup", "user_id"), _FAILURE_STATES)
+async def test_relay_failure_is_uniform_in_shape_and_latency(
+    client, monkeypatch, label, setup, user_id
+):
+    """Every relay failure — including author-online-but-never-streams —
+    answers the same ``503 unavailable`` only after the same
+    author-connect budget, so neither bytes nor latency reveal whether
+    the author's household is connected."""
+    budget = 0.3
+    monkeypatch.setattr(mr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", budget)
+    if setup is not None:
+        await setup(client)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    resp = await client.get(f"/gfs/moment_rtc/relay/{user_id}")
+    elapsed = loop.time() - t0
+    got = _shape(resp, await resp.read())
+
+    # Reference: author online + registered, never starts streaming.
+    client._app[gfs_ws_registry_key]._by_instance["inst-author"] = client._author_ws
+    await client._app[gfs_moment_public_registry_key].register_user(
+        user_id="u-ref",
+        instance_id="inst-author",
+        username="ref",
+        display_name="Ref",
+        home_instance_pk="00",
+    )
+    t1 = loop.time()
+    ref = await client.get("/gfs/moment_rtc/relay/u-ref")
+    ref_elapsed = loop.time() - t1
+    want = _shape(ref, await ref.read())
+
+    assert got == want, label
+    assert want[0] == 503
+    assert json.loads(want[1]) == {"error": "unavailable"}
+    assert elapsed >= budget, (label, elapsed)
+    assert ref_elapsed >= budget
 
 
-async def test_relay_author_offline_returns_503(client):
-    client._app[gfs_ws_registry_key]._by_instance.pop("inst-author", None)
+@pytest.mark.security
+async def test_relay_bridge_full_is_uniform(client, monkeypatch):
+    """The live-channel ceiling ("could not be brokered") is the same
+    response after the same budget."""
+    monkeypatch.setattr(mr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(relay_bridge, "MAX_LIVE_CHANNELS", 0)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
     resp = await client.get("/gfs/moment_rtc/relay/u-1")
+    assert loop.time() - t0 >= 0.2
     assert resp.status == 503
-
-
-async def test_relay_author_never_connects_times_out_503(client, monkeypatch):
-    import socialhome.global_server.routes.moment_rtc as mr
-
-    monkeypatch.setattr(mr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", 0.1)
-    resp = await client.get("/gfs/moment_rtc/relay/u-1")
-    assert resp.status == 503
+    assert await resp.json() == {"error": "unavailable"}
 
 
 async def test_relay_upload_unknown_relay_id_returns_404(client):

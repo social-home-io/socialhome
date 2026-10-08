@@ -22,19 +22,45 @@ import logging
 from aiohttp import web
 
 from .. import app_keys as K
+from ..public_unavailable import unavailable_at, unavailable_response
 from .base import GfsBaseView
 from .rtc import _rtc_authenticate, authenticate_relay_stream
 
 log = logging.getLogger(__name__)
 
 #: How long the guest's relay GET waits for the author SH to start
-#: streaming before giving up with 503. Matches the viewer's WebRTC
-#: poll budget so the fallback doesn't hang far longer than the primary.
+#: streaming before giving up with the uniform 503. Matches the viewer's
+#: WebRTC poll budget so the fallback doesn't hang far longer than the
+#: primary. It is also the latency of EVERY relay failure (unknown, offline,
+#: never streamed, bridge full), so timing can't reveal author presence.
 RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS: float = 30.0
 
 #: Author body is read in chunks this size and piped straight to the
 #: guest — independent of the framing chunk size (pure byte passthrough).
 RELAY_READ_CHUNK_BYTES: int = 64 * 1024
+
+
+async def _servable(
+    view: GfsBaseView, instance_id: str, highlight_id: str, token: str
+) -> bool:
+    """True iff ``token`` resolves to a live publication of exactly
+    ``(instance_id, highlight_id)`` AND the author's household is connected.
+
+    ``False`` folds every non-success state — unknown / revoked / expired
+    token, unpublished highlight, URL mixing a valid token with another
+    id, author offline — into one answer the callers map to the uniform
+    reply. The token lookup AND the connection check run on every branch,
+    so no branch skips work the others do.
+    """
+    registry = view.svc(K.gfs_highlight_pub_service_key)
+    resolved = await registry.resolve_token(token)
+    matches = (
+        resolved is not None
+        and resolved.publication.instance_id == instance_id
+        and resolved.publication.highlight_id == highlight_id
+    )
+    online = await registry.author_online(instance_id)
+    return matches and online
 
 
 # ─── Public viewer surface (anonymous) ───────────────────────────────────
@@ -60,16 +86,8 @@ class HighlightRtcOfferView(GfsBaseView):
                 {"error": "missing_fields"},
                 status=422,
             )
-        registry = self.svc(K.gfs_highlight_pub_service_key)
-        resolved = await registry.resolve_token(token)
-        if (
-            resolved is None
-            or resolved.publication.instance_id != instance_id
-            or resolved.publication.highlight_id != highlight_id
-        ):
-            return web.json_response({"error": "gone"}, status=410)
-        if not await registry.author_online(instance_id):
-            return web.json_response({"error": "unavailable"}, status=503)
+        if not await _servable(self, instance_id, highlight_id, token):
+            return unavailable_response()
 
         rtc = self.svc(K.gfs_rtc_key)
         session_id = await rtc.offer(instance_id, sdp)
@@ -154,27 +172,25 @@ class HighlightRelayStreamView(GfsBaseView):
     """
 
     async def get(self) -> web.StreamResponse:
+        # Every failure answers only at this deadline — the same budget the
+        # online-but-never-streams branch waits — so latency can't tell an
+        # offline author from an online one (see :mod:`..public_unavailable`).
+        deadline = (
+            asyncio.get_running_loop().time() + RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS
+        )
         instance_id = self.match("instance_id")
         highlight_id = self.match("highlight_id")
         token = self.request.query.get("token", "")
         if not token:
             return web.json_response({"error": "missing_token"}, status=422)
 
-        registry = self.svc(K.gfs_highlight_pub_service_key)
-        resolved = await registry.resolve_token(token)
-        if (
-            resolved is None
-            or resolved.publication.instance_id != instance_id
-            or resolved.publication.highlight_id != highlight_id
-        ):
-            return web.json_response({"error": "gone"}, status=410)
-        if not await registry.author_online(instance_id):
-            return web.json_response({"error": "unavailable"}, status=503)
+        if not await _servable(self, instance_id, highlight_id, token):
+            return await unavailable_at(deadline)
 
         bridge = self.svc(K.gfs_relay_bridge_key)
         relay_id = bridge.create(target_instance_id=instance_id, scope=highlight_id)
         if relay_id is None:
-            return web.json_response({"error": "unavailable"}, status=503)
+            return await unavailable_at(deadline)
         channel = bridge.get(relay_id)
         assert channel is not None  # just created
 
@@ -195,11 +211,11 @@ class HighlightRelayStreamView(GfsBaseView):
         try:
             await asyncio.wait_for(
                 channel.connected.wait(),
-                timeout=RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS,
+                timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
             )
         except asyncio.TimeoutError, TimeoutError:
             bridge.close(relay_id)
-            return web.json_response({"error": "unavailable"}, status=503)
+            return await unavailable_at(deadline)
 
         resp = web.StreamResponse(
             status=200,

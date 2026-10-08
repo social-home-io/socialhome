@@ -17,6 +17,7 @@
  */
 import { render } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
+import { humanizeViewerError as humanizeError } from './viewer_errors'
 
 const CHANNEL_LABEL = 'moment-public-v1'
 const POLL_INTERVAL_MS = 1000
@@ -262,7 +263,14 @@ function PublicMomentsViewer({ boot }: { boot: BootPayload }) {
   }, [boot.userId, boot.instanceId])
 
   if (state.status === 'error') {
-    return <div class="moments-error">{state.message || 'Couldn’t connect.'}</div>
+    return (
+      <div class="moments-error">
+        <p>{state.message || 'Couldn’t connect.'}</p>
+        <button type="button" class="viewer-retry" onClick={() => location.reload()}>
+          Try again
+        </button>
+      </div>
+    )
   }
   if (state.status !== 'ready') {
     return <div class="moments-status">{state.message ?? 'Loading…'}</div>
@@ -288,15 +296,6 @@ function PublicMomentsViewer({ boot }: { boot: BootPayload }) {
       })}
     </ul>
   )
-}
-
-
-function humanizeError(msg: string | null | undefined): string {
-  if (!msg) return 'Couldn’t connect.'
-  if (/HTTP 404/.test(msg)) return 'This person isn’t sharing public moments.'
-  if (/HTTP 503/.test(msg)) return 'Currently unavailable.'
-  if (/HTTP 429/.test(msg)) return 'Too many viewers — try again in a minute.'
-  return msg
 }
 
 
