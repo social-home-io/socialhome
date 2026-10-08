@@ -192,15 +192,15 @@ describe('SpaceSettings', () => {
     ).toBe(false)
   })
 
-  it('renders the Features fieldset with seven toggle checkboxes', () => {
+  it('renders the Features fieldset with eight toggle checkboxes', () => {
     const space = makeSpace()
     const { getByTestId } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
     const fieldset = getByTestId('space-features')
     const checkboxes = fieldset.querySelectorAll('input[type="checkbox"]')
-    // Pages, Calendar, Timetable, Tasks, Stickies, Gallery, Bazaar.
-    expect(checkboxes.length).toBe(7)
+    // Pages, Calendar, Timetable, Tasks, Stickies, Gallery, Bazaar, Chat.
+    expect(checkboxes.length).toBe(8)
   })
 
   it('mirrors the space features in the Features fieldset', () => {
@@ -221,10 +221,10 @@ describe('SpaceSettings', () => {
       fieldset.querySelectorAll('input[type="checkbox"]'),
     ) as HTMLInputElement[]
     // Order matches the JSX: pages, calendar, timetable, tasks, stickies,
-    // gallery, bazaar. ``bazaar`` is omitted from the payload → defaults
-    // on; ``timetable`` is an opt-in → defaults off.
+    // gallery, bazaar, chat. ``bazaar`` / ``chat`` are omitted from the
+    // payload → default on; ``timetable`` is an opt-in → defaults off.
     expect(checkboxes.map((c) => c.checked)).toEqual([
-      false, false, false, true, true, true, true,
+      false, false, false, true, true, true, true, true,
     ])
   })
 
@@ -249,10 +249,10 @@ describe('SpaceSettings', () => {
     const checkboxes = Array.from(
       fieldset.querySelectorAll('input[type="checkbox"]'),
     ) as HTMLInputElement[]
-    // pages, calendar, tasks, stickies, gallery, bazaar — all on; the
-    // timetable (3rd) is an opt-in and stays off.
+    // pages, calendar, tasks, stickies, gallery, bazaar, chat — all on;
+    // the timetable (3rd) is an opt-in and stays off.
     expect(checkboxes.map((c) => c.checked)).toEqual([
-      true, true, false, true, true, true, true,
+      true, true, false, true, true, true, true, true,
     ])
   })
 
@@ -309,6 +309,46 @@ describe('SpaceSettings', () => {
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body).toEqual({ features: { calendar: true } })
+  })
+
+  it('offers the Chat feature (on by default) and sends turning it off', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const { getByLabelText, getByText } = render(
+      <SpaceSettings space={makeSpace()} onUpdate={() => {}} />,
+    )
+    const box = getByLabelText(/space\.feature\.chat/) as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect(getByText('space.feature.chat_sub')).toBeTruthy()
+    fireEvent.change(box, { target: { checked: false } })
+    fireEvent.click(getByText('space.settings.save'))
+    await new Promise(r => setTimeout(r, 0))
+    const [, body] = apiMock.patch.mock.calls[0]
+    expect(body).toEqual({ features: { chat: false } })
+  })
+
+  it('mirrors a space whose chat is off and turns it back on', async () => {
+    apiMock.patch.mockResolvedValueOnce({})
+    const space = makeSpace({
+      features: {
+        calendar: true, todo: true, location: false, chat: false,
+        posts_access: 'open', pages_access: 'open',
+        stickies_access: 'open', calendar_access: 'open',
+        tasks_access: 'open',
+      },
+    })
+    const { getByText, getByTestId } = render(
+      <SpaceSettings space={space} onUpdate={() => {}} />,
+    )
+    const boxes = Array.from(
+      getByTestId('space-features').querySelectorAll('input[type="checkbox"]'),
+    ) as HTMLInputElement[]
+    const chat = boxes[7]
+    expect(chat.checked).toBe(false)
+    fireEvent.change(chat, { target: { checked: true } })
+    fireEvent.click(getByText('space.settings.save'))
+    await new Promise(r => setTimeout(r, 0))
+    const [, body] = apiMock.patch.mock.calls[0]
+    expect(body).toEqual({ features: { chat: true } })
   })
 
   it('offers the Timetable feature (off by default) and sends it in the diff', async () => {

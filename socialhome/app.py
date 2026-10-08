@@ -2510,7 +2510,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # A space's chat: its local writer seats while ``features.chat`` is on
     # (the federation half is wired with the federation stack, see
     # ``_build_space_chat_federation``).
-    space_chat_access = SpaceChatAccess(space_repo)
+    space_chat_access = SpaceChatAccess(space_repo, repos.space_remote_member)
     system_chat_policy.register(SystemChatScope.SPACE, space_chat_access)
     space_chat_service = SpaceChatService(
         conversation_repo,

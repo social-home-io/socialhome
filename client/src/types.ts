@@ -397,6 +397,9 @@ export interface SpaceFeatures {
   /** Per-space Bazaar tab (§23.15). When false the marketplace tab is
    *  hidden and new listings are rejected; existing listings remain. */
   bazaar?: boolean
+  /** The space chat (Feed tab → Feed | Chat, members only). Absent → on
+   *  (the backend default); off hides it and refuses new messages. */
+  chat?: boolean
   /** Per-feature access levels (§4.3): who may create / edit / delete.
    *  ``admin_only`` → owners and admins; ``moderated`` queues members'
    *  posts for review (posts only today). Absent on an older host → open. */

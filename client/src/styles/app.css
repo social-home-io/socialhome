@@ -4067,6 +4067,34 @@ button.sh-friends-member-chip:not(:disabled):hover {
   min-width: 0;
 }
 .sh-feed-chat-error { flex: 1 1 auto; justify-content: center; }
+/* A space's Feed tab on its Chat view (``SpaceFeedPage``): the same
+ * viewport-height column as the household Chat tab — the space header,
+ * the Feed | Chat switch, the audience bar and the thread share it and
+ * only ``.sh-messages`` scrolls. */
+.sh-space-feed--chat {
+  height: calc(100dvh - var(--sh-topbar-height) - 2 * var(--sh-space-lg));
+  min-height: 320px;
+}
+.sh-space-feed--chat > * { flex: 0 0 auto; }
+.sh-space-feed--chat > .sh-thread,
+.sh-space-feed--chat > .sh-feed-chat-error { flex: 1 1 auto; min-height: 0; }
+@media (max-width: 768px) {
+  .sh-main:has(.sh-space-feed--chat) { padding-bottom: 0; }
+  .sh-space-feed--chat {
+    height: calc(
+      100dvh - var(--sh-topbar-height) - var(--sh-space-md)
+      - var(--sh-mobile-nav-height) - var(--sh-space-sm)
+      - env(safe-area-inset-bottom, 0px)
+    );
+  }
+}
+.sh-space-feed--chat .sh-thread > .sh-composer {
+  margin-bottom: 0;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+}
 /* Unread count after a tab label (TabHeader ``badges``). */
 .sh-tab-unread {
   display: inline-block;
@@ -5340,6 +5368,16 @@ body.sh-dm-thread-open .sh-messages {
 .sh-message--mine .sh-message-react-btn { right: auto; left: -56px; }
 /* Own editable bubbles: an ✎ chip one step further out. */
 .sh-message--mine .sh-message-edit-btn { left: -84px; }
+/* Delete (a space chat): one step out from react on someone else's
+ * bubble (a moderator), past ✎ on an own one. */
+.sh-message-delete-btn { right: -84px; }
+.sh-message--mine .sh-message-delete-btn { right: auto; left: -84px; }
+.sh-message--mine .sh-message-edit-btn ~ .sh-message-delete-btn { left: -112px; }
+.sh-message-react-btn.sh-message-delete-btn:hover {
+  background: var(--sh-danger);
+  border-color: var(--sh-danger);
+  color: var(--sh-on-danger-fill);
+}
 /* In-place edit of an own message (DM thread). */
 .sh-message-edit {
   display: flex;
@@ -21976,8 +22014,10 @@ a.sh-btn--ghost:hover {
 .sh-toggle-row__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .sh-toggle-row__sub { color: var(--sh-text-muted); font-size: var(--sh-font-size-xs); }
 .sh-space-calendar-host { display: flex; flex-direction: column; gap: var(--sh-space-md); }
-.sh-space-calendar-host__switch { align-self: flex-start; }
-.sh-space-calendar-host__switch .sh-timetable-seg__btn {
+.sh-space-calendar-host__switch,
+.sh-space-feed-switch { align-self: flex-start; }
+.sh-space-calendar-host__switch .sh-timetable-seg__btn,
+.sh-space-feed-switch .sh-timetable-seg__btn {
   min-height: 36px;
   padding: 4px 18px;
   font-size: var(--sh-font-size-sm);
@@ -22017,8 +22057,10 @@ a.sh-btn--ghost:hover {
 .sh-timetable-info__row dt { color: var(--sh-text-muted); font-weight: 600; }
 .sh-timetable-info__row dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 @media (max-width: 640px) {
-  .sh-space-calendar-host__switch { align-self: stretch; }
-  .sh-space-calendar-host__switch .sh-timetable-seg__btn { flex: 1; min-height: 40px; }
+  .sh-space-calendar-host__switch,
+  .sh-space-feed-switch { align-self: stretch; }
+  .sh-space-calendar-host__switch .sh-timetable-seg__btn,
+  .sh-space-feed-switch .sh-timetable-seg__btn { flex: 1; min-height: 40px; }
 }
 
 /* ─── Organize primitives (Shopping · Tasks · Stickies) ──────────────

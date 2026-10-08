@@ -1368,7 +1368,16 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
 
     def _mentions(self) -> DmMentionResolver:
         """Mention resolver over this household's seats of a conversation."""
-        return DmMentionResolver(self._convos, self._users)
+        return DmMentionResolver(self._convos, self._users, self._system_chats)
+
+    async def remote_members(
+        self, conversation_id: str
+    ) -> list[RemoteConversationMember]:
+        """The conversation's members on other households — its stored
+        seats, or a system chat's computed roster (a space chat's writers
+        on other households). Callers check membership first."""
+        conv = await self._require_conversation(conversation_id)
+        return await self._mentions().remote_seats(conv)
 
     async def mention_tokens(self, conversation_id: str) -> dict[str, str | None]:
         """user_id → the @-token (without ``@``) a composer inserts to

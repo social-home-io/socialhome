@@ -68,8 +68,19 @@ travels**: each household maps `space_id` to its own chat.
 | `SPACE_CHAT_REACTION` | `space_id`, `message_id`, `user_id`, `emoji`, `action` (`"add"` / `"remove"`) |
 
 Mentions are not a field. Each household resolves @-mentions on the
-decrypted text against its own seats of the chat, as for DMs and space
-posts.
+decrypted text against its own view of the chat's members, as for DMs and
+space posts. A space chat keeps no seat rows for members on other
+households: that view is its local seats plus the space roster's writers
+on other households (`SpaceChatAccess.remote_seats` — never a follower,
+a banned or a removed seat). The same roster feeds
+`GET /api/conversations/{id}/members`, so the composer offers members of
+every household and their messages carry their names.
+
+**In the SPA** the chat is the Feed tab's **Feed | Chat** switch
+(`SpaceFeedPage`, `?view=chat` — where chat notifications link), shown
+to a member (never a follower) while `features.chat` is on. Owners,
+admins and moderators get Delete on anyone's message; everybody on their
+own.
 
 **Message ids** are owner-bound (`federation/owner_bound_id.py`, kind
 `space-chat-message`). The id commits to `(space_id, author_user_id)`, so

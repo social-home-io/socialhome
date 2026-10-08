@@ -3462,3 +3462,57 @@ async def test_a_space_admin_turns_the_chat_off_and_on(client):
     assert r.status == 200
     status, on = await _space_chat(client, sid, client._admin_token)
     assert on["enabled"] is True and on["conversation_id"] == cid
+
+
+async def test_space_chat_roster_names_writers_on_other_households(client):
+    """The chat keeps no remote seats: its roster (names + @-tokens for the
+    composer) folds in the space's writers on other households, never a
+    follower household."""
+    sid = await _chat_space(client)
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO remote_instances"
+        "(id, display_name, remote_identity_pk, key_self_to_remote,"
+        " key_remote_to_self, remote_inbox_url, local_inbox_id, status,"
+        " source) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "peer-b",
+            "Peer B",
+            "00" * 32,
+            "k1",
+            "k2",
+            "https://b/wh",
+            "wh-b",
+            "confirmed",
+            "manual",
+        ),
+    )
+    for uid, name, role in (
+        ("uid-jack", "Jack", "member"),
+        ("uid-fan", "Fan", "subscriber"),
+    ):
+        await db.enqueue(
+            "INSERT INTO space_remote_members"
+            "(space_id, instance_id, user_id, user_pk, display_name, role)"
+            " VALUES(?,?,?,?,?,?)",
+            (sid, "peer-b", uid, "pk", name, role),
+        )
+    await db.enqueue(
+        "INSERT INTO remote_users"
+        "(user_id, instance_id, remote_username, display_name,"
+        " synced_at, deprovisioned_at)"
+        " VALUES(?,?,?,?, datetime('now'), NULL)",
+        ("uid-jack", "peer-b", "jack", "Jack Remote"),
+    )
+    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
+    r = await client.get(
+        f"/api/conversations/{cid}/members", headers=_auth(client._admin_token)
+    )
+    assert r.status == 200, await r.text()
+    rows = {m["user_id"]: m for m in await r.json()}
+    assert "uid-fan" not in rows
+    jack = rows["uid-jack"]
+    assert jack["display_name"] == "Jack Remote"
+    assert jack["instance_id"] == "peer-b"
+    assert jack["household_name"] == "Peer B"
+    assert jack["mention"] == "jack"

@@ -13,6 +13,7 @@ from socialhome.domain.conversation import (
     ConversationMember,
     ConversationType,
     RemoteConversationMember,
+    SystemChatScope,
 )
 from socialhome.domain.mention import MentionType
 from socialhome.domain.user import RemoteUser
@@ -159,3 +160,91 @@ async def test_remote_seat_without_any_name_is_skipped(env):
         )
     )
     assert await env.resolver.resolve("d1", "@ghost") == ()
+
+
+class _Policy:
+    """A system-chat policy stub: a computed roster on other households."""
+
+    def __init__(self, *seats: RemoteConversationMember) -> None:
+        self.seats = list(seats)
+
+    async def remote_seats(self, conv) -> list[RemoteConversationMember]:
+        return self.seats
+
+
+async def _system_chat(env, conv_id, *usernames):
+    await env.convos.create(
+        Conversation(
+            id=conv_id,
+            type=ConversationType.GROUP_DM,
+            created_at=datetime.now(timezone.utc),
+            system_scope=SystemChatScope.HOUSEHOLD,
+        )
+    )
+    for u in usernames:
+        await env.convos.add_member(
+            ConversationMember(
+                conversation_id=conv_id,
+                username=u,
+                joined_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+
+def _computed(user_id: str, remote_username: str = "") -> RemoteConversationMember:
+    return RemoteConversationMember(
+        conversation_id="sys",
+        instance_id="peer-b",
+        remote_username=remote_username,
+        joined_at="",
+        user_id=user_id,
+        display_name=user_id,
+    )
+
+
+async def test_system_chat_resolves_the_policys_remote_roster(env):
+    """A space chat keeps no remote seat rows: the policy's computed roster
+    (looked up by ``user_id`` when it names no login) makes members on
+    other households mentionable."""
+    anna = await env.user_svc.provision(username="anna", display_name="Anna")
+    await _system_chat(env, "sys", "anna")
+    await env.users.upsert_remote(
+        RemoteUser(
+            user_id="remote-carol-1",
+            instance_id="peer-b",
+            remote_username="carol",
+            display_name="Carol",
+            handle="caz",
+        )
+    )
+    # A stored remote seat is ignored for a system chat.
+    await env.convos.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="sys",
+            instance_id="peer-b",
+            remote_username="erin",
+            joined_at=datetime.now(timezone.utc).isoformat(),
+            user_id="seat-erin-1",
+        )
+    )
+    policy = _Policy(
+        _computed("remote-carol-1"),
+        # Unknown here and no login on the roster: not mentionable.
+        _computed("remote-nameless"),
+        # Unknown here, but the roster named a login.
+        _computed("remote-frank", remote_username="frank"),
+    )
+    resolver = DmMentionResolver(env.convos, env.users, policy)  # type: ignore[arg-type]
+    out = await resolver.resolve("sys", "@anna @caz @frank @erin")
+    assert [m.user_id for m in out] == [anna.user_id, "remote-carol-1", "remote-frank"]
+    tokens = await resolver.tokens("sys")
+    assert tokens["remote-carol-1"] == "caz"
+    assert "remote-nameless" not in tokens
+
+
+async def test_system_chat_without_policy_has_no_remote_seats(env):
+    await env.user_svc.provision(username="anna", display_name="Anna")
+    await _system_chat(env, "sys", "anna")
+    conv = await env.convos.get("sys")
+    assert conv is not None
+    assert await env.resolver.remote_seats(conv) == []

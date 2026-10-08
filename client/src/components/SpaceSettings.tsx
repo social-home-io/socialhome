@@ -272,6 +272,8 @@ export function SpaceSettings({
   const featureStickies = useSignal(space.features?.stickies ?? true)
   const featureGallery = useSignal(space.features?.gallery ?? true)
   const featureBazaar = useSignal(space.features?.bazaar ?? true)
+  // The members' chat (Feed | Chat on the Feed tab). On by default.
+  const featureChat = useSignal(space.features?.chat ?? true)
   // The readability opt-in. OFF by default: with it off the space is
   // listed in a directory but nothing of its content is published — no GFS
   // relay, no content key for a follower, no subscribe accepted. It is
@@ -452,6 +454,7 @@ export function SpaceSettings({
       ['stickies', featureStickies.value, f?.stickies ?? true],
       ['gallery', featureGallery.value, f?.gallery ?? true],
       ['bazaar', featureBazaar.value, f?.bazaar ?? true],
+      ['chat', featureChat.value, f?.chat ?? true],
       ['location', locationEnabled.value, Boolean(f?.location)],
       ['location_mode', locationMode.value, previousMode],
       ['allow_subscribers', allowSubscribers.value, Boolean(f?.allow_subscribers)],
@@ -767,6 +770,19 @@ export function SpaceSettings({
               }}
             />
             🛍 {t('nav.bazaar')}
+          </label>
+          <label class="sh-toggle-row">
+            <input
+              type="checkbox"
+              checked={featureChat.value}
+              onChange={(e) => {
+                featureChat.value = (e.target as HTMLInputElement).checked
+              }}
+            />
+            <span class="sh-toggle-row__text">
+              <span>💬 {t('space.feature.chat')}</span>
+              <span class="sh-toggle-row__sub">{t('space.feature.chat_sub')}</span>
+            </span>
           </label>
         </fieldset>
         <fieldset class="sh-form-fieldset" data-testid="space-access">

@@ -11,8 +11,10 @@
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 
-export interface HouseholdChatSummary {
-  /** ``false`` while the household turned the chat off. */
+/** A system chat's summary for the viewer (``GET /api/household/chat``,
+ *  ``GET /api/spaces/{id}/chat``). */
+export interface SystemChatSummary {
+  /** ``false`` while the chat is off (or, in a space, for a follower). */
   enabled: boolean
   conversation_id: string | null
   unread: number
@@ -21,6 +23,22 @@ export interface HouseholdChatSummary {
   /** The viewer's read watermark (UTC) — anchors the "New messages"
    *  divider; ``null`` = never read. */
   last_read_at: string | null
+}
+
+export type HouseholdChatSummary = SystemChatSummary
+
+/** Normalise a summary answer (missing fields, a negative count). */
+export function parseChatSummary(body: Partial<SystemChatSummary> | null): SystemChatSummary {
+  return {
+    enabled: body?.enabled === true,
+    conversation_id: body?.conversation_id ?? null,
+    unread: Math.max(0, body?.unread ?? 0),
+    notif_level: body?.notif_level === 'mentions'
+      ? 'mentions'
+      : body?.notif_level === 'all' ? 'all' : null,
+    muted_until: body?.muted_until ?? null,
+    last_read_at: body?.last_read_at ?? null,
+  }
 }
 
 /** The latest summary; ``null`` before the first answer. */
@@ -33,16 +51,7 @@ export const householdChatError = signal(false)
 export async function loadHouseholdChat(): Promise<void> {
   try {
     const body = await api.get('/api/household/chat') as Partial<HouseholdChatSummary> | null
-    householdChat.value = {
-      enabled: body?.enabled === true,
-      conversation_id: body?.conversation_id ?? null,
-      unread: Math.max(0, body?.unread ?? 0),
-      notif_level: body?.notif_level === 'mentions'
-        ? 'mentions'
-        : body?.notif_level === 'all' ? 'all' : null,
-      muted_until: body?.muted_until ?? null,
-      last_read_at: body?.last_read_at ?? null,
-    }
+    householdChat.value = parseChatSummary(body)
     householdChatError.value = false
   } catch {
     householdChatError.value = true

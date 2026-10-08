@@ -577,7 +577,9 @@ class ConversationMembersView(BaseView):
         # the thread header reads its title + avatar from this endpoint,
         # and without the remote rows a cross-household DM renders with
         # no peer name and a placeholder avatar.
-        remote_members = await repo.list_remote_members(conv_id)
+        # A space chat keeps no remote seats: its members on other
+        # households come from the space roster (DmService computes them).
+        remote_members = await self.svc(dm_service_key).remote_members(conv_id)
         # Member rows hold ``username``; the user_repo lookup gives us
         # display_name + user_id (and the persisted last_seen_at fallback
         # for offline users).
@@ -618,9 +620,13 @@ class ConversationMembersView(BaseView):
                 }
             )
         for rm in remote_members:
-            ru = await user_repo.get_remote_by_member(
-                rm.instance_id,
-                rm.remote_username,
+            ru = (
+                await user_repo.get_remote_by_member(
+                    rm.instance_id,
+                    rm.remote_username,
+                )
+                if rm.remote_username
+                else await user_repo.get_remote(rm.user_id or "")
             )
             if ru is None:
                 if rm.user_id is None:

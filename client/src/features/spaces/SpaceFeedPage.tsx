@@ -1,6 +1,6 @@
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
-import { useRoute } from 'preact-iso'
+import { useLocation, useRoute } from 'preact-iso'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
 import { ws } from '@/ws'
@@ -62,6 +62,15 @@ import { SpaceVersionBanner } from '@/components/SpaceVersionBanner'
 import { SpaceHero } from '@/components/SpaceHero'
 import { SpaceNotifPrefsMenu } from './SpaceNotifPrefsMenu'
 import { confirmDialog } from '@/components/confirm'
+import { SegmentedSwitch } from '@/components/SegmentedSwitch'
+import { SpaceChatView, useSpaceChatSummary } from './SpaceChatView'
+import {
+  spaceChatOf,
+  spaceFeedViewFromQuery,
+  spaceFeedViews,
+  type SpaceFeedView,
+} from '@/store/spaceChat'
+import { isMuteActive } from '@/utils/mute'
 
 interface SpaceDetail {
   id: string
@@ -86,6 +95,8 @@ interface SpaceDetail {
     gallery?: boolean
     bazaar?: boolean
     location?: boolean
+    /** The space chat (Feed tab → Feed | Chat). Absent → on. */
+    chat?: boolean
     /** §23.49 — post types members may compose here; gates the
      *  composer's type picker. Absent → all types offered. */
     allowed_post_types?: string[]
@@ -272,6 +283,10 @@ export default function SpaceFeedPage() {
   // ``?tab=moderation`` (the review / report notifications) waits for the
   // viewer's role: only content authority has the tab.
   const wantsModeration = query?.tab === 'moderation'
+  // ``?view=chat`` (the chat notifications, a reload) opens the Feed tab's
+  // Chat view; the switch keeps the URL in step.
+  const loc = useLocation() as ReturnType<typeof useLocation> | undefined
+  const wantedView = spaceFeedViewFromQuery(query?.view)
 
   // Apply the space's custom theme (§23 customization). The hook
   // fetches /api/spaces/{id}/theme, sets CSS vars, and cleans up on
@@ -379,6 +394,20 @@ export default function SpaceFeedPage() {
     if (!spaceDetail.value || activeTab.value === 'moderation') return
     if (!visibleSpaceTabs(features, true).includes(activeTab.value)) activeTab.value = 'feed'
   }, [features])
+
+  // The Feed tab's Feed | Chat switch: Chat for a member (never a
+  // follower) while the space keeps chat on and the server agrees. A
+  // ``?view=chat`` the viewer can't have shows the posts.
+  const chatEligible = features?.chat !== false && isWriterRole(viewerRole.value)
+  const feedViews = spaceFeedViews(features, viewerRole.value, spaceChatOf(spaceId))
+  const feedView: SpaceFeedView = feedViews.includes(wantedView) ? wantedView : 'posts'
+  const chatOpen = activeTab.value === 'feed' && feedView === 'chat'
+  useSpaceChatSummary(spaceId, chatEligible, chatOpen)
+  const pickFeedView = (next: SpaceFeedView) => {
+    const path = `/spaces/${spaceId}`
+    const url = next === 'chat' ? `${path}?view=chat` : path
+    if (loc && loc.url !== url) loc.route(url, true)
+  }
 
   const loadTabData = (tab: SpaceTab) => {
     activeTab.value = tab
@@ -509,7 +538,7 @@ export default function SpaceFeedPage() {
     && !adminOnly('posts')
 
   return (
-    <div class="sh-space-feed sh-space-scope">
+    <div class={chatOpen ? 'sh-space-feed sh-space-scope sh-space-feed--chat' : 'sh-space-feed sh-space-scope'}>
       <SpaceSubHeader
         name={s?.name ?? t('spaces.space_title')}
         emoji={s?.emoji ?? null}
@@ -558,7 +587,9 @@ export default function SpaceFeedPage() {
        *  (cover or icon), so the space stays branded without eating the
        *  vertical space a tool tab needs. */}
       {s && (() => {
-        const isFeed = activeTab.value === 'feed'
+        // The open chat is a tool view: the slim header, so the thread
+        // keeps the height.
+        const isFeed = activeTab.value === 'feed' && !chatOpen
         const branded = !!(s.cover_url || s.icon_url)
         const show = isFeed ? branded || !!s.about_markdown : branded
         if (!show) return null
@@ -575,7 +606,29 @@ export default function SpaceFeedPage() {
         )
       })()}
 
-      {activeTab.value === 'feed' && (
+      {activeTab.value === 'feed' && feedViews.length > 1 && (
+        <SegmentedSwitch<SpaceFeedView>
+          class="sh-space-feed-switch"
+          options={feedViews}
+          value={feedView}
+          labels={{ posts: t('space.chat.view_posts'), chat: t('space.chat.view_chat') }}
+          ariaLabel={t('space.chat.view_aria')}
+          // A muted chat keeps its count on the server but raises no
+          // badge — the household Chat tab's rule.
+          badges={{
+            chat: chatOpen || isMuteActive(spaceChatOf(spaceId)?.muted_until)
+              ? 0
+              : (spaceChatOf(spaceId)?.unread ?? 0),
+          }}
+          onChange={pickFeedView}
+        />
+      )}
+      {chatOpen && (
+        <SpaceChatView spaceId={spaceId} spaceName={s?.name ?? t('spaces.space_title')}
+                       canModerate={canModerate} />
+      )}
+
+      {activeTab.value === 'feed' && !chatOpen && (
         <div class="sh-feed sh-space-feed-content">
           {viewerRole.value === 'subscriber' ? (
             <div class="sh-subscriber-banner" role="status">
