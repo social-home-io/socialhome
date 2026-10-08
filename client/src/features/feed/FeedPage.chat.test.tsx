@@ -342,16 +342,18 @@ describe('FeedPage — Chat tab pill vs mute and level', () => {
     })
   })
 
-  it('"Only @mentions": plain frames are not counted (the frame carries no mention info)', async () => {
-    const { findByRole, householdChat } = await onFeedWithSummary(
+  it('"Only @mentions": only frames that mention the viewer count', async () => {
+    const { findByRole, householdChat, waitFor } = await onFeedWithSummary(
       { ...SUMMARY, notif_level: 'mentions' },
     )
     const chatTab = await findByRole('tab', { name: 'Chat' })
     emit('dm.message', frame('m1'))
-    emit('dm.message', frame('m2'))
+    emit('dm.message', { ...frame('m2'), mentions_you: false })
     await new Promise(r => setTimeout(r, 20))
     expect(householdChat.value?.unread).toBe(0)
     expect(chatTab.querySelector('.sh-tab-unread')).toBeNull()
+    emit('dm.message', { ...frame('m3'), mentions_you: true })
+    await waitFor(() => expect(householdChat.value?.unread).toBe(1))
   })
 })
 

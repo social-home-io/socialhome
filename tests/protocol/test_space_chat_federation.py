@@ -327,6 +327,10 @@ async def test_a_space_chat_round_trips_between_its_writer_households(world):
     assert await _messages(b) == [(sent.id, "u-anna", SECRET, 0)]
     b_chat = await _chat_id(b, "bob")
     assert b_chat != a_chat
+    # A new seat hears only @-mentions (the badge counts none of this);
+    # at "all" the inbound message counts as unread.
+    assert (await b.chat.summary(SP, "bob")).unread == 0
+    await b.dm.set_notif_level(b_chat, username="bob", level="all")
     assert (await b.chat.summary(SP, "bob")).unread == 1
     # bob replies, edits, reacts — from his own household.
     reply = await b.dm.send_message(

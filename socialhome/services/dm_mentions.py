@@ -7,6 +7,11 @@ member view is the conversation's seats on THIS household — local
 peer's ``remote_users`` row, or the ``user_id`` a group roster seat names)
 — so a mention can never resolve to someone outside the conversation.
 
+A system chat keeps no remote seat rows: its members on other households
+come from the access policy (:meth:`SystemChatPolicy.remote_seats` — a
+space chat's writers on the space roster), so a space chat's composer can
+@-mention a member of another household too.
+
 Each household parses the decrypted message against its own seat view;
 nothing about mentions travels on the wire (no protocol change). ``@here``
 has no meaning in a chat and is always dropped.
@@ -15,8 +20,13 @@ has no meaning in a chat and is always dropped.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
-from ..domain.conversation import ConversationType
+from ..domain.conversation import (
+    Conversation,
+    ConversationType,
+    RemoteConversationMember,
+)
 from ..domain.mention import (
     Mention,
     MentionCandidate,
@@ -28,6 +38,9 @@ from ..domain.mention import (
 )
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+
+if TYPE_CHECKING:
+    from .system_chat_policy import SystemChatPolicy
 
 log = logging.getLogger(__name__)
 
@@ -48,15 +61,26 @@ def _names(*names: str | None) -> tuple[str, ...]:
 class DmMentionResolver:
     """Conversation-seat-scoped mention resolution. Stateless; cheap to build."""
 
-    __slots__ = ("_convos", "_users")
+    __slots__ = ("_convos", "_users", "_system_chats")
 
     def __init__(
         self,
         conversation_repo: AbstractConversationRepo,
         user_repo: AbstractUserRepo,
+        system_chats: "SystemChatPolicy | None" = None,
     ) -> None:
         self._convos = conversation_repo
         self._users = user_repo
+        self._system_chats = system_chats
+
+    async def remote_seats(self, conv: Conversation) -> list[RemoteConversationMember]:
+        """*conv*'s seats on other households: the stored rows, or — for a
+        system chat — the policy's computed roster (none without a policy)."""
+        if conv.system_scope is None:
+            return await self._convos.list_remote_members(conv.id)
+        if self._system_chats is None:
+            return []
+        return await self._system_chats.remote_seats(conv)
 
     async def candidates(self, conversation_id: str) -> list[MentionCandidate]:
         """Every mentionable seat of *conversation_id* (local + remote).
@@ -85,9 +109,13 @@ class DmMentionResolver:
                     handles=_names(user.handle, user.username),
                 )
             )
-        for rm in await self._convos.list_remote_members(conversation_id):
-            ru = await self._users.get_remote_by_member(
-                rm.instance_id, rm.remote_username
+        for rm in await self.remote_seats(conv):
+            ru = (
+                await self._users.get_remote_by_member(
+                    rm.instance_id, rm.remote_username
+                )
+                if rm.remote_username
+                else await self._users.get_remote(rm.user_id or "")
             )
             if ru is not None:
                 if ru.deprovisioned_at or ru.user_id in seen:
@@ -100,7 +128,7 @@ class DmMentionResolver:
                     )
                 )
                 continue
-            if rm.user_id is None or rm.user_id in seen:
+            if rm.user_id is None or rm.user_id in seen or not rm.remote_username:
                 continue
             # A group seat on a household we never paired with: only the
             # username the authority's roster shipped.
@@ -146,6 +174,37 @@ class DmMentionResolver:
             )
             return ()
         return out
+
+    async def count_mentioning(
+        self, conversation_id: str, contents: list[str], user_id: str
+    ) -> int:
+        """How many of ``contents`` @-mention ``user_id`` (one roster read
+        for all of them). Fail-soft: a lookup failure counts nothing."""
+        texts = [c for c in contents if c and "@" in c]
+        if not texts:
+            return 0
+        try:
+            parsed = await self._parse(conversation_id, texts)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "mention count failed for conversation %s: %s", conversation_id, exc
+            )
+            return 0
+        return sum(1 for ms in parsed if any(m.user_id == user_id for m in ms))
+
+    async def unread_for(
+        self, conversation_id: str, username: str, user_id: str, notif_level: str | None
+    ) -> int:
+        """A member's unread count as their level hears it: every unread
+        message at ``all``, only the unread ones that @-mention them at
+        ``mentions`` — so a chat badge never shows chatter the member
+        asked not to hear about."""
+        if notif_level != "mentions":
+            return await self._convos.count_unread(conversation_id, username)
+        contents = await self._convos.list_unread_contents(
+            conversation_id, username, types=MENTIONABLE_TYPES
+        )
+        return await self.count_mentioning(conversation_id, contents, user_id)
 
     async def added(
         self, conversation_id: str, before: str | None, after: str | None

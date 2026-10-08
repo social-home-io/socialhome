@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from datetime import datetime, timezone
 
@@ -310,6 +311,29 @@ async def test_count_unread(env):
         )
     count = await env.repo.count_unread("conv-unread", "bob")
     assert count == 2
+
+
+async def test_list_unread_contents_matches_count_unread_by_type(env):
+    """The texts an @-mention count parses: the unread messages
+    ``count_unread`` counts, of the asked types only, newest first."""
+    await env.repo.create(_conv("conv-uc"))
+    await env.repo.add_member(_member("conv-uc", "bob"))
+    await env.repo.save_message(_message("uc-1", "conv-uc", content="@bob one"))
+    await env.repo.save_message(
+        dataclasses.replace(_message("uc-2", "conv-uc", content="{}"), type="location")
+    )
+    texts = await env.repo.list_unread_contents(
+        "conv-uc", "bob", types=frozenset({"text"})
+    )
+    assert texts == ["@bob one"]
+    assert (
+        await env.repo.list_unread_contents("conv-uc", "bob", types=frozenset()) == []
+    )
+    await env.repo.set_last_read("conv-uc", "bob", at="9999-12-31 00:00:00")
+    assert (
+        await env.repo.list_unread_contents("conv-uc", "bob", types=frozenset({"text"}))
+        == []
+    )
 
 
 # ── Reactions ─────────────────────────────────────────────────────────────

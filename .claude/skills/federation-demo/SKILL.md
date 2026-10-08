@@ -487,6 +487,33 @@ That single command runs the full sequence:
    **a**) keep **a**'s name — **c** logs ``authority signature did not
    verify against the space key — dropping``.
 
+9f. ``space-chat`` (v_55, every space's members' chat) — in **b**'s
+   space from ``traffic`` / ``calendar`` (owner **b**, members **a** and
+   **c**). Prereqs: ``up``, ``pair``, ``traffic``, ``calendar``; runs
+   standalone after them (``up → pair → traffic → calendar → space-chat``).
+   - **d** becomes a **follower-only household**: **b** mints a
+     ``subscriber`` invite link (``via: internal``) and **d** (paired with
+     **b** only) redeems it over federation. **b**, **a** and **c** must
+     hold **d**'s ``role='subscriber'`` seat, and **d**'s
+     ``GET /api/spaces/{id}/chat`` answers ``enabled: false``.
+   - **a**, **b**, **c** read their own chat (``GET /api/spaces/{id}/chat``
+     — each household maps the space to its own conversation; no
+     conversation id rides the wire).
+   - **a** posts → **b** and **c** hold it (``SPACE_CHAT_MESSAGE_CREATED``);
+     **c** replies to it → **a** and **b** hold the reply linked to their
+     copy of **a**'s message; **b** posts and edits → **a** and **c** hold
+     the edit (``SPACE_CHAT_MESSAGE_UPDATED``); **a** reacts 👍 to **c**'s
+     reply → **b** and **c** hold it (``SPACE_CHAT_REACTION``).
+   - **b** — the owner, so a moderator — deletes **c**'s reply → it is
+     ``deleted`` with its text gone on **a**, **b** and **c**
+     (``SPACE_CHAT_MESSAGE_DELETED``).
+   - **d** holds no chat message of the run (fan-out is limited to
+     households with a writer seat), and **a**, **b**, **c** see each other
+     at ``>= FederationCapability.MIN_FOR_SPACE_CHAT`` (v_55).
+   In ``all`` it runs after ``rotation-offline-catchup`` and before
+   ``replay``: it seats **d** as a follower in **b**'s space, which the
+   earlier steps assert member counts on.
+
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is
    offline, restarts **c**, waits across the second outbox-backoff
@@ -519,8 +546,8 @@ mesh-member-cert → space-media-blob → space-gallery-media-blob →
 space-sync-catchup-media → sync-https-fallback → admin-promote-kick →
 app-session → remote-invite-decline → group-dm → federated-moderation →
 space-report → forwarded-role-change → page-concurrent-edit →
-admin-revoke-rotation → rotation-offline-catchup → replay → unpair →
-unpair-offline`` in that order.
+admin-revoke-rotation → rotation-offline-catchup → space-chat → replay →
+unpair → unpair-offline`` in that order.
 The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-open-signup`` /
 ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /

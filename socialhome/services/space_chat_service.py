@@ -51,6 +51,7 @@ from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .dm_mentions import DmMentionResolver
 from .system_chat_policy import SpaceChatAccess, SystemChatPolicy
 
 log = logging.getLogger(__name__)
@@ -182,7 +183,11 @@ class SpaceChatService:
         return SystemChatSummary(
             enabled=True,
             conversation_id=chat.id,
-            unread=await self._convos.count_unread(chat.id, username),
+            # At "Only @mentions" only the unread messages that mention the
+            # viewer count — the badge never shows chatter they muted.
+            unread=await DmMentionResolver(
+                self._convos, self._users, self._policy
+            ).unread_for(chat.id, username, user.user_id, seat.notif_level),
             notif_level=seat.notif_level,
             muted_until=muted_until,
             last_read_at=seat.last_read_at,

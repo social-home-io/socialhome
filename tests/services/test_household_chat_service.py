@@ -168,9 +168,12 @@ async def test_summary_reports_unread_level_and_mute(stack):
     await stack.provision("bob")
     chat_id = (await stack.chat.summary("anna")).conversation_id
     await stack.dm.send_message(chat_id, sender_username="bob", content="hi all")
+    assert (await stack.chat.summary("anna")).unread == 1
+    await stack.dm.send_message(chat_id, sender_username="bob", content="@anna lunch?")
     await stack.dm.set_notif_level(chat_id, username="anna", level="mentions")
     await stack.dm.mute(chat_id, username="anna", duration="forever")
     summary = await stack.chat.summary("anna")
+    # At "Only @mentions" only the unread message that mentions anna counts.
     assert summary.unread == 1
     assert summary.notif_level == "mentions"
     assert summary.muted_until == MUTED_FOREVER

@@ -28,7 +28,11 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
-from ..domain.conversation import Conversation, SystemChatScope
+from ..domain.conversation import (
+    Conversation,
+    RemoteConversationMember,
+    SystemChatScope,
+)
 from ..domain.preferences import FeatureDisabledError
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -38,6 +42,7 @@ from ..domain.space import (
     SpacePermissionError,
 )
 from ..domain.user import User
+from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .preferences_service import PreferencesService
@@ -73,6 +78,11 @@ class SystemChatAccess(Protocol):
         """Whether ``user`` may delete OTHER people's messages in ``conv``."""
         ...
 
+    async def remote_seats(self, conv: Conversation) -> list[RemoteConversationMember]:
+        """The chat's members on OTHER households, as seat-shaped rows
+        (system chats keep no remote seat rows: the roster is computed)."""
+        ...
+
 
 class HouseholdChatAccess:
     """Household chat: every active local user, while the toggle is on."""
@@ -99,6 +109,10 @@ class HouseholdChatAccess:
         """Nobody moderates the household chat: everyone deletes their own."""
         return False
 
+    async def remote_seats(self, conv: Conversation) -> list[RemoteConversationMember]:
+        """The household chat never leaves the household."""
+        return []
+
 
 class SpaceChatAccess:
     """A space's chat: the space's local WRITER seats, while chat is on.
@@ -111,15 +125,25 @@ class SpaceChatAccess:
     (:class:`SpaceArchivedError`), like posts and comments; reading an
     archived space's chat stays allowed. Content authority (owner, admin,
     moderator) may delete anyone's message (:meth:`may_moderate`).
+
+    The members on other households come from the space roster
+    (``space_remote_members``, :meth:`remote_seats`) — never a follower,
+    a banned or a removed seat — so the composer can @-mention them and
+    their messages carry their names.
     """
 
-    __slots__ = ("_spaces",)
+    __slots__ = ("_spaces", "_remote_members")
 
     #: A space chat can be busy; a new seat rings only on an @-mention.
     default_notif_level = "mentions"
 
-    def __init__(self, space_repo: AbstractSpaceRepo) -> None:
+    def __init__(
+        self,
+        space_repo: AbstractSpaceRepo,
+        remote_members: AbstractSpaceRemoteMemberRepo | None = None,
+    ) -> None:
         self._spaces = space_repo
+        self._remote_members = remote_members
 
     async def _writer_role(self, conv: Conversation, user: User) -> tuple[Space, str]:
         """``conv``'s space and the user's writer role in it; raise otherwise."""
@@ -150,6 +174,43 @@ class SpaceChatAccess:
         except PermissionError, FeatureDisabledError:
             return False
         return role in _CONTENT_ROLE_VALUES
+
+    async def remote_seats(self, conv: Conversation) -> list[RemoteConversationMember]:
+        """The space's writers on other households, seat-shaped.
+
+        Only writer roles are kept (an allow-list — a follower, or any role
+        added later, stays out); banned and removed (tombstoned) seats are
+        left out, as is everything while the space is unknown, dissolved
+        or has chat off. ``remote_username`` is always empty: the roster
+        carries no login, so consumers look the person up by ``user_id``
+        (``remote_users``), and the roster's ``display_name`` names them
+        when this household doesn't know them.
+        """
+        if self._remote_members is None or not conv.space_id:
+            return []
+        space = await self._spaces.get(conv.space_id)
+        if space is None or space.dissolved or not space.features.chat:
+            return []
+        banned = {str(b.get("user_id")) for b in await self._spaces.list_bans(space.id)}
+        out: list[RemoteConversationMember] = []
+        seen: set[str] = set()
+        for seat in await self._remote_members.list_for_space(space.id):
+            if seat.tombstoned or seat.user_id in seen or seat.user_id in banned:
+                continue
+            if seat.role not in _WRITER_ROLE_VALUES:
+                continue
+            seen.add(seat.user_id)
+            out.append(
+                RemoteConversationMember(
+                    conversation_id=conv.id,
+                    instance_id=seat.instance_id,
+                    remote_username="",
+                    joined_at=seat.joined_at or "",
+                    user_id=seat.user_id,
+                    display_name=seat.display_name,
+                )
+            )
+        return out
 
 
 class SystemChatPolicy:
@@ -211,6 +272,15 @@ class SystemChatPolicy:
         if user is None:
             return False
         return await access.may_moderate(conv, user)
+
+    async def remote_seats(self, conv: Conversation) -> list[RemoteConversationMember]:
+        """``conv``'s members on other households (empty for a scope
+        without rules — fail closed)."""
+        try:
+            access = self.access_for(conv)
+        except PermissionError:
+            return []
+        return await access.remote_seats(conv)
 
     async def can_read(self, conv: Conversation, user_id: str) -> bool:
         """Whether ``user_id`` may read ``conv`` right now."""

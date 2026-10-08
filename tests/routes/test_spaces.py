@@ -3353,6 +3353,15 @@ async def test_space_members_talk_in_the_space_chat(client):
     )
     assert r.status == 201, await r.text()
     mid = (await r.json())["id"]
+    # A new seat hears only @-mentions, so its badge counts none of this…
+    assert (await _space_chat(client, sid, client._admin_token))[1]["unread"] == 0
+    # …and at "all" it counts every unread message.
+    r = await client.put(
+        f"/api/conversations/{cid}/notif-prefs",
+        json={"level": "all"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
     assert (await _space_chat(client, sid, client._admin_token))[1]["unread"] == 1
     r = await client.get(
         f"/api/conversations/{cid}/messages", headers=_auth(client._admin_token)
@@ -3462,3 +3471,118 @@ async def test_a_space_admin_turns_the_chat_off_and_on(client):
     assert r.status == 200
     status, on = await _space_chat(client, sid, client._admin_token)
     assert on["enabled"] is True and on["conversation_id"] == cid
+
+
+async def test_space_chat_roster_names_writers_on_other_households(client):
+    """The chat keeps no remote seats: its roster (names + @-tokens for the
+    composer) folds in the space's writers on other households, never a
+    follower household."""
+    sid = await _chat_space(client)
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO remote_instances"
+        "(id, display_name, remote_identity_pk, key_self_to_remote,"
+        " key_remote_to_self, remote_inbox_url, local_inbox_id, status,"
+        " source) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "peer-b",
+            "Peer B",
+            "00" * 32,
+            "k1",
+            "k2",
+            "https://b/wh",
+            "wh-b",
+            "confirmed",
+            "manual",
+        ),
+    )
+    for uid, name, role in (
+        ("uid-jack", "Jack", "member"),
+        ("uid-fan", "Fan", "subscriber"),
+    ):
+        await db.enqueue(
+            "INSERT INTO space_remote_members"
+            "(space_id, instance_id, user_id, user_pk, display_name, role)"
+            " VALUES(?,?,?,?,?,?)",
+            (sid, "peer-b", uid, "pk", name, role),
+        )
+    await db.enqueue(
+        "INSERT INTO remote_users"
+        "(user_id, instance_id, remote_username, display_name,"
+        " synced_at, deprovisioned_at)"
+        " VALUES(?,?,?,?, datetime('now'), NULL)",
+        ("uid-jack", "peer-b", "jack", "Jack Remote"),
+    )
+    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
+    r = await client.get(
+        f"/api/conversations/{cid}/members", headers=_auth(client._admin_token)
+    )
+    assert r.status == 200, await r.text()
+    rows = {m["user_id"]: m for m in await r.json()}
+    assert "uid-fan" not in rows
+    jack = rows["uid-jack"]
+    assert jack["display_name"] == "Jack Remote"
+    assert jack["instance_id"] == "peer-b"
+    assert jack["household_name"] == "Peer B"
+    assert jack["mention"] == "jack"
+
+
+# ── Rate limits on /api/spaces ─────────────────────────────────────────────
+
+
+async def test_opening_many_spaces_in_a_minute_is_not_rate_limited(client):
+    """Opening one space costs ~10 ``/api/spaces/...`` requests; under the
+    60/min default the ~6th space opened in a minute got 429 (the chat
+    summary among them). Reads now share a 600/min bucket."""
+    sid = await _chat_space(client)
+    headers = _auth(client._admin_token)
+    statuses = [
+        (await client.get(f"/api/spaces/{sid}", headers=headers)).status
+        for _ in range(70)
+    ]
+    assert statuses.count(200) == 70
+
+
+async def test_space_writes_keep_their_tight_limits(client):
+    """The loose read bucket doesn't loosen create or ban: create (same path
+    as the list) has its own method rule, ban its 5/min glob."""
+    headers = _auth(client._admin_token)
+    created = [
+        (
+            await client.post("/api/spaces", json={"name": f"S{i}"}, headers=headers)
+        ).status
+        for i in range(21)
+    ]
+    assert created[:20] == [201] * 20
+    assert created[20] == 429
+    # Listing still works: a read isn't the create bucket.
+    assert (await client.get("/api/spaces", headers=headers)).status == 200
+    bans = [
+        (
+            await client.post(
+                "/api/spaces/sp-x/ban", json={"user_id": "nobody"}, headers=headers
+            )
+        ).status
+        for _ in range(6)
+    ]
+    assert 429 not in bans[:5]
+    assert bans[5] == 429
+
+
+async def test_space_chat_roster_is_refused_to_followers_and_non_members(client):
+    """The roster names people on other households: only the chat's
+    members (a space's writers) read it — a non-member and a local
+    follower get 403."""
+    sid = await _create_subscribable_space(client, "Broadcast roster")
+    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
+    path = f"/api/conversations/{cid}/members"
+    r = await client.get(path, headers=_auth(client._bob_token))
+    assert r.status == 403
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe", headers=_auth(client._bob_token)
+    )
+    assert r.status in (200, 201), await r.text()
+    r = await client.get(path, headers=_auth(client._bob_token))
+    assert r.status == 403
+    r = await client.get(path, headers=_auth(client._admin_token))
+    assert r.status == 200

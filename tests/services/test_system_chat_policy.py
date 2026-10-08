@@ -23,6 +23,7 @@ from socialhome.domain.space import (
     SpaceRole,
 )
 from socialhome.domain.user import User
+from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 from socialhome.services.preferences_service import PreferencesService
 from socialhome.services.system_chat_policy import (
     HOUSEHOLD_CHAT_SECTION,
@@ -185,6 +186,9 @@ class _Spaces:
     async def is_banned(self, space_id: str, user_id: str) -> bool:
         return user_id in self.banned
 
+    async def list_bans(self, space_id: str) -> list[dict]:
+        return [{"space_id": space_id, "user_id": u} for u in sorted(self.banned)]
+
 
 @pytest.fixture
 def space_env():
@@ -283,3 +287,90 @@ async def test_space_content_authority_moderates(space_env, role, moderates):
     assert (
         await policy.may_moderate(_chat(SystemChatScope.SPACE), "u-anna") is moderates
     )
+
+
+# ── Space chat: members on other households ────────────────────────────────
+
+
+class _RemoteSeats:
+    """In-memory ``space_remote_members`` (live rows only, like the repo)."""
+
+    def __init__(self, *seats: SpaceRemoteMember) -> None:
+        self.seats = list(seats)
+
+    async def list_for_space(self, space_id: str) -> list[SpaceRemoteMember]:
+        return [s for s in self.seats if s.space_id == space_id]
+
+
+def _seat(user_id: str, role: str = "member", **kw) -> SpaceRemoteMember:
+    return SpaceRemoteMember(
+        space_id="sp",
+        instance_id="peer-b",
+        user_id=user_id,
+        display_name=user_id.upper(),
+        joined_at="2026-10-01T00:00:00+00:00",
+        role=role,
+        **kw,
+    )
+
+
+@pytest.fixture
+def remote_env():
+    spaces = _Spaces()
+    seats = _RemoteSeats(
+        _seat("r-member"),
+        _seat("r-admin", role=SpaceRole.ADMIN.value),
+        _seat("r-follower", role=SpaceRole.SUBSCRIBER.value),
+        # A role the policy doesn't know is no writer (allow-list).
+        _seat("r-unknown", role="guest"),
+        _seat("r-gone", tombstoned=True),
+        _seat("r-banned"),
+        _seat("r-member"),  # a duplicate row counts once
+    )
+    spaces.banned.add("r-banned")
+    access = SpaceChatAccess(spaces, seats)  # type: ignore[arg-type]
+    policy = SystemChatPolicy(_Users(ANNA))  # type: ignore[arg-type]
+    policy.register(SystemChatScope.SPACE, access)
+    return spaces, policy
+
+
+async def test_space_remote_seats_are_the_writers_on_other_households(remote_env):
+    _spaces, policy = remote_env
+    seats = await policy.remote_seats(_chat(SystemChatScope.SPACE))
+    assert [s.user_id for s in seats] == ["r-member", "r-admin"]
+    first = seats[0]
+    assert first.conversation_id == "hh"
+    assert first.instance_id == "peer-b"
+    assert first.display_name == "R-MEMBER"
+    # The roster carries no login: consumers look the person up by id.
+    assert first.remote_username == ""
+
+
+@pytest.mark.parametrize("state", ["chat_off", "dissolved", "unknown"])
+async def test_space_remote_seats_empty_while_chat_unavailable(remote_env, state):
+    spaces, policy = remote_env
+    assert spaces.space is not None
+    if state == "chat_off":
+        spaces.space = dataclasses.replace(
+            spaces.space, features=SpaceFeatures(chat=False)
+        )
+    elif state == "dissolved":
+        spaces.space = dataclasses.replace(spaces.space, dissolved=True)
+    else:
+        spaces.space = None
+    assert await policy.remote_seats(_chat(SystemChatScope.SPACE)) == []
+
+
+async def test_remote_seats_empty_without_roster_household_or_rules(space_env):
+    _spaces, policy = space_env
+    # No remote-member repo wired.
+    assert await policy.remote_seats(_chat(SystemChatScope.SPACE)) == []
+    # No household rules registered → fail closed, no seats.
+    assert await policy.remote_seats(_chat(SystemChatScope.HOUSEHOLD)) == []
+    # A person-made conversation is no system chat.
+    assert await policy.remote_seats(_chat(None)) == []
+
+
+async def test_household_chat_has_no_remote_seats():
+    access = HouseholdChatAccess(_Prefs())  # type: ignore[arg-type]
+    assert await access.remote_seats(_chat()) == []

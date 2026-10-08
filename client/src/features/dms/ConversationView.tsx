@@ -12,6 +12,7 @@ import { AudioBubble } from '@/components/AudioBubble'
 import { VideoMedia } from '@/components/VideoMedia'
 import { openLightbox } from '@/components/ImageLightbox'
 import { showToast } from '@/components/Toast'
+import { confirmDialog } from '@/components/confirm'
 import { startCall } from '@/features/calls/callSession'
 import { showCallError } from '@/features/calls/CallEmbedBlockedDialog'
 import { ReadReceipt, readReceiptsEnabled } from '@/components/ReadReceipts'
@@ -357,6 +358,22 @@ export function canEditMessage(m: Message, myUserId: string | null | undefined):
   return ['image', 'video', 'file'].includes(m.type) && Boolean(m.content)
 }
 
+/** Sent and not deleted, and either the viewer's own or ``canModerate``
+ *  (a space chat's owner / admins / moderators delete anyone's). The
+ *  server re-checks the role. */
+export function canDeleteMessage(
+  m: Message, myUserId: string | null | undefined, canModerate: boolean,
+): boolean {
+  if (!myUserId || m.deleted || m.send_failed || m.id.startsWith('tmp-')) return false
+  return m.sender_user_id === myUserId || canModerate
+}
+
+/** ``m`` as the thread shows it once deleted: the placeholder, nothing of
+ *  what was said (text, media, reactions). */
+export function asDeleted(m: Message): Message {
+  return { ...m, deleted: true, content: '', media_url: null, reactions: [] }
+}
+
 /** WhatsApp-style "Last seen 12 min ago" formatter — same shape as the
  *  presence-page helper but inline so this page doesn't grow a util
  *  module just for one consumer. */
@@ -653,6 +670,12 @@ export interface ConversationViewProps {
    *  ``GET /api/conversations/{id}`` (a system chat 404s there) and
    *  follows later changes to it (the host's own mute control). */
   meta?: ConversationMeta
+  /** Offer "Delete" on the viewer's own messages (a hover chip and the
+   *  long-press sheet). Off by default: a DM thread has no delete. */
+  allowDelete?: boolean
+  /** With ``allowDelete``: the viewer may delete anyone's message — a
+   *  space chat's owner / admins / moderators. */
+  canModerate?: boolean
 }
 
 /** One conversation's thread — header, message list, composer — usable
@@ -668,6 +691,8 @@ export function ConversationView({
   allowCalls = true,
   onLeave,
   meta,
+  allowDelete = false,
+  canModerate = false,
 }: ConversationViewProps) {
   const convId = conversationId
   const location = useLocation()
@@ -715,6 +740,35 @@ export function ConversationView({
   /** The viewer changed their group level (header bell or Group info). */
   const setThreadLevel = (level: 'all' | 'mentions'): void => {
     if (threadInfo.value) threadInfo.value = { ...threadInfo.value, notif_level: level }
+  }
+  /** Show message ``id`` as deleted; drop a reply / edit aimed at it. */
+  const markDeleted = (id: string): void => {
+    const list = messages.value
+    const idx = list.findIndex(m => m.id === id)
+    if (idx >= 0 && !list[idx].deleted) {
+      const next = list.slice()
+      next[idx] = asDeleted(next[idx])
+      messages.value = next
+    }
+    if (replyTo.value?.id === id) replyTo.value = null
+    if (editing.value?.id === id) editing.value = null
+    if (contextSheetFor.value?.id === id) contextSheetFor.value = null
+  }
+  /** Delete ``m`` for everyone after a confirm — the viewer's own, or
+   *  (``canModerate``) somebody else's. */
+  const deleteMessage = async (m: Message): Promise<void> => {
+    const mine = m.sender_user_id === currentUser.value?.user_id
+    const ok = await confirmDialog(
+      mine ? t('dms.delete.confirm_own') : t('dms.delete.confirm_other'),
+      { destructive: true, confirmLabel: t('dms.delete.action') },
+    )
+    if (!ok) return
+    try {
+      await api.delete(`/api/conversations/${convId}/messages/${m.id}`)
+      markDeleted(m.id)
+    } catch (err) {
+      showToast(t('dms.delete.failed', { error: String((err as Error)?.message ?? err) }), 'error')
+    }
   }
   // Composer ``<input>`` ref — STT (push-to-talk transcription) appends
   // its final transcript here so the user can review + edit before
@@ -1215,6 +1269,14 @@ export function ConversationView({
       }
       messages.value = next
     })
+    // A message was deleted — by its sender or a space chat's moderator,
+    // here or on another household: the bubble turns into the
+    // placeholder in place (the frame carries ids only).
+    const offMessageDeleted = ws.on('dm.message_deleted', (e) => {
+      const d = e.data as { conversation_id?: string; message_id?: string }
+      if (d.conversation_id !== convId || !d.message_id) return
+      markDeleted(d.message_id)
+    })
     // Reaction add / remove from any session — sender's own
     // sessions get the frame too so a mobile + desktop mirror stay
     // in lockstep. The optimistic patch in ``toggleReaction`` is
@@ -1288,7 +1350,7 @@ export function ConversationView({
       // This store's thread is off screen once this runs — a page that
       // lands now has nowhere it legitimately belongs.
       s.active = false
-      offNewMsg(); offMediaReady(); offMessageUpdated()
+      offNewMsg(); offMediaReady(); offMessageUpdated(); offMessageDeleted()
       offReaction(); offGroupUpdated()
       offUserOnline(); offUserIdle(); offUserOffline()
     }
@@ -2702,6 +2764,19 @@ export function ConversationView({
                       ✎
                     </button>
                   )}
+                  {allowDelete && canDeleteMessage(m, myUserId, canModerate) && (
+                    <button
+                      type="button"
+                      class="sh-message-react-btn sh-message-delete-btn"
+                      title={t('dms.delete.action')}
+                      aria-label={m.sender_user_id === myUserId
+                        ? t('dms.delete.own_aria')
+                        : t('dms.delete.other_aria', { name: senderName(m.sender_user_id) })}
+                      onClick={() => { void deleteMessage(m) }}
+                    >
+                      🗑
+                    </button>
+                  )}
                   <button
                     type="button"
                     class="sh-message-reply-btn"
@@ -2870,7 +2945,9 @@ export function ConversationView({
          *  bubble (see ``send_failed`` in the messages signal) rather
          *  than throwing the draft back into the textarea, which
          *  would clobber whatever the user is typing now. */}
-        {composerHasContent.value ? (
+        {/* Text-only hosts (``allowAttachments`` off — a space chat)
+         *  keep Send in the slot: a voice note is an attachment too. */}
+        {composerHasContent.value || !allowAttachments ? (
           <Button
             type="submit"
             // Block sends while an upload is in flight — otherwise a
@@ -2935,7 +3012,6 @@ export function ConversationView({
        *  surfaces when a finger holds a bubble for ≥ 450 ms. */}
       {contextSheetFor.value && (() => {
         const target = contextSheetFor.value!
-        const isMine = target.sender_user_id === myUserId
         // Same gate as the file chip: a peer-supplied ``javascript:`` URL
         // must never reach ``window.open`` — the action is hidden instead.
         const openUrl = safeHref(target.media_url)
@@ -2966,10 +3042,17 @@ export function ConversationView({
                 onClick: () => { window.open(openUrl, '_blank', 'noopener,noreferrer') },
               }]
             : []),
+          // Delete for everyone — where the host offers it (a space
+          // chat): the viewer's own, or anyone's for a moderator.
+          ...(allowDelete && canDeleteMessage(target, myUserId, canModerate)
+            ? [{
+                label: t('dms.delete.action'),
+                glyph: '🗑',
+                destructive: true,
+                onClick: () => { void deleteMessage(target) },
+              }]
+            : []),
         ]
-        // `isMine` reserved for a future "Delete for everyone" action
-        // (the route exists; the UI isn't shipped yet).
-        void isMine
         return (
           <MessageContextSheet
             actions={actions}

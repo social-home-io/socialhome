@@ -2116,6 +2116,20 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # minute and the thread rendered empty. 600/min covers fast
             # switching between chats and the embedded household chat.
             "/api/conversations": (600, 60),
+            # Spaces — *looser* than the default for the same reason:
+            # opening one space costs ~10 requests (detail, members, feed,
+            # theme, moderation, proposals, notif-prefs, compat, chat, …),
+            # so the 60/min default 429'd the ~6th space opened in a minute.
+            # The writes worth keeping tight get method rules (they match
+            # the method and whole path, and win over every path rule):
+            # create shares its path with the list, so it needs one.
+            "POST /api/spaces": (20, 60),  # create
+            "POST /api/spaces/join": (20, 60),  # redeem an invite code
+            "POST /api/spaces/*/join-requests": (20, 60),
+            "POST /api/spaces/*/invite-tokens": (30, 60),
+            "POST /api/spaces/*/remote-invites": (30, 60),
+            "POST|DELETE /api/spaces/*/subscribe": (20, 60),
+            "/api/spaces": (600, 60),
             # Sensitive surfaces — tighter than the 60/min default.
             "/api/me/tokens": (10, 60),  # API token create
             "/api/feed/posts": (30, 60),  # household posting
@@ -2510,7 +2524,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # A space's chat: its local writer seats while ``features.chat`` is on
     # (the federation half is wired with the federation stack, see
     # ``_build_space_chat_federation``).
-    space_chat_access = SpaceChatAccess(space_repo)
+    space_chat_access = SpaceChatAccess(space_repo, repos.space_remote_member)
     system_chat_policy.register(SystemChatScope.SPACE, space_chat_access)
     space_chat_service = SpaceChatService(
         conversation_repo,

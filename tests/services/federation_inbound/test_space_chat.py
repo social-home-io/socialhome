@@ -317,6 +317,12 @@ async def test_the_message_that_creates_the_chat_here_reads_as_unread(stack):
     local writers JUST BEFORE it — seated at "now", the sender's earlier
     timestamp read as already seen and the bell's unread pill stayed at 0."""
     await _create(stack, chat_id("u-rb"))
+    summary = await stack.chat.summary(SP, "bob")
+    # A new seat hears only @-mentions, so its badge counts none; at "all"
+    # the creating message counts.
+    assert summary.unread == 0
+    assert summary.conversation_id is not None
+    await stack.convos.set_notif_level(summary.conversation_id, "bob", "all")
     assert (await stack.chat.summary(SP, "bob")).unread == 1
 
 

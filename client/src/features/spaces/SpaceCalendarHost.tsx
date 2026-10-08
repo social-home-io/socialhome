@@ -12,6 +12,7 @@
 import type { ComponentChildren } from 'preact'
 import { signal } from '@preact/signals'
 import { t } from '@/i18n/i18n'
+import { SegmentedSwitch } from '@/components/SegmentedSwitch'
 import { SpaceTimetableTab } from './SpaceTimetableTab'
 import { calendarModes, type CalendarMode, type SpaceTabFeatures } from './spaceTabs'
 
@@ -36,21 +37,18 @@ export function SpaceCalendarHost({ spaceId, features, canEdit, events }: Props)
   const wanted = modes.value[spaceId]
   const mode: CalendarMode = wanted && available.includes(wanted) ? wanted : (available[0] ?? 'events')
   const pick = (m: CalendarMode) => { modes.value = { ...modes.value, [spaceId]: m } }
-  const label = (m: CalendarMode) => (m === 'events' ? t('timetable.space.events') : t('nav.timetable'))
 
   return (
     <div class="sh-space-calendar-host">
       {available.length > 1 && (
-        <div class="sh-timetable-seg sh-space-calendar-host__switch" role="group"
-             aria-label={t('timetable.space.view_aria')}>
-          {available.map(m => (
-            <button key={m} type="button"
-                    class={`sh-timetable-seg__btn${mode === m ? ' is-on' : ''}`}
-                    aria-pressed={mode === m} onClick={() => pick(m)}>
-              {label(m)}
-            </button>
-          ))}
-        </div>
+        <SegmentedSwitch<CalendarMode>
+          class="sh-space-calendar-host__switch"
+          options={available}
+          value={mode}
+          labels={{ events: t('timetable.space.events'), timetable: t('nav.timetable') }}
+          ariaLabel={t('timetable.space.view_aria')}
+          onChange={pick}
+        />
       )}
       {mode === 'timetable'
         ? <SpaceTimetableTab spaceId={spaceId} canEdit={canEdit} />
