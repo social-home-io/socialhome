@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import aiohttp
 import pytest
+
+from socialhome.domain.errors import SpaceNotPublishableError
 from aiohttp.test_utils import TestClient, TestServer
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
@@ -184,7 +186,9 @@ def _make_conn(
     )
 
 
-async def _publishable_svc(env, session, gfs_id: str, *, space_id: str):
+async def _publishable_svc(
+    env, session, gfs_id: str, *, space_id: str, space_type: str = "global"
+):
     """Build a GfsConnectionService with the publish context wired + a real
     local space row so ``publish_space`` can compose a signed body.
 
@@ -207,7 +211,7 @@ async def _publishable_svc(env, session, gfs_id: str, *, space_id: str):
             identity_public_key="aa" * 32,
             config_sequence=0,
             features=SpaceFeatures(),
-            space_type=SpaceType.GLOBAL,
+            space_type=SpaceType(space_type),
             join_mode=JoinMode.OPEN,
         )
     )
@@ -3920,3 +3924,60 @@ async def test_a_failing_re_announce_never_fails_the_publish(env, monkeypatch):
     svc.attach_on_repinned(_boom)
     pub = await svc.publish_space("sp-r", "rp-1")
     assert pub.space_id == "sp-r"
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("space_type", ["private", "household"])
+async def test_publish_refuses_a_space_outside_the_public_tiers(env, space_type):
+    """A private or household space never reaches a GFS directory: refused
+    before any request is built, and no local publication row is written."""
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(
+        env, session, "gfs-1", space_id="sp-priv", space_type=space_type
+    )
+    with pytest.raises(SpaceNotPublishableError) as exc_info:
+        await svc.publish_space("sp-priv", "gfs-1")
+    assert exc_info.value.status == 409
+    assert exc_info.value.code == "SPACE_NOT_PUBLIC"
+    assert session.calls == []
+    _, repo = env
+    assert await repo.list_publications("gfs-1") == []
+
+
+async def test_publish_allows_a_public_space(env):
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(
+        env, session, "gfs-1", space_id="sp-pub", space_type="public"
+    )
+    pub = await svc.publish_space("sp-pub", "gfs-1")
+    assert pub.space_id == "sp-pub"
+    assert len(session.calls) == 1
+
+
+async def test_publish_to_all_and_republish_skip_a_private_space(env):
+    """The fan-out loops log and skip the refusal instead of raising, so a
+    space that turned private can't break an authority-key rotation."""
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(
+        env, session, "gfs-1", space_id="sp-priv", space_type="private"
+    )
+    assert await svc.publish_space_to_all("sp-priv") == 0
+    assert await svc.republish_space("sp-priv") == 0
+    assert session.calls == []
+
+
+async def test_unpublish_from_listed_only_contacts_listing_gfs(env):
+    """A GFS that never listed the space must not learn its id from the
+    withdrawal."""
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(
+        env, session, "gfs-1", space_id="sp-pub", space_type="public"
+    )
+    _, repo = env
+    await repo.save(_make_conn("gfs-2", inbox_url="https://other.example.com"))
+    await svc.publish_space("sp-pub", "gfs-1")
+    session.calls.clear()
+    assert await svc.unpublish_space_from_listed("sp-pub") == 1
+    assert len(session.calls) == 1
+    assert "gfs.example.com" in session.calls[0][1]
+    assert all("other.example.com" not in c[1] for c in session.calls)

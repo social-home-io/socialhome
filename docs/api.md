@@ -856,7 +856,7 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | POST | `/api/gfs/connections/{id}/appeal` | Appeal a ban. |
 | GET | `/api/gfs/publications` | Spaces published to GFS. |
 | GET | `/api/spaces/{id}/publications` | This space's GFS publications, each with `status` (`active`/`pending`/`banned`). Admin. |
-| POST / DELETE | `/api/spaces/{id}/publish/{gfs_id}` | Publish (returns the publication object: `{space_id, gfs_connection_id, published_at, status}`; `422` if the GFS is unreachable or rejects) / unpublish. |
+| POST / DELETE | `/api/spaces/{id}/publish/{gfs_id}` | Publish (returns the publication object: `{space_id, gfs_connection_id, published_at, status}`; `409 SPACE_NOT_PUBLIC` for a private or household space — only public and global spaces may be listed on a GFS, refused before anything is sent; `422` if the GFS is unreachable or rejects) / unpublish (always allowed, so an old listing can be withdrawn). A space that leaves the public tiers is withdrawn automatically: a global one from every GFS, a hand-published public one from the GFSes that list it (only those are contacted). |
 | GET | `/api/public_spaces` | Aggregated directory. Each row carries the host's real `join_mode` (how to become a posting member) **and** `allow_subscribers` (whether the content is publicly readable at all) — both normalised fail-closed, so an older connection server that reports neither reads as `invite_only` + not-readable and the SPA offers no Subscribe button. |
 | POST | `/api/public_spaces/refresh` | Force-poll GFS. |
 | POST | `/api/public_spaces/{space_id}/join-request` | Ask to join. |

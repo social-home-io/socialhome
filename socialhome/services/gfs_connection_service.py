@@ -68,7 +68,12 @@ from ..domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_PREFIX,
     SPACE_IMAGE_EMBED_MAX_BYTES,
 )
-from ..domain.space import normalize_category, normalize_join_mode
+from ..domain.errors import SpaceNotPublishableError
+from ..domain.space import (
+    PUBLIC_SPACE_TIERS,
+    normalize_category,
+    normalize_join_mode,
+)
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
@@ -1215,6 +1220,7 @@ class GfsConnectionService:
         conn = await self._repo.get(gfs_id)
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+        await self._require_publishable(space_id)
 
         body = await self._build_publish_body(space_id)
         if "authority_cert" in body and not await self._signed_capability_supported(
@@ -1794,6 +1800,21 @@ class GfsConnectionService:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
         return str(data.get("status") or "unsubscribed")
 
+    async def _require_publishable(self, space_id: str) -> None:
+        """Refuse to list a private or household space on a GFS.
+
+        Only :data:`PUBLIC_SPACE_TIERS` (public, global) are ever shown to
+        strangers; anything else would put a private space's name,
+        description and cover in a GFS directory. Checked before any
+        request is built, so nothing reaches the GFS. An unknown space is
+        left to :meth:`_build_publish_body`, which already refuses it.
+        """
+        if self._space_repo is None:
+            return
+        space = await self._space_repo.get(space_id)
+        if space is not None and space.space_type not in PUBLIC_SPACE_TIERS:
+            raise SpaceNotPublishableError()
+
     async def publish_space_to_all(self, space_id: str) -> int:
         """Publish a space to every active GFS connection.
 
@@ -1810,7 +1831,7 @@ class GfsConnectionService:
             try:
                 await self.publish_space(space_id, conn.id)
                 published += 1
-            except GfsConnectionError as exc:
+            except (GfsConnectionError, SpaceNotPublishableError) as exc:
                 log.warning(
                     "publish_space_to_all: failed for gfs %s: %s",
                     conn.id,
@@ -1834,7 +1855,7 @@ class GfsConnectionService:
             try:
                 await self.publish_space(space_id, conn.id)
                 done += 1
-            except GfsConnectionError as exc:
+            except (GfsConnectionError, SpaceNotPublishableError) as exc:
                 log.warning(
                     "republish_space: failed for gfs %s: %s",
                     conn.id,
@@ -2171,6 +2192,28 @@ class GfsConnectionService:
                     exc,
                 )
         return unpublished
+
+    async def unpublish_space_from_listed(self, space_id: str) -> int:
+        """Unpublish a space from every GFS that currently lists it.
+
+        Used when a hand-published PUBLIC space leaves the public tiers.
+        Unlike :meth:`unpublish_space_from_all` it only contacts the GFSes
+        that hold a publication row, so a GFS that never listed the space
+        never learns its id from the withdrawal. Fail-soft per GFS; returns
+        how many withdrawals succeeded.
+        """
+        done = 0
+        for conn in await self._repo.list_gfs_for_space(space_id):
+            try:
+                await self.unpublish_space(space_id, conn.id)
+                done += 1
+            except GfsConnectionError as exc:
+                log.warning(
+                    "unpublish_space_from_listed: failed for gfs %s: %s",
+                    conn.id,
+                    exc,
+                )
+        return done
 
     def _build_instance_name_body(self, display_name: str) -> dict | None:
         """Build the signed ``/gfs/instance`` body for a household-name push.

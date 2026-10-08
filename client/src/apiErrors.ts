@@ -63,6 +63,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   // Spaces: joining, following, writing.
   ALREADY_MEMBER: () => t('error.already_member'),
   GFS_RELAY_NOT_ALLOWED: () => t('error.gfs_relay_not_allowed'),
+  SPACE_NOT_PUBLIC: () => t('error.space_not_public'),
   USER_ALREADY_MEMBER: () => t('error.user_already_member'),
   BANNED: () => t('error.banned'),
   USER_BANNED: () => t('error.user_banned'),
