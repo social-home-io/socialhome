@@ -1985,7 +1985,7 @@
   "connections.unpaired": "Ontkoppeld",
   "connections.unpair_failed": "Ontkoppelen is niet gelukt. Probeer het opnieuw.",
   "connections.ext.title": "Extern adres",
-  "connections.ext.intro": "Het adres waarop andere huishoudens deze Social Home bereiken. Nodig om te koppelen. Zonder adres lukt het maken van een koppelcode niet.",
+  "connections.ext.intro": "Het adres waarop andere huishoudens deze Social Home direct bereiken. Zonder adres kun je nog steeds koppelen via een verbonden GFS, maar een direct adres is privéer en werkt ook als de GFS niet bereikbaar is.",
   "connections.ext.label": "Adres",
   "connections.ext.saving": "Opslaan…",
   "connections.ext.effective": "Andere huishoudens bereiken je nu op {url}",

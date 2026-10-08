@@ -2302,7 +2302,7 @@
   "connections.unpaired": "Unpaired",
   "connections.unpair_failed": "Couldn't unpair. Try again.",
   "connections.ext.title": "External address",
-  "connections.ext.intro": "The address other households use to reach this Social Home. Pairing needs it. Without one, creating a pairing code fails.",
+  "connections.ext.intro": "The address other households use to reach this Social Home directly. Without one, you can still pair through a connected GFS, but a direct address is more private and works when the GFS is down.",
   "connections.ext.label": "Address",
   "connections.ext.saving": "Saving…",
   "connections.ext.effective": "Other households currently reach you at {url}",

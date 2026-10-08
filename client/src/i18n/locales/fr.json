@@ -1985,7 +1985,7 @@
   "connections.unpaired": "Dissocié",
   "connections.unpair_failed": "Impossible de dissocier. Veuillez réessayer.",
   "connections.ext.title": "Adresse externe",
-  "connections.ext.intro": "L'adresse utilisée par les autres foyers pour joindre ce Social Home. Elle est nécessaire pour l'association. Sans elle, impossible de créer un code d'association.",
+  "connections.ext.intro": "L'adresse utilisée par les autres foyers pour joindre directement ce Social Home. Sans elle, vous pouvez quand même vous associer via un GFS connecté, mais une adresse directe est plus privée et fonctionne même si le GFS est indisponible.",
   "connections.ext.label": "Adresse",
   "connections.ext.saving": "Enregistrement…",
   "connections.ext.effective": "Les autres foyers vous joignent actuellement à {url}",

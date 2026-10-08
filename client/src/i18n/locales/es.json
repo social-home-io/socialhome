@@ -2012,7 +2012,7 @@
   "connections.unpaired": "Desemparejado",
   "connections.unpair_failed": "No se pudo desemparejar. Inténtalo de nuevo.",
   "connections.ext.title": "Dirección externa",
-  "connections.ext.intro": "La dirección que usan otros hogares para llegar a este Social Home. Es necesaria para emparejar. Sin ella, no se puede crear un código de emparejamiento.",
+  "connections.ext.intro": "La dirección que usan otros hogares para llegar directamente a este Social Home. Sin ella, aún puedes emparejar a través de un GFS conectado, pero una dirección directa es más privada y funciona aunque el GFS no esté disponible.",
   "connections.ext.label": "Dirección",
   "connections.ext.saving": "Guardando…",
   "connections.ext.effective": "Ahora otros hogares te encuentran en {url}",

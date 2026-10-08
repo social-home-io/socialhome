@@ -1990,7 +1990,7 @@
   "connections.unpaired": "Entkoppelt",
   "connections.unpair_failed": "Entkoppeln hat nicht geklappt. Versuch es noch einmal.",
   "connections.ext.title": "Externe Adresse",
-  "connections.ext.intro": "Die Adresse, unter der andere Haushalte dieses Social Home erreichen. Zum Koppeln wird sie gebraucht. Ohne sie lässt sich kein Kopplungscode erstellen.",
+  "connections.ext.intro": "Die Adresse, unter der andere Haushalte dieses Social Home direkt erreichen. Ohne sie kannst du dich trotzdem über einen verbundenen GFS koppeln, aber eine direkte Adresse ist privater und funktioniert auch, wenn der GFS ausfällt.",
   "connections.ext.label": "Adresse",
   "connections.ext.saving": "Wird gespeichert…",
   "connections.ext.effective": "Andere Haushalte erreichen dich gerade unter {url}",
