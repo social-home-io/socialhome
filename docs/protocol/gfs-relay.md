@@ -89,7 +89,8 @@ sequenceDiagram
   not registered with. The relay sender enforces the same (it resolves
   the URL against our own connections).
 - **A route comes only from an ack to one of OUR OWN probes**, through the
-  server that probe was sent on. Receiving a probe records nothing: the
+  server that probe was sent on — or, once, from a pairing code that
+  named the server ([Bootstrap route](#bootstrap-route-from-a-pairing-code)). Receiving a probe records nothing: the
   relay body is identity-free, so a malicious server the prober uses can
   re-post the sealed probe onto another server the receiver uses but the
   prober never reads. Had the receiver recorded that server, its relayed
@@ -158,6 +159,36 @@ after each round.
   15 min ack window, and at most one ack per peer per server every 30 s —
   a paired peer cannot make us spend unbounded relay posts.
 
+### Bootstrap route from a pairing code
+
+A pair made from a pairing code with a GFS reach
+([`pairing.md`](./pairing.md#reach--pairing-through-a-gfs)) needs a
+route before discovery can run: when one side has no URL, the pairing
+confirm and the first §24.11 envelopes (capabilities, profiles) can only
+ride the relay. So whoever writes the peer's row during the handshake —
+the scanner on scan, the code owner on the accept — sets `gfs_relay`,
+stores the peer's verified key-wrap key and **seeds one route**: its own
+connection to the server the code named (`last_ack_at` = now) — only
+when the peer provably reads that server. The scanner always does (the
+code owner is on it). The code owner does when the accept arrived
+through that server or the scanner has no URL (such a scanner refuses a
+code whose server it is not on); a scanner that answered at the inbox
+with its own URL gets no seeded route, since a route through a server
+it never reads turns every fallback into a silent `202` — discovery
+finds the servers the two really share.
+
+This does not reopen the hole the ack rule closes. The rule exists
+because a received relay frame proves nothing about which server the
+SENDER reads; a seeded route never comes from where a frame arrived.
+It comes from the code — exchanged out of band, verified against the
+code owner's identity key — and from our own registration with that
+same server (matched by its pinned `gfs_instance_id`). After the pair
+confirms, each side calls `probe_peer`, so discovery confirms or adds
+routes; a seeded route that no ack ever refreshes expires after 72 h
+like any other. The code and the signed peer-accept carry each side's
+`proto_version`, so the v_53 gate on probing already holds at confirm
+time.
+
 ## Privacy — who learns what
 
 | Party | Learns |
@@ -208,7 +239,11 @@ after each round.
   `send_event_via_gfs` (seal like `send_event`, deliver via one server).
 - `socialhome/federation/transport.py` — `FederationTransport
   .send_via_gfs_url` (one named server) and the round-robin relay tier.
-- `socialhome/services/gfs_relay_inbound.py` — `RELAY_DELIVERED_VIA`.
+- `socialhome/services/gfs_relay_inbound.py` — `RELAY_DELIVERED_VIA`;
+  relayed pairing bodies (`pairing_peer_accept` / `_confirm`).
+- `socialhome/federation/pairing_coordinator.py` /
+  `socialhome/federation/pairing_gfs_reach.py` — the bootstrap route
+  seeded from a pairing code (`_seat_relay`).
 - `socialhome/federation/inbound_validator.py` —
   `make_check_relay_opt_in`.
 - `socialhome/repositories/federation_repo.py` — `upsert_gfs_route`,

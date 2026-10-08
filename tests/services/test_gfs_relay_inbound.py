@@ -18,6 +18,7 @@ from socialhome.federation.gfs_relay_transport import seal_relay_envelope
 from socialhome.federation.inbound_validator import TRANSPORT_GFS_RELAY
 from socialhome.federation.invite_bootstrap import KIND_REDEEM
 from socialhome.federation.invite_token_redeem import (
+    BOOTSTRAP_BODY_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_WINDOW_S,
     RELAY_ENVELOPE_INBOUND_LIMIT,
@@ -314,5 +315,141 @@ async def test_relayed_envelopes_have_their_own_bucket(keys):
     assert fed.calls == []
 
     # …and a full envelope bucket never starves an invite redeem.
+    await inbound.handle_frame(_bootstrap_frame(keys))
+    assert len(invite.bodies) == 1
+
+
+# ── Relayed §11 pairing bodies ──────────────────────────────────────────
+
+
+class _PairingFederation:
+    """The two pairing handlers, recorded with the ContextVar they saw."""
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self.calls: list[tuple[str, dict, str | None, str | None]] = []
+        self.raises = raises
+
+    async def _record(self, name, body, relayed_via):
+        self.calls.append((name, body, relayed_via, RELAY_DELIVERED_VIA.get()))
+        if self.raises is not None:
+            raise self.raises
+        return {"ok": True}
+
+    async def handle_peer_accept(self, body, *, relayed_via=None):
+        return await self._record("accept", body, relayed_via)
+
+    async def handle_peer_confirm(self, body, *, relayed_via=None):
+        return await self._record("confirm", body, relayed_via)
+
+
+def _pairing_frame(keys, kind: str, *, event_type: str | None = None) -> dict:
+    inner = {"event_type": event_type or kind, "token": "t", "signature": "s"}
+    return {
+        "type": "envelope",
+        "sealed": seal_to_keywrap(
+            recipient_keywrap_pub=keys.public_key,
+            plaintext=json.dumps({"kind": kind, "pairing": inner}).encode(),
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "handler"),
+    [("pairing_peer_accept", "accept"), ("pairing_peer_confirm", "confirm")],
+)
+async def test_a_relayed_pairing_body_reaches_the_inbox_handler(keys, kind, handler):
+    federation = _PairingFederation()
+    invite = _Invite()
+    inbound = _inbound(
+        keys,
+        federation=federation,
+        invite=invite,
+        repo=_GfsRepo([_conn("own-g", "https://g.example")]),
+    )
+
+    assert await inbound.handle_frame(
+        _pairing_frame(keys, kind), gfs_url="https://G.example/"
+    ) == {"ok": True}
+
+    [(name, body, relayed_via, ctx)] = federation.calls
+    assert name == handler
+    assert body == {"event_type": kind, "token": "t", "signature": "s"}
+    # Our own connection id — passed explicitly AND visible for the dispatch.
+    assert relayed_via == "own-g" and ctx == "own-g"
+    assert RELAY_DELIVERED_VIA.get() is None
+    assert invite.bodies == []
+
+
+async def test_a_relayed_pairing_body_from_an_unknown_server_is_dropped(keys):
+    federation = _PairingFederation()
+    inbound = _inbound(keys, federation=federation, repo=_GfsRepo([]))
+
+    with pytest.raises(ValueError, match="one of our connection servers"):
+        await inbound.handle_frame(
+            _pairing_frame(keys, "pairing_peer_accept"),
+            gfs_url="https://g.example",
+        )
+    assert federation.calls == []
+
+
+async def test_a_relabelled_pairing_body_is_refused(keys):
+    """The wrapper's kind must match the signed body's own event_type —
+    a confirm can't be replayed into the accept handler."""
+    federation = _PairingFederation()
+    inbound = _inbound(
+        keys,
+        federation=federation,
+        repo=_GfsRepo([_conn("own-g", "https://g.example")]),
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        await inbound.handle_frame(
+            _pairing_frame(
+                keys, "pairing_peer_accept", event_type="pairing_peer_confirm"
+            ),
+            gfs_url="https://g.example",
+        )
+    assert federation.calls == []
+
+
+async def test_a_rejected_pairing_body_resets_the_contextvar(keys, caplog):
+    federation = _PairingFederation(raises=ValueError("No pending pairing"))
+    inbound = _inbound(
+        keys,
+        federation=federation,
+        repo=_GfsRepo([_conn("own-g", "https://g.example")]),
+    )
+    with caplog.at_level(logging.INFO, logger="socialhome.services.gfs_relay_inbound"):
+        with pytest.raises(ValueError, match="No pending pairing"):
+            await inbound.handle_frame(
+                _pairing_frame(keys, "pairing_peer_confirm"),
+                gfs_url="https://g.example",
+            )
+    assert RELAY_DELIVERED_VIA.get() is None
+    assert "pairing_peer_confirm" in caplog.text
+    assert '"t"' not in caplog.text  # never the body
+
+
+async def test_relayed_pairing_bodies_have_their_own_bucket(keys):
+    limiter = RateLimiter()
+    for _ in range(BOOTSTRAP_BODY_INBOUND_LIMIT):
+        assert limiter.is_allowed(
+            "invite-bootstrap:pairing",
+            limit=BOOTSTRAP_BODY_INBOUND_LIMIT,
+            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+        )
+    federation, invite = _PairingFederation(), _Invite()
+    inbound = _inbound(
+        keys,
+        federation=federation,
+        invite=invite,
+        repo=_GfsRepo([_conn("own-g", "https://g.example")]),
+        limiter=limiter,
+    )
+    with pytest.raises(ValueError, match="relayed pairing rate limit"):
+        await inbound.handle_frame(
+            _pairing_frame(keys, "pairing_peer_accept"), gfs_url="https://g.example"
+        )
+    assert federation.calls == []
+    # A full pairing bucket never starves an invite redeem.
     await inbound.handle_frame(_bootstrap_frame(keys))
     assert len(invite.bodies) == 1

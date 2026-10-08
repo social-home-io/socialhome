@@ -253,6 +253,7 @@ from .federation.invite_link_forward import InviteLinkForwardCoordinator
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
 from .federation.route_discovery import RouteDiscoveryService
 from .federation.gfs_relay_transport import GfsRelayTransport
+from .federation.pairing_gfs_reach import PairingGfsReach
 from .federation.routed_envelope import SpaceRoutedHandler
 from .federation.private_invite_handler import PrivateSpaceInviteHandler
 from .services.peer_directory_service import PeerDirectoryService
@@ -874,6 +875,28 @@ def _build_gfs_route_discovery(
     )
     service.attach_to(federation_service)
     return service, GfsRouteDiscoveryScheduler(service)
+
+
+def _build_pairing_gfs_reach(
+    *,
+    gfs_connection_repo: AbstractGfsConnectionRepo,
+    gfs_connection_service: GfsConnectionService,
+    relay_sender: GfsEnvelopeSender,
+    identity,
+    route_discovery: GfsRouteDiscoveryService,
+) -> PairingGfsReach:
+    """GFS reach for §11 pairing codes: our own relay-capable connections
+    (the same signed-capability check the relay sender uses), our
+    published key-wrap key + binding signature (never a fresh key), the
+    relay sender, and route discovery for a freshly confirmed pair."""
+    return PairingGfsReach(
+        gfs_connection_repo=gfs_connection_repo,
+        envelope_relay_supported=gfs_connection_service.envelope_relay_supported,
+        relay_sender=relay_sender,
+        keywrap_public_key=identity.keywrap_public_key,
+        keywrap_sig=identity.keywrap_sig,
+        probe_peer=route_discovery.probe_peer,
+    )
 
 
 def _wire_space_authority_rotation(
@@ -3529,6 +3552,19 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         app[K.gfs_route_discovery_key] = gfs_route_discovery
         app[K.gfs_route_discovery_scheduler_key] = gfs_route_discovery_scheduler
+        # Pairing codes with a GFS reach (``url_gfs`` / ``gfs``): the code
+        # names one of our relay-capable connections, the peer-accept /
+        # -confirm ride it sealed when a side has no URL, and a confirmed
+        # pair is handed to route discovery above.
+        federation_service.attach_pairing_gfs_reach(
+            _build_pairing_gfs_reach(
+                gfs_connection_repo=repos.gfs_connection,
+                gfs_connection_service=gfs_connection_service,
+                relay_sender=gfs_envelope_sender,
+                identity=identity,
+                route_discovery=gfs_route_discovery,
+            ),
+        )
         # #117 followup — federate SPACE_POST_CREATED outbound so
         # remote members on other households actually receive posts
         # in spaces they belong to. The inbound side was already

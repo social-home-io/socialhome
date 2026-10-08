@@ -40,12 +40,14 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.federation import (
+    PAIRING_REACH_GFS,
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
     is_relay_only,
 )
+from ..federation.pairing_gfs_reach import parse_reach
 from ..security import error_response
 from ..services.peer_home_sharing_service import UnknownInstanceError
 from ..services.user_identity_binding import user_identity_binding_fields
@@ -173,8 +175,16 @@ class PairingInitiateView(BaseView):
     integration has pushed into ``instance_config`` (Nabu Casa Remote
     UI or admin-set ``external_url``).
 
-    Returns 422 ``NOT_CONFIGURED`` if the adapter has no base to offer —
-    admin must set the URL before they can issue a QR.
+    Optional body ``{reach?: "url" | "url_gfs" | "gfs", gfs_id?: str}``
+    picks how the scanner reaches us (an empty or unparseable body is the
+    classic ``url`` code):
+
+    * ``url`` / ``url_gfs`` need a federation base — 422
+      ``NOT_CONFIGURED`` without one, as before;
+    * ``url_gfs`` / ``gfs`` need an active connection to a GFS that
+      relays envelopes (``gfs_id`` when it is one, else the first) — 422
+      ``GFS_NOT_CONNECTED`` without one;
+    * anything else — 422 ``INVALID_REACH``.
 
     Admin-only, like every step of the handshake: pairing is a trust
     decision for the whole household.
@@ -183,9 +193,15 @@ class PairingInitiateView(BaseView):
     async def post(self) -> web.Response:
         if not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
+        body = await self._lenient_body()
+        reach = parse_reach(body.get("reach"))
+        raw_gfs_id = body.get("gfs_id")
+        gfs_id = raw_gfs_id if isinstance(raw_gfs_id, str) and raw_gfs_id else None
         adapter = self.svc(platform_adapter_key)
-        base = await adapter.get_federation_base()
-        if not base:
+        base = (
+            None if reach == PAIRING_REACH_GFS else await adapter.get_federation_base()
+        )
+        if reach != PAIRING_REACH_GFS and not base:
             return error_response(
                 422,
                 "NOT_CONFIGURED",
@@ -195,8 +211,24 @@ class PairingInitiateView(BaseView):
                     "before pairing."
                 ),
             )
-        qr = await self.svc(federation_service_key).initiate_pairing(base)
+        qr = await self.svc(federation_service_key).initiate_pairing(
+            base,
+            reach=reach,
+            gfs_id=gfs_id,
+        )
         return web.json_response(qr, status=201)
+
+    async def _lenient_body(self) -> dict:
+        """The optional reach selection. Absent, unparseable or not an
+        object means "the classic code" — the endpoint took no body before
+        reach existed, and old clients still send garbage or nothing."""
+        if not self.request.body_exists:
+            return {}
+        try:
+            parsed = await self.request.json()
+        except Exception:  # noqa: BLE001 — an old client's junk body
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
 
 class PairingAcceptView(BaseView):

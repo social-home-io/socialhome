@@ -21,14 +21,26 @@ Two families ride the one socket, told apart by the sealed plaintext's
   buys no exemption. This path does not depend on the invite-link
   bootstrap being configured — a paired peer's relayed envelope needs
   only our key-wrap key and the pair's session keys.
+* **Pairing bodies** (``kind = pairing_peer_accept`` /
+  ``pairing_peer_confirm``) — the §11 QR handshake between households
+  whose pairing code named a bootstrap GFS (``reach = url_gfs / gfs``).
+  The inner body is the exact Ed25519-signed body the inbox path carries;
+  it goes to the very same handler
+  (:meth:`~socialhome.federation.federation_service.FederationService
+  .handle_peer_accept` / ``handle_peer_confirm``) with ``relayed_via`` =
+  the delivering connection, which the handler requires to be the one
+  the pairing session was issued with. A frame from a server that is not
+  one of our active connections is dropped before any handler runs.
 * **Invite bootstrap bodies** (``KIND_REDEEM*``) — delegated to the
   :class:`~socialhome.federation.invite_token_redeem
   .SpaceInviteTokenRedeemCoordinator`, which owns their validation.
 
 Throttles reuse the coordinator's limiter keys and constants unchanged: a
 process-wide bucket BEFORE the unseal (a flood costs a list append, not an
-AES-GCM open) and a per-family bucket after it, so space traffic and
-redeems never starve each other.
+AES-GCM open) and a per-family bucket after it, so space traffic,
+redeems and pairing bodies never starve each other (pairing bodies get the
+bootstrap-body budget, :data:`BOOTSTRAP_BODY_INBOUND_LIMIT`, under their
+own key).
 
 ``RELAY_DELIVERED_VIA``
 -----------------------
@@ -53,9 +65,15 @@ from ..federation.gfs_relay_transport import is_relay_envelope_body
 from ..federation.inbound_validator import TRANSPORT_GFS_RELAY
 from ..federation.invite_bootstrap import unseal_envelope_body
 from ..federation.invite_token_redeem import (
+    BOOTSTRAP_BODY_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_LIMIT,
     BOOTSTRAP_INBOUND_WINDOW_S,
     RELAY_ENVELOPE_INBOUND_LIMIT,
+)
+from ..federation.peer_pairing_client import (
+    KIND_PAIRING_PEER_ACCEPT,
+    is_pairing_relay_body,
+    pairing_body_from_relay,
 )
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from .gfs_envelope_sender import normalize_gfs_base
@@ -90,6 +108,8 @@ RELAY_DELIVERED_VIA: ContextVar[str | None] = ContextVar(
 #: owned this entry point, so the budgets are exactly what they were.
 _PROCESS_WIDE_KEY = "invite-bootstrap:inbound"
 _ENVELOPES_KEY = "invite-bootstrap:envelopes"
+#: Relayed §11 pairing bodies — their own bucket, the bootstrap-body budget.
+_PAIRING_KEY = "invite-bootstrap:pairing"
 
 
 class GfsRelayInbound:
@@ -157,7 +177,48 @@ class GfsRelayInbound:
             ):
                 raise ValueError("invite bootstrap envelopes rate limit exceeded")
             return await self._dispatch_envelope(body, gfs_url=gfs_url)
+        if is_pairing_relay_body(body):
+            if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
+                _PAIRING_KEY,
+                limit=BOOTSTRAP_BODY_INBOUND_LIMIT,
+                window_s=BOOTSTRAP_INBOUND_WINDOW_S,
+            ):
+                raise ValueError("relayed pairing rate limit exceeded")
+            return await self._dispatch_pairing(body, gfs_url=gfs_url)
         return await self._invite.handle_bootstrap_body(body, gfs_url=gfs_url)
+
+    async def _dispatch_pairing(self, body: dict[str, Any], *, gfs_url: str) -> dict:
+        """Hand one relayed §11 pairing body to the inbox path's handler.
+
+        No exemption for having ridden the relay: the handler runs the
+        identical token / signature / expiry / single-use checks and, on
+        top, requires the delivering connection to be the one the pairing
+        session was issued with.
+        """
+        kind, inner = pairing_body_from_relay(body)
+        delivered_via = await self._connection_id_for(gfs_url)
+        if delivered_via is None:
+            raise ValueError(
+                "relayed pairing body did not arrive through one of our "
+                "connection servers",
+            )
+        token = RELAY_DELIVERED_VIA.set(delivered_via)
+        try:
+            if kind == KIND_PAIRING_PEER_ACCEPT:
+                return await self._federation.handle_peer_accept(
+                    inner,
+                    relayed_via=delivered_via,
+                )
+            return await self._federation.handle_peer_confirm(
+                inner,
+                relayed_via=delivered_via,
+            )
+        except ValueError as exc:
+            # The reason only — never the body (it carries a token).
+            log.info("gfs_relay: rejected a relayed %s: %s", kind, exc)
+            raise
+        finally:
+            RELAY_DELIVERED_VIA.reset(token)
 
     async def _dispatch_envelope(self, body: dict[str, Any], *, gfs_url: str) -> dict:
         """Run one relayed §24.11 envelope through the normal pipeline.

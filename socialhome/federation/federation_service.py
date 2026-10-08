@@ -70,6 +70,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DELIVERY_ERROR_ROUTED_SEND_FAILED,
+    PAIRING_REACH_URL,
     BroadcastResult,
     DeliveryResult,
     FederationEvent,
@@ -123,6 +124,7 @@ from .inbound_validator import (
     run_post_decrypt_gates,
 )
 from .pairing_coordinator import PairingCoordinator
+from .pairing_gfs_reach import PairingGfsReach
 from .peer_pairing_client import PeerPairingClient
 from .event_dispatch_registry import EventDispatchRegistry
 
@@ -3972,14 +3974,30 @@ class FederationService:
     # :class:`PairingCoordinator`. The three methods below are thin
     # delegations so the public surface of FederationService is unchanged.
 
-    async def initiate_pairing(self, inbox_base_url: str) -> dict:
+    def attach_pairing_gfs_reach(self, reach: PairingGfsReach) -> None:
+        """Enable pairing codes with a ``url_gfs`` / ``gfs`` reach."""
+        self._pairing.attach_gfs_reach(reach)
+
+    async def initiate_pairing(
+        self,
+        inbox_base_url: str | None,
+        *,
+        reach: str = PAIRING_REACH_URL,
+        gfs_id: str | None = None,
+    ) -> dict:
         """Delegates to :class:`PairingCoordinator`.
 
         ``inbox_base_url`` is the external scheme+host+path prefix peers
         will POST to. The coordinator appends a freshly-minted
         ``own_local_inbox_id`` before baking the URL into the QR.
+        ``reach`` / ``gfs_id`` pick the code's GFS reach (see
+        :mod:`~socialhome.federation.pairing_gfs_reach`).
         """
-        return await self._pairing.initiate(inbox_base_url)
+        return await self._pairing.initiate(
+            inbox_base_url,
+            reach=reach,
+            gfs_id=gfs_id,
+        )
 
     async def accept_pairing(
         self,
@@ -4002,11 +4020,13 @@ class FederationService:
         body: dict,
         *,
         expected_local_inbox_id: str | None = None,
+        relayed_via: str | None = None,
     ) -> dict:
         """Delegates to :class:`PairingCoordinator.handle_peer_accept`."""
         return await self._pairing.handle_peer_accept(
             body,
             expected_local_inbox_id=expected_local_inbox_id,
+            relayed_via=relayed_via,
         )
 
     async def handle_peer_confirm(
@@ -4014,11 +4034,13 @@ class FederationService:
         body: dict,
         *,
         expected_local_inbox_id: str | None = None,
+        relayed_via: str | None = None,
     ) -> dict:
         """Delegates to :class:`PairingCoordinator.handle_peer_confirm`."""
         return await self._pairing.handle_peer_confirm(
             body,
             expected_local_inbox_id=expected_local_inbox_id,
+            relayed_via=relayed_via,
         )
 
     # ─── Encryption helpers ───────────────────────────────────────────────

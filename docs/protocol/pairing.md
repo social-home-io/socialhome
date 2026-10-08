@@ -9,7 +9,12 @@ here.
 
 - **HFS**: full participant. Scans / presents a QR code, runs the
   three-message DH handshake, stores the resulting session keys.
-- **GFS**: uninvolved. Pairing is strictly peer-to-peer.
+- **GFS**: uninvolved for a classic code (`reach = url`, the default) —
+  pairing is strictly peer-to-peer. A code with a **GFS reach**
+  (`url_gfs` / `gfs`, [below](#reach--pairing-through-a-gfs)) names ONE
+  connection server both households use; it relays the sealed
+  peer-accept / -confirm as opaque, identity-free blobs and learns
+  nothing else.
 
 **Not a pairing:** the §D2b invite-link bootstrap redeem
 ([`invites.md`](./invites.md)) also short-circuits the §24.11 pipeline
@@ -18,8 +23,8 @@ creates a **space-scoped** `remote_instances` row
 (`InstanceSource.space_session`) that is excluded from DMs, the user
 roster, presence, the friends constellation and the auto-pair vouching
 relay, and it publishes no `PairingConfirmed`. It runs over the
-connection server rather than the inbox URL, so "GFS: uninvolved" stays
-true of pairing itself.
+connection server rather than the inbox URL, and it never creates a
+paired (`manual`) row — a GFS-reach pairing does.
 
 ## Event types
 
@@ -87,7 +92,7 @@ sequenceDiagram
 | `event_type` | yes | `"PAIRING_PEER_ACCEPT"` |
 | `identity_pk` | yes | B's Ed25519 public key (base64). |
 | `dh_pk` | yes | B's X25519 ephemeral DH public key (base64). |
-| `inbox_url` | yes | B's federation inbox base URL. |
+| `inbox_url` | yes | B's federation inbox URL. May be `""` only on a GFS-reach pairing when B carries `keywrap_*` (B has no address; A reaches it through the bootstrap GFS). |
 | `display_name` | no | B's household display name. |
 | `token` | yes | The pairing token from A's QR / copy code. |
 | `verification_code` | yes | SAS digits to be verified out-of-band. |
@@ -96,6 +101,10 @@ sequenceDiagram
 | `pq_algorithm` | no | PQ algorithm name (when `sig_suite` is hybrid). |
 | `home_lat` | no | B's household latitude, truncated to 4 decimal places. Sent only when both `home_lat` and `home_lon` are available (HA / HAOS mode, or operator-configured). See [home-location.md](./home-location.md). |
 | `home_lon` | no | B's household longitude, truncated to 4 decimal places. |
+| `keywrap_pk` | GFS reach | B's static X25519 key-wrap public key (hex) — what A seals relayed traffic to. |
+| `keywrap_sig` | GFS reach | Ed25519 self-signature of `keywrap_pk` by B's identity key (b64url). A verifies the binding and refuses the accept on a mismatch (fail closed). |
+| `keywrap_suite` | GFS reach | `"x25519"` (`keywrap_seal.KEM_SUITE_X25519`). Unknown or missing → refused, never defaulted. |
+| `proto_version` | GFS reach | B's protocol version, recorded as a high-water mark so A can probe relay routes as soon as the pair confirms. |
 | `signature` | yes | Ed25519 signature over the body (TOFU auth). |
 
 ### Household inbox URLs
@@ -130,6 +139,137 @@ When `home_lat` / `home_lon` are present, A records them on B's newly-created
 `remote_instances` row immediately — the map pin is available as soon as the
 pair is confirmed, without waiting for a separate `LOCAL_HOME_LOCATION_CHANGED`
 broadcast.
+
+## Reach — pairing through a GFS
+
+A household with no reachable URL — or an admin who wants a fallback for
+when its URL is down — issues a code with a **reach**
+(`POST /api/pairing/initiate {reach, gfs_id?}`, see [`api.md`](../api.md)):
+
+| `reach` | Code carries | When |
+|---|---|---|
+| `url` (default) | `inbox_url` — no GFS information anywhere | today's code; needs a federation base |
+| `url_gfs` | `inbox_url` + the bootstrap GFS | needs a base and a relay-capable GFS connection |
+| `gfs` | the bootstrap GFS only (`inbox_url = ""`) | needs a relay-capable GFS connection |
+
+The bootstrap GFS is one of the code owner's own active connections whose
+server proved `envelope_relay` on its signed `/gfs/info` (the requested
+`gfs_id` when it qualifies, else the first). It is the only server ever
+revealed, and only to whoever holds the code.
+
+### Extra code fields (`url_gfs` / `gfs` only)
+
+| Field | Notes |
+|---|---|
+| `reach` | `"url_gfs"` or `"gfs"`. An unknown value is refused (`INVALID_REACH`), never defaulted. |
+| `gfs` | `{url, instance_id}` — the bootstrap server's base URL and the `gfs_instance_id` the owner pinned for it. |
+| `keywrap_pk` / `keywrap_sig` / `keywrap_suite` | The owner's static key-wrap key (the one `/gfs/info` serves — never a fresh key), its identity binding signature, and the `"x25519"` suite tag. |
+| `proto_version` | The owner's protocol version (see `PAIRING_PEER_ACCEPT` above). |
+
+### Rules
+
+- **Scanner adopts the code's reach.** It verifies the key-wrap binding
+  (`verify_keywrap_binding`; fail closed — `KEYWRAP_INVALID`). When the
+  code has no `inbox_url` (`gfs`) or the scanner has no URL of its own,
+  it must itself be connected to the bootstrap server — matched by the
+  pinned `gfs_instance_id`, falling back to the normalized base URL —
+  or the scan is refused with `GFS_NOT_SHARED` **before any state is
+  written or anything is sent**.
+- **Delivery.** A body goes to the other side's inbox when it has one;
+  otherwise — or when that POST did not reach the peer (network error,
+  timeout, 5xx; never after a 4xx, which is the peer's own answer) and
+  we hold a route to it through the bootstrap server — the *same signed body* is wrapped
+  as `{kind: "pairing_peer_accept" | "pairing_peer_confirm", pairing:
+  <signed body>}`, padded to a relay size bucket, sealed to the other
+  side's key-wrap key and posted to the bootstrap server as the
+  identity-free `{to_instance, sealed}`.
+- **Receiving a relayed body.** `GfsRelayInbound` opens it, throttles it
+  (own bucket, the bootstrap-body budget) and hands the inner body to
+  the very handler the inbox uses — token, signature, expiry and
+  single-use checks unchanged — with one more: the delivering connection
+  (`RELAY_DELIVERED_VIA`) must be the one the pairing session was issued
+  with (`pending_pairings.relay_via`); anything else is dropped. A frame
+  from a server that is not one of our active connections never reaches
+  a handler. Conversely, for a session on which we offered no address
+  (`gfs` code / scanner without URL) a body on the inbox path is refused
+  — nobody could know our inbox id.
+- **Confirm checks** (inbox or relay): the session must not have expired,
+  and the signer named in the confirm must be the household the token's
+  session was made with (`pending_pairings.peer_identity_pk`).
+- **Both sides opt into the relay.** Whoever writes the peer's row —
+  the scanner on scan, the code owner on the accept — sets `gfs_relay`,
+  stores the verified `remote_keywrap_pk` and **seeds one route**: its
+  own connection to the bootstrap server — but only where the peer
+  provably reads that server. The scanner always may (the code owner is
+  on it by construction). The code owner seeds only when the accept
+  arrived through the bootstrap server, or the scanner has no URL (a
+  scanner without one refuses a code whose server it is not on). A
+  scanner that answered at our inbox with its own URL may not be on that
+  server at all; a route there would make every fallback a silent `202`
+  and tell the server the scanner's id, so the code owner keeps the
+  opt-in and the key and leaves the routes to discovery. This is not the poisoning case
+  of [`gfs-relay.md`](./gfs-relay.md): the server was named in the
+  out-of-band code and we are ourselves registered there — never seeded
+  from where a relayed frame merely arrived. The row exists with the
+  opt-in before any relayed message from the peer can arrive (the
+  §24.11 relay opt-in gate would refuse it otherwise). `remote_inbox_url`
+  stays `""` for a peer with no address; its first `URL_UPDATED` fills it.
+- **After confirm** each side asks route discovery to probe the peer;
+  the seeded route expires after 72 h like any route no ack refreshes.
+- **A classic `url` pairing means no GFS**, also when it replaces an
+  earlier GFS pairing with the same household: both sides switch the
+  relay opt-in off and drop that peer's routes.
+- A `proto_version` above our own is recorded as our own (a newer peer
+  is relied on for what we know); a non-integer one is ignored.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as HFS A<br/>(code owner, no URL)
+    participant G as GFS G<br/>(both connected)
+    participant B as HFS B<br/>(scanner, no URL)
+
+    A->>A: initiate {reach: gfs}<br/>session.relay_via = conn A·G
+    Note over A,B: QR / code: token, identity_pk, dh_pk, inbox_url "",<br/>reach, gfs {url, instance_id}, keywrap_pk/sig/suite
+    B->>B: verify key-wrap binding,<br/>match G among own connections (else GFS_NOT_SHARED)
+    B->>B: row for A: manual, PENDING_RECEIVED, gfs_relay=1,<br/>keywrap pk, route (A, conn B·G)
+    B->>G: POST /gfs/envelope {to_instance: A, sealed}<br/>(PAIRING_PEER_ACCEPT incl. B's keywrap)
+    G->>A: WS frame {sealed}
+    A->>A: open → handle_peer_accept (token, sig, expiry,<br/>single use, delivered via conn A·G ✓)
+    A->>A: row for B: gfs_relay=1, keywrap pk,<br/>route (B, conn A·G); SAS to admin
+    Note over A,B: admins compare SAS out-of-band
+    A->>A: confirm → CONFIRMED
+    A->>G: POST /gfs/envelope {to_instance: B, sealed}<br/>(PAIRING_PEER_CONFIRM)
+    G->>B: WS frame {sealed}
+    B->>B: handle_peer_confirm (delivered via conn B·G ✓) → CONFIRMED
+    Note over A,B: each side: probe_peer → route discovery refines routes;<br/>§24.11 traffic rides the seeded route meanwhile
+```
+
+### Older households
+
+No protocol bump: the new code fields and relay kinds reach only a peer
+that just showed it has them. An older code owner never issues a reach
+code; an older scanner of a `gfs` code fails closed on the empty
+`inbox_url` (`validate_peer_url`, as any classic code without a URL); an
+older scanner of a `url_gfs` code ignores the extra fields and pairs
+URL-only — its accept carries no key-wrap key, so the code owner pairs
+URL-only too (no opt-in, no route, no probe).
+
+### Error codes
+
+| Code | Where | Meaning |
+|---|---|---|
+| `INVALID_REACH` (422) | initiate, accept | Unknown `reach`. |
+| `NOT_CONFIGURED` (422) | initiate | `url` / `url_gfs` without a federation base. |
+| `GFS_NOT_CONNECTED` (422) | initiate | `url_gfs` / `gfs` without an active, relay-capable GFS connection. |
+| `GFS_NOT_SHARED` (422) | accept | The code (or our missing URL) needs its bootstrap GFS, and we are not connected to it. Nothing was sent. |
+| `KEYWRAP_INVALID` (422) | accept | The code's key-wrap key is missing, unlabelled or not bound to its identity. |
+
+Implementation: `socialhome/federation/pairing_gfs_reach.py`,
+`socialhome/federation/pairing_coordinator.py`,
+`socialhome/federation/peer_pairing_client.py` (`build_relay_envelope`),
+`socialhome/services/gfs_relay_inbound.py`. Tests:
+`tests/protocol/test_gfs_pairing_reach.py`.
 
 ## Manual code fallback — `socialhome://` URL scheme
 
@@ -424,10 +564,21 @@ per-peer: sender appends the recipient's `local_inbox_id` to the new
 base, so each `URL_UPDATED` envelope delivers to exactly one peer
 with that peer's own secret path.
 
+Who is told: every confirmed **paired** (`manual`) peer — including one
+with no address of its own (paired [through a GFS](#reach--pairing-through-a-gfs);
+the envelope rides the relay) — and never a household met through an
+invite link (`space_session`: the GFS shields both addresses). The
+published base is the adapter's **effective** one
+(`adapter.get_federation_base()`): under HA that is the pushed URL plus
+the HA-hosted forwarder path `/api/socialhome/inbox`, and an admin
+override wins over a pushed value — `PUT /api/ha/integration/federation-base`
+publishes only when that effective base changed.
+
 Validation at the receiver: the envelope is already signature-verified
 by the §24.11 inbound pipeline. The handler additionally rejects
 empty URLs and anything that fails the
-[household inbox URL rules](#household-inbox-urls).
+[household inbox URL rules](#household-inbox-urls). A peer whose stored
+URL is `""` (paired through a GFS) takes its first URL this way.
 
 ## TTL + cleanup
 

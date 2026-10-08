@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ..domain.federation import FederationEventType
+from ..domain.federation import FederationEventType, InstanceSource
 from .peer_outbound import ConfirmedPeerBroadcaster
 
 if TYPE_CHECKING:
@@ -29,7 +29,9 @@ log = logging.getLogger(__name__)
 
 
 class UrlUpdateOutbound(ConfirmedPeerBroadcaster):
-    """Fan out ``URL_UPDATED`` to every confirmed peer."""
+    """Fan out ``URL_UPDATED`` to every confirmed paired peer — including
+    one with no address of its own (reached over the GFS relay), never a
+    household met through an invite link."""
 
     __slots__ = ("_federation", "_federation_repo")
 
@@ -60,6 +62,14 @@ class UrlUpdateOutbound(ConfirmedPeerBroadcaster):
         sent = 0
         for peer in await self.confirmed_peers():
             instance_id = peer.id
+            if getattr(peer, "source", None) is InstanceSource.SPACE_SESSION:
+                # A household met through an invite link must never learn
+                # an address — the GFS shields both sides. (The social list
+                # already excludes these rows; this keeps the rule local.)
+                continue
+            # A paired peer with NO URL of its own (paired through a GFS)
+            # is still told: the envelope rides the relay, and our new URL
+            # is how it can reach us directly from now on.
             local_id = getattr(peer, "local_inbox_id", None)
             if not local_id:
                 continue

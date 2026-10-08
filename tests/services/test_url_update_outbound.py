@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.services.url_update_outbound import UrlUpdateOutbound
 
 
@@ -109,3 +113,52 @@ async def test_publish_empty_when_no_confirmed_peers():
 
     assert sent == 0
     assert fed.sent == []
+
+
+async def test_publish_skips_a_household_met_through_an_invite_link():
+    """Belt and braces on top of the social list: a ``space_session`` row
+    must never learn our address, even from a repo that returned it."""
+    link_joined = replace(
+        _peer("peer-link", "wh-link"), source=InstanceSource.SPACE_SESSION
+    )
+    fed = _FakeFederationService(own="self-iid")
+    svc = UrlUpdateOutbound(
+        federation_service=fed,
+        federation_repo=_FakeFederationRepo([link_joined, _peer("peer-a", "wh-a")]),
+    )
+    assert await svc.publish(new_inbox_base_url="https://new.example/inbox") == 1
+    assert [iid for iid, _, _ in fed.sent] == ["peer-a"]
+
+
+async def test_publish_reaches_a_gfs_paired_peer_and_never_a_link_joined_one(
+    tmp_path,
+):
+    """Real SQLite: a MANUAL peer with no URL (paired through a GFS, reached
+    over the relay) is told our new URL; a link-joined household is not."""
+    db = AsyncDatabase(tmp_path / "u.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        repo = SqliteFederationRepo(db)
+        await repo.save_instance(
+            replace(_peer("peer-gfs", "wh-gfs"), remote_inbox_url="", gfs_relay=True)
+        )
+        await repo.save_instance(
+            replace(
+                _peer("peer-link", "wh-link"),
+                remote_inbox_url="",
+                source=InstanceSource.SPACE_SESSION,
+            )
+        )
+        fed = _FakeFederationService(own="self-iid")
+        svc = UrlUpdateOutbound(federation_service=fed, federation_repo=repo)
+
+        assert await svc.publish(new_inbox_base_url="https://new.example/inbox") == 1
+        assert fed.sent == [
+            (
+                "peer-gfs",
+                FederationEventType.URL_UPDATED,
+                {"inbox_url": "https://new.example/inbox/wh-gfs"},
+            )
+        ]
+    finally:
+        await db.shutdown()

@@ -10,6 +10,12 @@ from socialhome.domain.conversation import (
     DmTooLongError,
     GroupTooSmallError,
 )
+from socialhome.domain.federation import (
+    GfsNotConnectedError,
+    GfsNotSharedError,
+    PairingKeywrapInvalidError,
+    PairingReachInvalidError,
+)
 from socialhome.domain.errors import (
     CodedError,
     ImageTooLargeError,
@@ -255,3 +261,22 @@ def test_own_listing_and_listing_not_active_status_per_site():
     assert OwnListingError().code == "OWN_LISTING"
     assert ListingNotActiveError(status=409).status == 409
     assert ListingNotActiveError().code == "LISTING_NOT_ACTIVE"
+
+
+# ─── Pairing reach (§11 through a GFS) ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("exc", "code"),
+    [
+        (PairingReachInvalidError(), "INVALID_REACH"),
+        (GfsNotConnectedError(), "GFS_NOT_CONNECTED"),
+        (GfsNotSharedError(), "GFS_NOT_SHARED"),
+        (PairingKeywrapInvalidError(), "KEYWRAP_INVALID"),
+    ],
+)
+def test_pairing_reach_errors_are_coded_value_errors(exc, code):
+    assert isinstance(exc, CodedError)
+    assert isinstance(exc, ValueError)
+    assert (exc.status, exc.code) == (422, code)
+    assert exc.params == {}

@@ -25,6 +25,16 @@ Supervisor Ingress blocks every other route to remote callers.
 Both are best-effort sends: network errors are logged and returned as
 ``ok=False`` so the caller can surface a retry hint in the UI without
 corrupting local state.
+
+When the other household has no inbox URL (a pairing code with the
+``gfs`` reach, or a scanner without an address), the SAME signed body
+travels through the bootstrap connection server (GFS) instead: wrapped as
+``{kind, pairing: <signed body>}``, sealed to the recipient's static
+key-wrap key (:func:`~socialhome.federation.keywrap_seal.seal_to_keywrap`)
+and handed to the relay as the identity-free ``{to_instance, sealed}``.
+:meth:`PeerPairingClient.build_relay_envelope` builds it;
+:class:`~socialhome.services.gfs_relay_inbound.GfsRelayInbound` opens it
+and hands the inner body to the very same handler the inbox uses.
 """
 
 from __future__ import annotations
@@ -38,7 +48,10 @@ import orjson
 
 from ..crypto import sign_ed25519
 from ..domain.federation import FederationEventType
+from ..domain.space_item import pad_json_object
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
+from .gfs_relay_transport import RELAY_SIZE_BUCKETS
+from .keywrap_seal import seal_to_keywrap
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +91,46 @@ def sign_peer_body(body: dict, *, own_identity_seed: bytes) -> dict:
     """
     signature = sign_ed25519(own_identity_seed, _canonical_body_bytes(body))
     return {**body, "signature": signature.hex()}
+
+
+#: ``kind`` markers of a pairing body relayed through a GFS. Taken from the
+#: event-type enum so the wire strings live in one place; the inner signed
+#: body carries the same value as its ``event_type``.
+KIND_PAIRING_PEER_ACCEPT: str = FederationEventType.PAIRING_PEER_ACCEPT.value
+KIND_PAIRING_PEER_CONFIRM: str = FederationEventType.PAIRING_PEER_CONFIRM.value
+PAIRING_RELAY_KINDS: frozenset[str] = frozenset(
+    {KIND_PAIRING_PEER_ACCEPT, KIND_PAIRING_PEER_CONFIRM}
+)
+
+#: Hard cap on a relayed pairing plaintext once padded. A peer-accept is a
+#: few KiB even with a hybrid post-quantum identity key (an ML-DSA-65 key
+#: is ~4 KiB of hex) — so it lands in the 4 or 16 KiB bucket; anything
+#: bigger is not a pairing body.
+MAX_PAIRING_RELAY_BYTES: int = 16 * 1024
+
+
+def is_pairing_relay_body(body: object) -> bool:
+    """Whether an unsealed relay plaintext is a relayed pairing body."""
+    return isinstance(body, dict) and body.get("kind") in PAIRING_RELAY_KINDS
+
+
+def pairing_body_from_relay(body: dict) -> tuple[str, dict]:
+    """``(kind, signed pairing body)`` from an unsealed relay plaintext.
+
+    Raises :class:`ValueError` when the wrapper is malformed or its
+    ``kind`` disagrees with the signed body's own ``event_type`` — the
+    signature covers ``event_type``, so a confirm can never be replayed
+    into the accept handler by relabelling the wrapper.
+    """
+    kind = body.get("kind")
+    if kind not in PAIRING_RELAY_KINDS:
+        raise ValueError(f"not a relayed pairing body: kind={kind!r}")
+    inner = body.get("pairing")
+    if not isinstance(inner, dict):
+        raise ValueError("relayed pairing body missing its signed body")
+    if inner.get("event_type") != kind:
+        raise ValueError("relayed pairing kind does not match its event_type")
+    return str(kind), inner
 
 
 class PeerPairingClient:
@@ -145,6 +198,48 @@ class PeerPairingClient:
             FederationEventType.PAIRING_PEER_CONFIRM.value,
             body,
         )
+
+    def build_relay_envelope(
+        self,
+        *,
+        event_type: FederationEventType,
+        body: dict,
+        to_instance_id: str,
+        recipient_keywrap_pk: str,
+    ) -> dict:
+        """Sign ``body`` exactly as :meth:`_post` does and seal it for the
+        GFS relay.
+
+        The caller has already verified ``recipient_keywrap_pk`` bound to
+        the recipient's identity (from the pairing code or the signed
+        peer-accept). Returns the identity-free outer envelope
+        ``{to_instance, sealed}`` — the sender, the token and every key
+        live inside the ciphertext.
+
+        Raises :class:`ValueError` on malformed key material or an
+        oversized body.
+        """
+        envelope_body: dict = {"event_type": event_type.value, **body}
+        signed = sign_peer_body(
+            envelope_body, own_identity_seed=self._own_identity_seed
+        )
+        # Padded to a relay size bucket like every relayed envelope, so the
+        # GFS cannot tell a pairing body from any other small blob by size.
+        plaintext = pad_json_object(
+            {"kind": event_type.value, "pairing": signed},
+            buckets=RELAY_SIZE_BUCKETS,
+        )
+        if len(plaintext) > MAX_PAIRING_RELAY_BYTES:
+            raise ValueError("pairing body too large for the relay")
+        try:
+            keywrap_pub = bytes.fromhex(recipient_keywrap_pk)
+        except ValueError as exc:
+            raise ValueError(f"malformed recipient key-wrap key: {exc}") from exc
+        sealed = seal_to_keywrap(
+            recipient_keywrap_pub=keywrap_pub,
+            plaintext=plaintext,
+        )
+        return {"to_instance": to_instance_id, "sealed": sealed}
 
     async def _post(
         self,
