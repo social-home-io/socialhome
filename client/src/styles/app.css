@@ -4018,6 +4018,59 @@ button.sh-friends-member-chip:not(:disabled):hover {
   flex: 1 1 auto;
   min-height: 0;
 }
+/* The household feed's Chat tab (``FeedPage``): the host takes the
+ * routed thread's viewport height, so the tab strip, the audience bar
+ * and the embedded thread share it and only ``.sh-messages`` scrolls —
+ * the composer stays on screen above the mobile tab bar. */
+.sh-feed-host--chat {
+  display: flex;
+  flex-direction: column;
+  /* The topbar plus ``.sh-main``'s top and bottom padding. */
+  height: calc(100dvh - var(--sh-topbar-height) - 2 * var(--sh-space-lg));
+  min-height: 320px;
+}
+@media (max-width: 768px) {
+  .sh-feed-host--chat {
+    /* ``.sh-main`` here: md padding on top, 84 px at the bottom that
+     * keeps content clear of the fixed tab bar (plus the iOS inset). */
+    height: calc(
+      100dvh - var(--sh-topbar-height) - var(--sh-space-md) - 84px
+      - env(safe-area-inset-bottom, 0px)
+    );
+  }
+}
+.sh-feed-host--chat > .sh-space-subheader .sh-space-tabs { margin-bottom: 0; }
+.sh-feed-host--chat > .sh-space-subheader { margin-bottom: var(--sh-space-sm); }
+.sh-feed-chat-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  padding: 0 var(--sh-space-xs) var(--sh-space-xs);
+  flex: 0 0 auto;
+}
+.sh-feed-chat-audience {
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  min-width: 0;
+}
+.sh-feed-chat-error { flex: 1 1 auto; justify-content: center; }
+/* Unread count after a tab label (TabHeader ``badges``). */
+.sh-tab-unread {
+  display: inline-block;
+  min-width: 18px;
+  height: 18px;
+  margin-inline-start: 6px;
+  padding: 0 5px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  vertical-align: 1px;
+}
 .sh-thread--left {
   align-items: center;
   justify-content: center;

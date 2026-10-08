@@ -149,3 +149,29 @@ describe('TabHeader', () => {
     })
   })
 })
+
+describe('TabHeader badges', () => {
+  it('shows an unread pill after the label, announced, and hides it at zero', () => {
+    const { getByRole, container, rerender } = render(
+      <TabHeader<DmTab> activeTab="dms" visibleTabs={TABS} labels={LABELS}
+        onSelectTab={() => {}} ariaLabel="Chat sections" badges={{ groups: 3 }} />,
+    )
+    const groups = getByRole('tab', { name: /Groups/ })
+    expect(groups.querySelector('.sh-tab-unread')?.textContent).toBe('3')
+    expect(groups.textContent).toContain('3 unread')
+    expect(container.querySelectorAll('.sh-tab-unread').length).toBe(1)
+    rerender(
+      <TabHeader<DmTab> activeTab="dms" visibleTabs={TABS} labels={LABELS}
+        onSelectTab={() => {}} ariaLabel="Chat sections" badges={{ groups: 0 }} />,
+    )
+    expect(container.querySelector('.sh-tab-unread')).toBeNull()
+  })
+
+  it('caps the pill at 99+', () => {
+    const { container } = render(
+      <TabHeader<DmTab> activeTab="dms" visibleTabs={TABS} labels={LABELS}
+        onSelectTab={() => {}} ariaLabel="Chat sections" badges={{ calls: 250 }} />,
+    )
+    expect(container.querySelector('.sh-tab-unread')?.textContent).toBe('99+')
+  })
+})
