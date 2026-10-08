@@ -2285,6 +2285,7 @@
   "capability.anonymous_gfs_posting": "Anonym posten über den GFS",
   "capability.private_gfs_spaces": "Private Räume über den GFS",
   "capability.forwarded_invite_links": "Einladungslinks aus Mitglieds-Haushalten",
+  "capability.shared_gfs_relay": "Gekoppelte Haushalte über einen gemeinsamen GFS erreichen",
   "settings.tab.security": "Sicherheit",
   "settings.could_not_save": "Speichern fehlgeschlagen: {error}",
   "settings.profile.save_failed": "Speichern fehlgeschlagen: {error}",

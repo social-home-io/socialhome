@@ -58,6 +58,16 @@ class FederationEventType(str, enum.Enum):
     PAIRING_ABORT = "pairing_abort"
     UNPAIR = "unpair"
     URL_UPDATED = "url_updated"
+    #: v_53 — shared-GFS route discovery for the paired relay fallback
+    #: (``docs/protocol/gfs-relay.md``). A household sends one probe
+    #: through EACH of its own connection servers; the peer receives it
+    #: only through the ones it shares, and answers with
+    #: :attr:`GFS_RELAY_PROBE_ACK` through that same server. Both payloads
+    #: are ``{nonce}`` only, inside the encrypted payload — never a server
+    #: URL, server id or connection id. Paired (``manual``) peers only:
+    #: deliberately absent from :data:`SPACE_SESSION_ALLOWED_EVENT_TYPES`.
+    GFS_RELAY_PROBE = "gfs_relay_probe"
+    GFS_RELAY_PROBE_ACK = "gfs_relay_probe_ack"
     #: Sent on startup when the local HA-sourced home GPS coordinates
     #: change vs. the previously-stored value, and on first boot of
     #: a fresh instance. Payload: ``{"latitude": float, "longitude":

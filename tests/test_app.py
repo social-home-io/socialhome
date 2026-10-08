@@ -15,6 +15,7 @@ from socialhome._version import __version__
 from socialhome.app_keys import gfs_connection_service_key, http_session_key
 from socialhome.app import (
     _build_gfs_relay_inbound,
+    _build_gfs_route_discovery,
     _build_gfs_route_resolver,
     MAP_TILE_USER_AGENT,
     _build_link_previews,
@@ -35,6 +36,12 @@ from socialhome.domain.federation import (
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.services.gfs_relay_inbound import GfsRelayInbound
+from socialhome.services.gfs_route_discovery_service import GfsRouteDiscoveryService
+from socialhome.infrastructure.gfs_route_discovery_scheduler import (
+    GfsRouteDiscoveryScheduler,
+)
+from socialhome.domain.federation import FederationEventType
+from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.outbound_fetch import OutboundFetcher
 from socialhome.services.app_federation_service import AppFederationService
@@ -583,3 +590,27 @@ def test_build_gfs_relay_inbound_returns_the_service():
         rate_limiter=None,  # type: ignore[arg-type]
     )
     assert isinstance(svc, GfsRelayInbound)
+
+
+def test_build_gfs_route_discovery_registers_the_handlers_and_a_scheduler():
+    class _Fed:
+        _event_registry = EventDispatchRegistry()
+
+    class _GfsService:
+        async def envelope_relay_supported(self, conn) -> bool:
+            return True
+
+    fed = _Fed()
+    svc, sched = _build_gfs_route_discovery(
+        federation_service=fed,  # type: ignore[arg-type]
+        federation_repo=object(),  # type: ignore[arg-type]
+        gfs_connection_repo=object(),  # type: ignore[arg-type]
+        gfs_connection_service=_GfsService(),  # type: ignore[arg-type]
+    )
+    assert isinstance(svc, GfsRouteDiscoveryService)
+    assert isinstance(sched, GfsRouteDiscoveryScheduler)
+    for et in (
+        FederationEventType.GFS_RELAY_PROBE,
+        FederationEventType.GFS_RELAY_PROBE_ACK,
+    ):
+        assert fed._event_registry.handler_count(et) == 1

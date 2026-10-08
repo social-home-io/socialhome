@@ -43,6 +43,7 @@ _APP = "test_app_session_scope.py"
 _PAIRING = "test_pairing_auth_boundary.py"
 _UNPAIR = "test_unpair_authority.py"
 _MEDIA = "test_media_blob_scope.py"
+_GFS_ROUTES = "test_gfs_relay_route_discovery.py"
 
 #: Event type → the protocol test proving its binding rule.
 BOUND: dict[FederationEventType, str] = {
@@ -90,6 +91,8 @@ BOUND: dict[FederationEventType, str] = {
     FET.PAIRING_CONFIRM: _PAIRING,
     FET.PAIRING_ABORT: _PAIRING,
     FET.UNPAIR: _UNPAIR,
+    FET.GFS_RELAY_PROBE: _GFS_ROUTES,
+    FET.GFS_RELAY_PROBE_ACK: _GFS_ROUTES,
 }
 
 #: Event type → why its handler needs no row binding beyond ``from_instance``.

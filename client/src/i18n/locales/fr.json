@@ -2280,6 +2280,7 @@
   "capability.anonymous_gfs_posting": "Publication anonyme via le GFS",
   "capability.private_gfs_spaces": "Espaces privés via le GFS",
   "capability.forwarded_invite_links": "Liens d'invitation des foyers membres",
+  "capability.shared_gfs_relay": "Joindre un foyer associé via un GFS commun",
   "settings.tab.security": "Sécurité",
   "settings.could_not_save": "Impossible d'enregistrer : {error}",
   "settings.profile.save_failed": "Échec de l'enregistrement : {error}",

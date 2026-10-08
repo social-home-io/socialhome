@@ -8,7 +8,21 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 52
+    assert fc.OURS == 53
+
+
+def test_gfs_relay_routes_capability_threshold():
+    """v_53 — shared-GFS route discovery (``GFS_RELAY_PROBE`` / ``_ACK``).
+    Per-pair, not space-scoped: an older peer is simply never probed and
+    holds no relay routes."""
+    assert fc.FederationCapability.MIN_FOR_GFS_RELAY_ROUTES == 53
+    assert fc.FederationCapability.MIN_FOR_GFS_RELAY_ROUTES not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(52) == [
+        "Reaching a paired household through a shared GFS"
+    ]
+    assert fc.features_missing_below(53) == []
 
 
 def test_forwarded_invite_link_capability_threshold():
@@ -18,7 +32,9 @@ def test_forwarded_invite_link_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(52) == []
+    assert fc.features_missing_below(52) == [
+        "Reaching a paired household through a shared GFS"
+    ]
 
 
 def test_space_authority_rotation_capability_threshold():
@@ -46,6 +62,7 @@ def test_space_authority_rotation_capability_threshold():
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
         "Invite links from member households",
+        "Reaching a paired household through a shared GFS",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -54,6 +71,7 @@ def test_space_authority_rotation_capability_threshold():
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
         "Invite links from member households",
+        "Reaching a paired household through a shared GFS",
     ]
 
 
@@ -78,6 +96,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
         "Invite links from member households",
+        "Reaching a paired household through a shared GFS",
     ]
 
 
@@ -574,6 +593,7 @@ def test_forwarded_role_change_capability_threshold():
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
         "Invite links from member households",
+        "Reaching a paired household through a shared GFS",
     ]
 
 
@@ -591,6 +611,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
         "Invite links from member households",
+        "Reaching a paired household through a shared GFS",
     ]
 
 
@@ -606,6 +627,7 @@ def test_member_gfs_publish_capability_threshold():
         "Anonymous posting through the GFS",
         "Private spaces through the GFS",
         "Invite links from member households",
+        "Reaching a paired household through a shared GFS",
     ]
 
 
@@ -620,6 +642,7 @@ def test_strict_member_publish_capability_threshold():
     assert fc.features_missing_below(50) == [
         "Private spaces through the GFS",
         "Invite links from member households",
+        "Reaching a paired household through a shared GFS",
     ]
 
 
@@ -632,7 +655,10 @@ def test_private_channels_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_PRIVATE_CHANNELS not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(51) == ["Invite links from member households"]
+    assert fc.features_missing_below(51) == [
+        "Invite links from member households",
+        "Reaching a paired household through a shared GFS",
+    ]
 
 
 #: The pinned slug set. These are an API contract (``lacking_feature_keys`` /
@@ -689,6 +715,7 @@ _PINNED_FEATURE_KEYS = {
     50: "anonymous_gfs_posting",
     51: "private_gfs_spaces",
     52: "forwarded_invite_links",
+    53: "shared_gfs_relay",
 }
 
 

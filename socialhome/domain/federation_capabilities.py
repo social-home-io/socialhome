@@ -806,7 +806,18 @@ from __future__ import annotations
 #:   a host below v_52 would drop the unknown action in silence, so the
 #:   member household refuses up front with 409 ``HOST_TOO_OLD`` (``feature:
 #:   "invite_link"``) instead of waiting out a timeout.
-OURS: int = 52
+#: * **v_53** (2026-10-08) — shared-GFS route discovery for the paired
+#:   relay fallback. A household opted into the relay with a paired peer
+#:   sends :attr:`~socialhome.domain.federation.FederationEventType
+#:   .GFS_RELAY_PROBE` (``{nonce}``) through each of its OWN connection
+#:   servers; the peer receives it only through the servers it shares and
+#:   answers :attr:`~socialhome.domain.federation.FederationEventType
+#:   .GFS_RELAY_PROBE_ACK` through that same server, so both sides learn
+#:   the intersection without either naming a server
+#:   (``docs/protocol/gfs-relay.md``). **Gated, no fallback**: a peer below
+#:   v_53 is never probed, so it holds no relay routes and gets no relay
+#:   fallback — the pair keeps RTC and the HTTPS inbox exactly as before.
+OURS: int = 53
 
 
 class FederationCapability:
@@ -1245,6 +1256,12 @@ class FederationCapability:
     #: up front (409 ``HOST_TOO_OLD``).
     MIN_FOR_FORWARDED_INVITE_LINK = 52
 
+    #: v_53 — shared-GFS route discovery (``GFS_RELAY_PROBE`` /
+    #: ``GFS_RELAY_PROBE_ACK``). Only a peer at or above it is probed; an
+    #: older peer holds no relay routes, so the paired relay fallback never
+    #: engages for it. Per-pair, not space-scoped.
+    MIN_FOR_GFS_RELAY_ROUTES = 53
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1441,6 +1458,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK,
         "Invite links from member households",
     ),
+    (
+        FederationCapability.MIN_FOR_GFS_RELAY_ROUTES,
+        "Reaching a paired household through a shared GFS",
+    ),
 ]
 
 
@@ -1504,6 +1525,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH: "anonymous_gfs_posting",
     FederationCapability.MIN_FOR_PRIVATE_CHANNELS: "private_gfs_spaces",
     FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK: "forwarded_invite_links",
+    FederationCapability.MIN_FOR_GFS_RELAY_ROUTES: "shared_gfs_relay",
 }
 
 

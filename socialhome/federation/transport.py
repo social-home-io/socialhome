@@ -1964,6 +1964,51 @@ class FederationTransport:
             error=TRANSPORT_ERROR_NO_ROUTE,
         )
 
+    async def send_via_gfs_url(
+        self,
+        *,
+        instance: RemoteInstance,
+        envelope_dict: dict,
+        gfs_url: str,
+    ) -> _TransportSendResult:
+        """Deliver ``envelope_dict`` to a paired peer through ONE named
+        connection server — no route lookup, no round-robin, no fallback.
+
+        Only for shared-GFS route discovery
+        (:mod:`socialhome.services.gfs_route_discovery_service`): a probe
+        must travel through exactly the server it tests, and its ack back
+        through exactly the server the probe arrived on. ``gfs_url`` is the
+        base URL of one of THIS household's own connections; the relay
+        sender refuses any other. The same opt-in rule as every relayed
+        send: a paired peer we did not opt into the relay with gets
+        nothing, and a link-joined household never takes this path.
+
+        Never raises; ``via`` is always ``"gfs_relay"``.
+        """
+        if instance.source is InstanceSource.SPACE_SESSION or not instance.gfs_relay:
+            return _TransportSendResult(
+                ok=False,
+                via="gfs_relay",
+                error=TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED,
+            )
+        if self._gfs_relay is None or not gfs_url:
+            return _TransportSendResult(
+                ok=False,
+                via="gfs_relay",
+                error="gfs_relay_unavailable",
+            )
+        ok, status = await self._gfs_relay.send(
+            instance=instance,
+            envelope_dict=envelope_dict,
+            gfs_url=gfs_url,
+        )
+        return _TransportSendResult(
+            ok=ok,
+            via="gfs_relay",
+            status_code=status,
+            error=None if ok else _relay_failure_reason(status),
+        )
+
     async def _send_over_routes(
         self,
         instance: RemoteInstance,

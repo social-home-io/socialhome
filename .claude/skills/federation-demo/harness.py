@@ -6017,6 +6017,19 @@ def cmd_verify() -> None:
             else:
                 print(f"  {viewer} sees {peer} at proto_version={pv} (>= {_OURS}) ✓")
 
+    # 0b-bis. v_53 shared-GFS route discovery (GFS_RELAY_PROBE / _ACK): the
+    #     paired relay fallback only ever gets a route for a peer seen at
+    #     >= MIN_FOR_GFS_RELAY_ROUTES, so the OURS round-trip above is also
+    #     what proves every inner-ring pair is probe-able. Pin the threshold
+    #     so a bump that moves it off v_53 fails here, not in the field.
+    if int(_Cap.MIN_FOR_GFS_RELAY_ROUTES) != 53 or _OURS < 53:
+        failures.append(
+            "MIN_FOR_GFS_RELAY_ROUTES moved off v_53 (or OURS fell below it) "
+            "— shared-GFS route discovery would never probe a peer",
+        )
+    else:
+        print("  v_53 shared-GFS route discovery gate in place ✓")
+
     # 0c. v_29 round-trip on the §D2b BOOTSTRAP wire. The capability
     #     integer normally travels in INSTANCE_CAPABILITIES_UPDATED, over a
     #     peer row — and on this path there is no peer row yet, by
