@@ -5154,6 +5154,272 @@ def _check_private_space_off(state: dict, a_base: str) -> str:
     return off_id
 
 
+def _connection_row(info: dict, peer_iid: str) -> dict | None:
+    """``label``'s ``/api/connections`` row for ``peer_iid`` (or ``None``)."""
+    s, conns = _request(
+        f"http://127.0.0.1:{info['port']}/api/connections",
+        token=info["token"],
+    )
+    _must("connections", s, conns)
+    for c in conns:
+        if c["instance_id"] == peer_iid:
+            return c
+    return None
+
+
+def _relay_row(label: str, peer_iid: str) -> tuple | None:
+    """``(status, gfs_relay, remote_inbox_url, has keywrap pk)`` of
+    ``label``'s ``remote_instances`` row for ``peer_iid``."""
+    rows = _rows(
+        label,
+        "SELECT status, gfs_relay, remote_inbox_url, remote_keywrap_pk IS NOT NULL"
+        " FROM remote_instances WHERE id=?",
+        (peer_iid,),
+    )
+    return rows[0] if rows else None
+
+
+def cmd_gfs_reach_pair() -> None:
+    """Pair a household that offers NO address — through the GFS (pairing ``reach``).
+
+    e issues a ``reach: "gfs"`` code (``inbox_url = ""``: as if e had no
+    External URL), a scans it. a's peer-accept and e's peer-confirm can only
+    travel sealed through ``POST /gfs/envelope``; both sides must end
+    CONFIRMED with the relay opt-in (``gfs_relay = 1``), the other's key-wrap
+    key and a ``peer_gfs_routes`` row, and ordinary §24.11 traffic (a profile
+    update) must reach e. Then e sets an External URL through the admin route
+    and its ``URL_UPDATED`` fills a's empty ``remote_inbox_url`` for e.
+
+    Finally a unpairs e and e's manual URL is cleared again, so e is back to
+    being the stranger the ``gfs-invite-link`` steps rely on — but run this
+    step AFTER them anyway (it is the last ``gfs-*`` content step), since an
+    unpair leaves tombstones a later step should not have to reason about.
+
+    Prereqs: ``up`` + ``gfs-up`` + ``gfs-pair`` (a and e on the GFS). A
+    re-run against the same processes must wait a minute: route discovery
+    probes a peer at most once per ``PROBE_PEER_MIN_INTERVAL_S`` (60 s), so a
+    re-pair inside that window gets no fresh probe/ack to assert on.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    a = state["instances"]["a"]
+    e = state["instances"]["e"]
+    a_base = f"http://127.0.0.1:{a['port']}"
+    e_base = f"http://127.0.0.1:{e['port']}"
+    a_iid, e_iid = a["instance_id"], e["instance_id"]
+    failures: list[str] = []
+
+    if _relay_row("a", e_iid) or _relay_row("e", a_iid):
+        raise SystemExit(
+            "gfs-reach-pair: a and e already know each other — this step "
+            "needs e unpaired (fresh 'up' + 'gfs-up' + 'gfs-pair')",
+        )
+    # Relay frames are pushed down the household's SH↔GFS socket; one sent
+    # before it is open is lost (see ``_wait_for_gfs_ws``).
+    _wait_for_gfs_ws(a_iid)
+    _wait_for_gfs_ws(e_iid)
+
+    # 1. The code owner (e) offers no address.
+    s, qr = _pairing_call(
+        "e",
+        f"{e_base}/api/pairing/initiate",
+        token=e["token"],
+        method="POST",
+        body={"reach": "gfs"},
+    )
+    _must("initiate(e, reach=gfs)", s, qr, ok=(201,))
+    if qr.get("reach") != "gfs" or qr.get("inbox_url") != "":
+        raise SystemExit(f"gfs code must carry reach=gfs and no inbox_url: {qr!r}")
+    if not (qr.get("gfs") or {}).get("url") or not qr.get("keywrap_pk"):
+        raise SystemExit(f"gfs code is missing its GFS block / key-wrap key: {qr!r}")
+    print(f"  e: issued a reach=gfs code via {qr['gfs']['url']} (no inbox_url)")
+
+    # 2. a scans it. Nothing reaches e's inbox: the accept rides the relay.
+    gfs_off = _gfs_log_size()
+    s, ack = _pairing_call(
+        "a",
+        f"{a_base}/api/pairing/accept",
+        token=a["token"],
+        method="POST",
+        body=qr,
+    )
+    _must("accept(a)", s, ack)
+    print(f"  a: accepted — SAS {ack['verification_code']}")
+
+    # 3. e confirms once the relayed accept has landed (before that the
+    #    session has no SAS and confirm answers 4xx without touching state).
+    def _confirm():
+        s, body = _pairing_call(
+            "e",
+            f"{e_base}/api/pairing/confirm",
+            token=e["token"],
+            method="POST",
+            body={"token": ack["token"], "verification_code": ack["verification_code"]},
+        )
+        return body if s == 200 else None
+
+    # Every /api/pairing write shares one 5 / 60 s bucket — poll gently.
+    _poll(
+        "e's confirm (relayed peer-accept landed on e)",
+        _confirm,
+        timeout=90,
+        interval=4.0,
+    )
+    print("  e: confirmed")
+
+    def _both_confirmed():
+        ra, re_ = _relay_row("a", e_iid), _relay_row("e", a_iid)
+        return (
+            ra and re_ and ra[0] == "confirmed" and re_[0] == "confirmed" and (ra, re_)
+        )
+
+    ra, re_ = _poll("a and e both CONFIRMED", _both_confirmed, timeout=60)
+    print(f"  rows: a→e {ra}  e→a {re_}")
+    if ra[1] != 1 or re_[1] != 1:
+        failures.append(f"gfs_relay must be 1 on both rows (a→e={ra[1]}, e→a={re_[1]})")
+    if not ra[3] or not re_[3]:
+        failures.append("both rows must hold the other side's key-wrap key")
+    if ra[2]:
+        failures.append(f"a must hold NO inbox URL for e yet, got {ra[2]!r}")
+    relayed = _gfs_log_lines_matching("envelope", offset=gfs_off)
+    print(f"  GFS log: {len(relayed)} envelope line(s) during the handshake")
+
+    # 4. Routes: seeded on pairing, refreshed by the post-confirm probe/ack.
+    def _routes():
+        ga = _rows(
+            "a",
+            "SELECT gfs_connection_id FROM peer_gfs_routes WHERE instance_id=?",
+            (e_iid,),
+        )
+        ge = _rows(
+            "e",
+            "SELECT gfs_connection_id FROM peer_gfs_routes WHERE instance_id=?",
+            (a_iid,),
+        )
+        return ga and ge and (ga, ge)
+
+    ga, ge = _poll("a peer_gfs_routes row on both sides", _routes, timeout=60)
+    print(f"  routes: a→e via {ga[0][0][:8]}  e→a via {ge[0][0][:8]}")
+    if ga[0][0] != state["gfs"]["pairings"]["a"]["id"]:
+        failures.append("a's route for e must be a's own connection to the GFS")
+    if ge[0][0] != state["gfs"]["pairings"]["e"]["id"]:
+        failures.append("e's route for a must be e's own connection to the GFS")
+
+    # The post-confirm probe and its ack are federation messages that can
+    # ONLY travel through the GFS (a probe is a relay-route check by
+    # definition): an ack refreshing a seeded route proves a relayed
+    # round trip after the handshake, independent of any DataChannel.
+    def _acked():
+        out = []
+        for label, peer in (("a", e_iid), ("e", a_iid)):
+            rows = _rows(
+                label,
+                "SELECT confirmed_at, last_ack_at FROM peer_gfs_routes"
+                " WHERE instance_id=?",
+                (peer,),
+            )
+            out.append(bool(rows) and rows[0][1] > rows[0][0])
+        return any(out) and out
+
+    try:
+        acked = _poll("a probe ack refreshing a seeded route", _acked, timeout=60)
+        print(f"  probe/ack through the GFS refreshed the route on (a, e) = {acked}")
+    except SystemExit:
+        failures.append(
+            "no probe ack ever refreshed a seeded route (relayed round trip)"
+        )
+
+    # 5. Ordinary §24.11 traffic a → e. a has no address for e, so the only
+    #    ways there are the relay and a DataChannel whose signalling itself
+    #    went through the relay.
+    new_name = f"Alice via GFS {secrets.token_hex(3)}"
+    s, body = _request(
+        f"{a_base}/api/me",
+        token=a["token"],
+        method="PATCH",
+        body={"display_name": new_name},
+    )
+    _must("patch me(a)", s, body)
+    _poll(
+        "a's profile update on e",
+        lambda: new_name in _all_display_names(state, "e").values(),
+        timeout=60,
+    )
+    row = _connection_row(a, e_iid) or {}
+    print(
+        f"  e: sees {new_name!r} — a→e transport={row.get('transport')!r}"
+        f" last_relay_accepted_at={row.get('last_relay_accepted_at')!r}"
+    )
+    # Informational: once the DataChannel is up, §24.11 traffic prefers it,
+    # so whether THIS update rode the relay depends on ICE timing — the
+    # relayed round trip is asserted by the probe/ack check above instead.
+    # (``last_relay_accepted_at`` is in-memory per peer id, so a re-run
+    # against the same processes can show an earlier run's value.)
+
+    # WebRTC: signalling for an address-less peer rides the relay too. Not
+    # asserted (ICE timing on a loaded box is not deterministic) — reported.
+    try:
+        transport = _poll(
+            "a DataChannel a↔e",
+            lambda: (
+                (_connection_row(a, e_iid) or {}).get("transport") == "rtc" and "rtc"
+            ),
+            timeout=30,
+        )
+    except SystemExit:
+        transport = (_connection_row(a, e_iid) or {}).get("transport")
+    print(f"  a→e transport after 30 s: {transport!r} (informational)")
+
+    # 6. e gains a URL → URL_UPDATED → a's row for e gets it.
+    s, put = _request(
+        f"{e_base}/api/admin/federation/external-url",
+        token=e["token"],
+        method="PUT",
+        body={"base": e_base},
+    )
+    _must("external-url(e)", s, put)
+    print(f"  e: External URL set, peers_notified={put.get('peers_notified')}")
+    if not put.get("peers_notified"):
+        failures.append("e's URL change notified no peer")
+    got = _poll(
+        "URL_UPDATED from e on a",
+        lambda: (_relay_row("a", e_iid) or (None, None, ""))[2],
+        timeout=60,
+    )
+    print(f"  a: row for e now has inbox {got!r}")
+    if not got.startswith(e_base):
+        failures.append(f"a's inbox URL for e should be under {e_base}, got {got!r}")
+
+    # 7. Back to the stranger topology.
+    s, body = _pairing_call(
+        "a",
+        f"{a_base}/api/pairing/connections/{e_iid}",
+        token=a["token"],
+        method="DELETE",
+    )
+    _must("unpair(a→e)", s, body)
+    _poll(
+        "e drops a after the UNPAIR",
+        lambda: a_iid not in _peer_ids(e),
+        timeout=60,
+    )
+    s, body = _request(
+        f"{e_base}/api/admin/federation/external-url",
+        token=e["token"],
+        method="PUT",
+        body={"base": None},
+    )
+    _must("clear external-url(e)", s, body)
+    print("  a ↔ e unpaired again; e's manual URL cleared")
+
+    if failures:
+        raise SystemExit("gfs-reach-pair FAILED:\n  - " + "\n  - ".join(failures))
+    print(
+        "gfs-reach-pair: ok (address-less code → relayed handshake → relay traffic → URL_UPDATED)"
+    )
+
+
 def cmd_gfs_down() -> None:
     """Stop the GFS started by :func:`cmd_gfs_up` (idempotent)."""
     state = _load()

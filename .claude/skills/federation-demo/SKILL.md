@@ -525,7 +525,7 @@ The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-open-signup`` /
 ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-authority-rotate`` /
-``gfs-space-no-subscribers`` / ``gfs-down``)
+``gfs-space-no-subscribers`` / ``gfs-reach-pair`` / ``gfs-down``)
 stays
 opt-in — it spins up a
 separate GFS process and isn't required to validate the HFS↔HFS
@@ -750,6 +750,7 @@ python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py verify
+python .claude/skills/federation-demo/harness.py gfs-reach-pair
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
 
@@ -831,6 +832,36 @@ channel row and no seat and never holds the space id or the post. ``verify``
 then checks a, b and e agree on the channel, e's grant is stored
 KEK-wrapped, the GFS row names no space, b holds a seat, a holds none, and
 the OFF space has no channel. Polls every 3 s, backs off on 429.
+
+### ``gfs-reach-pair`` — pairing a household that offers no address (pairing ``reach``)
+
+Needs only ``up`` + ``gfs-up`` + ``gfs-pair`` (a and e on the GFS), but sits
+**last** in the chain, after ``verify``: it pairs e — the stranger every
+``gfs-invite-link*`` / member-publish / private-channel step relies on — and
+unpairs it again at the end. e issues a ``reach: "gfs"`` code
+(``POST /api/pairing/initiate {reach: "gfs"}`` → ``inbox_url: ""`` plus the
+GFS block and e's key-wrap key), a scans it, and the peer-accept rides the
+relay sealed to e's key-wrap key (e has no address to post it to); e confirms
+with the SAS once the relayed accept landed. Asserts:
+
+- both rows ``confirmed``, ``gfs_relay = 1``, the other side's key-wrap key
+  stored, and a holds **no** inbox URL for e;
+- a ``peer_gfs_routes`` row on both sides naming each side's OWN connection
+  to the GFS, and a post-confirm probe ack refreshing one (``last_ack_at``
+  past ``confirmed_at``) — a federation round trip that can only travel
+  through the relay;
+- a profile update on a reaches e (``/api/friends``). The a→e transport is
+  printed: WebRTC signalling for an address-less peer rides the relay too,
+  and the DataChannel did form (``transport='rtc'``) in every run so far, but
+  ICE timing on a loaded box isn't deterministic, so it is reported, not
+  asserted;
+- e then sets an External URL (``PUT /api/admin/federation/external-url``):
+  ``peers_notified ≥ 1`` and a's row for e gets e's inbox URL from the
+  ``URL_UPDATED``.
+
+Finally a unpairs e (e drops a) and e's manual URL is cleared, restoring the
+stranger topology. Re-running it against the same processes needs a minute's
+pause: route discovery probes a peer at most once per 60 s.
 
 ### ``gfs-cluster`` — a multi-process GFS on one shared DB
 
