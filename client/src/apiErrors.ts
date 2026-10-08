@@ -62,6 +62,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     : t('moderation.error.host_too_old'),
   // Spaces: joining, following, writing.
   ALREADY_MEMBER: () => t('error.already_member'),
+  GFS_RELAY_NOT_ALLOWED: () => t('error.gfs_relay_not_allowed'),
   USER_ALREADY_MEMBER: () => t('error.user_already_member'),
   BANNED: () => t('error.banned'),
   USER_BANNED: () => t('error.user_banned'),

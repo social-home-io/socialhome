@@ -31,13 +31,19 @@ from ...domain.events import (
     PeerProtoVersionRaised,
 )
 from ...crypto import derive_instance_id
-from ...domain.federation import FederationEventType, PairingStatus
+from ...domain.federation import (
+    FederationEventType,
+    InstanceSource,
+    PairingKeywrapInvalidError,
+    PairingStatus,
+)
+from ...federation.pairing_gfs_reach import verified_peer_keywrap
 from ...peer_url import InvalidPeerUrlError, validate_peer_url
 from ...infrastructure.event_bus import EventBus
 from ..protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
-    from ...domain.federation import FederationEvent, PairingSession
+    from ...domain.federation import FederationEvent, PairingSession, RemoteInstance
     from ...federation.federation_service import FederationService
     from ...repositories.dm_contact_repo import AbstractDmContactRepo
     from ...repositories.federation_repo import AbstractFederationRepo
@@ -307,9 +313,17 @@ class PairingInboundHandlers(ProtectionGateMixin):
         # before calling ``set_proto_version`` — so the admin panel can
         # distinguish a genuine v1 peer from one paired but never advertised.
         await self._repo.mark_capabilities_seen(event.from_instance)
+        # v_54 — the peer opted into the GFS relay with us and sent its
+        # key-wrap key. Applied before the version short-circuit below (a
+        # same-version re-announcement may carry it for the first time).
+        keywrap_learned = await self._apply_peer_keywrap(instance, event.payload)
         # Sent on every startup of that household: the "it is back" edge.
         await self._bus.publish(
-            PeerCapabilitiesAdvertised(instance_id=event.from_instance)
+            PeerCapabilitiesAdvertised(
+                instance_id=event.from_instance,
+                keywrap_learned=keywrap_learned,
+                peer_gfs_relay=self._peer_relay_marker(instance, event.payload),
+            )
         )
         # A rename re-broadcast carries the SAME proto_version but a NEW
         # display_name, so apply the advertised name BEFORE the version
@@ -362,6 +376,74 @@ class PairingInboundHandlers(ProtectionGateMixin):
             event.from_instance,
             proto_version,
         )
+
+    async def _apply_peer_keywrap(
+        self,
+        instance: "RemoteInstance",
+        payload: dict,
+    ) -> bool:
+        """Store a paired peer's key-wrap key from its capabilities (v_54).
+
+        Returns ``True`` when a key we did not hold yet was stored.
+
+        Fail closed: the suite must be one this build knows (no default on
+        a missing tag — every v_54 sender ships it) and the key must be
+        self-signed by the identity key we pinned for this household at
+        pairing (:func:`~socialhome.federation.pairing_gfs_reach
+        .verified_peer_keywrap`). A key that fails is dropped at WARNING
+        and the stored one stays. Only directly paired households
+        (``source = manual``): a link-joined household's key comes from
+        the invite bootstrap and never changes this way. Storing the key
+        does not opt us in — that stays our own admin's switch.
+        """
+        if not any(
+            k in payload for k in ("keywrap_pk", "keywrap_sig", "keywrap_suite")
+        ):
+            return False
+        if instance.source is not InstanceSource.MANUAL:
+            log.debug(
+                "INSTANCE_CAPABILITIES_UPDATED from %s: key-wrap key ignored "
+                "for a %s peer",
+                instance.id,
+                instance.source.value,
+            )
+            return False
+        try:
+            pk_hex = verified_peer_keywrap(
+                payload,
+                instance_id=instance.id,
+                identity_pk=instance.remote_identity_pk,
+            ).lower()
+        except PairingKeywrapInvalidError:
+            log.warning(
+                "INSTANCE_CAPABILITIES_UPDATED from %s: key-wrap key refused "
+                "(unknown suite or not bound to its identity key)",
+                instance.id,
+            )
+            return False
+        if pk_hex == instance.remote_keywrap_pk:
+            return False
+        await self._repo.set_remote_keywrap_pk(instance.id, pk_hex)
+        log.info(
+            "INSTANCE_CAPABILITIES_UPDATED from %s: key-wrap key stored",
+            instance.id,
+        )
+        return True
+
+    @staticmethod
+    def _peer_relay_marker(instance: "RemoteInstance", payload: dict) -> bool | None:
+        """The peer's own GFS fallback switch as it announced it (v_54).
+
+        ``False`` means its §24.11 relay opt-in gate now refuses our relayed
+        envelopes — :class:`~socialhome.services.peer_gfs_relay_service
+        .PeerGfsRelayService` then drops our routes to it. ``None`` when
+        the peer did not say (an older build) or is not a directly paired
+        household; only a real bool counts.
+        """
+        if instance.source is not InstanceSource.MANUAL:
+            return None
+        marker = payload.get("gfs_relay")
+        return marker if isinstance(marker, bool) else None
 
     async def _on_contact_request(self, event: "FederationEvent") -> None:
         """§23.47: pre-pairing DM handshake — a remote user wants to start

@@ -218,7 +218,10 @@ revealed, and only to whoever holds the code.
   the seeded route expires after 72 h like any route no ack refreshes.
 - **A classic `url` pairing means no GFS**, also when it replaces an
   earlier GFS pairing with the same household: both sides switch the
-  relay opt-in off and drop that peer's routes.
+  relay opt-in off and drop that peer's routes. Either admin can turn the
+  fallback on later, per connection — the key-wrap keys then travel in
+  `INSTANCE_CAPABILITIES_UPDATED` (v_54, see
+  [`gfs-relay.md`](./gfs-relay.md#turning-the-fallback-on-for-an-existing-pair)).
 - A `proto_version` above our own is recorded as our own (a newer peer
   is relied on for what we know); a non-integer one is ignored.
 

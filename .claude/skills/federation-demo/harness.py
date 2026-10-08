@@ -5179,6 +5179,139 @@ def _relay_row(label: str, peer_iid: str) -> tuple | None:
     return rows[0] if rows else None
 
 
+def _connection_row(label: str, peer_iid: str) -> dict | None:
+    """``label``'s ``GET /api/connections`` row for ``peer_iid``."""
+    inst = _load()["instances"][label]
+    s, rows = _request(
+        f"http://127.0.0.1:{inst['port']}/api/connections", token=inst["token"]
+    )
+    _must(f"connections({label})", s, rows)
+    return next((r for r in rows if r.get("instance_id") == peer_iid), None)
+
+
+def _switch_gfs_fallback(label: str, peer_iid: str, on: bool) -> dict:
+    inst = _load()["instances"][label]
+    s, body = _request(
+        f"http://127.0.0.1:{inst['port']}/api/pairing/connections/{peer_iid}",
+        token=inst["token"],
+        method="PATCH",
+        body={"gfs_relay": on},
+    )
+    return _must(f"gfs fallback {'on' if on else 'off'} ({label})", s, body)
+
+
+def _wait_row(
+    label: str, peer_iid: str, pred, what: str, timeout: float = 45.0
+) -> dict:
+    deadline = time.monotonic() + timeout
+    row: dict | None = None
+    while time.monotonic() < deadline:
+        row = _connection_row(label, peer_iid)
+        if row is not None and pred(row):
+            return row
+        time.sleep(1.0)
+    raise SystemExit(f"gfs-fallback-switch: {label} never saw {what}: {row!r}")
+
+
+def cmd_gfs_fallback_switch() -> None:
+    """Turn the GFS fallback on for an EXISTING pair (v_54).
+
+    a and d were paired without any GFS reach (``relay-pair``, an ordinary
+    trust-relay pair with addresses) and both are on the demo GFS
+    (``gfs-pair``). Neither holds the other's key-wrap key, so neither can
+    relay to the other. a's admin switches the fallback on for d: d must
+    store a's key (it rides the encrypted ``INSTANCE_CAPABILITIES_UPDATED``)
+    while d's own switch stays off and no route forms on either side. Then
+    d's admin switches it on: a learns d's key and probes at once, and both
+    sides must end with a route through the shared GFS. b (paired with a,
+    not on any GFS) must read ``gfs_relay_available`` but no route. Finally
+    both switch it off again and the routes must be gone, so the step can
+    run again at once (switching off clears the pair's probe throttles).
+
+    Prereqs: ``up`` + ``pair`` + ``relay-pair`` + ``gfs-up`` + ``gfs-pair``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    if not state.get("relay_pair_ran"):
+        raise SystemExit("run 'relay-pair' first (a <-> d)")
+    a = state["instances"]["a"]
+    d = state["instances"]["d"]
+    a_iid, d_iid = a["instance_id"], d["instance_id"]
+    _wait_for_gfs_ws(a_iid)
+    _wait_for_gfs_ws(d_iid)
+
+    before_a = _connection_row("a", d_iid)
+    if before_a is None or before_a.get("gfs_relay"):
+        raise SystemExit(
+            f"gfs-fallback-switch: a's row for d must exist with the switch off: {before_a!r}"
+        )
+    if not before_a.get("gfs_relay_available"):
+        raise SystemExit(f"gfs-fallback-switch: d should be available: {before_a!r}")
+
+    try:
+        body = _switch_gfs_fallback("a", d_iid, True)
+        if body.get("gfs_relay") is not True:
+            raise SystemExit(f"gfs-fallback-switch: PATCH answered {body!r}")
+        print("  a: GFS fallback on for d")
+        _wait_row(
+            "d",
+            a_iid,
+            lambda r: r.get("peer_keywrap_known") is True,
+            "a's key-wrap key",
+        )
+        row_d = _connection_row("d", a_iid) or {}
+        if row_d.get("gfs_relay") or row_d.get("gfs_routes"):
+            raise SystemExit(
+                f"gfs-fallback-switch: d's switch must stay off with no route: {row_d!r}"
+            )
+        time.sleep(3)
+        if (_connection_row("a", d_iid) or {}).get("gfs_routes"):
+            raise SystemExit("gfs-fallback-switch: a got a route with only one side on")
+        print("  d stored a's verified key; no route while only a is on ✓")
+
+        _switch_gfs_fallback("d", a_iid, True)
+        print("  d: GFS fallback on for a")
+        _wait_row("a", d_iid, lambda r: (r.get("gfs_routes") or 0) >= 1, "a route to d")
+        _wait_row("d", a_iid, lambda r: (r.get("gfs_routes") or 0) >= 1, "a route to a")
+        print("  both sides hold a route through the shared GFS ✓")
+
+        b_row = _connection_row("a", state["instances"]["b"]["instance_id"]) or {}
+        if b_row.get("gfs_routes"):
+            raise SystemExit(
+                f"gfs-fallback-switch: b has no GFS, yet a route: {b_row!r}"
+            )
+
+        # a switches off: its encrypted capabilities say ``gfs_relay:
+        # false`` and d drops ITS routes to a (no relaying into a closed
+        # gate), while d's own switch stays on.
+        _switch_gfs_fallback("a", d_iid, False)
+        print("  a: GFS fallback off for d")
+        row_d = _wait_row(
+            "d", a_iid, lambda r: not r.get("gfs_routes"), "its routes to a dropped"
+        )
+        if row_d.get("gfs_relay") is not True:
+            raise SystemExit(
+                f"gfs-fallback-switch: a's off must not flip d's switch: {row_d!r}"
+            )
+        print("  d dropped its route to a; d's own switch stays on ✓")
+    finally:
+        for label, peer in (("a", d_iid), ("d", a_iid)):
+            try:
+                _switch_gfs_fallback(label, peer, False)
+            except SystemExit as exc:  # pragma: no cover — report, keep cleaning
+                print(f"  cleanup: {exc}")
+    for label, peer in (("a", d_iid), ("d", a_iid)):
+        row = _connection_row(label, peer) or {}
+        if row.get("gfs_relay") or row.get("gfs_routes"):
+            raise SystemExit(
+                f"gfs-fallback-switch: {label} still relays after off: {row!r}"
+            )
+    print(
+        "gfs-fallback-switch: ok (key exchange over capabilities → shared-GFS routes → off)"
+    )
+
+
 def cmd_gfs_reach_pair() -> None:
     """Pair a household that offers NO address — through the GFS (pairing ``reach``).
 
@@ -6344,6 +6477,17 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_53 shared-GFS route discovery gate in place ✓")
+    # v_54 — the GFS fallback switch for an existing pair: the key-wrap key
+    # rides INSTANCE_CAPABILITIES_UPDATED. The OURS round-trip above proves
+    # every pair advertises >= v_54; ``gfs-fallback-switch`` proves the key
+    # exchange and the routes on the real wire.
+    if int(_Cap.MIN_FOR_GFS_RELAY_KEY_EXCHANGE) != 54 or _OURS < 54:
+        failures.append(
+            "MIN_FOR_GFS_RELAY_KEY_EXCHANGE moved off v_54 (or OURS fell below "
+            "it) — the GFS fallback switch would report every peer unavailable",
+        )
+    else:
+        print("  v_54 GFS fallback key exchange gate in place ✓")
 
     # 0c. v_29 round-trip on the §D2b BOOTSTRAP wire. The capability
     #     integer normally travels in INSTANCE_CAPABILITIES_UPDATED, over a

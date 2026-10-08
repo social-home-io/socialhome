@@ -8,7 +8,21 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 53
+    assert fc.OURS == 54
+
+
+def test_gfs_relay_key_exchange_capability_threshold():
+    """v_54 — the key-wrap key rides ``INSTANCE_CAPABILITIES_UPDATED`` so
+    a pair made without a GFS reach can turn the fallback on later.
+    Per-pair, not space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE == 54
+    assert fc.FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(53) == [
+        "Turning on the GFS fallback for an existing connection"
+    ]
+    assert fc.features_missing_below(54) == []
 
 
 def test_gfs_relay_routes_capability_threshold():
@@ -20,9 +34,12 @@ def test_gfs_relay_routes_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(52) == [
-        "Reaching a paired household through a shared GFS"
+        "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
-    assert fc.features_missing_below(53) == []
+    assert fc.features_missing_below(53) == [
+        "Turning on the GFS fallback for an existing connection"
+    ]
 
 
 def test_forwarded_invite_link_capability_threshold():
@@ -33,7 +50,8 @@ def test_forwarded_invite_link_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(52) == [
-        "Reaching a paired household through a shared GFS"
+        "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
 
 
@@ -63,6 +81,7 @@ def test_space_authority_rotation_capability_threshold():
         "Private spaces through the GFS",
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -72,6 +91,7 @@ def test_space_authority_rotation_capability_threshold():
         "Private spaces through the GFS",
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
 
 
@@ -97,6 +117,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Private spaces through the GFS",
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
 
 
@@ -594,6 +615,7 @@ def test_forwarded_role_change_capability_threshold():
         "Private spaces through the GFS",
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
 
 
@@ -612,6 +634,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Private spaces through the GFS",
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
 
 
@@ -628,6 +651,7 @@ def test_member_gfs_publish_capability_threshold():
         "Private spaces through the GFS",
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
 
 
@@ -643,6 +667,7 @@ def test_strict_member_publish_capability_threshold():
         "Private spaces through the GFS",
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
 
 
@@ -658,6 +683,7 @@ def test_private_channels_capability_threshold():
     assert fc.features_missing_below(51) == [
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
+        "Turning on the GFS fallback for an existing connection",
     ]
 
 
@@ -716,6 +742,7 @@ _PINNED_FEATURE_KEYS = {
     51: "private_gfs_spaces",
     52: "forwarded_invite_links",
     53: "shared_gfs_relay",
+    54: "gfs_fallback_later",
 }
 
 

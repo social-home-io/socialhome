@@ -12,6 +12,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { Spinner } from './Spinner'
 import { showToast } from './Toast'
 import { ShareHomeToggle } from './ShareHomeToggle'
+import { GfsFallbackToggle } from './GfsFallbackToggle'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
 import {
   peerSupportsResync,
@@ -67,6 +68,18 @@ interface Connection {
    *  INSTANCE_CAPABILITIES_UPDATED. Shown read-only so an admin can spot a
    *  peer that's behind. Absent on old API responses (defaults to v1 there). */
   proto_version?: number
+  /** ``manual`` (paired directly) or ``space_session`` (met through an
+   *  invite link). Only a direct pair gets the GFS fallback switch. */
+  source?: string
+  /** GFS fallback (v_54): our own opt-in for this household. */
+  gfs_relay?: boolean
+  /** GFSes both households were proven to use — a count, never a list. */
+  gfs_routes?: number
+  /** We hold the other household's key-wrap key (it turned the switch on). */
+  peer_keywrap_known?: boolean
+  /** The switch can work with this household at all (it runs a new
+   *  enough Social Home). */
+  gfs_relay_available?: boolean
 }
 
 interface VisibleUser {
@@ -96,8 +109,12 @@ function statusLabel(status: string): string {
   return key ? t(key) : status
 }
 
-export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved }: {
+export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRevoke, onAliasSaved }: {
   conn: Connection
+  /** This household has at least one GFS connection that relays
+   *  envelopes — without one the GFS fallback switch is hidden (unless it
+   *  is already on, so it can still be turned off). */
+  relayGfs?: boolean
   /** Matched federation-compat row for this peer, if loaded. Surfaces the
    *  peer's missing-feature list + the "Re-check version" affordance. */
   compat?: CompatPeer
@@ -411,6 +428,22 @@ export function ConnectionDetail({ conn, compat, onClose, onRevoke, onAliasSaved
             initialValue={conn.share_home ?? true}
           />
         </section>
+        {conn.status === 'confirmed' && (conn.source ?? 'manual') === 'manual'
+          && (relayGfs || conn.gfs_relay) && (
+          <section class="sh-connection-gfs-fallback">
+            <h4 style={{ margin: '12px 0 4px' }}>{t('connections.detail.gfs_fallback')}</h4>
+            <GfsFallbackToggle
+              instanceId={conn.instance_id}
+              peerName={conn.display_name}
+              initial={{
+                gfs_relay: conn.gfs_relay ?? false,
+                gfs_routes: conn.gfs_routes ?? 0,
+                peer_keywrap_known: conn.peer_keywrap_known ?? false,
+                gfs_relay_available: conn.gfs_relay_available ?? false,
+              }}
+            />
+          </section>
+        )}
 
         {visUsers !== null && visUsers.length > 0 && (
           <>

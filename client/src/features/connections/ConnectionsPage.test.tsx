@@ -1160,6 +1160,30 @@ describe('ConnectionDetail prop plumbing', () => {
     expect(conn.last_relay_accepted_at).toBe('2026-09-20 10:00:00')
     expect(conn.relay_only).toBe(true)
   })
+
+  it('passes the stored home-sharing state through (not always "on")', async () => {
+    const conn = await openManage(makeConnection({ share_home: false }))
+    expect(conn.share_home).toBe(false)
+  })
+
+  it('passes the GFS fallback state through to the modal', async () => {
+    const conn = await openManage(
+      makeConnection({
+        source: 'manual',
+        gfs_relay: true,
+        gfs_routes: 2,
+        peer_keywrap_known: true,
+        gfs_relay_available: true,
+      }),
+    )
+    expect(conn).toMatchObject({
+      source: 'manual',
+      gfs_relay: true,
+      gfs_routes: 2,
+      peer_keywrap_known: true,
+      gfs_relay_available: true,
+    })
+  })
 })
 
 describe('a household seated by an invite link (source = space_session)', () => {

@@ -88,6 +88,7 @@ from .infrastructure.calendar_reminder_scheduler import (
 from .infrastructure.task_deadline_scheduler import TaskDeadlineScheduler
 from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
+from .infrastructure.gfs_capability_warmup import GfsCapabilityWarmup
 from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
 from .infrastructure.dm_gc_scheduler import DmGcScheduler
 from .infrastructure.media_orphan_sweep_scheduler import MediaOrphanSweepScheduler
@@ -360,6 +361,7 @@ from .services.report_service import ReportService
 from .services.realtime_service import RealtimeService
 from .services.search_service import SearchService
 from .services.shopping_service import ShoppingService
+from .services.peer_gfs_relay_service import PeerGfsRelayService
 from .services.peer_home_sharing_service import PeerHomeSharingService
 from .services.pending_decrypts_cache import PendingDecryptsCache
 from .services.space_crypto_service import (
@@ -897,6 +899,27 @@ def _build_pairing_gfs_reach(
         keywrap_sig=identity.keywrap_sig,
         probe_peer=route_discovery.probe_peer,
     )
+
+
+def _build_peer_gfs_relay(
+    *,
+    federation_repo: AbstractFederationRepo,
+    capabilities_outbound: CapabilitiesOutbound,
+    route_discovery: GfsRouteDiscoveryService,
+    bus: EventBus,
+) -> PeerGfsRelayService:
+    """The per-connection GFS fallback switch (v_54): our key-wrap key
+    rides the capabilities announcement to the one peer, then route
+    discovery probes it — and again as soon as the peer's key arrives."""
+    service = PeerGfsRelayService(
+        federation_repo=federation_repo,
+        send_capabilities=capabilities_outbound.resend_to,
+        probe_peer=route_discovery.probe_peer,
+        forget_probes=route_discovery.forget_peer,
+        bus=bus,
+    )
+    service.wire()
+    return service
 
 
 def _wire_space_authority_rotation(
@@ -1696,6 +1719,9 @@ def _wire_federation_stack(
         federation_service=federation_service,
         federation_repo=federation_repo,
         bus=bus,
+        # v_54 — our key-wrap key for peers we opt into the GFS relay with.
+        keywrap_public_key=identity.keywrap_public_key,
+        keywrap_sig=identity.keywrap_sig,
     )
     capabilities_outbound.wire()
     app[K.capabilities_outbound_key] = capabilities_outbound
@@ -2027,6 +2053,12 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             "/api/link-preview": (30, 60),
             "/api/presence/location": (10, 60),  # GPS pings
             "/api/calls": (10, 60),  # initiate / signal
+            # Connection management — per-peer reads (visible users,
+            # transport detail), admin toggles (home sharing, GFS fallback)
+            # and unpair. Opening one Manage panel spends two requests, so
+            # the 5/min handshake bucket below 429'd after two opens and a
+            # toggle. The longest matching prefix wins.
+            "/api/pairing/connections": (30, 60),
             "/api/pairing": (5, 60),  # pairing handshakes
         },
     )
@@ -2774,6 +2806,7 @@ def create_app(config: Config | None = None) -> web.Application:
     outbox_processor: OutboxProcessor | None = None
     stale_call_scheduler: StaleCallCleanupScheduler | None = None
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
+    gfs_capability_warmup: GfsCapabilityWarmup | None = None
     routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
     gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
@@ -3552,6 +3585,14 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         app[K.gfs_route_discovery_key] = gfs_route_discovery
         app[K.gfs_route_discovery_scheduler_key] = gfs_route_discovery_scheduler
+        # v_54 — the admin's per-connection switch for pairs made without
+        # a GFS reach (``PATCH /api/pairing/connections/{id}`` ``gfs_relay``).
+        app[K.peer_gfs_relay_service_key] = _build_peer_gfs_relay(
+            federation_repo=repos.federation,
+            capabilities_outbound=app[K.capabilities_outbound_key],
+            route_discovery=gfs_route_discovery,
+            bus=bus,
+        )
         # Pairing codes with a GFS reach (``url_gfs`` / ``gfs``): the code
         # names one of our relay-capable connections, the peer-accept /
         # -confirm ride it sealed when a side has no URL, and a confirmed
@@ -3888,6 +3929,15 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         await gfs_ws_supervisor.start()
         app[K.gfs_ws_supervisor_key] = gfs_ws_supervisor
+        # Warm the RAM-only GFS capability cache now, not only when each
+        # socket connects: until then ``GET /api/gfs/connections`` reads
+        # ``envelope_relay: false`` and the pairing reach picker / GFS
+        # fallback switch stay hidden. Background, one pass, fail-soft.
+        nonlocal gfs_capability_warmup
+        gfs_capability_warmup = GfsCapabilityWarmup(
+            gfs_connection_service.warm_capabilities
+        )
+        await gfs_capability_warmup.start()
 
         # 6. OutboxProcessor — drains federation_outbox in the background.
         peer_unpair_service = app[K.peer_unpair_service_key]
@@ -4212,6 +4262,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await outbox_processor.stop()
         if stale_call_scheduler is not None:
             await stale_call_scheduler.stop()
+        if gfs_capability_warmup is not None:
+            await gfs_capability_warmup.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
         # Before the publish session closes: a retry rides it.

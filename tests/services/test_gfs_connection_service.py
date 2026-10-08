@@ -3008,6 +3008,65 @@ async def test_envelope_relay_known_is_warmed_by_an_info_fetch_without_probing(e
     assert len(session.gets) == 1
 
 
+def _relay_info(conn) -> dict:
+    return _signed_info(
+        gfs_instance_id=conn.gfs_instance_id,
+        capabilities={"anonymous_publish": True, "envelope_relay": True},
+    )
+
+
+async def test_warm_capabilities_warms_a_cold_connection_after_a_restart(env):
+    """After a restart the cache is cold; one startup pass warms it without
+    waiting for the GFS socket, so the list reads ``envelope_relay`` true."""
+    _db, repo = env
+    conn = _make_conn("wc-1", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(info=_relay_info(conn))
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert svc.envelope_relay_known(conn) is False
+
+    assert await svc.warm_capabilities() == 1
+
+    assert svc.envelope_relay_known(conn) is True
+    assert len(session.gets) == 1
+    # A second pass skips the warm connection: no network.
+    assert await svc.warm_capabilities() == 1
+    assert len(session.gets) == 1
+
+
+async def test_warm_capabilities_skips_inactive_connections(env):
+    _db, repo = env
+    conn = _make_conn("wc-2", status="pending", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(info=_relay_info(conn))
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+
+    assert await svc.warm_capabilities() == 0
+    assert session.gets == []
+
+
+async def test_warm_capabilities_is_fail_soft_on_an_unreachable_gfs(env):
+    _db, repo = env
+    conn = _make_conn("wc-3", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(raise_on_get=True)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+
+    assert await svc.warm_capabilities() == 0
+    assert svc.envelope_relay_known(conn) is False
+
+
+async def test_warm_capabilities_stops_before_the_next_fetch(env):
+    _db, repo = env
+    conn = _make_conn("wc-4", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(info=_relay_info(conn))
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+
+    assert await svc.warm_capabilities(should_stop=lambda: True) == 0
+    assert session.gets == []
+
+
 async def test_envelope_relay_known_ignores_an_unsigned_flag(env):
     _db, repo = env
     conn = _make_conn("er-6", public_key=_GFS_KP.public_key.hex())

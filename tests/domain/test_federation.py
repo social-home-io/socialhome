@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from socialhome.domain.federation import (
     ARCHIVED_ALLOWED_REMOVAL_TYPES,
     DELIVERY_ERROR_MESH_DEFERRED,
@@ -17,6 +19,12 @@ from socialhome.domain.federation import (
     SPACE_SESSION_ALLOWED_EVENT_TYPES,
     SPACE_WRITE_EVENT_TYPES,
     STRUCTURAL_EVENTS,
+    GfsRelayNotAllowedError,
+    GfsRelayPeerNotFoundError,
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+    gfs_relay_available,
     is_relay_only,
 )
 
@@ -295,3 +303,58 @@ def test_moderation_events_may_come_from_a_link_joined_household():
         FederationEventType.SPACE_MODERATION_DECIDED
         in SPACE_SESSION_ALLOWED_EVENT_TYPES
     )
+
+
+# ─── gfs_relay_available: can the GFS fallback ever work with this peer ──
+
+
+def _peer(**kw) -> RemoteInstance:
+    base = RemoteInstance(
+        id="peer",
+        display_name="peer",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
+        remote_inbox_url="https://peer.example/inbox",
+        local_inbox_id="wh-peer",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+        proto_version=54,
+    )
+    return replace(base, **kw)
+
+
+def test_gfs_relay_available_for_a_v54_direct_pair():
+    assert gfs_relay_available(_peer()) is True
+
+
+def test_gfs_relay_available_for_a_v53_peer_whose_key_we_hold():
+    """A pair made with a GFS reach exchanged keys at pairing time."""
+    assert gfs_relay_available(_peer(proto_version=53, remote_keywrap_pk="ab" * 32))
+
+
+def test_gfs_relay_not_available_for_a_v53_peer_without_its_key():
+    """It never sends its key, so the switch could never complete."""
+    assert gfs_relay_available(_peer(proto_version=53)) is False
+
+
+def test_gfs_relay_not_available_below_route_discovery():
+    assert (
+        gfs_relay_available(_peer(proto_version=52, remote_keywrap_pk="ab" * 32))
+        is False
+    )
+
+
+def test_gfs_relay_not_available_for_link_joined_or_pending_peers():
+    assert gfs_relay_available(_peer(source=InstanceSource.SPACE_SESSION)) is False
+    assert gfs_relay_available(_peer(status=PairingStatus.PENDING_SENT)) is False
+
+
+def test_gfs_relay_switch_errors_are_coded():
+    assert (GfsRelayPeerNotFoundError().status, GfsRelayPeerNotFoundError().code) == (
+        404,
+        "NOT_FOUND",
+    )
+    exc = GfsRelayNotAllowedError()
+    assert (exc.status, exc.code) == (409, "GFS_RELAY_NOT_ALLOWED")
+    assert isinstance(exc, ValueError)

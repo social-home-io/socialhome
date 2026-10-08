@@ -1493,9 +1493,20 @@ class PeerCapabilitiesAdvertised(DomainEvent):
     (``INSTANCE_CAPABILITIES_UPDATED``) — which it does on every startup, so
     this is the "that household is back" signal. A private-space member that
     gets the link-joined members' items from the host only by catch-up sync
-    (v_51) asks for one when its host is back."""
+    (v_51) asks for one when its host is back.
+
+    ``keywrap_learned`` (v_54) is ``True`` when this very announcement
+    carried a key-wrap key we did not hold yet and it verified bound to the
+    household's identity key: the GFS fallback switch then probes for
+    shared GFSes at once, instead of waiting for the next discovery round."""
 
     instance_id: str
+    keywrap_learned: bool = False
+    #: The household's own GFS fallback switch as it announced it (v_54):
+    #: ``False`` — it switched off, so our relay routes to it lead into a
+    #: closed gate and are dropped; ``None`` — it did not say (older build,
+    #: or not a directly paired household).
+    peer_gfs_relay: bool | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

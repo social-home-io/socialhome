@@ -525,7 +525,8 @@ The whole ``gfs-*`` chain (``gfs-up`` / ``gfs-pair`` / ``gfs-open-signup`` /
 ``gfs-traffic``
 / ``gfs-replay`` / ``gfs-space-subscribe`` / ``gfs-space-post`` /
 ``gfs-space-rotate`` / ``gfs-authority-rotate`` /
-``gfs-space-no-subscribers`` / ``gfs-reach-pair`` / ``gfs-down``)
+``gfs-space-no-subscribers`` / ``gfs-reach-pair`` /
+``gfs-fallback-switch`` / ``gfs-down``)
 stays
 opt-in — it spins up a
 separate GFS process and isn't required to validate the HFS↔HFS
@@ -751,6 +752,7 @@ python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-reach-pair
+python .claude/skills/federation-demo/harness.py gfs-fallback-switch   # needs relay-pair (a <-> d)
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
 
@@ -832,6 +834,23 @@ channel row and no seat and never holds the space id or the post. ``verify``
 then checks a, b and e agree on the channel, e's grant is stored
 KEK-wrapped, the GFS row names no space, b holds a seat, a holds none, and
 the OFF space has no channel. Polls every 3 s, backs off on 429.
+
+### ``gfs-fallback-switch`` — the GFS fallback for an existing pair (v_54)
+
+Needs ``relay-pair`` (a ↔ d, an ordinary pair with addresses and no GFS
+reach) + ``gfs-up`` + ``gfs-pair`` (a and d on the GFS). a's admin turns
+"Use the GFS as a fallback" on for d (``PATCH /api/pairing/connections/{d}
+{gfs_relay: true}``): d must store a's key-wrap key — it rides a's
+encrypted ``INSTANCE_CAPABILITIES_UPDATED`` and d checks it against a's
+pinned identity key — while d's own switch stays off and no route forms
+on either side. Then d turns it on for a: a learns d's key, probes at
+once, and both ``GET /api/connections`` rows must reach ``gfs_routes >= 1``
+within 45 s. a's row for b (b is on no GFS) must show no route. Then a
+switches off: its ``gfs_relay: false`` announcement must make d drop its
+route to a while d's own switch stays on. Both
+switches go off again at the end and the routes must be gone, so the
+step can be re-run at once (switching off clears both sides' probe
+throttles for the pair).
 
 ### ``gfs-reach-pair`` — pairing a household that offers no address (pairing ``reach``)
 

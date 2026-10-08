@@ -147,3 +147,30 @@ def test_retry_after_s_counts_down_to_the_oldest_stamp_leaving_the_window():
 def test_retry_after_s_is_zero_for_an_empty_bucket():
     rl = RateLimiter()
     assert rl.retry_after_s("never-seen", window_s=60) == 0
+
+
+async def test_the_most_specific_prefix_wins_whatever_the_order():
+    """``/api/pairing/connections`` (per-peer reads, admin toggles) must not
+    fall into the 5/min handshake bucket of ``/api/pairing`` — opening a
+    connection's Manage panel twice and flipping a switch 429'd."""
+    mw = build_rate_limit_middleware(
+        RateLimiter(),
+        limits={"/api/pairing": (1, 60), "/api/pairing/connections": (3, 60)},
+    )
+    for _ in range(3):
+        assert await _hit(mw, "/api/pairing/connections/peer-1/visible-users") == 204
+    assert await _hit(mw, "/api/pairing/connections/peer-1") == 429
+    # The handshake endpoints keep the tight bucket of their own.
+    assert await _hit(mw, "/api/pairing/initiate") == 204
+    assert await _hit(mw, "/api/pairing/initiate") == 429
+
+
+async def test_a_glob_rule_still_beats_a_literal_prefix():
+    mw = build_rate_limit_middleware(
+        RateLimiter(),
+        limits={"/api/calls": (1, 60), "/api/calls/*/ice": (3, 60)},
+    )
+    for _ in range(3):
+        assert await _hit(mw, "/api/calls/c1/ice") == 204
+    assert await _hit(mw, "/api/calls/c1/ice") == 429
+    assert await _hit(mw, "/api/calls") == 204

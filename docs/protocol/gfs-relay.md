@@ -146,7 +146,14 @@ after each round.
   once a minute — so a reconnect storm or a flapping socket costs one
   round per 10 min. A scheduler stop lands between peers, never mid-POST.
 - **On demand:** `probe_peer(instance_id)` probes one peer at once (for
-  a fresh pairing or a newly enabled opt-in; same per-peer cap).
+  a fresh pairing or a newly enabled opt-in; same per-peer cap). The
+  admin switching the fallback from off to on (v_54) probes past that
+  window — even right after another probe — and opens none: its probe
+  usually goes unanswered (the other side has not switched on yet), and
+  our probe-back when the other side does must not be swallowed by it. A
+  repeated "on" is an ordinary, throttled probe. Either side switching
+  off clears the probe and answer windows for that peer, so the next
+  switch-on starts fresh.
 - **Expiry:** a route whose `last_ack_at` is older than 72 h (three
   intervals) is deleted, so one missed round never costs a working route
   but a peer that left a server stops being relayed there. Until then —
@@ -154,6 +161,8 @@ after each round.
   send through that server is answered `202` and lost (the relay cannot
   say the recipient is gone without becoming a presence oracle). Removing
   one of OUR connection servers deletes its routes at once (FK cascade).
+  A peer switching its fallback **off** does not wait for expiry: it tells
+  us (`gfs_relay: false`, below) and we drop our routes to it at once.
 - **Caps:** at most 1024 outstanding probes (oldest forgotten first, with
   a WARNING — its ack will be ignored), a
   15 min ack window, and at most one ack per peer per server every 30 s —
@@ -188,6 +197,92 @@ routes; a seeded route that no ack ever refreshes expires after 72 h
 like any other. The code and the signed peer-accept carry each side's
 `proto_version`, so the v_53 gate on probing already holds at confirm
 time.
+
+## Turning the fallback on for an existing pair
+
+A pair made with a plain `url` code — or before the relay existed — has
+`gfs_relay = 0` on both sides and neither holds the other's key-wrap
+key, so neither can seal anything to the other. Each admin can switch
+the fallback on later, per connection
+(`PATCH /api/pairing/connections/{id}` `{gfs_relay: true}`, see
+[`api.md`](../api.md); the Connections → Manage panel's "Use the GFS as
+a fallback" switch). Since v_54
+(`FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE`).
+
+- **The key rides the capabilities announcement.** No new event: to a
+  directly paired peer we opted in with, `INSTANCE_CAPABILITIES_UPDATED`
+  also carries `keywrap_pk` / `keywrap_sig` / `keywrap_suite` — our
+  static key-wrap key (the one `/gfs/info` and a GFS-reach code carry),
+  its identity binding signature and the `"x25519"` suite tag — inside
+  the AES-256-GCM payload, next to `gfs_relay: true`. Switching on sends
+  it to that one peer at once; the startup fan-out repeats it while the
+  switch stays on. A peer we did not opt in with never gets the key — its
+  announcement says `gfs_relay: false` instead.
+- **The receiver checks it against the pinned identity.** The suite must
+  be known (unknown or missing → refused, never defaulted) and the key
+  self-signed by the identity key pinned for that household at pairing
+  (`verified_peer_keywrap`); anything else is dropped at WARNING and the
+  stored key stays. Only `source = manual` rows take a key this way. A
+  stored key does **not** opt the receiver in — that stays its own
+  admin's switch.
+- **Both sides must switch on.** Probing needs the peer's key, and the
+  §24.11 relay opt-in gate refuses relayed envelopes from a household we
+  did not opt in with — so with only one side on, no relay body is ever
+  posted. When the second side switches on, its key reaches the first
+  side, which probes at once (a newly learned key triggers `probe_peer`);
+  the second side probes too. Discovery then runs exactly as above. A
+  probe that overtakes the announcement carrying its sender's key (the
+  probe rides the GFS, the key the direct link) cannot be acked — we have
+  nothing to seal to — so it is ignored without opening the 30 s answer
+  window; the sender's next probe, triggered by ours, is answered.
+- **Off** clears our opt-in, deletes that peer's routes and our probes in
+  flight to it (a late ack re-creates nothing — the ack handler re-reads
+  the opt-in), and re-sends our capabilities with `gfs_relay: false`. The
+  receiver (directly paired peers only; an explicit `false`, never a
+  missing field) drops **its** routes to us and its probe state for us,
+  without touching its own opt-in. Without that it would keep relaying to
+  us for up to 72 h: the relay answers `202`, so those envelopes count as
+  delivered and are never queued, while our gate refuses every one. Now
+  its next send takes RTC / the HTTPS inbox and, failing those, its
+  outbox. The keys stay (public, bound to the identity key, needed if the
+  switch comes back on); switching on again runs the key / probe flow and
+  restores the routes on both sides.
+- **Older peers.** A v_53 peer never sends its key, so the switch cannot
+  complete with it unless we already hold its key from a GFS-reach
+  pairing; the connections API says so (`gfs_relay_available: false`)
+  and the SPA tells the admin the other household needs a newer Social
+  Home. The status line otherwise reads "reachable through N GFS"
+  (`gfs_routes`), "waiting for the other household" (on, peer key
+  unknown) or "no GFS you both use found yet" (on, keys known, no route).
+  Which GFS the two share is never shown — only counted.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as HFS A<br/>(servers X, Y)
+    participant Y as GFS Y
+    participant B as HFS B<br/>(servers Y, Z)
+
+    Note over A,B: paired with a url code: gfs_relay = 0, no key-wrap keys
+    A->>A: admin switches on: gfs_relay = 1
+    A->>B: INSTANCE_CAPABILITIES_UPDATED (RTC / HTTPS inbox)<br/>{proto_version, keywrap_pk, keywrap_sig, keywrap_suite} — encrypted
+    B->>B: verify binding vs pinned identity → store A's key<br/>(B's gfs_relay stays 0)
+    A->>A: probe_peer(B) → not eligible (no key for B): nothing sent
+    Note over A,B: later — B's admin switches on
+    B->>B: gfs_relay = 1
+    B->>A: INSTANCE_CAPABILITIES_UPDATED {…, keywrap_*}
+    A->>A: verify, store B's key → keywrap_learned → probe_peer(B)
+    A->>Y: GFS_RELAY_PROBE {nonce} (and through X)
+    Y->>B: WS frame {sealed}
+    B->>Y: GFS_RELAY_PROBE_ACK {nonce} — same server
+    Y->>A: WS frame {sealed}
+    A->>A: route (B, conn A·Y)
+    Note over A,B: B probes too (its own switch, and the probe-back) → route (A, conn B·Y)
+    Note over A,B: later — A's admin switches off
+    A->>A: gfs_relay = 0, delete routes to B, forget probes to B
+    A->>B: INSTANCE_CAPABILITIES_UPDATED {…, gfs_relay: false} — encrypted
+    B->>B: drop routes to A (B's own gfs_relay stays 1)<br/>next send to A: RTC / HTTPS / outbox, never the relay
+```
 
 ## Privacy — who learns what
 
@@ -228,6 +323,13 @@ time.
 
 ## Implementation
 
+- `socialhome/services/peer_gfs_relay_service.py` — `PeerGfsRelayService`:
+  the per-connection switch (on: opt in, send our key, probe; off: opt
+  out, drop routes) and the probe on a newly learned peer key (v_54).
+- `socialhome/services/capabilities_outbound.py` — our key-wrap fields
+  in `INSTANCE_CAPABILITIES_UPDATED` for opted-in paired peers;
+  `socialhome/services/federation_inbound/pairing.py` —
+  `_apply_peer_keywrap` on the receiving side.
 - `socialhome/services/gfs_route_discovery_service.py` —
   `GfsRouteDiscoveryService`: `probe_peer` / `probe_all`, the probe and
   ack handlers (registered in `attach_to`), pending-nonce map, throttles,

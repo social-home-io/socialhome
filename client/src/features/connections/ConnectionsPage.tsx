@@ -1018,9 +1018,20 @@ export default function ConnectionsPage() {
             paired_at: detail.paired_at ?? null,
             transport: detail.transport ?? null,
             proto_version: detail.proto_version,
+            share_home: detail.share_home,
+            source: detail.source,
+            gfs_relay: detail.gfs_relay,
+            gfs_routes: detail.gfs_routes,
+            peer_keywrap_known: detail.peer_keywrap_known,
+            gfs_relay_available: detail.gfs_relay_available,
           }}
           compat={detail ? compatByInstance.get(detail.instance_id) : undefined}
-          onClose={() => setDetail(null)}
+          relayGfs={gfsConnections.value.some(
+            g => g.status === 'active' && g.envelope_relay === true,
+          )}
+          // Re-read on close: the per-pair switches (home sharing, GFS
+          // fallback) changed server state the listing still has stale.
+          onClose={() => { setDetail(null); void loadConnections() }}
           onRevoke={() => { setDetail(null); void loadConnections() }}
           onAliasSaved={() => { setDetail(null); void loadConnections() }}
         />

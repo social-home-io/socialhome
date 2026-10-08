@@ -211,31 +211,58 @@ class GfsRouteDiscoveryService:
             sent += await self._probe(peer)
         return sent
 
-    async def probe_peer(self, instance_id: str) -> int:
+    async def probe_peer(
+        self,
+        instance_id: str,
+        *,
+        throttled: bool = True,
+    ) -> int:
         """Probe one peer through each of our relay-capable connections.
 
         Public trigger for a fresh pairing / a newly enabled opt-in. A peer
         that is not eligible (not confirmed, not opted in, no key-wrap key,
         below v_53) or was probed within :data:`PROBE_PEER_MIN_INTERVAL_S`
         gets nothing. Returns the number of probes sent.
+
+        ``throttled=False`` neither waits for nor opens the per-peer
+        window. Only for the admin switching the GFS fallback from off to
+        on (v_54) — a state transition, never a repeat: that probe must go
+        out even if a timer probe just did, and it usually goes unanswered
+        (the other household's relay opt-in gate refuses it until ITS
+        admin switches on too) — so when that happens seconds later, our
+        probe-back to its first probe must not be swallowed by a window our
+        own unanswered probe opened (we would hold no route for a day).
         """
         peer = await self._federation_repo.get_instance(instance_id)
         if peer is None:
             return 0
-        return await self._probe(peer)
+        return await self._probe(peer, throttled=throttled)
 
-    async def _probe(self, peer: RemoteInstance) -> int:
+    def forget_peer(self, instance_id: str) -> None:
+        """Drop everything in flight for *instance_id*: its pending probe
+        nonces (a late ack must not re-create a route) and its probe and
+        answer throttle windows. Called when either side switches the
+        fallback off — the next switch-on starts a fresh exchange, which a
+        window left from the old one must not swallow."""
+        for nonce in [n for n, p in self._pending.items() if p.peer_id == instance_id]:
+            del self._pending[nonce]
+        self._last_probe_at.pop(instance_id, None)
+        for key in [k for k in self._last_answer_at if k[0] == instance_id]:
+            del self._last_answer_at[key]
+
+    async def _probe(self, peer: RemoteInstance, *, throttled: bool = True) -> int:
         if not await self._eligible(peer):
             return 0
         now = self._clock()
         last = self._last_probe_at.get(peer.id)
-        if last is not None and now - last < PROBE_PEER_MIN_INTERVAL_S:
+        if throttled and last is not None and now - last < PROBE_PEER_MIN_INTERVAL_S:
             log.debug("gfs routes: probe to %s throttled", peer.id)
             return 0
         conns = await self._relay_connections()
         if not conns:
             return 0
-        self._last_probe_at[peer.id] = now
+        if throttled:
+            self._last_probe_at[peer.id] = now
         sent = 0
         for conn in conns:
             nonce = secrets.token_urlsafe(PROBE_NONCE_BYTES)
@@ -334,6 +361,20 @@ class GfsRouteDiscoveryService:
         if nonce is None:
             log.debug("gfs routes: malformed probe from %s", event.from_instance)
             return
+        # Without the peer's key-wrap key we cannot seal an ack. That happens
+        # when its switch-on probe overtakes the capabilities announcement
+        # that carries the key (v_54): ignore it WITHOUT opening the answer
+        # window, or its next probe — sent once our own probe, triggered by
+        # the key arriving, reaches it — would be swallowed for 30 s and it
+        # would hold no route to us for a day. Nothing was posted, so
+        # nothing needs throttling.
+        peer = await self._federation_repo.get_instance(event.from_instance)
+        if peer is None or not peer.remote_keywrap_pk:
+            log.debug(
+                "gfs routes: probe from %s before its key-wrap key — not answered",
+                event.from_instance,
+            )
+            return
         now = self._clock()
         key = (event.from_instance, via)
         last = self._last_answer_at.get(key)
@@ -417,6 +458,15 @@ class GfsRouteDiscoveryService:
             )
             return
         self._pending.pop(nonce, None)
+        # Re-read: the admin may have switched the fallback off while this
+        # probe was out (its routes were just deleted) — never re-create one.
+        peer = await self._federation_repo.get_instance(event.from_instance)
+        if peer is None or not peer.gfs_relay:
+            log.debug(
+                "gfs routes: ack from %s after the fallback was switched off",
+                event.from_instance,
+            )
+            return
         await self._federation_repo.upsert_gfs_route(
             event.from_instance,
             probe.gfs_connection_id,

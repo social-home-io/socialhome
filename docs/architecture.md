@@ -221,7 +221,7 @@ event needs and whether the peer is reachable:
 | 1 — hot | WebRTC DataChannel `fed-v1` | Routine, real-time envelopes once the P2P channel is up. |
 | 2 — warm | WebRTC DataChannel `sync-v1` | Bulk content sync (initial sync after pairing, recovery after long offline). |
 | 3 — cold | HTTPS inbox `POST /federation/inbox/{id}` | Fallback before/while DataChannel is down, and for peers behind a blocked UDP path. |
-| 4 — no address / last resort | Connection-server envelope relay `POST {gfs}/gfs/envelope` | Households seated from an invite link (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. Also the last-resort fallback for a **paired** household this household opted into the relay with (`remote_instances.gfs_relay`), over its confirmed `peer_gfs_routes`. |
+| 4 — no address / last resort | Connection-server envelope relay `POST {gfs}/gfs/envelope` | Households seated from an invite link (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. Also the last-resort fallback for a **paired** household this household opted into the relay with (`remote_instances.gfs_relay` — set by a pairing code with a GFS reach, or later per connection by the admin, v_54), over its confirmed `peer_gfs_routes`. |
 
 **Redirects.** Every outbound POST to a household inbox — tier 3 and outbox
 redelivery (a connection server never POSTs to a household: it holds no

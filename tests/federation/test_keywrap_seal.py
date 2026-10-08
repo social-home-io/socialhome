@@ -22,10 +22,21 @@ from socialhome.federation.keywrap_seal import (
     KEM_SUITE_X25519,
     SUPPORTED_KEM_SUITES,
     UnsupportedKemSuite,
+    keywrap_wire_fields,
     open_keywrap,
     seal_to_keywrap,
     verify_keywrap_binding,
 )
+
+
+def test_keywrap_wire_fields_are_suite_tagged():
+    """One shape for every carrier (pairing code, peer-accept,
+    capabilities) — always with the suite tag."""
+    assert keywrap_wire_fields(b"\x01" * 32, "sig") == {
+        "keywrap_pk": "01" * 32,
+        "keywrap_sig": "sig",
+        "keywrap_suite": KEM_SUITE_X25519,
+    }
 
 
 def test_kem_suite_constant_is_in_supported_set():

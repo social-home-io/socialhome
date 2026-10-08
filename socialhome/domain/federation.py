@@ -12,6 +12,7 @@ import enum
 from dataclasses import dataclass, field
 
 from .errors import CodedError
+from .federation_capabilities import FederationCapability
 
 
 # ─── Event type vocabulary (§24.11) ───────────────────────────────────────
@@ -1219,6 +1220,25 @@ class GfsNotSharedError(CodedError, ValueError):
     detail = "This household is not connected to the GFS this pairing code uses."
 
 
+class GfsRelayPeerNotFoundError(CodedError, LookupError):
+    """The GFS fallback switch names a household we hold no row for."""
+
+    status = 404
+    code = "NOT_FOUND"
+    detail = "Peer not found."
+
+
+class GfsRelayNotAllowedError(CodedError, ValueError):
+    """The GFS fallback switch is only for a confirmed household paired
+    directly (``source = manual``). A household met through an invite link
+    rides the GFS that introduced it already; a pairing that is still in
+    progress has nothing to fall back from yet."""
+
+    status = 409
+    code = "GFS_RELAY_NOT_ALLOWED"
+    detail = "The GFS fallback is only for confirmed, directly paired households."
+
+
 class PairingKeywrapInvalidError(CodedError, ValueError):
     """The peer's key-wrap key is missing, of an unknown suite, or not
     bound to its identity key — never seal anything to it."""
@@ -1387,6 +1407,28 @@ def is_relay_only(
     if not last_reachable_at:
         return True
     return last_relay_accepted_at > last_reachable_at
+
+
+def gfs_relay_available(instance: "RemoteInstance") -> bool:
+    """Whether the GFS fallback can work with this peer at all.
+
+    Only a confirmed, directly paired household (``source = manual``) at
+    v_53+ takes part in route discovery. Both sides also need the other's
+    key-wrap key: either we already hold the peer's (a pairing made with a
+    GFS reach) or the peer runs v_54+, which sends it in
+    ``INSTANCE_CAPABILITIES_UPDATED`` once its own admin turns the
+    fallback on. A peer below that never will — the SPA tells the admin
+    the other household needs a newer Social Home. Pure, no I/O.
+    """
+    if instance.status is not PairingStatus.CONFIRMED:
+        return False
+    if instance.source is not InstanceSource.MANUAL:
+        return False
+    if instance.proto_version < FederationCapability.MIN_FOR_GFS_RELAY_ROUTES:
+        return False
+    return bool(instance.remote_keywrap_pk) or (
+        instance.proto_version >= FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE
+    )
 
 
 @dataclass(slots=True, frozen=True)

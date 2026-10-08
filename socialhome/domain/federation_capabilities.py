@@ -817,7 +817,20 @@ from __future__ import annotations
 #:   (``docs/protocol/gfs-relay.md``). **Gated, no fallback**: a peer below
 #:   v_53 is never probed, so it holds no relay routes and gets no relay
 #:   fallback — the pair keeps RTC and the HTTPS inbox exactly as before.
-OURS: int = 53
+#: * **v_54** (2026-10-08) — the GFS fallback for households paired BEFORE
+#:   it existed (or paired with a plain ``url`` code). An admin turns the
+#:   relay on per connection; a household opted into the relay with a
+#:   paired peer now carries its static key-wrap key in
+#:   :attr:`~socialhome.domain.federation.FederationEventType
+#:   .INSTANCE_CAPABILITIES_UPDATED` (``keywrap_pk`` / ``keywrap_sig`` /
+#:   ``keywrap_suite``, inside the encrypted payload), and the receiver
+#:   stores it once it verifies bound to the sender's identity key. No new
+#:   event type. **Additive, informational gate**: an older receiver
+#:   ignores the fields, and an older peer never sends its key, so the
+#:   switch cannot complete with it — the connections API reports such a
+#:   peer as not available (``gfs_relay_available``) so the admin is told
+#:   the other household needs a newer Social Home.
+OURS: int = 54
 
 
 class FederationCapability:
@@ -1262,6 +1275,13 @@ class FederationCapability:
     #: engages for it. Per-pair, not space-scoped.
     MIN_FOR_GFS_RELAY_ROUTES = 53
 
+    #: v_54 — a paired household sends its key-wrap key in
+    #: ``INSTANCE_CAPABILITIES_UPDATED`` once its admin turns the GFS
+    #: fallback on for the pair, so a pair made without a GFS reach can
+    #: opt in later. Below it the peer never sends its key: the switch is
+    #: reported as not available. Per-pair, not space-scoped.
+    MIN_FOR_GFS_RELAY_KEY_EXCHANGE = 54
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1462,6 +1482,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_GFS_RELAY_ROUTES,
         "Reaching a paired household through a shared GFS",
     ),
+    (
+        FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE,
+        "Turning on the GFS fallback for an existing connection",
+    ),
 ]
 
 
@@ -1526,6 +1550,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_PRIVATE_CHANNELS: "private_gfs_spaces",
     FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK: "forwarded_invite_links",
     FederationCapability.MIN_FOR_GFS_RELAY_ROUTES: "shared_gfs_relay",
+    FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE: "gfs_fallback_later",
 }
 
 

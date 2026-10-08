@@ -14,13 +14,26 @@ outbound fields on the version we actually run. Three trigger points:
    would skip optional fields forever.
 3. **Manually** — call :meth:`publish` after the operator changes the
    advertised set mid-run (rare; usually only on restart).
-4. **Mesh-only space hosts** — :meth:`announce_to_mesh_host`, driven by
+4. **GFS fallback switched on** — :class:`~socialhome.services
+   .peer_gfs_relay_service.PeerGfsRelayService` calls :meth:`resend_to`
+   when an admin turns the relay on for one paired household (v_54).
+5. **Mesh-only space hosts** — :meth:`announce_to_mesh_host`, driven by
    the space sync scheduler's mesh sweep at startup and on its periodic
    tick: a host we reach only over the mesh holds no row for us and gets
    our version (plus identity key) as a claim over ``SPACE_ROUTED``.
 
 A failed send to a single peer lands in the outbox retry queue; we
 never raise.
+
+**Relay opt-in and key-wrap key (v_54).** To a directly paired peer the
+payload carries ``gfs_relay`` — our opt-in (a ``false`` makes the peer drop
+its relay routes to us). Opted in, it also carries our static key-wrap key — ``keywrap_pk`` /
+``keywrap_sig`` / ``keywrap_suite``, the very material ``/gfs/info`` and a
+GFS-reach pairing code carry, never a fresh key — so a pair made without
+a GFS reach can switch the fallback on later. It rides the encrypted
+payload like every other field; the receiver stores it only once it
+verifies bound to our identity key. Additive: an older receiver ignores
+it. Nobody else gets it — a peer we did not opt in with has no use for it.
 
 **Every CONFIRMED peer, not just the social ones.** A household seated
 from an invite link (``source = space_session``) is not a social peer —
@@ -35,8 +48,9 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..domain.events import PairingConfirmed
-from ..domain.federation import FederationEventType, PairingStatus
+from ..domain.federation import FederationEventType, InstanceSource, PairingStatus
 from ..domain.federation_capabilities import OURS as OUR_PROTO_VERSION
+from ..federation.keywrap_seal import keywrap_wire_fields
 from ..federation.mesh_member_claim import mesh_member_claim
 from .peer_outbound import ConfirmedPeerBroadcaster
 
@@ -51,7 +65,13 @@ log = logging.getLogger(__name__)
 class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
     """Fan out ``INSTANCE_CAPABILITIES_UPDATED`` to every confirmed peer."""
 
-    __slots__ = ("_federation", "_federation_repo", "_bus")
+    __slots__ = (
+        "_federation",
+        "_federation_repo",
+        "_bus",
+        "_keywrap_public_key",
+        "_keywrap_sig",
+    )
 
     # Narrow the broadcaster's optional ``_federation`` / ``_federation_repo``
     # — both required at construction, so the direct ``send_event`` and
@@ -65,10 +85,17 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         federation_service: "FederationService",
         federation_repo: "AbstractFederationRepo",
         bus: "EventBus | None" = None,
+        keywrap_public_key: bytes = b"",
+        keywrap_sig: str = "",
     ) -> None:
         self._federation = federation_service
         self._federation_repo = federation_repo
         self._bus = bus
+        #: Our static key-wrap key + its identity binding signature, sent
+        #: only to peers we opted into the GFS relay with (v_54). Empty
+        #: means "not configured": the field is then never sent.
+        self._keywrap_public_key = keywrap_public_key
+        self._keywrap_sig = keywrap_sig
 
     async def confirmed_peers(self) -> list:
         """Every CONFIRMED peer — social **and** space-session.
@@ -155,6 +182,7 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         name = (local or {}).get("display_name")
         if isinstance(name, str) and name.strip():
             payload["display_name"] = name.strip()
+        payload.update(await self._relay_fields_for(instance_id))
         await self._federation.send_event(
             to_instance_id=instance_id,
             event_type=FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
@@ -166,6 +194,31 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
             instance_id,
         )
         return True
+
+    async def _relay_fields_for(self, instance_id: str) -> dict[str, object]:
+        """Our GFS-relay fields for *instance_id*, or ``{}`` (v_54).
+
+        Directly paired peers only (a link-joined household got our key
+        from the invite bootstrap and rides the relay by construction):
+
+        * opted in — ``gfs_relay: true`` plus our key-wrap key, which the
+          peer needs to seal a relayed envelope (or a probe ack) to us;
+        * not opted in — ``gfs_relay: false``, so a peer that still holds
+          routes to us drops them: our inbound gate refuses its relayed
+          envelopes, while the relay answers 202 to each one, so they would
+          count as delivered and never be queued.
+        """
+        if not self._keywrap_public_key or not self._keywrap_sig:
+            return {}
+        peer = await self._federation_repo.get_instance(instance_id)
+        if peer is None or peer.source is not InstanceSource.MANUAL:
+            return {}
+        if not peer.gfs_relay:
+            return {"gfs_relay": False}
+        return {
+            "gfs_relay": True,
+            **keywrap_wire_fields(self._keywrap_public_key, self._keywrap_sig),
+        }
 
     async def announce_to_mesh_host(self, host_instance_id: str) -> bool:
         """Tell a space host we reach only over the mesh our version.

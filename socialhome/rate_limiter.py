@@ -123,16 +123,23 @@ def build_rate_limit_middleware(
 
     def _pick(path: str) -> tuple[str | None, int, int]:
         # Two key flavours:
-        #   * literal prefix — most specific wins via insertion order
-        #     (callers list narrower prefixes first).
         #   * fnmatch-style with ``*`` — matches the whole path; great
-        #     for ``/api/spaces/*/ban`` style action endpoints.
+        #     for ``/api/spaces/*/ban`` style action endpoints. An exact
+        #     action rule always wins over a prefix (first one listed).
+        #   * literal prefix — the LONGEST matching prefix wins, whatever
+        #     the order the rules are listed in, so ``/api/pairing/
+        #     connections`` never falls into the ``/api/pairing`` bucket.
         for pattern, (limit, window_s) in limits.items():
-            if "*" in pattern:
-                if fnmatch.fnmatchcase(path, pattern):
-                    return pattern, limit, window_s
-            elif path.startswith(pattern):
+            if "*" in pattern and fnmatch.fnmatchcase(path, pattern):
                 return pattern, limit, window_s
+        best: str | None = None
+        for pattern in limits:
+            if "*" not in pattern and path.startswith(pattern):
+                if best is None or len(pattern) > len(best):
+                    best = pattern
+        if best is not None:
+            limit, window_s = limits[best]
+            return best, limit, window_s
         return None, default_limit, default_window_s
 
     @web.middleware

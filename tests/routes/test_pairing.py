@@ -12,6 +12,7 @@ import orjson
 
 from socialhome.app_keys import (
     auto_pair_coordinator_key,
+    capabilities_outbound_key,
     db_key as _db_key,
     dm_routing_service_key,
     event_bus_key,
@@ -23,6 +24,7 @@ from socialhome.app_keys import (
     instance_keywrap_public_key_key,
     key_manager_key,
     outbox_repo_key,
+    peer_gfs_relay_service_key,
     peer_home_sharing_service_key,
     peer_unpair_service_key,
     platform_adapter_key,
@@ -1902,3 +1904,277 @@ async def test_unpair_unreachable_peer_still_succeeds_promptly(client):
     assert await r.json() == {"ok": True, "peer_notified": False}
     assert await fed_repo.get_instance("peer-u2") is None
     assert [e.instance_id for e in seen] == ["peer-u2"]
+
+
+# ─── PATCH /api/pairing/connections/{instance_id} gfs_relay (v_54) ──────────
+
+
+class _SwitchCalls:
+    """Records what the GFS fallback switch hands the wire."""
+
+    def __init__(self) -> None:
+        self.keywrap_to: list[str] = []
+        self.probed: list[str] = []
+
+    async def send_keywrap(self, instance_id: str) -> bool:
+        self.keywrap_to.append(instance_id)
+        return True
+
+    async def probe(self, instance_id: str, **_kw) -> int:
+        self.probed.append(instance_id)
+        return 0
+
+
+def _record_switch(client) -> _SwitchCalls:
+    calls = _SwitchCalls()
+    svc = client.app[peer_gfs_relay_service_key]
+    svc._send_capabilities = calls.send_keywrap
+    svc._probe_peer = calls.probe
+    return calls
+
+
+async def _seed_peer(client, iid: str, **overrides) -> RemoteInstance:
+    inst = dataclasses.replace(_fake_instance(iid), **overrides)
+    repo = client.app[federation_repo_key]
+    await repo.save_instance(inst)
+    if "proto_version" in overrides:
+        await repo.set_proto_version(iid, overrides["proto_version"])
+    if overrides.get("gfs_relay"):
+        await repo.set_gfs_relay(iid, enabled=True)
+    return inst
+
+
+async def _patch_relay(client, iid: str, value, tok: str | None = None):
+    return await client.patch(
+        f"/api/pairing/connections/{iid}",
+        json={"gfs_relay": value},
+        headers=_auth(tok or client._tok),
+    )
+
+
+async def test_patch_gfs_relay_on_opts_in_sends_key_and_probes(client):
+    await _seed_peer(client, "peer-gr-1", proto_version=54)
+    calls = _record_switch(client)
+
+    r = await _patch_relay(client, "peer-gr-1", True)
+
+    assert r.status == 200
+    body = await r.json()
+    assert body["gfs_relay"] is True
+    assert body["gfs_routes"] == 0
+    assert body["peer_keywrap_known"] is False
+    assert body["gfs_relay_available"] is True
+    row = await client.app[federation_repo_key].get_instance("peer-gr-1")
+    assert row.gfs_relay is True
+    assert calls.keywrap_to == ["peer-gr-1"]
+    assert calls.probed == ["peer-gr-1"]
+
+
+async def test_patch_gfs_relay_on_sends_our_keywrap_key_in_capabilities(
+    client, monkeypatch
+):
+    """The real key hand-over: our capabilities announcement to that one
+    peer carries our key-wrap key, its binding signature and suite tag."""
+    await _seed_peer(client, "peer-gr-key", proto_version=54)
+    sent: list[dict] = []
+
+    class _Wire:
+        _own_instance_id = "self-instance"
+
+        async def send_event(self, *, to_instance_id, event_type, payload, **_kw):
+            sent.append({"to": to_instance_id, "type": event_type, "payload": payload})
+
+    monkeypatch.setattr(client.app[capabilities_outbound_key], "_federation", _Wire())
+
+    r = await _patch_relay(client, "peer-gr-key", True)
+
+    assert r.status == 200
+    caps = [
+        m
+        for m in sent
+        if m["type"] is FederationEventType.INSTANCE_CAPABILITIES_UPDATED
+    ]
+    assert [m["to"] for m in caps] == ["peer-gr-key"]
+    payload = caps[0]["payload"]
+    assert payload["keywrap_pk"] == client.app[instance_keywrap_public_key_key].hex()
+    assert payload["keywrap_suite"] == "x25519"
+    assert payload["keywrap_sig"]
+
+
+async def test_patch_gfs_relay_off_drops_routes_and_opt_in(client):
+    await _connect_gfs(client, "gfs-gr", "https://gfs-gr.example")
+    await _seed_peer(client, "peer-gr-2", proto_version=54, gfs_relay=True)
+    repo = client.app[federation_repo_key]
+    await repo.upsert_gfs_route("peer-gr-2", "gfs-gr", now="2026-10-08T00:00:00+00:00")
+    calls = _record_switch(client)
+
+    listed = await client.get("/api/connections", headers=_auth(client._tok))
+    assert [c["gfs_routes"] for c in await listed.json()] == [1]
+
+    r = await _patch_relay(client, "peer-gr-2", False)
+
+    assert r.status == 200
+    body = await r.json()
+    assert (body["gfs_relay"], body["gfs_routes"]) == (False, 0)
+    assert (await repo.get_instance("peer-gr-2")).gfs_relay is False
+    assert await repo.list_gfs_routes("peer-gr-2") == []
+    # Off tells the peer (``gfs_relay: false``) and probes nothing.
+    assert calls.keywrap_to == ["peer-gr-2"] and calls.probed == []
+
+
+async def test_patch_gfs_relay_requires_admin(client):
+    await _seed_peer(client, "peer-gr-3", proto_version=54)
+    calls = _record_switch(client)
+    member_tok = await _seed_member(client._db, "bob-gr")
+
+    r = await _patch_relay(client, "peer-gr-3", True, tok=member_tok)
+
+    assert r.status == 403
+    assert (
+        await client.app[federation_repo_key].get_instance("peer-gr-3")
+    ).gfs_relay is False
+    assert calls.keywrap_to == [] and calls.probed == []
+
+
+async def test_patch_gfs_relay_refused_for_a_link_joined_household(client):
+    await _seed_peer(
+        client,
+        "peer-gr-4",
+        proto_version=54,
+        source=InstanceSource.SPACE_SESSION,
+        remote_inbox_url="",
+    )
+    calls = _record_switch(client)
+
+    r = await _patch_relay(client, "peer-gr-4", True)
+
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "GFS_RELAY_NOT_ALLOWED"
+    assert calls.keywrap_to == [] and calls.probed == []
+
+
+async def test_patch_gfs_relay_refused_while_pairing_is_pending(client):
+    await _seed_peer(client, "peer-gr-5", status=PairingStatus.PENDING_SENT)
+
+    r = await _patch_relay(client, "peer-gr-5", True)
+
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "GFS_RELAY_NOT_ALLOWED"
+
+
+async def test_patch_gfs_relay_unknown_peer_is_404(client):
+    r = await _patch_relay(client, "nobody-here", True)
+
+    assert r.status == 404
+    assert (await r.json())["error"]["code"] == "NOT_FOUND"
+
+
+async def test_patch_gfs_relay_non_bool_is_422(client):
+    await _seed_peer(client, "peer-gr-6", proto_version=54)
+
+    r = await _patch_relay(client, "peer-gr-6", "yes")
+
+    assert r.status == 422
+
+
+async def test_get_connections_reports_gfs_fallback_availability(client):
+    """``gfs_relay_available`` is what the SPA's "needs a newer Social
+    Home" line reads: a v_53 peer without a key can never send one; a
+    v_54 peer can; a v_53 peer whose key we hold (a GFS-reach pairing)
+    still works."""
+    await _seed_peer(client, "peer-old", proto_version=53)
+    await _seed_peer(client, "peer-new", proto_version=54)
+    await _seed_peer(
+        client, "peer-keyed", proto_version=53, remote_keywrap_pk="ab" * 32
+    )
+    await _seed_peer(client, "peer-ancient", proto_version=52)
+
+    r = await client.get("/api/connections", headers=_auth(client._tok))
+
+    rows = {c["instance_id"]: c for c in await r.json()}
+    assert rows["peer-old"]["gfs_relay_available"] is False
+    assert rows["peer-new"]["gfs_relay_available"] is True
+    assert rows["peer-keyed"]["gfs_relay_available"] is True
+    assert rows["peer-keyed"]["peer_keywrap_known"] is True
+    assert rows["peer-ancient"]["gfs_relay_available"] is False
+    for row in rows.values():
+        assert row["gfs_relay"] is False
+        assert row["gfs_routes"] == 0
+
+
+async def _patch_both(client, iid: str, body: dict):
+    return await client.patch(
+        f"/api/pairing/connections/{iid}",
+        json=body,
+        headers=_auth(client._tok),
+    )
+
+
+async def test_patch_both_fields_a_bad_share_home_applies_neither(client):
+    await _seed_peer(client, "peer-both-1", proto_version=54)
+    calls = _record_switch(client)
+
+    r = await _patch_both(
+        client, "peer-both-1", {"share_home": "no", "gfs_relay": True}
+    )
+
+    assert r.status == 422
+    row = await client.app[federation_repo_key].get_instance("peer-both-1")
+    assert row.gfs_relay is False
+    assert calls.keywrap_to == [] and calls.probed == []
+
+
+async def test_patch_both_fields_a_bad_gfs_relay_applies_neither(client):
+    await _seed_peer(client, "peer-both-2", proto_version=54)
+    stub = _CapturingShareHomeSvc()
+    client.app[peer_home_sharing_service_key] = stub
+
+    r = await _patch_both(
+        client, "peer-both-2", {"share_home": False, "gfs_relay": "yes"}
+    )
+
+    assert r.status == 422
+    assert stub.calls == []
+
+
+async def test_patch_both_fields_a_refused_switch_applies_neither(client):
+    """409 for a link-joined household must not leave home sharing flipped."""
+    await _seed_peer(
+        client,
+        "peer-both-3",
+        source=InstanceSource.SPACE_SESSION,
+        remote_inbox_url="",
+    )
+    stub = _CapturingShareHomeSvc()
+    client.app[peer_home_sharing_service_key] = stub
+
+    r = await _patch_both(
+        client, "peer-both-3", {"share_home": False, "gfs_relay": True}
+    )
+
+    assert r.status == 409
+    assert stub.calls == []
+
+
+async def test_managing_connections_has_its_own_rate_limit_bucket(client):
+    """Opening Manage spends two ``/api/pairing/connections/*`` reads and a
+    switch one more; in the 5/min handshake bucket that 429'd after two
+    opens and a toggle. Connection management gets 30/min of its own."""
+    await _seed_peer(client, "peer-rl", proto_version=54)
+    _record_switch(client)
+    for _ in range(4):
+        r = await client.get(
+            "/api/pairing/connections/peer-rl/transport-detail",
+            headers=_auth(client._tok),
+        )
+        assert r.status == 200
+        r = await client.get(
+            "/api/pairing/connections/peer-rl/visible-users",
+            headers=_auth(client._tok),
+        )
+        assert r.status == 200
+    r = await _patch_relay(client, "peer-rl", True)
+    assert r.status == 200
+    # …while the handshake endpoints keep the tight bucket of their own.
+    statuses = [(await _initiate(client)).status for _ in range(6)]
+    assert statuses[-1] == 429

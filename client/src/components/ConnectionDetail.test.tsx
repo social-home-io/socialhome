@@ -768,6 +768,56 @@ describe('ConnectionDetail — writes only target registered routes', () => {
   })
 })
 
+describe('ConnectionDetail — GFS fallback section', () => {
+  const section = () => document.querySelector('.sh-connection-gfs-fallback')
+
+  it('shows the switch for a direct pair when a GFS relays envelopes', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ source: 'manual', gfs_relay_available: true }) as any}
+        relayGfs
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(section()).not.toBeNull()
+    expect(screen.getByText('GFS fallback')).toBeTruthy()
+    expect(screen.getByRole('checkbox', { name: 'Use the GFS as a fallback' })).toBeTruthy()
+  })
+
+  it('hides the switch without a relaying GFS while it is off', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(<ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />)
+    expect(section()).toBeNull()
+  })
+
+  it('keeps the switch reachable when it is on, so it can be turned off', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ gfs_relay: true, gfs_relay_available: true }) as any}
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(section()).not.toBeNull()
+  })
+
+  it('never offers it for a household met through an invite link', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail
+        conn={_conn({ source: 'space_session' }) as any}
+        relayGfs
+        onClose={() => {}}
+        onRevoke={() => {}}
+      />,
+    )
+    expect(section()).toBeNull()
+  })
+})
+
 describe('ConnectionDetail in German', () => {
   beforeEach(async () => {
     const { setLocale } = await import('@/i18n/i18n')
