@@ -136,7 +136,7 @@ describe('OnboardingFlow — GFS step visibility', () => {
     expect(screen.getByText(/Join people with GFS links/)).toBeTruthy()
     expect(screen.getByText(/Which households take part/)).toBeTruthy()
     expect(screen.getByText(/Settings → Connections/)).toBeTruthy()
-    expect(gfsBox().checked).toBe(false)
+    expect(gfsBox().checked).toBe(true)
     expect(screen.getAllByText(/gfs\.social-home\.io/).length).toBeGreaterThan(0)
   })
 
@@ -177,19 +177,27 @@ describe('OnboardingFlow — GFS step choice', () => {
     return onComplete
   }
 
-  it('is unchecked by default, and finishing leaves the GFS alone', async () => {
+  it('is ticked by default, so the primary button connects', async () => {
+    await open()
+    expect(gfsBox().checked).toBe(true)
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: "Let's go" })).toBeNull()
+    expect(postsTo(DEFAULT_PATH)).toHaveLength(0)
+  })
+
+  it('unticking it opts out: finishing leaves the GFS alone', async () => {
     const onComplete = await open()
+    fireEvent.click(gfsBox())
     expect(gfsBox().checked).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: "Let's go" }))
     expect(onComplete).toHaveBeenCalled()
     expect(postsTo(DEFAULT_PATH)).toHaveLength(0)
   })
 
-  it('ticking it and connecting pairs, then shows success', async () => {
+  it('connecting with the default tick pairs, then shows success', async () => {
     apiMock.post.mockImplementation(async (path: string) =>
       path === DEFAULT_PATH ? { id: 'c1', status: 'active' } : {})
     const onComplete = await open()
-    fireEvent.click(gfsBox())
     expect(gfsBox().checked).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(await screen.findByText(/You're connected to the GFS/)).toBeTruthy()
@@ -204,7 +212,6 @@ describe('OnboardingFlow — GFS step choice', () => {
     apiMock.post.mockImplementation(async (path: string) =>
       path === DEFAULT_PATH ? { id: 'c1', status: 'pending' } : {})
     await open()
-    fireEvent.click(gfsBox())
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(await screen.findByText(/Waiting for the GFS to approve/)).toBeTruthy()
   })
@@ -220,7 +227,6 @@ describe('OnboardingFlow — GFS step choice', () => {
       return {}
     })
     const onComplete = await open()
-    fireEvent.click(gfsBox())
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(await screen.findByRole('alert')).toBeTruthy()
     expect(screen.getByText(text)).toBeTruthy()
@@ -248,7 +254,6 @@ describe('OnboardingFlow — GFS step choice', () => {
       return {}
     })
     await open()
-    fireEvent.click(gfsBox())
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(await screen.findByRole('alert')).toBeTruthy()
     expect(screen.getByText(text)).toBeTruthy()
@@ -265,7 +270,6 @@ describe('OnboardingFlow — GFS step choice', () => {
       return {}
     })
     await open()
-    fireEvent.click(gfsBox())
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     expect(await screen.findByRole('alert')).toBeTruthy()
     expect(screen.getByText('That code has expired.')).toBeTruthy()
@@ -280,7 +284,6 @@ describe('OnboardingFlow — GFS step choice', () => {
       return {}
     })
     const onComplete = await open()
-    fireEvent.click(gfsBox())
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     await screen.findByRole('alert')
     fireEvent.click(gfsBox())

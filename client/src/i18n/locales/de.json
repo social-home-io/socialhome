@@ -1487,7 +1487,7 @@
   "onboarding.gfs.sees_heading": "Was der GFS sieht",
   "onboarding.gfs.sees_body": "Welche Haushalte dabei sind. Nie, was du postest.",
   "onboarding.gfs.checkbox": "Diesen Haushalt mit {server} verbinden",
-  "onboarding.gfs.default_note": "Es wird nichts gesendet, solange du das nicht ankreuzt. Du kannst es überspringen und dich später unter Einstellungen → Verbindungen verbinden.",
+  "onboarding.gfs.default_note": "Entferne das Häkchen, wenn du den GFS nicht nutzen willst. Du kannst dich später unter Einstellungen → Verbindungen verbinden oder trennen.",
   "onboarding.gfs.connect": "Verbinden",
   "onboarding.gfs.connecting": "Verbinde…",
   "onboarding.gfs.retry": "Nochmal versuchen",

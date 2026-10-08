@@ -1800,7 +1800,7 @@
   "onboarding.gfs.sees_heading": "What the GFS can see",
   "onboarding.gfs.sees_body": "Which households take part. Never what you post.",
   "onboarding.gfs.checkbox": "Connect this household to {server}",
-  "onboarding.gfs.default_note": "Nothing is sent unless you tick this. You can skip it and connect later in Settings → Connections.",
+  "onboarding.gfs.default_note": "Untick this to stay off the GFS. You can connect or disconnect later in Settings → Connections.",
   "onboarding.gfs.connect": "Connect",
   "onboarding.gfs.connecting": "Connecting…",
   "onboarding.gfs.retry": "Try again",

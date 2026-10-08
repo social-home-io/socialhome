@@ -1482,7 +1482,7 @@
   "onboarding.gfs.sees_heading": "Wat de GFS kan zien",
   "onboarding.gfs.sees_body": "Welke huishoudens meedoen. Nooit wat je plaatst.",
   "onboarding.gfs.checkbox": "Dit huishouden verbinden met {server}",
-  "onboarding.gfs.default_note": "Er wordt niets verstuurd tenzij je dit aanvinkt. Je kunt het overslaan en later verbinden via Instellingen → Verbindingen.",
+  "onboarding.gfs.default_note": "Vink dit uit als je de GFS niet wilt gebruiken. Je kunt later verbinden of de verbinding verbreken via Instellingen → Verbindingen.",
   "onboarding.gfs.connect": "Verbinden",
   "onboarding.gfs.connecting": "Verbinden…",
   "onboarding.gfs.retry": "Opnieuw proberen",

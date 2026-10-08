@@ -361,9 +361,12 @@ token** (10-minute TTL). There are two ways to get one:
   `[gfs] default_url` (`SH_GFS_DEFAULT_URL`, default
   `https://gfs.social-home.io`; empty hides the step).
 
-The onboarding step is **opt-in and unchecked**: nothing is sent to any GFS
-unless an admin ticks it and confirms (`tests/protocol/
-test_gfs_onboarding_opt_in.py`). It needs no External URL: the GFS relays
+The onboarding step is **opt-out and pre-ticked** (owner decision
+2026-10-08): the box is ticked by default, but nothing is sent to any GFS
+until an admin reaches the step and presses Connect — unticking it, or
+skipping the tour, connects nothing (`tests/protocol/
+test_gfs_onboarding_opt_in.py` pins that the household never contacts the
+GFS on its own). It needs no External URL: the GFS relays
 over the WebSocket the household opens, so registration carries no household
 address — which is what lets the Home Assistant App connect during first-run
 onboarding, before it has any public URL. The household learns whether to

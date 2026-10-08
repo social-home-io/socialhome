@@ -1482,7 +1482,7 @@
   "onboarding.gfs.sees_heading": "Ce que le GFS voit",
   "onboarding.gfs.sees_body": "Quels foyers participent. Jamais ce que vous publiez.",
   "onboarding.gfs.checkbox": "Connecter ce foyer à {server}",
-  "onboarding.gfs.default_note": "Rien n'est envoyé tant que vous ne cochez pas cette case. Vous pouvez passer cette étape et vous connecter plus tard dans Paramètres → Connexions.",
+  "onboarding.gfs.default_note": "Décochez cette case si vous ne voulez pas utiliser le GFS. Vous pouvez vous connecter ou vous déconnecter plus tard dans Paramètres → Connexions.",
   "onboarding.gfs.connect": "Se connecter",
   "onboarding.gfs.connecting": "Connexion…",
   "onboarding.gfs.retry": "Réessayer",

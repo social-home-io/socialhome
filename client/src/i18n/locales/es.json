@@ -1509,7 +1509,7 @@
   "onboarding.gfs.sees_heading": "Qué puede ver el GFS",
   "onboarding.gfs.sees_body": "Qué hogares participan. Nunca lo que publicas.",
   "onboarding.gfs.checkbox": "Conectar este hogar a {server}",
-  "onboarding.gfs.default_note": "No se envía nada si no marcas esta casilla. Puedes saltarlo y conectarte más tarde en Ajustes → Conexiones.",
+  "onboarding.gfs.default_note": "Desmarca esta casilla si no quieres usar el GFS. Puedes conectarte o desconectarte más tarde en Ajustes → Conexiones.",
   "onboarding.gfs.connect": "Conectar",
   "onboarding.gfs.connecting": "Conectando…",
   "onboarding.gfs.retry": "Reintentar",
