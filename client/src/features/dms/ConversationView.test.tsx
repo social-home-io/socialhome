@@ -119,6 +119,34 @@ const threadOf = (root: Element, id: string): HTMLElement =>
   root.querySelector<HTMLElement>(`[data-testid="${id}"] .sh-thread`)!
 
 describe('ConversationView', () => {
+  it('a failed message load shows an error with Try again, not an empty thread', async () => {
+    // A rate-limited (429) or failed load used to blank the thread, which
+    // read as "no messages". It now says so and offers a retry.
+    let fail = true
+    const wired = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (fail && url.startsWith('/api/conversations/conv-a/messages')) {
+        throw new Error('API 429: Too many requests')
+      }
+      return wired(url)
+    })
+    const { render, waitFor, fireEvent, ConversationView } = await setup()
+    const { container, queryByTestId, getByText } = render(
+      <ConversationView conversationId="conv-a" />,
+    )
+    await waitFor(() => {
+      expect(queryByTestId('thread-load-error')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    expect(queryByTestId('thread-load-error')!.getAttribute('role')).toBe('alert')
+    expect(container.textContent ?? '').toContain("Couldn't load this conversation.")
+    fail = false
+    fireEvent.click(getByText('Try again'))
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('BOB-conv-a')
+    }, { timeout: RENDER_WAIT })
+    expect(queryByTestId('thread-load-error')).toBeNull()
+  })
+
   it('loads its metadata from GET /api/conversations/{id}, never the whole list', async () => {
     const { render, waitFor, ConversationView } = await setup()
     const { container } = render(<ConversationView conversationId="conv-b" />)

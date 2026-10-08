@@ -1591,3 +1591,15 @@ async def test_get_one_conversation_is_not_found_for_the_household_chat(client):
     cid = (await r.json())["conversation_id"]
     r = await client.get(f"/api/conversations/{cid}", headers=_auth(client._bob_token))
     assert r.status == 404
+
+
+async def test_opening_many_threads_in_a_minute_is_not_rate_limited(client):
+    """Opening one thread costs ~8 ``/api/conversations/...`` requests, all
+    in one per-user bucket. Under the 60/min default the 8th thread opened
+    in a minute got 429 and rendered empty; the bucket is now 600/min."""
+    headers = _auth(client._admin_token)
+    statuses = [
+        (await client.get("/api/conversations", headers=headers)).status
+        for _ in range(120)
+    ]
+    assert statuses.count(200) == 120

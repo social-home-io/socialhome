@@ -388,6 +388,12 @@ interface MessageGap {
 interface ThreadState {
   messages: Signal<Message[]>
   loading: Signal<boolean>
+  /** The entry load of the thread's messages failed (network error, 5xx,
+   *  or 429 from the rate limiter). Shows an error with Retry instead of
+   *  an empty thread, which would read as "no messages". */
+  loadError: Signal<boolean>
+  /** Bumped by Retry to re-run the thread's load effect. */
+  reloadNonce: Signal<number>
   /** Whether older messages are available to fetch via
    *  ``?before=<oldest_id>``. Set to ``false`` when a fetch returns
    *  fewer messages than the requested limit (= no more history). */
@@ -464,6 +470,8 @@ function createThreadState(): ThreadState {
   return {
     messages: signal<Message[]>([]),
     loading: signal(true),
+    loadError: signal(false),
+    reloadNonce: signal(0),
     hasMoreHistory: signal(true),
     isLoadingOlder: signal(false),
     unreadAnchor: signal<{ message_id: string } | null>(null),
@@ -646,13 +654,14 @@ export function ConversationView({
   const afterLeaveRef = useRef(afterLeave)
   afterLeaveRef.current = afterLeave
   const {
-    messages, loading, hasMoreHistory, isLoadingOlder, unreadAnchor,
+    messages, loading, loadError, reloadNonce, hasMoreHistory, isLoadingOlder, unreadAnchor,
     newSinceScrollUp, composerHasContent, locationPickerOpen,
     pendingAttachment, uploadingAttachment, attachmentError,
     readMessageIds, deliveredMessageIds, memberCount, threadMembers,
     threadInfo, groupInfoOpen, replyTo, editing, contextSheetFor,
     reactionPickerFor, gaps,
   } = s
+  const reloadKey = reloadNonce.value
   /** The viewer muted / unmuted this thread (header bell or Group info). */
   const setThreadMute = (mutedUntil: string | null): void => {
     if (threadInfo.value) threadInfo.value = { ...threadInfo.value, muted_until: mutedUntil }
@@ -861,6 +870,7 @@ export function ConversationView({
     // first ``await`` anywhere below.
     s.active = true
     loading.value = true
+    loadError.value = false
     // Reset the lazy-load + anchor state for the new thread. Without
     // this a re-entry would inherit the previous thread's divider or
     // "no more history" flag, both wrong for the new context.
@@ -971,14 +981,14 @@ export function ConversationView({
         // presented to the user as "this conversation is empty".
         () => {
           if (cancelled) return
-          // Network blip or 5xx — don't strand the user on the skeleton
-          // forever. The thread page renders an empty list (which the
-          // existing empty-state copy handles) and the next entry
-          // retries; surfacing a toast would be louder than necessary
-          // for a transient backend glitch.
+          // Network blip, 5xx, or a 429 from the rate limiter — don't
+          // strand the user on the skeleton, and don't show an empty
+          // thread either: that reads as "no messages". Show an error
+          // with Retry (see ``loadError`` in the render).
           loading.value = false
           messages.value = []
           hasMoreHistory.value = false
+          loadError.value = true
         },
       ).catch(err => {
         // A throw out of the success handler — our own bug, not a
@@ -1228,8 +1238,8 @@ export function ConversationView({
       offReaction(); offGroupUpdated()
       offUserOnline(); offUserIdle(); offUserOffline()
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- the store's signals are fixed per ``convId`` (``s`` is memoised on it)
-  }, [convId])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- the store's signals are fixed per ``convId`` (``s`` is memoised on it); ``reloadKey`` re-runs the load on Retry
+  }, [convId, reloadKey])
 
   let typingTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -2046,6 +2056,19 @@ export function ConversationView({
     )
   }
   if (loading.value) return <>{pageTitleEl}<DmThreadSkeleton /></>
+  if (loadError.value && messages.value.length === 0) {
+    return (
+      <>
+        {pageTitleEl}
+        <div class="sh-thread-load-error" role="alert" data-testid="thread-load-error">
+          <p>{t('dms.load_failed')}</p>
+          <Button variant="secondary" onClick={() => { reloadNonce.value++ }}>
+            {t('common.try_again')}
+          </Button>
+        </div>
+      </>
+    )
+  }
   const myUserId = currentUser.value?.user_id
 
   const handleScroll = () => {

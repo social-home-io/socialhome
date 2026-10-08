@@ -4136,6 +4136,7 @@
   "dms.call_event.call_back": "Terugbellen",
   "dms.removed_from_group": "Je zit niet meer in deze groep",
   "dms.no_longer_in_conversation": "Je zit niet meer in dit gesprek.",
+  "dms.load_failed": "Dit gesprek kon niet worden geladen.",
   "dms.upload_failed": "Kon {name} niet uploaden: {error}",
   "dms.voice_direct_only": "Spraakberichten kun je alleen sturen naar huishoudens waarmee je direct verbonden bent.",
   "dms.voice_send_failed": "Kon het spraakbericht niet versturen: {error}",
