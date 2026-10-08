@@ -13,14 +13,15 @@ of a server; it is discovered through the peer instead:
    ``envelope_relay`` capability — never through a server A is not itself
    registered with. A remembers ``nonce → (peer, our connection id)`` for
    :data:`PENDING_PROBE_TTL_S`.
-2. **Receive.** Household B receives the probe only through the servers it
-   shares with A (a server pushes a relayed blob only down a recipient's
-   own socket). The relay inbound leg tells B which of B's OWN
+2. **Receive.** Household B receives the probe through the servers it
+   shares with A. The relay inbound leg tells B which of B's OWN
    connections carried it (:data:`~socialhome.services.gfs_relay_inbound
-   .RELAY_DELIVERED_VIA`); B records that connection as a route to A and
-   answers :attr:`FederationEventType.GFS_RELAY_PROBE_ACK` ``{nonce}``
-   through THAT SAME server. A probe that did not arrive over the relay
-   proves nothing and is ignored.
+   .RELAY_DELIVERED_VIA`); B answers
+   :attr:`FederationEventType.GFS_RELAY_PROBE_ACK` ``{nonce}`` through
+   THAT SAME server, records **nothing**, and probes A back. A probe that
+   did not arrive over the relay is ignored. (A received probe is not
+   proof of a route: a malicious server A uses can re-post the sealed,
+   identity-free probe onto another server B uses but A does not read.)
 3. **Ack.** A accepts the ack only if the nonce is pending, was sent to
    this peer, and the ack arrived over the very connection the probe was
    sent through; then A records the route and forgets the nonce.
@@ -31,8 +32,9 @@ or inbox id ever goes on the wire, and the routes each side stores are
 ITS OWN ``gfs_connections`` ids. A GFS sees two identity-free relay
 blobs, nothing else.
 
-Routes are refreshed by the next probe round (a received probe refreshes
-B's route, an accepted ack A's) and expire once not refreshed for
+Each side records a route only from an ack to ITS OWN probe, so both
+sides probe (a received probe triggers a throttled probe back). Routes are
+refreshed by the next accepted ack and expire once not refreshed for
 :data:`ROUTE_MAX_AGE` (three discovery intervals) — see
 :class:`~socialhome.infrastructure.gfs_route_discovery_scheduler
 .GfsRouteDiscoveryScheduler`. ``docs/protocol/gfs-relay.md`` has the
@@ -189,12 +191,23 @@ class GfsRouteDiscoveryService:
 
     # ── Outbound: probes ────────────────────────────────────────────────
 
-    async def probe_all(self) -> int:
-        """Probe every eligible peer. Returns the number of probes sent."""
+    async def probe_all(
+        self,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> int:
+        """Probe every eligible peer. Returns the number of probes sent.
+
+        ``should_stop`` is checked before each peer, so a scheduler's
+        ``stop()`` lands between peers instead of cancelling a POST
+        mid-flight.
+        """
         sent = 0
         for peer in await self._federation_repo.list_instances(
             status=PairingStatus.CONFIRMED.value,
         ):
+            if should_stop is not None and should_stop():
+                break
             sent += await self._probe(peer)
         return sent
 
@@ -284,7 +297,15 @@ class GfsRouteDiscoveryService:
     def _remember(self, nonce: str, probe: _PendingProbe) -> None:
         self._prune_pending(probe.sent_at)
         while len(self._pending) >= MAX_PENDING_PROBES:
-            self._pending.pop(next(iter(self._pending)))
+            evicted = self._pending.pop(next(iter(self._pending)))
+            # Loud on purpose: an evicted probe's ack is ignored, so a
+            # route through that server is not confirmed this round.
+            log.warning(
+                "gfs routes: %d probes pending — forgot the oldest (to %s); "
+                "its ack will be ignored",
+                MAX_PENDING_PROBES,
+                evicted.peer_id,
+            )
         self._pending[nonce] = probe
 
     def _prune_pending(self, now: float) -> None:
@@ -320,29 +341,31 @@ class GfsRouteDiscoveryService:
             log.debug("gfs routes: probe from %s throttled", event.from_instance)
             return
         self._note_answer(key, now)
-        # The probe crossed our connection ``via`` from this peer, so the
-        # peer can reach us there — and, being registered with the same
-        # server, we can reach it there too.
-        await self._federation_repo.upsert_gfs_route(
-            event.from_instance,
-            via,
-            now=self._now_iso(),
-        )
+        # NOT a route. Receiving a probe proves only that SOME server
+        # delivered a blob to us: the relay body is identity-free, so a
+        # malicious server the prober uses can re-post the sealed probe onto
+        # any other server — one the prober never reads. Recording ``via``
+        # here would let it steer our relayed traffic into a server that
+        # answers 202 and drops it. A route is recorded only when one of OUR
+        # OWN probes is acked through the server it was sent on
+        # (:meth:`_on_probe_ack`). So: ack through the delivering server
+        # (the prober needs that to confirm ITS side), then probe back to
+        # confirm ours (throttled per peer like every probe).
         url = await self._connection_url(via)
-        if url is None:  # the connection was removed mid-dispatch
-            return
-        result = await self._federation.send_event_via_gfs(
-            to_instance_id=event.from_instance,
-            event_type=FederationEventType.GFS_RELAY_PROBE_ACK,
-            payload={"nonce": nonce},
-            gfs_url=url,
-        )
-        if not result.ok:
-            log.debug(
-                "gfs routes: ack to %s not accepted: %s",
-                event.from_instance,
-                result.error,
+        if url is not None:
+            result = await self._federation.send_event_via_gfs(
+                to_instance_id=event.from_instance,
+                event_type=FederationEventType.GFS_RELAY_PROBE_ACK,
+                payload={"nonce": nonce},
+                gfs_url=url,
             )
+            if not result.ok:
+                log.debug(
+                    "gfs routes: ack to %s not accepted: %s",
+                    event.from_instance,
+                    result.error,
+                )
+        await self.probe_peer(event.from_instance)
 
     def _note_answer(self, key: tuple[str, str], now: float) -> None:
         if len(self._last_answer_at) >= MAX_ANSWER_ENTRIES:

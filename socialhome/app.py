@@ -3528,6 +3528,7 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_connection_service=gfs_connection_service,
         )
         app[K.gfs_route_discovery_key] = gfs_route_discovery
+        app[K.gfs_route_discovery_scheduler_key] = gfs_route_discovery_scheduler
         # #117 followup — federate SPACE_POST_CREATED outbound so
         # remote members on other households actually receive posts
         # in spaces they belong to. The inbound side was already
@@ -3738,12 +3739,13 @@ def create_app(config: Config | None = None) -> web.Application:
         # refresh the stored display_name if the operator renamed the
         # server (a rename typically restarts the GFS → forces a reconnect).
         async def _on_gfs_connected(gfs_id: str) -> None:
-            await gfs_connection_service.refresh_connection_metadata(gfs_id)
             # v_53 — a connection came up: re-learn which servers we share
-            # with our opted-in peers. Coalesced, so a reconnect storm costs
-            # one probe round.
+            # with our opted-in peers. First, and non-blocking, so a failing
+            # self-heal below never swallows it; coalesced and gap-limited,
+            # so a reconnect storm or a flapping socket costs one round.
             if gfs_route_discovery_scheduler is not None:
                 gfs_route_discovery_scheduler.trigger()
+            await gfs_connection_service.refresh_connection_metadata(gfs_id)
             # Self-heal the space-authority pins on the GFS: ``/gfs/publish``
             # authorizes a relay on the space's TOFU-pinned authority key
             # alone, so a space whose GFS row pinned none (published before

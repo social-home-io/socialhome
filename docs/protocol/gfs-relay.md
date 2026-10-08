@@ -65,13 +65,20 @@ sequenceDiagram
     Y-->>A: 202 (uniform)
     Y->>B: WS frame {sealed}
     B->>B: unseal, §24.11 pipeline (relay opt-in gate,<br/>sig, replay, decrypt)<br/>RELAY_DELIVERED_VIA = conn B·Y
-    B->>B: upsert route (A, conn B·Y)
+    Note over B: no route recorded on receipt
     B->>Y: POST /gfs/envelope {to_instance: A, sealed}<br/>(GFS_RELAY_PROBE_ACK {nonce2}) — same server
     Y->>A: WS frame {sealed}
     A->>A: §24.11 pipeline, RELAY_DELIVERED_VIA = conn A·Y<br/>nonce2 pending, sent to B, via A·Y ✓
     A->>A: upsert route (B, conn A·Y), drop nonce2
-    Note over A,B: later: A → B relayed traffic round-robins<br/>over A's routes (here: Y only)
-    Note over Z: never touched — A is not registered there
+    Note over B: probe back (throttled): nonce3 → (A, B·Y), nonce4 → (A, B·Z)
+    B->>Y: GFS_RELAY_PROBE {nonce3}
+    Y->>A: WS frame {sealed}
+    A->>Y: GFS_RELAY_PROBE_ACK {nonce3} — same server
+    Y->>B: WS frame {sealed}
+    B->>B: nonce3 pending, sent to A, via B·Y ✓<br/>upsert route (A, conn B·Y)
+    B->>Z: GFS_RELAY_PROBE {nonce4}
+    Note over Z: A never opens a socket here —<br/>no ack, no route
+    Note over A,B: later: relayed traffic round-robins<br/>over each side's routes (here: Y only)
 ```
 
 ### Rules
@@ -81,7 +88,16 @@ sequenceDiagram
   capability on its signed `/gfs/info` block — never through a server it is
   not registered with. The relay sender enforces the same (it resolves
   the URL against our own connections).
-- **A probe proves a route only if it arrived over the relay.** The relay
+- **A route comes only from an ack to one of OUR OWN probes**, through the
+  server that probe was sent on. Receiving a probe records nothing: the
+  relay body is identity-free, so a malicious server the prober uses can
+  re-post the sealed probe onto another server the receiver uses but the
+  prober never reads. Had the receiver recorded that server, its relayed
+  traffic would go where the relay answers `202` and nobody collects it —
+  a silent loss the attacker could keep alive every round. Instead the
+  receiver acks and **probes back** (throttled per peer), so both sides
+  confirm their own direction.
+- **A probe is answered only if it arrived over the relay.** The relay
   inbound leg (`services/gfs_relay_inbound.py`) binds
   `RELAY_DELIVERED_VIA` to B's own connection id for the duration of the
   dispatch; the handler reads it synchronously. A probe that arrived over
@@ -101,7 +117,7 @@ sequenceDiagram
 - **A peer we did not opt in with cannot probe us.** The §24.11 relay
   opt-in gate (`make_check_relay_opt_in`) drops a relayed envelope from a
   paired peer whose `gfs_relay` is off before any handler runs — so no
-  route is recorded and no ack is sent.
+  ack is sent.
 
 ### Round-robin
 
@@ -112,23 +128,33 @@ connections), trying each at most once per send. Probes and acks
 themselves never round-robin: they use
 `FederationService.send_event_via_gfs`, which seals exactly like
 `send_event` but delivers through one named server, best-effort (no
-outbox, no reachability change; a `202` is acceptance, not delivery).
+outbox, no reachability change; a `202` is acceptance, not delivery). Nor
+is a probe's `202` recorded as a relay acceptance: every server answers
+`202` to every probe, so it would mark a healthy direct peer "relay only"
+after each round.
 
 ### Refresh, triggers and expiry
 
 - **Every 24 h ± 1 h** (`GfsRouteDiscoveryScheduler`) every eligible peer
-  is re-probed. A received probe refreshes the receiver's route
-  (`last_ack_at`); an accepted ack refreshes the prober's.
+  is re-probed. Only an accepted ack refreshes a route (`last_ack_at`);
+  a received probe makes the receiver probe back, which refreshes its
+  side.
 - **On our own GFS (re)connect** an early round is requested. Triggers
-  within 30 s coalesce into one round, and each peer is probed at most
-  once a minute, so a reconnect storm costs one round.
+  within 30 s coalesce into one round, a triggered round never starts
+  within 10 min of the previous round, and each peer is probed at most
+  once a minute — so a reconnect storm or a flapping socket costs one
+  round per 10 min. A scheduler stop lands between peers, never mid-POST.
 - **On demand:** `probe_peer(instance_id)` probes one peer at once (for
   a fresh pairing or a newly enabled opt-in; same per-peer cap).
 - **Expiry:** a route whose `last_ack_at` is older than 72 h (three
   intervals) is deleted, so one missed round never costs a working route
-  but a peer that left a server stops being relayed there. Removing a
-  connection server deletes its routes at once (FK cascade).
-- **Caps:** at most 1024 outstanding probes (oldest forgotten first), a
+  but a peer that left a server stops being relayed there. Until then —
+  up to 72 h, on either side, since both sides keep routes — a relayed
+  send through that server is answered `202` and lost (the relay cannot
+  say the recipient is gone without becoming a presence oracle). Removing
+  one of OUR connection servers deletes its routes at once (FK cascade).
+- **Caps:** at most 1024 outstanding probes (oldest forgotten first, with
+  a WARNING — its ack will be ignored), a
   15 min ack window, and at most one ack per peer per server every 30 s —
   a paired peer cannot make us spend unbounded relay posts.
 
@@ -138,11 +164,18 @@ outbox, no reachability change; a `202` is acceptance, not delivery).
 |---|---|
 | A (prober) | Which of ITS OWN servers B also uses (the intersection) — nothing about B's other servers. |
 | B (receiver) | The same intersection, from which of its own sockets the probe arrived on — nothing about A's other servers. |
-| A server both use (Y) | Two relay bodies `{to_instance, sealed}` (A→B, then B→A), padded to a size bucket, like any relayed envelope: recipient, time, size bucket. It cannot tell a probe from other traffic. |
+| A server both use (Y) | Relay bodies `{to_instance, sealed}` both ways, padded to a size bucket like any relayed envelope: recipient, time, size bucket. The content is opaque, but a probe followed within seconds by a small blob in the other direction — and a probe back — may be recognisable as a probe / ack exchange by timing and size alone; that reveals only that the two households exchange relayed envelopes through it, which the relay fallback concedes anyway (below). |
 | A server only A uses (X) | One relay body addressed to B's instance id, which it queues and never delivers (B is not its client). It learns that *someone* addressed B — the same as any relayed envelope. |
-| A server only B uses (Z) | Nothing. |
+| A server only B uses (Z) | The same, mirrored: B's probe back, addressed to A, queued and never delivered. |
 
 ### Residuals
+
+- **A malicious server cannot plant a route.** A server one household
+  uses (X) may re-post that household's sealed probe onto another server
+  the peer uses (Z). The peer then acks through Z, where the prober never
+  reads, and records nothing — at most it is made to spend one ack (and
+  its throttled probe back) on a server that leads nowhere. Pinned by
+  `test_a_malicious_gfs_replaying_a_probe_elsewhere_creates_no_route`.
 
 - **A paired peer can test a server it is not on.** A malicious paired
   peer could `POST /gfs/envelope` a probe through an arbitrary server it is

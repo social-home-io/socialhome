@@ -5020,7 +5020,10 @@ async def test_send_event_via_gfs_seals_like_send_event_and_uses_only_that_serve
     plain = svc._decrypt_payload(env["encrypted_payload"], session_key)
     assert json.loads(plain) == {"nonce": "n" * 22}
     # Acceptance is not delivery; nothing queued, reachability untouched.
-    assert svc.last_relay_accepted_at(inst.id) is not None
+    # And a probe's 202 is not traffic: every GFS answers 202 to every
+    # probe, so recording it would paint a healthy direct peer "relay only"
+    # after each discovery round.
+    assert svc.last_relay_accepted_at(inst.id) is None
     assert fed_repo.reachable_calls == [] and fed_repo.unreachable_calls == []
     assert outbox.enqueued == []
 

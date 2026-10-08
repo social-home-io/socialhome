@@ -313,7 +313,11 @@ async def test_expired_pending_probes_are_pruned_on_the_next_probe():
 # ── receiving a probe ──────────────────────────────────────────────────
 
 
-async def test_a_relayed_probe_records_the_route_and_acks_via_the_same_server():
+async def test_a_relayed_probe_is_acked_via_the_same_server_but_records_no_route():
+    """A received probe proves only that SOME server carried a blob to us —
+    a malicious server can re-post a sealed probe it saw onto another
+    server. So it is acked (the prober needs that), never recorded; the
+    receiver probes back to confirm its own side."""
     svc, fed, repo, *_ = _svc(_peer(), conns=(("b-y", URL_Y), ("b-z", "https://z")))
 
     await _deliver(
@@ -322,15 +326,41 @@ async def test_a_relayed_probe_records_the_route_and_acks_via_the_same_server():
         via="b-y",
     )
 
-    assert repo.routes == {(PEER, "b-y"): "2026-10-08T12:00:00+00:00"}
-    assert fed.sent == [
-        {
-            "to_instance_id": PEER,
-            "event_type": FederationEventType.GFS_RELAY_PROBE_ACK,
-            "payload": {"nonce": "n" * 22},
-            "gfs_url": URL_Y,
-        }
+    assert repo.routes == {}
+    assert fed.sent[0] == {
+        "to_instance_id": PEER,
+        "event_type": FederationEventType.GFS_RELAY_PROBE_ACK,
+        "payload": {"nonce": "n" * 22},
+        "gfs_url": URL_Y,
+    }
+    # ...then our own probe round to the sender, through each of our servers.
+    assert [(s["event_type"], s["gfs_url"]) for s in fed.sent[1:]] == [
+        (FederationEventType.GFS_RELAY_PROBE, URL_Y),
+        (FederationEventType.GFS_RELAY_PROBE, "https://z"),
     ]
+    assert svc.pending_count == 2
+
+
+async def test_probing_back_is_throttled_like_any_probe():
+    svc, fed, repo, _gfs, clock = _svc(_peer())
+
+    await _deliver(
+        svc._on_probe,
+        _event(FederationEventType.GFS_RELAY_PROBE, {"nonce": "n" * 22}),
+        via="a-x",
+    )
+    clock.t += PROBE_ANSWER_MIN_INTERVAL_S
+    await _deliver(
+        svc._on_probe,
+        _event(FederationEventType.GFS_RELAY_PROBE, {"nonce": "m" * 22}),
+        via="a-x",
+    )
+
+    probes = [
+        s for s in fed.sent if s["event_type"] is FederationEventType.GFS_RELAY_PROBE
+    ]
+    assert len(probes) == 2  # one round (two servers), not two rounds
+    assert clock.t - 1000.0 < PROBE_PEER_MIN_INTERVAL_S
 
 
 async def test_a_probe_that_did_not_arrive_over_the_relay_is_ignored():
@@ -381,7 +411,12 @@ async def test_answers_to_one_peer_over_one_server_are_rate_capped():
     clock.t += PROBE_ANSWER_MIN_INTERVAL_S
     await _deliver(svc._on_probe, probe, via="a-x")
 
-    assert [s["gfs_url"] for s in fed.sent] == [URL_X, URL_Y, URL_X]
+    acks = [
+        s["gfs_url"]
+        for s in fed.sent
+        if s["event_type"] is FederationEventType.GFS_RELAY_PROBE_ACK
+    ]
+    assert acks == [URL_X, URL_Y, URL_X]
 
 
 async def test_the_answer_throttle_is_bounded(monkeypatch):
@@ -400,7 +435,7 @@ async def test_the_answer_throttle_is_bounded(monkeypatch):
     assert len(svc._last_answer_at) <= 2
 
 
-async def test_a_probe_over_a_vanished_connection_records_but_cannot_answer():
+async def test_a_probe_over_a_vanished_connection_is_not_answered():
     svc, fed, repo, *_ = _svc(_peer())
 
     await _deliver(
@@ -409,8 +444,10 @@ async def test_a_probe_over_a_vanished_connection_records_but_cannot_answer():
         via="gone",
     )
 
-    assert (PEER, "gone") in repo.routes
-    assert fed.sent == []
+    assert repo.routes == {}
+    assert all(
+        s["event_type"] is not FederationEventType.GFS_RELAY_PROBE_ACK for s in fed.sent
+    )
 
 
 async def test_an_ack_the_relay_refuses_is_only_logged():
@@ -422,8 +459,8 @@ async def test_an_ack_the_relay_refuses_is_only_logged():
         via="a-x",
     )
 
-    assert len(fed.sent) == 1
-    assert (PEER, "a-x") in repo.routes
+    assert fed.sent[0]["event_type"] is FederationEventType.GFS_RELAY_PROBE_ACK
+    assert repo.routes == {}
 
 
 # ── receiving an ack ───────────────────────────────────────────────────
@@ -568,3 +605,31 @@ async def test_attach_to_registers_both_handlers():
 def test_the_default_clock_stamps_tz_aware_utc():
     stamp = mod._utc_now_iso()
     assert stamp.endswith("+00:00")
+
+
+async def test_probe_all_stops_between_peers_when_asked():
+    svc, fed, *_ = _svc(_peer(PEER), _peer(OTHER))
+    asked: list[int] = []
+
+    def _should_stop() -> bool:
+        asked.append(len(fed.sent))
+        return len(fed.sent) > 0
+
+    sent = await svc.probe_all(should_stop=_should_stop)
+
+    assert sent == 2  # the first peer's round only
+    assert {s["to_instance_id"] for s in fed.sent} == {PEER}
+    assert asked == [0, 2]
+
+
+async def test_evicting_a_pending_probe_is_logged_at_warning(monkeypatch, caplog):
+    monkeypatch.setattr(mod, "MAX_PENDING_PROBES", 3)
+    svc, *_ = _svc(_peer(), _peer(OTHER))
+
+    with caplog.at_level("WARNING", logger=mod.__name__):
+        await svc.probe_peer(PEER)
+        assert not caplog.records
+        await svc.probe_peer(OTHER)
+
+    assert any("pending" in r.getMessage() for r in caplog.records)
+    assert all(r.levelname == "WARNING" for r in caplog.records)

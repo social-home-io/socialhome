@@ -614,3 +614,28 @@ def test_build_gfs_route_discovery_registers_the_handlers_and_a_scheduler():
         FederationEventType.GFS_RELAY_PROBE_ACK,
     ):
         assert fed._event_registry.handler_count(et) == 1
+
+
+async def test_a_gfs_connect_triggers_a_route_discovery_round(cfg, monkeypatch):
+    """The supervisor's ``on_connected`` hook asks the route-discovery
+    scheduler for an early (coalesced) round, before the slower self-heals,
+    so a failing heal never swallows it."""
+    from socialhome.app_keys import (
+        gfs_route_discovery_scheduler_key,
+        gfs_ws_supervisor_key,
+    )
+
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        sched = app[gfs_route_discovery_scheduler_key]
+        assert isinstance(sched, GfsRouteDiscoveryScheduler)
+        calls: list[None] = []
+        monkeypatch.setattr(
+            GfsRouteDiscoveryScheduler, "trigger", lambda _self: calls.append(None)
+        )
+        on_connected = app[gfs_ws_supervisor_key]._on_connected
+        try:
+            await on_connected("no-such-gfs")
+        except Exception:  # noqa: BLE001 — the heals may refuse an unknown id
+            pass
+        assert calls == [None]

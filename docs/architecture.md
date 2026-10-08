@@ -263,11 +263,13 @@ selects it in two cases:
   *discovered*, never configured (v_53,
   `services/gfs_route_discovery_service.py`): we probe the peer through
   each of our own connection servers, it acks through the one each probe
-  arrived on, and both sides keep only the servers that carried a probe
-  (and, on our side, its ack back) — no server is ever named on the wire.
+  arrived on and probes back, and each side records a server only when
+  an ack to ITS OWN probe came back through it (a received probe proves
+  nothing — a malicious server can re-post it elsewhere). No server is
+  ever named on the wire.
   `infrastructure/gfs_route_discovery_scheduler.py` re-probes every
-  24 h ± 1 h and on a GFS reconnect, and drops routes not refreshed for
-  72 h; see [`protocol/gfs-relay.md`](./protocol/gfs-relay.md). Because the connection server is a third party
+  24 h ± 1 h and on a GFS reconnect (coalesced, at most one triggered
+  round per 10 min), and drops routes not refreshed for 72 h; see [`protocol/gfs-relay.md`](./protocol/gfs-relay.md). Because the connection server is a third party
 — not a household — the whole §24.11 envelope (its routing fields are
 plaintext by construction) is sealed to the peer's static X25519 key-wrap
 key before the relay sees it, so the *wire* carries only `(to_instance,

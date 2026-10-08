@@ -1548,8 +1548,9 @@ class FederationService:
         exactly the server it tests. Best-effort by design — no outbox
         enqueue (a probe re-sent hours later through another path would
         prove nothing), no reachability change either way (a relay ``202``
-        is acceptance, not delivery; a refusal says nothing about the peer).
-        An acceptance is recorded with :meth:`note_relay_accepted`.
+        is acceptance, not delivery; a refusal says nothing about the peer),
+        and no :meth:`note_relay_accepted` (a uniform ``202`` per probe
+        would flip a direct peer to "relay only").
         """
         instance = await self._federation_repo.get_instance(to_instance_id)
         if instance is None:
@@ -1582,8 +1583,10 @@ class FederationService:
             envelope_dict=envelope_dict,
             gfs_url=gfs_url,
         )
-        if result.ok:
-            self.note_relay_accepted(to_instance_id)
+        # No ``note_relay_accepted``: every GFS answers 202 to every probe
+        # (uniform, by design), so recording it would mark a healthy direct
+        # peer "relay only" after each discovery round. Probes are not
+        # traffic the operator needs to see.
         return DeliveryResult(
             instance_id=to_instance_id,
             ok=result.ok,

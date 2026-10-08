@@ -251,7 +251,10 @@ Round-robin across several connection servers the pair shares spreads these
 observations across operators; it does not remove them. The shared servers
 are found by a probe / ack through each household's own servers (v_53,
 [`protocol/gfs-relay.md`](./protocol/gfs-relay.md)) whose payload is a
-random nonce only, so neither household names a server to the other. One
+random nonce only, so neither household names a server to the other. Each
+side records a server only when an ack to its OWN probe comes back through
+it, so a malicious connection server re-posting a probe elsewhere cannot
+plant a route. One
 residual is inherent to any such intersection test: a malicious *paired*
 peer we opted in with could post a probe through a server it is not
 registered on; our ack, queued there for it, tells it that we use that server

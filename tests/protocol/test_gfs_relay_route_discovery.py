@@ -298,16 +298,49 @@ async def test_only_the_shared_server_becomes_a_route_on_both_sides(world):
 
     # a probed through BOTH of its own servers, nothing else.
     assert sent == 2
-    assert {url for url, _env in a.sealed_log} == {URL_X, URL_Y}
+    assert {
+        url for url, env in a.sealed_log if env["event_type"] == "gfs_relay_probe"
+    } == {
+        URL_X,
+        URL_Y,
+    }
     assert a.sender.foreign == [] and b.sender.foreign == []
-    # Only Y carried anything to b; X queued it for a socket b never opens.
+    # Each side holds only a route its OWN probe proved: Y, on both sides.
     assert await _route_ids(b, a) == [b.conn_ids[URL_Y]]
     assert await _route_ids(a, b) == [a.conn_ids[URL_Y]]
-    # b's ack went back through Y only — never a round-robin pick.
-    assert [url for url, _env in b.sealed_log] == [URL_Y]
-    assert world.net[URL_Z].bodies == []
-    # The X probe is still waiting (and will expire); Y's was consumed.
+    # b acked through Y (where a's probe arrived) — never a round-robin pick.
+    assert [
+        url for url, env in b.sealed_log if env["event_type"] == "gfs_relay_probe_ack"
+    ] == [URL_Y]
+    # Z only ever saw b's own probe for a, which nobody collects.
+    assert {body["to_instance"] for body in world.net[URL_Z].bodies} == {a.iid}
+    # The X / Z probes are still waiting (and will expire); Y's were consumed.
     assert a.discovery.pending_count == 1
+    assert b.discovery.pending_count == 1
+
+
+async def test_a_malicious_gfs_replaying_a_probe_elsewhere_creates_no_route(world):
+    """X (a's server, malicious) re-posts every sealed blob for b onto Z —
+    anyone may POST the identity-free body, and b never saw that blob, so
+    the replay cache does not stop it. b must not learn a route through Z:
+    a never reads Z, so relaying there would be a silent loss."""
+    a, b = world.a, world.b
+    await _pair(a, b)
+    honest_post = world.net[URL_X].post
+
+    def _replaying_post(body: dict) -> None:
+        honest_post(body)
+        if body["to_instance"] == b.iid:
+            world.net[URL_Z].post(dict(body))
+
+    world.net[URL_X].post = _replaying_post  # type: ignore[method-assign]
+
+    await a.discovery.probe_peer(b.iid)
+    await world.drain()
+
+    assert b.conn_ids[URL_Z] not in await _route_ids(b, a)
+    assert await _route_ids(b, a) == [b.conn_ids[URL_Y]]
+    assert await _route_ids(a, b) == [a.conn_ids[URL_Y]]
 
 
 async def test_discovery_runs_the_same_way_from_the_other_side(world):
@@ -317,7 +350,9 @@ async def test_discovery_runs_the_same_way_from_the_other_side(world):
     assert await b.discovery.probe_peer(a.iid) == 2
     await world.drain()
 
-    assert {url for url, _env in b.sealed_log} == {URL_Y, URL_Z}
+    assert {
+        url for url, env in b.sealed_log if env["event_type"] == "gfs_relay_probe"
+    } == {URL_Y, URL_Z}
     assert await _route_ids(a, b) == [a.conn_ids[URL_Y]]
     assert await _route_ids(b, a) == [b.conn_ids[URL_Y]]
 
