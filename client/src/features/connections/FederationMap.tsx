@@ -3,7 +3,7 @@
  *
  * Shows the local household as a filled green "You" pin, and each
  * confirmed peer with a white/green circle bearing their first initial
- * plus a small transport badge (⚡ WebRTC / ☁ HTTPS).  Peers on HTTPS
+ * plus a small transport badge (⚡ WebRTC / 🌐 HTTPS / ☁ through the GFS).  Peers on HTTPS
  * fallback get an amber border.  Auto-fits bounds so the map opens
  * centred on the network.
  *
@@ -40,8 +40,10 @@ function _peerPinHtml(name: string | undefined, transport: TransportState | unde
   const badge = transport === 'rtc'
     ? '<span class="sh-fed-pin-tx" aria-hidden="true">⚡</span>'
     : transport === 'https'
-      ? '<span class="sh-fed-pin-tx" aria-hidden="true">☁</span>'
-      : ''
+      ? '<span class="sh-fed-pin-tx" aria-hidden="true">🌐</span>'
+      : transport === 'gfs_relay'
+        ? '<span class="sh-fed-pin-tx" aria-hidden="true">☁</span>'
+        : ''
   return (
     `<div class="sh-fed-pin${modifier}">`
     + escapeHtml(_initial(name))
@@ -52,8 +54,8 @@ function _peerPinHtml(name: string | undefined, transport: TransportState | unde
 
 function _transportLabel(transport: TransportState | null | undefined): string {
   if (transport === 'rtc') return `⚡ ${t('connections.transport.direct')}`
-  if (transport === 'https') return `☁ ${t('connections.transport.internet')}`
-  if (transport === 'gfs_relay') return `🔁 ${t('connections.transport.gfs')}`
+  if (transport === 'https') return `🌐 ${t('connections.transport.internet')}`
+  if (transport === 'gfs_relay') return `☁ ${t('connections.transport.gfs')}`
   return t('connections.transport.unknown')
 }
 

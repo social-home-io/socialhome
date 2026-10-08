@@ -19956,7 +19956,8 @@ a.sh-btn--ghost:hover {
   line-height: 1.35;
 }
 
-/* Transport indicator glyph — inline ⚡ / ☁ between the display name
+/* Transport indicator glyph — inline ⚡ direct / 🌐 internet (HTTPS) /
+ * ☁ through the GFS, between the display name
  * and the type badge on each connection card. Fixed width so the card
  * doesn't reflow when the transport flips live via WS. */
 .sh-transport-icon {

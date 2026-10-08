@@ -154,9 +154,14 @@ function transportIcon(kind: Connection['transport']) {
         title={t('connections.transport.internet_title')}
         aria-label={t('connections.transport.internet')}
       >
-        <svg width="14" height="14" viewBox="0 0 24 24"
-             fill="currentColor" aria-hidden="true">
-          <path d="M19 18H6a4 4 0 010-8 5 5 0 019.6-2A4 4 0 0119 18z" />
+        {/* Globe: straight to the household's own address over the
+            internet — no server in between. */}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.6" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true" data-glyph="globe">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18" />
+          <path d="M12 3a14 14 0 010 18 14 14 0 010-18z" />
         </svg>
       </span>
     )
@@ -168,9 +173,10 @@ function transportIcon(kind: Connection['transport']) {
         title={t('connections.transport.gfs')}
         aria-label={t('connections.transport.gfs')}
       >
+        {/* Cloud: carried by the GFS, a server in between. */}
         <svg width="14" height="14" viewBox="0 0 24 24"
-             fill="currentColor" aria-hidden="true">
-          <path d="M4 7h10l-2-2 1.4-1.4L17.8 8l-4.4 4.4L12 11l2-2H4V7zm16 10H10l2 2-1.4 1.4L6.2 16l4.4-4.4L12 13l-2 2h10v2z" />
+             fill="currentColor" aria-hidden="true" data-glyph="cloud">
+          <path d="M19 18H6a4 4 0 010-8 5 5 0 019.6-2A4 4 0 0119 18z" />
         </svg>
       </span>
     )
