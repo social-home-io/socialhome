@@ -212,6 +212,24 @@ async def test_list_defaults_health_when_supervisor_unwired(client):
     assert row["last_error"] is None
 
 
+async def test_list_reports_envelope_relay_from_the_cache_only(client):
+    # ``envelope_relay`` is what the pairing screen's reach picker keys on.
+    # It comes from the signed-capability cache (never a probe on a list
+    # read) and only an ACTIVE connection can carry it.
+    await _seed_gfs(client, "gfs-relay")
+    await _seed_gfs(client, "gfs-cold")
+    await _seed_gfs(client, "gfs-pending", status="pending")
+    svc = client.app[gfs_connection_service_key]
+    svc._envelope_relay["gfs-relay"] = True
+    svc._envelope_relay["gfs-pending"] = True
+    r = await client.get("/api/gfs/connections", headers=_auth(client._tok))
+    assert r.status == 200
+    body = {c["id"]: c for c in await r.json()}
+    assert body["gfs-relay"]["envelope_relay"] is True
+    assert body["gfs-cold"]["envelope_relay"] is False
+    assert body["gfs-pending"]["envelope_relay"] is False
+
+
 # ─── POST /api/gfs/connections (pair) ────────────────────────────────
 
 
