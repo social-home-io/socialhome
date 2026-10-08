@@ -115,7 +115,12 @@ class AbstractPageRepo(Protocol):
     ) -> bool: ...
     async def is_page_deleted(self, page_id: str, *, space_id: str) -> bool: ...
     async def list_page_tombstones(
-        self, space_id: str, *, since: str | None = None, limit: int = 500
+        self,
+        space_id: str,
+        *,
+        since: str | None = None,
+        limit: int = 500,
+        before: tuple[str, str] | None = None,
     ) -> builtins.list[PageTombstone]: ...
     async def raise_seq(self, page_id: str, *, space_id: str, seq: int) -> bool: ...
 
@@ -471,7 +476,12 @@ class SqlitePageRepo:
         return row is not None
 
     async def list_page_tombstones(
-        self, space_id: str, *, since: str | None = None, limit: int = 500
+        self,
+        space_id: str,
+        *,
+        since: str | None = None,
+        limit: int = 500,
+        before: tuple[str, str] | None = None,
     ) -> builtins.list[PageTombstone]:
         """The space's deleted pages, newest delete first (so a ``limit``
         keeps the deletes a peer is likeliest to have missed) — all of
@@ -486,7 +496,12 @@ class SqlitePageRepo:
         if since is not None:
             sql += " AND datetime(deleted_at) >= datetime(?)"
             params += (since,)
-        sql += " ORDER BY deleted_at DESC, id LIMIT ?"
+        if before is not None:
+            # Keyset paging (§25.6 export): strictly after ``before`` =
+            # (deleted_at, id) of the previous page's last row.
+            sql += " AND (deleted_at < ? OR (deleted_at = ? AND id < ?))"
+            params += (before[0], before[0], before[1])
+        sql += " ORDER BY deleted_at DESC, id DESC LIMIT ?"
         rows = await self._db.fetchall(sql, (*params, int(limit)))
         return [
             PageTombstone(

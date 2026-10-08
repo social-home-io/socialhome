@@ -2169,6 +2169,15 @@ class FederationInboundService(ProtectionGateMixin):
         ):
             return
         moderated_by = event.payload.get("moderated_by")
+        if not moderated_by:
+            # v_42 names the user who made the delete; anyone but the
+            # author is a moderator removal. Recorded (migration 0084) so
+            # this household's §25.6 ``posts_deleted`` tombstone can name
+            # the moderator to a household that missed this event.
+            actor = payload_actor(event)
+            held = await self._space_post_repo.get(post_id)
+            if actor and held is not None and held[1].author != actor:
+                moderated_by = actor
         if not await self._space_post_repo.soft_delete(
             post_id,
             space_id=space_id,

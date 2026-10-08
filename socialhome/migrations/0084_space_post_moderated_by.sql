@@ -1,0 +1,36 @@
+-- 0084 — Who removed a space post (``space_posts.moderated_by``).
+--
+-- A moderator's removal of someone else's post already sets
+-- ``space_posts.moderated = 1``; the moderator was dropped. The §25.6
+-- ``posts_deleted`` sync tombstone needs to name them: a member household
+-- relaying a moderator removal is judged by the live SPACE_POST_DELETED
+-- rule, which for a restricted ``posts`` level checks the actor with
+-- ``moderates_as`` — an actor-less record is refused there.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this data. ``moderated`` is
+--       written only by ``SqliteSpacePostRepo.soft_delete(moderated_by=…)``
+--       (callers: ``SpaceService.delete_post`` — the moderator user id when
+--       the actor is not the author; ``FederationInboundService
+--       ._on_space_post_deleted`` — the payload's moderator / actor;
+--       ``CalendarFeedBridge`` / ``SpaceItemInbound`` — never moderated)
+--       and copied by ``save`` (a post create carries the flag, never a
+--       moderator). Readers: the post mapper (flag only), the realtime /
+--       HA bridges (from the ``SpacePostModerated`` event, not the row).
+--       So the moderator id exists at exactly one write site and is lost
+--       there.
+--   (2) Non-migration alternatives considered and rejected:
+--       * Reuse a cleared column of the tombstone (``content`` /
+--         ``media_url``) — overloads content columns with an identity and
+--         every reader would have to know.
+--       * Carry it only on the live event — the tombstone exists for the
+--         household that MISSED the live event; it can only stream what
+--         the row holds.
+--       * Ship tombstones without an actor — refused under a restricted
+--         level for every moderator household but the host (the state
+--         before this change); a host outage then strands the removal.
+--   (3) Smallest possible change: one additive NULL-defaulted TEXT column,
+--       no backfill (old removals keep naming nobody), no index (read only
+--       per tombstone page, which filters on ``deleted``).
+ALTER TABLE space_posts ADD COLUMN moderated_by TEXT;

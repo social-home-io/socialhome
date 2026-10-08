@@ -9,17 +9,17 @@ from socialhome.federation.sync.space.exporter import (
     ROSTER_RESOURCES,
 )
 from socialhome.federation.sync.space.exporters import TasksDeletedExporter
-from socialhome.federation.sync.space.exporters.tasks_deleted import (
-    MAX_TOMBSTONES_STREAMED,
-)
+from socialhome.federation.sync.space.window import SYNC_PAGE_SIZE
 
 
 class _Repo:
     def __init__(self) -> None:
         self.asked: list[tuple] = []
 
-    async def list_task_tombstones(self, space_id, *, since=None, limit=500):
-        self.asked.append((space_id, since, limit))
+    async def list_task_tombstones(
+        self, space_id, *, since=None, limit=500, before=None
+    ):
+        self.asked.append((space_id, since, limit, before))
         return [
             TaskTombstone(
                 id="t1",
@@ -44,7 +44,8 @@ async def test_exports_each_tombstone_as_the_delete_payload():
             "actor_user_id": "u-d",
         }
     ]
-    assert repo.asked == [("sp-1", None, MAX_TOMBSTONES_STREAMED)]
+    # Every tombstone, page by page — no fixed count cuts the stream.
+    assert repo.asked == [("sp-1", None, SYNC_PAGE_SIZE, None)]
 
 
 def test_tombstones_stream_after_the_lists_and_before_the_tasks():

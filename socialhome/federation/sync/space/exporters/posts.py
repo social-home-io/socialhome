@@ -1,28 +1,62 @@
-"""Posts exporter for §25.6 space sync."""
+"""Posts exporter for §25.6 space sync.
+
+Every live post of the space inside its retention window (all of them
+when the space keeps forever — :mod:`..window`), newest first, read page
+by page so a big space streams in bounded memory.
+"""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from typing import Any, TYPE_CHECKING
 
+from ..exporter import PagedExporterMixin
+from ..window import SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
+
 if TYPE_CHECKING:
+    from .....domain.post import Post
     from .....repositories.space_post_repo import AbstractSpacePostRepo
 
 
-class PostsExporter:
-    """Exports non-deleted ``space_posts`` rows."""
+def iter_post_pages(
+    repo: "AbstractSpacePostRepo",
+    space_id: str,
+    window: SyncWindow,
+) -> AsyncIterator[list["Post"]]:
+    """The space's live posts in ``window``, page by page. Shared by every
+    exporter that walks posts (posts, polls, schedules) and the catch-up
+    media."""
+
+    async def fetch(cursor: int | None) -> tuple[list["Post"], int | None]:
+        return await repo.list_sync_page(
+            space_id,
+            cutoff=window.cutoff,
+            exempt_types=window.exempt_types,
+            cursor=cursor,
+            limit=SYNC_PAGE_SIZE,
+        )
+
+    return iter_pages(fetch)
+
+
+class PostsExporter(PagedExporterMixin):
+    """Exports the live ``space_posts`` rows inside the retention window."""
 
     resource = "posts"
 
-    __slots__ = ("_repo",)
+    __slots__ = ("_repo", "_windows")
 
-    def __init__(self, space_post_repo: "AbstractSpacePostRepo") -> None:
+    def __init__(
+        self, space_post_repo: "AbstractSpacePostRepo", windows: SyncWindows
+    ) -> None:
         self._repo = space_post_repo
+        self._windows = windows
 
-    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
-        # Upper-bound limit; household-scale spaces have well under 1000 posts.
-        posts = await self._repo.list_for_sync(space_id, limit=1000)
-        return [_post_to_dict(p) for p in posts]
+    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        window = await self._windows.for_space(space_id)
+        async for posts in iter_post_pages(self._repo, space_id, window):
+            yield [_post_to_dict(p) for p in posts]
 
 
 def _post_to_dict(post) -> dict[str, Any]:

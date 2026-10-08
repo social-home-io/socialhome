@@ -163,6 +163,21 @@ BAZAAR_CURRENCIES: dict[str, int] = {
 
 
 @dataclass(slots=True, frozen=True)
+class PostTombstone:
+    """A deleted space post as the §25.6 ``posts_deleted`` resource sees it:
+    the soft-deleted row's identity, never its content. ``moderated_by``
+    names the moderator of a moderator removal (migration 0084), ``None``
+    for the author's own delete or one recorded before 0084."""
+
+    id: str
+    author: str
+    type: str
+    created_at: str
+    moderated: bool = False
+    moderated_by: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class BazaarListing:
     """The listing payload embedded in a ``PostType.BAZAAR`` post.
 

@@ -616,6 +616,11 @@ async def test_list_list_tombstones_newest_first_and_since(two_spaces):
     )
     assert [t.id for t in since] == ["l-1b"]
     assert await env.space_repo.list_list_tombstones("sp-1", limit=1) == got[:1]
+    # Keyset paging (§25.6 export): strictly after the previous page's last.
+    after = await env.space_repo.list_list_tombstones(
+        "sp-1", limit=1, before=(got[0].deleted_at, got[0].id)
+    )
+    assert after == got[1:2]
     assert await env.space_repo.list_list_tombstones("sp-2") == []
 
 
@@ -726,6 +731,10 @@ async def test_list_task_tombstones_newest_first_and_since(two_spaces):
     )
     assert [t.id for t in since] == ["t-1b"]
     assert await env.space_repo.list_task_tombstones("sp-1", limit=1) == got[:1]
+    after = await env.space_repo.list_task_tombstones(
+        "sp-1", limit=1, before=(got[0].deleted_at, got[0].id)
+    )
+    assert after == got[1:2]
     assert await env.space_repo.list_task_tombstones("sp-2") == []
     # Tombstones never replay as live tasks.
     assert await env.space_repo.list_since("sp-1", "2000-01-01T00:00:00+00:00") == []

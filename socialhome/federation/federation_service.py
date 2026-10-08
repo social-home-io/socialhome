@@ -3677,6 +3677,8 @@ class FederationService:
                     record.sync_id,
                 )
                 return
+            # Progress: a long stream is not reaped while chunks flow.
+            record.touch()
             try:
                 await self._space_sync_receiver.on_chunk(
                     raw,
@@ -3915,6 +3917,8 @@ class FederationService:
                 record.provider_instance_id,
             )
             return
+        # Progress: a long stream is not reaped while chunks flow.
+        self._sync_manager.touch_session(sync_id)
         try:
             await self._space_sync_receiver.on_chunk(
                 raw,

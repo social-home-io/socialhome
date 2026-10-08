@@ -2464,6 +2464,14 @@ A seed-holding delegated admin's retention change is applied to its mirror
 and also forwarded to the host as an `update_config` carrying just those
 fields.
 
+Retention also bounds §25.6 sync on **every** provider, host or member: a
+space with `retention_days` streams only the live posts and chat that
+retention keeps (exempt post types at any age), a space without it streams
+everything — there is no fixed size limit. Gallery items and the post /
+comment tombstones always stream in full; the tombstones are how the host's
+retention expiry reaches member households, which never sweep. See
+[`sync.md`](./sync.md#what-a-sync-streams).
+
 ```mermaid
 sequenceDiagram
     autonumber

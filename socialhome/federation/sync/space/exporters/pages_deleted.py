@@ -12,22 +12,18 @@ tombstone as a live page. Ships before ``pages`` in :data:`RESOURCE_ORDER`.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from .....domain.page import page_tombstone_to_wire_dict
+from ..exporter import PagedExporterMixin
+from ..window import SYNC_PAGE_SIZE, iter_tombstone_pages
 
 if TYPE_CHECKING:
     from .....repositories.page_repo import AbstractPageRepo
 
 
-#: Newest deletes first; a space that has deleted more pages than this
-#: streams the most recent ones. Trade-off: a household that missed more
-#: than this many deletes in one outage keeps the older pages — bounded
-#: chunks over an unrealistic workload. Tombstones are never pruned.
-MAX_TOMBSTONES_STREAMED: int = 500
-
-
-class PagesDeletedExporter:
+class PagesDeletedExporter(PagedExporterMixin):
     resource = "pages_deleted"
 
     __slots__ = ("_repo",)
@@ -35,8 +31,15 @@ class PagesDeletedExporter:
     def __init__(self, page_repo: "AbstractPageRepo") -> None:
         self._repo = page_repo
 
-    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
-        tombstones = await self._repo.list_page_tombstones(
-            space_id, limit=MAX_TOMBSTONES_STREAMED
-        )
-        return [page_tombstone_to_wire_dict(t, space_id) for t in tombstones]
+    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        # Every tombstone, newest delete first, page by page: pages are not
+        # governed by the space's retention, so no window applies and no
+        # fixed count cuts the stream (a household that missed more
+        # deletes than any cap would keep the rest forever).
+        async def fetch(before: tuple[str, str] | None) -> list:
+            return await self._repo.list_page_tombstones(
+                space_id, limit=SYNC_PAGE_SIZE, before=before
+            )
+
+        async for page in iter_tombstone_pages(fetch, lambda t: (t.deleted_at, t.id)):
+            yield [page_tombstone_to_wire_dict(t, space_id) for t in page]

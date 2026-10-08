@@ -15,6 +15,7 @@ from .bazaar import BazaarExporter
 from .calendar import CalendarExporter
 from .chat_messages import ChatMessagesDeletedExporter, ChatMessagesExporter
 from .comments import CommentsExporter
+from .comments_deleted import CommentsDeletedExporter
 from .gallery import GalleryExporter
 from .member_pictures import MemberPicturesExporter
 from .members import MembersExporter
@@ -22,6 +23,7 @@ from .pages import PagesExporter
 from .pages_deleted import PagesDeletedExporter
 from .polls import PollsExporter
 from .posts import PostsExporter
+from .posts_deleted import PostsDeletedExporter
 from .schedules import SchedulesExporter
 from .stickies import StickiesExporter
 from .task_lists import TaskListsExporter
@@ -38,6 +40,7 @@ __all__ = [
     "CalendarExporter",
     "ChatMessagesDeletedExporter",
     "ChatMessagesExporter",
+    "CommentsDeletedExporter",
     "CommentsExporter",
     "GalleryExporter",
     "MemberPicturesExporter",
@@ -45,6 +48,7 @@ __all__ = [
     "PagesDeletedExporter",
     "PagesExporter",
     "PollsExporter",
+    "PostsDeletedExporter",
     "PostsExporter",
     "SchedulesExporter",
     "StickiesExporter",

@@ -443,6 +443,20 @@ async def test_comments(setup):
     assert c.comments[0].id == "c-1"
 
 
+async def test_an_older_providers_deleted_comment_record_is_not_stored(setup):
+    """Before ``comments_deleted`` a provider streamed its deleted comments
+    as plain records (content cleared); stored, one read as a live empty
+    comment. Deletes travel as tombstones now — such a record is skipped."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "comments",
+        [{"id": "c-gone", "post_id": "p-1", "author": "u-1", "deleted": True}],
+    )
+    assert c.comments == []
+
+
 async def test_synced_media_references_keep_only_the_local_shape(setup):
     """A synced row's media references must look like a local upload
     (``api/media/<name>``); anything else is dropped, never stored."""

@@ -31,7 +31,13 @@ from ..domain.conversation import (
     SystemChatScope,
     TOMBSTONE_MESSAGE_TYPE,
 )
-from .base import bool_col, row_to_dict, rows_to_dicts
+from .base import (
+    bool_col,
+    retention_window_sql,
+    row_to_dict,
+    rows_to_dicts,
+    sync_page_cursor,
+)
 from .cp_repo import guardian_block_counterparts_sql
 
 
@@ -141,18 +147,15 @@ class AbstractConversationRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[ConversationMessage]: ...
-    async def list_recent_live_messages(
+    async def list_messages_sync_page(
         self,
         conversation_id: str,
         *,
-        limit: int = 500,
-    ) -> list[ConversationMessage]: ...
-    async def list_recent_deleted_messages(
-        self,
-        conversation_id: str,
-        *,
-        limit: int = 2000,
-    ) -> list[ConversationMessage]: ...
+        deleted: bool = False,
+        cutoff: str | None = None,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[ConversationMessage], int | None]: ...
     async def insert_tombstone(
         self,
         conversation_id: str,
@@ -1040,44 +1043,41 @@ class SqliteConversationRepo:
             )
         return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
 
-    async def list_recent_live_messages(
+    async def list_messages_sync_page(
         self,
         conversation_id: str,
         *,
-        limit: int = 500,
-    ) -> list[ConversationMessage]:
-        """The newest ``limit`` messages of a conversation that are not
-        deleted, oldest first — the space chat's catch-up window (§25.6)."""
-        rows = await self._db.fetchall(
-            """
-            SELECT * FROM (
-                SELECT * FROM conversation_messages
-                 WHERE conversation_id=? AND deleted=0
-                 ORDER BY created_at DESC LIMIT ?
-            ) ORDER BY created_at ASC
-            """,
-            (conversation_id, int(limit)),
+        deleted: bool = False,
+        cutoff: str | None = None,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[ConversationMessage], int | None]:
+        """One page of a space chat for a §25.6 sync, oldest stored first
+        (a reply after the message it names): the live messages, or
+        (``deleted=True``) the deleted ones — tombstone rows included, the
+        ``chat_messages_deleted`` resource. ``cutoff`` is the space's
+        retention window (:func:`~.base.retention_window_sql`); ``None``
+        streams the whole chat. Returns ``(messages, next_cursor)``;
+        ``next_cursor`` is ``None`` after the last page (keyset on the row
+        id: no page repeats or skips a row)."""
+        window, window_params = retention_window_sql("created_at", cutoff)
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, * FROM conversation_messages"
+                " WHERE conversation_id=? AND deleted=?"
+                + window
+                + " AND rowid > ? ORDER BY rowid LIMIT ?",
+                (
+                    conversation_id,
+                    int(deleted),
+                    *window_params,
+                    cursor or 0,
+                    int(limit),
+                ),
+            )
         )
-        return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
-
-    async def list_recent_deleted_messages(
-        self,
-        conversation_id: str,
-        *,
-        limit: int = 2000,
-    ) -> list[ConversationMessage]:
-        """The newest ``limit`` deleted messages of a conversation —
-        tombstone rows included — newest first: the space chat's catch-up
-        deletions (``chat_messages_deleted``)."""
-        rows = await self._db.fetchall(
-            """
-            SELECT * FROM conversation_messages
-             WHERE conversation_id=? AND deleted=1
-             ORDER BY created_at DESC LIMIT ?
-            """,
-            (conversation_id, int(limit)),
-        )
-        return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
+        messages = [m for m in (_row_to_message(d) for d in rows) if m]
+        return messages, sync_page_cursor(rows, limit)
 
     async def insert_tombstone(
         self,

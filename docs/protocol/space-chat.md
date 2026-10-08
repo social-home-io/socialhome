@@ -152,9 +152,13 @@ sequenceDiagram
 
 ## Catch-up (§25.6)
 
-The `chat_messages` sync resource streams the last 500 messages of the
-provider's chat that are not deleted, oldest first, encrypted under the
-space content key like every resource (`ChatMessagesExporter`). The
+The `chat_messages` sync resource streams the provider's chat messages
+that are not deleted and fall inside the space's retention window (the
+whole chat when the space keeps forever; see
+[`sync.md`](./sync.md#what-a-sync-streams)), oldest first and page by
+page in storage order (oldest stored first), encrypted under the space
+content key like every resource (`ChatMessagesExporter`). No fixed count
+cuts it. The
 provider gates it per requester. A requester must be at v_55 and hold a
 writer seat (`SpaceChatAudience.may_receive`). Otherwise it gets no
 exporter: a follower-only household gets the chat by catch-up no more than
@@ -170,8 +174,9 @@ resolve no mention and send no WS frame. A chat that a catch-up creates
 seats its readers at "now", so a joiner inherits no backlog as unread.
 
 **Deletions converge.** The `chat_messages_deleted` resource streams
-**before** the messages. It carries the provider's most recent 2000
-deletions as `{id, author_user_id}`, never content
+**before** the messages. It carries the provider's deletions inside the
+same retention window (all of them when the space keeps forever) as
+`{id, author_user_id}`, never content
 (`ChatMessagesDeletedExporter`), and is gated per requester like the
 messages. It is a removal resource, so it still lands in an archived copy.
 Each record must be owner-bound to its author in the space. The provider

@@ -58,7 +58,9 @@ from socialhome.domain.federation import (
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
     SPACE_CHAT_MESSAGE_KIND,
+    SPACE_COMMENT_KIND,
     SPACE_PAGE_KIND,
+    SPACE_POST_KIND,
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
@@ -123,6 +125,15 @@ _TASK_ELSEWHERE = mint_owner_bound_id(
 _PAGE_SYNC = mint_owner_bound_id(SPACE_PAGE_KIND, space_id=SP, owner_user_id="u-a")
 _PAGE_ELSEWHERE = mint_owner_bound_id(
     SPACE_PAGE_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
+)
+#: The post / comment twins (``posts_deleted`` / ``comments_deleted``).
+_POST_SYNC = mint_owner_bound_id(SPACE_POST_KIND, space_id=SP, owner_user_id="u-a")
+_POST_ELSEWHERE = mint_owner_bound_id(
+    SPACE_POST_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
+)
+_CMT_SYNC = mint_owner_bound_id(SPACE_COMMENT_KIND, space_id=SP, owner_user_id="u-a")
+_CMT_ELSEWHERE = mint_owner_bound_id(
+    SPACE_COMMENT_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
 )
 _TT_FOR_U_A = mint_owner_bound_id(
     SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-a"
@@ -1923,6 +1934,72 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         ],
         (HOST,),
         (AUTHOR, OTHER, ADMIN),
+    ),
+    # Tombstones: the live SPACE_POST_DELETED / SPACE_COMMENT_DELETED rule
+    # (the author's household or content authority), a stub only from the
+    # host and only for an id bound to its author in THIS space.
+    (
+        "posts_deleted",
+        "delete u-a's post (a delete the provider heard, we missed)",
+        [{"id": "post-a", "author": "u-a"}],
+        (AUTHOR, ADMIN, HOST, MOD),
+        (OTHER, STRANGER),
+    ),
+    (
+        "posts_deleted",
+        "delete our local user's post",
+        [{"id": "post-l", "author": LOCAL_USER}],
+        (ADMIN, HOST, MOD),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "posts_deleted",
+        "tombstone a post id not held here",
+        [{"id": _POST_SYNC, "author": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER, MOD),
+    ),
+    (
+        "posts_deleted",
+        "stub a post id bound to another space (a cross-space squat)",
+        [{"id": _POST_ELSEWHERE, "author": "u-a"}],
+        (),
+        (HOST, AUTHOR, OTHER),
+    ),
+    (
+        "posts_deleted",
+        "stub a legacy (unbound) post id never held here",
+        [{"id": "p-legacy-tomb", "author": "u-a"}],
+        (),
+        (HOST, AUTHOR),
+    ),
+    (
+        "comments_deleted",
+        "delete u-a's comment (a delete the provider heard, we missed)",
+        [{"id": "cmt-a", "post_id": "post-a", "author": "u-a"}],
+        (AUTHOR, ADMIN, HOST, MOD),
+        (OTHER, STRANGER),
+    ),
+    (
+        "comments_deleted",
+        "delete our local user's comment",
+        [{"id": "cmt-l", "post_id": "post-l", "author": LOCAL_USER}],
+        (ADMIN, HOST, MOD),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "comments_deleted",
+        "tombstone a comment id not held here",
+        [{"id": _CMT_SYNC, "post_id": "post-a", "author": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER, MOD),
+    ),
+    (
+        "comments_deleted",
+        "stub a comment id bound to another space (a cross-space squat)",
+        [{"id": _CMT_ELSEWHERE, "post_id": "post-a", "author": "u-a"}],
+        (),
+        (HOST, AUTHOR, OTHER),
     ),
     (
         "comments",

@@ -27,11 +27,18 @@ from ..domain.post import (
     CommentType,
     MAX_DISTINCT_REACTIONS_PER_POST,
     Post,
+    PostTombstone,
     PostType,
 )
 from ..domain.space_item import StaleItemStamp, stamp_to_db
 from ..utils.datetime import parse_iso8601_optional
-from .base import bool_col, row_to_dict, rows_to_dicts
+from .base import (
+    bool_col,
+    retention_window_sql,
+    row_to_dict,
+    rows_to_dicts,
+    sync_page_cursor,
+)
 from .post_repo import (  # reuse the household post helpers verbatim
     _decode_reactions,
     _encode_reactions,
@@ -63,21 +70,45 @@ class AbstractSpacePostRepo(Protocol):
         before: str | None = None,
         limit: int = 20,
     ) -> list[Post]: ...
-    async def list_for_sync(
+    async def list_sync_page(
         self,
         space_id: str,
         *,
-        limit: int = 1000,
-    ) -> list[Post]:
-        """Every non-deleted post of ``space_id``, anchors included.
+        cutoff: str | None = None,
+        exempt_types: tuple[str, ...] = (),
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[Post], int | None]:
+        """One page of the space's live posts for a §25.6 sync, newest
+        first. Anchors included.
 
-        The §25.6 catch-up exporters enumerate posts through this, NOT
-        :meth:`list_feed`: the feed query drops ``hidden_from_feed``
-        rows (bazaar listing / calendar event anchors the author chose
-        not to announce), and a joiner that never receives the anchor
-        cannot store the listing that hangs on it —
-        ``bazaar_listings.post_id`` references ``space_posts(id)``.
+        The catch-up exporters enumerate posts through this, NOT
+        :meth:`list_feed`: the feed query drops ``hidden_from_feed`` rows
+        (bazaar listing / calendar event anchors the author chose not to
+        announce), and a joiner that never receives the anchor cannot
+        store the listing that hangs on it — ``bazaar_listings.post_id``
+        references ``space_posts(id)``.
+
+        ``cutoff`` / ``exempt_types`` are the space's retention window
+        (:func:`~socialhome.repositories.base.retention_window_sql`).
+        Returns ``(posts, next_cursor)``; ``next_cursor`` is ``None`` once
+        the last page is read, else what to pass as ``cursor`` for the
+        next one (keyset on the row id: no page repeats or skips a row).
         """
+        ...
+
+    async def list_post_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[PostTombstone], int | None]:
+        """One page of the space's deleted posts (``posts_deleted``),
+        newest first — every one, whatever its age: a delete, or a retention
+        expiry on the host, must reach every household that holds the row.
+        Identity only (no content). Same ``(rows, next_cursor)`` paging as
+        :meth:`list_sync_page`."""
         ...
 
     async def list_since(
@@ -147,6 +178,24 @@ class AbstractSpacePostRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[tuple[str, Comment]]: ...
+    async def list_comments_sync_page(
+        self,
+        space_id: str,
+        *,
+        deleted: bool = False,
+        cutoff: str | None = None,
+        exempt_types: tuple[str, ...] = (),
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[Comment], int | None]:
+        """One page of the space's comments for a §25.6 sync, oldest
+        stored first (a reply never before its parent): the live ones on
+        live posts, or (``deleted=True``) the deleted ones on any post —
+        the ``comments_deleted`` tombstones. The retention window is the
+        parent post's. Same ``(rows, next_cursor)`` paging as
+        :meth:`list_sync_page`."""
+        ...
+
     async def soft_delete_comment(
         self,
         comment_id: str,
@@ -292,22 +341,61 @@ class SqliteSpacePostRepo:
             )
         return [_row_to_space_post(d) for d in rows_to_dicts(rows)]
 
-    async def list_for_sync(
+    async def list_sync_page(
         self,
         space_id: str,
         *,
-        limit: int = 1000,
-    ) -> list[Post]:
+        cutoff: str | None = None,
+        exempt_types: tuple[str, ...] = (),
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[Post], int | None]:
         # No ``hidden_from_feed`` filter — see the protocol docstring. The
         # receiver stores the flag with the row, so the joiner's feed stays
         # exactly as clean as the provider's.
-        rows = await self._db.fetchall(
-            "SELECT * FROM space_posts "
-            "WHERE space_id=? AND deleted=0 "
-            "ORDER BY created_at DESC LIMIT ?",
-            (space_id, int(limit)),
+        window, window_params = retention_window_sql(
+            "created_at", cutoff, type_col="type", exempt_types=exempt_types
         )
-        return [_row_to_space_post(d) for d in rows_to_dicts(rows)]
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, * FROM space_posts"
+                " WHERE space_id=? AND deleted=0"
+                + window
+                + " AND (? IS NULL OR rowid < ?)"
+                " ORDER BY rowid DESC LIMIT ?",
+                (space_id, *window_params, cursor, cursor, int(limit)),
+            )
+        )
+        return [_row_to_space_post(d) for d in rows], sync_page_cursor(rows, limit)
+
+    async def list_post_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[PostTombstone], int | None]:
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, id, author, type, created_at,"
+                " moderated, moderated_by FROM space_posts"
+                " WHERE space_id=? AND deleted=1 AND (? IS NULL OR rowid < ?)"
+                " ORDER BY rowid DESC LIMIT ?",
+                (space_id, cursor, cursor, int(limit)),
+            )
+        )
+        tombstones = [
+            PostTombstone(
+                id=d["id"],
+                author=d["author"],
+                type=d["type"],
+                created_at=d["created_at"],
+                moderated=bool_col(d["moderated"]),
+                moderated_by=d["moderated_by"],
+            )
+            for d in rows
+        ]
+        return tombstones, sync_page_cursor(rows, limit)
 
     async def list_since(
         self,
@@ -353,10 +441,11 @@ class SqliteSpacePostRepo:
                 UPDATE space_posts
                    SET deleted=1, content=NULL, media_url=NULL,
                        link_preview_json=NULL,
-                       moderated=CASE WHEN ? IS NOT NULL THEN 1 ELSE moderated END
+                       moderated=CASE WHEN ? IS NOT NULL THEN 1 ELSE moderated END,
+                       moderated_by=COALESCE(?, moderated_by)
                  WHERE id=? AND space_id=?
                 """,
-                (moderated_by, post_id, space_id),
+                (moderated_by, moderated_by, post_id, space_id),
             )
             > 0
         )
@@ -681,6 +770,33 @@ class SqliteSpacePostRepo:
                 continue
             out.append((d["post_id"], comment))
         return out
+
+    async def list_comments_sync_page(
+        self,
+        space_id: str,
+        *,
+        deleted: bool = False,
+        cutoff: str | None = None,
+        exempt_types: tuple[str, ...] = (),
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[Comment], int | None]:
+        window, window_params = retention_window_sql(
+            "p.created_at", cutoff, type_col="p.type", exempt_types=exempt_types
+        )
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT c.rowid AS sync_rowid, c.* FROM space_post_comments c"
+                " JOIN space_posts p ON p.id = c.post_id"
+                " WHERE p.space_id=? AND c.deleted=?"
+                + ("" if deleted else " AND p.deleted=0")
+                + window
+                + " AND c.rowid > ? ORDER BY c.rowid LIMIT ?",
+                (space_id, int(deleted), *window_params, cursor or 0, int(limit)),
+            )
+        )
+        comments = [c for c in (_row_to_space_comment(d) for d in rows) if c]
+        return comments, sync_page_cursor(rows, limit)
 
     async def soft_delete_comment(self, comment_id: str, *, space_id: str) -> bool:
         """Soft-delete a comment whose parent post is in ``space_id``.

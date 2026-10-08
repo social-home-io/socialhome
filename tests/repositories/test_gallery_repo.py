@@ -586,3 +586,45 @@ async def test_delete_album_in_space_is_scoped_and_takes_its_items(two_spaces):
     assert await repo.get_album("alb-2") is None
     assert await repo.get_item("it-2") is None
     assert not await repo.delete_album_in_space("alb-2", space_id="sp-2")
+
+
+async def test_sync_pages_walk_every_album_and_own_item_in_the_window(env):
+    """§25.6: albums and the space's own items, page by page, no fixed
+    count; an item past the retention window stays out unless its album
+    is exempt; a post's mirror never streams."""
+    from dataclasses import replace
+
+    db, repo = env
+    await repo.create_album(_album("alb-1"))
+    await repo.create_album(replace(_album("alb-keep"), retention_exempt=True))
+    await repo.create_album(_album("alb-home", space_id=None))
+    for item_id, album_id in (
+        ("it-new", "alb-1"),
+        ("it-old", "alb-1"),
+        ("it-old-kept", "alb-keep"),
+        ("it-mirror", "alb-1"),
+        ("it-home", "alb-home"),
+    ):
+        await repo.create_item(_item(item_id, album_id=album_id))
+    await db.enqueue(
+        "UPDATE gallery_items SET created_at='2020-01-01 00:00:00'"
+        " WHERE id IN ('it-old', 'it-old-kept')"
+    )
+    await db.enqueue(
+        "UPDATE gallery_items SET source_post_id='p-1' WHERE id='it-mirror'"
+    )
+    albums, cursor = await repo.list_albums_sync_page("sp-1", limit=1)
+    more, cursor = await repo.list_albums_sync_page("sp-1", cursor=cursor, limit=1)
+    last, cursor = await repo.list_albums_sync_page("sp-1", cursor=cursor, limit=1)
+    assert [a.id for a in albums + more + last] == ["alb-1", "alb-keep"]
+    assert cursor is None
+    seen: list[str] = []
+    cursor = None
+    while True:
+        page, cursor = await repo.list_items_sync_page("sp-1", cursor=cursor, limit=1)
+        seen.extend(i.id for i in page)
+        if cursor is None:
+            break
+    # No retention window: nothing prunes gallery items, so every one the
+    # host shows streams, old ones included.
+    assert seen == ["it-new", "it-old", "it-old-kept"]

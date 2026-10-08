@@ -25,6 +25,7 @@ Security audit findings addressed here (§25.6.2):
 from __future__ import annotations
 
 import asyncio
+import time
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -424,3 +425,17 @@ class SyncSessionRecord:
     #: ``SPACE_SYNC_DIRECT_FAILED`` on the 15 s ICE timeout. Tracked so
     #: ``close_session`` can cancel it cleanly.
     rtc_watcher: Any | None = None
+    #: When a chunk last moved on this session (sent by the provider,
+    #: received by the requester). The stale reaper measures idleness from
+    #: it, not from ``created_at``: a big stream may run longer than the
+    #: TTL and must not be torn down (and restarted from scratch) while it
+    #: is still making progress. Starts at ``created_at``.
+    last_activity: float = field(default=0.0)
+
+    def __post_init__(self) -> None:
+        if not self.last_activity:
+            self.last_activity = self.created_at
+
+    def touch(self, now: float | None = None) -> None:
+        """Record progress on the session (a chunk moved)."""
+        self.last_activity = now if now is not None else time.time()

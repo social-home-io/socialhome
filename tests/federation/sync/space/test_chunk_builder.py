@@ -12,8 +12,10 @@ from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.sync.space.exporter import (
     CHUNK_SIZE_BUDGET_BYTES,
     ChunkBuilder,
+    PagedExporterMixin,
     SENTINEL_RESOURCE,
     parse_chunk,
+    record_batches,
     serialise_chunk,
 )
 
@@ -169,3 +171,64 @@ def test_serialise_parse_round_trip():
 def test_parse_chunk_rejects_malformed():
     with pytest.raises(ValueError, match="malformed"):
         parse_chunk(b"not json")
+
+
+class _PagedExporter(PagedExporterMixin):
+    """Serves ``pages`` one at a time and records how far the stream had
+    read when each page was asked for — the bounded-memory contract."""
+
+    resource = "posts"
+
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self._pages = pages
+        self.served = 0
+
+    async def iter_batches(self, space_id: str):
+        for page in self._pages:
+            self.served += 1
+            yield page
+        yield []  # an empty page is skipped, not chunked
+
+
+async def test_a_paged_exporter_streams_page_by_page_with_one_seq(builder):
+    pages = [[{"id": f"{p}-{i}"} for i in range(3)] for p in range(4)]
+    exporter = _PagedExporter(pages)
+    seen_served: list[int] = []
+    chunks = []
+    async for c in builder.build_chunks(
+        exporter=exporter, space_id="sp-1", sync_id="sync-x", sig_suite="ed25519"
+    ):
+        seen_served.append(exporter.served)
+        chunks.append(c)
+    # One chunk per small page, built before the next page was read.
+    assert seen_served == [1, 2, 3, 4]
+    # One continuous seq across the pages.
+    assert [(c["seq_start"], c["seq_end"]) for c in chunks] == [
+        (0, 3),
+        (3, 6),
+        (6, 9),
+        (9, 12),
+    ]
+    records = [
+        r
+        for c in chunks
+        for r in orjson.loads(
+            await _FakeCrypto().decrypt_chunk(
+                space_id="sp-1",
+                epoch=0,
+                sync_id="sync-x",
+                ciphertext=c["encrypted_payload"],
+            )
+        )["records"]
+    ]
+    assert records == [r for p in pages for r in p]
+    # ``list_records`` of a paged exporter is every page in one list.
+    assert await _PagedExporter(pages).list_records("sp-1") == records
+
+
+async def test_record_batches_wraps_a_plain_exporter_as_one_page():
+    plain = _FakeExporter("members", [{"id": "a"}, {"id": "b"}])
+    assert [b async for b in record_batches(plain, "sp-1")] == [
+        [{"id": "a"}, {"id": "b"}]
+    ]
+    assert [b async for b in record_batches(_FakeExporter("bans", []), "sp-1")] == []
