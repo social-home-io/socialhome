@@ -470,6 +470,23 @@ case. Anything else would be a presence/existence oracle: an anonymous
 caller could walk instance ids and learn which households use the server
 and which are awake. An envelope for an unknown, pending or banned
 recipient is dropped server-side, logged at DEBUG, and stored nowhere.
+
+**The timing is uniform too.** The three outcomes cost different work
+(an unknown id is one indexed miss, an online one a socket write, an
+offline one a DB insert), so the route never waits for them: it validates
+the outer shape, hands the envelope to `GfsEnvelopeRelay.submit` — which
+schedules the lookup / push / enqueue as a background task — and answers.
+At most `ENVELOPE_MAX_INFLIGHT` (256) such tasks run at once, and at most
+`ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT` (16) for any one recipient; past
+either the envelope is dropped with a rate-limited WARNING (one line per
+minute with the drop count and no recipient id, never one per envelope)
+and the caller still gets the same `202`. The per-recipient bound means a
+flood aimed at one household — even one that stopped reading its socket —
+can never cost another recipient its envelope, so a canary's fate says
+nothing about a target's load. A live push that stalls for 10 s
+(`WS_SEND_TIMEOUT_S`) evicts the socket and queues the envelope instead. One recipient's envelopes are processed in the order they
+were posted (a per-recipient lock), so the hand-off does not reorder a
+sender's stream.
 Malformed bodies are a 400 and anything over
 `ENVELOPE_MAX_BODY_BYTES` (320 KiB, sized from the ACK's `space_meta`
 under the household's own 256 KiB sealed-blob cap, which the household
@@ -492,6 +509,15 @@ the recipient and the depth, and still answered with the same uniform
 in order on that household's next authenticated hello, each row deleted
 only after its frame went out. Expired rows are swept by the GFS
 maintenance loop.
+
+**Across cluster nodes.** The queue table is shared by every node of a
+GFS cluster, but a node only knows its own sockets — so an envelope posted
+to node A for a household connected to node B is queued by A. A then
+sends one coalesced `NODE_DRAIN_HINT {instances:[…]}` cluster frame (ids
+only, batched for up to 0.5 s) and B, which holds the socket, drains the
+household's queue at once rather than on its next reconnect. Drains are
+serialised per household, so a hello drain and a hint drain racing each
+other never deliver a row twice.
 
 **What the server must never do**, and what its tests pin: parse or log
 the sealed content, store or log any sender attribute (there is none),

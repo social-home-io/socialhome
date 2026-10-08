@@ -21,6 +21,7 @@ from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     sign_authority_event,
 )
+from socialhome import crypto as crypto_mod
 from socialhome.crypto import b64url_encode, sign_ed25519
 from socialhome.global_server.app_keys import (
     gfs_fed_repo_key,
@@ -235,6 +236,19 @@ async def test_ws_rejects_bad_signature(ws_client):
         msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
         assert msg.type.name == "CLOSE"
         assert ws.close_code == 4401
+        assert msg.extra == "auth-failed"
+
+
+@pytest.mark.security
+async def test_ws_rejects_an_undecodable_signature_as_auth_failed(ws_client):
+    async with ws_client.ws_connect("/gfs/ws") as ws:
+        bad = _hello("peer.home", ws_client._seed)
+        bad["sig"] = "!!not-base64!!"
+        await ws.send_json(bad)
+
+        msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
+        assert ws.close_code == 4401
+        assert msg.extra == "auth-failed"
 
 
 async def test_ws_rejects_skewed_timestamp(ws_client):
@@ -256,6 +270,37 @@ async def test_ws_rejects_unknown_instance(ws_client):
         msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
         assert msg.type.name == "CLOSE"
         assert ws.close_code == 4401
+        assert msg.extra == "auth-failed"
+
+
+@pytest.mark.security
+async def test_ws_unknown_and_bad_signature_are_indistinguishable(
+    ws_client, monkeypatch
+):
+    """An unregistered id must not be told apart from a registered one with
+    a wrong signature — not by close reason, and not by skipping the Ed25519
+    verify (timing): both branches run exactly one verification."""
+    verifies: list[bytes] = []
+    real_verify = crypto_mod.verify_ed25519
+
+    def _counting(pub, message, sig):
+        verifies.append(message)
+        return real_verify(pub, message, sig)
+
+    monkeypatch.setattr(crypto_mod, "verify_ed25519", _counting)
+    stranger_seed, _pub = _gen_ed25519()
+    reasons = []
+    for instance_id, seed in (
+        ("ghost.home", stranger_seed),
+        ("peer.home", stranger_seed),  # registered, wrong key
+    ):
+        async with ws_client.ws_connect("/gfs/ws") as ws:
+            await ws.send_json(_hello(instance_id, seed))
+            msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
+            reasons.append((ws.close_code, msg.extra))
+    assert reasons == [(4401, "auth-failed"), (4401, "auth-failed")]
+    assert len(verifies) == 2
+    assert verifies[0].startswith(b"ghost.home|")
 
 
 async def test_ws_hello_timeout_closes_4408(ws_client, monkeypatch):

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
 
+from socialhome.global_server import ws_registry as ws_registry_mod
 from socialhome.global_server.ws_registry import GfsWebSocketRegistry
 
 
@@ -209,3 +211,42 @@ async def test_close_all_closes_every_socket(registry):
     assert a.closed_with == (1001, b"server-shutdown")
     assert b.closed_with == (1001, b"server-shutdown")
     assert registry.connection_count() == 0
+
+
+# ── stalled sockets ────────────────────────────────────────────────────────────
+
+
+class _StalledWS(_FakeWS):
+    """A peer that stopped reading: ``send_str`` blocks on a paused
+    transport until something cancels it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_started = asyncio.Event()
+
+    async def send_str(self, msg: str) -> None:
+        self.send_started.set()
+        await asyncio.Event().wait()
+
+
+async def test_a_stalled_send_times_out_returns_false_and_evicts(registry, monkeypatch):
+    """A household that stops reading must not hold the sender (an envelope
+    accept, a drain, a fan-out worker) until the heartbeat notices."""
+    monkeypatch.setattr(ws_registry_mod, "WS_SEND_TIMEOUT_S", 0.02)
+    ws = _StalledWS()
+    await registry.register("inst-1", ws)
+
+    assert await asyncio.wait_for(registry.send("inst-1", {"a": 1}), timeout=1) is False
+    assert registry.is_connected("inst-1") is False
+    # The stalled socket is closed in the background so the household
+    # reconnects (and drains its queue) instead of hanging on.
+    await registry.close_all()
+    assert ws.closed_with is not None
+    # The next send fails fast — no second stall.
+    assert (
+        await asyncio.wait_for(registry.send("inst-1", {"a": 1}), timeout=0.01) is False
+    )
+
+
+def test_send_timeout_is_the_documented_value():
+    assert ws_registry_mod.WS_SEND_TIMEOUT_S == 10.0

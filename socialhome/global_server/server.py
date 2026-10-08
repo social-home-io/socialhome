@@ -368,6 +368,11 @@ class GfsApp:
             queue_repo=repos.envelope_queue,
             ws_registry=ws_registry,
         )
+        # Cross-node drain: after an enqueue the relay hints the cluster, and
+        # an inbound NODE_DRAIN_HINT drains through the relay. Wired by
+        # setters because each needs the other.
+        envelope_relay.attach_cluster(cluster)
+        cluster.attach_drain(envelope_relay.drain)
         # Trusted-mode member publish (v_49): writer-cert-authorized items
         # fanned out through the same push-or-queue path as envelopes.
         member_publish = GfsMemberPublishService(
@@ -516,6 +521,8 @@ class GfsApp:
 
     async def _on_cleanup(self, app: web.Application) -> None:
         log.info("GFS: shutting down")
+        # Background envelope accepts write to the DB — settle them first.
+        await self.services.envelope_relay.close()
         await self.services.maintenance.stop()
         await self.services.member_publish.stop()
         await self.services.cluster.stop()

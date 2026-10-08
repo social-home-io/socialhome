@@ -804,6 +804,30 @@ and a seed holder can churn sibling node ids, holding up to 32 sibling rows at a
 each with its own 660-digest replay share (it holds our identity, so this
 is no escalation).
 
+**Cross-node envelope drain.** Nodes share `gfs.db`, so the store-and-forward
+`gfs_envelope_queue` is shared, but each node's `/gfs/ws` registry is its own
+memory. A node that queues an envelope (`POST /gfs/envelope`) or a member
+item for a household gives `ClusterService.hint_drain` the recipient id; ids
+are coalesced for up to 0.5 s and sent as one fire-and-forget
+`NODE_DRAIN_HINT {instances:[…]}` (≤ 256 ids a frame) to every member peer.
+The receiver validates each id against the instance-id shape and drains,
+through `GfsEnvelopeRelay.drain`, every one it holds a socket for — so a
+household connected to node B gets an envelope posted to node A now, not on
+its next reconnect. The relay and the cluster are wired by setters
+(`relay.attach_cluster`, `cluster.attach_drain`) because each calls the
+other. `drain` holds a per-household lock, so a hello drain and a hint drain
+never send the same row twice; repeated hints for a household whose hinted
+drain is still running coalesce into one more drain. The lock is per
+process: during a reconnect that moves a household between nodes, a stale
+socket on the old node can in rare cases take a frame another node also
+delivers. Receivers tolerate it — a relayed §24.11 envelope is dropped by the
+pipeline's replay step (`msg_id`), an invite-bootstrap body by its
+`redeem_nonce` replay guard, a member item by its item-id dedupe. Every push
+to a `/gfs/ws` socket is bounded by `WS_SEND_TIMEOUT_S` (10 s,
+`global_server/ws_registry.py`): a socket whose peer stopped reading is
+evicted and closed (1013) rather than holding an accept, a drain or a fan-out
+worker until the heartbeat notices; the envelope falls back to the queue.
+
 ### Database writer (write coalescing)
 
 Every process (household or GFS node) owns one `AsyncDatabase`

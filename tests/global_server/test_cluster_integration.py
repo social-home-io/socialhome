@@ -7,6 +7,7 @@ admin /admin/api/cluster endpoints. Uses an in-process aiohttp
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
@@ -24,7 +25,9 @@ from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_cluster_key,
     gfs_cluster_repo_key,
+    gfs_envelope_queue_repo_key,
     gfs_fed_repo_key,
+    gfs_ws_registry_key,
 )
 from socialhome.global_server.cluster import (
     CLUSTER_FAILED_VERIFY_RATE_LIMIT_PER_MIN,
@@ -36,13 +39,14 @@ from socialhome.global_server.cluster import (
     CLUSTER_REPLAY_TTL_S,
     CLUSTER_TS_SKEW_S,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
+    NODE_DRAIN_HINT,
     NODE_HEARTBEAT,
     NODE_HELLO,
     ClusterService,
     _now_iso,
 )
 from socialhome.global_server.config import GfsConfig
-from socialhome.global_server.domain import ClusterNode
+from socialhome.global_server.domain import ClientInstance, ClusterNode
 from socialhome.global_server.public import RATE_LIMIT_MAX_TRACKED_IPS
 from socialhome.global_server.repositories import SqliteClusterRepo
 from socialhome.global_server.routes import cluster as cluster_routes
@@ -1789,3 +1793,91 @@ async def test_a_losing_concurrent_approval_moves_nothing_and_is_a_conflict(
         "http://winner.test",
         "http://winner.test",
     )
+
+
+# ─── NODE_DRAIN_HINT ──────────────────────────────────────────────────
+
+_HOUSEHOLD = "household222222222222222222222aa"
+
+
+async def test_node_drain_hint_is_dispatched(client, monkeypatch):
+    seed = await _register_peer(client)
+    seen: list[object] = []
+
+    async def _record(self, instances):
+        seen.append(instances)
+        return 0
+
+    monkeypatch.setattr(ClusterService, "apply_drain_hint", _record)
+    resp = await _sync(
+        client,
+        from_node=PEER,
+        seed=seed,
+        ip=GENUINE_IP,
+        type_=NODE_DRAIN_HINT,
+        payload={"instances": [_HOUSEHOLD]},
+    )
+    assert resp.status == 200
+    assert seen == [[_HOUSEHOLD]]
+
+
+async def test_a_drain_hint_flushes_an_envelope_queued_by_another_node(client):
+    """Cross-node delivery: node B queued an envelope (the queue table is
+    shared) for a household whose socket is HERE; B's hint makes this node
+    push it now instead of on the household's next reconnect."""
+    app = client._app
+    household_seed = secrets.token_bytes(32)
+    await app[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id=_HOUSEHOLD,
+            display_name="Household",
+            public_key=ed25519_public_key(household_seed).hex(),
+            status="active",
+        )
+    )
+    peer_seed = await _register_peer(client)
+    sealed = {"kem_suite": "x25519", "eph_pk": "ZXBo", "ciphertext": "cross-node"}
+
+    async with client.ws_connect("/gfs/ws") as ws:
+        ts = int(time.time())
+        await ws.send_json(
+            {
+                "type": "hello",
+                "instance_id": _HOUSEHOLD,
+                "ts": ts,
+                "sig": b64url_encode(
+                    sign_ed25519(household_seed, f"{_HOUSEHOLD}|{ts}".encode())
+                ),
+            }
+        )
+        registry = app[gfs_ws_registry_key]
+        for _ in range(200):
+            if registry.is_connected(_HOUSEHOLD):
+                break
+            await asyncio.sleep(0.01)
+        assert registry.is_connected(_HOUSEHOLD)
+
+        # What node B's ``accept`` wrote into the shared table.
+        now = int(time.time())
+        await app[gfs_envelope_queue_repo_key].enqueue(
+            _HOUSEHOLD,
+            json.dumps(sealed),
+            created_at=now,
+            expires_at=now + 60,
+            max_per_recipient=10,
+            max_bytes_per_recipient=1 << 20,
+            frame_type="envelope",
+        )
+        resp = await _sync(
+            client,
+            from_node=PEER,
+            seed=peer_seed,
+            ip=GENUINE_IP,
+            type_=NODE_DRAIN_HINT,
+            payload={"instances": [_HOUSEHOLD]},
+        )
+        assert resp.status == 200
+        frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
+
+    assert frame == {"type": "envelope", "sealed": sealed}
+    assert await app[gfs_envelope_queue_repo_key].count_for(_HOUSEHOLD) == 0

@@ -23,12 +23,48 @@ instance ids and learn which households use this server and which are
 awake. An envelope for a household this server does not know is dropped
 server-side, logged at DEBUG, and stored nowhere.
 
+**Uniform timing.** The same holds for HOW LONG the answer takes. The three
+outcomes cost different amounts of work (an unknown id is one indexed miss,
+an online one is a socket write, an offline one is a DB insert), so the route
+never awaits them: it validates the outer shape and hands the envelope to
+:meth:`GfsEnvelopeRelay.submit`, which schedules :meth:`GfsEnvelopeRelay.accept`
+as a background task and returns at once. At most
+:data:`ENVELOPE_MAX_INFLIGHT` such tasks run at a time, and at most
+:data:`ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT` for any one recipient; past either
+the envelope is dropped with a rate-limited WARNING and the caller still gets
+the same ``202`` — a slower answer under load would be an oracle of its own.
+The per-recipient bound is what keeps one household (say, one that stopped
+reading its socket and is being flooded) from using up the slots every other
+recipient needs, which would also make one envelope's fate depend on
+another household's load. A live push that stalls is bounded too
+(``ws_registry.WS_SEND_TIMEOUT_S``): the stalled socket is evicted and the
+envelope queued instead. Tasks for one recipient run in submit order (a
+per-recipient lock), so one sender's envelopes are not reordered by the
+hand-off.
+
 **Store and forward.** A live ``/gfs/ws`` socket takes the frame
 immediately. Otherwise the blob waits in ``gfs_envelope_queue`` (GFS
 migration 0011) for :data:`ENVELOPE_QUEUE_TTL_SECONDS` and is drained, in
 order, on that household's next authenticated hello. Dropping instead
 would make an invite link fail whenever the issuing household happens to
 be asleep — which is most of the night.
+
+**Cross-node drain.** Cluster nodes share one database, so the queue is
+shared, but every node only knows its OWN live sockets. An envelope posted to
+node A for a household whose socket is on node B is queued by A; A then
+calls :meth:`socialhome.global_server.cluster.ClusterService.hint_drain`,
+which coalesces recipient ids for a moment and broadcasts one
+``NODE_DRAIN_HINT`` frame. Node B drains each hinted household it holds a
+socket for, so the envelope arrives now rather than on the household's next
+reconnect. Drains are serialised per household (a hello drain and a hint
+drain can otherwise race and deliver a row twice). That lock is per process:
+during a reconnect that moves a household between nodes, a stale socket on
+the old node can in rare cases take a frame another node also delivers, and
+a send that timed out may still flush from the socket buffer after its row
+was queued. Receivers tolerate the duplicate — a relayed §24.11 envelope is
+dropped by the replay step of the inbound pipeline (its ``msg_id``), an
+invite-bootstrap body by its ``redeem_nonce`` replay guard, and a member
+item by its item-id dedupe.
 
 Ordering note: envelopes that arrive DURING a drain go straight to the
 now-live socket and can therefore overtake a queued one. The bootstrap
@@ -40,8 +76,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -50,6 +89,7 @@ from .public import ClientIpResolver, build_window_limiter
 
 
 if TYPE_CHECKING:
+    from .cluster import ClusterService
     from .repositories import AbstractGfsEnvelopeQueueRepo, AbstractGfsFederationRepo
     from .ws_registry import GfsWebSocketRegistry
 
@@ -208,6 +248,35 @@ RELAY_SEEN_MIN_SESSION_S: float = 60.0
 #: Max simultaneous live pushes for one member-published item.
 RELAY_FAN_OUT_CONCURRENCY: int = 8
 
+#: Max background ``accept`` tasks in flight (see "Uniform timing" above).
+#: The per-IP limiter caps one source at :data:`ENVELOPE_MAX_PER_MINUTE`, and a
+#: healthy ``accept`` finishes in milliseconds, so a real server sits far below
+#: this; it is the ceiling that keeps a many-source flood, or a stalled
+#: database, from piling up unbounded tasks (each holding up to
+#: :data:`ENVELOPE_MAX_BODY_BYTES`). Past it the envelope is dropped — the
+#: answer is still the uniform ``202``.
+ENVELOPE_MAX_INFLIGHT: int = 256
+
+#: Max background ``accept`` tasks pending for ONE recipient (their per-
+#: recipient lock serialises them, so the rest would only wait). The inner
+#: bound that keeps one household — one that stopped reading its socket and
+#: is being flooded, say — from occupying the slots everybody else needs:
+#: past it only that recipient's new envelopes are dropped (same ``202``,
+#: counted into the saturation warning). Well below
+#: :data:`ENVELOPE_MAX_INFLIGHT`, so a single recipient can never exhaust the
+#: global bound; it takes ``ENVELOPE_MAX_INFLIGHT / 16`` simultaneously
+#: flooded, stalled recipients to do that.
+ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT: int = 16
+
+#: Minimum seconds between two "relay saturated" WARNINGs. Each warning reports
+#: how many envelopes were dropped since the previous one — an operator signal,
+#: never a per-envelope log flood driven by an anonymous caller.
+ENVELOPE_SATURATION_WARN_INTERVAL_S: float = 60.0
+
+#: How long :meth:`GfsEnvelopeRelay.close` waits for in-flight ``accept`` tasks
+#: before cancelling the rest at shutdown.
+ENVELOPE_CLOSE_TIMEOUT_S: float = 5.0
+
 
 class InvalidEnvelope(ValueError):
     """The posted body is not a well-formed routing envelope."""
@@ -243,6 +312,39 @@ def validate_envelope(body: Any) -> tuple[str, dict[str, str]]:
     return to_instance, dict(sealed)
 
 
+class KeyedLocks:
+    """One :class:`asyncio.Lock` per key, dropped once nobody holds or waits.
+
+    ``async with locks.hold(key)`` serialises everything for *key* in arrival
+    order (``asyncio.Lock`` wakes waiters FIFO) and leaves other keys
+    untouched. The map only holds keys with a current holder or waiter, so it
+    cannot grow with the number of households ever seen.
+    """
+
+    __slots__ = ("_slots",)
+
+    def __init__(self) -> None:
+        #: key → [lock, number of holders + waiters].
+        self._slots: dict[str, list[Any]] = {}
+
+    def __len__(self) -> int:
+        return len(self._slots)
+
+    @asynccontextmanager
+    async def hold(self, key: str) -> AsyncIterator[None]:
+        slot = self._slots.get(key)
+        if slot is None:
+            slot = self._slots[key] = [asyncio.Lock(), 0]
+        slot[1] += 1
+        try:
+            async with slot[0]:
+                yield
+        finally:
+            slot[1] -= 1
+            if slot[1] == 0:
+                del self._slots[key]
+
+
 class GfsEnvelopeRelay:
     """Deliver-or-queue sealed envelopes addressed by instance id."""
 
@@ -253,6 +355,16 @@ class GfsEnvelopeRelay:
         "_ttl",
         "_max_queued",
         "_max_bytes",
+        "_max_inflight",
+        "_inflight",
+        "_clock",
+        "_saturated_drops",
+        "_saturation_warned_at",
+        "_cluster",
+        "_accept_locks",
+        "_drain_locks",
+        "_max_inflight_per_recipient",
+        "_pending_by_recipient",
     )
 
     def __init__(
@@ -264,6 +376,9 @@ class GfsEnvelopeRelay:
         ttl_seconds: int = ENVELOPE_QUEUE_TTL_SECONDS,
         max_queued_per_recipient: int = ENVELOPE_QUEUE_MAX_PER_RECIPIENT,
         max_bytes_per_recipient: int = ENVELOPE_QUEUE_MAX_BYTES_PER_RECIPIENT,
+        max_inflight: int = ENVELOPE_MAX_INFLIGHT,
+        max_inflight_per_recipient: int = ENVELOPE_MAX_INFLIGHT_PER_RECIPIENT,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._fed_repo = fed_repo
         self._queue_repo = queue_repo
@@ -271,6 +386,150 @@ class GfsEnvelopeRelay:
         self._ttl = ttl_seconds
         self._max_queued = max_queued_per_recipient
         self._max_bytes = max_bytes_per_recipient
+        self._max_inflight = max_inflight
+        self._max_inflight_per_recipient = max_inflight_per_recipient
+        #: recipient → background accepts scheduled or running for it.
+        self._pending_by_recipient: dict[str, int] = {}
+        self._inflight: set[asyncio.Task[None]] = set()
+        self._clock = clock
+        #: Envelopes dropped at saturation since the last WARNING.
+        self._saturated_drops = 0
+        self._saturation_warned_at = -math.inf
+        #: Set by :meth:`attach_cluster`; ``None`` on a single node.
+        self._cluster: "ClusterService | None" = None
+        self._accept_locks = KeyedLocks()
+        self._drain_locks = KeyedLocks()
+
+    def attach_cluster(self, cluster: "ClusterService") -> None:
+        """Hint *cluster* after every enqueue, so a sibling node holding the
+        recipient's socket drains it (see "Cross-node drain" above). A
+        setter rather than a constructor argument: the cluster in turn calls
+        :meth:`drain`, and neither can be built first."""
+        self._cluster = cluster
+
+    @property
+    def in_flight(self) -> int:
+        """Background ``accept`` tasks currently scheduled or running."""
+        return len(self._inflight)
+
+    @property
+    def lock_count(self) -> int:
+        """Per-recipient locks currently held or waited on."""
+        return len(self._accept_locks) + len(self._drain_locks)
+
+    def submit(self, to_instance: str, sealed: dict[str, str]) -> None:
+        """Hand *sealed* off to a background :meth:`accept` and return at once.
+
+        Synchronous and constant-cost on purpose (see "Uniform timing" in the
+        module docstring): the route must answer before the lookup, the push
+        or the enqueue runs, so their different costs never reach the
+        response latency. At :data:`ENVELOPE_MAX_INFLIGHT` the envelope is
+        dropped — still silently as far as the caller is concerned.
+        """
+        pending = self._pending_by_recipient.get(to_instance, 0)
+        if pending >= self._max_inflight_per_recipient:
+            # One recipient's backlog — e.g. a household that stopped reading
+            # its socket and is being flooded — must never use up the slots
+            # every other recipient's envelopes need (that would also make
+            # one envelope's fate depend on another household's load).
+            log.debug("gfs.envelope: backlog cap reached for %s", to_instance)
+            self._note_saturated()
+            return
+        if len(self._inflight) >= self._max_inflight:
+            self._note_saturated()
+            return
+        self._pending_by_recipient[to_instance] = pending + 1
+        task = asyncio.get_running_loop().create_task(
+            self._accept_in_background(to_instance, sealed),
+            name="gfs-envelope-accept",
+        )
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+        task.add_done_callback(lambda _t: self._release_pending(to_instance))
+
+    def _release_pending(self, to_instance: str) -> None:
+        left = self._pending_by_recipient.get(to_instance, 0) - 1
+        if left > 0:
+            self._pending_by_recipient[to_instance] = left
+        else:
+            self._pending_by_recipient.pop(to_instance, None)
+
+    @property
+    def pending_recipients(self) -> int:
+        """Recipients with at least one background ``accept`` pending."""
+        return len(self._pending_by_recipient)
+
+    def _note_saturated(self) -> None:
+        """Count a saturation drop; WARN at most once per interval."""
+        self._saturated_drops += 1
+        now = self._clock()
+        if now - self._saturation_warned_at < ENVELOPE_SATURATION_WARN_INTERVAL_S:
+            return
+        log.warning(
+            "gfs.envelope: relay saturated (%d accepts in flight, or one "
+            "recipient at its backlog cap) — dropped %d envelope(s) since the "
+            "last warning; the database is slow, a recipient stopped reading, "
+            "or the relay is being flooded",
+            len(self._inflight),
+            self._saturated_drops,
+        )
+        self._saturated_drops = 0
+        self._saturation_warned_at = now
+
+    async def _accept_in_background(
+        self, to_instance: str, sealed: dict[str, str]
+    ) -> None:
+        """:meth:`accept` under the recipient's lock, failures logged.
+
+        The lock keeps one recipient's envelopes in submit order: tasks start
+        in creation order and ``asyncio.Lock`` hands over FIFO. Nothing awaits
+        this task's result, so an exception raised here would otherwise only
+        surface as "Task exception was never retrieved" — or not at all.
+        """
+        try:
+            async with self._accept_locks.hold(to_instance):
+                await self.accept(to_instance, sealed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The traceback carries no frame locals, so the sealed blob is
+            # never rendered; the recipient id is a validated instance id.
+            log.warning(
+                "gfs.envelope: background accept failed for %s",
+                to_instance,
+                exc_info=True,
+            )
+
+    async def close(self, timeout: float | None = None) -> None:
+        """Let in-flight ``accept`` tasks finish, cancelling any still running
+        after *timeout* (default :data:`ENVELOPE_CLOSE_TIMEOUT_S`). Called from
+        the server's cleanup hook BEFORE the database shuts down."""
+        pending = set(self._inflight)
+        if not pending:
+            return
+        _done, still = await asyncio.wait(
+            pending,
+            timeout=ENVELOPE_CLOSE_TIMEOUT_S if timeout is None else timeout,
+        )
+        for task in still:
+            task.cancel()
+        if still:
+            await asyncio.gather(*still, return_exceptions=True)
+
+    async def _after_enqueue(self, to_instance: str) -> None:
+        """A row for *to_instance* just landed in the shared queue.
+
+        Tell sibling nodes — one of them may hold the recipient's socket.
+        And close a same-node race: the recipient's hello can land between
+        the failed live push and the committed insert, in which case its
+        hello drain listed the queue before this row existed. If it is
+        connected HERE now, drain it (under the drain lock, so this never
+        double-sends with that hello drain).
+        """
+        if self._cluster is not None:
+            self._cluster.hint_drain(to_instance)
+        if self._ws_registry.is_connected(to_instance):
+            await self.drain(to_instance)
 
     async def accept(self, to_instance: str, sealed: dict[str, str]) -> None:
         """Push *sealed* to *to_instance*, or queue it for later.
@@ -319,6 +578,7 @@ class GfsEnvelopeRelay:
             )
             return
         log.debug("gfs.envelope: queued for offline recipient %s", to_instance)
+        await self._after_enqueue(to_instance)
 
     async def fan_out_relay(
         self,
@@ -369,6 +629,7 @@ class GfsEnvelopeRelay:
             )
             if queued:
                 reached += 1
+                await self._after_enqueue(target)
             else:
                 log.warning(
                     "gfs.envelope: a space item for %s exceeds the relay "
@@ -378,12 +639,19 @@ class GfsEnvelopeRelay:
         return reached
 
     async def drain(self, to_instance: str) -> int:
-        """Flush queued envelopes to a freshly-connected household.
+        """Flush queued envelopes to a connected household.
 
-        Delivers oldest first and deletes each row only after its frame went
-        out, so a socket that dies mid-drain leaves the rest queued for the
-        next hello rather than losing them. Returns the number delivered.
+        Called on hello and on a sibling node's ``NODE_DRAIN_HINT``. Delivers
+        oldest first and deletes each row only after its frame went out, so a
+        socket that dies mid-drain leaves the rest queued for the next hello
+        rather than losing them. Serialised per household: two overlapping
+        drains would both list the same rows and send each twice. Returns the
+        number delivered.
         """
+        async with self._drain_locks.hold(to_instance):
+            return await self._drain_locked(to_instance)
+
+    async def _drain_locked(self, to_instance: str) -> int:
         try:
             pending = await self._queue_repo.list_for(to_instance, now=int(time.time()))
         except Exception as exc:  # fail-soft: a drain must never kill the socket

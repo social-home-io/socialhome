@@ -2,7 +2,8 @@
 
 Symmetric peer-to-peer — no primary/leader. Every node runs the same
 code, shares ``client_instances`` + ``global_spaces`` registries via
-``NODE_SYNC_*`` messages, and fan-outs post relays via ``NODE_RELAY``.
+``NODE_SYNC_*`` messages, fan-outs post relays via ``NODE_RELAY``, and
+tells siblings about freshly queued envelopes via ``NODE_DRAIN_HINT``.
 State sync is last-write-wins with two exceptions: a ``banned`` record
 always wins over any subsequent non-ban upsert, and a locally-``withdrawn``
 space stays withdrawn against a peer's stale ``withdrawn=0`` row.
@@ -23,8 +24,9 @@ import math
 import re
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -41,6 +43,7 @@ from ..crypto import (
 from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
+from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
 from .federation import certified_authority_repin
 from .peer_url import normalized_peer_url
 from .public import SlidingWindowCounter
@@ -211,6 +214,21 @@ NODE_POLICY_PUSH = "NODE_POLICY_PUSH"
 #: a banner instead).
 NODE_PARTITION_CATCHUP = "NODE_PARTITION_CATCHUP"
 NODE_PARTITION_GAP = "NODE_PARTITION_GAP"
+#: "I just queued something for these households" — sent after an envelope or
+#: relay item lands in the shared ``gfs_envelope_queue``. The households'
+#: sockets may live on a sibling node (each node only knows its own), so every
+#: receiver drains the listed ids it holds a socket for. Payload:
+#: ``{"instances": [<instance id>, ...]}`` — ids only, never content.
+NODE_DRAIN_HINT = "NODE_DRAIN_HINT"
+
+#: How long :meth:`ClusterService.hint_drain` gathers ids before it sends one
+#: ``NODE_DRAIN_HINT``. A burst (a catch-up backfill, a space fan-out to many
+#: offline subscribers) becomes one frame per peer instead of one per row.
+DRAIN_HINT_DELAY_S: float = 0.5
+
+#: Max instance ids in one ``NODE_DRAIN_HINT`` frame (a bigger batch is split),
+#: and the most a receiver reads from one frame.
+DRAIN_HINT_MAX_IDS: int = 256
 
 
 #: Longest ``node_id`` the admin API accepts for a peer.
@@ -509,6 +527,11 @@ class ClusterService:
         "_process_start",
         "_seen_frames",
         "_dup_url_warned",
+        "_drain_hint_pending",
+        "_drain_hint_task",
+        "_drain_cb",
+        "_hint_drains",
+        "_hint_rerun",
     )
 
     def __init__(
@@ -604,6 +627,17 @@ class ClusterService:
         self._sync_failed_verify_node_limiter = SlidingWindowCounter(
             CLUSTER_FAILED_VERIFY_NODE_CEILING_PER_MIN
         )
+        #: Recipient ids waiting for the next ``NODE_DRAIN_HINT`` flush.
+        self._drain_hint_pending: set[str] = set()
+        #: The one-shot flush task, live while ids are pending.
+        self._drain_hint_task: asyncio.Task | None = None
+        #: ``GfsEnvelopeRelay.drain``, set by :meth:`attach_drain`.
+        self._drain_cb: Callable[[str], Awaitable[int]] | None = None
+        #: Running hint-started drain per household, awaited / cancelled in
+        #: ``stop``. At most one per household: further hints coalesce.
+        self._hint_drains: dict[str, asyncio.Task] = {}
+        #: Households hinted again while their drain ran — drained once more.
+        self._hint_rerun: set[str] = set()
 
     # ─── /cluster/sync budgets ───────────────────────────────────────
 
@@ -797,7 +831,7 @@ class ClusterService:
 
     async def stop(self) -> None:
         self._stop.set()
-        for attr in ("_heartbeat_task", "_announce_task"):
+        for attr in ("_heartbeat_task", "_announce_task", "_drain_hint_task"):
             task = getattr(self, attr)
             if task is not None:
                 try:
@@ -807,6 +841,14 @@ class ClusterService:
                 except Exception:  # pragma: no cover
                     pass
                 setattr(self, attr, None)
+        self._drain_hint_pending.clear()
+        self._hint_rerun.clear()
+        if self._hint_drains:
+            pending = set(self._hint_drains.values())
+            _done, still = await asyncio.wait(pending, timeout=5.0)
+            for task in still:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def health(self) -> dict:
         """Return this node's cluster status (public ``GET /cluster/health``).
@@ -1057,6 +1099,116 @@ class ClusterService:
                 session=session,
             )
         )
+
+    # ─── Cross-node envelope-queue drain (NODE_DRAIN_HINT) ────────────
+
+    def attach_drain(self, drain: Callable[[str], Awaitable[int]]) -> None:
+        """Register the callback an inbound ``NODE_DRAIN_HINT`` runs per
+        locally-connected household (``GfsEnvelopeRelay.drain``). A setter,
+        not a constructor argument: the relay hints this service too."""
+        self._drain_cb = drain
+
+    def hint_drain(self, instance_id: str) -> None:
+        """Note that a row for *instance_id* just landed in the shared queue.
+
+        Synchronous and cheap — called from the enqueue path. Ids are
+        coalesced for :data:`DRAIN_HINT_DELAY_S` and sent as one
+        fire-and-forget ``NODE_DRAIN_HINT`` per peer. No-op when cluster mode
+        is off (a single node drains on hello, there is nobody to tell).
+        """
+        if not self._enabled:
+            return
+        self._drain_hint_pending.add(instance_id)
+        if self._drain_hint_task is None or self._drain_hint_task.done():
+            self._drain_hint_task = asyncio.get_running_loop().create_task(
+                self._flush_drain_hints(), name="gfs-cluster-drain-hint"
+            )
+
+    async def _flush_drain_hints(self) -> None:
+        """Send pending ids after the coalescing delay; repeat while new ids
+        arrived during a send. Ends on ``stop`` (the ``_stop`` event)."""
+        while self._drain_hint_pending and not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=DRAIN_HINT_DELAY_S)
+            except TimeoutError:
+                pass
+            if self._stop.is_set():
+                return
+            batch = sorted(self._drain_hint_pending)
+            self._drain_hint_pending.clear()
+            for start in range(0, len(batch), DRAIN_HINT_MAX_IDS):
+                chunk = batch[start : start + DRAIN_HINT_MAX_IDS]
+                try:
+                    await self._broadcast(
+                        NODE_DRAIN_HINT, {"instances": chunk}, ignore_errors=True
+                    )
+                except Exception as exc:
+                    # Best effort: the household still gets the rows on its
+                    # next hello. Logged so a broken roster read is visible.
+                    log.warning(
+                        "cluster: drain hint for %d household(s) not sent: %r",
+                        len(chunk),
+                        exc,
+                    )
+
+    async def apply_drain_hint(self, instances: object) -> int:
+        """Inbound ``NODE_DRAIN_HINT`` — drain the listed households whose
+        socket is on THIS node.
+
+        Each id must be a well-formed instance id
+        (:data:`~socialhome.global_server.envelope_relay.ENVELOPE_INSTANCE_ID_RE`)
+        — anything else is skipped, it is going into a log line and a SQL
+        bind. Ids without a local socket are ignored: their node drains them,
+        or their next hello does. Drains run as background tasks so the
+        sender's ``/cluster/sync`` POST is answered at once. Returns how many
+        drains were started.
+        """
+        if self._drain_cb is None or self._ws_registry is None:
+            return 0
+        if not isinstance(instances, list):
+            return 0
+        started = 0
+        seen: set[str] = set()
+        for raw in instances[:DRAIN_HINT_MAX_IDS]:
+            if not isinstance(raw, str) or raw in seen:
+                continue
+            seen.add(raw)
+            if not ENVELOPE_INSTANCE_ID_RE.fullmatch(raw):
+                continue
+            if not self._ws_registry.is_connected(raw):
+                continue
+            if raw in self._hint_drains:
+                # A drain for it is already running and may have listed the
+                # queue before the new row landed: run it once more after,
+                # however many hints arrive meanwhile.
+                self._hint_rerun.add(raw)
+                continue
+            task = asyncio.get_running_loop().create_task(
+                self._run_hinted_drain(self._drain_cb, raw),
+                name="gfs-cluster-hint-drain",
+            )
+            self._hint_drains[raw] = task
+            task.add_done_callback(partial(self._forget_hint_drain, raw))
+            started += 1
+        return started
+
+    def _forget_hint_drain(self, instance_id: str, task: asyncio.Task) -> None:
+        if self._hint_drains.get(instance_id) is task:
+            del self._hint_drains[instance_id]
+
+    async def _run_hinted_drain(
+        self, drain: Callable[[str], Awaitable[int]], instance_id: str
+    ) -> None:
+        while True:
+            self._hint_rerun.discard(instance_id)
+            try:
+                await drain(instance_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("cluster: hint drain failed for %s: %r", instance_id, exc)
+            if instance_id not in self._hint_rerun or self._stop.is_set():
+                return
 
     # ─── Admin-portal entry points ────────────────────────────────────
 

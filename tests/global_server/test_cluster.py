@@ -25,6 +25,7 @@ from socialhome.global_server.cluster import (
     SUPPORTED_CLUSTER_SIG_SUITES,
     CLUSTER_UNVERIFIED_RATE_LIMIT_PER_MIN,
     MAX_SIGNALING_SESSIONS,
+    NODE_DRAIN_HINT,
     NODE_HEARTBEAT,
     NODE_HELLO,
     NODE_POLICY_PUSH,
@@ -36,6 +37,7 @@ from socialhome.global_server.cluster import (
     member_url,
     parse_cluster_sig_suite,
 )
+from socialhome.global_server import cluster as cluster_mod
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.repositories import SqliteClusterRepo
@@ -1441,3 +1443,245 @@ async def test_announce_names_the_recipient_for_a_differently_spelled_peer_url(
     )
     await svc._announce_to_peers()
     assert posted == [("https://b.gfs.test", "node-b")]
+
+
+# ─── NODE_DRAIN_HINT (cross-node envelope-queue drain) ────────────────
+
+_HOME_A = "homea2222222222222222222222222aa"
+_HOME_B = "homeb2222222222222222222222222bb"
+_HOME_C = "homec2222222222222222222222222cc"
+
+
+class _Connected:
+    """``GfsWebSocketRegistry`` stand-in: only ``is_connected`` matters."""
+
+    def __init__(self, online: set[str]) -> None:
+        self.online = online
+
+    def is_connected(self, instance_id: str) -> bool:
+        return instance_id in self.online
+
+
+def _drain_cluster(gfs_db, *, enabled=True, online=()):
+    return ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        own_public_key_hex=_OWN,
+        enabled=enabled,
+        ws_registry=_Connected(set(online)),
+    )
+
+
+async def _flushed(svc: ClusterService) -> None:
+    """Wait for the pending drain-hint flush task itself — no polling."""
+    task = svc._drain_hint_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=2)
+
+
+def _record_broadcasts(monkeypatch) -> list[tuple[str, dict, bool]]:
+    sent: list[tuple[str, dict, bool]] = []
+
+    async def fake_broadcast(
+        self, msg_type, payload, *, ignore_errors=False, session=None
+    ):
+        sent.append((msg_type, payload, ignore_errors))
+
+    monkeypatch.setattr(ClusterService, "_broadcast", fake_broadcast)
+    return sent
+
+
+async def test_hint_drain_is_a_no_op_when_the_cluster_is_disabled(gfs_db, monkeypatch):
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db, enabled=False)
+    svc.hint_drain(_HOME_A)
+    assert svc._drain_hint_task is None
+    assert sent == []
+    await svc.stop()
+
+
+async def test_hint_drain_coalesces_many_ids_into_one_broadcast(gfs_db, monkeypatch):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    for _ in range(20):
+        svc.hint_drain(_HOME_B)
+        svc.hint_drain(_HOME_A)
+    await _flushed(svc)
+    assert sent == [(NODE_DRAIN_HINT, {"instances": [_HOME_A, _HOME_B]}, True)]
+    await svc.stop()
+
+
+async def test_hint_drain_caps_ids_per_frame(gfs_db, monkeypatch):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MAX_IDS", 2)
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    for iid in (_HOME_A, _HOME_B, _HOME_C):
+        svc.hint_drain(iid)
+    await _flushed(svc)
+    assert [p["instances"] for _t, p, _i in sent] == [[_HOME_A, _HOME_B], [_HOME_C]]
+    await svc.stop()
+
+
+async def test_a_hint_after_a_flush_starts_a_new_flush(gfs_db, monkeypatch):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    svc.hint_drain(_HOME_A)
+    await _flushed(svc)
+    svc.hint_drain(_HOME_B)
+    await _flushed(svc)
+    assert [p["instances"] for _t, p, _i in sent] == [[_HOME_A], [_HOME_B]]
+    await svc.stop()
+
+
+async def test_a_failing_flush_is_logged_and_the_next_hint_still_flushes(
+    gfs_db, monkeypatch, caplog
+):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_DELAY_S", 0.01)
+    calls: list[dict] = []
+
+    async def flaky(self, msg_type, payload, *, ignore_errors=False, session=None):
+        calls.append(payload)
+        if len(calls) == 1:
+            raise RuntimeError("roster read failed")
+
+    monkeypatch.setattr(ClusterService, "_broadcast", flaky)
+    svc = _drain_cluster(gfs_db)
+    with caplog.at_level("WARNING"):
+        svc.hint_drain(_HOME_A)
+        await _flushed(svc)
+    assert "drain hint" in caplog.text
+    svc.hint_drain(_HOME_B)
+    await _flushed(svc)
+    assert calls[-1] == {"instances": [_HOME_B]}
+    await svc.stop()
+
+
+async def test_stop_abandons_a_pending_hint(gfs_db, monkeypatch):
+    sent = _record_broadcasts(monkeypatch)
+    svc = _drain_cluster(gfs_db)
+    svc.hint_drain(_HOME_A)
+    task = svc._drain_hint_task
+    await svc.stop()
+    assert task is not None and task.done()
+    assert sent == []
+
+
+async def test_apply_drain_hint_drains_only_locally_connected_valid_ids(gfs_db):
+    svc = _drain_cluster(gfs_db, online={_HOME_A, "not-an-instance-id"})
+    drained: list[str] = []
+
+    async def _drain(instance_id: str) -> int:
+        drained.append(instance_id)
+        return 1
+
+    svc.attach_drain(_drain)
+    scheduled = await svc.apply_drain_hint(
+        [
+            _HOME_A,
+            _HOME_A,  # duplicate → one drain
+            _HOME_B,  # registered elsewhere, not on this node
+            "not-an-instance-id",  # connected, but not an instance id
+            _HOME_A.upper(),
+            _HOME_A + "\nforged",
+            42,
+            None,
+        ]
+    )
+    assert scheduled == 1
+    await svc.stop()
+    assert drained == [_HOME_A]
+
+
+@pytest.mark.parametrize("instances", [None, "x", {"a": 1}, 7])
+async def test_apply_drain_hint_ignores_a_malformed_payload(gfs_db, instances):
+    svc = _drain_cluster(gfs_db, online={_HOME_A})
+    drained: list[str] = []
+
+    async def _drain(instance_id: str) -> int:
+        drained.append(instance_id)
+        return 0
+
+    svc.attach_drain(_drain)
+    assert await svc.apply_drain_hint(instances) == 0
+    await svc.stop()
+    assert drained == []
+
+
+async def test_apply_drain_hint_without_a_drain_callback_is_a_no_op(gfs_db):
+    svc = _drain_cluster(gfs_db, online={_HOME_A})
+    assert await svc.apply_drain_hint([_HOME_A]) == 0
+
+
+async def test_apply_drain_hint_caps_the_ids_it_reads(gfs_db, monkeypatch):
+    monkeypatch.setattr(cluster_mod, "DRAIN_HINT_MAX_IDS", 1)
+    svc = _drain_cluster(gfs_db, online={_HOME_A, _HOME_B})
+    drained: list[str] = []
+
+    async def _drain(instance_id: str) -> int:
+        drained.append(instance_id)
+        return 0
+
+    svc.attach_drain(_drain)
+    assert await svc.apply_drain_hint([_HOME_A, _HOME_B]) == 1
+    await svc.stop()
+    assert drained == [_HOME_A]
+
+
+async def test_a_failing_hint_drain_is_logged(gfs_db, caplog):
+    svc = _drain_cluster(gfs_db, online={_HOME_A})
+
+    async def _drain(instance_id: str) -> int:
+        raise RuntimeError("socket gone")
+
+    svc.attach_drain(_drain)
+    with caplog.at_level("WARNING"):
+        await svc.apply_drain_hint([_HOME_A])
+        await svc.stop()
+    assert "hint drain failed" in caplog.text
+
+
+async def test_a_repeated_hint_does_not_stack_drains_for_one_household(gfs_db):
+    """Hints for a household whose hinted drain is still running start no
+    second task: however many arrive, they coalesce into ONE more drain
+    after the running one (which may have listed before the new rows)."""
+    svc = _drain_cluster(gfs_db, online={_HOME_A})
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    async def _drain(instance_id: str) -> int:
+        calls.append(instance_id)
+        started.set()
+        await release.wait()
+        return 0
+
+    svc.attach_drain(_drain)
+    assert await svc.apply_drain_hint([_HOME_A]) == 1
+    await asyncio.wait_for(started.wait(), timeout=2)
+    assert await svc.apply_drain_hint([_HOME_A]) == 0
+    assert await svc.apply_drain_hint([_HOME_A]) == 0
+    release.set()
+    await asyncio.wait_for(svc._hint_drains[_HOME_A], timeout=2)
+    assert calls == [_HOME_A, _HOME_A]
+    assert svc._hint_drains == {}
+    await svc.stop()
+
+
+async def test_a_hint_after_the_drain_finished_drains_again(gfs_db):
+    svc = _drain_cluster(gfs_db, online={_HOME_A})
+    calls: list[str] = []
+
+    async def _drain(instance_id: str) -> int:
+        calls.append(instance_id)
+        return 0
+
+    svc.attach_drain(_drain)
+    assert await svc.apply_drain_hint([_HOME_A]) == 1
+    # Awaiting the task resumes us after its own bookkeeping callback ran.
+    await asyncio.wait_for(svc._hint_drains[_HOME_A], timeout=2)
+    assert await svc.apply_drain_hint([_HOME_A]) == 1
+    await svc.stop()
+    assert calls == [_HOME_A, _HOME_A]
