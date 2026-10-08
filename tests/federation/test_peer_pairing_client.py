@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import secrets
+
 import orjson
 import pytest
 
@@ -316,16 +318,19 @@ def _relay_client():
 def test_build_relay_envelope_seals_the_same_signed_body():
     kp, client = _relay_client()
     recipient = generate_x25519_keypair()
+    # A realistic-length token: a short marker like "tok" turns up by chance
+    # in base64 ciphertext often enough to flake (~0.6% per run).
+    token = "pairing-token-" + secrets.token_urlsafe(32)
     envelope = client.build_relay_envelope(
         event_type=FederationEventType.PAIRING_PEER_ACCEPT,
-        body={"token": "tok", "inbox_url": ""},
+        body={"token": token, "inbox_url": ""},
         to_instance_id="r" * 32,
         recipient_keywrap_pk=recipient.public_key.hex(),
     )
     # Identity-free outer shape: the recipient and the ciphertext only.
     assert set(envelope) == {"to_instance", "sealed"}
     assert envelope["to_instance"] == "r" * 32
-    assert "tok" not in orjson.dumps(envelope).decode()
+    assert token not in orjson.dumps(envelope).decode()
     plain = orjson.loads(
         open_keywrap(
             sealed=envelope["sealed"],
@@ -344,7 +349,7 @@ def test_build_relay_envelope_seals_the_same_signed_body():
     kind, inner = pairing_body_from_relay(plain)
     assert kind == "pairing_peer_accept"
     assert inner["event_type"] == "pairing_peer_accept"
-    assert inner["token"] == "tok"
+    assert inner["token"] == token
     # Exactly the signature the inbox path would carry.
     assert verify_ed25519(
         kp.public_key,

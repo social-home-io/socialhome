@@ -2546,7 +2546,11 @@ async def test_send_app_message_falls_back_to_json_when_peer_unsupported():
     assert meta["data"] == app_payload
     # ENCRYPTION-FIRST: the raw payload dict must NOT appear in plaintext in
     # the envelope dict itself.
-    assert "move" not in str(env.get("encrypted_payload", ""))
+    # Compare against the whole plaintext payload, not a short word: a short
+    # marker turns up by chance in base64 ciphertext and flakes.
+    assert orjson.dumps(app_payload).decode() not in str(
+        env.get("encrypted_payload", "")
+    )
     # The key fields that the caller passed must not be in any top-level field
     # of the envelope (they should only be inside the ciphertext).
     assert env.get("app_id") is None
