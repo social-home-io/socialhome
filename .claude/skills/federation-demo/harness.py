@@ -11229,6 +11229,326 @@ def cmd_app_session() -> None:
     print("app-session: ok")
 
 
+def _space_chat_conv(label: str, info: dict, space_id: str) -> dict:
+    """``GET /api/spaces/{id}/chat`` on ``label`` (the household's own chat
+    summary — every household maps the space to its own conversation)."""
+    s, body = _request(
+        f"http://127.0.0.1:{info['port']}/api/spaces/{space_id}/chat",
+        token=info["token"],
+    )
+    _must(f"space chat summary({label})", s, body)
+    return body
+
+
+def _chat_row(label: str, conv_id: str, needle: str) -> dict | None:
+    """The newest message of ``conv_id`` on ``label`` whose content contains
+    ``needle`` (deleted rows included — their content is blanked)."""
+    import sqlite3
+
+    conn = sqlite3.connect(_instance_dir(label) / "socialhome.db")
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = list(
+            conn.execute(
+                "SELECT * FROM conversation_messages WHERE conversation_id=?"
+                " AND content LIKE ? ORDER BY created_at DESC",
+                (conv_id, f"%{needle}%"),
+            )
+        )
+    finally:
+        conn.close()
+    return dict(rows[0]) if rows else None
+
+
+def _chat_row_by_id(label: str, msg_id: str) -> dict | None:
+    import sqlite3
+
+    conn = sqlite3.connect(_instance_dir(label) / "socialhome.db")
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = list(
+            conn.execute("SELECT * FROM conversation_messages WHERE id=?", (msg_id,))
+        )
+    finally:
+        conn.close()
+    return dict(rows[0]) if rows else None
+
+
+def cmd_space_chat() -> None:
+    """Every space's members' chat across households (v_55).
+
+    Prereqs: ``traffic`` + ``calendar`` (Beta's private space — Beta the
+    owner, Alpha and Gamma remote members). Runs standalone after them.
+
+    1. **Follower household.** Beta mints a ``subscriber`` (Follower)
+       invite link (``via: internal``) and Delta — paired with Beta only —
+       redeems it over federation, so d sits in the space as a read-only
+       follower household. Its chat summary must say ``enabled: false``.
+    2. a / b / c read their own chat summary (each household maps the
+       space to its own conversation — no conversation id rides the wire).
+    3. **Create.** a posts; b and c hold it (``SPACE_CHAT_MESSAGE_CREATED``).
+    4. **Reply.** c replies to a's message; a and b hold it, linked to
+       their copy of a's message.
+    5. **Edit.** b posts and edits its message; a and c hold the edit
+       (``SPACE_CHAT_MESSAGE_UPDATED``).
+    6. **React.** a reacts 👍 to c's reply; b and c hold the reaction
+       (``SPACE_CHAT_REACTION``).
+    7. **Moderator delete.** b — the space's owner — deletes c's reply;
+       it is deleted (content gone) on a, b and c
+       (``SPACE_CHAT_MESSAGE_DELETED``).
+    8. **Follower household gets nothing.** d holds no chat message of
+       this run (``only_instances`` limits fan-out to households with a
+       writer seat).
+    9. **v_55.** ``OURS`` is at least ``MIN_FOR_SPACE_CHAT`` and a, b and c
+       see each other at it.
+    """
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("space_id")
+    if not space_id:
+        raise SystemExit("run 'traffic' and 'calendar' first — needs Beta's space")
+    inst = state["instances"]
+    a, b, c, d = inst["a"], inst["b"], inst["c"], inst["d"]
+    nonce = secrets.token_hex(3)
+
+    def wait(what: str, check, timeout: float = 45.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check():
+                return
+            time.sleep(1.0)
+        raise SystemExit(f"space-chat: timed out waiting for {what}")
+
+    # 1. d joins as a follower household (once per demo run).
+    if not state.get("space_chat_follower_d"):
+        s, link = _request(
+            f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}/invite-tokens",
+            token=b["token"],
+            method="POST",
+            body={"role": "subscriber", "uses": 1, "via": "internal"},
+        )
+        _must("mint follower link(b)", s, link, ok=(201,))
+        s, joined = _request(
+            f"http://127.0.0.1:{d['port']}/api/spaces/join",
+            token=d["token"],
+            method="POST",
+            body={
+                "token": link["token"],
+                "issuer_instance_id": b["instance_id"],
+                "space_id": space_id,
+            },
+            timeout=40.0,
+        )
+        _must("redeem follower link(d→b)", s, joined, ok=(200, 201))
+        state["space_chat_follower_d"] = True
+        _save(state)
+        print(f"  d joined space {space_id[:8]} as a follower household")
+
+    def d_is_follower_on(label: str) -> bool:
+        return any(
+            r[0] == "subscriber"
+            for r in _rows(
+                label,
+                "SELECT role FROM space_remote_members WHERE space_id=?"
+                " AND user_id=? AND tombstoned=0",
+                (space_id, d["user_id"]),
+            )
+        )
+
+    wait("b to seat d as a follower", lambda: d_is_follower_on("b"))
+    wait(
+        "a and c to learn d's follower seat",
+        lambda: all(d_is_follower_on(x) for x in ("a", "c")),
+    )
+    print("  b, a and c hold d's follower seat ✓")
+    d_chat = _space_chat_conv("d", d, space_id)
+    if d_chat.get("enabled") is not False or d_chat.get("conversation_id"):
+        raise SystemExit(f"space-chat: follower d got a chat: {d_chat!r}")
+    print("  d (follower) sees no chat ✓")
+
+    # 2. Every member household's own chat.
+    convs: dict[str, str] = {}
+    for label, info in (("a", a), ("b", b), ("c", c)):
+        chat = _space_chat_conv(label, info, space_id)
+        if chat.get("enabled") is not True or not chat.get("conversation_id"):
+            raise SystemExit(f"space-chat: {label} has no chat: {chat!r}")
+        convs[label] = chat["conversation_id"]
+    print("  chats: " + ", ".join(f"{k}={v[:8]}" for k, v in convs.items()))
+
+    def send(label: str, info: dict, text: str, reply_to: str | None = None) -> str:
+        body: dict = {"content": text}
+        if reply_to:
+            body["reply_to_id"] = reply_to
+        s, msg = _request(
+            f"http://127.0.0.1:{info['port']}/api/conversations/"
+            f"{convs[label]}/messages",
+            token=info["token"],
+            method="POST",
+            body=body,
+        )
+        _must(f"chat send({label})", s, msg, ok=(200, 201))
+        return msg["id"]
+
+    # 3. a posts; b and c receive it.
+    hello = f"space-chat hello from a {nonce}"
+    hello_id = send("a", a, hello)
+    for x in ("b", "c"):
+        wait(f"{x} to receive a's message", lambda x=x: _chat_row(x, convs[x], hello))
+    print("  a → chat; b and c hold it ✓")
+
+    # 4. c replies to a's message (by c's copy of it); a and b hold the reply
+    #    linked to their own copy.
+    c_hello = _chat_row("c", convs["c"], hello)
+    assert c_hello is not None
+    reply = f"space-chat reply from c {nonce}"
+    reply_id = send("c", c, reply, reply_to=c_hello["id"])
+    for x in ("a", "b"):
+        wait(f"{x} to receive c's reply", lambda x=x: _chat_row(x, convs[x], reply))
+        got = _chat_row(x, convs[x], reply)
+        mine_hello = _chat_row(x, convs[x], hello)
+        assert got is not None and mine_hello is not None
+        if got["reply_to_id"] != mine_hello["id"]:
+            raise SystemExit(
+                f"space-chat: {x}'s copy of c's reply points at "
+                f"{got['reply_to_id']!r}, not its copy of a's message "
+                f"{mine_hello['id']!r}"
+            )
+    print("  c replies; a and b hold it, linked to a's message ✓")
+
+    # 5. b posts and edits its own message; a and c hold the edit.
+    draft = f"space-chat from b {nonce} draft"
+    b_id = send("b", b, draft)
+    for x in ("a", "c"):
+        wait(f"{x} to receive b's message", lambda x=x: _chat_row(x, convs[x], draft))
+    edited = f"space-chat from b {nonce} edited"
+    s, body = _request(
+        f"http://127.0.0.1:{b['port']}/api/conversations/{convs['b']}/messages/{b_id}",
+        token=b["token"],
+        method="PATCH",
+        body={"content": edited},
+    )
+    _must("chat edit(b)", s, body)
+    for x in ("a", "c"):
+
+        def has_edit(x: str = x) -> bool:
+            row = _chat_row(x, convs[x], edited)
+            return bool(row and row["edited_at"])
+
+        wait(f"{x} to receive b's edit", has_edit)
+        if _chat_row(x, convs[x], draft):
+            raise SystemExit(f"space-chat: {x} still holds b's pre-edit text")
+    print("  b edits its message; a and c hold the edit ✓")
+
+    # 6. a reacts to c's reply; b and c hold the reaction.
+    a_reply = _chat_row("a", convs["a"], reply)
+    assert a_reply is not None
+    s, body = _request(
+        f"http://127.0.0.1:{a['port']}/api/conversations/{convs['a']}/messages/"
+        f"{a_reply['id']}/reactions/{urllib.request.quote('👍')}",
+        token=a["token"],
+        method="PUT",
+    )
+    _must("chat react(a)", s, body, ok=(200, 201, 204))
+    for x in ("b", "c"):
+
+        def has_reaction(x: str = x) -> bool:
+            row = _chat_row(x, convs[x], reply)
+            if row is None:
+                return False
+            return bool(
+                _rows(
+                    x,
+                    "SELECT 1 FROM message_reactions WHERE message_id=? AND user_id=?"
+                    " AND emoji=?",
+                    (row["id"], a["user_id"], "👍"),
+                )
+            )
+
+        wait(f"{x} to receive a's reaction", has_reaction)
+    print("  a reacts 👍 to c's reply; b and c hold it ✓")
+
+    # 7. b — the owner — deletes c's reply (a moderator delete); it is gone
+    #    on a, b and c.
+    b_reply = _chat_row("b", convs["b"], reply)
+    assert b_reply is not None
+    s, body = _request(
+        f"http://127.0.0.1:{b['port']}/api/conversations/{convs['b']}/messages/"
+        f"{b_reply['id']}",
+        token=b["token"],
+        method="DELETE",
+    )
+    _must("chat moderator delete(b)", s, body)
+    reply_ids = {"a": a_reply["id"], "b": b_reply["id"], "c": reply_id}
+    for x in ("a", "b", "c"):
+
+        def gone(x: str = x) -> bool:
+            row = _chat_row_by_id(x, reply_ids[x])
+            return bool(row and row["deleted"] == 1 and reply not in row["content"])
+
+        wait(f"{x} to drop c's reply", gone)
+    print("  b (owner) deletes c's reply; deleted on a, b and c ✓")
+
+    # 8. The follower household received nothing of the chat.
+    leaked = _rows(
+        "d",
+        "SELECT id, content FROM conversation_messages WHERE content LIKE ?",
+        (f"%{nonce}%",),
+    )
+    d_space_convs = _rows(
+        "d", "SELECT id FROM conversations WHERE space_id=?", (space_id,)
+    )
+    d_msgs = (
+        _rows(
+            "d",
+            "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id=?",
+            (d_space_convs[0][0],),
+        )[0][0]
+        if d_space_convs
+        else 0
+    )
+    if leaked or d_msgs:
+        raise SystemExit(
+            f"space-chat: follower household d holds chat messages: "
+            f"{leaked!r} / {d_msgs} in its space chat"
+        )
+    print("  d (follower household) holds no chat message ✓")
+
+    # 9. v_55.
+    if _OURS < _Cap.MIN_FOR_SPACE_CHAT:
+        raise SystemExit(
+            f"space-chat: OURS={_OURS} < MIN_FOR_SPACE_CHAT={_Cap.MIN_FOR_SPACE_CHAT}"
+        )
+    for label, info in (("a", a), ("b", b), ("c", c)):
+        s, conns = _request(
+            f"http://127.0.0.1:{info['port']}/api/connections", token=info["token"]
+        )
+        _must(f"connections({label})", s, conns)
+        for row in conns:
+            peer = row.get("instance_id")
+            if row.get("status") != "confirmed" or peer not in {
+                a["instance_id"],
+                b["instance_id"],
+                c["instance_id"],
+            }:
+                continue
+            pv = int(row.get("proto_version") or 1)
+            if pv < _Cap.MIN_FOR_SPACE_CHAT:
+                raise SystemExit(
+                    f"space-chat: {label} sees {peer[:8]} at v{pv} "
+                    f"(< {_Cap.MIN_FOR_SPACE_CHAT})"
+                )
+    print(f"  a, b, c see each other at >= v{_Cap.MIN_FOR_SPACE_CHAT} (OURS={_OURS}) ✓")
+    state["space_chat"] = {"conversations": convs, "nonce": nonce, "hello_id": hello_id}
+    _save(state)
+    print("space-chat: ok")
+
+
 def cmd_down() -> None:
     state = _load()
     gfs = state.get("gfs")
@@ -13994,6 +14314,12 @@ def main() -> None:
         # bundle (K2 pin + baseline), holds the post, the rename and the
         # post-rotation content key, and refuses b's K1-signed rename.
         cmd_rotation_offline_catchup()
+        # ``space-chat`` (v_55): in Beta's space (owner b, members a + c) d
+        # joins as a follower household; a posts, c replies, b edits, a
+        # reacts and b (owner) deletes c's reply — a, b and c converge and
+        # d holds nothing. Late in the chain: it seats d as a follower in
+        # the space the earlier steps assert member counts on.
+        cmd_space_chat()
         # ``replay`` exercises the §24 outbox redelivery path by
         # killing Carol, posting a highlight from Alpha, restarting
         # Carol, and asserting the queued envelope flushes after the
