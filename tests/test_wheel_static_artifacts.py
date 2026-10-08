@@ -22,6 +22,7 @@ keeps any future chunk-name drift from re-breaking it.
 from __future__ import annotations
 
 import fnmatch
+import re
 import tomllib
 from pathlib import Path
 
@@ -34,6 +35,9 @@ GFS_SHARED_CHUNK_SAMPLES = [
     "socialhome/global_server/static/jsxRuntime.module-DdiM6-lp.js",
     "socialhome/global_server/static/hooks.module-abc12345.js",
     "socialhome/global_server/static/preact.module-0Z9aA1.js",
+    # The public viewers' shared error copy (``client/gfs/viewer_errors.ts``),
+    # named into this family by ``manualChunks`` in ``vite.gfs.config.ts``.
+    "socialhome/global_server/static/viewer.module-BjUB5M97.js",
 ]
 
 
@@ -56,3 +60,26 @@ def test_gfs_vite_shared_chunks_are_in_wheel_artifacts() -> None:
             f"would be excluded from the wheel (→ 404 at runtime, blank SPA). "
             f"artifacts={artifacts}"
         )
+
+
+def _gfs_vite_entries() -> list[str]:
+    """The ``rollupOptions.input`` entry names in ``client/vite.gfs.config.ts``."""
+    text = (REPO_ROOT / "client" / "vite.gfs.config.ts").read_text(encoding="utf-8")
+    block = re.search(r"input:\s*\{(.*?)\}", text, re.S)
+    assert block is not None, "no rollupOptions.input block in vite.gfs.config.ts"
+    return re.findall(r"^\s*(\w+)\s*:", block.group(1), re.M)
+
+
+def test_gfs_vite_entry_bundles_are_ignored_and_in_wheel_artifacts() -> None:
+    """Each GFS entry bundle is a build output: gitignored (so a stale copy
+    can't be committed and shadow the build) and in the wheel artifacts (so
+    the release build — ``pnpm run build`` then ``python -m build`` — ships
+    it to the GFS image)."""
+    entries = _gfs_vite_entries()
+    assert {"highlight_public_viewer", "moment_public_viewer", "admin"} <= set(entries)
+    artifacts = _build_artifacts()
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    for name in entries:
+        path = f"socialhome/global_server/static/{name}.js"
+        assert any(fnmatch.fnmatch(path, pat) for pat in artifacts), path
+        assert path in ignored, f"{path} must be gitignored (build output)"

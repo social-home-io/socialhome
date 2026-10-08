@@ -1202,24 +1202,30 @@ Public highlights and the public moments index both stream live from the
 author's SH — a direct WebRTC DataChannel first, with a GFS-relay HTTP
 fallback when WebRTC can't connect. The GFS stores **zero** content bytes
 for either; the relay is a transient in-memory pipe of the byte-identical
-framed stream. Author-offline → `503`.
+framed stream. Every non-success state (unknown author, unknown / revoked /
+unpublished item, author offline, relay capacity, author never streams)
+gets one response, the uniform `503 {"error":"unavailable"}` (`Cache-Control: no-store`), so these anonymous
+routes are not an author-presence oracle. Failures are answered at once,
+with no added delay. Only success shows the author's household was connected
+(a `201` offer means it is online). That residual is in
+[`principles.md`](./principles.md#the-gfs-is-not-an-author-presence-oracle).
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/gfs/highlights/ice-servers` | Anon STUN/TURN list for the browser bootstrap. |
-| POST | `/gfs/highlight_rtc/offer` | Anon (rate-limited 20/min per IP). Body `{instance_id, highlight_id, token, sdp}`; pushes a `highlight_signal kind=offer` WS frame to the author. Returns `{session_id}`. |
+| POST | `/gfs/highlight_rtc/offer` | Anon (rate-limited 20/min per IP). Body `{instance_id, highlight_id, token, sdp}`; pushes a `highlight_signal kind=offer` WS frame to the author. Returns `201 {session_id}`; any failure (unknown/revoked/expired token, URL mismatch, author offline) → uniform `503 unavailable`. |
 | GET | `/gfs/highlight_rtc/session/{session_id}` | Anon poll for `answer_sdp` + author ICE. |
 | POST | `/gfs/highlight_rtc/ice/viewer` | Anon. Trickle the viewer's ICE candidate. |
 | POST | `/gfs/highlight_rtc/answer` | Author SH (Ed25519-signed). Authority guard: `session.initiator_id` == signer. |
 | POST | `/gfs/highlight_rtc/ice/author` | Author SH (signed). Same guard. |
-| GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anon, token-gated (rate-limited 20/min per IP). Chunked `application/octet-stream`; pushes a `highlight_signal kind=relay_offer` and pipes the author's framed bytes. `503` author offline / relay capacity, `410` bad/expired token, `422` missing token. |
+| GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anon, token-gated (rate-limited 20/min per IP). Chunked `application/octet-stream`; pushes a `highlight_signal kind=relay_offer` and pipes the author's framed bytes. Any failure (bad/expired token, URL mismatch, author offline, relay capacity, author never streams) → uniform `503 unavailable`, sent at once (only the never-streams branch waits its 30 s connect budget); `422` missing token. |
 | POST | `/gfs/highlight_rtc/relay-stream/{relay_id}` | Author SH. Header-auth `X-SH-Instance` + `X-SH-Timestamp` (±300 s) + `X-SH-Signature` (Ed25519 over canonical `{"instance_id","relay_id","ts"}`); body is the raw framed stream. `403` target != signer, `404` unknown relay, `401` bad sig / stale ts, `422` missing headers. |
-| POST | `/gfs/moment_rtc/offer` | Anon (rate-limited 20/min per IP). Body `{user_id, sdp}`; pushes a `moment_signal kind=offer` (carries `user_id` + `gfs_id`) to the author. `404` unregistered/suspended, `503` author offline. Returns `{session_id}`. |
+| POST | `/gfs/moment_rtc/offer` | Anon (rate-limited 20/min per IP). Body `{user_id, sdp}`; pushes a `moment_signal kind=offer` (carries `user_id` + `gfs_id`) to the author. Returns `201 {session_id}`; any failure (unregistered/suspended, author offline) → uniform `503 unavailable`. |
 | GET | `/gfs/moment_rtc/session/{session_id}` | Anon poll for `answer_sdp` + author ICE. |
 | POST | `/gfs/moment_rtc/ice/viewer` | Anon. Trickle the viewer's ICE candidate. |
 | POST | `/gfs/moment_rtc/answer` | Author SH (signed). Authority guard: `session.initiator_id` == signer. |
 | POST | `/gfs/moment_rtc/ice/author` | Author SH (signed). Same guard. |
-| GET | `/gfs/moment_rtc/relay/{user_id}` | Anon chunked relay fallback (registration-gated, rate-limited 20/min per IP). `404` unregistered, `503` author offline / relay capacity. |
+| GET | `/gfs/moment_rtc/relay/{user_id}` | Anon chunked relay fallback (registration-gated, rate-limited 20/min per IP). Any failure (unregistered, author offline, relay capacity, author never streams) → uniform `503 unavailable`, sent at once (only the never-streams branch waits its 30 s connect budget). |
 | POST | `/gfs/moment_rtc/relay-stream/{relay_id}` | Author SH. Header-auth (same `X-SH-Instance`/`X-SH-Timestamp`/`X-SH-Signature` scheme as the highlight relay-stream); body is the raw framed stream. |
 
 ### GFS — Opaque channels for private spaces (v_51)
@@ -1316,6 +1322,7 @@ sync. The GFS holds no PeerConnection.
 | GET | `/` | Operator landing page. |
 | GET | `/spaces/{slug}` | Public space detail. |
 | GET | `/join/{gfs_token}` | **Invite-link landing.** Renders the space's already-public directory metadata (name, icon, accent) next to the `socialhome://invite#<blob>` code — as copyable text **and** as a QR of the same string — which the visitor pastes into their OWN Social Home (Spaces → Join with invite code). There is deliberately no clickable deep link: the redeem has to happen on the visitor's household, and a link can only ever open the issuer's. **The page writes nothing to the database** — no use counter, no fetch row, and the handler adds no log line of its own; the connection server must never become a durable record of who redeemed what (the `uses` / `max_uses` columns on `gfs_invite_tokens` are dead by design). The residual is the HTTP access log, which records `GET /join/<token>` with the visitor's IP — signed off in [`principles.md`](principles.md); operators who care should redact the `/join/` path at the front end and keep retention short. 404 — with the same styled "expired or revoked" page — when the token is unknown, expired, revoked, or its space is no longer publicly listed; one answer for all of them, so the page is not an existence oracle. |
+| GET | `/highlight/{instance_id}/{highlight_id}/{token}` | Public highlight viewer shell. Always `200` with the same page and `Cache-Control: no-store` (the URL carries the share token): no token lookup, no author-online check (not a presence oracle). The viewer's `POST /gfs/highlight_rtc/offer` consults state. |
 | GET | `/moments` | Public-Momentum directory (SPA shell). Loads `/static/users_directory.js`, which fetches `GET /gfs/moments/users` and renders cards + search. |
 | GET | `/moments/{user_id}` | Per-user landing — avatar + display_name + bio + follower count + "Follow on your Social Home" deeplink. |
 
@@ -1373,8 +1380,17 @@ a loopback/RFC1918 proxy and one host cannot claim two buckets by switching
 address family. An IPv6 zone (`2001:db8::1%eth0`) is stripped from both
 the peer and the header entry before keying, so one host cannot mint a fresh
 bucket per zone spelling — nor inflate the bucket key with an arbitrarily long
-zone string. Each limiter tracks at most 10 000 addresses, evicting the
-least recently seen.
+zone string. **An IPv6 client is counted by its /64**, not its full address.
+One subscriber is routinely given a whole /64 and could otherwise rotate
+through its addresses for a fresh bucket each time. IPv4 is counted per
+address. Every per-client limiter and throttle uses this key: the windows
+above, the admin-login lockout, the pairing-token interval, the
+channel / member-publish per-address windows and the `/cluster/sync`
+source-address budget. The household's unauthenticated per-IP limits use the
+same key: `/api/auth/token`, password reset, `/federation/inbox/*` and
+`/api/invite-links/{token}/code` (`socialhome/rate_limiter.py:client_bucket`).
+The admin audit log keeps the exact address. Each limiter tracks at most
+10 000 buckets, evicting the least recently seen.
 
 Three limits of this scheme, stated so operators can design around them:
 

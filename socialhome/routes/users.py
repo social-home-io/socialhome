@@ -44,6 +44,7 @@ from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.user import User, UserStatus, _picture_url
 from ..media_signer import sign_media_urls_in
 from ..platform.adapter import Capability
+from ..rate_limiter import client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.user_service import _UNSET
 from .base import BaseView
@@ -716,7 +717,7 @@ class RedeemPasswordResetView(BaseView):
         # tokens, so we share the bucket budget with login attempts.
         limiter = self.request.app.get(rate_limiter_key)
         if limiter is not None:
-            client_ip = self.request.remote or "unknown"
+            client_ip = client_bucket(self.request.remote)
             bucket = f"password-reset:{client_ip}"
             if not limiter.is_allowed(
                 bucket,
@@ -804,7 +805,7 @@ class AuthTokenView(BaseView):
         # IP-bucket throttle — independent of the authenticated rate limiter.
         limiter = self.request.app.get(rate_limiter_key)
         if limiter is not None:
-            client_ip = self.request.remote or "unknown"
+            client_ip = client_bucket(self.request.remote)
             bucket = f"auth-token:{client_ip}"
             if not limiter.is_allowed(
                 bucket,

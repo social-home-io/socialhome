@@ -59,6 +59,7 @@ from ..domain.federation import PairingStatus
 from ..federation.invite_bootstrap import InviteBootstrapHint
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..media_signer import sign_media_urls_in, strip_signature_query
+from ..rate_limiter import client_bucket
 from ..security import error_response, sanitise_for_api
 from ..services.gfs_connection_service import GfsConnectionError
 from ..services.space_service import (
@@ -1743,7 +1744,7 @@ class InviteLinkCodeView(BaseView):
     async def get(self) -> web.Response:
         limiter = self.request.app.get(rate_limiter_key)
         if limiter is not None:
-            client_ip = self.request.remote or "unknown"
+            client_ip = client_bucket(self.request.remote)
             if not limiter.is_allowed(
                 f"invite-link-code:{client_ip}",
                 limit=INVITE_CODE_RATE_LIMIT,

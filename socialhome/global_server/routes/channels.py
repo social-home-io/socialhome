@@ -73,7 +73,7 @@ class ChannelRegisterView(_ChannelView):
         svc = self.svc(K.gfs_channel_service_key)
         req = await self._parse(ChannelRegisterRequest)
         try:
-            status = await svc.register(req, client_ip=self.client_ip())
+            status = await svc.register(req, client_ip=self.client_bucket())
         except MemberPublishRateLimited:
             return self._limited()
         except MemberPublishBusy:
@@ -159,7 +159,7 @@ class ChannelPublishAnonView(_ChannelView):
         svc = self.svc(K.gfs_channel_service_key)
         req = await self._parse(ChannelPublishAnonRequest, PUBLISH_MAX_BODY_BYTES)
         try:
-            await svc.publish_anon(req, client_ip=self.client_ip())
+            await svc.publish_anon(req, client_ip=self.client_bucket())
         except MemberPublishRateLimited:
             return self._limited()
         except MemberPublishBusy:

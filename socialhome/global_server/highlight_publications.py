@@ -137,8 +137,8 @@ class HighlightPublicationRegistry:
         """Land an opaque token on its (publication, token row) pair.
 
         Returns ``None`` when the token is unknown, has been revoked, or
-        the publication's ``expires_at`` has passed. The ``GET /highlight/...``
-        route turns ``None`` into 410 Gone.
+        the publication's ``expires_at`` has passed. The anonymous
+        offer / relay routes fold ``None`` into the uniform 503.
         """
         hit = await self._tokens.lookup_active(token, now=int(time()))
         if hit is None:
@@ -162,10 +162,12 @@ class HighlightPublicationRegistry:
     async def author_online(self, instance_id: str) -> bool:
         """True iff the author's SH has a live WS to this GFS.
 
-        We only consider a publication servable when the author is
-        online, since the public landing page asks GFS to push a WebRTC
-        signalling offer to that exact WS. If the author is offline,
-        the page returns 503 instead of trying to broker a dead offer.
+        A publication is only servable when the author is online, since
+        the viewer's offer / relay asks the GFS to push a signalling frame
+        to that exact WS. Callers MUST fold ``False`` into the same uniform
+        reply as an unknown or withdrawn publication
+        (:mod:`.public_unavailable`) — never surface it on its own, or the
+        anonymous routes become an author-presence oracle.
         """
         return self._ws.is_connected(instance_id)
 

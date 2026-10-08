@@ -175,8 +175,9 @@ async def handle_login(request: web.Request) -> web.Response:
     # The login throttle keys on the client address, so it must come from the
     # server's ONE ``ClientIpResolver`` — a local re-parse that believed
     # ``X-Forwarded-For`` unconditionally would hand every attacker a fresh
-    # 5-attempt bucket per request.
-    client_ip = request.app[K.gfs_client_ip_key](request)
+    # 5-attempt bucket per request. ``bucket`` keys an IPv6 client by its /64
+    # so rotating through one prefix can't reset the throttle either.
+    client_ip = request.app[K.gfs_client_ip_key].bucket(request)
     token, status = await auth.login(password, client_ip)
     if status == "locked":
         resp = web.json_response(

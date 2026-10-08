@@ -162,6 +162,50 @@ GFS ban cannot gate an anonymous relay — the space-level ban is the
 moderation lever there. See
 [`protocol/discovery.md`](./protocol/discovery.md).
 
+### The GFS is not an author-presence oracle
+
+An outsider must not be able to ask the GFS whether a household is
+connected. `/gfs/envelope` and the `/gfs/ws` hello already answer
+uniformly whether the recipient is online or not. The **anonymous public
+viewer routes** follow the same rule:
+
+- **The highlight landing page** `GET /highlight/{instance}/{highlight}/{token}`
+  is the same viewer shell for every URL. It does not look up the token or
+  check the author's connection, so a live, revoked, expired, never-issued or
+  offline-author link all render the same page.
+- **The streaming entry points** — `POST /gfs/highlight_rtc/offer`,
+  `GET /gfs/highlight_rtc/relay/…`, `POST /gfs/moment_rtc/offer`,
+  `GET /gfs/moment_rtc/relay/{user_id}` — answer every non-success state
+  (unknown author, unknown / revoked / unpublished / expired item, deregistered
+  user, author's household not connected, relay capacity full, author never
+  started streaming) with one response: `503 {"error":"unavailable"}`,
+  `Cache-Control: no-store`. Status, body and headers are the same, and so is
+  the work: every branch runs the same lookup and the same connection check.
+  The viewers show it as "This isn't available right now."
+- **Failures are uniform, so they can't be told apart.** Unknown,
+  revoked and offline all get the same reply. A caller who gets a 503 learns
+  only that this request did not succeed. They cannot tell whether the item
+  exists, whether the token was ever valid, or whether the author is offline.
+- **No added delay.** Failures answer at once. The relay GET's
+  "online but never streamed" branch still waits for its 30 s connect
+  budget, because that is how long the author's household gets to start
+  streaming. No other failure is held to match it. A delay would hide
+  nothing: anyone who can call a relay can call the matching offer, which
+  answers `201` or `503` immediately. A delay would also let anonymous
+  callers hold a task and a socket open for 30 s each.
+
+**The residual we can't remove: a successful offer shows the author is
+online.** The content is streamed live from the author's household, and the
+GFS only pushes an offer to a household that is connected. So an offer
+accepted with `201` shows that the author's household is connected at that
+moment, even if the offer is never answered. A relay that delivers bytes
+shows the same. Anyone who holds a valid share link, or visits a registered
+public-moments user, can learn this. It is inherent to serving live content
+from the author's household instead of storing it on the GFS, and no other
+public route reveals more. The public-moments directory lists opted-in users
+by design, so whether a user is *registered* is public. Whether they are
+*online* is revealed only by a successful offer.
+
 ### Sign-off: the connection server learns the recipients of a link-joined pair
 
 Two households introduced by an invite link (§D2b) hold no address for

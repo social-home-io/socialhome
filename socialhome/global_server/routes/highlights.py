@@ -8,8 +8,9 @@ Two surfaces:
   bodies are Ed25519-signed and reuse the existing
   :func:`_rtc_authenticate` middleware in :mod:`global_server.routes.rtc`.
 * **Public landing page** ``GET /highlight/{instance_id}/{highlight_id}/{token}`` —
-  served as plain HTML to anyone with the URL. PR1 returns a placeholder
-  with ``200 / 410 / 503`` shape; PR2 wires the WebRTC bootstrap script.
+  served as plain HTML to anyone with the URL. Always the same viewer
+  shell (no state lookup), so the page is not an author-presence oracle;
+  the viewer's offer call is where state is consulted.
 
 The author's instance is the only entity that holds highlight bytes; this
 GFS only relays SDP/ICE later.
@@ -17,7 +18,6 @@ GFS only relays SDP/ICE later.
 
 from __future__ import annotations
 
-import html as html_lib
 import logging
 
 from aiohttp import web
@@ -148,32 +148,20 @@ class HighlightUnpublishView(GfsBaseView):
 class HighlightPublicLandingView(GfsBaseView):
     """``GET /highlight/{instance_id}/{highlight_id}/{token}`` — public viewer.
 
-    PR1 returns a static placeholder body and the 410 / 503 logic so
-    the publish/revoke contract can be tested end-to-end without the
-    PR2 WebRTC layer. PR2 swaps the body for the actual bootstrap
-    HTML + ``<script src="/static/highlight-public-viewer.js">``.
+    Always serves the same viewer shell, whatever the state behind the
+    URL: no token lookup, no author-presence check. The GFS must not be a
+    presence (or token-validity) oracle, so a live, revoked, expired,
+    never-issued or offline-author link all render identically; the
+    viewer's ``POST /gfs/highlight_rtc/offer`` is the one place state is
+    consulted, and it answers every non-success state with the uniform
+    ``503`` (:mod:`..public_unavailable`) the viewer shows as "This isn't
+    available right now."
     """
 
     async def get(self) -> web.Response:
         instance_id = self.match("instance_id")
         highlight_id = self.match("highlight_id")
         token = self.match("token")
-
-        registry = self.svc(K.gfs_highlight_pub_service_key)
-        resolved = await registry.resolve_token(token)
-        if resolved is None:
-            return _gone_html(instance_id, highlight_id)
-
-        # Token-vs-URL consistency check — guards against someone
-        # crafting a URL that mixes the right token with a wrong
-        # highlight_id (e.g. trying to enumerate other highlights on the
-        # same instance).
-        pub = resolved.publication
-        if pub.highlight_id != highlight_id or pub.instance_id != instance_id:
-            return _gone_html(instance_id, highlight_id)
-
-        if not await registry.author_online(instance_id):
-            return _unavailable_html(instance_id, highlight_id)
 
         # Boot payload — the bootstrap JS reads this <script id="boot">
         # tag for the (instance_id, highlight_id, token) triple it needs to
@@ -204,7 +192,11 @@ class HighlightPublicLandingView(GfsBaseView):
             "<script type='module' src='static/highlight_public_viewer.js'></script>"
             "</body></html>"
         )
-        return html_response(body, inline_styles=[_VIEWER_CSS])
+        resp = html_response(body, inline_styles=[_VIEWER_CSS])
+        # The URL and the boot JSON carry the share token — a bearer
+        # credential — so neither a shared nor a browser cache may keep it.
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
 
 # ─── Internal helpers ────────────────────────────────────────────────────
@@ -226,69 +218,13 @@ _VIEWER_CSS = (
     ".stage img,.stage video{max-width:100%;max-height:100%;border-radius:8px;}"
     ".caption{position:absolute;bottom:24px;padding:8px 14px;"
     "background:rgba(0,0,0,.5);border-radius:8px;max-width:80%;}"
-    ".highlight-error,.highlight-end{padding:24px;text-align:center;width:100%;}"
+    ".highlight-error,.highlight-end{padding:24px;text-align:center;width:100%;"
+    "align-self:center;}"
+    ".highlight-error p{margin:0 0 16px;}"
+    ".viewer-retry{min-height:40px;padding:8px 18px;border-radius:999px;"
+    "border:1px solid rgba(255,255,255,.35);background:transparent;color:#eee;"
+    "font:inherit;cursor:pointer;}"
+    ".viewer-retry:hover{border-color:#fff;}"
+    ".viewer-retry:focus-visible{outline:2px solid #fff;outline-offset:2px;}"
     ".status{color:#aaa;font-size:.9em;text-align:center;}"
 )
-
-#: Fallback style used by the gone/unavailable HTML responses (inline
-#: ``<style>``, admitted by its sha256 like :data:`_VIEWER_CSS`).
-#: Token values mirror ``--sh-*`` from ``client/src/styles/tokens.css`` —
-#: paper / ink / hairline / hearth — so the failure pages read as
-#: part of the SH product family rather than a stark federation
-#: error screen. We don't try to load the Manrope/Fraunces webfont
-#: here (failure path; no preconnect handshake to spend) — system
-#: fallbacks are fine for two short paragraphs.
-_FALLBACK_CSS = (
-    "html,body{margin:0;padding:0;background:#F4ECE0;color:#1A1814;"
-    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
-    "system-ui,sans-serif;min-height:100%;line-height:1.55;}"
-    "main{max-width:560px;margin:0 auto;padding:48px 24px;"
-    "text-align:center;}"
-    "h1{font-family:'Iowan Old Style','Palatino Linotype',Georgia,serif;"
-    "font-size:28px;letter-spacing:-0.01em;margin:0 0 12px;}"
-    "p{color:#807766;margin:0 0 16px;}"
-    "small{color:#A8A090;font-size:11px;}"
-    ".accent-bar{height:6px;background:#D2542A;border-radius:3px;"
-    "max-width:120px;margin:0 auto 24px;}"
-)
-
-
-def _gone_html(instance_id: str, highlight_id: str) -> web.Response:
-    body = (
-        "<!doctype html><html lang='en'><head>"
-        "<meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Highlight expired</title>"
-        f"<style>{_FALLBACK_CSS}</style>"
-        "</head><body><main>"
-        "<div class='accent-bar'></div>"
-        "<h1>This highlight has ended</h1>"
-        "<p>The link is no longer valid — the author may have "
-        "unpublished it, the highlight expired, or this token was revoked.</p>"
-        # Both come from the URL path (router-decoded) — escape.
-        f"<p><small>{html_lib.escape(instance_id)}/"
-        f"{html_lib.escape(highlight_id)}</small></p>"
-        "</main></body></html>"
-    )
-    return html_response(body, inline_styles=[_FALLBACK_CSS], status=410)
-
-
-def _unavailable_html(instance_id: str, highlight_id: str) -> web.Response:
-    body = (
-        "<!doctype html><html lang='en'><head>"
-        "<meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Highlight unavailable</title>"
-        "<meta http-equiv='refresh' content='10'>"
-        f"<style>{_FALLBACK_CSS}</style>"
-        "</head><body><main>"
-        "<div class='accent-bar'></div>"
-        "<h1>Currently unavailable</h1>"
-        "<p>The author's instance is offline. This page will retry "
-        "automatically in 10 seconds.</p>"
-        # Both come from the URL path (router-decoded) — escape.
-        f"<p><small>{html_lib.escape(instance_id)}/"
-        f"{html_lib.escape(highlight_id)}</small></p>"
-        "</main></body></html>"
-    )
-    return html_response(body, inline_styles=[_FALLBACK_CSS], status=503)

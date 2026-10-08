@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
-from socialhome.rate_limiter import RateLimiter, build_rate_limit_middleware
+from socialhome.rate_limiter import (
+    RateLimiter,
+    build_rate_limit_middleware,
+    client_bucket,
+)
 
 
 async def test_allows_within_limit():
@@ -174,3 +178,38 @@ async def test_a_glob_rule_still_beats_a_literal_prefix():
         assert await _hit(mw, "/api/calls/c1/ice") == 204
     assert await _hit(mw, "/api/calls/c1/ice") == 429
     assert await _hit(mw, "/api/calls") == 204
+
+
+# ─── client_bucket — the per-address rate-limit key ──────────────────────
+
+
+def test_client_bucket_keeps_ipv4_as_is():
+    assert client_bucket("203.0.113.9") == "203.0.113.9"
+
+
+def test_client_bucket_collapses_ipv6_to_its_64():
+    """One IPv6 subscriber owns a whole /64 and can rotate through 2^64
+    addresses — keying on the full address hands it a fresh bucket each
+    time. Every address in the /64 shares one bucket."""
+    a = client_bucket("2001:db8:1:2::1")
+    b = client_bucket("2001:db8:1:2:ffff:ffff:ffff:fffe")
+    assert a == b == "2001:db8:1:2::/64"
+
+
+def test_client_bucket_separates_different_64s():
+    assert client_bucket("2001:db8:1:2::1") != client_bucket("2001:db8:1:3::1")
+
+
+def test_client_bucket_unmaps_ipv4_mapped_ipv6():
+    assert client_bucket("::ffff:198.51.100.7") == "198.51.100.7"
+
+
+def test_client_bucket_strips_zone_id():
+    assert client_bucket("fe80::1%eth0") == client_bucket("fe80::2%eth1")
+
+
+def test_client_bucket_missing_or_unparseable():
+    assert client_bucket(None) == "unknown"
+    assert client_bucket("") == "unknown"
+    # Not an address (e.g. a unix-socket peer) — passed through, still a key.
+    assert client_bucket("not-an-ip") == "not-an-ip"

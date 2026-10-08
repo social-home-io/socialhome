@@ -17,6 +17,8 @@
  */
 import { render } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
+import { humanizeViewerError as humanizeError } from './viewer_errors'
+import { RetryHost, ViewerError, type RetryControl } from './viewer_retry'
 
 const CHANNEL_LABEL = 'moment-public-v1'
 const POLL_INTERVAL_MS = 1000
@@ -90,7 +92,7 @@ function takeFrame(
 }
 
 
-function PublicMomentsViewer({ boot }: { boot: BootPayload }) {
+function PublicMomentsViewer({ boot, retry }: { boot: BootPayload; retry: RetryControl }) {
   const [state, setState] = useState<ViewerState>({
     status: 'connecting',
     message: 'Connecting…',
@@ -262,7 +264,13 @@ function PublicMomentsViewer({ boot }: { boot: BootPayload }) {
   }, [boot.userId, boot.instanceId])
 
   if (state.status === 'error') {
-    return <div class="moments-error">{state.message || 'Couldn’t connect.'}</div>
+    return (
+      <ViewerError
+        className="moments-error"
+        message={state.message || 'Couldn’t connect.'}
+        retry={retry}
+      />
+    )
   }
   if (state.status !== 'ready') {
     return <div class="moments-status">{state.message ?? 'Loading…'}</div>
@@ -288,15 +296,6 @@ function PublicMomentsViewer({ boot }: { boot: BootPayload }) {
       })}
     </ul>
   )
-}
-
-
-function humanizeError(msg: string | null | undefined): string {
-  if (!msg) return 'Couldn’t connect.'
-  if (/HTTP 404/.test(msg)) return 'This person isn’t sharing public moments.'
-  if (/HTTP 503/.test(msg)) return 'Currently unavailable.'
-  if (/HTTP 429/.test(msg)) return 'Too many viewers — try again in a minute.'
-  return msg
 }
 
 
@@ -338,5 +337,12 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     root.textContent = 'Missing boot context.'
     return
   }
-  render(<PublicMomentsViewer boot={boot} />, root)
+  render(
+    <RetryHost
+      render={(retry, attempt) => (
+        <PublicMomentsViewer key={attempt} boot={boot} retry={retry} />
+      )}
+    />,
+    root,
+  )
 })()

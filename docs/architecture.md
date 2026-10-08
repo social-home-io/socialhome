@@ -1210,8 +1210,8 @@ script.
   `MEDIA_CSP`.
 - **GFS public pages have their own strict policy:** the anonymous,
   server-rendered pages — landing `/`, `/spaces/{id}`, `/join/{token}`
-  (live and dead), the highlight viewer `/highlight/…` and its 410 / 503
-  pages, and the Momentum directory `/moments` + `/moments/{user}` — all
+  (live and dead), the highlight viewer `/highlight/…` (one shell for every
+  URL), and the Momentum directory `/moments` + `/moments/{user}` — all
   go out through `global_server/html_page.py:html_response`, which sets
   `csp.build_public_page_csp()`:
   `default-src 'self'; script-src 'self'; style-src 'self'

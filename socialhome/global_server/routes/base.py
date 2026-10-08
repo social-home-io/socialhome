@@ -103,3 +103,13 @@ class GfsBaseView(web.View):
         forge the trail.
         """
         return self.svc(K.gfs_client_ip_key)(self.request)
+
+    def client_bucket(self) -> str:
+        """The caller's rate-limit key: :meth:`client_ip` with an IPv6
+        client collapsed to its /64
+        (:meth:`~socialhome.global_server.public.ClientIpResolver.bucket`).
+
+        Every per-client throttle a handler applies keys on this — never on
+        :meth:`client_ip`, which is the exact address for the audit trail.
+        """
+        return self.svc(K.gfs_client_ip_key).bucket(self.request)

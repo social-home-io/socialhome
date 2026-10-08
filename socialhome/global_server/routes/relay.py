@@ -176,7 +176,7 @@ class SignupTokenView(GfsBaseView):
         if not cfg.open_signup:
             return web.json_response({"error": "not_found"}, status=404)
         token_svc = self.request.app["gfs_token_service"]
-        token, wait = await token_svc.generate(self.client_ip())
+        token, wait = await token_svc.generate(self.client_bucket())
         if token is None:
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = str(wait)

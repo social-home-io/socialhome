@@ -30,6 +30,7 @@ from aiohttp import web
 
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.space import SPACE_CATEGORIES
+from ..rate_limiter import client_bucket
 from . import app_keys as K
 from .config import DEFAULT_TRUSTED_PROXIES
 from .html_page import css_color, html_response
@@ -200,6 +201,17 @@ class ClientIpResolver:
             # rather than keying the limiter on an attacker-chosen string.
             return str(peer)
         return str(last)
+
+    def bucket(self, request: web.Request) -> str:
+        """The rate-limit key for this request's client.
+
+        :meth:`__call__` (the exact address — what the audit log records)
+        coarsened by :func:`socialhome.rate_limiter.client_bucket`: an IPv6
+        client is keyed by its /64, so rotating through one subscriber's
+        prefix can't mint fresh buckets. IPv4 is unchanged. Every per-client
+        limiter on this server keys on this, never on :meth:`__call__`.
+        """
+        return client_bucket(self(request))
 
     @staticmethod
     def _peer_ip(
@@ -376,7 +388,7 @@ def build_window_limiter(
     async def _rate_limit(request: web.Request, handler):
         if not applies(request.rel_url.path):
             return await handler(request)
-        if not counter.allow(resolver(request)):
+        if not counter.allow(resolver.bucket(request)):
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
             return resp
@@ -468,7 +480,7 @@ def build_signup_rate_limit(resolver: ClientIpResolver):
     async def _signup_rate_limit(request: web.Request, handler):
         if request.rel_url.path != SIGNUP_TOKEN_PATH:
             return await handler(request)
-        if not per_ip.allow(resolver(request)) or not overall.allow("*"):
+        if not per_ip.allow(resolver.bucket(request)) or not overall.allow("*"):
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
             return resp
@@ -480,14 +492,15 @@ def build_signup_rate_limit(resolver: ClientIpResolver):
 # ─── Helpers ────────────────────────────────────────────────────────────
 
 
-def _client_ip(request: web.Request) -> str:
-    """The client address for this request, per the app's trusted-proxy policy.
+def _client_bucket(request: web.Request) -> str:
+    """The rate-limit key for this request's client
+    (:meth:`ClientIpResolver.bucket`), per the app's trusted-proxy policy.
 
     Handlers (unlike the middlewares, which close over the resolver) read it
     off the app so there is exactly ONE parsed trusted-proxy set per server.
     """
     resolver: ClientIpResolver = request.app[K.gfs_client_ip_key]
-    return resolver(request)
+    return resolver.bucket(request)
 
 
 def _escape(value: object | None) -> str:
@@ -1147,7 +1160,7 @@ async def handle_landing(request: web.Request) -> web.Response:
         await admin_repo.get_config("header_image_file")
     ) or cfg.header_image_file
 
-    token, _wait = await token_svc.generate(_client_ip(request))
+    token, _wait = await token_svc.generate(_client_bucket(request))
     if token is None:
         token = "please-wait"
     # The pairing code is a single ``socialhome://gfs-pair/{base_url}

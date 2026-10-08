@@ -110,14 +110,17 @@ class ClusterSyncView(GfsBaseView):
     async def post(self) -> web.Response:
         svc = self.svc(K.gfs_cluster_key)
         client_ip = self.client_ip()
+        # Budgets key on the /64-collapsed bucket (IPv6 rotation can't refill
+        # them); the exact address is kept for the log line below.
+        source = self.client_bucket()
         # A shed address is not dropped outright: a member syncing from an
         # address someone filled with junk must still get through. Its
         # frames take the cheap checks; anything that does not verify as an
         # approved node is answered 429.
-        shed = svc.sync_source_exhausted(client_ip)
+        shed = svc.sync_source_exhausted(source)
 
         def _reject(response: web.Response) -> web.Response:
-            svc.charge_unverified_sync(client_ip)
+            svc.charge_unverified_sync(source)
             return _rate_limited() if shed else response
 
         raw = await self.request.read()
@@ -241,12 +244,12 @@ class ClusterSyncView(GfsBaseView):
         # that bounds the CPU forgeries can burn without ever spending the
         # node's own (verified) budget, and forgeries "from" other addresses
         # cannot spend the budget the member's own address uses.
-        if shed and svc.failed_verify_exhausted(from_node, client_ip):
+        if shed and svc.failed_verify_exhausted(from_node, source):
             return _rate_limited()
         signature = self.request.headers.get("X-Node-Signature", "")
         if not verify_node_signature(raw, signature, verdict.verify_key):
             if shed:
-                svc.charge_failed_verify(from_node, client_ip)
+                svc.charge_failed_verify(from_node, source)
             return _reject(
                 web.json_response({"error": "invalid_signature"}, status=401),
             )

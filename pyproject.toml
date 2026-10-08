@@ -137,7 +137,7 @@ version-file = "socialhome/_version.py"
 # ships empty (which happened on the 2026.5.10 / 2026.5.11 releases).
 #
 # ``socialhome/global_server/static/`` mixes vite outputs (``admin.*``,
-# ``highlight_public_viewer.js``, the shared ``*.module-*.js`` chunk) with
+# ``{highlight,moment}_public_viewer.js``, the shared ``*.module-*.js`` chunks) with
 # handcrafted SSR assets (``avatar_placeholder.svg``,
 # ``users_directory.{css,js}``). The vite outputs are gitignored
 # alongside the SPA (per ``.gitignore``) so the wheel needs explicit
@@ -148,6 +148,7 @@ artifacts = [
     "socialhome/global_server/static/admin.css",
     "socialhome/global_server/static/admin.js",
     "socialhome/global_server/static/highlight_public_viewer.js",
+    "socialhome/global_server/static/moment_public_viewer.js",
     # vite factors the shared Preact runtime into a separate chunk that
     # every entry bundle imports; its representative-module name drifts
     # across vite/preset upgrades (hooks → jsxRuntime → …), so glob the

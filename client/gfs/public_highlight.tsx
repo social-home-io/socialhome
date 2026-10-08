@@ -14,6 +14,8 @@
  */
 import { render } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
+import { humanizeViewerError } from './viewer_errors'
+import { RetryHost, ViewerError, type RetryControl } from './viewer_retry'
 
 const CHANNEL_LABEL = 'highlight-public-v1'
 const FRAME_DURATION_MS = 6000
@@ -100,7 +102,7 @@ function takeFrame(
 }
 
 
-function PublicHighlightViewer({ boot }: { boot: BootPayload }) {
+function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: RetryControl }) {
   const [state, setState] = useState<ViewerState>({
     status: 'connecting',
     message: 'Connecting…',
@@ -316,9 +318,11 @@ function PublicHighlightViewer({ boot }: { boot: BootPayload }) {
 
   if (state.status === 'error') {
     return (
-      <div class="highlight-error">
-        {state.message || 'Couldn’t connect.'}
-      </div>
+      <ViewerError
+        className="highlight-error"
+        message={state.message || 'Couldn’t connect.'}
+        retry={retry}
+      />
     )
   }
 
@@ -361,13 +365,10 @@ function PublicHighlightViewer({ boot }: { boot: BootPayload }) {
 
 
 function humanizeError(msg: string | null | undefined): string {
-  if (!msg) return 'Couldn’t connect.'
-  if (/HTTP 410/.test(msg)) return 'This highlight has ended.'
-  if (/HTTP 503/.test(msg)) return 'Currently unavailable.'
-  if (/HTTP 429/.test(msg)) return 'Too many viewers — try again in a minute.'
-  if (/expired/i.test(msg)) return 'This highlight has ended.'
-  if (/backpressure/i.test(msg)) return 'Too many viewers — try again in a minute.'
-  return msg
+  // ``expired`` only arrives inside a stream the author's own household
+  // sent — the GFS itself never says it (see ``viewer_errors.ts``).
+  if (msg && /expired/i.test(msg)) return 'This highlight has ended.'
+  return humanizeViewerError(msg)
 }
 
 
@@ -413,5 +414,12 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     root.textContent = 'Missing boot context.'
     return
   }
-  render(<PublicHighlightViewer boot={boot} />, root)
+  render(
+    <RetryHost
+      render={(retry, attempt) => (
+        <PublicHighlightViewer key={attempt} boot={boot} retry={retry} />
+      )}
+    />,
+    root,
+  )
 })()

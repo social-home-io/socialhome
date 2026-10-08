@@ -87,7 +87,7 @@ class MemberPublishAnonView(GfsBaseView):
         except InvalidMemberPublish as exc:
             raise web.HTTPBadRequest(reason=str(exc)) from exc
         try:
-            await svc.publish_anon(req, client_ip=self.client_ip())
+            await svc.publish_anon(req, client_ip=self.client_bucket())
         except MemberPublishRateLimited:
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"
