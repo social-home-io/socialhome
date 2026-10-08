@@ -511,6 +511,41 @@ class SpaceAuthorship:
             space_id, user_id
         )
 
+    async def may_author_writer(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        user_id: str,
+    ) -> bool:
+        """May the sender create a row attributed to ``user_id`` in content
+        only WRITERS make, with none of :meth:`may_author`'s exceptions?
+
+        The rule of the v_55 space chat: :meth:`acts_for` (a live writer
+        seat on the sender), or the space **host** relaying a remote user
+        whose own live seat — on their own household — is a writer one (the
+        §25.6 catch-up the host streams). Never the shared bot identity,
+        never one of OUR users, never a banned user, never a follower (no
+        ``allow_subscriber_comment`` opt-in here), and never a moderation
+        release — a chat message has no moderation queue.
+        """
+        if not user_id or user_id == SYSTEM_AUTHOR or not space_id:
+            return False
+        if await self._spaces.is_banned(space_id, user_id):
+            return False
+        if await self._is_local_user(user_id):
+            return False
+        if await self.acts_for(event, space_id, user_id):
+            return True
+        if not await self.is_host(event, space_id):
+            return False
+        row = await self._seats.get_including_tombstones(space_id, "", user_id)
+        return (
+            row is not None
+            and not row.tombstoned
+            and row.instance_id != str(event.from_instance or "")
+            and row.role in _WRITER_ROLES
+        )
+
     async def _subscriber_may_comment(
         self, event: "FederationEvent", space_id: str, user_id: str
     ) -> bool:

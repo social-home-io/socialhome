@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from collections.abc import Awaitable, Callable
 from typing import Any, TYPE_CHECKING
 
 from ....domain.federation import (
@@ -107,6 +108,7 @@ class SpaceSyncService:
         "_gallery_repo",
         "_bazaar_repo",
         "_federation",
+        "_chat_gate",
     )
 
     def __init__(
@@ -138,6 +140,15 @@ class SpaceSyncService:
         #: for HTTPS-mode chunk delivery (``session.transport_mode ==
         #: "https"``); ``_send`` falls back to RTC when ``None``.
         self._federation = None
+        #: v_55 — who may receive the ``chat_messages`` resource:
+        #: ``(space_id, requester_instance_id) -> bool`` (a household holding
+        #: a writer seat — :meth:`SpaceChatAudience.may_receive`). ``None``
+        #: never streams the chat (fail closed).
+        self._chat_gate: Callable[[str, str], Awaitable[bool]] | None = None
+
+    def attach_chat_gate(self, gate: Callable[[str, str], Awaitable[bool]]) -> None:
+        """Wire who may receive a space's chat by catch-up (v_55)."""
+        self._chat_gate = gate
 
     async def _exporter_for(
         self, resource: str, session: "SyncSessionRecord"
@@ -147,8 +158,26 @@ class SpaceSyncService:
         v_41: a requester below ``MIN_FOR_SPACE_MODERATOR_ROLE`` (or one we
         cannot ask — no federation attached) gets moderator rows as
         ``member`` (:class:`PreModeratorMembersExporter`).
+
+        v_55: the space chat (``chat_messages``) goes only to a requester at
+        ``MIN_FOR_SPACE_CHAT`` or later that holds a writer seat in the
+        space (the chat gate) — a follower-only household, an older one, or
+        one we cannot ask gets no exporter at all.
         """
         exporter = self._exporters.get(resource)
+        if exporter is not None and resource == "chat_messages":
+            allowed = (
+                self._chat_gate is not None
+                and self._federation is not None
+                and await self._federation.space_member_supports(
+                    session.requester_instance_id,
+                    min_version=FederationCapability.MIN_FOR_SPACE_CHAT,
+                )
+                and await self._chat_gate(
+                    session.space_id, session.requester_instance_id
+                )
+            )
+            return exporter if allowed else None
         if exporter is None or resource != "members":
             return exporter
         supports = (

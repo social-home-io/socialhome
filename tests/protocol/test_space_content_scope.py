@@ -49,6 +49,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.timetable import Timetable, to_wire_dict
 from socialhome.federation.owner_bound_id import (
+    SPACE_CHAT_MESSAGE_KIND,
     SPACE_TASK_LIST_KIND,
     mint_owner_bound_id,
 )
@@ -69,6 +70,14 @@ VICTIM_HOUSE = "peer-seated-in-b"  # B's own member household (the control)
 #: the gallery uploader — like every remote member, without a ``users`` row
 #: here (the gallery columns carry no FK to it, migration 0046).
 SEATED_IN_GATED = ("u-evil", "u-b", "u-b2", "u-g")
+#: A chat message of B's chat (owner-bound to u-b in B), and an id bound to
+#: u-evil — but in B, not in the gated space.
+CHAT_MSG_B = mint_owner_bound_id(
+    SPACE_CHAT_MESSAGE_KIND, space_id=VICTIM, owner_user_id="u-b"
+)
+CHAT_MSG_BOUND_TO_B = mint_owner_bound_id(
+    SPACE_CHAT_MESSAGE_KIND, space_id=VICTIM, owner_user_id="u-evil"
+)
 
 #: Every table holding space content, plus the household tables a
 #: space-content event could otherwise reach. Snapshotted whole.
@@ -96,6 +105,10 @@ CONTENT_TABLES = (
     "bazaar_listings",
     "bazaar_bids",
     "space_timetables",
+    # The space chats (v_55) — every space's chat, and any other
+    # conversation a chat event could otherwise reach.
+    "conversation_messages",
+    "message_reactions",
 )
 
 
@@ -393,6 +406,65 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
         ),
     ],
     FET.SPACE_ZONE_DELETED: [("delete B's zone", {"zone_id": "zone-b"})],
+    # ── Space chat (v_55): each space's chat is its own conversation ──
+    FET.SPACE_CHAT_MESSAGE_CREATED: [
+        (
+            "re-create B's chat message",
+            {
+                "message_id": CHAT_MSG_B,
+                "author_user_id": "u-b",
+                "content": "x",
+            },
+        ),
+        (
+            "post in A with an id bound to B's space",
+            {
+                "message_id": CHAT_MSG_BOUND_TO_B,
+                "author_user_id": "u-evil",
+                "content": "x",
+            },
+        ),
+    ],
+    FET.SPACE_CHAT_MESSAGE_UPDATED: [
+        (
+            "edit B's chat message",
+            {"message_id": CHAT_MSG_B, "author_user_id": "u-b", "content": "x"},
+        ),
+        (
+            "edit a DM message",
+            {"message_id": "dm-msg-home", "author_user_id": "u-b", "content": "x"},
+        ),
+    ],
+    FET.SPACE_CHAT_MESSAGE_DELETED: [
+        (
+            "delete B's chat message",
+            {"message_id": CHAT_MSG_B, "actor_user_id": "u-evil"},
+        ),
+        (
+            "delete a DM message",
+            {"message_id": "dm-msg-home", "actor_user_id": "u-evil"},
+        ),
+    ],
+    FET.SPACE_CHAT_REACTION: [
+        (
+            "react on B's chat message",
+            {
+                "message_id": CHAT_MSG_B,
+                "user_id": "u-evil",
+                "emoji": "👍",
+                "action": "add",
+            },
+        ),
+        (
+            "remove a reaction on B's chat message",
+            {
+                "message_id": CHAT_MSG_B,
+                "user_id": "u-b",
+                "emoji": "👍",
+                "action": "remove",
+            },
+        ),
+    ],
     # ── Timetables ──
     FET.SPACE_TIMETABLE_UPSERTED: [
         (
@@ -693,6 +765,41 @@ _SEED = [
         "INSERT INTO bazaar_bids(id, listing_post_id, bidder_user_id, amount)"
         " VALUES('bid-b', 'post-b-listing', 'u-b2', 50)",
         (),
+    ),
+    # Space chats (v_55): our local user writes in both spaces, so each
+    # holds a chat here; B's chat holds a message with a reaction, and a
+    # household DM holds one too.
+    *[
+        (
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'member')",
+            (sid, LOCAL_USER),
+        )
+        for sid in (GATED, VICTIM)
+    ],
+    *[
+        (
+            "INSERT INTO conversations(id, type, system_scope, space_id)"
+            " VALUES(?, 'group_dm', ?, ?)",
+            (cid, scope, sid),
+        )
+        for cid, scope, sid in (
+            ("chat-a", "space", GATED),
+            ("chat-b", "space", VICTIM),
+            ("dm-home", None, None),
+        )
+    ],
+    *[
+        (
+            "INSERT INTO conversation_messages(id, conversation_id,"
+            " sender_user_id, content) VALUES(?, ?, 'u-b', 'hello')",
+            (mid, cid),
+        )
+        for mid, cid in ((CHAT_MSG_B, "chat-b"), ("dm-msg-home", "dm-home"))
+    ],
+    (
+        "INSERT INTO message_reactions(message_id, user_id, emoji)"
+        " VALUES(?, 'u-b', '👍')",
+        (CHAT_MSG_B,),
     ),
 ]
 

@@ -5087,3 +5087,37 @@ async def test_send_event_via_gfs_unknown_peer_no_transport_and_bad_key():
     )
     assert result.error == "key_decrypt_error"
     assert relay.calls == []
+
+
+@pytest.mark.asyncio
+async def test_broadcast_to_space_members_only_instances_narrows_never_widens(
+    monkeypatch,
+):
+    """``only_instances`` (v_55 space chat) keeps the fan-out to the member
+    households it names — a follower-only household is skipped — and never
+    adds a household that is not a member of the space."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    writer, _ = _make_remote_instance(km)
+    follower, _ = _make_remote_instance(km)
+    outsider, _ = _make_remote_instance(km)
+    for inst in (writer, follower, outsider):
+        await fed_repo.save_instance(inst)
+    fed_repo.add_space_member("sp", writer.id)
+    fed_repo.add_space_member("sp", follower.id)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    sent: list[str] = []
+
+    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
+        sent.append(to_instance_id)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+    result = await svc.broadcast_to_space_members(
+        "sp",
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        {"content": "hi"},
+        only_instances={writer.id, outsider.id},
+    )
+    assert sent == [writer.id]
+    assert result.attempted == 1

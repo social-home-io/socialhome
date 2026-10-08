@@ -57,6 +57,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    SPACE_CHAT_MESSAGE_KIND,
     SPACE_PAGE_KIND,
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
@@ -126,6 +127,25 @@ _PAGE_ELSEWHERE = mint_owner_bound_id(
 _TT_FOR_U_A = mint_owner_bound_id(
     SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-a"
 )
+
+
+def _chat_id(owner: str, space_id: str = SP) -> str:
+    return mint_owner_bound_id(
+        SPACE_CHAT_MESSAGE_KIND, space_id=space_id, owner_user_id=owner
+    )
+
+
+#: Space chat (v_55): u-a's message and our local user's, both held in SP's
+#: chat; fresh ids for creates — bound to u-a, to our user, to a follower,
+#: to u-o (claimed for u-a), and one bound to u-a in another space.
+_CHAT_A = _chat_id("u-a")
+_CHAT_L = _chat_id(LOCAL_USER)
+_CHAT_NEW = _chat_id("u-a")
+_CHAT_NEW_LOCAL = _chat_id(LOCAL_USER)
+_CHAT_NEW_SUB = _chat_id("u-sub")
+_CHAT_NEW_FOR_O = _chat_id("u-o")
+_CHAT_ELSEWHERE = _chat_id("u-a", "sp-elsewhere")
+_CHAT_SYNC = _chat_id("u-a")
 
 
 def _config(tmp_dir) -> Config:
@@ -319,6 +339,30 @@ _SEED = [
         "INSERT INTO space_timetables(id, space_id, name, created_by, updated_by,"
         " created_at, updated_at) VALUES(?, ?, 'Plan', 'u-adm', 'u-adm', ?, ?)",
         (_TT_A, SP, _TS, _TS),
+    ),
+    # Space chat (v_55): our local user writes in SP, so its chat lives
+    # here, holding a message by u-a (with u-o's reaction) and one by ours.
+    (
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'member')",
+        (SP, LOCAL_USER),
+    ),
+    (
+        "INSERT INTO conversations(id, type, system_scope, space_id)"
+        " VALUES('chat-sp', 'group_dm', 'space', ?)",
+        (SP,),
+    ),
+    *[
+        (
+            "INSERT INTO conversation_messages(id, conversation_id,"
+            " sender_user_id, content) VALUES(?, 'chat-sp', ?, 'hello')",
+            (mid, uid),
+        )
+        for mid, uid in ((_CHAT_A, "u-a"), (_CHAT_L, LOCAL_USER))
+    ],
+    (
+        "INSERT INTO message_reactions(message_id, user_id, emoji)"
+        " VALUES(?, 'u-o', '👍')",
+        (_CHAT_A,),
     ),
 ]
 
@@ -999,6 +1043,146 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         {"timetable_id": _TT_A, "deleted_by": "u-a", "deleted_at": _NOW},
         (),
         (AUTHOR, ADMIN, HOST, MOD),
+    ),
+    # ── Space chat (v_55): writers only, owner-bound ids, author edits,
+    #    author or content-authority deletes, the reactor's own reaction ──
+    (
+        FET.SPACE_CHAT_MESSAGE_CREATED,
+        "chat as u-a",
+        {"message_id": _CHAT_NEW, "author_user_id": "u-a", "content": "hi"},
+        (AUTHOR, HOST),
+        (OTHER, ADMIN, STRANGER, MOD, THIRD),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_CREATED,
+        "chat as our local user",
+        {
+            "message_id": _CHAT_NEW_LOCAL,
+            "author_user_id": LOCAL_USER,
+            "content": "hi",
+        },
+        (),
+        (AUTHOR, OTHER, ADMIN, HOST, MOD),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_CREATED,
+        "chat as a follower",
+        {"message_id": _CHAT_NEW_SUB, "author_user_id": "u-sub", "content": "hi"},
+        (),
+        (AUTHOR, HOST),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_CREATED,
+        "chat as u-a under an id bound to u-o",
+        {"message_id": _CHAT_NEW_FOR_O, "author_user_id": "u-a", "content": "hi"},
+        (),
+        (AUTHOR, HOST),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_CREATED,
+        "chat as u-a under an id bound to another space",
+        {"message_id": _CHAT_ELSEWHERE, "author_user_id": "u-a", "content": "hi"},
+        (),
+        (AUTHOR, HOST),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_CREATED,
+        "chat as u-a under a legacy (unbound) id",
+        {"message_id": "ab" * 16, "author_user_id": "u-a", "content": "hi"},
+        (),
+        (AUTHOR, HOST),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_CREATED,
+        "re-send u-a's message with new words",
+        {"message_id": _CHAT_A, "author_user_id": "u-a", "content": "rewritten"},
+        (),
+        (AUTHOR, HOST),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_UPDATED,
+        "edit u-a's message",
+        {"message_id": _CHAT_A, "author_user_id": "u-a", "content": "edited"},
+        (AUTHOR,),
+        (OTHER, ADMIN, MOD, HOST, STRANGER),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_UPDATED,
+        "edit our local user's message",
+        {"message_id": _CHAT_L, "author_user_id": LOCAL_USER, "content": "x"},
+        (),
+        (AUTHOR, ADMIN, HOST, MOD),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_DELETED,
+        "delete u-a's message as u-a",
+        {"message_id": _CHAT_A, "actor_user_id": "u-a"},
+        (AUTHOR,),
+        (OTHER, STRANGER, THIRD),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_DELETED,
+        "moderate u-a's message as the admin",
+        {"message_id": _CHAT_A, "actor_user_id": "u-adm"},
+        (ADMIN,),
+        (OTHER, AUTHOR, STRANGER),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_DELETED,
+        "moderate u-a's message as the moderator",
+        {"message_id": _CHAT_A, "actor_user_id": "u-mod"},
+        (MOD,),
+        (OTHER, ADMIN, STRANGER),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_DELETED,
+        "moderate our user's message as the host's owner",
+        {"message_id": _CHAT_L, "actor_user_id": "u-h"},
+        (HOST,),
+        (AUTHOR, OTHER, ADMIN),
+    ),
+    (
+        FET.SPACE_CHAT_MESSAGE_DELETED,
+        "moderate as a plain member",
+        {"message_id": _CHAT_L, "actor_user_id": "u-o"},
+        (),
+        (OTHER, AUTHOR),
+    ),
+    (
+        FET.SPACE_CHAT_REACTION,
+        "react as u-o",
+        {
+            "message_id": _CHAT_A,
+            "user_id": "u-o",
+            "emoji": "🎉",
+            "action": "add",
+        },
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST, STRANGER, MOD),
+    ),
+    (
+        FET.SPACE_CHAT_REACTION,
+        "take back u-o's reaction",
+        {
+            "message_id": _CHAT_A,
+            "user_id": "u-o",
+            "emoji": "👍",
+            "action": "remove",
+        },
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST),
+    ),
+    (
+        FET.SPACE_CHAT_REACTION,
+        "react as a follower",
+        {
+            "message_id": _CHAT_A,
+            "user_id": "u-sub",
+            "emoji": "🎉",
+            "action": "add",
+        },
+        (),
+        (AUTHOR,),
     ),
 ]
 
@@ -1986,6 +2170,51 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         [timetable_wire(_TT_A, created_by="u-adm", updated_by="u-adm")],
         (ADMIN, HOST),
         (AUTHOR, OTHER),
+    ),
+    (
+        "chat_messages",
+        "u-a's message",
+        [
+            {
+                "id": _CHAT_SYNC,
+                "message_id": _CHAT_SYNC,
+                "author_user_id": "u-a",
+                "content": "caught up",
+                "created_at": _NOW,
+            }
+        ],
+        (AUTHOR, HOST),
+        (OTHER, ADMIN),
+    ),
+    (
+        "chat_messages",
+        "a message claiming our local user",
+        [
+            {
+                "id": _CHAT_NEW_LOCAL,
+                "message_id": _CHAT_NEW_LOCAL,
+                "author_user_id": LOCAL_USER,
+                "content": "x",
+                "created_at": _NOW,
+            }
+        ],
+        (),
+        (HOST, AUTHOR),
+    ),
+    (
+        "chat_messages",
+        "rewrite u-a's held message",
+        [
+            {
+                "id": _CHAT_A,
+                "message_id": _CHAT_A,
+                "author_user_id": "u-a",
+                "content": "rewritten",
+                "created_at": _NOW,
+            }
+        ],
+        (),
+        (HOST, AUTHOR),
     ),
     (
         "timetables",

@@ -830,7 +830,17 @@ from __future__ import annotations
 #:   switch cannot complete with it — the connections API reports such a
 #:   peer as not available (``gfs_relay_available``) so the admin is told
 #:   the other household needs a newer Social Home.
-OURS: int = 54
+#: * **v_55** (2026-10-08) — space chat. Four new event types,
+#:   :attr:`~socialhome.domain.federation.FederationEventType
+#:   .SPACE_CHAT_MESSAGE_CREATED` / ``_UPDATED`` / ``_DELETED`` and
+#:   ``SPACE_CHAT_REACTION``: the space's own group chat, every field but
+#:   the routing ones inside the encrypted payload, message ids owner-bound
+#:   (``space-chat-message``) to their author, fanned out only to households
+#:   holding a writer seat (``docs/protocol/space-chat.md``). **Gated, no
+#:   fallback**: a member household below v_55 is sent no chat event (it
+#:   would drop the unknown types anyway) and gets no chat catch-up; its
+#:   users simply see no chat.
+OURS: int = 55
 
 
 class FederationCapability:
@@ -1282,6 +1292,12 @@ class FederationCapability:
     #: reported as not available. Per-pair, not space-scoped.
     MIN_FOR_GFS_RELAY_KEY_EXCHANGE = 54
 
+    #: v_55 — space chat (``SPACE_CHAT_MESSAGE_CREATED`` / ``_UPDATED`` /
+    #: ``_DELETED`` / ``SPACE_CHAT_REACTION`` and the ``chat_messages``
+    #: catch-up resource). A member household below it is sent none of
+    #: them. Space-scoped: a lagging member household misses the chat.
+    MIN_FOR_SPACE_CHAT = 55
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1486,6 +1502,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE,
         "Turning on the GFS fallback for an existing connection",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_CHAT,
+        "Chat in spaces",
+    ),
 ]
 
 
@@ -1551,6 +1571,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK: "forwarded_invite_links",
     FederationCapability.MIN_FOR_GFS_RELAY_ROUTES: "shared_gfs_relay",
     FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE: "gfs_fallback_later",
+    FederationCapability.MIN_FOR_SPACE_CHAT: "space_chat",
 }
 
 
@@ -1634,6 +1655,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_AUTHORITY_EPOCH_ECHO,
         FederationCapability.MIN_FOR_FORWARDED_ROLE_CHANGE,
         FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
+        FederationCapability.MIN_FOR_SPACE_CHAT,
     }
 )
 

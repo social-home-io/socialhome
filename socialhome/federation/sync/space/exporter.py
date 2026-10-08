@@ -83,6 +83,10 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # Space timetables (v_39). Self-contained rows; an older receiver drops
     # the unknown resource.
     "timetables",
+    # The space chat's recent messages (v_55). Sent only to a writer
+    # household at v_55+ (the provider gates it per requester); a reply
+    # names a message streamed earlier in the same resource (oldest first).
+    "chat_messages",
 )
 
 

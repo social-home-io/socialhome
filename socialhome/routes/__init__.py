@@ -274,6 +274,7 @@ from .spaces import (
     SpaceLinkCollectionView,
     SpaceLinkDetailView,
     SpaceNotifPrefsView,
+    SpaceChatView,
     SpaceMemberLocationSharingView,
     SpacePresenceView,
     SpaceJoinRequestCollectionView,
@@ -640,6 +641,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         "/api/spaces/{id}/notif-prefs",
         SpaceNotifPrefsView,
     )
+    app.router.add_view("/api/spaces/{id}/chat", SpaceChatView)
     # Bot personas (named bots that post into a space via the bot-bridge).
     app.router.add_view("/api/spaces/{id}/bots", SpaceBotCollectionView)
     app.router.add_view("/api/spaces/{id}/bots/{bot_id}", SpaceBotDetailView)

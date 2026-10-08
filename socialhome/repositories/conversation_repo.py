@@ -41,6 +41,7 @@ class AbstractConversationRepo(Protocol):
     async def get(self, conversation_id: str) -> Conversation | None: ...
     async def list_for_user(self, username: str) -> list[Conversation]: ...
     async def get_household_chat(self) -> Conversation | None: ...
+    async def get_space_chat(self, space_id: str) -> Conversation | None: ...
     async def create_system_chat(
         self,
         scope: SystemChatScope,
@@ -136,6 +137,12 @@ class AbstractConversationRepo(Protocol):
         self,
         conversation_id: str,
         since_iso: str | None,
+        *,
+        limit: int = 500,
+    ) -> list[ConversationMessage]: ...
+    async def list_recent_live_messages(
+        self,
+        conversation_id: str,
         *,
         limit: int = 500,
     ) -> list[ConversationMessage]: ...
@@ -293,6 +300,14 @@ class SqliteConversationRepo:
         row = await self._db.fetchone(
             "SELECT * FROM conversations WHERE system_scope=?",
             (SystemChatScope.HOUSEHOLD.value,),
+        )
+        return _row_to_conv(row_to_dict(row))
+
+    async def get_space_chat(self, space_id: str) -> Conversation | None:
+        """The chat of ``space_id``, or ``None`` before it was first created."""
+        row = await self._db.fetchone(
+            "SELECT * FROM conversations WHERE space_id=? AND system_scope=?",
+            (space_id, SystemChatScope.SPACE.value),
         )
         return _row_to_conv(row_to_dict(row))
 
@@ -999,6 +1014,26 @@ class SqliteConversationRepo:
                 """,
                 (conversation_id, int(limit)),
             )
+        return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
+
+    async def list_recent_live_messages(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 500,
+    ) -> list[ConversationMessage]:
+        """The newest ``limit`` messages of a conversation that are not
+        deleted, oldest first — the space chat's catch-up window (§25.6)."""
+        rows = await self._db.fetchall(
+            """
+            SELECT * FROM (
+                SELECT * FROM conversation_messages
+                 WHERE conversation_id=? AND deleted=0
+                 ORDER BY created_at DESC LIMIT ?
+            ) ORDER BY created_at ASC
+            """,
+            (conversation_id, int(limit)),
+        )
         return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
 
     async def list_conversations_with_remote_member(

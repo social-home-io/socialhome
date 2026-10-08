@@ -121,16 +121,27 @@ class _SeatPrefs:
     name: str | None = None
     #: Set for a system chat (household / space chat).
     system_scope: SystemChatScope | None = None
+    #: A space chat's space and its name (the bell reads "… in {space}").
+    space_id: str | None = None
+    space_name: str | None = None
 
 
 #: Where a household-chat bell / push leads: the feed's Chat tab.
 HOUSEHOLD_CHAT_LINK = "/?tab=chat"
 
 
-def _conversation_link(conversation_id: str, scope: SystemChatScope | None) -> str:
-    """The SPA path a conversation's bell / push opens."""
+def _conversation_link(
+    conversation_id: str,
+    scope: SystemChatScope | None,
+    space_id: str | None = None,
+) -> str:
+    """The SPA path a conversation's bell / push opens: the feed's Chat
+    tab for the household chat, the space's Feed | Chat switch for a space
+    chat, the DM thread otherwise."""
     if scope is SystemChatScope.HOUSEHOLD:
         return HOUSEHOLD_CHAT_LINK
+    if scope is SystemChatScope.SPACE and space_id:
+        return f"/spaces/{space_id}?view=chat"
     return f"/dms/{conversation_id}"
 
 
@@ -636,8 +647,10 @@ class NotificationService(ProtectionGateMixin):
         else:
             title = f"{event.sender_display_name} messaged you"
         prefs = await self._seat_prefs(event.conversation_id)
-        link = _conversation_link(event.conversation_id, prefs.system_scope)
-        household_chat = prefs.system_scope is SystemChatScope.HOUSEHOLD
+        link = _conversation_link(
+            event.conversation_id, prefs.system_scope, prefs.space_id
+        )
+        system_chat = prefs.system_scope is not None
         muted = prefs.muted
         mentioned = (
             {m.user_id for m in event.mentions if m.user_id} if prefs.group else set()
@@ -690,7 +703,7 @@ class NotificationService(ProtectionGateMixin):
                             author=event.sender_display_name,
                             chat_name=self._chat_name(prefs, local),
                         )
-                        if household_chat
+                        if system_chat
                         else title
                     ),
                     link_url=link,
@@ -700,7 +713,14 @@ class NotificationService(ProtectionGateMixin):
 
     def _chat_name(self, prefs: "_SeatPrefs", recipient) -> str | None:
         """The name a bell gives the conversation: the group's own, or for
-        the household chat its localised label."""
+        the household chat its localised label, for a space chat the space's
+        name."""
+        if prefs.system_scope is SystemChatScope.SPACE:
+            return prefs.space_name or self._t(
+                "notification.space_chat.name",
+                locale=self._locale(recipient),
+                fallback="a space",
+            )
         if prefs.system_scope is SystemChatScope.HOUSEHOLD:
             return self._t(
                 "notification.household_chat.name",
@@ -720,7 +740,9 @@ class NotificationService(ProtectionGateMixin):
         prefs = await self._seat_prefs(event.conversation_id)
         if not prefs.group:
             return
-        link = _conversation_link(event.conversation_id, prefs.system_scope)
+        link = _conversation_link(
+            event.conversation_id, prefs.system_scope, prefs.space_id
+        )
         allowed = set(event.recipient_user_ids)
         blocked = await self._guardian_block_counterparts(event.sender_user_id)
         name = event.sender_display_name or await self._display_name(
@@ -794,6 +816,8 @@ class NotificationService(ProtectionGateMixin):
         members = await self._convos.list_members(conversation_id)
         conv = await self._convos.get(conversation_id)
         group = conv is not None and conv.type is ConversationType.GROUP_DM
+        space_id = conv.space_id if conv is not None else None
+        space = await self._spaces.get(space_id) if space_id else None
         return _SeatPrefs(
             muted=frozenset(
                 m.username for m in members if mute_active(m.muted_until, now=now)
@@ -804,6 +828,8 @@ class NotificationService(ProtectionGateMixin):
             group=group,
             name=conv.name if conv is not None and group else None,
             system_scope=conv.system_scope if conv is not None else None,
+            space_id=space_id,
+            space_name=space.name if space is not None else None,
         )
 
     async def mark_read_for_dm(
@@ -821,7 +847,9 @@ class NotificationService(ProtectionGateMixin):
         """
         conv = await self._convos.get(conversation_id) if self._convos else None
         link = _conversation_link(
-            conversation_id, conv.system_scope if conv is not None else None
+            conversation_id,
+            conv.system_scope if conv is not None else None,
+            conv.space_id if conv is not None else None,
         )
         flipped = 0
         for ntype in ("dm_message", "dm_mention"):

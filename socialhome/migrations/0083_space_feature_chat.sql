@@ -1,0 +1,42 @@
+-- 0083 — Per-space chat toggle (``spaces.feature_chat``).
+--
+-- Every space gets a chat (a system group conversation, migration 0082,
+-- ``conversations.system_scope = 'space'``): its writers (owner, admins,
+-- moderators, members — never a follower) talk in it, and it travels
+-- between member households as the v_55 ``SPACE_CHAT_*`` events. This
+-- column is the admin's switch for it, like every other ``feature_*``
+-- tab. Owner decision: ON in every existing and every new space, so the
+-- default is 1 (no backfill: a constant default is metadata-only in
+-- SQLite). Off hides the chat, refuses local writes and drops inbound
+-- chat events; the stored messages are kept.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this data. ``spaces`` rows
+--       are written only by ``SqliteSpaceRepo`` (``_save_statement`` — the
+--       upsert every create / config edit / inbound config uses — reading
+--       ``SpaceFeatures.to_columns``) and read back through
+--       ``SpaceFeatures.from_row``; the wire form for SPACE_CONFIG_CHANGED,
+--       the §25.6 sync and the PATCH body is ``SpaceFeatures.to_wire_dict``
+--       / ``from_wire_dict``. Every ``feature_*`` toggle takes exactly that
+--       path, so ``feature_chat`` joins it in the same change (domain,
+--       repo, route body, wire dict). The chat conversation itself
+--       already exists in shape (0082) and needs nothing new.
+--   (2) Non-migration alternatives considered and rejected:
+--       * Reuse ``conversations`` (a chat row present = on) — the chat is
+--         created lazily on first open, so "absent" can't also mean "off",
+--         and turning it off must keep the messages.
+--       * A household preference (``preferences.feat_*``) — the switch
+--         belongs to the space (its admins), and must federate with the
+--         rest of the space's features to every member household.
+--       * Derive from another feature (e.g. ``allowed_post_types``) — two
+--         unrelated decisions sharing one bit; an admin hiding text posts
+--         would silently silence the chat.
+--       * Keep it out of the database (always on) — the owner asked for an
+--         admin switch, and every other space tab is one column here.
+--   (3) Smallest possible change: one additive ``NOT NULL DEFAULT 1``
+--       column with a CHECK, the exact shape of every sibling
+--       ``feature_*`` column. No existing row is rewritten.
+ALTER TABLE spaces
+    ADD COLUMN feature_chat INTEGER NOT NULL DEFAULT 1
+        CHECK (feature_chat IN (0, 1));

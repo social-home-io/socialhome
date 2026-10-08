@@ -33,6 +33,7 @@
   "notification.dm.mention_unnamed": "{author} mentioned you in a group chat",
   "notification.household_chat.message": "{author} in {chat_name}",
   "notification.household_chat.name": "Household chat",
+  "notification.space_chat.name": "a space",
   "notification.space.moderation.approved": "Your submission in {space_name} was approved",
   "notification.space.moderation.rejected": "Your submission in {space_name} was not approved",
   "notification.space.moderation.expired": "Your submission in {space_name} expired without a review",

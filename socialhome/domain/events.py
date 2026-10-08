@@ -1634,6 +1634,11 @@ class DmMessageCreated(DomainEvent):
     #: system chat — not a DM, so DM-only consumers (the HA
     #: ``socialhome.dm_received`` event) skip it. ``None`` for a DM.
     system_scope: str | None = None
+    #: The household a space-chat message arrived from (inbound
+    #: ``SPACE_CHAT_MESSAGE_CREATED`` / catch-up); ``None`` when it was
+    #: written here. The space-chat outbound never re-broadcasts an event
+    #: that carries it (echo guard).
+    origin_instance_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1672,6 +1677,32 @@ class DmMessageUpdated(DomainEvent):
     new_mentions: tuple["Mention", ...] = ()
     #: The sender's name for a mention bell ("{name} mentioned you …").
     sender_display_name: str | None = None
+    #: Inbound space-chat edit: the household it came from (echo guard,
+    #: see :attr:`DmMessageCreated.origin_instance_id`). ``None`` locally.
+    origin_instance_id: str | None = None
+    #: ``True`` for a sender's edit (not a transcript patch) — the only
+    #: kind the space-chat outbound federates.
+    is_edit: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class DmMessageDeleted(DomainEvent):
+    """A conversation message was deleted (soft: content cleared).
+
+    Published by :meth:`DmService.delete_message` and by the inbound
+    space-chat delete. The space-chat outbound federates a local one as
+    ``SPACE_CHAT_MESSAGE_DELETED``; ``actor_user_id`` differs from
+    ``sender_user_id`` for a moderator's delete.
+    """
+
+    conversation_id: str
+    message_id: str
+    sender_user_id: str
+    actor_user_id: str
+    system_scope: str | None = None
+    #: Inbound: the household it came from (echo guard). ``None`` locally.
+    origin_instance_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1692,6 +1723,9 @@ class DmMessageReactionChanged(DomainEvent):
     action: str  # "add" | "remove"
     recipient_user_ids: tuple[str, ...]
     occurred_at: datetime = field(default_factory=_now)
+    #: Inbound space-chat reaction: the household it came from (echo
+    #: guard). ``None`` locally.
+    origin_instance_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

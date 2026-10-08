@@ -791,6 +791,40 @@ async def test_space_chat_round_trips_its_space(env):
     assert got.system_scope is SystemChatScope.SPACE and got.space_id == "sp1"
 
 
+async def test_get_space_chat_finds_only_that_spaces_chat(env):
+    for sid in ("sp1", "sp2"):
+        await env.db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES(?,'S','host','alice','ab')",
+            (sid,),
+        )
+    assert await env.repo.get_space_chat("sp1") is None
+    chat = await env.repo.create_system_chat(SystemChatScope.SPACE, space_id="sp1")
+    got = await env.repo.get_space_chat("sp1")
+    assert got is not None and got.id == chat.id
+    assert await env.repo.get_space_chat("sp2") is None
+    # The space's chat goes with the space.
+    await env.db.enqueue("DELETE FROM spaces WHERE id='sp1'")
+    assert await env.repo.get_space_chat("sp1") is None
+
+
+async def test_list_recent_live_messages_is_newest_window_oldest_first(env):
+    await env.repo.create(_conv("c-live", ConversationType.GROUP_DM))
+    for i in range(5):
+        await env.repo.save_message(
+            ConversationMessage(
+                id=f"m{i}",
+                conversation_id="c-live",
+                sender_user_id="uid-alice",
+                content=f"hi {i}",
+                created_at=datetime(2026, 1, 1, 0, i, tzinfo=timezone.utc),
+            )
+        )
+    await env.repo.soft_delete_message("m3")
+    got = await env.repo.list_recent_live_messages("c-live", limit=3)
+    assert [m.id for m in got] == ["m1", "m2", "m4"]
+
+
 async def test_create_round_trips_system_columns(env):
     conv = Conversation(
         id="c-sys",

@@ -23,6 +23,7 @@
   "notification.dm.mention_unnamed": "{author} noemde je in een groepschat",
   "notification.household_chat.message": "{author} in {chat_name}",
   "notification.household_chat.name": "Huishoudchat",
+  "notification.space_chat.name": "een ruimte",
   "notification.space.moderation.approved": "Je inzending in {space_name} is goedgekeurd",
   "notification.space.moderation.rejected": "Je inzending in {space_name} is niet goedgekeurd",
   "notification.space.moderation.expired": "Je inzending in {space_name} is verlopen zonder beoordeling",

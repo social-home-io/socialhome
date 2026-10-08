@@ -6,6 +6,7 @@ Thin handlers delegating to :class:`SpaceService`.
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 
 from aiohttp import web
 
@@ -33,6 +34,7 @@ from ..app_keys import (
     space_remote_member_repo_key,
     space_repo_key,
     space_moderation_service_key,
+    space_chat_service_key,
     space_service_key,
     space_sync_scheduler_key,
     space_zone_repo_key,
@@ -2904,6 +2906,28 @@ class SpaceLinkDetailView(BaseView):
 
 
 _NOTIF_LEVELS = frozenset({"all", "mentions", "muted"})
+
+
+class SpaceChatView(BaseView):
+    """``GET /api/spaces/{id}/chat`` — the space's chat for the caller.
+
+    ``{enabled, conversation_id, unread, notif_level, muted_until,
+    last_read_at}``. A member with a writer role (owner, admin, moderator,
+    member) gets the chat — created and its seats reconciled on the way —
+    while the space's admins keep it on. A **follower** gets
+    ``{"enabled": false, "conversation_id": null, ...}`` (followers neither
+    read nor post the chat), as does everyone while the chat is off; a
+    non-member, a banned user or an unknown space gets 404. Messages,
+    reads, reactions, edits, deletes (moderators: anyone's), mute and level
+    use the ``/api/conversations/{id}/...`` routes with ``conversation_id``.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        summary = await self.svc(space_chat_service_key).summary(
+            self.match("id"), ctx.username
+        )
+        return self._json(asdict(summary))
 
 
 class SpaceNotifPrefsView(BaseView):

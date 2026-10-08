@@ -974,3 +974,75 @@ async def test_members_stream_without_federation_degrades_conservatively(encoder
     session = _FakeSession()
     await svc.stream_initial(session)
     assert _member_roles(session)["u-mod"] == "member"
+
+
+# ─── v_55: the space chat streams only to a writer household ────────────
+
+
+def _chat_provider(encoder):
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    exporters = {
+        "chat_messages": _FakeExporter(
+            "chat_messages", [{"id": "m-1", "author_user_id": "u-1", "content": "hi"}]
+        ),
+    }
+    return SpaceSyncService(builder=builder, exporters=exporters, sig_suite="ed25519")
+
+
+def _resources(session) -> list[str]:
+    return [
+        orjson.loads(raw)["resource"]
+        for raw in session.rtc.sent
+        if orjson.loads(raw)["resource"] != SENTINEL_RESOURCE
+    ]
+
+
+@pytest.mark.parametrize(
+    ("supports", "writer", "streamed"),
+    [
+        (True, True, True),
+        # A household below v_55, or one holding only follower seats, gets
+        # no chat — by catch-up any more than live.
+        (False, True, False),
+        (True, False, False),
+    ],
+)
+async def test_chat_streams_only_to_a_v55_writer_household(
+    encoder, supports, writer, streamed
+):
+    from unittest.mock import AsyncMock
+
+    svc = _chat_provider(encoder)
+    federation = AsyncMock()
+    federation.space_member_supports = AsyncMock(return_value=supports)
+    svc.attach_federation(federation)
+    asked: list[tuple[str, str]] = []
+
+    async def _gate(space_id: str, instance_id: str) -> bool:
+        asked.append((space_id, instance_id))
+        return writer
+
+    svc.attach_chat_gate(_gate)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    assert (_resources(session) == ["chat_messages"]) is streamed
+    session2 = _FakeSession()
+    await svc.stream_request_more(session2, {"resource": "chat_messages"})
+    assert (_resources(session2) == ["chat_messages"]) is streamed
+    if supports:
+        assert asked and asked[0] == ("sp-1", "peer-r")
+
+
+async def test_chat_never_streams_without_a_gate_or_federation(encoder):
+    svc = _chat_provider(encoder)
+    session = _FakeSession()
+    await svc.stream_initial(session)
+    assert _resources(session) == []
+
+    async def _yes(_space_id: str, _instance_id: str) -> bool:
+        return True
+
+    svc.attach_chat_gate(_yes)
+    session2 = _FakeSession()
+    await svc.stream_initial(session2)
+    assert _resources(session2) == []

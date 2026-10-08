@@ -6494,6 +6494,18 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_54 GFS fallback key exchange gate in place ✓")
+    # v_55 — space chat (SPACE_CHAT_* + the ``chat_messages`` catch-up). The
+    # OURS round-trip above proves every pair advertises >= v_55, which is
+    # what lets ``broadcast_to_space_members`` ship chat events to it at all;
+    # a household below it is skipped silently. Pin the threshold so a bump
+    # that moves it off v_55 fails here, not in the field.
+    if int(_Cap.MIN_FOR_SPACE_CHAT) != 55 or _OURS < 55:
+        failures.append(
+            "MIN_FOR_SPACE_CHAT moved off v_55 (or OURS fell below it) — space "
+            "chat events would never reach a member household",
+        )
+    else:
+        print("  v_55 space chat gate in place ✓")
 
     # 0c. v_29 round-trip on the §D2b BOOTSTRAP wire. The capability
     #     integer normally travels in INSTANCE_CAPABILITIES_UPDATED, over a

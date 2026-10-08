@@ -2785,3 +2785,53 @@ async def test_household_chat_edit_mention_links_to_the_chat_tab(stack):
     assert [
         (n.title, n.link_url) for n in await stack.notif_repo.list(bob.user_id)
     ] == [("Anna mentioned you in Household chat", "/?tab=chat")]
+
+
+# ── Space chat (system chat of a space, v_55) ─────────────────────────────
+
+
+async def _space_chat(stack, *users) -> str:
+    await stack.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-chat', 'Choir', 'iid', 'anna', ?)",
+        ("ab" * 32,),
+    )
+    chat = await stack.conv_repo.create_system_chat(
+        SystemChatScope.SPACE, space_id="sp-chat"
+    )
+    for u in users:
+        await stack.conv_repo.upsert_seat(chat.id, u.username, notif_level="all")
+    return chat.id
+
+
+async def test_space_chat_bell_names_the_space_and_opens_its_chat(stack):
+    anna = await stack.provision_user("anna-s")
+    bob = await stack.provision_user("bob-s")
+    carl = await stack.provision_user("carl-s")
+    chat_id = await _space_chat(stack, anna, bob, carl)
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl], mentions=[_m(bob)]))
+    link = "/spaces/sp-chat?view=chat"
+    assert [
+        (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(carl.user_id)
+    ] == [("dm_message", "anna-s in Choir", link)]
+    assert [
+        (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(bob.user_id)
+    ] == [("dm_mention", "anna-s mentioned you in Choir", link)]
+    # §25.3: the push is the title only — never the message.
+    for _ids, payload in push.calls:
+        assert not getattr(payload, "body", None)
+    await stack.notif_svc.mark_read_for_dm(carl.user_id, chat_id)
+    assert await stack.notif_repo.count_unread(carl.user_id) == 0
+
+
+async def test_space_chat_respects_the_mentions_level(stack):
+    anna = await stack.provision_user("anna-sl")
+    bob = await stack.provision_user("bob-sl")
+    chat_id = await _space_chat(stack, anna, bob)
+    await stack.conv_repo.set_notif_level(chat_id, bob.username, "mentions")
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob]))
+    assert await stack.notif_repo.list(bob.user_id) == []
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob], mentions=[_m(bob)]))
+    assert [n.type for n in await stack.notif_repo.list(bob.user_id)] == ["dm_mention"]

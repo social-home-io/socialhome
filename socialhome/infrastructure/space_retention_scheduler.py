@@ -14,6 +14,15 @@ Soft-delete sets ``space_posts.deleted = 1`` so the existing
 moderation/feed-rendering paths keep working unchanged. Comments on a
 purged post cascade via the row's foreign key.
 
+The space's **chat** (v_55) is pruned by the same horizon, on EVERY
+household that holds a chat for the space — not only the host: each
+household keeps its own copy of the chat (no household re-streams old
+messages beyond the catch-up window), so a member's copy would otherwise
+outlive the space's retention forever. Expired chat messages are
+soft-deleted exactly like ``DmService.delete_message`` does (content and
+media cleared, the row kept for reply links); ``retention_exempt_json``
+names post types and does not apply to chat.
+
 Mirrors the start/stop pattern of :class:`PageLockExpiryScheduler` so
 it plugs into the existing app-startup hook list.
 """
@@ -70,7 +79,7 @@ class SpaceRetentionScheduler:
                 pruned = await self._prune_once()
                 if pruned:
                     log.info(
-                        "space-retention: soft-deleted %d posts",
+                        "space-retention: soft-deleted %d posts / chat messages",
                         pruned,
                     )
             except Exception as exc:  # pragma: no cover
@@ -149,4 +158,35 @@ class SpaceRetentionScheduler:
                     (s["id"], cutoff),
                 )
             total += int(row["n"]) if row else 0
+        total += await self._prune_chats()
+        return total
+
+    async def _prune_chats(self) -> int:
+        """Soft-delete space-chat messages past their space's retention
+        horizon, on every space this household holds a chat for."""
+        spaces = await self._db.fetchall(
+            "SELECT s.id, s.retention_days FROM spaces s"
+            " JOIN conversations c ON c.space_id = s.id"
+            " WHERE s.retention_days IS NOT NULL AND c.system_scope = 'space'"
+        )
+        total = 0
+        for s in spaces:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=int(s["retention_days"]))
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            total += await self._db.enqueue_rowcount(
+                """
+                UPDATE conversation_messages
+                   SET deleted=1, content='', media_url=NULL,
+                       file_name=NULL, mime_type=NULL, file_size_bytes=NULL,
+                       media_blob_id=NULL, media_sync_status=NULL
+                 WHERE deleted=0
+                   AND datetime(created_at) < datetime(?)
+                   AND conversation_id IN (
+                       SELECT id FROM conversations
+                        WHERE space_id=? AND system_scope='space'
+                   )
+                """,
+                (cutoff, s["id"]),
+            )
         return total

@@ -3,7 +3,9 @@
 Marked ``@pytest.mark.security``.
 
 The household chat (``conversations.system_scope = 'household'``) is
-group-DM storage that never leaves this household. A paired household
+group-DM storage that never leaves this household; a space's chat
+(``'space'``) travels only as the v_55 ``SPACE_CHAT_*`` events, never as a
+DM. A paired household
 must not write into it, edit, delete or react to its messages, pull its
 history, push history into it, or re-roster it through any ``DM_*`` event
 — not even when it (somehow) holds a seat row there. The control case
@@ -32,6 +34,7 @@ FET = FederationEventType
 
 PEER = "peer-bob"
 CHAT = "c-household"
+SPACE_CHAT = "c-space"
 PLAIN = "c-plain"
 
 
@@ -50,10 +53,18 @@ def _config(tmp_dir) -> Config:
     )
 
 
-async def _seed_conversation(db, conv_id: str, system_scope: str | None) -> None:
+async def _seed_conversation(
+    db, conv_id: str, system_scope: str | None, space_id: str | None = None
+) -> None:
     await db.enqueue(
-        "INSERT INTO conversations(id, type, system_scope) VALUES(?, ?, ?)",
-        (conv_id, "dm" if system_scope is None else "group_dm", system_scope),
+        "INSERT INTO conversations(id, type, system_scope, space_id)"
+        " VALUES(?, ?, ?, ?)",
+        (
+            conv_id,
+            "dm" if system_scope is None else "group_dm",
+            system_scope,
+            space_id,
+        ),
     )
     await db.enqueue(
         "INSERT INTO conversation_members(conversation_id, username) VALUES(?, 'anna')",
@@ -98,11 +109,28 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
     )
     await _seed_conversation(db, CHAT, "household")
     await _seed_conversation(db, PLAIN, None)
-    for msg_id, sender in (("m-anna", "u-anna"), ("m-bob", "u-bob")):
+    # A space's chat, Bob's household a writer member of the space.
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-1', 'S', 'us', 'anna', ?)",
+        ("ab" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES('sp-1', ?, 'u-bob', 'member')",
+        (PEER,),
+    )
+    await _seed_conversation(db, SPACE_CHAT, "space", "sp-1")
+    for msg_id, sender, conv in (
+        ("m-anna", "u-anna", CHAT),
+        ("m-bob", "u-bob", CHAT),
+        ("s-anna", "u-anna", SPACE_CHAT),
+        ("s-bob", "u-bob", SPACE_CHAT),
+    ):
         await db.enqueue(
             "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
             " content, created_at) VALUES(?,?,?,?,?)",
-            (msg_id, CHAT, sender, "chat", "2026-05-01T10:00:00+00:00"),
+            (msg_id, conv, sender, "chat", "2026-05-01T10:00:00+00:00"),
         )
     sent: list[tuple[str, FederationEventType, dict]] = []
 
@@ -216,7 +244,48 @@ _ATTACKS = [
 ]
 
 
-@pytest.mark.parametrize(("event_type", "payload"), _ATTACKS)
+#: The same attacks aimed at a space's chat: it federates only as the v_55
+#: ``SPACE_CHAT_*`` events (authorship-bound to the space roster), so a DM
+#: event naming its conversation id is refused outright.
+_SPACE_CHAT_ATTACKS = [
+    pytest.param(
+        FET.DM_MESSAGE, _dm(SPACE_CHAT, "s-new"), id="posts into a space chat"
+    ),
+    pytest.param(
+        FET.DM_MESSAGE,
+        _dm(SPACE_CHAT, "s-bob", "rewritten", edited_at="2026-05-02T11:00:00+00:00"),
+        id="edits a space chat message",
+    ),
+    pytest.param(
+        FET.DM_MESSAGE,
+        _dm("c-elsewhere", "s-bob", "moved"),
+        id="re-homes a space chat message id",
+    ),
+    pytest.param(
+        FET.DM_MESSAGE_DELETED,
+        {"conversation_id": SPACE_CHAT, "message_id": "s-anna"},
+        id="deletes a space chat message",
+    ),
+    pytest.param(
+        FET.DM_MESSAGE_REACTION,
+        {
+            "conversation_id": SPACE_CHAT,
+            "message_id": "s-anna",
+            "user_id": "u-bob",
+            "emoji": "👍",
+            "action": "add",
+        },
+        id="reacts in a space chat",
+    ),
+    pytest.param(
+        FET.DM_GROUP_ROSTER,
+        {"conversation_id": SPACE_CHAT, "version": 9, "name": "x", "members": []},
+        id="re-rosters a space chat",
+    ),
+]
+
+
+@pytest.mark.parametrize(("event_type", "payload"), _ATTACKS + _SPACE_CHAT_ATTACKS)
 async def test_dm_events_never_touch_a_system_chat(env, event_type, payload):
     app, db, _ = env
     before = await _state(db)
@@ -227,6 +296,7 @@ async def test_dm_events_never_touch_a_system_chat(env, event_type, payload):
 async def test_history_of_a_system_chat_is_never_handed_out(env):
     app, _, sent = env
     await _send(app, FET.DM_HISTORY_REQUEST, {"conversation_id": CHAT})
+    await _send(app, FET.DM_HISTORY_REQUEST, {"conversation_id": SPACE_CHAT})
     assert sent == []
 
 

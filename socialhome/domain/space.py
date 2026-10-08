@@ -466,6 +466,13 @@ class SpaceFeatures:
     #: because it only makes sense for a school / class space; migration
     #: 0063 added the column with ``DEFAULT 0``.
     timetable: bool = False
+    #: Per-space chat (a system group conversation of the space's writers,
+    #: federated as the v_55 ``SPACE_CHAT_*`` events). Defaults ON — owner
+    #: decision: every space, existing (migration 0083 ``DEFAULT 1``) and
+    #: new, has one; space admins turn it off. Off hides the chat, refuses
+    #: writes and drops inbound chat events; the messages are kept. Older
+    #: peers that omit the field read ON.
+    chat: bool = True
 
     posts_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
     pages_access: SpaceFeatureAccess = SpaceFeatureAccess.OPEN
@@ -659,6 +666,7 @@ class SpaceFeatures:
             gallery=bool(row.get("feature_gallery", 1)),
             bazaar=bool(row.get("feature_bazaar", 1)),
             timetable=bool(row.get("feature_timetable", 0)),
+            chat=bool(row.get("feature_chat", 1)),
             posts_access=SpaceFeatureAccess(row.get("posts_access", "open")),
             pages_access=SpaceFeatureAccess(row.get("pages_access", "open")),
             stickies_access=SpaceFeatureAccess(row.get("stickies_access", "open")),
@@ -684,6 +692,7 @@ class SpaceFeatures:
             "feature_gallery": int(self.gallery),
             "feature_bazaar": int(self.bazaar),
             "feature_timetable": int(self.timetable),
+            "feature_chat": int(self.chat),
             "posts_access": self.posts_access.value,
             "pages_access": self.pages_access.value,
             "stickies_access": self.stickies_access.value,
@@ -722,6 +731,7 @@ class SpaceFeatures:
             "gallery": self.gallery,
             "bazaar": self.bazaar,
             "timetable": self.timetable,
+            "chat": self.chat,
             "posts_access": self.posts_access.value,
             "pages_access": self.pages_access.value,
             "stickies_access": self.stickies_access.value,
@@ -795,6 +805,7 @@ class SpaceFeatures:
             gallery=bool(raw.get("gallery", defaults.gallery)),
             bazaar=bool(raw.get("bazaar", defaults.bazaar)),
             timetable=bool(raw.get("timetable", defaults.timetable)),
+            chat=bool(raw.get("chat", defaults.chat)),
             posts_access=access("posts_access", defaults.posts_access),
             pages_access=access("pages_access", defaults.pages_access),
             stickies_access=access("stickies_access", defaults.stickies_access),

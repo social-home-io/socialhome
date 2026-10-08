@@ -3311,3 +3311,154 @@ async def test_allow_here_mention_toggle_and_here_end_to_end(client):
         for n in notes
         if n["type"] in {"space_here", "space_post_created", "space_mention"}
     ] == []
+
+
+# ── Space chat (GET /api/spaces/{id}/chat + /api/conversations/{id}/…) ───
+
+
+async def _space_chat(client, sid: str, token: str) -> tuple[int, dict]:
+    r = await client.get(f"/api/spaces/{sid}/chat", headers=_auth(token))
+    return r.status, await r.json()
+
+
+async def _chat_space(client, name: str = "Choir") -> str:
+    r = await client.post(
+        "/api/spaces", json={"name": name}, headers=_auth(client._admin_token)
+    )
+    assert r.status == 201, await r.text()
+    return (await r.json())["id"]
+
+
+async def test_space_chat_requires_auth(client):
+    sid = await _chat_space(client)
+    r = await client.get(f"/api/spaces/{sid}/chat")
+    assert r.status == 401
+
+
+async def test_space_members_talk_in_the_space_chat(client):
+    sid = await _chat_space(client)
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    status, mine = await _space_chat(client, sid, client._admin_token)
+    assert status == 200
+    assert mine["enabled"] is True and mine["conversation_id"]
+    assert mine["unread"] == 0 and mine["notif_level"] == "mentions"
+    assert mine["muted_until"] is None and mine["last_read_at"]
+    cid = mine["conversation_id"]
+    status, bobs = await _space_chat(client, sid, client._bob_token)
+    assert bobs["conversation_id"] == cid
+    r = await client.post(
+        f"/api/conversations/{cid}/messages",
+        json={"content": "rehearsal at 7"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 201, await r.text()
+    mid = (await r.json())["id"]
+    assert (await _space_chat(client, sid, client._admin_token))[1]["unread"] == 1
+    r = await client.get(
+        f"/api/conversations/{cid}/messages", headers=_auth(client._admin_token)
+    )
+    assert [m["content"] for m in await r.json()] == ["rehearsal at 7"]
+    # Text only for now.
+    r = await client.post(
+        f"/api/conversations/{cid}/messages",
+        json={"content": "x", "type": "image", "media_url": "api/media/a.webp"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 422
+    # Kept out of the DM inbox.
+    r = await client.get("/api/conversations", headers=_auth(client._bob_token))
+    assert cid not in {c["id"] for c in await r.json()}
+    # The owner moderates: deletes bob's message; bob cannot delete hers.
+    r = await client.post(
+        f"/api/conversations/{cid}/messages",
+        json={"content": "mine"},
+        headers=_auth(client._admin_token),
+    )
+    owner_mid = (await r.json())["id"]
+    r = await client.delete(
+        f"/api/conversations/{cid}/messages/{owner_mid}",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403
+    r = await client.delete(
+        f"/api/conversations/{cid}/messages/{mid}",
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200
+
+
+async def test_space_chat_is_404_for_non_members_and_unknown_spaces(client):
+    sid = await _chat_space(client)
+    status, _ = await _space_chat(client, sid, client._bob_token)
+    assert status == 404
+    status, _ = await _space_chat(client, "sp-nope", client._admin_token)
+    assert status == 404
+    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
+    r = await client.post(
+        f"/api/conversations/{cid}/messages",
+        json={"content": "let me in"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 403
+
+
+async def test_space_chat_is_disabled_for_a_follower(client):
+    sid = await _create_subscribable_space(client, "Broadcast")
+    r = await client.post(
+        f"/api/spaces/{sid}/subscribe", headers=_auth(client._bob_token)
+    )
+    assert r.status in (200, 201), await r.text()
+    status, follower = await _space_chat(client, sid, client._bob_token)
+    assert status == 200
+    assert follower == {
+        "enabled": False,
+        "conversation_id": None,
+        "unread": 0,
+        "notif_level": None,
+        "muted_until": None,
+        "last_read_at": None,
+    }
+    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
+    for call in (
+        client.post(
+            f"/api/conversations/{cid}/messages",
+            json={"content": "hi"},
+            headers=_auth(client._bob_token),
+        ),
+        client.get(
+            f"/api/conversations/{cid}/messages", headers=_auth(client._bob_token)
+        ),
+    ):
+        r = await call
+        assert r.status == 403
+
+
+async def test_a_space_admin_turns_the_chat_off_and_on(client):
+    sid = await _chat_space(client)
+    assert (await _features(client, sid))["chat"] is True
+    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
+    await _promote_bob_to_admin(client, sid)
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"chat": False}},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200, await r.text()
+    assert (await _features(client, sid))["chat"] is False
+    status, off = await _space_chat(client, sid, client._admin_token)
+    assert status == 200 and off["enabled"] is False
+    r = await client.post(
+        f"/api/conversations/{cid}/messages",
+        json={"content": "hi"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 403
+    assert (await r.json())["error"]["code"] == "FEATURE_DISABLED"
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"chat": True}},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    status, on = await _space_chat(client, sid, client._admin_token)
+    assert on["enabled"] is True and on["conversation_id"] == cid

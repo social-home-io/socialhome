@@ -2602,6 +2602,7 @@
   "capability.forwarded_invite_links": "Invite links from member households",
   "capability.shared_gfs_relay": "Reaching a paired household through a shared GFS",
   "capability.gfs_fallback_later": "Turning on the GFS fallback later",
+  "capability.space_chat": "Chat in spaces",
   "settings.tab.security": "Security",
   "settings.could_not_save": "Could not save: {error}",
   "settings.profile.save_failed": "Save failed: {error}",

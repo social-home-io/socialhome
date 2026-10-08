@@ -2290,6 +2290,7 @@
   "capability.forwarded_invite_links": "Uitnodigingslinks van lid-huishoudens",
   "capability.shared_gfs_relay": "Een gekoppeld huishouden bereiken via een gedeelde GFS",
   "capability.gfs_fallback_later": "De GFS-terugvaloptie later aanzetten",
+  "capability.space_chat": "Chat in ruimtes",
   "settings.tab.security": "Beveiliging",
   "settings.could_not_save": "Kon niet opslaan: {error}",
   "settings.profile.save_failed": "Opslaan mislukt: {error}",

@@ -187,3 +187,73 @@ async def test_mirrored_space_is_never_pruned_here(env):
         for r in await db.fetchall("SELECT id, deleted FROM space_posts")
     }
     assert rows == {"mirror-old": 0, "hosted-old": 1}
+
+
+async def _seed_chat(db, space_id, conv_id, msgs):
+    await db.enqueue(
+        "INSERT INTO conversations(id, type, system_scope, space_id)"
+        " VALUES(?, 'group_dm', 'space', ?)",
+        (conv_id, space_id),
+    )
+    for msg_id, days_old in msgs:
+        created = (datetime.now(timezone.utc) - timedelta(days=days_old)).isoformat()
+        await db.enqueue(
+            "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+            " content, created_at) VALUES(?, ?, 'u-author', 'hi', ?)",
+            (msg_id, conv_id, created),
+        )
+
+
+async def _chat_rows(db) -> dict[str, tuple[int, str]]:
+    return {
+        r["id"]: (r["deleted"], r["content"])
+        for r in await db.fetchall(
+            "SELECT id, deleted, content FROM conversation_messages"
+        )
+    }
+
+
+async def test_space_chat_messages_past_retention_are_soft_deleted(env):
+    """The space chat (v_55) follows the space's retention: old messages are
+    cleared (content gone, row kept), fresh ones stay."""
+    db = env
+    await _seed_chat(db, "sp-1", "chat-1", [("c-old", 10), ("c-new", 1)])
+    n = await SpaceRetentionScheduler(db, own_instance_id="iid")._prune_once()
+    assert n == 1
+    assert await _chat_rows(db) == {"c-old": (1, ""), "c-new": (0, "hi")}
+
+
+async def test_space_chat_is_pruned_on_a_member_household_too(env):
+    """Each household keeps its own copy of a space's chat, so a mirrored
+    space's chat is pruned here as well (unlike its posts)."""
+    db = env
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
+        "identity_public_key, retention_days, retention_exempt_json) "
+        "VALUES('sp-mirror', 't', 'other-iid', 'u', ?, 7, '[]')",
+        ("bb" * 32,),
+    )
+    await _seed_chat(db, "sp-mirror", "chat-m", [("m-old", 10)])
+    n = await SpaceRetentionScheduler(db, own_instance_id="iid")._prune_once()
+    assert n == 1
+    assert await _chat_rows(db) == {"m-old": (1, "")}
+
+
+async def test_space_chat_without_retention_and_dms_are_untouched(env):
+    db = env
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
+        "identity_public_key) VALUES('sp-keep', 't', 'iid', 'u', ?)",
+        ("cc" * 32,),
+    )
+    await _seed_chat(db, "sp-keep", "chat-k", [("k-old", 400)])
+    await db.enqueue("INSERT INTO conversations(id, type) VALUES('dm-1', 'dm')")
+    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    await db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, created_at) VALUES('dm-old', 'dm-1', 'u-author', 'hi', ?)",
+        (old,),
+    )
+    n = await SpaceRetentionScheduler(db, own_instance_id="iid")._prune_once()
+    assert n == 0
+    assert await _chat_rows(db) == {"k-old": (0, "hi"), "dm-old": (0, "hi")}

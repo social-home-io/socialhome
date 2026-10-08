@@ -79,3 +79,32 @@ async def test_include_actor_keeps_the_actors_other_tabs():
         _Convos(system=True), _Users(), "c", actor_user_id="u-anna", include_actor=True
     )
     assert got == ("u-anna", "u-bob", "u-mia")
+
+
+class _Policy:
+    """Live access: ``mia`` may no longer read (demoted to follower)."""
+
+    async def can_read(self, conv, user_id):
+        return user_id != "u-mia"
+
+
+async def test_system_chat_policy_drops_who_may_no_longer_read():
+    got = await local_audience(
+        _Convos(system=True),
+        _Users(),
+        "c",
+        actor_user_id="u-anna",
+        policy=_Policy(),  # type: ignore[arg-type]
+    )
+    assert got == ("u-bob",)
+
+
+async def test_policy_is_ignored_for_a_plain_dm():
+    got = await local_audience(
+        _Convos(system=False),
+        _Users(),
+        "c",
+        actor_user_id="u-anna",
+        policy=_Policy(),  # type: ignore[arg-type]
+    )
+    assert "u-mia" in got
