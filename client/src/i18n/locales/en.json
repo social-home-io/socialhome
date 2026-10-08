@@ -2221,7 +2221,7 @@
   "connections.your_version": "Your app version: v{v}",
   "connections.transport.direct": "Direct",
   "connections.transport.direct_title": "Direct connection, fast",
-  "connections.transport.internet": "Over the internet (slower)",
+  "connections.transport.internet": "Over the internet",
   "connections.transport.internet_title": "Over the internet. Works, but slower than direct.",
   "connections.transport.gfs": "Through the GFS",
   "connections.transport.unknown": "Connection unknown",

@@ -1931,7 +1931,7 @@
   "connections.your_version": "Tu versión de la app: v{v}",
   "connections.transport.direct": "Directa",
   "connections.transport.direct_title": "Conexión directa, rápida",
-  "connections.transport.internet": "Por internet (más lenta)",
+  "connections.transport.internet": "Por internet",
   "connections.transport.internet_title": "Por internet. Funciona, pero es más lenta que la directa.",
   "connections.transport.gfs": "A través del GFS",
   "connections.transport.unknown": "Conexión desconocida",

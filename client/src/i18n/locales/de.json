@@ -1909,7 +1909,7 @@
   "connections.your_version": "Deine App-Version: v{v}",
   "connections.transport.direct": "Direkt",
   "connections.transport.direct_title": "Direkte Verbindung, schnell",
-  "connections.transport.internet": "Über das Internet (langsamer)",
+  "connections.transport.internet": "Über das Internet",
   "connections.transport.internet_title": "Über das Internet. Funktioniert, ist aber langsamer als direkt.",
   "connections.transport.gfs": "Über den GFS",
   "connections.transport.unknown": "Verbindung unbekannt",

@@ -1904,7 +1904,7 @@
   "connections.your_version": "Jouw app-versie: v{v}",
   "connections.transport.direct": "Direct",
   "connections.transport.direct_title": "Directe verbinding, snel",
-  "connections.transport.internet": "Via internet (langzamer)",
+  "connections.transport.internet": "Via internet",
   "connections.transport.internet_title": "Via internet. Werkt, maar langzamer dan direct.",
   "connections.transport.gfs": "Via de GFS",
   "connections.transport.unknown": "Verbinding onbekend",
