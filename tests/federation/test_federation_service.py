@@ -4282,6 +4282,63 @@ async def test_a_paired_peer_reached_only_through_the_relay_is_not_marked_reacha
     assert svc.last_relay_accepted_at(inst.id) is not None
 
 
+class _TooLargeRelay:
+    async def send(self, *, instance, envelope_dict, gfs_url=None):
+        return False, 413
+
+
+@pytest.mark.asyncio
+async def test_a_too_large_fallback_relay_still_queues_the_envelope():
+    """Review fix: inbox down (network error) + relay refuses the frame as
+    too large → the envelope must be QUEUED for HTTPS retry, and the peer
+    marked unreachable, exactly as before the relay tier existed. Too-large
+    is permanent only when the relay is the peer's sole tier."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, _ = _make_remote_instance(km)
+    inst = dataclasses.replace(
+        inst,
+        source=InstanceSource.MANUAL,
+        gfs_relay=True,
+        remote_keywrap_pk="cc" * 32,
+    )
+    await fed_repo.save_instance(inst)
+    outbox = InMemoryOutboxRepo()
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox,
+        key_manager=km,
+    )
+
+    async def _routes(_instance_id: str) -> list[str]:
+        return ["https://gfs.example.org"]
+
+    async def _no_signal(*_a, **_kw):
+        return None
+
+    transport = FederationTransport(
+        own_instance_id=svc.own_instance_id,
+        https_inbox=_DownInbox(),
+        gfs_relay=_TooLargeRelay(),
+        gfs_routes=_routes,
+        signaling_send=_no_signal,
+    )
+    transport.mark_ice_primed()
+    transport._rtc_suppressed_until[inst.id] = float("inf")
+    svc.attach_transport(transport)
+
+    result = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.USER_UPDATED,
+        payload={"user_id": "abc"},
+    )
+
+    assert result.ok is False
+    assert result.error == DELIVERY_ERROR_QUEUED
+    assert fed_repo.unreachable_calls == [inst.id]
+    assert [e["instance_id"] for e in outbox.enqueued] == [inst.id]
+
+
 @pytest.mark.asyncio
 async def test_a_relay_acceptance_is_remembered_for_the_operator():
     """Acceptance is not delivery, but it is not nothing either: the

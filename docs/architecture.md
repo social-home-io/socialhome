@@ -248,9 +248,13 @@ selects it in two cases:
   for the peer (`peer_gfs_routes`; only active connections count); sends
   round-robin over them with a per-peer in-memory index, trying each route
   at most once, so one send can still land when one server is down. A
-  throttled server moves on to the next route and, if none accepts,
-  surfaces as the waitable `relay_throttled`; a too-large frame stops at
-  once. With no URL the RTC offer is still kicked — it rides the relay
+  throttled server moves on to the next route; a too-large frame stops at
+  once. As a fallback only an acceptance counts: any relay failure
+  reports the original HTTPS failure, so the envelope is queued for
+  retry and the peer marked unreachable exactly as without the relay.
+  Only where the relay is the sole tier (no inbox URL) does a throttle
+  surface as the waitable `relay_throttled` and a too-large frame as
+  permanent. With no URL the RTC offer is still kicked — it rides the relay
   like any other envelope, so a DataChannel can come up later. The outbox
   redelivery reaches the same selection point
   (`FederationTransport.send_via_gfs_relay`). Without the opt-in or a

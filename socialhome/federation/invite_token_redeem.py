@@ -47,7 +47,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-
 from ..domain.events import SpaceRemoteSeatLive
 from ..domain.federation import (
     FederationEventType,

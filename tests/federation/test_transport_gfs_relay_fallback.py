@@ -417,3 +417,46 @@ async def test_send_via_gfs_relay_for_a_link_joined_peer_uses_relay_via():
     assert result.ok is True
     # No explicit route: the relay tier reads ``relay_via`` itself.
     assert [c[0] for c in relay.calls] == [None]
+
+
+# ─── Fallback failures surface as the HTTPS failure (review fix) ─────────
+
+
+@pytest.mark.parametrize(
+    "relay_result",
+    [
+        (False, RELAY_STATUS_TOO_LARGE),
+        (False, RELAY_STATUS_THROTTLED),
+        (False, None),
+    ],
+    ids=["too-large", "throttled", "failed"],
+)
+async def test_a_failed_fallback_relay_reports_the_original_https_failure(
+    relay_result,
+):
+    """After the inbox was not reached, the relay is a bonus attempt: its
+    failure must not turn a transient HTTPS outage into a permanent
+    (too-large: not queued) or waitable (throttled: no unreachable mark)
+    outcome. The caller sees the HTTPS failure and queues as before."""
+    relay = _Relay({ROUTE_A: relay_result})
+    t = _transport(https=_Https(ok=False, status=503), relay=relay, routes=(ROUTE_A,))
+
+    result = await t.send(instance=_paired(), envelope_dict={"msg_id": "m"})
+
+    assert len(relay.calls) == 1
+    assert result.ok is False
+    assert result.via == "https"
+    assert result.status_code == 503
+    assert result.error == "https_inbox_failed"
+
+
+async def test_a_404_from_the_inbox_is_not_relayed():
+    """404 is the peer's Social Home (or its front) answering — the outbox
+    treats it as the pair-window race, never a reason to switch carrier."""
+    https, relay = _Https(ok=False, status=404), _Relay()
+    t = _transport(https=https, relay=relay, routes=(ROUTE_A,))
+
+    result = await t.send(instance=_paired(), envelope_dict={"msg_id": "m"})
+
+    assert result.via == "https" and result.status_code == 404
+    assert relay.calls == []

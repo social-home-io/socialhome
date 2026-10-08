@@ -1214,3 +1214,28 @@ async def test_gfs_routes_cascade_with_the_gfs_connection(env):
     await env.fed_repo.upsert_gfs_route("peer-gfs", "gfs-1", now="t1")
     await SqliteGfsConnectionRepo(env.db).delete("gfs-1")
     assert await env.fed_repo.list_gfs_routes("peer-gfs") == []
+
+
+async def test_save_instance_without_a_keywrap_key_keeps_the_stored_one(env):
+    """A rebuild-and-save that does not carry the key (the pairing confirm
+    rebuilds the row from scratch) must not wipe it while the relay opt-in
+    stays on — the relay would then have nothing to seal to."""
+    await env.fed_repo.save_instance(_peer(remote_keywrap_pk="cc" * 32))
+    await env.fed_repo.set_gfs_relay("peer-gfs", enabled=True)
+    await env.fed_repo.save_instance(_peer(remote_keywrap_pk=None))
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None
+    assert got.remote_keywrap_pk == "cc" * 32
+    assert got.gfs_relay is True
+
+
+async def test_save_instance_with_a_new_keywrap_key_replaces_it(env):
+    """A space-session re-seat brings a freshly verified key — it wins."""
+    await env.fed_repo.save_instance(
+        _peer(source=InstanceSource.SPACE_SESSION, remote_keywrap_pk="cc" * 32),
+    )
+    await env.fed_repo.save_instance(
+        _peer(source=InstanceSource.SPACE_SESSION, remote_keywrap_pk="dd" * 32),
+    )
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None and got.remote_keywrap_pk == "dd" * 32

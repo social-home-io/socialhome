@@ -425,9 +425,9 @@ def make_check_relay_opt_in() -> InboundStep:
     opted into the relay with it.
 
     An envelope that the connection-server relay carried
-    (:data:`TRANSPORT_GFS_RELAY`) from a
-    :data:`~socialhome.domain.federation.InstanceSource.MANUAL` peer whose
-    ``gfs_relay`` opt-in is off is refused: the relay fallback is a
+    (:data:`TRANSPORT_GFS_RELAY`) from any peer other than a
+    :data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION` one
+    whose ``gfs_relay`` opt-in is off is refused (fail closed): the relay fallback is a
     per-pair decision of this household, and a peer must not be able to
     move the pair onto a connection server on its own. A row without the
     attribute counts as not opted in (fail closed).
@@ -442,7 +442,10 @@ def make_check_relay_opt_in() -> InboundStep:
     async def check_relay_opt_in(ctx: InboundContext) -> None:
         if ctx.transport != TRANSPORT_GFS_RELAY:
             return
-        if getattr(ctx.instance, "source", None) is not InstanceSource.MANUAL:
+        # Fail closed: only a link-joined row (relay-only by construction)
+        # is exempt; every other source — today ``manual``, tomorrow
+        # whatever is added — needs the explicit opt-in.
+        if getattr(ctx.instance, "source", None) is InstanceSource.SPACE_SESSION:
             return
         if getattr(ctx.instance, "gfs_relay", False) is True:
             return

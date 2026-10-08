@@ -1885,9 +1885,14 @@ class FederationTransport:
         if not ok and instance.gfs_relay and https_failure_is_relayable(status):
             # Last-resort tier for a paired peer that opted in: the inbox
             # did not answer, so try our confirmed relay routes before
-            # queueing the envelope for the outbox.
+            # queueing the envelope for the outbox. Only an ACCEPTANCE is
+            # returned: a relay failure here (too large, throttled, down)
+            # must not replace the HTTPS outcome — the inbox may come back,
+            # so the caller still marks the peer unreachable and queues the
+            # envelope for retry exactly as without the relay tier.
+            # Too-large is permanent only where the relay is the sole tier.
             relayed = await self._send_over_routes(instance, envelope_dict)
-            if relayed is not None:
+            if relayed is not None and relayed.ok:
                 return relayed
         return _TransportSendResult(
             ok=ok,

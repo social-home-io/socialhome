@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from .pending_seat_buffer import PendingSeatBuffer
     from .route_discovery import RouteDiscoveryService
     from .routed_envelope import SpaceRoutedHandler
+    from .transport import FederationTransport
 
 from ..crypto import (
     REPLAY_CACHE_WINDOW,
@@ -789,7 +790,7 @@ class FederationService:
         )
 
     @property
-    def transport(self):
+    def transport(self) -> "FederationTransport | None":
         """The attached :class:`FederationTransport` facade, or ``None``.
 
         Read by the outbox redelivery, which reaches the relay tier

@@ -721,6 +721,21 @@ async def test_relay_gate_treats_a_row_without_the_flag_as_not_opted_in():
         )
 
 
+@pytest.mark.parametrize("source", [None, "manual", "something-new"])
+async def test_relay_gate_fails_closed_for_any_source_but_space_session(source):
+    """Only a link-joined row is exempt; a row of any other (or unknown)
+    class needs the explicit opt-in."""
+    step = make_check_relay_opt_in()
+    with pytest.raises(ValueError):
+        await step(
+            InboundContext(
+                envelope=_minimal_envelope(),
+                instance=_RelayInstance(source, gfs_relay=False),
+                transport=TRANSPORT_GFS_RELAY,
+            )
+        )
+
+
 async def test_relay_gate_runs_after_the_lookup_and_before_any_crypto():
     """Mutation guard: the gate has to be IN the chain, where it can read
     the row and before the signature work it saves."""

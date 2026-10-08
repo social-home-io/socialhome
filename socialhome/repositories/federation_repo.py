@@ -932,7 +932,12 @@ ON CONFLICT(id) DO UPDATE SET
     sig_suite=excluded.sig_suite,
     intro_relay_enabled=excluded.intro_relay_enabled,
     relay_via=excluded.relay_via,
-    remote_keywrap_pk=excluded.remote_keywrap_pk,
+    -- A rebuild-and-save that does not carry the key (the pairing confirm
+    -- rebuilds the row) must not wipe it; a re-seat with a new verified key
+    -- still replaces it.
+    remote_keywrap_pk=COALESCE(
+        excluded.remote_keywrap_pk, remote_instances.remote_keywrap_pk
+    ),
     home_lat=excluded.home_lat,
     home_lon=excluded.home_lon,
     paired_at=excluded.paired_at,

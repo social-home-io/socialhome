@@ -74,6 +74,13 @@ log = logging.getLogger(__name__)
 #: reset afterwards. ``None`` outside a relayed dispatch (RTC, HTTPS inbox)
 #: or when the delivering server is not one of our active connections.
 #: Local-only: it names OUR row, and never goes on a wire.
+#:
+#: Read it SYNCHRONOUSLY inside the event handler. A task spawned during
+#: the dispatch (``asyncio.create_task``) runs in a *copy* of the context
+#: taken at spawn time — it would still see the value, but only by
+#: accident of timing, and a task scheduled from elsewhere (the outbox, a
+#: bus subscriber running later) sees ``None``. Capture the value into a
+#: local first and pass it along explicitly.
 RELAY_DELIVERED_VIA: ContextVar[str | None] = ContextVar(
     "gfs_relay_delivered_via",
     default=None,
