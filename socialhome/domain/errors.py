@@ -29,6 +29,7 @@ __all__ = [
     "ImageUnreadableError",
     "InvalidMediaRefError",
     "PayloadTooLargeError",
+    "SpaceNotPublishableError",
 ]
 
 ParamValue = str | int | float | bool
@@ -120,3 +121,16 @@ class InvalidMediaRefError(CodedError, ValueError):
             f"{field} must be a file uploaded via /api/media/upload",
             params={"field": field},
         )
+
+
+class SpaceNotPublishableError(CodedError):
+    """Only a public or global space may be listed on a GFS.
+
+    A private or household space never leaves its member households, so
+    publishing one would put its name, description and cover in a GFS
+    directory. Raised before anything is sent to the GFS.
+    """
+
+    status = 409
+    code = "SPACE_NOT_PUBLIC"
+    detail = "Only public and global spaces can be published to a GFS."

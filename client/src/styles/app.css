@@ -15697,6 +15697,9 @@ a.sh-link-preview-link:focus-visible {
   flex-wrap: wrap;
 }
 .sh-ha-user-row:last-child, .sh-federation-row:last-child, .sh-token-row:last-child { border-bottom: none; }
+/* A note inside the federation list (tier note, held-connection note) lines
+ * up with the rows instead of sitting on the box's edge. */
+.sh-federation-list > p.sh-muted { margin: 0; padding: var(--sh-space-sm) var(--sh-space-md); }
 .sh-ha-user-info, .sh-federation-actions { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .sh-ha-user-name { font-weight: 600; }
 .sh-federation-actions { display: flex; flex-direction: row; gap: var(--sh-space-xs); justify-content: flex-end; flex: 0 0 auto; }

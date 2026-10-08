@@ -2430,6 +2430,17 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             was_global=was_global,
             is_global=will_be_global,
         )
+        new_type = new_fields.get("space_type")
+        if (
+            self._gfs is not None
+            and new_type is not None
+            and new_type not in PUBLIC_SPACE_TIERS
+            and space.space_type is SpaceType.PUBLIC
+        ):
+            # A PUBLIC space may have been published to a GFS by hand; once it
+            # is private or household it must not stay listed. (A GLOBAL space
+            # is withdrawn everywhere by ``_auto_publish_on_type`` above.)
+            await self._gfs.unpublish_space_from_listed(space_id)
         if (
             directory_state_changed
             and was_global

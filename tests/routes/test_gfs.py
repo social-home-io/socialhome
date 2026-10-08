@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import aiohttp
+import pytest
 
 from socialhome.app import create_app
 from socialhome.app_keys import (
@@ -118,7 +119,9 @@ async def _seed_gfs(client, gfs_id: str = "gfs-1", *, status: str = "active"):
     await repo.save(_make_conn(gfs_id, status=status))
 
 
-async def _seed_space(client, space_id: str = "sp-1") -> None:
+async def _seed_space(
+    client, space_id: str = "sp-1", space_type: str = "public"
+) -> None:
     """Create a real local space row so publish can build + sign a body.
 
     The GFS now mandates a signed publish body, so the HFS refuses to
@@ -128,8 +131,8 @@ async def _seed_space(client, space_id: str = "sp-1") -> None:
     await client._db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
         "identity_public_key, space_type) "
-        "VALUES(?, 'Space One', 'iid', 'admin', ?, 'household')",
-        (space_id, "aa" * 32),
+        "VALUES(?, 'Space One', 'iid', 'admin', ?, ?)",
+        (space_id, "aa" * 32, space_type),
     )
 
 
@@ -549,6 +552,23 @@ async def test_publish_returns_publication_with_status(client):
     assert body["gfs_connection_id"] == "gfs-1"
     assert body["status"] == "pending"
     assert "published_at" in body
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("space_type", ["private", "household"])
+async def test_publish_refuses_a_space_outside_the_public_tiers(client, space_type):
+    """Only public and global spaces may be listed on a GFS; anything else
+    is a 409 SPACE_NOT_PUBLIC and nothing is sent to the GFS."""
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-priv", space_type=space_type)
+    _stub_session(client, status=200, body={"status": "active"})
+    r = await client.post(
+        "/api/spaces/sp-priv/publish/gfs-1",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 409
+    body = await r.json()
+    assert body["error"]["code"] == "SPACE_NOT_PUBLIC"
 
 
 async def test_publish_unknown_space_is_rejected(client):

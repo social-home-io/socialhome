@@ -29,13 +29,14 @@ function makeSpace(overrides: Partial<{
   archived: boolean
   archived_reason: 'dissolved' | 'removed' | null
   has_remote_households: boolean
+  space_type: 'private' | 'household' | 'public' | 'global'
 }> = {}) {
   return {
     id: 's-1',
     name: 'Trip group',
     description: '',
     emoji: null,
-    space_type: 'private' as const,
+    space_type: overrides.space_type ?? ('private' as const),
     join_mode: 'invite_only' as const,
     features: overrides.features ?? {
       calendar: true, todo: true, location: false,
@@ -523,6 +524,60 @@ describe('SpaceSettings', () => {
     )
   })
 
+  function gfsWith(published: boolean) {
+    apiMock.get.mockReset()
+    apiMock.get.mockImplementation((url: string) => {
+      if (url.includes('/connections')) {
+        return Promise.resolve([
+          { id: 'gfs-1', gfs_instance_id: 'i1', display_name: 'Town GFS',
+            inbox_url: 'https://gfs.example.com', status: 'active',
+            paired_at: '', published_space_count: published ? 1 : 0 },
+        ])
+      }
+      return Promise.resolve(published
+        ? [{ space_id: 's-1', gfs_connection_id: 'gfs-1',
+             published_at: '2026-06-06T00:00:00+00:00', status: 'active' }]
+        : [])
+    })
+  }
+
+  it.each(['private', 'household'] as const)(
+    'a %s space offers no Publish button and says why', async (tier) => {
+      gfsWith(false)
+      const { container, queryByTestId } = render(
+        <SpaceSettings space={makeSpace({ space_type: tier })} onUpdate={() => {}} />,
+      )
+      await new Promise(r => setTimeout(r, 0))
+      const publishBtns = Array.from(container.querySelectorAll('button'))
+        .filter(b => b.textContent === 'gfs.publish')
+      expect(publishBtns).toHaveLength(0)
+      expect(queryByTestId('gfs-publish-tier-note')).toBeTruthy()
+    })
+
+  it('a private space that is still listed can be unpublished', async () => {
+    gfsWith(true)
+    const { container } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'private' })} onUpdate={() => {}} />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    const unpublish = Array.from(container.querySelectorAll('button'))
+      .filter(b => b.textContent === 'gfs.unpublish')
+    expect(unpublish).toHaveLength(1)
+  })
+
+  it.each(['public', 'global'] as const)(
+    'a %s space keeps its Publish button and shows no tier note', async (tier) => {
+      gfsWith(false)
+      const { container, queryByTestId } = render(
+        <SpaceSettings space={makeSpace({ space_type: tier })} onUpdate={() => {}} />,
+      )
+      await new Promise(r => setTimeout(r, 0))
+      const publishBtns = Array.from(container.querySelectorAll('button'))
+        .filter(b => b.textContent === 'gfs.publish')
+      expect(publishBtns).toHaveLength(1)
+      expect(queryByTestId('gfs-publish-tier-note')).toBeNull()
+    })
+
   it('does NOT render a Publish button for a non-active (pending) GFS', async () => {
     apiMock.get.mockReset()
     apiMock.get.mockImplementation((url: string) => {
@@ -538,7 +593,7 @@ describe('SpaceSettings', () => {
       }
       return Promise.resolve([]) // nothing published
     })
-    const space = makeSpace()
+    const space = makeSpace({ space_type: 'public' })
     const { container, queryByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )
@@ -571,7 +626,7 @@ describe('SpaceSettings', () => {
       space_id: 's-1', gfs_connection_id: 'gfs-1',
       published_at: '2026-06-06T00:00:00+00:00', status: 'pending',
     })
-    const space = makeSpace()
+    const space = makeSpace({ space_type: 'public' })
     const { container, getByText, queryByText } = render(
       <SpaceSettings space={space} onUpdate={() => {}} />,
     )

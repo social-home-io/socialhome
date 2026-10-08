@@ -318,3 +318,83 @@ async def test_subscribers_flag_on_a_household_space_does_not_publish(stack):
         features=SpaceFeatures(allow_subscribers=True),
     )
     gfs.publish_space_to_all.assert_not_awaited()
+
+
+async def test_public_space_turning_private_is_withdrawn_from_listing_gfs(stack):
+    """A PUBLIC space may have been published to a GFS by hand; once it is
+    private it must not stay listed. Only the GFSes that list it are told."""
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Club",
+        lat=47.0,
+        lon=8.0,
+        space_type=SpaceType.PUBLIC,
+    )
+    await svc.update_config(
+        space.id, actor_username="alice", space_type=SpaceType.PRIVATE
+    )
+    gfs.unpublish_space_from_listed.assert_awaited_once_with(space.id)
+    gfs.unpublish_space_from_all.assert_not_awaited()
+
+
+async def test_public_space_turning_household_is_withdrawn(stack):
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Club",
+        lat=47.0,
+        lon=8.0,
+        space_type=SpaceType.PUBLIC,
+    )
+    await svc.update_config(
+        space.id, actor_username="alice", space_type=SpaceType.HOUSEHOLD
+    )
+    gfs.unpublish_space_from_listed.assert_awaited_once_with(space.id)
+
+
+async def test_public_space_turning_global_is_not_withdrawn(stack):
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Club",
+        lat=47.0,
+        lon=8.0,
+        space_type=SpaceType.PUBLIC,
+    )
+    await svc.update_config(
+        space.id, actor_username="alice", space_type=SpaceType.GLOBAL
+    )
+    gfs.unpublish_space_from_listed.assert_not_awaited()
+    gfs.publish_space_to_all.assert_awaited_once_with(space.id)
+
+
+async def test_global_space_turning_private_uses_the_global_withdrawal_only(stack):
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Club",
+        lat=47.0,
+        lon=8.0,
+        space_type=SpaceType.GLOBAL,
+    )
+    await svc.update_config(
+        space.id, actor_username="alice", space_type=SpaceType.PRIVATE
+    )
+    gfs.unpublish_space_from_all.assert_awaited_once_with(space.id)
+    gfs.unpublish_space_from_listed.assert_not_awaited()
+
+
+async def test_private_space_turning_public_is_not_withdrawn(stack):
+    svc, gfs = stack
+    space = await svc.create_space(
+        owner_username="alice",
+        name="Club",
+        lat=47.0,
+        lon=8.0,
+        space_type=SpaceType.PRIVATE,
+    )
+    await svc.update_config(
+        space.id, actor_username="alice", space_type=SpaceType.PUBLIC
+    )
+    gfs.unpublish_space_from_listed.assert_not_awaited()

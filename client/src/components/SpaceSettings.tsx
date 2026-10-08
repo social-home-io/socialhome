@@ -299,6 +299,8 @@ export function SpaceSettings({
   // and a space already strict keeps it visible so the owner can always
   // switch back. A private space: exactly while it uses the connection
   // server (the live switch above); with it off the choice means nothing.
+  // Only these tiers may be listed on a GFS directory.
+  const publishableTier = space.space_type === 'public' || space.space_type === 'global'
   const showGfsPublishMode = isOwner && (
     isPrivate
       ? privateGfs.value
@@ -1133,6 +1135,11 @@ export function SpaceSettings({
         <p class="sh-muted">{t('space.no_gfs_connections')}</p>
       ) : (
         <div class="sh-federation-list">
+          {!publishableTier && (
+            <p class="sh-muted" data-testid="gfs-publish-tier-note">
+              {t('space.gfs_publish_needs_public')}
+            </p>
+          )}
           {/* You can only publish to a GFS that has accepted your household
               (``active``); pending/suspended connections get no publish row.
               The backend now returns those non-active connections too, so we
@@ -1199,13 +1206,18 @@ export function SpaceSettings({
                 )}
                 <div class="sh-federation-actions">
                   <span class={statusClass}>{statusLabel}</span>
-                  <Button
-                    variant={published ? 'danger' : 'primary'}
-                    loading={inFlight}
-                    onClick={() => togglePublish(space.id, gfs.id)}
-                  >
-                    {published ? t('gfs.unpublish') : t('gfs.publish')}
-                  </Button>
+                  {/* Only public / global spaces may be listed on a GFS (the
+                      server refuses the rest with SPACE_NOT_PUBLIC). An old
+                      listing can still be withdrawn. */}
+                  {(published || publishableTier) && (
+                    <Button
+                      variant={published ? 'danger' : 'primary'}
+                      loading={inFlight}
+                      onClick={() => togglePublish(space.id, gfs.id)}
+                    >
+                      {published ? t('gfs.unpublish') : t('gfs.publish')}
+                    </Button>
+                  )}
                 </div>
               </div>
             )
