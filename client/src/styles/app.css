@@ -3993,6 +3993,28 @@ button.sh-friends-member-chip:not(:disabled):hover {
   }
 }
 
+/* A thread embedded in another surface (``ConversationView embedded``)
+ * fills the box its host gives it instead of the routed page's
+ * viewport math above — the host decides the height. ``min-height: 0``
+ * lets it shrink inside a flex column so ``.sh-messages`` scrolls
+ * rather than the host. Placed after the mobile override so it wins
+ * at every width; the routed page never carries the class. */
+.sh-thread--embedded {
+  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.sh-thread--left {
+  align-items: center;
+  justify-content: center;
+  padding: var(--sh-space-lg);
+}
+.sh-thread-left-note {
+  margin: 0;
+  color: var(--sh-text-muted);
+  text-align: center;
+}
+
 /* When the user is INSIDE a single chat (``body.sh-dm-thread-open``
  * is set by :class:`DmThreadPage`), the chat claims the whole space
  * below the sticky topbar on every viewport — full-bleed on phones

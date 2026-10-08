@@ -305,3 +305,153 @@ describe('ConversationView', () => {
     expect(route).not.toHaveBeenCalled()
   })
 })
+
+describe('ConversationView — dm.active ownership', () => {
+  const activeCalls = (send: ReturnType<typeof vi.fn>) =>
+    send.mock.calls.filter(c => c[0] === 'dm.active').map(c => c[1])
+
+  it('the last view to open claims it; an earlier one unmounting leaves the claim alone', async () => {
+    const { render, ConversationView } = await setup()
+    const { ws } = await import('@/ws')
+    const send = ws.send as unknown as ReturnType<typeof vi.fn>
+    send.mockClear()
+    const first = render(<ConversationView conversationId="conv-a" embedded />)
+    const second = render(<ConversationView conversationId="conv-b" embedded />)
+    expect(activeCalls(send).at(-1)).toEqual({ conversation_id: 'conv-b' })
+
+    send.mockClear()
+    first.unmount()
+    // conv-b is still on screen — the backend must keep suppressing it.
+    expect(activeCalls(send)).toEqual([])
+
+    second.unmount()
+    expect(activeCalls(send)).toEqual([{ conversation_id: null }])
+  })
+
+  it('the owner unmounting clears it', async () => {
+    const { render, ConversationView } = await setup()
+    const { ws } = await import('@/ws')
+    const send = ws.send as unknown as ReturnType<typeof vi.fn>
+    send.mockClear()
+    const only = render(<ConversationView conversationId="conv-a" />)
+    expect(activeCalls(send)).toEqual([{ conversation_id: 'conv-a' }])
+    send.mockClear()
+    only.unmount()
+    expect(activeCalls(send)).toEqual([{ conversation_id: null }])
+  })
+})
+
+describe('ConversationView — composer emoji picker', () => {
+  const pickerOpen = (root: Element) =>
+    root.querySelector('.sh-composer-emoji-inline')?.getAttribute('aria-expanded') === 'true'
+
+  it('does not pop back open when returning to a thread', async () => {
+    const { render, waitFor, fireEvent, ConversationView } = await setup()
+    const { container, rerender } = render(
+      <ConversationView conversationId="conv-a" embedded />,
+    )
+    await waitFor(() => {
+      expect(container.querySelector('.sh-composer-emoji-inline')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    fireEvent.click(container.querySelector('.sh-composer-emoji-inline')!)
+    await waitFor(() => { expect(pickerOpen(container)).toBe(true) })
+
+    rerender(<ConversationView conversationId="conv-b" embedded />)
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('BOB-conv-b')
+    }, { timeout: RENDER_WAIT })
+    rerender(<ConversationView conversationId="conv-a" embedded />)
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('BOB-conv-a')
+    }, { timeout: RENDER_WAIT })
+    expect(pickerOpen(container)).toBe(false)
+  })
+
+  it('does not pop back open after the view unmounts and remounts', async () => {
+    const { render, waitFor, fireEvent, ConversationView } = await setup()
+    const first = render(<ConversationView conversationId="conv-a" embedded />)
+    await waitFor(() => {
+      expect(first.container.querySelector('.sh-composer-emoji-inline')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    fireEvent.click(first.container.querySelector('.sh-composer-emoji-inline')!)
+    await waitFor(() => { expect(pickerOpen(first.container)).toBe(true) })
+    first.unmount()
+
+    const second = render(<ConversationView conversationId="conv-a" embedded />)
+    await waitFor(() => {
+      expect(second.container.textContent ?? '').toContain('BOB-conv-a')
+    }, { timeout: RENDER_WAIT })
+    expect(pickerOpen(second.container)).toBe(false)
+  })
+})
+
+describe('ConversationView — embedded, after leaving', () => {
+  it('without onLeave shows a neutral note instead of a dead thread', async () => {
+    const { render, waitFor, fireEvent, ConversationView } = await setup()
+    const { container, findByRole } = render(
+      <ConversationView conversationId="conv-b" embedded />,
+    )
+    await waitFor(() => {
+      expect(container.querySelector('.sh-thread-group-btn')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    fireEvent.click(container.querySelector('.sh-thread-group-btn')!)
+    await waitFor(() => {
+      expect(document.querySelector('.sh-groupinfo-leave button')).not.toBeNull()
+    })
+    fireEvent.click(document.querySelector('.sh-groupinfo-leave button')!)
+    fireEvent.click(await findByRole('button', { name: 'Leave' }))
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('You’re no longer in this conversation.')
+    }, { timeout: RENDER_WAIT })
+    expect(container.querySelector('form.sh-composer')).toBeNull()
+    expect(container.querySelector('[data-msg-id]')).toBeNull()
+    expect(route).not.toHaveBeenCalled()
+  })
+})
+
+describe('ConversationView — older history across a switch', () => {
+  it('an older-history page in flight when conversationId switches never lands in the new thread', async () => {
+    const fullPage = (id: string) => Array.from({ length: 25 }).map(
+      (_, i) => msgRow(`${id}-${24 - i}`, `${id} body ${24 - i}`),
+    )
+    let releaseOlderA: (rows: unknown[]) => void = () => {}
+    const slowOlderA = new Promise<unknown[]>(res => { releaseOlderA = res })
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/conversations/conv-a') return convRow('conv-a')
+      if (url === '/api/conversations/conv-b') return convRow('conv-b')
+      if (url.startsWith('/api/conversations/conv-a/messages')) {
+        return url.includes('before=') ? slowOlderA : fullPage('THREAD-A')
+      }
+      if (url.startsWith('/api/conversations/conv-b/messages')) {
+        return url.includes('before=') ? [] : [msgRow('msg-b', 'THREAD-B only')]
+      }
+      if (url.endsWith('/members')) return roster.slice(0, 2)
+      return {}
+    })
+    const { render, waitFor, ConversationView } = await setup()
+    const { container, rerender } = render(
+      <ConversationView conversationId="conv-a" embedded />,
+    )
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('THREAD-A body 0')
+    }, { timeout: RENDER_WAIT })
+    // jsdom does no layout, so the container reads as "at the top" and
+    // a scroll event arms ``loadOlder``.
+    container.querySelector('.sh-messages')!.dispatchEvent(new Event('scroll'))
+    await waitFor(() => {
+      expect(apiGet.mock.calls.some(([u]) => typeof u === 'string'
+        && u.startsWith('/api/conversations/conv-a/messages?before='))).toBe(true)
+    }, { timeout: RENDER_WAIT })
+
+    rerender(<ConversationView conversationId="conv-b" embedded />)
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('THREAD-B only')
+    }, { timeout: RENDER_WAIT })
+    releaseOlderA([msgRow('msg-a-old', 'THREAD-A-OLDER from the thread we left')])
+    await new Promise(r => setTimeout(r, 50))
+    expect(container.textContent ?? '').toContain('THREAD-B only')
+    expect(container.textContent ?? '').not.toContain('THREAD-A')
+    expect(container.querySelectorAll('[data-msg-id]').length).toBe(1)
+    expect(container.querySelector('.sh-dm-load-older')).toBeNull()
+  })
+})

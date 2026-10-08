@@ -19,6 +19,7 @@
  * other inputs.
  */
 import { signal, type Signal } from '@preact/signals'
+import { useEffect } from 'preact/hooks'
 import { ReactionPicker } from './ReactionPicker'
 import { t } from '@/i18n/i18n'
 
@@ -48,6 +49,14 @@ export type EmojiPickButtonProps = SignalTargetProps | CallbackTargetProps
 
 export function EmojiPickButton(props: EmojiPickButtonProps) {
   const isOpen = openFor.value === props.openKey
+  // An open picker belongs to this mount under this key: close it when
+  // the key changes (e.g. the DM composer switching conversations) or
+  // the button unmounts, so coming back later never finds it popped
+  // open.
+  const key = props.openKey
+  useEffect(() => () => {
+    if (openFor.value === key) openFor.value = null
+  }, [key])
   const insert = (emoji: string) => {
     if (props.target) {
       props.target.value = props.target.value + emoji

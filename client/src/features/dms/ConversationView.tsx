@@ -447,6 +447,10 @@ interface ThreadState {
    *  the signal. */
   reactionPickerFor: Signal<Message | null>
   gaps: Signal<MessageGap[]>
+  /** The viewer left / was removed while embedded with no ``onLeave``
+   *  host to hand off to — the view shows a short note instead of a
+   *  thread they can no longer use. */
+  left: Signal<boolean>
   /** ``true`` while this store's thread is the one on screen. Read by
    *  ``loadOlder`` — a callback outside the load effect, so it can't
    *  see that effect's per-run ``cancelled`` closure — before it writes
@@ -480,9 +484,15 @@ function createThreadState(): ThreadState {
     contextSheetFor: signal<Message | null>(null),
     reactionPickerFor: signal<Message | null>(null),
     gaps: signal<MessageGap[]>([]),
+    left: signal(false),
     active: false,
   }
 }
+
+/** The mounted view that last told the backend "this thread is open"
+ *  (``dm.active``), or ``null``. Module-level on purpose: the claim is
+ *  one per WS connection, shared by every view on the page. */
+let activeOwner: symbol | null = null
 
 /** Refetch the roster. Resolves ``false`` when the viewer is no longer a
  *  member (403) — they were removed from a group, or left it elsewhere. */
@@ -623,17 +633,18 @@ export function ConversationView({
   const location = useLocation()
   /** Leave the thread after the viewer left / was removed. Read from the
    *  long-lived WS handlers through a ref so they don't re-subscribe. */
-  const afterLeave = () => {
-    if (onLeave) onLeave()
-    else if (!embedded) location.route('/dms')
-  }
-  const afterLeaveRef = useRef(afterLeave)
-  afterLeaveRef.current = afterLeave
   // A fresh store per conversation: switching ``conversationId`` starts
   // clean, and a late write from the thread we left lands in its own,
   // no-longer-rendered store.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- ``convId`` is the reset key, not an input
   const s = useMemo(() => createThreadState(), [convId])
+  const afterLeave = () => {
+    if (onLeave) onLeave()
+    else if (embedded) s.left.value = true
+    else location.route('/dms')
+  }
+  const afterLeaveRef = useRef(afterLeave)
+  afterLeaveRef.current = afterLeave
   const {
     messages, loading, hasMoreHistory, isLoadingOlder, unreadAnchor,
     newSinceScrollUp, composerHasContent, locationPickerOpen,
@@ -703,19 +714,33 @@ export function ConversationView({
   // backend stops suppressing when the user tabs away — without
   // that, a backgrounded tab would silently swallow notifications
   // forever, which is worse than the original bug.
+  //
+  // An embedded view claims it too — an open embedded chat is a thread
+  // the user is looking at. The backend tracks ONE active conversation
+  // per connection, so the last view to open owns the claim
+  // (``activeOwner``) and a view only clears it while it still owns it:
+  // an older view unmounting must not un-suppress the one on screen.
   useEffect(() => {
     if (!convId) return
-    const emit = (id: string | null) => {
-      ws.send('dm.active', { conversation_id: id })
+    const me = Symbol(convId)
+    const claim = () => {
+      activeOwner = me
+      ws.send('dm.active', { conversation_id: convId })
     }
-    emit(convId)
+    const release = () => {
+      if (activeOwner !== me) return
+      activeOwner = null
+      ws.send('dm.active', { conversation_id: null })
+    }
+    claim()
     const onVis = () => {
-      emit(document.visibilityState === 'visible' ? convId : null)
+      if (document.visibilityState === 'visible') claim()
+      else release()
     }
     document.addEventListener('visibilitychange', onVis)
     return () => {
       document.removeEventListener('visibilitychange', onVis)
-      emit(null)
+      release()
     }
   }, [convId])
 
@@ -2013,6 +2038,13 @@ export function ConversationView({
     />
   )
 
+  if (s.left.value) {
+    return (
+      <div class="sh-thread sh-thread--embedded sh-thread--left" role="status">
+        <p class="sh-thread-left-note">{t('dms.no_longer_in_conversation')}</p>
+      </div>
+    )
+  }
   if (loading.value) return <>{pageTitleEl}<DmThreadSkeleton /></>
   const myUserId = currentUser.value?.user_id
 

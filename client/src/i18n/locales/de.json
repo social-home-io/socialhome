@@ -4133,6 +4133,7 @@
   "dms.call_event.started": "Anruf gestartet",
   "dms.call_event.call_back": "Zurückrufen",
   "dms.removed_from_group": "Du bist nicht mehr in dieser Gruppe",
+  "dms.no_longer_in_conversation": "Du bist nicht mehr in dieser Unterhaltung.",
   "dms.upload_failed": "{name} konnte nicht hochgeladen werden: {error}",
   "dms.voice_direct_only": "Sprachnachrichten kannst du nur an Haushalte schicken, mit denen du direkt verbunden bist.",
   "dms.voice_send_failed": "Sprachnachricht konnte nicht gesendet werden: {error}",
