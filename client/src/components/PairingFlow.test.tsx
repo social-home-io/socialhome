@@ -740,8 +740,14 @@ describe('PairingFlow — reach picker', () => {
     await waitFor(() => expect(radio('pairing.reach.gfs').checked).toBe(true))
     expect(radio('pairing.reach.url').disabled).toBe(true)
     expect(radio('pairing.reach.url_gfs').disabled).toBe(true)
-    expect(screen.getByTestId('pairing-reach-no-url').textContent)
-      .toContain('pairing.error.no_url')
+    // The picker's own line: it speaks only for the URL options ("GFS
+    // only" works without a URL), never the "set a URL before pairing" hint.
+    expect(screen.getByTestId('pairing-reach-no-url').textContent).toBe('pairing.reach.no_url')
+    expect(en['pairing.reach.no_url']).toContain('Settings → Connections')
+    expect(en['pairing.reach.no_url']).not.toContain('before pairing')
+    const fieldset = screen.getByText('pairing.reach.legend').closest('fieldset')!
+    expect(fieldset.getAttribute('aria-describedby'))
+      .toBe('sh-pairing-reach-hint sh-pairing-reach-no-url')
   })
 
   it('shows the privacy note only while a GFS option is selected', async () => {
@@ -893,9 +899,17 @@ describe('PairingFlow — scan side names the GFS a code uses', () => {
   }
   const base = { token: 't', identity_pk: 'i', dh_pk: 'd', inbox_url: 'https://a.example/inbox' }
 
-  it.each(['url_gfs', 'gfs'])('reach=%s shows the GFS host on the confirm step', async (r) => {
-    const text = await scan({ ...base, reach: r, gfs: { url: 'https://relay.example.org/', instance_id: 'gi' } })
+  it('reach=url_gfs: the pairing ALSO uses the GFS', async () => {
+    const text = await scan({ ...base, reach: 'url_gfs', gfs: { url: 'https://relay.example.org/', instance_id: 'gi' } })
     expect(text).toContain('pairing.scan.uses_gfs relay.example.org')
+    expect(text).not.toContain('pairing.scan.via_gfs')
+  })
+
+  it('reach=gfs: the pairing goes THROUGH the GFS', async () => {
+    const text = await scan({ ...base, inbox_url: '', reach: 'gfs', gfs: { url: 'https://relay.example.org/', instance_id: 'gi' } })
+    expect(text).toContain('pairing.scan.via_gfs relay.example.org')
+    expect(text).not.toContain('pairing.scan.uses_gfs')
+    expect(en['pairing.scan.via_gfs']).toContain('goes through')
   })
 
   it('reach=url shows no GFS line', async () => {
@@ -915,5 +929,113 @@ describe('PairingFlow — scan side names the GFS a code uses', () => {
     expect(pairingCodeGfsHost({ reach: 'gfs', gfs: 'x' })).toBeNull()
     expect(pairingCodeGfsHost({ reach: 'gfs' })).toBeNull()
     expect(pairingCodeGfsHost({ reach: 'url', gfs: { url: 'https://x.example' } })).toBeNull()
+  })
+})
+
+// ─── Reach picker: placement, loading race, retry, reopen ──────────────
+
+describe('PairingFlow — reach picker lifecycle', () => {
+  it('renders above the role cards', async () => {
+    stubReach([RELAY_GFS], 'https://home.example')
+    await openStart()
+    const legend = await screen.findByText('pairing.reach.legend')
+    const show = screen.getByLabelText('pairing.role_show_aria')
+    expect(legend.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('"Show my QR" waits while the lookups load — a tap mints nothing', async () => {
+    let release: (v: unknown) => void = () => {}
+    apiGet.mockImplementation((path: string) => path === '/api/gfs/connections'
+      ? new Promise(r => { release = r })
+      : Promise.resolve({ effective: null }))
+    apiPost.mockResolvedValue({ token: 't', identity_pk: 'i', dh_pk: 'd' })
+    await openStart()
+    const show = screen.getByLabelText('pairing.role_show_aria')
+    expect(show.getAttribute('aria-disabled')).toBe('true')
+    fireEvent.click(show)
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiPost).not.toHaveBeenCalled()
+    release([RELAY_GFS])
+    await screen.findByText('pairing.reach.legend')
+    await waitFor(() => expect(show.getAttribute('aria-disabled')).toBeNull())
+    fireEvent.click(show)
+    // No URL → GFS only was preselected, never the bare {} body.
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/initiate', { reach: 'gfs', gfs_id: 'gfs-a' },
+    ))
+  })
+
+  it('external-url lookup failure → every option stays enabled', async () => {
+    apiGet.mockImplementation((path: string) => path === '/api/gfs/connections'
+      ? Promise.resolve([RELAY_GFS])
+      : Promise.reject(new Error('403')))
+    await openStart()
+    await screen.findByText('pairing.reach.legend')
+    for (const k of ['pairing.reach.url', 'pairing.reach.url_gfs', 'pairing.reach.gfs']) {
+      expect(radio(k).disabled).toBe(false)
+    }
+    expect(radio('pairing.reach.url').checked).toBe(true)
+    expect(screen.queryByTestId('pairing-reach-no-url')).toBeNull()
+  })
+
+  it('Retry after a GFS refusal re-reads the lookups and keeps the choice; focus lands on "Show my QR"', async () => {
+    const { ApiError } = await import('@/api')
+    stubReach([RELAY_GFS], 'https://home.example')
+    apiPost.mockRejectedValueOnce(new ApiError(422, '/api/pairing/initiate', {
+      code: 'GFS_NOT_CONNECTED', detail: 'x',
+    }))
+    await openStart()
+    await screen.findByText('pairing.reach.legend')
+    fireEvent.click(radio('pairing.reach.url_gfs'))
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    const retry = await screen.findByText('pairing.retry')
+    const getsBefore = apiGet.mock.calls.length
+    fireEvent.click(retry)
+    const show = await screen.findByLabelText('pairing.role_show_aria')
+    await waitFor(() => expect(document.activeElement).toBe(show))
+    await waitFor(() => expect(apiGet.mock.calls.length).toBe(getsBefore + 2))
+    await waitFor(() => expect(show.getAttribute('aria-disabled')).toBeNull())
+    expect(radio('pairing.reach.url_gfs').checked).toBe(true)
+  })
+
+  it('Retry drops a choice that is no longer possible', async () => {
+    const { ApiError } = await import('@/api')
+    stubReach([RELAY_GFS], 'https://home.example')
+    apiPost.mockRejectedValueOnce(new ApiError(422, '/api/pairing/initiate', {
+      code: 'GFS_NOT_CONNECTED', detail: 'x',
+    }))
+    await openStart()
+    await screen.findByText('pairing.reach.legend')
+    fireEvent.click(radio('pairing.reach.url_gfs'))
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    // Meanwhile the URL went away: url_gfs can't work any more.
+    stubReach([RELAY_GFS], null)
+    fireEvent.click(await screen.findByText('pairing.retry'))
+    await waitFor(() => expect(radio('pairing.reach.gfs').checked).toBe(true))
+  })
+
+  it('reopening resets the choice, and a late answer for the old open is ignored', async () => {
+    const answers: ((v: unknown) => void)[] = []
+    apiGet.mockImplementation((path: string) => path === '/api/gfs/connections'
+      ? new Promise(r => { answers.push(r) })
+      : Promise.resolve({ effective: 'https://home.example' }))
+    const { PairingFlow, openPairing } = await import('./PairingFlow')
+    render(<PairingFlow />)
+    openPairing('household')      // lookup #1 — will answer late
+    openPairing('gfs')            // a GFS-mode open invalidates it too
+    openPairing('household')      // lookup #2
+    await waitFor(() => expect(answers.length).toBe(2))
+    answers[1]([RELAY_GFS])
+    await screen.findByText('pairing.reach.legend')
+    fireEvent.click(radio('pairing.reach.gfs'))
+    // The stale answer (no relay GFS) must not wipe the current picker.
+    answers[0]([])
+    await new Promise(r => setTimeout(r, 0))
+    expect(screen.getByText('pairing.reach.legend')).toBeTruthy()
+    expect(radio('pairing.reach.gfs').checked).toBe(true)
+    // A fresh open starts from the default again.
+    stubReach([RELAY_GFS], 'https://home.example')
+    openPairing('household')
+    await waitFor(() => expect(radio('pairing.reach.url').checked).toBe(true))
   })
 })

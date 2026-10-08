@@ -425,5 +425,7 @@
   "pairing.reach.legend": "Legend of the radio group on the pairing start screen: how the other household reaches this one (direct URL / via the GFS). GFS = Global Federation Server, never translate the acronym.",
   "pairing.reach.gfs_warning": "Calm, informational note (not an error) shown when a GFS option is picked. Keep the meaning: the GFS sees timing and volume, never content.",
   "pairing.scan.uses_gfs": "Shown to the scanning admin. {host} is a server host name such as gfs.example.com.",
-  "pairing.error.gfs_not_shared": "{host} is the GFS host name from the scanned code."
+  "pairing.error.gfs_not_shared": "{host} is the GFS host name from the scanned code.",
+  "pairing.reach.no_url": "Shown under the disabled URL options of the reach picker when no External URL is set. The \"GFS only\" option still works, so do not say pairing is impossible.",
+  "pairing.scan.via_gfs": "Scanner side, for a code that offers ONLY the GFS (no direct address). {host} is a server host name."
 }

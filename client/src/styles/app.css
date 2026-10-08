@@ -12853,6 +12853,8 @@ a.sh-welcome-card:hover {
   background: color-mix(in srgb, var(--sh-primary) 5%, var(--sh-bg));
   transform: translateY(-1px);
 }
+/* While the reach picker's lookups load, "Show my QR" waits (aria-disabled). */
+.sh-pairing-role-card.is-loading { opacity: 0.55; cursor: progress; transform: none; }
 .sh-pairing-role-icon { font-size: 2rem; line-height: 1; }
 .sh-pairing-role-title { font-weight: 600; }
 .sh-pairing-role-hint {
@@ -12866,7 +12868,7 @@ a.sh-welcome-card:hover {
  * sentences) and ≥ 40 px tall; the radio dot stays native for a11y. */
 .sh-pairing-reach {
   width: 100%;
-  margin: var(--sh-space-sm) 0 0;
+  margin: 0;
   padding: var(--sh-space-sm) var(--sh-space-md) var(--sh-space-md);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-lg);

@@ -860,7 +860,9 @@ with the SAS once the relayed accept landed. Asserts:
   ``URL_UPDATED``.
 
 Finally a unpairs e (e drops a) and e's manual URL is cleared, restoring the
-stranger topology. Re-running it against the same processes needs a minute's
+stranger topology. That cleanup runs in a ``finally`` — also when an assertion
+or poll above fails — and unpairs from whichever side still holds a row
+(a 404 is fine), so a failed run never leaves e paired. Re-running it against the same processes needs a minute's
 pause: route discovery probes a peer at most once per 60 s.
 
 ### ``gfs-cluster`` — a multi-process GFS on one shared DB
