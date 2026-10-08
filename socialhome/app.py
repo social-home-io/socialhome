@@ -2046,6 +2046,14 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # still capping what a leaked signed URL can drive upstream —
             # unbounded traffic from the household IP risks an OSMF ban.
             "/api/map/tiles": (1200, 60),
+            # Conversations — *looser* than the default. Every
+            # ``/api/conversations/...`` path shares one bucket per user,
+            # and opening a single thread costs about 8 requests (list,
+            # item, members, messages, delivery states, gaps, read, …),
+            # so the 60/min default 429'd the 8th thread opened in a
+            # minute and the thread rendered empty. 600/min covers fast
+            # switching between chats and the embedded household chat.
+            "/api/conversations": (600, 60),
             # Sensitive surfaces — tighter than the 60/min default.
             "/api/me/tokens": (10, 60),  # API token create
             "/api/feed/posts": (30, 60),  # household posting

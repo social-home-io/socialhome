@@ -4172,6 +4172,7 @@
   "dms.call_event.call_back": "Call back",
   "dms.removed_from_group": "You are no longer in this group",
   "dms.no_longer_in_conversation": "You’re no longer in this conversation.",
+  "dms.load_failed": "Couldn't load this conversation.",
   "dms.upload_failed": "Couldn't upload {name}: {error}",
   "dms.voice_direct_only": "Voice notes can only be sent to households you're connected with directly.",
   "dms.voice_send_failed": "Couldn't send voice note: {error}",

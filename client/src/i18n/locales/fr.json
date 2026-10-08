@@ -4136,6 +4136,7 @@
   "dms.call_event.call_back": "Rappeler",
   "dms.removed_from_group": "Vous ne faites plus partie de ce groupe",
   "dms.no_longer_in_conversation": "Vous ne faites plus partie de cette conversation.",
+  "dms.load_failed": "Impossible de charger cette conversation.",
   "dms.upload_failed": "Impossible d'envoyer {name} : {error}",
   "dms.voice_direct_only": "Les messages vocaux ne peuvent être envoyés qu'aux foyers avec lesquels vous êtes connecté directement.",
   "dms.voice_send_failed": "Impossible d'envoyer le message vocal : {error}",

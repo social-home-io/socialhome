@@ -3999,6 +3999,20 @@ button.sh-friends-member-chip:not(:disabled):hover {
  * lets it shrink inside a flex column so ``.sh-messages`` scrolls
  * rather than the host. Placed after the mobile override so it wins
  * at every width; the routed page never carries the class. */
+/* A thread whose messages failed to load (network, 5xx, rate limit):
+ * an error with Retry, never an empty thread that reads as "no messages". */
+.sh-thread-load-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sh-space-md);
+  padding: var(--sh-space-xl) var(--sh-space-md);
+  min-height: 40vh;
+  text-align: center;
+  color: var(--sh-text-muted);
+}
+.sh-thread-load-error p { margin: 0; }
 .sh-thread--embedded {
   height: 100%;
   flex: 1 1 auto;

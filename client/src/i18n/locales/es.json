@@ -4163,6 +4163,7 @@
   "dms.call_event.call_back": "Devolver llamada",
   "dms.removed_from_group": "Ya no estás en este grupo",
   "dms.no_longer_in_conversation": "Ya no estás en esta conversación.",
+  "dms.load_failed": "No se pudo cargar esta conversación.",
   "dms.upload_failed": "No se pudo subir {name}: {error}",
   "dms.voice_direct_only": "Las notas de voz solo se pueden enviar a hogares con los que estás conectado directamente.",
   "dms.voice_send_failed": "No se pudo enviar la nota de voz: {error}",
