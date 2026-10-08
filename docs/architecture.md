@@ -1054,6 +1054,41 @@ See [`protocol/apps.md`](./protocol/apps.md) for the wire protocol and
 sequence diagram, and [`docs/crypto.md`](./crypto.md) for the `fed-app-v1`
 AEAD suite details.
 
+## System chats on group-DM storage
+
+The household chat (and, later, one chat per space) is not a new chat
+system: it is a `group_dm` conversation the household creates itself,
+marked by `conversations.system_scope` (`household` / `space`, migration
+0082). Messages, edit / delete, reactions, mentions, unread, mute and the
+per-member notification level are the group-DM machinery unchanged, served
+by the existing `/api/conversations/{id}/...` routes.
+
+- **Access is computed, seats are state.** `SystemChatPolicy`
+  (`services/system_chat_policy.py`) answers read / write live with one
+  access strategy per scope — household: an active local user while
+  `feat_household_chat` is on; a scope without registered rules is refused.
+  `DmService._require_membership` defers to it whenever `system_scope` is
+  set. Seat rows only hold per-user state; `HouseholdChatService`
+  reconciles them on `UserProvisioned` / `UserDeprovisioned` and lazily on
+  `GET /api/household/chat`, and a caller the policy allows without a seat
+  yet is seated on first use.
+- **Out of every DM path.** `list_for_user` filters `system_scope IS NULL`
+  (inbox, DM badge, the guardian's DM view), the DM GC sweep skips system
+  chats, `GET /api/conversations/{id}` and the group-management calls
+  (rename, add / remove, leave) answer 404, calls are refused (409
+  `calls_unavailable`; an inbound `CALL_OFFER` never rings), the HA bridge
+  fires no `socialhome.dm_received` (`DmMessageCreated.system_scope`),
+  `DmService._fan_to_remote` never federates them, and `DmScope` plus the
+  inbound `DM_*` / roster handlers refuse any id that resolves to one.
+  `dm.*` WS frames carry `system_scope` / `space_id` so the SPA can route
+  them to the feed / space Chat tab.
+- **Child protection.** Being in the household is the consent, so guardian
+  blocks never refuse a send or make the chat unusable for a protected
+  account; the blocked person's messages are withheld from it (recipients,
+  `list_messages`, unread, notifications) instead.
+- **Notifications** link the household chat to `/?tab=chat` and read
+  "{sender} in Household chat" (title only, §25.3).
+
 ## Map tiles
 
 Every map surface (location pins, space zones, the Federation map) renders

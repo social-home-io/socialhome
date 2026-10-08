@@ -13,9 +13,12 @@ from datetime import datetime, timezone
 from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.call import CallQualitySample, CallSession
 from socialhome.domain.conversation import (
+    Conversation,
     ConversationMember,
     ConversationMessage,
+    ConversationType,
     RemoteConversationMember,
+    SystemChatScope,
 )
 from socialhome.domain.user import RemoteUser, User
 from socialhome.services.call_service import CallSignalingService
@@ -126,6 +129,8 @@ class FakeConversationRepo:
         self._remote_members: dict[str, list[RemoteConversationMember]] = {}
         self.messages: list[ConversationMessage] = []
         self.touched: list[str] = []
+        #: Conversation ids that are system chats (household chat).
+        self.system: set[str] = set()
 
     def add_conversation(
         self,
@@ -155,6 +160,18 @@ class FakeConversationRepo:
             )
             for inst, ru, _uid in remotes
         ]
+
+    async def get(self, conversation_id):
+        if conversation_id not in self._members:
+            return None
+        return Conversation(
+            id=conversation_id,
+            type=ConversationType.GROUP_DM,
+            created_at=datetime.now(timezone.utc),
+            system_scope=(
+                SystemChatScope.HOUSEHOLD if conversation_id in self.system else None
+            ),
+        )
 
     async def list_members(self, conversation_id):
         return list(self._members.get(conversation_id, []))

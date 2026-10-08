@@ -11,7 +11,12 @@ import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from socialhome.domain.conversation import RemoteConversationMember
+from socialhome.domain.conversation import (
+    Conversation,
+    ConversationType,
+    RemoteConversationMember,
+    SystemChatScope,
+)
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.federation.dm_scope import DmScope, refuse
 
@@ -41,6 +46,10 @@ class _Conversations:
             "c-bob": [RemoteConversationMember("c-bob", PEER, "bob", "t")],
             "c-dora": [RemoteConversationMember("c-dora", OTHER, "dora", "t")],
         }
+
+    async def get(self, conversation_id):
+        # Plain DMs only: no system chat (``DmScope`` asks).
+        return None
 
     async def list_remote_members(self, conversation_id):
         return self.remote.get(conversation_id, [])
@@ -93,6 +102,27 @@ async def test_speaks_for_needs_the_remote_user_row():
     users = _Users()
     users.remote.pop("u-bob")
     scope = DmScope(conversation_repo=_Conversations(), user_repo=users)
+    assert not await scope.speaks_for(_event(), "c-bob", "u-bob")
+
+
+async def test_a_system_chat_seats_no_household_whatever_its_rows_say():
+    """The household chat (or a space chat) is never a DM peer's: even a
+    (forged) remote seat row binds nobody to it."""
+
+    class _WithSystemChat(_Conversations):
+        async def get(self, conversation_id):
+            if conversation_id != "c-bob":
+                return None
+            return Conversation(
+                id="c-bob",
+                type=ConversationType.GROUP_DM,
+                created_at=datetime.now(timezone.utc),
+                system_scope=SystemChatScope.HOUSEHOLD,
+            )
+
+    scope = DmScope(conversation_repo=_WithSystemChat(), user_repo=_Users())
+    assert not await scope.seated(_event(), "c-bob")
+    assert await scope.seat_of(_event(), "c-bob", "u-bob") is None
     assert not await scope.speaks_for(_event(), "c-bob", "u-bob")
 
 

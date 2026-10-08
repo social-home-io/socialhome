@@ -1,4 +1,4 @@
-"""Household routes — preferences + household name (§22)."""
+"""Household routes — preferences + household name (§22), household chat."""
 
 from __future__ import annotations
 
@@ -30,3 +30,21 @@ class HouseholdPreferencesView(BaseView):
             tz=body.get("tz"),
         )
         return self._json(asdict(prefs))
+
+
+class HouseholdChatView(BaseView):
+    """``GET /api/household/chat`` — the household chat for the caller.
+
+    ``{enabled, conversation_id, unread, notif_level, muted_until}``. Any
+    active local user; the chat (a system group conversation of every
+    local user) is created and its seats reconciled on the way. While
+    ``feat_household_chat`` is off: ``{"enabled": false,
+    "conversation_id": null, ...}`` and nothing is created. Messages, reads,
+    reactions, edits, deletes, mute and level use the existing
+    ``/api/conversations/{id}/...`` routes with ``conversation_id``.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        summary = await self.svc(K.household_chat_service_key).summary(ctx.username)
+        return self._json(asdict(summary))

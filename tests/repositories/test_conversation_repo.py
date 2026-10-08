@@ -13,6 +13,7 @@ from socialhome.domain.conversation import (
     ConversationMessage,
     ConversationType,
     RemoteConversationMember,
+    SystemChatScope,
 )
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
 
@@ -753,3 +754,94 @@ async def test_roster_seats_carry_the_version_they_joined_at(env):
     assert members["bob"].joined_version == 4
     (seat,) = await env.repo.list_remote_members("g1")
     assert seat.joined_version == 1  # still the same seat since v1
+
+
+# ── System chats (migration 0082) ─────────────────────────────────────────
+
+
+async def test_create_system_chat_is_idempotent(env):
+    assert await env.repo.get_household_chat() is None
+    first = await env.repo.create_system_chat(SystemChatScope.HOUSEHOLD)
+    again = await env.repo.create_system_chat(SystemChatScope.HOUSEHOLD)
+    assert first.id == again.id
+    assert first.type is ConversationType.GROUP_DM
+    assert first.system_scope is SystemChatScope.HOUSEHOLD
+    assert first.is_system and first.space_id is None
+    stored = await env.repo.get_household_chat()
+    assert stored is not None and stored.id == first.id
+
+
+async def test_create_system_chat_space_needs_a_space_id(env):
+    with pytest.raises(ValueError):
+        await env.repo.create_system_chat(SystemChatScope.SPACE)
+    with pytest.raises(ValueError):
+        await env.repo.create_system_chat(SystemChatScope.HOUSEHOLD, space_id="sp")
+
+
+async def test_space_chat_round_trips_its_space(env):
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp1','S','host','alice','ab')"
+    )
+    chat = await env.repo.create_system_chat(SystemChatScope.SPACE, space_id="sp1")
+    again = await env.repo.create_system_chat(SystemChatScope.SPACE, space_id="sp1")
+    assert chat.id == again.id
+    got = await env.repo.get(chat.id)
+    assert got is not None
+    assert got.system_scope is SystemChatScope.SPACE and got.space_id == "sp1"
+
+
+async def test_create_round_trips_system_columns(env):
+    conv = Conversation(
+        id="c-sys",
+        type=ConversationType.GROUP_DM,
+        created_at=datetime.now(timezone.utc),
+        system_scope=SystemChatScope.HOUSEHOLD,
+    )
+    await env.repo.create(conv)
+    got = await env.repo.get("c-sys")
+    assert got is not None and got.system_scope is SystemChatScope.HOUSEHOLD
+    plain = await env.repo.create(_conv("c-plain"))
+    stored = await env.repo.get(plain.id)
+    assert stored is not None and stored.system_scope is None
+    assert not stored.is_system
+
+
+async def test_system_chats_are_not_listed_or_swept(env):
+    chat = await env.repo.create_system_chat(SystemChatScope.HOUSEHOLD)
+    await env.repo.upsert_seat(chat.id, "alice", notif_level="all")
+    await env.repo.create(_conv("c-dm"))
+    await env.repo.add_member(_member("c-dm", "alice"))
+    assert [c.id for c in await env.repo.list_for_user("alice")] == ["c-dm"]
+    # Nobody seated any more: a DM would be swept, the household chat stays.
+    await env.repo.remove_seat(chat.id, "alice")
+    assert chat.id not in await env.repo.list_fully_left_conversation_ids()
+
+
+async def test_upsert_seat_seats_reactivates_and_keeps_own_settings(env):
+    chat = await env.repo.create_system_chat(SystemChatScope.HOUSEHOLD)
+    await env.repo.upsert_seat(
+        chat.id, "alice", notif_level="mentions", at="2026-01-01T00:00:00+00:00"
+    )
+    (seat,) = await env.repo.list_members(chat.id)
+    assert seat.notif_level == "mentions"
+    assert seat.last_read_at == "2026-01-01T00:00:00+00:00"
+    assert seat.deleted_at is None
+    # An active seat is left alone (watermark not reset).
+    await env.repo.upsert_seat(
+        chat.id, "alice", notif_level="all", at="2026-02-01T00:00:00+00:00"
+    )
+    (seat,) = await env.repo.list_members(chat.id)
+    assert seat.last_read_at == "2026-01-01T00:00:00+00:00"
+    assert seat.notif_level == "mentions"
+    # Removed, then back: watermark moves to the return, own level kept.
+    await env.repo.remove_seat(chat.id, "alice")
+    (seat,) = await env.repo.list_members(chat.id)
+    assert seat.deleted_at is not None
+    await env.repo.upsert_seat(
+        chat.id, "alice", notif_level="all", at="2026-03-01T00:00:00+00:00"
+    )
+    (seat,) = await env.repo.list_members(chat.id)
+    assert seat.deleted_at is None
+    assert seat.last_read_at == "2026-03-01T00:00:00+00:00"
+    assert seat.notif_level == "mentions"

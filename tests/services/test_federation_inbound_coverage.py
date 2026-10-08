@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from socialhome.domain.conversation import ConversationType
 from socialhome.domain.events import (
     CommentDeleted,
     CommentUpdated,
@@ -57,6 +58,11 @@ def svc():
     # True`` and publishes ``DmMessageCreated`` as the old peek-then-
     # save path used to.
     convo.save_message_returning_created.return_value = (object(), True)
+    # A plain DM conversation — never a system chat (household / space),
+    # which every DM handler refuses.
+    convo.get.return_value = SimpleNamespace(
+        is_system=False, type=ConversationType.DM, id="c"
+    )
     sp_post = AsyncMock()
     # A live post / comment by ``u`` in ``sp`` — the §24.11 authorship
     # pre-read resolves the row's owner before any edit or delete.

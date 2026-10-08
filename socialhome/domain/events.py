@@ -1630,6 +1630,10 @@ class DmMessageCreated(DomainEvent):
     #: Drives the ``dm_mention`` bell and the group ``mentions`` level.
     #: Never on the wire; never contains ``@here``.
     mentions: tuple["Mention", ...] = ()
+    #: Set (``"household"`` / ``"space"``) when the conversation is a
+    #: system chat — not a DM, so DM-only consumers (the HA
+    #: ``socialhome.dm_received`` event) skip it. ``None`` for a DM.
+    system_scope: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

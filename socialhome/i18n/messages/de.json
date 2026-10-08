@@ -21,6 +21,8 @@
   "notification.space.here": "{author} hat alle in {space_name} benachrichtigt",
   "notification.dm.mention": "{author} hat dich in {chat_name} erwähnt",
   "notification.dm.mention_unnamed": "{author} hat dich in einem Gruppenchat erwähnt",
+  "notification.household_chat.message": "{author} in {chat_name}",
+  "notification.household_chat.name": "Haushalts-Chat",
   "notification.space.moderation.approved": "Dein Beitrag in {space_name} wurde freigegeben",
   "notification.space.moderation.rejected": "Dein Beitrag in {space_name} wurde nicht freigegeben",
   "notification.space.moderation.expired": "Dein Beitrag in {space_name} ist ohne Prüfung abgelaufen",

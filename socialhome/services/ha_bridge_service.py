@@ -142,6 +142,9 @@ class HaBridgeService:
         )
 
     async def _on_dm_message_created(self, event: DmMessageCreated) -> None:
+        if event.system_scope is not None:
+            # The household / a space chat is not a DM.
+            return
         # §25.3 privacy: NO message content in HA events.
         await self._fire(
             "socialhome.dm_received",

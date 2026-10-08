@@ -14,6 +14,11 @@ from socialhome.domain.events import (
     CommentAdded,
     ConnectionReachable,
     ConnectionUnreachable,
+    DmConversationCreated,
+    DmGroupRosterChanged,
+    DmMessageCreated,
+    DmMessageReactionChanged,
+    DmMessageUpdated,
     GalleryAlbumCreated,
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
@@ -40,6 +45,12 @@ from socialhome.domain.events import (
     UserStatusChanged,
 )
 from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.conversation import (
+    Conversation,
+    ConversationMember,
+    ConversationType,
+    SystemChatScope,
+)
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.timetable import Timetable, to_wire_dict
@@ -1217,3 +1228,121 @@ async def test_calendar_frames_never_carry_a_non_local_cover(env):
     assert covers[("calendar.created", "e0")] is None
     assert covers[("calendar.updated", "e0")] is None
     assert covers[("calendar.created", "e1")].split("?", 1)[0] == "api/media/ok.webp"
+
+
+# ── dm.* frames name a system chat (household / space) ────────────────────
+
+
+class _SysWs:
+    def __init__(self) -> None:
+        self.frames: list[dict] = []
+
+    async def broadcast_to_user(self, user_id: str, payload: dict) -> None:
+        self.frames.append(payload)
+
+    async def broadcast_to_users(self, user_ids, payload: dict) -> None:
+        self.frames.append(payload)
+
+
+class _SysConvos:
+    def __init__(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.convs = {
+            "hh": Conversation(
+                id="hh",
+                type=ConversationType.GROUP_DM,
+                created_at=now,
+                system_scope=SystemChatScope.HOUSEHOLD,
+            ),
+            "dm": Conversation(id="dm", type=ConversationType.DM, created_at=now),
+        }
+
+    async def get(self, conversation_id: str):
+        return self.convs.get(conversation_id)
+
+    async def list_members(self, conversation_id: str):
+        return [
+            ConversationMember(
+                conversation_id=conversation_id, username="anna", joined_at="t"
+            )
+        ]
+
+
+class _SysUsers:
+    async def get(self, username: str):
+        return _user("u-anna", username)
+
+
+@pytest.mark.parametrize(
+    ("conv_id", "scope"), [("hh", "household"), ("dm", None), ("gone", None)]
+)
+async def test_dm_frames_carry_system_scope(conv_id, scope):
+    bus = EventBus()
+    ws = _SysWs()
+    svc = RealtimeService(
+        bus=bus,
+        ws=ws,
+        user_repo=_SysUsers(),
+        space_repo=object(),
+        conversation_repo=_SysConvos(),
+    )
+    svc.wire()
+    now = datetime.now(timezone.utc)
+    await bus.publish(
+        DmMessageCreated(
+            conversation_id=conv_id,
+            message_id="m",
+            sender_user_id="u-anna",
+            sender_display_name="Anna",
+            recipient_user_ids=("u-bob",),
+        )
+    )
+    await bus.publish(
+        DmMessageUpdated(
+            conversation_id=conv_id,
+            message_id="m",
+            sender_user_id="u-anna",
+            recipient_user_ids=("u-bob",),
+            content="x",
+            edited_at=now,
+        )
+    )
+    await bus.publish(
+        DmMessageReactionChanged(
+            conversation_id=conv_id,
+            message_id="m",
+            user_id="u-anna",
+            emoji="👍",
+            action="add",
+            recipient_user_ids=("u-bob",),
+        )
+    )
+    await bus.publish(
+        DmConversationCreated(
+            conversation_id=conv_id,
+            conversation_type="group_dm",
+            name=None,
+            creator_user_id="u-anna",
+            member_user_ids=("u-anna",),
+        )
+    )
+    await bus.publish(
+        DmGroupRosterChanged(
+            conversation_id=conv_id, name=None, notify_user_ids=("u-anna",)
+        )
+    )
+    await svc.broadcast_dm_media_ready(
+        message_id="m", conversation_id=conv_id, media_url="api/media/x.webp"
+    )
+    types = {f["type"] for f in ws.frames}
+    assert types == {
+        "dm.message",
+        "dm.message_updated",
+        "dm.message_reaction",
+        "dm.conversation.created",
+        "dm.group.updated",
+        "dm.media_ready",
+    }
+    for frame in ws.frames:
+        assert frame["system_scope"] == scope
+        assert frame["space_id"] is None

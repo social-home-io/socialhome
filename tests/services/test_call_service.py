@@ -11,15 +11,19 @@ import pytest
 from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.call import CallQualitySample, CallSession
 from socialhome.domain.conversation import (
+    Conversation,
     ConversationMember,
     ConversationMessage,
+    ConversationType,
     RemoteConversationMember,
+    SystemChatScope,
 )
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import RemoteUser, User
 from socialhome.services.call_service import (
     MAX_CALLS_PER_USER,
     CallConversationError,
+    CallInSystemChatError,
     CallNotFoundError,
     CallSignalingService,
     StaleCallCleanupScheduler,
@@ -136,6 +140,8 @@ class _FakeConversationRepo:
         self._remote_members: dict[str, list[RemoteConversationMember]] = {}
         self.messages: list[ConversationMessage] = []
         self.touched: list[str] = []
+        #: Conversation ids that are system chats (household chat).
+        self.system: set[str] = set()
 
     def add_conversation(
         self,
@@ -165,6 +171,18 @@ class _FakeConversationRepo:
             )
             for inst, ru, _uid in remotes
         ]
+
+    async def get(self, conversation_id):
+        if conversation_id not in self._members:
+            return None
+        return Conversation(
+            id=conversation_id,
+            type=ConversationType.GROUP_DM,
+            created_at=datetime.now(timezone.utc),
+            system_scope=(
+                SystemChatScope.HOUSEHOLD if conversation_id in self.system else None
+            ),
+        )
 
     async def list_members(self, conversation_id):
         return list(self._members.get(conversation_id, []))
@@ -909,3 +927,65 @@ async def test_stale_call_scheduler_start_and_stop(env):
     # Second start is a no-op.
     await sched.start()
     await sched.stop()
+
+
+# ─── System chats (household chat): no calls ──────────────────────────────
+
+
+async def test_no_call_starts_in_a_system_chat(env):
+    env.convos.add_conversation("hh", ["alice", "bob"])
+    env.convos.system.add("hh")
+    with pytest.raises(CallInSystemChatError):
+        await env.svc.initiate_call(
+            caller_user_id="uid-alice",
+            conversation_id="hh",
+            call_type="audio",
+            sdp_offer="v=0\r\n",
+        )
+    assert env.ws.calls == [] and env.fed.sent == []
+
+
+async def test_no_one_joins_a_call_bound_to_a_system_chat(env):
+    env.convos.add_conversation("hh", ["alice", "bob"])
+    env.call_repo._sessions["c-hh"] = CallSession(
+        id="c-hh",
+        conversation_id="hh",
+        initiator_user_id="uid-alice",
+        callee_user_id=None,
+        call_type="audio",
+        status="ringing",
+        participant_user_ids=("uid-alice",),
+    )
+    env.convos.system.add("hh")
+    with pytest.raises(CallInSystemChatError):
+        await env.svc.join_call(
+            call_id="c-hh",
+            joiner_user_id="uid-bob",
+            sdp_offers={"uid-alice": "v=0\r\n"},
+        )
+
+
+async def test_inbound_call_offer_for_a_system_chat_never_rings(env):
+    """Even a (forged) remote seat in the household chat rings nobody."""
+    env.users.add_remote(
+        user_id="uid-alice", instance_id="remote-inst", remote_username="alice"
+    )
+    env.convos.add_conversation(
+        "hh", ["bob"], remotes=[("remote-inst", "alice", "uid-alice")]
+    )
+    env.convos.system.add("hh")
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_OFFER,
+            "remote-inst",
+            {
+                "call_id": "c-hh",
+                "conversation_id": "hh",
+                "from_user": "uid-alice",
+                "to_user": "uid-bob",
+                "call_type": "audio",
+            },
+        )
+    )
+    assert env.svc.get_call("c-hh") is None
+    assert not [c for c in env.ws.calls if c[1].get("type") == "call.ringing"]

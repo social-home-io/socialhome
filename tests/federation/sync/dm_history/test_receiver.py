@@ -36,6 +36,10 @@ class _FakeConvRepo:
         self.saved = [m for m in self.saved if m.id != message.id] + [message]
         return message
 
+    async def get(self, conversation_id):
+        # Plain DMs only: no system chat (``DmScope`` asks).
+        return None
+
     async def list_remote_members(self, conversation_id):
         if conversation_id != "c-1":
             return []

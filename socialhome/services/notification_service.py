@@ -38,7 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ..domain.conversation import ConversationType, mute_active
+from ..domain.conversation import ConversationType, SystemChatScope, mute_active
 from ..domain.events import (
     AppChallengeReceived,
     BazaarBidPlaced,
@@ -119,6 +119,19 @@ class _SeatPrefs:
     mentions_only: frozenset[str] = frozenset()
     group: bool = False
     name: str | None = None
+    #: Set for a system chat (household / space chat).
+    system_scope: SystemChatScope | None = None
+
+
+#: Where a household-chat bell / push leads: the feed's Chat tab.
+HOUSEHOLD_CHAT_LINK = "/?tab=chat"
+
+
+def _conversation_link(conversation_id: str, scope: SystemChatScope | None) -> str:
+    """The SPA path a conversation's bell / push opens."""
+    if scope is SystemChatScope.HOUSEHOLD:
+        return HOUSEHOLD_CHAT_LINK
+    return f"/dms/{conversation_id}"
 
 
 #: English names of the access-levelled features (catalog fallback).
@@ -609,6 +622,10 @@ class NotificationService(ProtectionGateMixin):
         the ``dm_message`` one; a member at level ``mentions``
         (``conversation_members.notif_level``) is rung only when mentioned.
         A mute wins over both. In a 1:1 a mention is just a message.
+
+        The household chat (a system chat) reads "{sender} in Household
+        chat" (localised; no location / content hint) and opens the feed's
+        Chat tab (:data:`HOUSEHOLD_CHAT_LINK`) instead of ``/dms/{id}``.
         """
         if not event.recipient_user_ids:
             return
@@ -618,8 +635,9 @@ class NotificationService(ProtectionGateMixin):
             title = f"{event.sender_display_name} shared a location"
         else:
             title = f"{event.sender_display_name} messaged you"
-        link = f"/dms/{event.conversation_id}"
         prefs = await self._seat_prefs(event.conversation_id)
+        link = _conversation_link(event.conversation_id, prefs.system_scope)
+        household_chat = prefs.system_scope is SystemChatScope.HOUSEHOLD
         muted = prefs.muted
         mentioned = (
             {m.user_id for m in event.mentions if m.user_id} if prefs.group else set()
@@ -656,7 +674,7 @@ class NotificationService(ProtectionGateMixin):
                 await self._save_dm_mention(
                     local,
                     sender_name=event.sender_display_name,
-                    chat_name=prefs.name,
+                    chat_name=self._chat_name(prefs, local),
                     link=link,
                 )
                 continue
@@ -664,11 +682,32 @@ class NotificationService(ProtectionGateMixin):
                 new_notification(
                     user_id=recipient_id,
                     type="dm_message",
-                    title=title,
+                    title=(
+                        self._t(
+                            "notification.household_chat.message",
+                            locale=self._locale(local),
+                            fallback="{author} in {chat_name}",
+                            author=event.sender_display_name,
+                            chat_name=self._chat_name(prefs, local),
+                        )
+                        if household_chat
+                        else title
+                    ),
                     link_url=link,
                 ),
                 dedupe_by_link=True,
             )
+
+    def _chat_name(self, prefs: "_SeatPrefs", recipient) -> str | None:
+        """The name a bell gives the conversation: the group's own, or for
+        the household chat its localised label."""
+        if prefs.system_scope is SystemChatScope.HOUSEHOLD:
+            return self._t(
+                "notification.household_chat.name",
+                locale=self._locale(recipient),
+                fallback="Household chat",
+            )
+        return prefs.name
 
     async def on_dm_message_updated(self, event: DmMessageUpdated) -> None:
         """A sender's edit rings only the group members it newly @-mentions
@@ -681,7 +720,7 @@ class NotificationService(ProtectionGateMixin):
         prefs = await self._seat_prefs(event.conversation_id)
         if not prefs.group:
             return
-        link = f"/dms/{event.conversation_id}"
+        link = _conversation_link(event.conversation_id, prefs.system_scope)
         allowed = set(event.recipient_user_ids)
         blocked = await self._guardian_block_counterparts(event.sender_user_id)
         name = event.sender_display_name or await self._display_name(
@@ -704,7 +743,10 @@ class NotificationService(ProtectionGateMixin):
             ):
                 continue
             await self._save_dm_mention(
-                local, sender_name=name, chat_name=prefs.name, link=link
+                local,
+                sender_name=name,
+                chat_name=self._chat_name(prefs, local),
+                link=link,
             )
 
     async def _save_dm_mention(
@@ -761,6 +803,7 @@ class NotificationService(ProtectionGateMixin):
             ),
             group=group,
             name=conv.name if conv is not None and group else None,
+            system_scope=conv.system_scope if conv is not None else None,
         )
 
     async def mark_read_for_dm(
@@ -776,7 +819,10 @@ class NotificationService(ProtectionGateMixin):
         the thread is the natural "I've seen these" signal, no
         separate UI gesture needed.
         """
-        link = f"/dms/{conversation_id}"
+        conv = await self._convos.get(conversation_id) if self._convos else None
+        link = _conversation_link(
+            conversation_id, conv.system_scope if conv is not None else None
+        )
         flipped = 0
         for ntype in ("dm_message", "dm_mention"):
             flipped += await self._notifs.mark_read_by_link(

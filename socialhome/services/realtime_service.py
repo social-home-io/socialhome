@@ -2083,6 +2083,23 @@ class RealtimeService:
 
     # ─── DMs (§23.47) ────────────────────────────────────────────────────
 
+    async def _system_chat_fields(self, conversation_id: str) -> dict:
+        """``system_scope`` / ``space_id`` of a conversation for ``dm.*`` frames.
+
+        A system chat (the household chat, a space's chat) rides the DM
+        frames too; these two fields let the SPA's DM inbox and badge leave
+        it alone and route it to the feed / space Chat tab instead. Both
+        ``None`` for a person-made DM (or without a conversation repo).
+        """
+        conv = (
+            await self._conversation_repo.get(conversation_id)
+            if self._conversation_repo is not None
+            else None
+        )
+        if conv is None or conv.system_scope is None:
+            return {"system_scope": None, "space_id": None}
+        return {"system_scope": conv.system_scope.value, "space_id": conv.space_id}
+
     async def _on_dm_message_created(self, event: DmMessageCreated) -> None:
         """Push new DM messages to every recipient's WS sessions.
 
@@ -2111,6 +2128,7 @@ class RealtimeService:
         payload = {
             "type": "dm.message",
             "conversation_id": event.conversation_id,
+            **await self._system_chat_fields(event.conversation_id),
             "sender_display": event.sender_display_name,
             "message": {
                 "id": event.message_id,
@@ -2158,6 +2176,7 @@ class RealtimeService:
         payload = {
             "type": "dm.message_updated",
             "conversation_id": event.conversation_id,
+            **await self._system_chat_fields(event.conversation_id),
             "message_id": event.message_id,
             "content": event.content,
             "edited_at": event.edited_at.isoformat(),
@@ -2183,6 +2202,7 @@ class RealtimeService:
         payload = {
             "type": "dm.message_reaction",
             "conversation_id": event.conversation_id,
+            **await self._system_chat_fields(event.conversation_id),
             "message_id": event.message_id,
             "user_id": event.user_id,
             "emoji": event.emoji,
@@ -2246,6 +2266,7 @@ class RealtimeService:
             {
                 "type": "dm.media_ready",
                 "conversation_id": conversation_id,
+                **await self._system_chat_fields(conversation_id),
                 "message_id": message_id,
                 "media_url": signed,
             },
@@ -2304,6 +2325,7 @@ class RealtimeService:
         payload = {
             "type": "dm.conversation.created",
             "conversation_id": event.conversation_id,
+            **await self._system_chat_fields(event.conversation_id),
             "conversation_type": event.conversation_type,
             "name": event.name,
         }
@@ -2323,6 +2345,7 @@ class RealtimeService:
         payload = {
             "type": "dm.group.updated",
             "conversation_id": event.conversation_id,
+            **await self._system_chat_fields(event.conversation_id),
             "name": event.name,
         }
         for user_id in event.notify_user_ids:

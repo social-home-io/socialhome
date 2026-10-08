@@ -931,6 +931,17 @@ class FederationInboundService(ProtectionGateMixin):
         scope = self._dm_scope
         reason: str | None = None
         conv = await self._conversation_repo.get(conv_id)
+        if conv is not None and conv.is_system:
+            # A system chat (household / space) never takes DM events: the
+            # household chat is never federated, a space chat has its own.
+            refuse(
+                event,
+                "system conversation",
+                conversation=conv_id,
+                message=message_id,
+                sender=sender_user_id,
+            )
+            return False
         seat = (
             await scope.seat_of(event, conv_id, sender_user_id)
             if conv is not None
@@ -953,6 +964,17 @@ class FederationInboundService(ProtectionGateMixin):
                 )
                 return False
         existing = await self._conversation_repo.get_message(message_id)
+        if existing is not None and await self._in_system_chat(
+            existing.conversation_id
+        ):
+            refuse(
+                event,
+                "system conversation",
+                conversation=conv_id,
+                message=message_id,
+                sender=sender_user_id,
+            )
+            return False
         if seat is None and not await scope.sent_from(event, sender_user_id):
             reason = "sender is not a user of the sending household"
         elif existing is not None and (
@@ -979,6 +1001,11 @@ class FederationInboundService(ProtectionGateMixin):
             sender=sender_user_id,
         )
         return False
+
+    async def _in_system_chat(self, conversation_id: str) -> bool:
+        """``conversation_id`` is a system chat here (household / space)."""
+        conv = await self._conversation_repo.get(conversation_id)
+        return conv is not None and conv.is_system
 
     async def _heal_legacy_seat(
         self,
@@ -1337,8 +1364,14 @@ class FederationInboundService(ProtectionGateMixin):
         adopts the file when the message lands.
         """
         msg = await self._conversation_repo.get_message(message_id)
+        named = str((event.payload or {}).get("conversation_id") or "")
+        if await self._in_system_chat(
+            msg.conversation_id if msg is not None else named
+        ):
+            refuse(event, "system conversation", message=message_id)
+            return False
         if msg is None:
-            conv_id = str((event.payload or {}).get("conversation_id") or "")
+            conv_id = named
             if await self._media_blob_guardian_refused(event, conv_id):
                 refuse(event, "guardian block", message=message_id)
                 return False
@@ -1548,7 +1581,9 @@ class FederationInboundService(ProtectionGateMixin):
         if msg is None:
             return
         reason: str | None = None
-        if not await self._dm_scope.authored_by_sender(
+        if await self._in_system_chat(msg.conversation_id):
+            reason = "system conversation"
+        elif not await self._dm_scope.authored_by_sender(
             event, msg.conversation_id, msg.sender_user_id
         ):
             reason = "message was not sent from this household"
@@ -1576,6 +1611,8 @@ class FederationInboundService(ProtectionGateMixin):
         reason: str | None = None
         if conv_id and conv_id != msg.conversation_id:
             reason = "message is not in the named conversation"
+        elif await self._in_system_chat(msg.conversation_id):
+            reason = "system conversation"
         elif not await self._dm_scope.speaks_for(event, msg.conversation_id, user_id):
             reason = "reactor is not a seated user of the sending household"
         if reason is not None:

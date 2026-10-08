@@ -29,6 +29,7 @@ from ..domain.call import CallQualitySample
 from ..services.call_service import (
     CallAlreadyAnsweredError,
     CallConversationError,
+    CallInSystemChatError,
     CallNotFoundError,
     CallTooLargeError,
 )
@@ -109,6 +110,10 @@ class CallCollectionView(BaseView):
         except PermissionError as exc:
             return web.json_response(
                 {"error": "forbidden", "detail": str(exc)}, status=403
+            )
+        except CallInSystemChatError as exc:
+            return web.json_response(
+                {"error": "calls_unavailable", "detail": str(exc)}, status=409
             )
         except CallConversationError as exc:
             return web.json_response(
@@ -253,6 +258,10 @@ class CallJoinView(BaseView):
             )
         except CallNotFoundError:
             return web.json_response({"error": "call_not_found"}, status=404)
+        except CallInSystemChatError as exc:
+            return web.json_response(
+                {"error": "calls_unavailable", "detail": str(exc)}, status=409
+            )
         except CallTooLargeError as exc:
             return web.json_response(
                 {"error": "too_many_participants", "detail": str(exc)}, status=422

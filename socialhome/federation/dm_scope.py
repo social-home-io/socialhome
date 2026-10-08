@@ -22,6 +22,11 @@ sender cannot forge:
 * for a group, the authority itself — the household its owner-bound
   conversation id commits to.
 
+A *system chat* (``Conversation.system_scope`` set — the household chat, a
+space's chat) is never a DM peer's business: no household is ever seated
+in one, whatever a seat row says, so no DM event, history request or
+history chunk can reach it.
+
 No new key or table.
 """
 
@@ -81,8 +86,14 @@ class DmScope:
         sender = str(event.from_instance or "")
         if not conversation_id or not sender:
             return False
+        if await self._is_system_chat(conversation_id):
+            return False
         members = await self._conversations.list_remote_members(conversation_id)
         return any(m.instance_id == sender for m in members)
+
+    async def _is_system_chat(self, conversation_id: str) -> bool:
+        conv = await self._conversations.get(conversation_id)
+        return conv is not None and conv.is_system
 
     async def seat_of(
         self,
@@ -107,6 +118,8 @@ class DmScope:
         """
         sender = str(event.from_instance or "")
         if not conversation_id or not user_id or not sender:
+            return None
+        if await self._is_system_chat(conversation_id):
             return None
         home = await self._users.get_instance_for_user(user_id)
         if home is not None and home != sender:

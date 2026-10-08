@@ -21,6 +21,8 @@
   "notification.space.here": "{author} a notifié tout le monde dans {space_name}",
   "notification.dm.mention": "{author} vous a mentionné dans {chat_name}",
   "notification.dm.mention_unnamed": "{author} vous a mentionné dans une discussion de groupe",
+  "notification.household_chat.message": "{author} dans {chat_name}",
+  "notification.household_chat.name": "Discussion du foyer",
   "notification.space.moderation.approved": "Votre contribution dans {space_name} a été approuvée",
   "notification.space.moderation.rejected": "Votre contribution dans {space_name} n'a pas été approuvée",
   "notification.space.moderation.expired": "Votre contribution dans {space_name} a expiré sans vérification",

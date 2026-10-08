@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from socialhome.domain.events import (
+    DmMessageCreated,
     PostCreated,
     SpacePostCreated,
     TaskAssigned,
@@ -135,3 +136,39 @@ async def test_adapter_failure_does_not_propagate():
     bridge.wire()
     # Should not raise.
     await bus.publish(PostCreated(post=_post()))
+
+
+async def test_dm_message_fires_dm_received_without_content(env):
+    bus, adapter = env
+    await bus.publish(
+        DmMessageCreated(
+            conversation_id="c1",
+            message_id="m1",
+            sender_user_id="u1",
+            sender_display_name="Anna",
+            recipient_user_ids=("u2",),
+            content="secret",
+        )
+    )
+    assert adapter.calls == [
+        (
+            "socialhome.dm_received",
+            {"conversation_id": "c1", "sender_display_name": "Anna", "is_group": False},
+        )
+    ]
+
+
+async def test_system_chat_message_is_not_a_dm_for_ha(env):
+    """A household-chat message is no DM: no ``socialhome.dm_received``."""
+    bus, adapter = env
+    await bus.publish(
+        DmMessageCreated(
+            conversation_id="hh",
+            message_id="m1",
+            sender_user_id="u1",
+            sender_display_name="Anna",
+            recipient_user_ids=("u2", "u3"),
+            system_scope="household",
+        )
+    )
+    assert adapter.calls == []

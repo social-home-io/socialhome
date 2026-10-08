@@ -336,6 +336,8 @@ from .services.app_federation_service import AppFederationService
 from .services.app_service import AppService
 from .services.resync_on_upgrade import request_capability_resync_if_upgraded
 from .services.preferences_service import PreferencesService
+from .services.household_chat_service import HouseholdChatService
+from .services.system_chat_policy import HouseholdChatAccess, SystemChatPolicy
 from .services.page_conflict_service import PageConflictService
 from .services.page_proposal_forwarder import PageProposalForwarder
 from .services.space_page_service import PageModerationHandler, SpacePageService
@@ -2425,6 +2427,17 @@ def create_app(config: Config | None = None) -> web.Application:
         bus=bus,
     )
 
+    # ── System chats (household chat on group-DM storage) ───────────────
+    # Access is decided live by the policy (DmService defers to it for every
+    # conversation with ``system_scope`` set); the service keeps the seats.
+    household_chat_access = HouseholdChatAccess(preferences_service)
+    system_chat_policy = SystemChatPolicy(user_repo, household=household_chat_access)
+    dm_service.attach_system_chats(system_chat_policy)
+    household_chat_service = HouseholdChatService(
+        conversation_repo, user_repo, household_chat_access, bus
+    )
+    household_chat_service.wire()
+
     # ── Link previews (author-side, SSRF-guarded) ────────────────────────
     link_preview_service = _build_link_previews(config, preferences_service)
     feed_service.attach_link_previews(link_preview_service)
@@ -2701,6 +2714,7 @@ def create_app(config: Config | None = None) -> web.Application:
     )
     # §CP.F2: no typing indicator across a guardian block.
     typing_service.attach_child_protection(child_protection_service)
+    typing_service.attach_system_chats(system_chat_policy)
 
     # ── Platform adapter (HA vs standalone) ──────────────────────────────
     platform_adapter = build_platform_adapter(config.mode, db, config)
@@ -2860,6 +2874,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.child_protection_service_key] = child_protection_service
     app[K.typing_service_key] = typing_service
     app[K.preferences_service_key] = preferences_service
+    app[K.household_chat_service_key] = household_chat_service
     app[K.link_preview_service_key] = link_preview_service
     app[K.app_service_key] = app_service
     app[K.alias_service_key] = alias_service
@@ -4039,6 +4054,10 @@ def create_app(config: Config | None = None) -> web.Application:
                 transcribe=audio_transcription_service,
                 bus=bus,
                 media_dir=pathlib.Path(config.media_path),
+            )
+            # §CP.F2: no transcript across a guardian block.
+            audio_transcript_scheduler.attach_child_protection(
+                app[K.child_protection_service_key]
             )
             await audio_transcript_scheduler.start()
 

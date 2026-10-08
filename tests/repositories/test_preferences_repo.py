@@ -43,6 +43,14 @@ async def test_feat_timetable_round_trips(repo):
     assert (await repo.get_household()).feat_timetable is False
 
 
+async def test_feat_household_chat_round_trips(repo):
+    assert (await repo.get_household()).feat_household_chat is True
+    await repo.ensure_row(HOUSEHOLD_ROW_ID)
+    assert (await repo.get_household()).feat_household_chat is True
+    await repo.set_household_value("feat_household_chat", 0)
+    assert (await repo.get_household()).feat_household_chat is False
+
+
 async def test_get_household_returns_row_values_after_ensure_and_set(repo):
     await repo.ensure_row(HOUSEHOLD_ROW_ID)
     await repo.set_household_value("feat_feed", 0)
