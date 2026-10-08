@@ -5173,19 +5173,6 @@ def _check_private_space_off(state: dict, a_base: str) -> str:
     return off_id
 
 
-def _connection_row(info: dict, peer_iid: str) -> dict | None:
-    """``label``'s ``/api/connections`` row for ``peer_iid`` (or ``None``)."""
-    s, conns = _request(
-        f"http://127.0.0.1:{info['port']}/api/connections",
-        token=info["token"],
-    )
-    _must("connections", s, conns)
-    for c in conns:
-        if c["instance_id"] == peer_iid:
-            return c
-    return None
-
-
 def _relay_row(label: str, peer_iid: str) -> tuple | None:
     """``(status, gfs_relay, remote_inbox_url, has keywrap pk)`` of
     ``label``'s ``remote_instances`` row for ``peer_iid``."""
@@ -5512,7 +5499,7 @@ def cmd_gfs_reach_pair() -> None:
             lambda: new_name in _all_display_names(state, "e").values(),
             timeout=60,
         )
-        row = _connection_row(a, e_iid) or {}
+        row = _connection_row("a", e_iid) or {}
         print(
             f"  e: sees {new_name!r} — a→e transport={row.get('transport')!r}"
             f" last_relay_accepted_at={row.get('last_relay_accepted_at')!r}"
@@ -5529,13 +5516,13 @@ def cmd_gfs_reach_pair() -> None:
             transport = _poll(
                 "a DataChannel a↔e",
                 lambda: (
-                    (_connection_row(a, e_iid) or {}).get("transport") == "rtc"
+                    (_connection_row("a", e_iid) or {}).get("transport") == "rtc"
                     and "rtc"
                 ),
                 timeout=30,
             )
         except SystemExit:
-            transport = (_connection_row(a, e_iid) or {}).get("transport")
+            transport = (_connection_row("a", e_iid) or {}).get("transport")
         print(f"  a→e transport after 30 s: {transport!r} (informational)")
 
         # 6. e gains a URL → URL_UPDATED → a's row for e gets it.
