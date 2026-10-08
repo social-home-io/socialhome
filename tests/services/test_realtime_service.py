@@ -1188,3 +1188,32 @@ async def test_space_timetable_frames_reach_members_only(env):
     assert types == ["timetable.changed", "timetable.deleted"]
     assert all(json.loads(m)["space_id"] == "sp-1" for m in member.sent)
     assert nonmember.sent == []
+
+
+async def test_calendar_frames_never_carry_a_non_local_cover(env):
+    """A cover stored before the local-only rule is ``null`` on the WS
+    frame too, like on every REST read — it never reaches an ``<img>``."""
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    for i, cover in enumerate(("https://cdn.example/old.jpg", "api/media/ok.webp")):
+        e = CalendarEvent(
+            id=f"e{i}",
+            calendar_id="c1",
+            summary="X",
+            created_by="me",
+            start=datetime(2026, 4, 15, tzinfo=timezone.utc),
+            end=datetime(2026, 4, 15, 1, tzinfo=timezone.utc),
+            cover_url=cover,
+        )
+        await bus.publish(CalendarEventCreated(event=e))
+        await bus.publish(CalendarEventUpdated(event=e))
+    frames = [json.loads(m) for m in sock.sent]
+    covers = {
+        (f["type"], f["event"]["id"]): f["event"]["cover_url"]
+        for f in frames
+        if f["type"] in ("calendar.created", "calendar.updated")
+    }
+    assert covers[("calendar.created", "e0")] is None
+    assert covers[("calendar.updated", "e0")] is None
+    assert covers[("calendar.created", "e1")].split("?", 1)[0] == "api/media/ok.webp"

@@ -646,7 +646,12 @@ content are blocked entirely.**
 1. **Only local pictures render.** A picture shows only when it is this
    household's own media (`api/…` — an upload, a space cover, a profile
    picture). Federated media fields are cut to that shape on receipt
-   (`services/inbound_media_store.local_media_ref`); the Pages markdown
+   (`services/inbound_media_store.local_media_ref`), and the local
+   create / edit paths refuse the same thing up front — a highlight frame,
+   moment, post / comment, Bazaar listing, event cover or page cover whose
+   media is not a local upload is `422 INVALID_MEDIA_URL`
+   (`require_local_media_ref`), so what the author's household accepts is
+   exactly what every receiver keeps; the Pages markdown
    renderer turns an external `http(s)` image into a plain link the reader
    may choose to open, and drops any other source
    (`client/src/utils/markdown.ts`); the post renderer has no image

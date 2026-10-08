@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from PIL import Image
 
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
@@ -10529,3 +10530,44 @@ async def test_roster_snapshot_carries_the_recipients_channel_grant(stack):
     assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
     payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
     assert payload["gfs_channel"] == {"grant_for": "peer-a"}
+
+
+# ── Local media only (docs/principles.md "No third-party fetches") ───────
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"type": PostType.IMAGE, "image_urls": ["https://cdn.example/x.jpg"]},
+        {"type": PostType.VIDEO, "media_url": "https://cdn.example/x.webm"},
+    ],
+)
+async def test_space_post_with_non_local_media_is_refused(stack, kwargs):
+    """Receivers drop a remote media URL and every member's browser would
+    fetch it — so the author's household refuses it up front."""
+    a = await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="S")
+    with pytest.raises(InvalidMediaRefError):
+        await stack.space_svc.create_post(space.id, author_user_id=a.user_id, **kwargs)
+
+
+async def test_space_comment_with_non_local_media_is_refused(stack):
+    a = await stack.provision_user("anna")
+    s = await stack.space_svc.create_space(owner_username="anna", name="S")
+    p = await stack.space_svc.create_post(
+        s.id, author_user_id=a.user_id, type=PostType.TEXT, content="x"
+    )
+    with pytest.raises(InvalidMediaRefError):
+        await stack.space_svc.add_comment(
+            p.id,
+            author_user_id=a.user_id,
+            comment_type="image",
+            media_url="https://cdn.example/x.jpg",
+        )
+    c = await stack.space_svc.add_comment(
+        p.id,
+        author_user_id=a.user_id,
+        comment_type="image",
+        media_url="api/media/ok.webp",
+    )
+    assert c.media_url == "api/media/ok.webp"

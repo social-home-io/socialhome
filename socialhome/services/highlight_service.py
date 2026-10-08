@@ -1,9 +1,10 @@
 """Highlight service (§Highlights).
 
 Orchestrates the create/append/delete/share/expire flows on top of
-:class:`AbstractHighlightRepo`. Holds no SQL, no HTTP, no media validation —
-those live in repos, routes, and the existing ``MediaValidator``
-respectively.
+:class:`AbstractHighlightRepo`. Holds no SQL, no HTTP, no media byte
+validation — those live in repos, routes, and the existing
+``MediaValidator`` respectively. It does refuse a frame whose
+``media_url`` is not a local upload (``require_local_media_ref``).
 
 The encryption-first rule (§25.8.21) shapes the federation outbound:
 this service collects the *plaintext* domain event (id, sequence,
@@ -46,6 +47,7 @@ from ..domain.highlight import (
 )
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
+from .inbound_media_store import require_local_media_ref
 from .user_preferences import parse_highlights_preferences
 
 if TYPE_CHECKING:
@@ -118,6 +120,10 @@ class HighlightService:
         :class:`FederationEventType`). Subsequent frames the same day
         re-use the existing :class:`Highlight` row.
         """
+        # Local uploads only — before anything is written, so a refused
+        # frame leaves no empty highlight behind. A remote URL would leak
+        # every viewer's IP, and receivers drop it (``_frame_from_payload``).
+        media_url = require_local_media_ref(media_url)
         author = await self._users.get_by_user_id(author_user_id)
         if author is None:
             raise LookupError(f"author {author_user_id!r} not found")

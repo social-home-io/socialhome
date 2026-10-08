@@ -13,9 +13,12 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import (
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
@@ -24,6 +27,7 @@ from socialhome.domain.events import (
     HighlightRemoved,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.highlight import HighlightFrameType
 from socialhome.domain.user import RemoteUser
 from socialhome.repositories import (
     SqliteConversationRepo,
@@ -32,7 +36,12 @@ from socialhome.repositories import (
     SqliteUserRepo,
 )
 from socialhome.repositories.highlight_repo import SqliteHighlightRepo
+from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound_service import FederationInboundService
+from socialhome.services.highlight_federation_outbound import (
+    HighlightFederationOutbound,
+)
+from socialhome.services.highlight_service import HighlightService
 
 
 @pytest.fixture
@@ -412,3 +421,85 @@ async def test_highlight_frame_with_a_remote_media_url_is_not_stored(
         ),
     )
     assert await inbound._highlight_repo.list_frames("s-fed-1") == []
+
+
+# ─── Round trip: local create → outbound → receiver ──────────────────────────
+
+
+@pytest.fixture
+async def author_db(tmp_dir):
+    """The author's own household — a second, separate database."""
+    database = AsyncDatabase(tmp_dir / "author.db", batch_timeout_ms=10)
+    await database.startup()
+    await database.enqueue(
+        "INSERT INTO users(user_id, username, display_name) VALUES(?,?,?)",
+        ("uid-remote", "alice", "Alice"),
+    )
+    yield database
+    await database.shutdown()
+
+
+@pytest.mark.parametrize(
+    "media_url",
+    [
+        "api/media/x.webp",
+        "/api/media/x.webp",
+        "https://example.invalid/img.jpg",
+        "//evil.example/x.webp",
+        "javascript:alert(1)",
+        "api/media/../secret",
+    ],
+)
+async def test_every_locally_accepted_frame_lands_on_the_receiver(
+    author_db, inbound, media_url
+):
+    """The author's household and the receiver apply one rule to
+    ``media_url``: a frame the author's household accepts is landed by
+    every receiver, and one the receiver would drop is refused at create
+    time — so a highlight can never be visible at home and invisible on
+    the other households (the federation-demo ``verify`` regression)."""
+    author_bus = EventBus()
+    frames: list[HighlightFrameAdded] = []
+    author_bus.subscribe(HighlightFrameAdded, frames.append)
+    service = HighlightService(
+        SqliteHighlightRepo(author_db), SqliteUserRepo(author_db), author_bus
+    )
+    try:
+        await service.create_or_append_frame(
+            author_user_id="uid-remote",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url=media_url,
+        )
+    except InvalidMediaRefError:
+        accepted = False
+    else:
+        accepted = True
+
+    # The wire payload exactly as the outbound builds it.
+    federation = MagicMock()
+    federation.own_instance_id = "peer-a"
+    federation.send_event = AsyncMock()
+    user_repo = MagicMock()
+    user_repo.get_instance_for_user = AsyncMock(return_value="peer-a")
+    fed_repo = MagicMock()
+    peer = MagicMock()
+    peer.id = "self"
+    fed_repo.list_social_instances = AsyncMock(return_value=[peer])
+    outbound = HighlightFederationOutbound(
+        bus=author_bus,
+        federation_service=federation,
+        federation_repo=fed_repo,
+        user_repo=user_repo,
+    )
+    for ev in frames:
+        await outbound._on_frame_added(ev)
+    sent = [c.kwargs for c in federation.send_event.call_args_list]
+    assert len(sent) == (1 if accepted else 0)
+    if not accepted:
+        return
+
+    await inbound._on_highlight_created(
+        _event(FederationEventType.HIGHLIGHT_CREATED, sent[0]["payload"])
+    )
+    landed = await inbound._highlight_repo.list_frames(frames[0].highlight_id)
+    assert [f.media_url for f in landed] == [media_url]

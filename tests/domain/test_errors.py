@@ -18,6 +18,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.errors import (
     CodedError,
+    InvalidMediaRefError,
     ImageTooLargeError,
     ImageUnreadableError,
     PayloadTooLargeError,
@@ -280,3 +281,26 @@ def test_pairing_reach_errors_are_coded_value_errors(exc, code):
     assert isinstance(exc, ValueError)
     assert (exc.status, exc.code) == (422, code)
     assert exc.params == {}
+
+
+# ─── Local media references ─────────────────────────────────────────────
+
+
+def test_invalid_media_ref_error_is_coded():
+    """422 ``INVALID_MEDIA_URL`` with a fixed detail (never the submitted
+    URL), and still a ``ValueError`` for existing callers."""
+    exc = InvalidMediaRefError()
+    assert isinstance(exc, CodedError)
+    assert isinstance(exc, ValueError)
+    assert (exc.status, exc.code) == (422, "INVALID_MEDIA_URL")
+    assert exc.detail == "media_url must be a file uploaded via /api/media/upload"
+    assert exc.params == {"field": "media_url"}
+
+
+def test_invalid_media_ref_error_names_the_field():
+    """Covers, image lists… share the code; the detail names the field."""
+    exc = InvalidMediaRefError("cover_url")
+    assert (exc.status, exc.code) == (422, "INVALID_MEDIA_URL")
+    assert exc.detail == "cover_url must be a file uploaded via /api/media/upload"
+    # The field rides as a param so the SPA can name it; never the value.
+    assert exc.params == {"field": "cover_url"}

@@ -34,12 +34,11 @@ from ..domain.conversation import (
     ConversationMessage,
     CONVERSATION_NOTIF_LEVELS,
     ConversationType,
-    InvalidMediaRefError,
     MESSAGE_TYPES,
     RemoteConversationMember,
     mute_until_for,
 )
-from ..domain.errors import CodedError
+from ..domain.errors import CodedError, InvalidMediaRefError
 from ..domain.dm_location import normalise_location_content
 from ..domain.events import (
     DmConversationCreated,

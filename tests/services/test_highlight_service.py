@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import (
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
@@ -508,3 +509,49 @@ async def test_create_or_append_frame_unknown_author_raises_lookup(db, svc):
             frame_type=HighlightFrameType.IMAGE,
             media_url="/api/media/x.webp",
         )
+
+
+# ── Local media only (docs/principles.md "No third-party fetches") ───────
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "https://example.invalid/img.jpg",
+        "//evil.example/x.webp",
+        "javascript:alert(1)",
+        "api/media/../secret",
+        "/media/x.webp",
+    ],
+)
+async def test_frame_with_non_local_media_is_refused(db, svc, bad_url):
+    """A frame must point at a local upload: a third-party URL would be
+    fetched by every viewer's browser (IP leak) and every receiving
+    household drops it, so the highlight would never federate."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    captured: list[HighlightFrameAdded] = []
+    bus.subscribe(HighlightFrameAdded, lambda e: captured.append(e))
+    with pytest.raises(InvalidMediaRefError) as ei:
+        await service.create_or_append_frame(
+            author_user_id="u1",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url=bad_url,
+        )
+    assert (ei.value.status, ei.value.code) == (422, "INVALID_MEDIA_URL")
+    assert captured == []
+    # No empty highlight row is left behind either.
+    assert await SqliteHighlightRepo(db).list_authored("u1") == []
+
+
+async def test_frame_keeps_local_media_ref_verbatim(db, svc):
+    """The stored value is the one the client sent — receivers keep the
+    federated copy verbatim too, so both sides hold the same string."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    _, frame = await service.create_or_append_frame(
+        author_user_id="u1",
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/a.webp",
+    )
+    assert frame.media_url == "/api/media/a.webp"

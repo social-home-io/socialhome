@@ -46,7 +46,10 @@ from ..repositories.page_repo import (
 )
 from ..security import error_response
 from ..domain.page_version import PageConflictSide, version_hash
-from ..services.inbound_media_store import verbatim_local_media_ref
+from ..services.inbound_media_store import (
+    optional_local_media_ref,
+    verbatim_local_media_ref,
+)
 from ..services.page_conflict_service import RESOLUTIONS
 from ..services.space_page_service import PageStaleError, snapshot_page_version
 from .base import BaseView
@@ -260,7 +263,10 @@ class PageDetailView(BaseView):
         if "content" in body:
             kwargs["content"] = strip_signed_media_in_markdown(body["content"])
         if "cover_image_url" in body:
-            kwargs["cover_image_url"] = strip_signature_query(body["cover_image_url"])
+            kwargs["cover_image_url"] = optional_local_media_ref(
+                strip_signature_query(body["cover_image_url"]),
+                field="cover_image_url",
+            )
         updated = replace(p, **kwargs)
         await repo.save(updated, space_id=updated.space_id)
         # Answer with the stored row: the upsert stamps its own
