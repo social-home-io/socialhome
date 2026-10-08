@@ -14,7 +14,10 @@
 --     system chat is decided live by ``services/system_chat_policy.py``,
 --     never by its seat rows (those only hold per-user state).
 --   * ``conversations.space_id`` — the space a ``'space'`` chat belongs
---     to; the chat goes with the space (``ON DELETE CASCADE``).
+--     to; the chat goes with the space (``ON DELETE CASCADE``). Set if and
+--     only if ``system_scope = 'space'``: enforced where system chats are
+--     created (``SqliteConversationRepo.create_system_chat``), not by a
+--     table CHECK — adding one to ``conversations`` would mean a rebuild.
 --   * ``ux_conv_space_chat`` / ``ux_conv_household_chat`` — at most one
 --     chat per space and one household chat, so concurrent first opens
 --     race into the same row (``INSERT OR IGNORE`` then read back).

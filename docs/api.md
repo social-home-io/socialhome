@@ -800,7 +800,7 @@ bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/household/chat` | The household chat for the caller: `{enabled, conversation_id, unread, notif_level, muted_until}`. Creates the chat on first use and reconciles its seats (one per active local user; new seats start at `notif_level: "all"` with nothing unread). `muted_until` is the caller's own mute while it is on, else `null`. With `feat_household_chat` off: `{enabled: false, conversation_id: null, unread: 0, notif_level: null, muted_until: null}` and nothing is created. Active local users only (403 otherwise). |
+| GET | `/api/household/chat` | The household chat for the caller: `{enabled, conversation_id, unread, notif_level, muted_until}`. Creates the chat on first use and reconciles its seats (one per active local user; new seats start at `notif_level: "all"` with nothing unread; an account that comes back (deprovisioned, then reactivated) also starts with no unread backlog — what was said while it was away is readable, but not counted as unread, keeping its own level and mute). `muted_until` is the caller's own mute while it is on, else `null`. With `feat_household_chat` off: `{enabled: false, conversation_id: null, unread: 0, notif_level: null, muted_until: null}` and nothing is created. Active local users only (403 otherwise). |
 
 ## HFS — Presence, notifications, search
 

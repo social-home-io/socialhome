@@ -12,7 +12,11 @@ from socialhome.domain.conversation import (
     RemoteConversationMember,
     SystemChatScope,
 )
-from socialhome.domain.events import DmMessageCreated
+from socialhome.domain.events import (
+    DmMessageCreated,
+    DmMessageReactionChanged,
+    DmMessageUpdated,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.preferences import FeatureDisabledError
 from socialhome.infrastructure.event_bus import EventBus
@@ -341,3 +345,51 @@ async def test_guardian_block_never_refuses_but_hides_the_blocked_sender(stack):
     # Anna can't react to a message she isn't shown.
     with pytest.raises(PermissionError):
         await stack.dm.add_reaction(from_bob.id, username="anna", emoji="👍")
+
+
+async def test_a_blocked_senders_edit_never_reaches_the_protected_member(stack):
+    """Guardian blocks Bob for Mia: Bob posts and edits in the household
+    chat; Mia gets neither event, Carl gets both."""
+    mia = await stack.provision("mia")
+    bob = await stack.provision("bob")
+    carl = await stack.provision("carl")
+    chat = await stack.chat.reconcile()
+    stack.guardian.protected.add(mia.user_id)
+    stack.guardian.pairs.add(frozenset((mia.user_id, bob.user_id)))
+    created: list[DmMessageCreated] = []
+    updated: list[DmMessageUpdated] = []
+
+    async def _c(e: DmMessageCreated) -> None:
+        created.append(e)
+
+    async def _u(e: DmMessageUpdated) -> None:
+        updated.append(e)
+
+    stack.bus.subscribe(DmMessageCreated, _c)
+    stack.bus.subscribe(DmMessageUpdated, _u)
+    msg = await stack.dm.send_message(chat.id, sender_username="bob", content="b")
+    await stack.dm.edit_message(msg.id, editor_username="bob", new_content="b2")
+    assert created[-1].recipient_user_ids == (carl.user_id,)
+    assert updated[-1].recipient_user_ids == (carl.user_id,)
+
+
+async def test_reactions_skip_removed_seats_and_the_protected_member(stack):
+    mia = await stack.provision("mia")
+    bob = await stack.provision("bob")
+    carl = await stack.provision("carl")
+    await stack.provision("dora")
+    chat = await stack.chat.reconcile()
+    stack.guardian.protected.add(mia.user_id)
+    stack.guardian.pairs.add(frozenset((mia.user_id, bob.user_id)))
+    await stack.convos.remove_seat(chat.id, "dora")
+    changes: list[DmMessageReactionChanged] = []
+
+    async def _r(e: DmMessageReactionChanged) -> None:
+        changes.append(e)
+
+    stack.bus.subscribe(DmMessageReactionChanged, _r)
+    from_bob = await stack.dm.send_message(chat.id, sender_username="bob", content="b")
+    # Carl reacts to Bob's message: Mia (who never sees it) gets no frame,
+    # nor does removed Dora; Carl's own tabs and Bob do.
+    await stack.dm.add_reaction(from_bob.id, username="carl", emoji="👍")
+    assert set(changes[-1].recipient_user_ids) == {bob.user_id, carl.user_id}

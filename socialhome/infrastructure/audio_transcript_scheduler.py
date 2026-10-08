@@ -35,6 +35,8 @@ from ..domain.events import DmMessageUpdated
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+from ..services.dm_audience import local_audience
+from ..services.protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
     from ..services.audio_transcription_service import AudioTranscriptionService
@@ -42,10 +44,16 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class AudioTranscriptScheduler:
-    """Periodic receiver-side STT for un-transcribed audio DMs."""
+class AudioTranscriptScheduler(ProtectionGateMixin):
+    """Periodic receiver-side STT for un-transcribed audio DMs.
+
+    Guardian blocks (§CP.F2, via :class:`ProtectionGateMixin`): a patched
+    transcript is never pushed to a member a block separates from the
+    voice note's sender.
+    """
 
     __slots__ = (
+        "_child_protection",
         "_convos",
         "_users",
         "_transcribe",
@@ -70,6 +78,7 @@ class AudioTranscriptScheduler:
     ) -> None:
         self._convos = conversation_repo
         self._users = user_repo
+        self._child_protection = None
         self._transcribe = transcribe
         self._bus = bus
         self._media_dir = media_dir
@@ -189,10 +198,12 @@ class AudioTranscriptScheduler:
         re-fan over federation — every household runs its own
         fallback independently for messages it received.
         """
-        out: list[str] = []
-        for member in await self._convos.list_members(conversation_id):
-            user = await self._users.get(member.username)
-            if user is None or user.user_id == sender_user_id:
-                continue
-            out.append(user.user_id)
-        return tuple(out)
+        return await local_audience(
+            self._convos,
+            self._users,
+            conversation_id,
+            actor_user_id=sender_user_id,
+            # §CP.F2: a blocked sender's transcript never reaches the
+            # protected member (they never see the voice note either).
+            withheld=await self._guardian_block_counterparts(sender_user_id),
+        )

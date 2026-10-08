@@ -24,11 +24,14 @@ from ..domain.federation import FederationEventType
 from ..federation.dm_scope import DmScope, refuse
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .dm_audience import local_audience
 from .peer_outbound import SingleTargetSender
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
+    from ..domain.conversation import Conversation
+    from .system_chat_policy import SystemChatPolicy
     from ..repositories.peer_user_visibility_repo import (
         AbstractPeerUserVisibilityRepo,
     )
@@ -67,6 +70,7 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
         "_own_instance_id",
         "_active",
         "_active_comments",
+        "_system_chats",
     )
 
     def __init__(
@@ -98,6 +102,14 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
         # (a separate keyspace from conversation typing so the two
         # never alias on a stray collision between an id pair).
         self._active_comments: dict[tuple[str, str], _TypingState] = {}
+        #: Live read access to system chats (household / space chat);
+        #: without it nobody types into one.
+        self._system_chats: "SystemChatPolicy | None" = None
+
+    def attach_system_chats(self, policy: "SystemChatPolicy") -> None:
+        """Wire the system-chat policy: typing in the household (or a
+        space's) chat is shown only while the typist may read it."""
+        self._system_chats = policy
 
     def attach_federation(self, federation_service, own_instance_id: str) -> None:
         self._federation = federation_service
@@ -125,6 +137,11 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
     ) -> int:
         """Record + fan out a typing event. Returns count of WS deliveries."""
         now = now if now is not None else time.monotonic()
+        conv = await self._convo_repo.get(conversation_id)
+        if conv is not None and conv.is_system:
+            return await self._system_chat_typing(
+                conv, sender_user_id=sender_user_id, sender_username=sender_username
+            )
         key = (conversation_id, sender_user_id)
         # Throttle: ignore duplicates within 1 second.
         existing = self._active.get(key)
@@ -161,6 +178,40 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
             sender_username=sender_username,
         )
         return delivered
+
+    async def _system_chat_typing(
+        self,
+        conv: "Conversation",
+        *,
+        sender_user_id: str,
+        sender_username: str,
+    ) -> int:
+        """Typing in a system chat: only from someone the policy lets read
+        it right now (chat on, still a member), only to its live audience,
+        never federated (household chat) — a space chat's typing would ride
+        its own events."""
+        if self._system_chats is None or not await self._system_chats.can_read(
+            conv, sender_user_id
+        ):
+            return 0
+        targets = await local_audience(
+            self._convo_repo,
+            self._user_repo,
+            conv.id,
+            actor_user_id=sender_user_id,
+            withheld=await self._guardian_block_counterparts(sender_user_id),
+        )
+        if not targets:
+            return 0
+        return await self._ws.broadcast_to_users(
+            list(targets),
+            {
+                "type": "conversation.user_typing",
+                "conversation_id": conv.id,
+                "sender_user_id": sender_user_id,
+                "sender_username": sender_username,
+            },
+        )
 
     # ─── Comment-thread typing ────────────────────────────────────────────
 

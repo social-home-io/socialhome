@@ -63,6 +63,10 @@ async def test_typing_event_carries_only_routing():
     from socialhome.services.typing_service import TypingService
 
     class _FakeRepo:
+        async def get(self, _):
+            # A plain DM — never a system chat.
+            return None
+
         async def list_members(self, _):
             return []
 

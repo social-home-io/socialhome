@@ -53,6 +53,7 @@ from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .dm_audience import local_audience
 from .dm_group_service import DmGroupService, clean_group_name
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .inbound_media_store import local_media_ref
@@ -760,20 +761,15 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         # members so :meth:`FederationInboundService._on_dm_message`
         # on the recipient side can ensure the conversation row +
         # local membership exists for the right user.
-        recipients: list[str] = []
-        for m in await self._convos.list_members(conversation_id):
-            if m.username == sender_username:
-                continue
-            if m.deleted_at is not None and conv.is_system:
-                continue
-            u = await self._users.get(m.username)
-            if u is None or u.user_id in withheld:
-                continue
-            if conv.is_system and u.state != "active":
-                # A seat the reconciler has not taken out yet never rings
-                # a deactivated account.
-                continue
-            recipients.append(u.user_id)
+        recipients: list[str] = list(
+            await local_audience(
+                self._convos,
+                self._users,
+                conversation_id,
+                actor_user_id=sender.user_id,
+                withheld=withheld,
+            )
+        )
         # Resolve each remote member's ``user_id`` via the
         # ``remote_users`` mirror so the federation envelope carries
         # the full recipient set. ``RemoteConversationMember`` only
@@ -1066,14 +1062,15 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         edited_at = datetime.now(timezone.utc)
         # Every open thread tab swaps the bubble in place; the members an
         # edit newly @-mentions (never those already mentioned) get a
-        # mention bell (NotificationService).
-        recipients: list[str] = []
-        for m in await self._convos.list_members(msg.conversation_id):
-            if m.username == editor_username:
-                continue
-            u = await self._users.get(m.username)
-            if u is not None:
-                recipients.append(u.user_id)
+        # mention bell (NotificationService). §CP.F2: never to someone a
+        # guardian block separates from the editor — they never saw it.
+        recipients = await local_audience(
+            self._convos,
+            self._users,
+            msg.conversation_id,
+            actor_user_id=editor.user_id,
+            withheld=await self._guardian_block_counterparts(editor.user_id),
+        )
         await self._bus.publish(
             DmMessageUpdated(
                 conversation_id=msg.conversation_id,
@@ -1411,14 +1408,19 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         the recipient list so their other open tabs (mobile + desktop)
         update the reaction strip in lockstep.
         """
-        members = await self._convos.list_members(msg.conversation_id)
-        # §CP.F2: never to someone a guardian block separates from the actor.
-        withheld = await self._guardian_block_counterparts(actor_user_id)
-        recipient_ids: list[str] = []
-        for m in members:
-            u = await self._users.get(m.username)
-            if u is not None and u.user_id not in withheld:
-                recipient_ids.append(u.user_id)
+        # §CP.F2: never to someone a guardian block separates from the
+        # actor, nor from the message's author (they are never shown it).
+        withheld = await self._guardian_block_counterparts(
+            actor_user_id
+        ) | await self._guardian_block_counterparts(msg.sender_user_id)
+        recipient_ids = await local_audience(
+            self._convos,
+            self._users,
+            msg.conversation_id,
+            actor_user_id=actor_user_id,
+            withheld=withheld,
+            include_actor=True,
+        )
         await self._bus.publish(
             DmMessageReactionChanged(
                 conversation_id=msg.conversation_id,

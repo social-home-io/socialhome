@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 
+from socialhome.domain.conversation import (
+    Conversation,
+    ConversationMember,
+    ConversationType,
+    SystemChatScope,
+)
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.user import User
 from socialhome.services.typing_service import (
     TYPING_TTL_SECONDS,
     TypingService,
@@ -754,3 +763,81 @@ async def test_inbound_typing_from_a_blocked_person_skips_the_protected_account(
     assert ws.calls, "carol still sees eve typing"
     targets, _ = ws.calls[0]
     assert set(targets) == {"carol"}
+
+
+# ── System chats: typing follows the live policy ─────────────────────────
+
+
+class _Policy:
+    def __init__(self, readers: set[str]) -> None:
+        self.readers = readers
+
+    async def can_read(self, conv, user_id: str) -> bool:
+        return user_id in self.readers
+
+
+class _SystemConvos:
+    def __init__(self) -> None:
+        self.members = [
+            ConversationMember(conversation_id="hh", username=u, joined_at="t")
+            for u in ("anna", "bob")
+        ]
+
+    async def get(self, conversation_id):
+        return Conversation(
+            id="hh",
+            type=ConversationType.GROUP_DM,
+            created_at=datetime.now(timezone.utc),
+            system_scope=SystemChatScope.HOUSEHOLD,
+        )
+
+    async def list_members(self, conversation_id):
+        return list(self.members)
+
+    async def list_remote_members(self, conversation_id):
+        return []
+
+
+class _SystemUsers:
+    async def get(self, username):
+        return User(user_id=f"u-{username}", username=username, display_name=username)
+
+
+class _SystemWs:
+    def __init__(self) -> None:
+        self.sent: list[list[str]] = []
+
+    async def broadcast_to_users(self, user_ids, payload):
+        self.sent.append(list(user_ids))
+        return len(user_ids)
+
+
+@pytest.mark.parametrize(
+    ("readers", "expected"), [({"u-anna", "u-bob"}, [["u-bob"]]), ({"u-bob"}, [])]
+)
+async def test_typing_in_a_system_chat_needs_read_access(readers, expected):
+    ws = _SystemWs()
+    svc = TypingService(
+        conversation_repo=_SystemConvos(),
+        user_repo=_SystemUsers(),
+        ws_manager=ws,
+    )
+    svc.attach_system_chats(_Policy(readers))
+    await svc.user_started_typing(
+        conversation_id="hh", sender_user_id="u-anna", sender_username="anna"
+    )
+    assert ws.sent == expected
+
+
+async def test_typing_in_a_system_chat_without_a_policy_goes_nowhere():
+    ws = _SystemWs()
+    svc = TypingService(
+        conversation_repo=_SystemConvos(), user_repo=_SystemUsers(), ws_manager=ws
+    )
+    assert (
+        await svc.user_started_typing(
+            conversation_id="hh", sender_user_id="u-anna", sender_username="anna"
+        )
+        == 0
+    )
+    assert ws.sent == []

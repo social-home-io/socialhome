@@ -2431,9 +2431,8 @@ def create_app(config: Config | None = None) -> web.Application:
     # Access is decided live by the policy (DmService defers to it for every
     # conversation with ``system_scope`` set); the service keeps the seats.
     household_chat_access = HouseholdChatAccess(preferences_service)
-    dm_service.attach_system_chats(
-        SystemChatPolicy(user_repo, household=household_chat_access)
-    )
+    system_chat_policy = SystemChatPolicy(user_repo, household=household_chat_access)
+    dm_service.attach_system_chats(system_chat_policy)
     household_chat_service = HouseholdChatService(
         conversation_repo, user_repo, household_chat_access, bus
     )
@@ -2715,6 +2714,7 @@ def create_app(config: Config | None = None) -> web.Application:
     )
     # §CP.F2: no typing indicator across a guardian block.
     typing_service.attach_child_protection(child_protection_service)
+    typing_service.attach_system_chats(system_chat_policy)
 
     # ── Platform adapter (HA vs standalone) ──────────────────────────────
     platform_adapter = build_platform_adapter(config.mode, db, config)
@@ -4054,6 +4054,10 @@ def create_app(config: Config | None = None) -> web.Application:
                 transcribe=audio_transcription_service,
                 bus=bus,
                 media_dir=pathlib.Path(config.media_path),
+            )
+            # §CP.F2: no transcript across a guardian block.
+            audio_transcript_scheduler.attach_child_protection(
+                app[K.child_protection_service_key]
             )
             await audio_transcript_scheduler.start()
 

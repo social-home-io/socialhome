@@ -312,3 +312,53 @@ async def test_start_stop_lifecycle(stack):
     assert sched._task is not None and not sched._task.done()
     await sched.stop()
     assert sched._task is None
+
+
+class _GuardianBlocks:
+    """§CP.F2 stand-in: ``pairs`` are guardian-blocked both ways."""
+
+    def __init__(self, *pairs: tuple[str, str]) -> None:
+        self.pairs = {frozenset(p) for p in pairs}
+
+    def register_gate(self, _gate) -> None:
+        pass
+
+    async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        return frozenset(
+            other
+            for pair in self.pairs
+            if user_id in pair
+            for other in pair - {user_id}
+        )
+
+
+async def test_late_transcript_never_reaches_a_guardian_blocked_member(stack):
+    """A blocked sender's voice-note transcript is not pushed to the
+    protected member; everyone else still gets it."""
+    carl = await UserService(
+        stack.user_repo, stack.bus, own_instance_public_key=b"\x00" * 32
+    ).provision(username="carl", display_name="Carl")
+    await stack.db.enqueue(
+        "INSERT INTO conversation_members(conversation_id, username, joined_at) "
+        "VALUES('conv-1','carl',datetime('now'))"
+    )
+    (stack.media_dir / "v.ogg").write_bytes(b"OggS" + b"\x00" * 64)
+    await _insert_audio_message(
+        stack.db,
+        msg_id="m-blocked",
+        sender_user_id=stack.remote.user_id,
+        media_url="api/media/v.ogg",
+    )
+    sched = AudioTranscriptScheduler(
+        conversation_repo=stack.conv_repo,
+        user_repo=stack.user_repo,
+        transcribe=_FakeTranscription("hi"),
+        bus=stack.bus,
+        media_dir=stack.media_dir,
+    )
+    sched.attach_child_protection(
+        _GuardianBlocks((stack.local.user_id, stack.remote.user_id))
+    )
+    assert await sched._sweep_once() == 1
+    (event,) = [e for e in stack.events if isinstance(e, DmMessageUpdated)]
+    assert event.recipient_user_ids == (carl.user_id,)
