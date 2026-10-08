@@ -2154,12 +2154,17 @@ class RealtimeService:
         # Sender's own sessions get the frame too — open thread tabs
         # show the sent message without the round-trip GET that
         # ``handleSend`` used to do.
+        # ``mentions_you`` (per recipient): this message @-mentions the
+        # recipient — a chat badge at "Only @mentions" counts only those.
+        mentioned = {m.user_id for m in event.mentions if m.user_id}
         seen: set[str] = set()
         for user_id in (event.sender_user_id, *event.recipient_user_ids):
             if user_id in seen:
                 continue
             seen.add(user_id)
-            await self._ws.broadcast_to_user(user_id, payload)
+            await self._ws.broadcast_to_user(
+                user_id, {**payload, "mentions_you": user_id in mentioned}
+            )
 
     async def _on_dm_message_updated(self, event: DmMessageUpdated) -> None:
         """Push the in-place ``dm.message_updated`` frame.

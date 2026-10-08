@@ -190,6 +190,14 @@ class AbstractConversationRepo(Protocol):
         media_url: str | None = None,
     ) -> None: ...
     async def count_unread(self, conversation_id: str, username: str) -> int: ...
+    async def list_unread_contents(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        types: frozenset[str],
+        limit: int = 500,
+    ) -> list[str]: ...
 
     # Reactions -----------------------------------------------------------
     async def add_reaction(
@@ -1298,6 +1306,49 @@ class SqliteConversationRepo:
                 default=0,
             )
         )
+
+    async def list_unread_contents(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        types: frozenset[str],
+        limit: int = 500,
+    ) -> list[str]:
+        """The text of the messages :meth:`count_unread` counts (same
+        filters), of the given ``types`` only, newest first, at most
+        ``limit`` — what an @-mention count parses."""
+        if not types:
+            return []
+        marks = ",".join("?" for _ in types)
+        rows = await self._db.fetchall(
+            f"""
+            SELECT m.content FROM conversation_messages m
+              LEFT JOIN users u ON u.username = ?
+             WHERE m.conversation_id = ?
+               AND (u.user_id IS NULL OR m.sender_user_id != u.user_id)
+               AND m.sender_user_id NOT IN (
+                   {guardian_block_counterparts_sql("u.user_id")}
+               )
+               AND m.deleted = 0
+               AND m.type IN ({marks})
+               AND m.created_at > COALESCE(
+                     (SELECT last_read_at FROM conversation_members
+                       WHERE conversation_id=? AND username=?),
+                     '1970-01-01')
+             ORDER BY m.created_at DESC
+             LIMIT ?
+            """,
+            (
+                username,
+                conversation_id,
+                *sorted(types),
+                conversation_id,
+                username,
+                limit,
+            ),
+        )
+        return [str(r["content"] or "") for r in rows]
 
     # ── Reactions ──────────────────────────────────────────────────────
 

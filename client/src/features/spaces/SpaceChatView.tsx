@@ -108,10 +108,11 @@ export function SpaceChatView({ spaceId, spaceName, canModerate }: Props) {
  *   leaving the Chat view (the server's unread and watermark after what
  *   the open chat marked read).
  * - Unread counts other people's new messages while the Chat view is
- *   closed — never while the viewer muted the chat, and never at "Only
- *   @mentions": a frame doesn't say whom it mentions (the server
- *   resolves that), so counting it would light the badge for chatter
- *   the viewer asked not to hear about.
+ *   closed — never while the viewer muted the chat, and at "Only
+ *   @mentions" only the ones that mention the viewer (the frame's
+ *   per-recipient ``mentions_you``), the rule the server's summary count
+ *   follows too — so the badge never shows chatter the viewer asked not
+ *   to hear about.
  * - Viewing the chat reads it (ConversationView posts the watermark), so
  *   the badge clears while it's open.
  */
@@ -133,11 +134,11 @@ export function useSpaceChatSummary(spaceId: string, eligible: boolean, chatOpen
   useEffect(() => {
     const offMsg = ws.on('dm.message', (e) => {
       if (!isSpaceChatFrame(e.data, spaceId) || openRef.current) return
-      const d = e.data as { message?: { sender_user_id?: string } }
+      const d = e.data as { message?: { sender_user_id?: string }; mentions_you?: boolean }
       if (d.message?.sender_user_id === currentUser.value?.user_id) return
       const chat = spaceChatOf(spaceId)
       if (!chat || !chat.enabled || isMuteActive(chat.muted_until)) return
-      if (chat.notif_level === 'mentions') return
+      if (chat.notif_level === 'mentions' && d.mentions_you !== true) return
       patchSpaceChat({ unread: chat.unread + 1 })
     })
     let prevConn = connectionState.value

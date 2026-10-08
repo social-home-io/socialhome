@@ -150,11 +150,41 @@ def build_rate_limit_middleware(
     ``limits`` maps a path prefix (``"/api/media"``) to a
     ``(limit, window_s)`` tuple that overrides the defaults. Handlers that
     want tighter limits add themselves here; anything not present falls
-    back to ``default_limit`` / ``default_window_s``.
+    back to ``default_limit`` / ``default_window_s``. A key may name the
+    methods it applies to (``"POST /api/spaces"``,
+    ``"POST|DELETE /api/spaces/*/subscribe"``); such a rule matches the whole
+    path only and wins over every path rule.
     """
     limits = limits or {}
+    # Method rules — ``"POST /api/spaces"`` / ``"POST|DELETE /api/spaces/*/x"``:
+    # match only those methods, and the WHOLE path (exact, or fnmatch with
+    # ``*``). They come first, so a write that shares its path with a read
+    # (``POST /api/spaces`` create vs the list) keeps its own tight bucket.
+    method_rules: list[tuple[str, frozenset[str], str, int, int]] = []
+    path_limits: dict[str, tuple[int, int]] = {}
+    for key, (limit, window_s) in limits.items():
+        methods, sep, pattern = key.partition(" ")
+        if sep and pattern.startswith("/"):
+            method_rules.append(
+                (key, frozenset(methods.upper().split("|")), pattern, limit, window_s)
+            )
+        else:
+            path_limits[key] = (limit, window_s)
 
-    def _pick(path: str) -> tuple[str | None, int, int]:
+    def _pick(method: str, path: str) -> tuple[str | None, int, int]:
+        for key, methods, pattern, limit, window_s in method_rules:
+            if method.upper() not in methods:
+                continue
+            if (
+                fnmatch.fnmatchcase(path, pattern)
+                if "*" in pattern
+                else path == pattern
+            ):
+                return key, limit, window_s
+        return _pick_path(path)
+
+    def _pick_path(path: str) -> tuple[str | None, int, int]:
+        limits = path_limits
         # Two key flavours:
         #   * fnmatch-style with ``*`` — matches the whole path; great
         #     for ``/api/spaces/*/ban`` style action endpoints. An exact
@@ -183,7 +213,7 @@ def build_rate_limit_middleware(
         # protected handler anyway.
         if not user:
             return await handler(request)
-        rule, limit, window_s = _pick(request.path)
+        rule, limit, window_s = _pick(request.method, request.path)
         user_id = getattr(user, "user_id", None) or str(user)
         # A request counts only against the rule it matched: a looser rule
         # (``/api/calls/*/ice``, 300/min) must not use up a tighter one

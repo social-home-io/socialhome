@@ -102,8 +102,8 @@ async def test_check_uses_first_two_path_segments_as_bucket():
     )
 
 
-async def _hit(mw, path: str, user: str = "u1") -> int:
-    request = make_mocked_request("POST", path)
+async def _hit(mw, path: str, user: str = "u1", method: str = "POST") -> int:
+    request = make_mocked_request(method, path)
     request["user"] = SimpleNamespace(user_id=user)
 
     async def handler(_req):
@@ -178,6 +178,31 @@ async def test_a_glob_rule_still_beats_a_literal_prefix():
         assert await _hit(mw, "/api/calls/c1/ice") == 204
     assert await _hit(mw, "/api/calls/c1/ice") == 429
     assert await _hit(mw, "/api/calls") == 204
+
+
+async def test_a_method_rule_applies_to_that_method_and_exact_path_only():
+    """The limiter keys on the path, and ``POST /api/spaces`` (create) shares
+    its path with the list: a ``"POST /api/spaces"`` rule keeps creates tight
+    while the reads use the loose ``/api/spaces`` bucket."""
+    mw = build_rate_limit_middleware(
+        RateLimiter(),
+        limits={
+            "POST /api/spaces": (2, 60),
+            "POST|DELETE /api/spaces/*/subscribe": (1, 60),
+            "/api/spaces": (5, 60),
+        },
+    )
+    for _ in range(2):
+        assert await _hit(mw, "/api/spaces") == 204
+    assert await _hit(mw, "/api/spaces") == 429
+    # Reads (and a longer POST path) use the broad bucket, not the create one.
+    for _ in range(4):
+        assert await _hit(mw, "/api/spaces", method="GET") == 204
+    assert await _hit(mw, "/api/spaces/s1/posts") == 204
+    assert await _hit(mw, "/api/spaces/s1", method="GET") == 429
+    # A glob method rule with alternatives.
+    assert await _hit(mw, "/api/spaces/s1/subscribe", method="DELETE") == 204
+    assert await _hit(mw, "/api/spaces/s1/subscribe") == 429
 
 
 # ─── client_bucket — the per-address rate-limit key ──────────────────────

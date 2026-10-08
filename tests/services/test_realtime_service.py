@@ -52,6 +52,7 @@ from socialhome.domain.conversation import (
     ConversationType,
     SystemChatScope,
 )
+from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.timetable import Timetable, to_wire_dict
@@ -1394,3 +1395,37 @@ async def test_a_delete_reaches_only_its_audience_with_ids_only():
         "space_id": None,
         "message_id": "m-9",
     }
+
+
+async def test_dm_message_frame_says_whom_it_mentions_per_recipient():
+    """``mentions_you`` lets a chat badge at "Only @mentions" count only the
+    messages that mention the viewer — per recipient, never a shared list."""
+    bus = EventBus()
+    sent: list[tuple[str, dict]] = []
+
+    class _Ws:
+        async def broadcast_to_user(self, user_id: str, payload: dict) -> None:
+            sent.append((user_id, payload))
+
+    svc = RealtimeService(
+        bus=bus,
+        ws=_Ws(),
+        user_repo=_SysUsers(),
+        space_repo=object(),
+        conversation_repo=_SysConvos(),
+    )
+    svc.wire()
+    await bus.publish(
+        DmMessageCreated(
+            conversation_id="dm",
+            message_id="m-1",
+            sender_user_id="u-anna",
+            sender_display_name="Anna",
+            recipient_user_ids=("u-bob", "u-cat"),
+            content="@bob hi",
+            mentions=(Mention(type=MentionType.USER, raw="@bob", user_id="u-bob"),),
+        )
+    )
+    flags = {u: f["mentions_you"] for u, f in sent}
+    assert flags == {"u-anna": False, "u-bob": True, "u-cat": False}
+    assert "mentions" not in sent[0][1]

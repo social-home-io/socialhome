@@ -112,9 +112,15 @@ async def test_summary_for_a_member(stack):
 async def test_summary_reports_unread_and_mute(stack):
     chat_id = (await stack.chat.summary(SP, "bob")).conversation_id
     await stack.dm.send_message(chat_id, sender_username="anna", content="hi all")
+    await stack.dm.send_message(chat_id, sender_username="anna", content="@bob 7pm?")
     await stack.dm.mute(chat_id, username="bob", duration="forever")
     summary = await stack.chat.summary(SP, "bob")
+    # A new space-chat seat hears only @-mentions: only the message that
+    # mentions bob counts — the badge never shows chatter he muted.
+    assert summary.notif_level == "mentions"
     assert summary.unread == 1 and summary.muted_until == MUTED_FOREVER
+    await stack.dm.set_notif_level(chat_id, username="bob", level="all")
+    assert (await stack.chat.summary(SP, "bob")).unread == 2
 
 
 async def test_summary_follower_and_chat_off_are_disabled(stack):

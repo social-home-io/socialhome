@@ -175,6 +175,37 @@ class DmMentionResolver:
             return ()
         return out
 
+    async def count_mentioning(
+        self, conversation_id: str, contents: list[str], user_id: str
+    ) -> int:
+        """How many of ``contents`` @-mention ``user_id`` (one roster read
+        for all of them). Fail-soft: a lookup failure counts nothing."""
+        texts = [c for c in contents if c and "@" in c]
+        if not texts:
+            return 0
+        try:
+            parsed = await self._parse(conversation_id, texts)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "mention count failed for conversation %s: %s", conversation_id, exc
+            )
+            return 0
+        return sum(1 for ms in parsed if any(m.user_id == user_id for m in ms))
+
+    async def unread_for(
+        self, conversation_id: str, username: str, user_id: str, notif_level: str | None
+    ) -> int:
+        """A member's unread count as their level hears it: every unread
+        message at ``all``, only the unread ones that @-mention them at
+        ``mentions`` — so a chat badge never shows chatter the member
+        asked not to hear about."""
+        if notif_level != "mentions":
+            return await self._convos.count_unread(conversation_id, username)
+        contents = await self._convos.list_unread_contents(
+            conversation_id, username, types=MENTIONABLE_TYPES
+        )
+        return await self.count_mentioning(conversation_id, contents, user_id)
+
     async def added(
         self, conversation_id: str, before: str | None, after: str | None
     ) -> tuple[Mention, ...]:

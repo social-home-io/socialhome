@@ -97,18 +97,17 @@ export default function FeedPage() {
     const offCfg = ws.on('household.config_changed', () => { void loadToggles() })
     // Unread on the Chat tab: count other people's new messages while
     // the Feed tab shows; the open chat reads them itself. Nothing while
-    // the viewer muted the chat, and nothing at "Only @mentions": the
-    // frame doesn't say who a message mentions (the server resolves
-    // that), so counting it would light the pill for chatter the viewer
-    // asked not to hear about.
+    // the viewer muted the chat, and at "Only @mentions" only the
+    // messages that mention the viewer (the frame's per-recipient
+    // ``mentions_you``) — the same rule as the server's summary count.
     const offMsg = ws.on('dm.message', (e) => {
       if (!isHouseholdChatFrame(e.data)) return
       if (activeRef.current === 'chat') return
-      const d = e.data as { message?: { sender_user_id?: string } }
+      const d = e.data as { message?: { sender_user_id?: string }; mentions_you?: boolean }
       if (d.message?.sender_user_id === currentUser.value?.user_id) return
       const chat = householdChat.value
       if (!chat || isMuteActive(chat.muted_until)) return
-      if (chat.notif_level === 'mentions') return
+      if (chat.notif_level === 'mentions' && d.mentions_you !== true) return
       patchHouseholdChat({ unread: chat.unread + 1 })
     })
     // Frames missed while the socket was down: re-read the summary.

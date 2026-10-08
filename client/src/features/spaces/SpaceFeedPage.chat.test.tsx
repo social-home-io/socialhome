@@ -246,7 +246,7 @@ describe('SpaceFeedPage — Feed | Chat switch', () => {
     await r.waitFor(() => expect(r.getByRole('button', { name: 'Chat' })).toBeTruthy())
   })
 
-  it('unread: none while muted; no live counting at "Only @mentions"', async () => {
+  it('unread: none while muted; at "Only @mentions" only frames that mention me', async () => {
     wire({ summary: { ...SUMMARY, unread: 4, muted_until: FOREVER } })
     const r = await renderPage()
     await r.waitFor(() => expect(summaryCalls()).toBe(1))
@@ -258,8 +258,15 @@ describe('SpaceFeedPage — Feed | Chat switch', () => {
     const r2 = await renderPage()
     await r2.findByRole('button', { name: /Chat.*1 unread/ })
     emit('dm.message', { system_scope: 'space', space_id: 's1', message: { sender_user_id: 'u2' } })
+    emit('dm.message', {
+      system_scope: 'space', space_id: 's1', mentions_you: false, message: { sender_user_id: 'u2' },
+    })
     await new Promise(res => setTimeout(res, 20))
     expect(r2.getByRole('button', { name: /Chat.*1 unread/ })).toBeTruthy()
+    emit('dm.message', {
+      system_scope: 'space', space_id: 's1', mentions_you: true, message: { sender_user_id: 'u2' },
+    })
+    await r2.findByRole('button', { name: /Chat.*2 unread/ })
   })
 
   it('re-reads the summary on a WS reconnect and on leaving the chat', async () => {

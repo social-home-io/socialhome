@@ -38,6 +38,7 @@ from ..domain.events import UserDeprovisioned, UserProvisioned
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .dm_mentions import DmMentionResolver
 from .system_chat_policy import HouseholdChatAccess
 
 log = logging.getLogger(__name__)
@@ -124,7 +125,14 @@ class HouseholdChatService:
         return SystemChatSummary(
             enabled=True,
             conversation_id=chat.id,
-            unread=await self._convos.count_unread(chat.id, username),
+            # At "Only @mentions" only the unread messages that mention the
+            # viewer count — the badge never shows chatter they muted.
+            unread=await DmMentionResolver(self._convos, self._users).unread_for(
+                chat.id,
+                username,
+                user.user_id,
+                seat.notif_level if seat is not None else None,
+            ),
             notif_level=seat.notif_level if seat is not None else None,
             muted_until=muted_until,
             last_read_at=seat.last_read_at if seat is not None else None,

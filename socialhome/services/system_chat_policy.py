@@ -40,7 +40,6 @@ from ..domain.space import (
     Space,
     SpaceArchivedError,
     SpacePermissionError,
-    SpaceRole,
 )
 from ..domain.user import User
 from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
@@ -179,25 +178,26 @@ class SpaceChatAccess:
     async def remote_seats(self, conv: Conversation) -> list[RemoteConversationMember]:
         """The space's writers on other households, seat-shaped.
 
-        Followers, banned and removed (tombstoned) seats are left out, as
-        is everything while the space is unknown, dissolved or has chat
-        off. ``remote_username`` is the ``remote_users`` login when this
-        household knows the person, else empty (the roster's
-        ``display_name`` and ``user_id`` still name them).
+        Only writer roles are kept (an allow-list — a follower, or any role
+        added later, stays out); banned and removed (tombstoned) seats are
+        left out, as is everything while the space is unknown, dissolved
+        or has chat off. ``remote_username`` is always empty: the roster
+        carries no login, so consumers look the person up by ``user_id``
+        (``remote_users``), and the roster's ``display_name`` names them
+        when this household doesn't know them.
         """
         if self._remote_members is None or not conv.space_id:
             return []
         space = await self._spaces.get(conv.space_id)
         if space is None or space.dissolved or not space.features.chat:
             return []
+        banned = {str(b.get("user_id")) for b in await self._spaces.list_bans(space.id)}
         out: list[RemoteConversationMember] = []
         seen: set[str] = set()
         for seat in await self._remote_members.list_for_space(space.id):
-            if seat.tombstoned or seat.user_id in seen:
+            if seat.tombstoned or seat.user_id in seen or seat.user_id in banned:
                 continue
-            if seat.role == SpaceRole.SUBSCRIBER.value:
-                continue
-            if await self._spaces.is_banned(space.id, seat.user_id):
+            if seat.role not in _WRITER_ROLE_VALUES:
                 continue
             seen.add(seat.user_id)
             out.append(

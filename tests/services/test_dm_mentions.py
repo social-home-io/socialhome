@@ -248,3 +248,32 @@ async def test_system_chat_without_policy_has_no_remote_seats(env):
     conv = await env.convos.get("sys")
     assert conv is not None
     assert await env.resolver.remote_seats(conv) == []
+
+
+async def test_a_seat_without_a_login_is_looked_up_by_user_id(env):
+    """A stored (person-made group) seat that names no ``remote_username``
+    falls back to ``remote_users`` by ``user_id`` — the person's handle
+    resolves and becomes their composer token."""
+    await env.user_svc.provision(username="anna", display_name="Anna")
+    await _group(env, "g9", "anna")
+    await env.users.upsert_remote(
+        RemoteUser(
+            user_id="remote-gus-1",
+            instance_id="peer-b",
+            remote_username="gus",
+            display_name="Gus",
+            handle="gussy",
+        )
+    )
+    await env.convos.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="g9",
+            instance_id="peer-b",
+            remote_username="",
+            joined_at=datetime.now(timezone.utc).isoformat(),
+            user_id="remote-gus-1",
+        )
+    )
+    out = await env.resolver.resolve("g9", "hey @gussy")
+    assert [m.user_id for m in out] == ["remote-gus-1"]
+    assert (await env.resolver.tokens("g9"))["remote-gus-1"] == "gussy"

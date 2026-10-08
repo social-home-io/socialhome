@@ -186,6 +186,9 @@ class _Spaces:
     async def is_banned(self, space_id: str, user_id: str) -> bool:
         return user_id in self.banned
 
+    async def list_bans(self, space_id: str) -> list[dict]:
+        return [{"space_id": space_id, "user_id": u} for u in sorted(self.banned)]
+
 
 @pytest.fixture
 def space_env():
@@ -318,6 +321,8 @@ def remote_env():
         _seat("r-member"),
         _seat("r-admin", role=SpaceRole.ADMIN.value),
         _seat("r-follower", role=SpaceRole.SUBSCRIBER.value),
+        # A role the policy doesn't know is no writer (allow-list).
+        _seat("r-unknown", role="guest"),
         _seat("r-gone", tombstoned=True),
         _seat("r-banned"),
         _seat("r-member"),  # a duplicate row counts once
