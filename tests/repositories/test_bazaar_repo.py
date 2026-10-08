@@ -654,3 +654,35 @@ async def test_accept_offer_is_scoped(env, other_listing):
     assert not (await env.bazaar_repo.get_bid(bid_id)).accepted
     await env.bazaar_repo.accept_offer(bid_id, space_id=_OTHER_SPACE_ID)
     assert (await env.bazaar_repo.get_bid(bid_id)).accepted
+
+
+async def test_list_sync_page_follows_the_wrapper_posts_window(env):
+    """§25.6: every listing whose wrapper post streams — live, inside the
+    retention window — page by page, never a fixed count."""
+    for pid in ("bz-new-1", "bz-new-2", "bz-old", "bz-gone"):
+        await _seed_listing(env, pid)
+    await env.db.enqueue(
+        "UPDATE space_posts SET created_at='2020-01-01 00:00:00' WHERE id='bz-old'"
+    )
+    await env.db.enqueue("UPDATE space_posts SET deleted=1 WHERE id='bz-gone'")
+    seen: list[str] = []
+    cursor = None
+    while True:
+        page, cursor = await env.bazaar_repo.list_sync_page(
+            _DEFAULT_SPACE_ID, cursor=cursor, limit=1
+        )
+        seen.extend(lst.post_id for lst in page)
+        if cursor is None:
+            break
+    # Newest stored first; a deleted post's listing never streams.
+    assert seen == ["bz-old", "bz-new-2", "bz-new-1"]
+    windowed, _ = await env.bazaar_repo.list_sync_page(
+        _DEFAULT_SPACE_ID, cutoff="2025-01-01 00:00:00"
+    )
+    assert {lst.post_id for lst in windowed} == {"bz-new-1", "bz-new-2"}
+    exempt, _ = await env.bazaar_repo.list_sync_page(
+        _DEFAULT_SPACE_ID, cutoff="2025-01-01 00:00:00", exempt_types=("bazaar",)
+    )
+    assert {lst.post_id for lst in exempt} == {"bz-new-1", "bz-new-2", "bz-old"}
+    other, _ = await env.bazaar_repo.list_sync_page("space-elsewhere")
+    assert other == []

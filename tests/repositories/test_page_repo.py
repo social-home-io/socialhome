@@ -769,6 +769,19 @@ async def test_page_tombstones_list_newest_first_and_since(scoped):
     assert [t.id for t in await repo.list_page_tombstones("space-a", limit=1)] == [
         "pg-x"
     ]
+    after = await repo.list_page_tombstones(
+        "space-a", before=(got[0].deleted_at, got[0].id)
+    )
+    assert [t.id for t in after] == ["pg-a"]
+    # Same delete second: the id breaks the tie, nothing repeats or skips.
+    await scoped.db.enqueue(
+        "UPDATE space_pages SET deleted_at='2020-01-01 00:00:00' WHERE id='pg-x'"
+    )
+    first = await repo.list_page_tombstones("space-a", limit=1)
+    rest = await repo.list_page_tombstones(
+        "space-a", limit=1, before=(first[0].deleted_at, first[0].id)
+    )
+    assert [t.id for t in first + rest] == ["pg-x", "pg-a"]
     assert await repo.list_page_tombstones("space-b") == []
 
 

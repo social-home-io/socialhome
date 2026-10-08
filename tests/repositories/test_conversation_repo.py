@@ -832,7 +832,7 @@ async def test_get_space_chat_finds_only_that_spaces_chat(env):
     assert await env.repo.get_space_chat("sp1") is None
 
 
-async def test_list_recent_live_messages_is_newest_window_oldest_first(env):
+async def test_list_messages_sync_page_pages_the_live_chat_oldest_first(env):
     await env.repo.create(_conv("c-live", ConversationType.GROUP_DM))
     for i in range(5):
         await env.repo.save_message(
@@ -845,8 +845,24 @@ async def test_list_recent_live_messages_is_newest_window_oldest_first(env):
             )
         )
     await env.repo.soft_delete_message("m3")
-    got = await env.repo.list_recent_live_messages("c-live", limit=3)
-    assert [m.id for m in got] == ["m1", "m2", "m4"]
+    # No fixed window: every live message, page by page, none twice.
+    seen: list[str] = []
+    cursor = None
+    while True:
+        page, cursor = await env.repo.list_messages_sync_page(
+            "c-live", cursor=cursor, limit=2
+        )
+        seen.extend(m.id for m in page)
+        if cursor is None:
+            break
+    assert seen == ["m0", "m1", "m2", "m4"]
+    gone, _ = await env.repo.list_messages_sync_page("c-live", deleted=True)
+    assert [m.id for m in gone] == ["m3"]
+    # The retention window: only what is newer than the cutoff.
+    recent, _ = await env.repo.list_messages_sync_page(
+        "c-live", cutoff="2026-01-01 00:02:00"
+    )
+    assert [m.id for m in recent] == ["m2", "m4"]
 
 
 async def test_create_round_trips_system_columns(env):
@@ -932,9 +948,8 @@ async def test_a_tombstone_is_deleted_invisible_and_blocks_its_id(env):
     conv = await env.repo.get("c-tomb")
     assert conv is not None and conv.last_message_at is not None
     assert conv.last_message_at.year == 2026 and conv.last_message_at.month == 1
-    assert [m.id for m in await env.repo.list_recent_deleted_messages("c-tomb")] == [
-        "m-t"
-    ]
+    gone, _ = await env.repo.list_messages_sync_page("c-tomb", deleted=True)
+    assert [m.id for m in gone] == ["m-t"]
 
 
 async def test_prune_space_chat_messages_clears_only_expired_chat_rows(env):

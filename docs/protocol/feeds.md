@@ -77,6 +77,16 @@ ID; if the receiver has never seen the ID (e.g. missed the create
 event during a network partition), the `_UPDATED` / `_DELETED` is
 dropped silently.
 
+A delete keeps the row (`deleted = 1`, content cleared) as the post's or
+comment's **tombstone**. A household that missed the `_DELETED` (offline
+past the outbox, a mesh drop) learns of it from the §25.6
+`posts_deleted` / `comments_deleted` sync resources — `{id, author}`
+(plus `post_id` for a comment), never content — judged by the same rule
+as the live delete: the author's household or content authority (host,
+admin, moderator), then the space's `posts` level. From the host, an id
+never held gets the soft-deleted row, so a stale copy streamed later
+cannot create it. See [`sync.md`](./sync.md#post-and-comment-tombstones).
+
 ## Polls
 
 A poll lives inside a post. `SPACE_POLL_CREATED` announces the poll

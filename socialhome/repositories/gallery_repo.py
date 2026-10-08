@@ -7,7 +7,7 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.gallery import GalleryAlbum, GalleryItem
-from .base import rows_to_dicts
+from .base import rows_to_dicts, sync_page_cursor
 
 
 @runtime_checkable
@@ -46,6 +46,32 @@ class AbstractGalleryRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[GalleryItem]: ...
+    async def list_albums_sync_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[GalleryAlbum], int | None]:
+        """One page of the space's albums (the system album included) for a
+        §25.6 sync. ``(rows, next_cursor)`` paging, keyset on the row id."""
+        ...
+
+    async def list_items_sync_page(
+        self,
+        space_id: str,
+        *,
+        cutoff: str | None = None,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[GalleryItem], int | None]:
+        """One page of the space's own gallery items for a §25.6 sync —
+        never a mirror of a post's media (``source_post_id``; the receiver
+        re-creates those from the post). ``cutoff`` is the space's
+        retention window; an item in a ``retention_exempt`` album streams
+        at any age. ``(rows, next_cursor)`` paging, keyset on the row id."""
+        ...
+
     async def get_item(self, item_id: str) -> GalleryItem | None: ...
     async def list_items_by_source_post(
         self,
@@ -384,6 +410,49 @@ class SqliteGalleryRepo:
                 (album_id, limit),
             )
         return [self._row_to_item(r) for r in rows_to_dicts(rows)]
+
+    async def list_albums_sync_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[GalleryAlbum], int | None]:
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, * FROM gallery_albums"
+                " WHERE space_id=? AND rowid > ? ORDER BY rowid LIMIT ?",
+                (space_id, cursor or 0, int(limit)),
+            )
+        )
+        return [self._row_to_album(r) for r in rows], sync_page_cursor(rows, limit)
+
+    async def list_items_sync_page(
+        self,
+        space_id: str,
+        *,
+        cutoff: str | None = None,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[GalleryItem], int | None]:
+        window = ""
+        window_params: tuple = ()
+        if cutoff is not None:
+            window = (
+                " AND (a.retention_exempt=1 OR datetime(i.created_at) >= datetime(?))"
+            )
+            window_params = (cutoff,)
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT i.rowid AS sync_rowid, i.* FROM gallery_items i"
+                " JOIN gallery_albums a ON a.id = i.album_id"
+                " WHERE a.space_id=? AND i.source_post_id IS NULL"
+                + window
+                + " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",
+                (space_id, *window_params, cursor or 0, int(limit)),
+            )
+        )
+        return [self._row_to_item(r) for r in rows], sync_page_cursor(rows, limit)
 
     async def get_item(self, item_id: str) -> GalleryItem | None:
         row = await self._db.fetchone(

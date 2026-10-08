@@ -111,6 +111,79 @@ Implemented by `socialhome/federation/sync/space/resume.py`
 Each resource is capped at `MAX_PER_RESOURCE = 500` events per request
 — receivers paginate by re-issuing with the new high-water mark.
 
+## What a sync streams
+
+The provider walks `RESOURCE_ORDER` (`federation/sync/space/exporter.py`)
+— roster first (`bans`, `members`, `member_pictures`), then content, each
+live resource preceded by its tombstones:
+
+`posts_deleted`, `posts`, `comments_deleted`, `comments`, `task_lists`,
+`task_lists_deleted`, `tasks_deleted`, `tasks`, `tasks_archived`,
+`pages_deleted`, `pages`, `stickies`, `calendar`, `gallery`, `polls`,
+`schedules`, `space_zones`, `bazaar`, `timetables`,
+`chat_messages_deleted`, `chat_messages`.
+
+A receiver drops a resource it does not know (DEBUG), so a new resource
+needs no capability gate: an older receiver ignores it, and a newer
+receiver simply gets nothing from an older provider.
+
+**No fixed size limit — the space's retention window.** What streams is
+what the space's retention keeps (`federation/sync/space/window.py`):
+
+- `retention_days` set → posts (and the comments, polls, schedules and
+  bazaar listings that hang on them), gallery items and chat messages
+  created at or after `now − retention_days`; post types in
+  `retention_exempt_json` at any age, as the retention sweep keeps them;
+  a gallery item of a `retention_exempt` album at any age. The post,
+  comment and chat tombstones use the same window — a row past retention
+  is gone for every household anyway.
+- no retention (keep forever) → **everything**.
+- pages, task lists and tasks are not governed by retention: their live
+  rows and tombstones always stream in full.
+
+**Bounded memory.** Exporters read their repo in keyset pages of
+`SYNC_PAGE_SIZE` (200) rows — on the row id, or `(deleted_at, id)` for
+the page / task tombstones — so a page never repeats or skips a row, and
+`ChunkBuilder` turns each page into ≤ 8 KB chunks (halving a page until a
+chunk fits) before the next page is read. `seq_start` / `seq_end` run on
+across pages. The provider's catch-up media walks the same window the
+same way. No export holds a whole resource in memory, however big the
+space, so there is no safety ceiling on the count.
+
+### Post and comment tombstones
+
+A post or comment delete keeps the row (`deleted = 1`, content cleared):
+the same soft-deleted row a member-published delete that overtook its
+create leaves (v_49). `posts_deleted` streams `{id, post_id, author,
+created_at}` and `comments_deleted` `{id, comment_id, post_id, author,
+created_at}` — never content. Before them, a household that missed a
+`SPACE_POST_DELETED` / `SPACE_COMMENT_DELETED` kept the row forever and,
+as a catch-up provider, re-spread it to every joiner. On the receiver
+(`SpaceSyncReceiver._persist_post_tombstones` /
+`_persist_comment_tombstones`):
+
+- a row held live **in this space** is soft-deleted (a comment also
+  lowers its post's count) and `PostDeleted` / `CommentDeleted` is
+  published with the provider as origin, so nothing is re-broadcast;
+- a **member** household's record is admitted only under the live
+  delete rule: the held row's author's household or one with content
+  authority (`may_mutate`), and for a post the space's `posts` level.
+  `space_posts` records no deleter, so the record names none: it is the
+  author's own delete when the provider speaks for the author; a
+  moderator household's actor-less record passes only an `OPEN` level (or
+  a pre-v_42 provider) — the host's stream carries that delete anyway;
+- from the **host**, an id never held gets the soft-deleted row — only
+  for an id owner-bound to the record's `author` in **this** space (and,
+  for a comment, on a post held here), so a stale copy streamed later
+  cannot create it and no space's id can be squatted. A member household's
+  record never stubs.
+
+A comment record carrying `deleted: true` from an older provider (which
+streamed deleted comments as plain records) is skipped instead of being
+stored as a live empty comment.
+
+Tripwire: `tests/protocol/test_space_post_tombstones.py` (§27.9).
+
 ## Backpressure
 
 The DataChannel carries its own high-water mark
@@ -199,9 +272,11 @@ A space that is **archived here** is a read-only snapshot to sync as well:
 `SpaceSyncReceiver._admit` drops every content resource (anything but the
 roster — `members`, `bans`, `member_pictures`) unless the provider is the
 host of a *reversibly* archived space; a terminated copy (`archived_reason`
-set) takes content from nobody. The stream carries no tombstones, so
-removals reach an archived copy only as live `*_DELETED` events, which the
-archive gate lets through. The resume replay above is a burst of live
+set) takes content from nobody. Removals still land: the tombstone resources
+(`REMOVAL_RESOURCES` — `posts_deleted`, `comments_deleted`,
+`task_lists_deleted`, `tasks_deleted`, `pages_deleted`,
+`chat_messages_deleted`) pass the archive gate as live `*_DELETED`
+events do. The resume replay above is a burst of live
 events, so the §24.11 `check_space_archived` gate refuses it the same way.
 See [`spaces.md`](./spaces.md#an-archived-space-is-read-only-to-peers-too).
 
@@ -350,6 +425,12 @@ and the sync handlers make no HTTP request.
   chunk application on the requester side.
 - `socialhome/federation/sync/space/provider.py` —
   `serialise_chunk()` and per-space authoritative snapshot.
+- `socialhome/federation/sync/space/window.py` — the retention window
+  (`SyncWindow`, `SyncWindows`) and keyset paging (`SYNC_PAGE_SIZE`,
+  `iter_pages`, `iter_tombstone_pages`).
+- `socialhome/federation/sync/space/exporters/{posts_deleted,comments_deleted}.py`
+  and `receiver.py` (`_persist_post_tombstones`,
+  `_persist_comment_tombstones`) — post / comment tombstones.
 
 ## Spec references
 

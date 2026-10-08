@@ -11,8 +11,10 @@ from socialhome.repositories.base import (
     dump_json,
     load_json,
     pick,
+    retention_window_sql,
     row_to_dict,
     rows_to_dicts,
+    sync_page_cursor,
 )
 
 
@@ -155,3 +157,53 @@ def test_pick_empty_keys():
 def test_pick_empty_mapping():
     """pick returns an empty dict when the mapping is empty."""
     assert pick({}, ["a", "b"]) == {}
+
+
+# ── §25.6 sync paging helpers ─────────────────────────────────────────────
+
+
+def test_retention_window_sql_keep_forever_adds_nothing():
+    assert retention_window_sql("created_at", None) == ("", ())
+
+
+def test_retention_window_sql_cutoff_and_exempt_types():
+    sql, params = retention_window_sql("p.created_at", "2026-01-01 00:00:00")
+    assert sql == " AND datetime(p.created_at) >= datetime(?)"
+    assert params == ("2026-01-01 00:00:00",)
+    sql, params = retention_window_sql(
+        "p.created_at",
+        "2026-01-01 00:00:00",
+        type_col="p.type",
+        exempt_types=("poll", "poll", "event"),
+    )
+    assert "p.type IN (SELECT value FROM json_each(?))" in sql
+    assert params == ("2026-01-01 00:00:00", '["event", "poll"]')
+    # Exempt types without a type column add nothing beyond the cutoff.
+    sql, _ = retention_window_sql("c", "x", exempt_types=("poll",))
+    assert "json_each" not in sql
+
+
+def test_retention_window_sql_runs_in_sqlite():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t(id TEXT, created_at TEXT, type TEXT)")
+    conn.executemany(
+        "INSERT INTO t VALUES(?,?,?)",
+        [
+            ("new-iso", "2026-06-01T10:00:00+00:00", "text"),
+            ("new-naive", "2026-06-01 10:00:00", "text"),
+            ("old", "2025-01-01T10:00:00+00:00", "text"),
+            ("old-poll", "2025-01-01T10:00:00+00:00", "poll"),
+        ],
+    )
+    sql, params = retention_window_sql(
+        "created_at", "2026-01-01 00:00:00", type_col="type", exempt_types=("poll",)
+    )
+    got = {r[0] for r in conn.execute("SELECT id FROM t WHERE 1=1" + sql, params)}
+    assert got == {"new-iso", "new-naive", "old-poll"}
+
+
+def test_sync_page_cursor():
+    rows = [{"sync_rowid": 3}, {"sync_rowid": 9}]
+    assert sync_page_cursor(rows, 2) == 9
+    assert sync_page_cursor(rows, 3) is None
+    assert sync_page_cursor([], 2) is None

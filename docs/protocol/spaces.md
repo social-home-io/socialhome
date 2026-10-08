@@ -2464,6 +2464,11 @@ A seed-holding delegated admin's retention change is applied to its mirror
 and also forwarded to the host as an `update_config` carrying just those
 fields.
 
+Retention also bounds §25.6 sync on **every** provider, host or member: a
+space with `retention_days` streams only what that retention keeps (exempt
+post types at any age), a space without it streams everything — there is no
+fixed size limit. See [`sync.md`](./sync.md#what-a-sync-streams).
+
 ```mermaid
 sequenceDiagram
     autonumber

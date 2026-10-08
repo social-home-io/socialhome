@@ -11,22 +11,18 @@ tombstone as a live task. Ships after ``task_lists_deleted`` and before
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from .....domain.task import task_tombstone_to_wire_dict
+from ..exporter import PagedExporterMixin
+from ..window import SYNC_PAGE_SIZE, iter_tombstone_pages
 
 if TYPE_CHECKING:
     from .....repositories.task_repo import AbstractSpaceTaskRepo
 
 
-#: Newest deletes first; a space that has deleted more tasks than this
-#: streams the most recent ones. Trade-off: a household that missed more
-#: than this many deletes in one outage keeps the older tasks — bounded
-#: chunks over an unrealistic workload. Tombstones are never pruned.
-MAX_TOMBSTONES_STREAMED: int = 500
-
-
-class TasksDeletedExporter:
+class TasksDeletedExporter(PagedExporterMixin):
     resource = "tasks_deleted"
 
     __slots__ = ("_repo",)
@@ -34,8 +30,15 @@ class TasksDeletedExporter:
     def __init__(self, space_task_repo: "AbstractSpaceTaskRepo") -> None:
         self._repo = space_task_repo
 
-    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
-        tombstones = await self._repo.list_task_tombstones(
-            space_id, limit=MAX_TOMBSTONES_STREAMED
-        )
-        return [task_tombstone_to_wire_dict(t, space_id) for t in tombstones]
+    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        # Every tombstone, newest delete first, page by page: tasks are not
+        # governed by the space's retention, so no window applies and no
+        # fixed count cuts the stream (a household that missed more
+        # deletes than any cap would keep the rest forever).
+        async def fetch(before: tuple[str, str] | None) -> list:
+            return await self._repo.list_task_tombstones(
+                space_id, limit=SYNC_PAGE_SIZE, before=before
+            )
+
+        async for page in iter_tombstone_pages(fetch, lambda t: (t.deleted_at, t.id)):
+            yield [task_tombstone_to_wire_dict(t, space_id) for t in page]

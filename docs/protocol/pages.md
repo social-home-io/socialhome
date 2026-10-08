@@ -399,7 +399,8 @@ held it, since a member takes a new page from any member household.
   pages' authority.
 - **`pages_deleted`** (§25.6 resource, in `REMOVAL_RESOURCES`, ships before
   `pages`): `{id, page_id, space_id, created_by, actor_user_id}`, newest
-  delete first, at most 500. On the receiver:
+  delete first, every tombstone of the space read page by page (no fixed
+  count; pages are not governed by `retention_days`). On the receiver:
   - a page held live in this space is tombstoned, with `actor_user_id` as
     the deleter. It is confirmed from the host, or when this household is
     the host (which then re-broadcasts the delete), and unconfirmed from

@@ -1107,8 +1107,9 @@ by the existing `/api/conversations/{id}/...` routes.
   the space. Message ids are owner-bound (`space-chat-message`). The
   inbound handlers (`federation_inbound/space_chat.py`) re-check
   authorship on the space roster. The `chat_messages` catch-up resource
-  carries the last 500 messages to a v_55 writer household, and the
-  space's retention prunes every household's copy. See
+  carries the messages inside the space's retention window (the whole
+  chat without retention) to a v_55 writer household, and the space's
+  retention prunes every household's copy. See
   [`protocol/space-chat.md`](./protocol/space-chat.md).
 
 ## Map tiles
@@ -1412,7 +1413,13 @@ the envelope's signed `from_instance` in `space_remote_members`
 household holding a live `admin` seat) may edit and delete owned rows;
 collaborative rows (tasks, pages, stickies, calendar events) accept any
 writer household; the host may relay a remote member's create. The §25.6
-catch-up stream is held to the same rules unless it comes from the host.
+catch-up stream is held to the same rules unless it comes from the host —
+its tombstone resources (`posts_deleted`, `comments_deleted`,
+`pages_deleted`, `task_lists_deleted`, `tasks_deleted`,
+`chat_messages_deleted`) to the live delete rule. What it streams is the
+space's retention window (everything without retention), read page by
+page in bounded memory — never a fixed count; see
+[`protocol/sync.md`](./protocol/sync.md#what-a-sync-streams).
 Because every author is bound to the roster mirror, the mirror must heal on
 its own: the host sends a v_32 roster snapshot on seat, on a member's
 upgrade and on the periodic sync tick, and a write that beat the gossip

@@ -18,10 +18,7 @@ from socialhome.federation.sync.space.exporters import (
     ChatMessagesDeletedExporter,
     ChatMessagesExporter,
 )
-from socialhome.federation.sync.space.exporters.chat_messages import (
-    CHAT_CATCH_UP_LIMIT,
-    CHAT_TOMBSTONE_LIMIT,
-)
+from socialhome.federation.sync.space.window import SYNC_PAGE_SIZE
 
 _AT = datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
 _SPACE = Space(
@@ -58,12 +55,18 @@ class _Convos:
             if chat
             else None
         )
-        self.limit: int | None = None
-        self.deleted_limit: int | None = None
+        #: Every page asked for: (deleted, cutoff, cursor, limit).
+        self.asked: list[tuple] = []
 
-    async def list_recent_deleted_messages(self, conversation_id, *, limit):
+    async def list_messages_sync_page(
+        self, conversation_id, *, deleted, cutoff, cursor, limit
+    ):
         assert conversation_id == "chat-1"
-        self.deleted_limit = limit
+        self.asked.append((deleted, cutoff, cursor, limit))
+        rows = self._deleted() if deleted else self._live()
+        return rows, None
+
+    def _deleted(self):
         return [
             ConversationMessage(
                 id="m-gone",
@@ -88,9 +91,7 @@ class _Convos:
         assert space_id == "sp-1"
         return self.chat
 
-    async def list_recent_live_messages(self, conversation_id, *, limit):
-        assert conversation_id == "chat-1"
-        self.limit = limit
+    def _live(self):
         return [
             ConversationMessage(
                 id="m-1",
@@ -132,7 +133,8 @@ async def test_streams_the_recent_window_in_the_live_payload_shape():
     exporter = ChatMessagesExporter(convos, _Spaces(_SPACE))  # type: ignore[arg-type]
     assert exporter.resource == "chat_messages" in ALLOWED_RESOURCES
     records = await exporter.list_records("sp-1")
-    assert convos.limit == CHAT_CATCH_UP_LIMIT == 500
+    # No retention on the space: the whole chat, paged — no fixed count.
+    assert convos.asked == [(False, None, None, SYNC_PAGE_SIZE)]
     assert records == [
         {
             "id": "m-1",
@@ -186,7 +188,7 @@ async def test_deletions_stream_ids_and_authors_only_before_the_messages():
         {"id": "m-gone", "message_id": "m-gone", "author_user_id": "u-a"},
         {"id": "m-tomb", "message_id": "m-tomb", "author_user_id": "u-b"},
     ]
-    assert convos.deleted_limit == CHAT_TOMBSTONE_LIMIT
+    assert convos.asked == [(True, None, None, SYNC_PAGE_SIZE)]
     # A deletion streams even while the chat is off (a removal must land).
     off = dataclasses.replace(_SPACE, features=SpaceFeatures(chat=False))
     assert await ChatMessagesDeletedExporter(
@@ -201,3 +203,51 @@ async def test_deletions_stream_ids_and_authors_only_before_the_messages():
             ).list_records("sp-1")
             == []
         )
+
+
+class _PagedConvos(_Convos):
+    """A chat of ``n`` live messages served ``SYNC_PAGE_SIZE`` at a time."""
+
+    def __init__(self, n: int) -> None:
+        super().__init__()
+        self.rows = [
+            ConversationMessage(
+                id=f"m-{i}",
+                conversation_id="chat-1",
+                sender_user_id="u-a",
+                content=f"msg {i}",
+                created_at=_AT,
+            )
+            for i in range(n)
+        ]
+
+    async def list_messages_sync_page(
+        self, conversation_id, *, deleted, cutoff, cursor, limit
+    ):
+        self.asked.append((deleted, cutoff, cursor, limit))
+        start = cursor or 0
+        page = self.rows[start : start + limit]
+        nxt = start + limit if len(page) == limit else None
+        return page, nxt
+
+
+async def test_a_long_chat_streams_whole_page_by_page():
+    convos = _PagedConvos(SYNC_PAGE_SIZE * 2 + 7)
+    exporter = ChatMessagesExporter(convos, _Spaces(_SPACE))  # type: ignore[arg-type]
+    pages = [page async for page in exporter.iter_batches("sp-1")]
+    assert [len(p) for p in pages] == [SYNC_PAGE_SIZE, SYNC_PAGE_SIZE, 7]
+    assert [r["id"] for p in pages for r in p] == [m.id for m in convos.rows]
+    assert [c for _, _, c, _ in convos.asked] == [None, SYNC_PAGE_SIZE, 400]
+
+
+async def test_a_space_with_retention_streams_its_window():
+    convos = _Convos()
+    kept = dataclasses.replace(_SPACE, retention_days=7)
+    await ChatMessagesExporter(convos, _Spaces(kept)).list_records("sp-1")  # type: ignore[arg-type]
+    await ChatMessagesDeletedExporter(convos, _Spaces(kept)).list_records("sp-1")  # type: ignore[arg-type]
+    cutoffs = [c for _, c, _, _ in convos.asked]
+    assert len(cutoffs) == 2 and all(c is not None for c in cutoffs)
+    expected = datetime.now(timezone.utc).replace(tzinfo=None)
+    for c in cutoffs:
+        age = expected - datetime.fromisoformat(c)
+        assert 6.99 < age.total_seconds() / 86400 < 7.01

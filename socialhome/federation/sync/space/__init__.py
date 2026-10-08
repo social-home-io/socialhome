@@ -4,10 +4,10 @@ Signalling lives in :mod:`~socialhome.federation.sync_manager` and
 :mod:`~socialhome.federation.sync_rtc`. This package implements the
 content-transfer layer: once a DataChannel is open the provider
 streams encrypted, signed chunks of space content; the requester
-persists them. The 11 resource types (bans, members, posts, comments,
-tasks, tasks_archived, pages, stickies, calendar, gallery, polls)
-pass through a common :class:`ResourceExporter` Protocol so adding a
-twelfth is a small addition rather than a rewrite.
+persists them. Every resource type (:data:`~.exporter.RESOURCE_ORDER`)
+passes through a common :class:`ResourceExporter` Protocol so adding one
+is a small addition rather than a rewrite. What streams is the space's
+retention window, page by page (:mod:`window`).
 
 Modules:
 
@@ -26,6 +26,7 @@ from .exporter import ChunkBuilder, ResourceExporter, RESOURCE_ORDER
 from .provider import SpaceSyncService
 from .receiver import SpaceSyncReceiver
 from .scheduler import SpaceSyncScheduler
+from .window import SyncWindows
 
 __all__ = [
     "ChunkBuilder",
@@ -34,4 +35,5 @@ __all__ = [
     "SpaceSyncService",
     "SpaceSyncReceiver",
     "SpaceSyncScheduler",
+    "SyncWindows",
 ]

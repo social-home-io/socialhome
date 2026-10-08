@@ -15,43 +15,67 @@ event — broken cards for every pre-existing listing.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, TYPE_CHECKING
 
+from ..exporter import PagedExporterMixin
+from ..window import SYNC_PAGE_SIZE, SyncWindows, iter_pages
+
 if TYPE_CHECKING:
+    from .....domain.post import BazaarListing
     from .....repositories.bazaar_repo import AbstractBazaarRepo
 
 
-class BazaarExporter:
+class BazaarExporter(PagedExporterMixin):
+    """Every listing whose wrapper post streams (live, inside the space's
+    retention window), page by page."""
+
     resource = "bazaar"
 
-    __slots__ = ("_repo",)
+    __slots__ = ("_repo", "_windows")
 
-    def __init__(self, bazaar_repo: "AbstractBazaarRepo") -> None:
+    def __init__(self, bazaar_repo: "AbstractBazaarRepo", windows: SyncWindows) -> None:
         self._repo = bazaar_repo
+        self._windows = windows
 
-    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
-        listings = await self._repo.list_in_space(space_id, limit=2000)
-        out: list[dict[str, Any]] = []
-        for lst in listings:
-            out.append(
-                {
-                    "post_id": lst.post_id,
-                    "space_id": lst.space_id,
-                    "seller_user_id": lst.seller_user_id,
-                    "mode": lst.mode.value,
-                    "title": lst.title,
-                    "description": lst.description,
-                    "image_urls": list(lst.image_urls),
-                    "end_time": lst.end_time,
-                    "currency": lst.currency,
-                    "status": lst.status.value,
-                    "price": lst.price,
-                    "start_price": lst.start_price,
-                    "step_price": lst.step_price,
-                    "winner_user_id": lst.winner_user_id,
-                    "winning_price": lst.winning_price,
-                    "sold_at": lst.sold_at,
-                    "created_at": lst.created_at,
-                },
+    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        window = await self._windows.for_space(space_id)
+
+        async def fetch(cursor: int | None) -> tuple[list["BazaarListing"], int | None]:
+            return await self._repo.list_sync_page(
+                space_id,
+                cutoff=window.cutoff,
+                exempt_types=window.exempt_types,
+                cursor=cursor,
+                limit=SYNC_PAGE_SIZE,
             )
-        return out
+
+        async for listings in iter_pages(fetch):
+            yield _records(listings)
+
+
+def _records(listings: list["BazaarListing"]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for lst in listings:
+        out.append(
+            {
+                "post_id": lst.post_id,
+                "space_id": lst.space_id,
+                "seller_user_id": lst.seller_user_id,
+                "mode": lst.mode.value,
+                "title": lst.title,
+                "description": lst.description,
+                "image_urls": list(lst.image_urls),
+                "end_time": lst.end_time,
+                "currency": lst.currency,
+                "status": lst.status.value,
+                "price": lst.price,
+                "start_price": lst.start_price,
+                "step_price": lst.step_price,
+                "winner_user_id": lst.winner_user_id,
+                "winning_price": lst.winning_price,
+                "sold_at": lst.sold_at,
+                "created_at": lst.created_at,
+            },
+        )
+    return out

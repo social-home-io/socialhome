@@ -30,6 +30,8 @@ from ....domain.federation import (
 from ....domain.federation_capabilities import FederationCapability
 from .exporter import ChunkBuilder, RESOURCE_ORDER, serialise_chunk
 from .exporters.members import PreModeratorMembersExporter
+from .exporters.posts import iter_post_pages
+from .window import KEEP_FOREVER, SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
 
 if TYPE_CHECKING:
     from ...sync_manager import SyncSessionRecord
@@ -109,6 +111,7 @@ class SpaceSyncService:
         "_bazaar_repo",
         "_federation",
         "_chat_gate",
+        "_windows",
     )
 
     def __init__(
@@ -121,8 +124,13 @@ class SpaceSyncService:
         space_post_repo=None,
         gallery_repo=None,
         bazaar_repo=None,
+        windows: SyncWindows | None = None,
     ) -> None:
         self._builder = builder
+        #: The space's retention window bounds the catch-up media as it
+        #: bounds the metadata chunks (the exporters hold their own).
+        #: ``None``: no window known — everything (keep forever).
+        self._windows = windows
         self._exporters = exporters
         self._sig_suite = sig_suite
         #: Optional — when wired, the provider enqueues bytes for
@@ -375,81 +383,52 @@ class SpaceSyncService:
         """
         if self._media_sync is None or target_instance_id == "":
             return
-        # Posts
+        window = (
+            await self._windows.for_space(space_id)
+            if self._windows is not None
+            else KEEP_FOREVER
+        )
+        # Posts — the same ones the ``posts`` resource streamed: live,
+        # inside the retention window, page by page.
         if self._space_post_repo is not None:
             try:
-                posts = await self._space_post_repo.list_for_sync(
-                    space_id,
-                    limit=1000,
-                )
+                async for posts in iter_post_pages(
+                    self._space_post_repo, space_id, window
+                ):
+                    for post in posts:
+                        await self._enqueue_media(
+                            space_id,
+                            target_instance_id,
+                            post.id,
+                            self._post_media_urls(post),
+                        )
             except sqlite3.Error:
                 log.exception(
                     "sync-catchup-media: list posts failed for space=%s",
                     space_id,
                 )
-                posts = []
-            for post in posts:
-                urls = self._post_media_urls(post)
-                if not urls:
-                    continue
-                try:
-                    await self._media_sync.enqueue_for_blob(
-                        space_id=space_id,
-                        correlation_id=post.id,
-                        target_instance_ids=[target_instance_id],
-                        media_urls=urls,
-                    )
-                except sqlite3.Error:
-                    # One outbox-insert hitting a transient SQLite
-                    # error (lock, disk full) shouldn't kill the whole
-                    # loop — the next sync will re-enqueue.
-                    log.exception(
-                        "sync-catchup-media: enqueue failed for post=%s",
-                        post.id,
-                    )
-        # Gallery items — enumerate every album in the space, then every
-        # item per album. The repo API is per-album (no list_items_for_space
-        # shortcut); we walk both levels so a space with multiple albums
-        # catches up cleanly.
+        # Gallery items — the space's own items the ``gallery`` resource
+        # streamed (never a post's mirror: its bytes ride with the post).
         if self._gallery_repo is not None:
-            items: list = []
             try:
-                albums = await self._gallery_repo.list_albums(
-                    space_id,
-                    limit=200,
-                )
-                for album in albums:
-                    page = await self._gallery_repo.list_items(
-                        album.id,
-                        limit=500,
-                    )
-                    items.extend(page)
+                async for items in self._gallery_item_pages(space_id, window):
+                    for item in items:
+                        gallery_urls: list[str] = []
+                        if getattr(item, "thumbnail_url", None):
+                            gallery_urls.append(item.thumbnail_url)
+                        if (
+                            getattr(item, "url", None)
+                            and item.url != item.thumbnail_url
+                        ):
+                            gallery_urls.append(item.url)
+                        await self._enqueue_media(
+                            space_id, target_instance_id, item.id, gallery_urls
+                        )
             except sqlite3.Error:
                 log.exception(
                     "sync-catchup-media: list gallery items failed for space=%s",
                     space_id,
                 )
-                items = []
-            for item in items:
-                gallery_urls: list[str] = []
-                if getattr(item, "thumbnail_url", None):
-                    gallery_urls.append(item.thumbnail_url)
-                if getattr(item, "url", None) and item.url != item.thumbnail_url:
-                    gallery_urls.append(item.url)
-                if not gallery_urls:
-                    continue
-                try:
-                    await self._media_sync.enqueue_for_blob(
-                        space_id=space_id,
-                        correlation_id=item.id,
-                        target_instance_ids=[target_instance_id],
-                        media_urls=gallery_urls,
-                    )
-                except sqlite3.Error:
-                    log.exception(
-                        "sync-catchup-media: enqueue failed for gallery item=%s",
-                        item.id,
-                    )
         # Bazaar listings — each listing's photos live on
         # ``BazaarListing.image_urls`` (NOT on the wrapper Post). Without
         # this walk a remote member sees the wrapper ``PostType.BAZAAR``
@@ -460,31 +439,69 @@ class SpaceSyncService:
         # collide cleanly at the outbox PK.
         if self._bazaar_repo is not None:
             try:
-                listings = await self._bazaar_repo.list_in_space(
-                    space_id,
-                    limit=500,
-                )
+                async for listings in self._bazaar_pages(space_id, window):
+                    for listing in listings:
+                        await self._enqueue_media(
+                            space_id,
+                            target_instance_id,
+                            listing.post_id,
+                            list(listing.image_urls),
+                        )
             except sqlite3.Error:
                 log.exception(
                     "sync-catchup-media: list bazaar listings failed for space=%s",
                     space_id,
                 )
-                listings = []
-            for listing in listings:
-                if not listing.image_urls:
-                    continue
-                try:
-                    await self._media_sync.enqueue_for_blob(
-                        space_id=space_id,
-                        correlation_id=listing.post_id,
-                        target_instance_ids=[target_instance_id],
-                        media_urls=list(listing.image_urls),
-                    )
-                except sqlite3.Error:
-                    log.exception(
-                        "sync-catchup-media: enqueue failed for bazaar listing=%s",
-                        listing.post_id,
-                    )
+
+    def _gallery_item_pages(self, space_id: str, window: SyncWindow):
+        repo = self._gallery_repo
+
+        async def fetch(cursor: int | None):
+            return await repo.list_items_sync_page(
+                space_id, cutoff=window.cutoff, cursor=cursor, limit=SYNC_PAGE_SIZE
+            )
+
+        return iter_pages(fetch)
+
+    def _bazaar_pages(self, space_id: str, window: SyncWindow):
+        repo = self._bazaar_repo
+
+        async def fetch(cursor: int | None):
+            return await repo.list_sync_page(
+                space_id,
+                cutoff=window.cutoff,
+                exempt_types=window.exempt_types,
+                cursor=cursor,
+                limit=SYNC_PAGE_SIZE,
+            )
+
+        return iter_pages(fetch)
+
+    async def _enqueue_media(
+        self,
+        space_id: str,
+        target_instance_id: str,
+        correlation_id: str,
+        urls: list[str],
+    ) -> None:
+        """Enqueue one row's media for the requester. One outbox insert
+        hitting a transient SQLite error (lock, disk full) must not kill
+        the whole walk — the next sync re-enqueues."""
+        if not urls or self._media_sync is None:
+            return
+        try:
+            await self._media_sync.enqueue_for_blob(
+                space_id=space_id,
+                correlation_id=correlation_id,
+                target_instance_ids=[target_instance_id],
+                media_urls=urls,
+            )
+        except sqlite3.Error:
+            log.exception(
+                "sync-catchup-media: enqueue failed for %s in space=%s",
+                correlation_id,
+                space_id,
+            )
 
     @staticmethod
     def _post_media_urls(post) -> list[str]:

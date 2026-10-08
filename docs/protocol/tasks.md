@@ -79,13 +79,13 @@ renames that cross are last-writer-wins by arrival, as for the live
 `SPACE_TASK_LIST_UPDATED` — there is no version on a list. The host's
 `task_lists` stream (taken whole) heals a missed rename too.
 
-**Limits.** The sync stream carries a space's newest **500** tombstones
-(the resume replay at most 500 since `since`): a household that missed
-more deletes than that across one outage keeps the older lists until
-the host's tombstone for each reaches it some other way — in practice
-never, since a space deleting 500+ lists between two syncs is not a
-real workload, and the bound keeps a chunk small. Tombstones are **never
-pruned**, like `space_timetables` tombstones: a row is a few dozen
+**Limits.** The sync stream carries **every** list tombstone of the
+space, newest delete first, read page by page (no fixed count: a
+household that missed any number of deletes in one outage converges).
+Tasks are not governed by the space's `retention_days`, so no retention
+window applies either. The resume replay carries at most 500 since
+`since` per request and the receiver re-issues for more. Tombstones are
+**never pruned**, like `space_timetables` tombstones: a row is a few dozen
 bytes, and pruning one would let a household offline past the window
 resurrect the list. They cascade away with the space.
 
@@ -131,9 +131,9 @@ list of the space. A task tombstoned before its list keeps its own
 `deleted_by`. Tasks of a deleted list are not streamed or replayed as
 task tombstones: the list's tombstone covers them, and its trigger
 tombstones them on the receiver too, so nothing is shipped twice. A
-task tombstone naming a list tombstoned here is a quiet no-op. Same limits as lists: the stream carries the newest
-**500** task tombstones, the replay at most 500 since `since`, and
-they are never pruned (they cascade away with their list or space).
+task tombstone naming a list tombstoned here is a quiet no-op. Same limits as lists: the stream carries every task
+tombstone, page by page; the replay at most 500 since `since` per
+request; and they are never pruned (they cascade away with their list or space).
 
 **Received text is sanitised** like REST input (control / bidi /
 spoofing characters removed) and cut to fit — title ≤ 200, list name

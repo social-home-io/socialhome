@@ -55,7 +55,14 @@ from ....domain.space import (
 )
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
-from ....domain.events import PageDeleted, TaskDeleted, TaskListDeleted, TimetableSaved
+from ....domain.events import (
+    CommentDeleted,
+    PageDeleted,
+    PostDeleted,
+    TaskDeleted,
+    TaskListDeleted,
+    TimetableSaved,
+)
 from ....domain.timetable import (
     Timetable,
     from_wire_dict,
@@ -567,8 +574,18 @@ class SpaceSyncReceiver:
                         post.id,
                         space_id,
                     )
+        elif resource == "posts_deleted":
+            await self._persist_post_tombstones(records, space_id, provider=provider)
+        elif resource == "comments_deleted":
+            await self._persist_comment_tombstones(records, space_id, provider=provider)
         elif resource == "comments":
             for r in records:
+                if r.get("deleted"):
+                    # An older provider streamed its deleted comments as
+                    # comment records (content cleared); stored, they would
+                    # read as a live empty comment. Deletes travel as
+                    # ``comments_deleted`` tombstones.
+                    continue
                 comment = _comment_from_record(r)
                 if comment is None or await self._space_post_repo.add_comment(
                     comment, space_id=space_id
@@ -841,6 +858,158 @@ class SpaceSyncReceiver:
                         timetable=tt, space_id=space_id, origin_instance_id=provider
                     )
                 )
+
+    async def _persist_post_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed post deletes (``posts_deleted``).
+
+        A post held live here in this space is soft-deleted — content
+        cleared, the row kept as its tombstone — and ``PostDeleted`` is
+        published as for a live ``SPACE_POST_DELETED`` (its origin the
+        provider, so nothing is re-broadcast). A member household's records
+        were admitted only under the live rule (:meth:`_authored_record`).
+
+        From the **host**, an id we never held gets the soft-deleted row a
+        delete that overtook its create leaves (v_49), so a stale copy
+        another household streams later cannot create it — but only when
+        the id is owner-bound to its ``author`` in THIS space (post ids are
+        global: a stub for another space's id would block that space's real
+        post here). A legacy (unbound) or mismatched id is skipped.
+        Refusals are summarised once per chunk.
+        """
+        space = await self._space_repo.get(space_id)
+        from_host = space is not None and space.owner_instance_id == provider
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            post_id = str(r.get("id") or r.get("post_id") or "")
+            if not post_id:
+                continue
+            held = await self._space_post_repo.get(post_id)
+            if held is not None:
+                if held[0] != space_id:
+                    cross_space.append(post_id)
+                elif not held[1].deleted and await self._space_post_repo.soft_delete(
+                    post_id, space_id=space_id
+                ):
+                    await self._bus.publish(
+                        PostDeleted(
+                            post_id=post_id,
+                            space_id=space_id,
+                            origin_instance_id=provider,
+                            author_user_id=held[1].author,
+                        )
+                    )
+                continue
+            if not from_host:
+                continue
+            author = str(r.get("author") or "")
+            if (
+                check_owner_bound_id(
+                    SPACE_POST_KIND, post_id, space_id=space_id, owner_user_id=author
+                )
+                is not OwnerBinding.VALID
+            ):
+                unbound += 1
+                continue
+            await self._space_post_repo.save(
+                space_id,
+                Post(
+                    id=post_id,
+                    author=author,
+                    type=PostType.TEXT,
+                    created_at=_parse_iso(r.get("created_at")),
+                    deleted=True,
+                ),
+            )
+        _log_tombstone_refusals("post", provider, space_id, cross_space, unbound)
+
+    async def _persist_comment_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed comment deletes (``comments_deleted``).
+
+        A comment held live here on a post of this space is soft-deleted,
+        its post's comment count lowered and ``CommentDeleted`` published —
+        what a live ``SPACE_COMMENT_DELETED`` does. A member household's
+        records were admitted only under the live rule
+        (:meth:`_authored_record`).
+
+        From the **host**, an id we never held gets a soft-deleted row on
+        its post — only when the id is owner-bound to its ``author`` in THIS
+        space and the post is held here in this space (the insert checks
+        it), so a stale copy streamed later cannot create the comment.
+        """
+        space = await self._space_repo.get(space_id)
+        from_host = space is not None and space.owner_instance_id == provider
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            comment_id = str(r.get("id") or r.get("comment_id") or "")
+            if not comment_id:
+                continue
+            held = await self._space_post_repo.get_comment(comment_id)
+            if held is not None:
+                parent = await self._space_post_repo.get(held.post_id)
+                if parent is None or parent[0] != space_id:
+                    cross_space.append(comment_id)
+                elif (
+                    not held.deleted
+                    and await self._space_post_repo.soft_delete_comment(
+                        comment_id, space_id=space_id
+                    )
+                ):
+                    await self._space_post_repo.decrement_comment_count(
+                        held.post_id, space_id=space_id
+                    )
+                    await self._bus.publish(
+                        CommentDeleted(
+                            post_id=held.post_id,
+                            comment_id=comment_id,
+                            space_id=space_id,
+                            origin_instance_id=provider,
+                            author_user_id=held.author,
+                        )
+                    )
+                continue
+            if not from_host:
+                continue
+            author = str(r.get("author") or "")
+            post_id = str(r.get("post_id") or "")
+            if (
+                not post_id
+                or check_owner_bound_id(
+                    SPACE_COMMENT_KIND,
+                    comment_id,
+                    space_id=space_id,
+                    owner_user_id=author,
+                )
+                is not OwnerBinding.VALID
+            ):
+                unbound += 1
+                continue
+            if not await self._space_post_repo.add_comment(
+                Comment(
+                    id=comment_id,
+                    post_id=post_id,
+                    author=author,
+                    type=CommentType.TEXT,
+                    created_at=_parse_iso(r.get("created_at")),
+                    deleted=True,
+                ),
+                space_id=space_id,
+            ):
+                unbound += 1  # its post is not held here in this space
+        _log_tombstone_refusals("comment", provider, space_id, cross_space, unbound)
 
     async def _persist_task_list_tombstones(
         self,
@@ -1363,6 +1532,54 @@ class SpaceSyncReceiver:
                 return await auth.may_author(
                     event, space_id, str(r.get("author") or "")
                 )
+            case "posts_deleted":
+                # The live SPACE_POST_DELETED rule
+                # (``FederationInboundService._owned_post_mutation_allowed``):
+                # a post held live here IN THIS SPACE, removed by its
+                # author's household or one with content authority (host /
+                # admin / moderator seat — ``may_mutate``), then the space's
+                # ``posts`` level for the delete. ``space_posts`` records no
+                # deleter, so the record names none: it is the author's own
+                # delete when the provider speaks for the author; from a
+                # moderator household it carries no actor, which only an
+                # ``OPEN`` space (or a pre-v_42 provider) admits — the host's
+                # own stream carries every moderator delete regardless.
+                rid = rid or str(r.get("post_id") or "")
+                held_post = await self._space_post_repo.get(rid) if rid else None
+                if (
+                    held_post is None
+                    or held_post[0] != space_id
+                    or held_post[1].deleted
+                ):
+                    return False
+                author = held_post[1].author
+                if not await auth.may_mutate(event, space_id, author):
+                    return False
+                own = await auth.acts_for(event, space_id, author, any_role=True)
+                return await auth.access_admits(
+                    event,
+                    space_id,
+                    "posts",
+                    ContentAction.DELETE,
+                    actor=author if own else None,
+                    row_owner=author,
+                    quiet=True,
+                )
+            case "comments_deleted":
+                # The live SPACE_COMMENT_DELETED rule
+                # (``_owned_comment_mutation_allowed``): a comment held live
+                # here on a post of THIS SPACE, removed by its author's
+                # household or one with content authority.
+                rid = rid or str(r.get("comment_id") or "")
+                held_comment = (
+                    await self._space_post_repo.get_comment(rid) if rid else None
+                )
+                if held_comment is None or held_comment.deleted:
+                    return False
+                parent = await self._space_post_repo.get(held_comment.post_id)
+                if parent is None or parent[0] != space_id:
+                    return False
+                return await auth.may_mutate(event, space_id, held_comment.author)
             case "comments":
                 if not rid or await self._space_post_repo.get_comment(rid) is not None:
                     return False
@@ -1669,7 +1886,9 @@ class SpaceSyncReceiver:
 #: checked in :meth:`SpaceSyncReceiver._persist_album` (v_34).
 _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "posts": (SPACE_POST_KIND, ("author",)),
+    "posts_deleted": (SPACE_POST_KIND, ("author",)),
     "comments": (SPACE_COMMENT_KIND, ("author",)),
+    "comments_deleted": (SPACE_COMMENT_KIND, ("author",)),
     "gallery": (GALLERY_ITEM_KIND, ("uploaded_by", "uploader")),
     "calendar": (SPACE_CALENDAR_EVENT_KIND, ("created_by",)),
     "task_lists": (SPACE_TASK_LIST_KIND, ("created_by",)),
@@ -1711,6 +1930,34 @@ def _claims_bound_id(resource: str, space_id: str, r: dict[str, Any]) -> bool:
         owner_user_id=owner,
         context=f"space sync ({resource})",
     )
+
+
+def _log_tombstone_refusals(
+    what: str, provider: str, space_id: str, cross_space: list[str], unbound: int
+) -> None:
+    """One summary per chunk of the tombstone records that were refused."""
+    if cross_space:
+        log.warning(
+            "space sync: %d %s tombstone(s) from %s for %s name a %s held in "
+            "another space — refused: %s",
+            len(cross_space),
+            what,
+            provider,
+            space_id,
+            what,
+            ", ".join(cross_space[:5]),
+        )
+    if unbound:
+        log.info(
+            "space sync: %d %s tombstone(s) from %s for %s name a %s never "
+            "held here whose id is not bound to this space (or, for a "
+            "comment, whose post is not held here) — no stub recorded",
+            unbound,
+            what,
+            provider,
+            space_id,
+            what,
+        )
 
 
 def _log_sync_refusal(what: str, row_id: str, space_id: str) -> None:

@@ -17,12 +17,22 @@ from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceMember
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import RecurrenceRule, Task, TaskPriority, TaskStatus
+from socialhome.federation.sync.space.window import SyncWindows
+
+
+class _NoSpaces:
+    async def get(self, space_id):
+        return None
+
+
+#: A space with no retention known: everything streams (keep forever).
+_WINDOWS = SyncWindows(_NoSpaces())  # type: ignore[arg-type]
 
 
 class _FakeSpacePostRepo:
     def __init__(self, posts, comments_by_post=None, anchors=None):
         self._posts = posts
-        #: ``hidden_from_feed`` anchor posts: in ``list_for_sync``, never
+        #: ``hidden_from_feed`` anchor posts: in ``list_sync_page``, never
         #: in ``list_feed`` — the same split the SQLite repo makes.
         self._anchors = anchors or []
         self._comments_by_post = comments_by_post or {}
@@ -30,11 +40,30 @@ class _FakeSpacePostRepo:
     async def list_feed(self, space_id, *, before=None, limit=20):
         return self._posts
 
-    async def list_for_sync(self, space_id, *, limit=1000):
-        return self._posts + self._anchors
+    async def list_sync_page(
+        self,
+        space_id,
+        *,
+        deleted=False,
+        cutoff=None,
+        exempt_types=(),
+        cursor=None,
+        limit=200,
+    ):
+        return ([] if deleted else self._posts + self._anchors), None
 
-    async def list_comments(self, post_id):
-        return self._comments_by_post.get(post_id, [])
+    async def list_comments_sync_page(
+        self,
+        space_id,
+        *,
+        deleted=False,
+        cutoff=None,
+        exempt_types=(),
+        cursor=None,
+        limit=200,
+    ):
+        rows = [c for cs in self._comments_by_post.values() for c in cs]
+        return [c for c in rows if c.deleted == deleted], None
 
 
 class _FakeSpaceRepo:
@@ -113,7 +142,7 @@ async def test_posts_exporter_serialises_enums_and_datetimes():
         created_at=datetime(2026, 4, 18, tzinfo=timezone.utc),
         content="hi",
     )
-    ex = PostsExporter(_FakeSpacePostRepo([post]))
+    ex = PostsExporter(_FakeSpacePostRepo([post]), _WINDOWS)
     recs = await ex.list_records("sp-1")
     assert recs[0]["type"] == "text"  # enum → str
     assert recs[0]["created_at"].startswith("2026-04-18")  # datetime → ISO
@@ -125,7 +154,7 @@ async def test_posts_exporter_ships_hidden_anchor_posts_with_their_flag():
 
     ``bazaar_listings.post_id`` references ``space_posts(id)``; a joiner
     that never receives the anchor cannot store the listing. The exporter
-    therefore enumerates through ``list_for_sync`` (anchors included) and
+    therefore enumerates through ``list_sync_page`` (anchors included) and
     ships ``hidden_from_feed`` so the joiner's feed stays as clean as the
     provider's.
     """
@@ -143,7 +172,7 @@ async def test_posts_exporter_ships_hidden_anchor_posts_with_their_flag():
         content="listing card",
         hidden_from_feed=True,
     )
-    ex = PostsExporter(_FakeSpacePostRepo([shown], anchors=[anchor]))
+    ex = PostsExporter(_FakeSpacePostRepo([shown], anchors=[anchor]), _WINDOWS)
     recs = {r["id"]: r for r in await ex.list_records("sp-1")}
     assert set(recs) == {"p-shown", "p-anchor"}
     assert recs["p-anchor"]["hidden_from_feed"] is True
@@ -168,7 +197,7 @@ async def test_comments_exporter_walks_posts():
         content="nice",
     )
     repo = _FakeSpacePostRepo([post], {"p-1": [comment]})
-    ex = CommentsExporter(repo)
+    ex = CommentsExporter(repo, _WINDOWS)
     recs = await ex.list_records("sp-1")
     assert len(recs) == 1
     assert recs[0]["id"] == "c-1"
@@ -382,13 +411,15 @@ async def test_gallery_exporter_emits_albums_then_items():
     )
 
     class _Repo:
-        async def list_albums(self, space_id, *, limit=30, before=None):
-            return [album]
+        async def list_albums_sync_page(self, space_id, *, cursor=None, limit=200):
+            return [album], None
 
-        async def list_items(self, album_id, *, limit=50, before=None):
-            return [item]
+        async def list_items_sync_page(
+            self, space_id, *, cutoff=None, cursor=None, limit=200
+        ):
+            return [item], None
 
-    recs = await GalleryExporter(_Repo()).list_records("sp-1")
+    recs = await GalleryExporter(_Repo(), _WINDOWS).list_records("sp-1")
     assert len(recs) == 2
     assert recs[0]["kind"] == "album"
     assert recs[1]["kind"] == "item"
@@ -400,8 +431,8 @@ async def test_polls_exporter_walks_posts_with_polls():
     post = SimpleNamespace(id="p-1")
 
     class _Posts:
-        async def list_for_sync(self, space_id, *, limit):
-            return [post]
+        async def list_sync_page(self, space_id, **_kw):
+            return [post], None
 
     class _Polls:
         async def get_meta(self, post_id):
@@ -410,7 +441,7 @@ async def test_polls_exporter_walks_posts_with_polls():
         async def list_options_with_counts(self, post_id):
             return [{"id": "opt-a", "text": "Yes", "count": 3}]
 
-    recs = await PollsExporter(_Polls(), _Posts()).list_records("sp-1")
+    recs = await PollsExporter(_Polls(), _Posts(), _WINDOWS).list_records("sp-1")
     assert recs[0]["post_id"] == "p-1"
     assert recs[0]["meta"]["question"] == "Pizza?"
     assert recs[0]["options"][0]["id"] == "opt-a"
@@ -422,8 +453,8 @@ async def test_polls_exporter_skips_posts_without_polls():
     post = SimpleNamespace(id="p-2")
 
     class _Posts:
-        async def list_for_sync(self, space_id, *, limit):
-            return [post]
+        async def list_sync_page(self, space_id, **_kw):
+            return [post], None
 
     class _Polls:
         async def get_meta(self, post_id):
@@ -432,7 +463,7 @@ async def test_polls_exporter_skips_posts_without_polls():
         async def list_options_with_counts(self, post_id):
             return []
 
-    recs = await PollsExporter(_Polls(), _Posts()).list_records("sp-1")
+    recs = await PollsExporter(_Polls(), _Posts(), _WINDOWS).list_records("sp-1")
     assert recs == []
 
 
@@ -494,10 +525,10 @@ async def test_bazaar_exporter_serialises_listings():
     )
 
     class _Repo:
-        async def list_in_space(self, space_id, *, limit=2000):
-            return [listing]
+        async def list_sync_page(self, space_id, **_kw):
+            return [listing], None
 
-    recs = await BazaarExporter(_Repo()).list_records("sp-1")
+    recs = await BazaarExporter(_Repo(), _WINDOWS).list_records("sp-1")
     assert len(recs) == 1
     r = recs[0]
     assert r["post_id"] == "bzr-1"
@@ -602,8 +633,8 @@ async def test_schedules_exporter_emits_slot_defs():
     )
 
     class _PostRepo:
-        async def list_for_sync(self, space_id, limit=1000):
-            return [post]
+        async def list_sync_page(self, space_id, **_kw):
+            return [post], None
 
     class _PollRepo:
         async def get_schedule_meta(self, post_id):
@@ -629,7 +660,9 @@ async def test_schedules_exporter_emits_slot_defs():
                 },
             ]
 
-    recs = await SchedulesExporter(_PollRepo(), _PostRepo()).list_records("sp-1")
+    recs = await SchedulesExporter(_PollRepo(), _PostRepo(), _WINDOWS).list_records(
+        "sp-1"
+    )
     assert len(recs) == 1
     r = recs[0]
     assert r["post_id"] == "p-sched"

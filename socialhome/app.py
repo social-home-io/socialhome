@@ -294,6 +294,7 @@ from .federation.sync import (
     BazaarExporter,
     CalendarExporter,
     ChunkBuilder,
+    CommentsDeletedExporter,
     CommentsExporter,
     GalleryExporter,
     MemberPicturesExporter,
@@ -301,12 +302,14 @@ from .federation.sync import (
     PagesDeletedExporter,
     PagesExporter,
     PollsExporter,
+    PostsDeletedExporter,
     PostsExporter,
     SchedulesExporter,
     SpaceSyncReceiver,
     SpaceSyncScheduler,
     SpaceSyncService,
     StickiesExporter,
+    SyncWindows,
     TaskListsDeletedExporter,
     TaskListsExporter,
     TasksArchivedExporter,
@@ -1493,7 +1496,10 @@ def _wire_federation_stack(
         user_repo=user_repo,
     ).attach_to(federation_service)
 
-    # §25.6 Direct Space Sync — content transfer over DataChannel.
+    # §25.6 Direct Space Sync — content transfer over DataChannel. What
+    # streams is the space's retention window (everything when it keeps
+    # forever), read page by page — no fixed size limit.
+    sync_windows = SyncWindows(space_repo)
     exporters: dict = {
         "bans": BansExporter(space_repo),
         "members": MembersExporter(space_repo),
@@ -1501,8 +1507,10 @@ def _wire_federation_stack(
             space_repo,
             profile_picture_repo,
         ),
-        "posts": PostsExporter(space_post_repo),
-        "comments": CommentsExporter(space_post_repo),
+        "posts_deleted": PostsDeletedExporter(space_post_repo, sync_windows),
+        "posts": PostsExporter(space_post_repo, sync_windows),
+        "comments_deleted": CommentsDeletedExporter(space_post_repo, sync_windows),
+        "comments": CommentsExporter(space_post_repo, sync_windows),
         "task_lists": TaskListsExporter(space_task_repo),
         "task_lists_deleted": TaskListsDeletedExporter(space_task_repo),
         "tasks_deleted": TasksDeletedExporter(space_task_repo),
@@ -1512,11 +1520,11 @@ def _wire_federation_stack(
         "pages": PagesExporter(page_repo),
         "stickies": StickiesExporter(sticky_repo),
         "calendar": CalendarExporter(space_calendar_repo),
-        "gallery": GalleryExporter(gallery_repo),
-        "polls": PollsExporter(space_poll_repo, space_post_repo),
-        "schedules": SchedulesExporter(space_poll_repo, space_post_repo),
+        "gallery": GalleryExporter(gallery_repo, sync_windows),
+        "polls": PollsExporter(space_poll_repo, space_post_repo, sync_windows),
+        "schedules": SchedulesExporter(space_poll_repo, space_post_repo, sync_windows),
         "space_zones": ZonesExporter(space_zone_repo),
-        "bazaar": BazaarExporter(bazaar_repo),
+        "bazaar": BazaarExporter(bazaar_repo, sync_windows),
         "timetables": TimetablesExporter(space_timetable_repo),
         # v_55 — streamed only to a writer household (the chat gate is
         # attached with the space chat, ``_build_space_chat_federation``).
@@ -1541,6 +1549,7 @@ def _wire_federation_stack(
         space_post_repo=space_post_repo,
         gallery_repo=gallery_repo,
         bazaar_repo=bazaar_repo,
+        windows=sync_windows,
     )
     space_sync_receiver = SpaceSyncReceiver(
         bus=bus,

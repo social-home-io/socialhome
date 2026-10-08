@@ -114,8 +114,8 @@ async def test_list_feed_excludes_hidden_from_feed(env):
     assert got[1].hidden_from_feed is True
 
 
-async def test_list_for_sync_ships_hidden_anchors_but_not_deleted_posts(env):
-    """The §25.6 catch-up exporters enumerate through ``list_for_sync``.
+async def test_list_sync_page_ships_hidden_anchors_but_not_deleted_posts(env):
+    """The §25.6 catch-up exporters enumerate through ``list_sync_page``.
 
     A bazaar listing or calendar event the author did not announce hangs
     on a ``hidden_from_feed`` anchor post; ``bazaar_listings.post_id``
@@ -134,8 +134,13 @@ async def test_list_for_sync_ships_hidden_anchors_but_not_deleted_posts(env):
         await env.repo.save(env.space_id, p)
     await env.repo.soft_delete("sp-sync-gone", space_id=env.space_id)
 
-    synced = {p.id: p for p in await env.repo.list_for_sync(env.space_id)}
+    page, cursor = await env.repo.list_sync_page(env.space_id)
+    synced = {p.id: p for p in page}
+    assert cursor is None
     assert set(synced) == {"sp-sync-vis", "sp-sync-anchor"}
+    # The deleted post is the tombstone page — its row, content cleared.
+    gone_page, _ = await env.repo.list_sync_page(env.space_id, deleted=True)
+    assert [(p.id, p.content) for p in gone_page] == [("sp-sync-gone", None)]
     assert synced["sp-sync-anchor"].hidden_from_feed is True
     # And the feed contract is unchanged: the anchor stays out of it.
     assert "sp-sync-anchor" not in {
@@ -723,3 +728,101 @@ async def test_add_comment_of_a_held_id_is_a_no_op_not_an_error(env):
     dup = _comment("c1", "p1")
     assert not await env.repo.add_comment(dup, space_id=env.space_id)
     assert (await env.repo.get_comment("c1")).content == "Great post!"
+
+
+def _aged(post_id: str, days: float, *, type: PostType = PostType.TEXT) -> Post:
+    from datetime import timedelta
+
+    return Post(
+        id=post_id,
+        author="uid-alice",
+        type=type,
+        created_at=datetime.now(timezone.utc) - timedelta(days=days),
+        content="x",
+    )
+
+
+def _cutoff(days: float) -> str:
+    from datetime import timedelta
+
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+async def test_list_sync_page_pages_every_post_newest_first(env):
+    """No fixed cap: keyset pages walk every post exactly once."""
+    for i in range(7):
+        await env.repo.save(env.space_id, _aged(f"pg-{i}", days=7 - i))
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        page, cursor = await env.repo.list_sync_page(
+            env.space_id, cursor=cursor, limit=3
+        )
+        seen.extend(p.id for p in page)
+        pages += 1
+        if cursor is None:
+            break
+    assert seen == [f"pg-{i}" for i in reversed(range(7))]
+    assert pages == 3
+
+
+async def test_list_sync_page_keeps_the_retention_window_and_exempt_types(env):
+    await env.repo.save(env.space_id, _aged("new", days=1))
+    await env.repo.save(env.space_id, _aged("old", days=30))
+    await env.repo.save(env.space_id, _aged("old-poll", days=30, type=PostType.POLL))
+    await env.repo.save(env.space_id, _aged("gone-new", days=1))
+    await env.repo.save(env.space_id, _aged("gone-old", days=30))
+    for pid in ("gone-new", "gone-old"):
+        await env.repo.soft_delete(pid, space_id=env.space_id)
+    live, _ = await env.repo.list_sync_page(
+        env.space_id, cutoff=_cutoff(7), exempt_types=("poll",)
+    )
+    assert {p.id for p in live} == {"new", "old-poll"}
+    live, _ = await env.repo.list_sync_page(env.space_id, cutoff=_cutoff(7))
+    assert {p.id for p in live} == {"new"}
+    gone, _ = await env.repo.list_sync_page(
+        env.space_id, deleted=True, cutoff=_cutoff(7)
+    )
+    assert {p.id for p in gone} == {"gone-new"}
+    # Keep forever: everything.
+    live, _ = await env.repo.list_sync_page(env.space_id)
+    assert {p.id for p in live} == {"new", "old", "old-poll"}
+
+
+async def test_list_comments_sync_page_splits_live_and_tombstones(env):
+    await env.repo.save(env.space_id, _aged("p-new", days=1))
+    await env.repo.save(env.space_id, _aged("p-old", days=30))
+    await env.repo.save(env.space_id, _aged("p-gone", days=1))
+    for cid, pid in (
+        ("c-1", "p-new"),
+        ("c-2", "p-new"),
+        ("c-old", "p-old"),
+        ("c-on-gone", "p-gone"),
+    ):
+        await env.repo.add_comment(_comment(cid, pid), space_id=env.space_id)
+    await env.repo.soft_delete_comment("c-2", space_id=env.space_id)
+    await env.repo.soft_delete("p-gone", space_id=env.space_id)
+
+    live, cursor = await env.repo.list_comments_sync_page(env.space_id)
+    # A live comment on a deleted post never streams; nor does a deleted one.
+    assert [c.id for c in live] == ["c-1", "c-old"] and cursor is None
+    live, _ = await env.repo.list_comments_sync_page(env.space_id, cutoff=_cutoff(7))
+    assert [c.id for c in live] == ["c-1"]
+    gone, _ = await env.repo.list_comments_sync_page(env.space_id, deleted=True)
+    assert [(c.id, c.content) for c in gone] == [("c-2", None)]
+    # Paged: one row per page, oldest stored first, every row once.
+    seen, cursor = [], None
+    while True:
+        page, cursor = await env.repo.list_comments_sync_page(
+            env.space_id, cursor=cursor, limit=1
+        )
+        seen.extend(c.id for c in page)
+        if cursor is None:
+            break
+    assert seen == ["c-1", "c-old"]
+    # Another space's comments never appear.
+    other, _ = await env.repo.list_comments_sync_page("sp-other")
+    assert other == []

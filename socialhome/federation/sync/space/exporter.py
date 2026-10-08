@@ -11,16 +11,21 @@ Encryption: each chunk body is encrypted with the space content key
 envelope is signed. The signature covers the encrypted payload, not
 the plaintext, so a man-in-the-middle can't swap ciphertexts.
 
-v1 scope: exporters return the full record list for a space, no
-pagination complexity. Household-scale spaces (dozens of posts, a
-handful of tasks, etc.) fit in a couple of chunks. A follow-up pass
-can add keyset pagination when a real operator hits the budget.
+Paging: no fixed size limits what syncs (see :mod:`.window` — a space
+streams what its retention keeps, everything without retention). An
+exporter whose resource can grow large also offers ``iter_batches``: it
+reads its repo in pages of :data:`~.window.SYNC_PAGE_SIZE` rows and
+yields each page; :class:`ChunkBuilder` turns a page into chunks before
+the next page is read, so memory stays bounded by one page, never by the
+resource. A small resource (bans, members, zones …) keeps the single
+``list_records`` call.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncIterator, Protocol, runtime_checkable
+from collections.abc import AsyncIterator
+from typing import Any, Protocol, runtime_checkable
 from typing import TYPE_CHECKING
 
 import orjson as _orjson
@@ -45,7 +50,16 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # a 404 on the joiner's own host (the bytes lived only on the
     # originating user's instance).
     "member_pictures",
+    # Post tombstones before the live posts: a household that missed a
+    # post delete (offline, or the event lost) soft-deletes its copy, and
+    # a host stub keeps a stale copy streamed later out. An older receiver
+    # drops the unknown resource.
+    "posts_deleted",
     "posts",
+    # Comment tombstones after the posts (a stub needs its post held here)
+    # and before the live comments (a live reply may hang under a deleted
+    # comment, whose stub the reply's parent check then finds).
+    "comments_deleted",
     "comments",
     # Task lists (v_40) ship BEFORE tasks: a space task is only filed under
     # a list the receiver already holds in that space.
@@ -83,8 +97,8 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # Space timetables (v_39). Self-contained rows; an older receiver drops
     # the unknown resource.
     "timetables",
-    # The space chat's recent messages (v_55). Sent only to a writer
-    # household at v_55+ (the provider gates it per requester); a reply
+    # The space chat's messages in the retention window (v_55). Sent only
+    # to a writer household at v_55+ (the provider gates it per requester); a reply
     # names a message streamed earlier in the same resource (oldest first).
     # Its deletions ship first: a household that missed a delete drops (or
     # tombstones) the message before any stream could bring it back.
@@ -109,7 +123,14 @@ ROSTER_RESOURCES: frozenset[str] = frozenset({"bans", "members", "member_picture
 #: ``ARCHIVED_ALLOWED_REMOVAL_TYPES``, they still land in a space that is
 #: archived here — a delete must not outlive itself on the snapshot.
 REMOVAL_RESOURCES: frozenset[str] = frozenset(
-    {"task_lists_deleted", "tasks_deleted", "pages_deleted", "chat_messages_deleted"}
+    {
+        "posts_deleted",
+        "comments_deleted",
+        "task_lists_deleted",
+        "tasks_deleted",
+        "pages_deleted",
+        "chat_messages_deleted",
+    }
 )
 
 
@@ -128,8 +149,10 @@ CHUNK_SIZE_BUDGET_BYTES: int = 8 * 1024
 class ResourceExporter(Protocol):
     """Read-only view of one resource type for sync.
 
-    v1 returns the full record list; :class:`ChunkBuilder` handles
-    splitting by size budget.
+    ``list_records`` returns every record; :class:`ChunkBuilder` handles
+    splitting by size budget. An exporter that also has an
+    ``iter_batches(space_id)`` async generator (:class:`BatchedExporter`)
+    is streamed page by page through it instead.
     """
 
     resource: str
@@ -138,6 +161,42 @@ class ResourceExporter(Protocol):
         """Return every record for ``space_id`` as a list of
         JSON-serialisable dicts, in a stable order."""
         ...
+
+
+@runtime_checkable
+class BatchedExporter(ResourceExporter, Protocol):
+    """A :class:`ResourceExporter` that streams its records in pages."""
+
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        """Yield the records for ``space_id`` page by page, each page a
+        bounded list in a stable order."""
+        ...
+
+
+async def record_batches(
+    exporter: ResourceExporter, space_id: str
+) -> AsyncIterator[list[dict[str, Any]]]:
+    """The exporter's records as non-empty pages — its ``iter_batches``
+    when it pages, else its whole ``list_records`` as one page."""
+    if isinstance(exporter, BatchedExporter):
+        async for batch in exporter.iter_batches(space_id):
+            if batch:
+                yield batch
+        return
+    records = await exporter.list_records(space_id)
+    if records:
+        yield records
+
+
+async def collect_batches(
+    batches: AsyncIterator[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Every record of ``batches`` in one list — ``list_records`` of a
+    paged exporter (tests, small callers). The stream never uses it."""
+    out: list[dict[str, Any]] = []
+    async for batch in batches:
+        out.extend(batch)
+    return out
 
 
 class ChunkBuilder:
@@ -171,16 +230,36 @@ class ChunkBuilder:
         Each yielded dict can be serialised with :func:`serialise_chunk`
         and sent via ``SyncRtcSession.send_chunk``.
         """
-        records = await exporter.list_records(space_id)
-        if not records:
-            return
-        # Size-budget: start with the full list, halve until fits.
-        pending = list(records)
         cursor = 0
+        async for batch in record_batches(exporter, space_id):
+            async for envelope in self._chunks_of(
+                exporter.resource,
+                batch,
+                space_id=space_id,
+                sync_id=sync_id,
+                sig_suite=sig_suite,
+                cursor=cursor,
+            ):
+                yield envelope
+            cursor += len(batch)
+
+    async def _chunks_of(
+        self,
+        resource: str,
+        records: list[dict[str, Any]],
+        *,
+        space_id: str,
+        sync_id: str,
+        sig_suite: str,
+        cursor: int,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Chunk one page of records: start with the whole page, halve
+        until it fits the size budget (or is a single record)."""
+        pending = list(records)
         while pending:
             chunk_records = pending
             envelope = await self._build_one(
-                exporter.resource,
+                resource,
                 chunk_records,
                 space_id,
                 sync_id,
@@ -193,7 +272,7 @@ class ChunkBuilder:
             while len(encoded) > CHUNK_SIZE_BUDGET_BYTES and len(chunk_records) > 1:
                 chunk_records = chunk_records[: max(1, len(chunk_records) // 2)]
                 envelope = await self._build_one(
-                    exporter.resource,
+                    resource,
                     chunk_records,
                     space_id,
                     sync_id,
@@ -282,3 +361,18 @@ def parse_chunk(raw: bytes | str) -> dict[str, Any]:
         return _orjson.loads(raw)
     except Exception as exc:
         raise ValueError(f"malformed sync chunk: {exc}") from exc
+
+
+class PagedExporterMixin:
+    """``list_records`` for a :class:`BatchedExporter`: every page of its
+    ``iter_batches`` in one list. The sync stream itself reads the pages
+    one at a time (:func:`record_batches`); this is for callers that want
+    the whole resource (tests, small spaces)."""
+
+    __slots__ = ()
+
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        raise NotImplementedError  # pragma: no cover — every consumer defines it
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return await collect_batches(self.iter_batches(space_id))

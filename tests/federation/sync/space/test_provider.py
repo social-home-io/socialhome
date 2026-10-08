@@ -221,28 +221,22 @@ async def test_stream_initial_enqueues_catchup_media(encoder):
         thumbnail_url: str
 
     class _PostRepo:
-        async def list_for_sync(self, space_id, limit=1000):
+        async def list_sync_page(self, space_id, **kw):
+            assert not kw["deleted"]  # never a deleted post's media
             return [
                 _Post(id="post-1", image_urls=("api/media/a.webp",)),
                 _Post(id="post-2", media_url="api/media/v.webm"),
-            ]
-
-    @dataclass
-    class _GalleryAlbum:
-        id: str
+            ], None
 
     class _GalleryRepo:
-        async def list_albums(self, space_id, *, limit=200):
-            return [_GalleryAlbum(id="album-1")]
-
-        async def list_items(self, album_id, *, limit=500):
+        async def list_items_sync_page(self, space_id, **_kw):
             return [
                 _GalleryItem(
                     id="g-1",
                     url="api/media/full.webp",
                     thumbnail_url="api/media/thumb.webp",
                 ),
-            ]
+            ], None
 
     media_sync = AsyncMock()
     media_sync.enqueue_for_blob = AsyncMock()
@@ -307,7 +301,7 @@ async def test_stream_initial_enqueues_bazaar_catchup_media(encoder):
         image_urls: tuple
 
     class _BazaarRepo:
-        async def list_in_space(self, space_id, *, limit=500):
+        async def list_sync_page(self, space_id, **_kw):
             return [
                 _Listing(
                     post_id="bzr-1",
@@ -317,7 +311,7 @@ async def test_stream_initial_enqueues_bazaar_catchup_media(encoder):
                     post_id="bzr-2",
                     image_urls=(),
                 ),
-            ]
+            ], None
 
     media_sync = AsyncMock()
     media_sync.enqueue_for_blob = AsyncMock()
@@ -341,6 +335,63 @@ async def test_stream_initial_enqueues_bazaar_catchup_media(encoder):
         "api/media/chair-1.webp",
         "api/media/chair-2.webp",
     ]
+
+
+async def test_catchup_media_follows_the_spaces_retention_window(encoder):
+    """The catch-up media walks the same window the metadata streamed:
+    every page, each asked with the space's retention cutoff."""
+    from dataclasses import dataclass
+    from unittest.mock import AsyncMock
+
+    from socialhome.federation.sync.space.window import SyncWindow
+
+    @dataclass
+    class _Post:
+        id: str
+        media_url: str | None = None
+
+    asked: list[dict] = []
+
+    class _PostRepo:
+        async def list_sync_page(self, space_id, **kw):
+            asked.append(kw)
+            if kw["cursor"] is None:  # two pages: no fixed count
+                return [_Post(id="p-1", media_url="api/media/1.webp")], 7
+            return [_Post(id="p-2", media_url="api/media/2.webp")], None
+
+    class _GalleryRepo:
+        async def list_items_sync_page(self, space_id, **kw):
+            asked.append(kw)
+            return [], None
+
+    class _BazaarRepo:
+        async def list_sync_page(self, space_id, **kw):
+            asked.append(kw)
+            return [], None
+
+    class _Windows:
+        async def for_space(self, space_id):
+            return SyncWindow(cutoff="2026-10-01 00:00:00", exempt_types=("poll",))
+
+    media_sync = AsyncMock()
+    media_sync.enqueue_for_blob = AsyncMock()
+    svc = SpaceSyncService(
+        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+        exporters={},
+        sig_suite="ed25519",
+        media_sync=media_sync,
+        space_post_repo=_PostRepo(),
+        gallery_repo=_GalleryRepo(),
+        bazaar_repo=_BazaarRepo(),
+        windows=_Windows(),  # type: ignore[arg-type]
+    )
+    await svc.stream_initial(_FakeSession(requester="peer-w"))
+    ids = [
+        c.kwargs["correlation_id"] for c in media_sync.enqueue_for_blob.call_args_list
+    ]
+    assert ids == ["p-1", "p-2"]
+    assert all(kw["cutoff"] == "2026-10-01 00:00:00" for kw in asked)
+    assert len(asked) == 4
 
 
 async def test_stream_initial_no_bazaar_repo_is_noop(encoder):

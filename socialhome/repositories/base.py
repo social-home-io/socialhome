@@ -75,3 +75,44 @@ def pick(
     present on a particular update payload.
     """
     return {k: mapping[k] for k in keys if k in mapping}
+
+
+def retention_window_sql(
+    created_col: str,
+    cutoff: str | None,
+    *,
+    type_col: str | None = None,
+    exempt_types: Iterable[str] = (),
+) -> tuple[str, tuple[Any, ...]]:
+    """``(" AND …", params)`` keeping the rows a space's retention keeps.
+
+    For the §25.6 sync exporters: ``cutoff`` (naive UTC
+    ``"YYYY-MM-DD HH:MM:SS"``) drops rows created before it — compared
+    through ``datetime()`` on both sides, as the retention sweep does,
+    because stored ``created_at`` values mix the ISO ``T`` form and the
+    naive form. A row whose ``type_col`` is one of ``exempt_types`` is kept
+    at any age (``spaces.retention_exempt_json``). ``cutoff=None`` (keep
+    forever) adds nothing. Column names are code, never input.
+    """
+    if cutoff is None:
+        return "", ()
+    exempt = sorted(set(exempt_types))
+    if type_col is None or not exempt:
+        return f" AND datetime({created_col}) >= datetime(?)", (cutoff,)
+    return (
+        f" AND (datetime({created_col}) >= datetime(?)"
+        f" OR {type_col} IN (SELECT value FROM json_each(?)))",
+        (cutoff, json.dumps(exempt)),
+    )
+
+
+def sync_page_cursor(rows: list[dict[str, Any]], limit: int) -> int | None:
+    """The keyset cursor after one §25.6 sync page.
+
+    The page's query selects the row id as ``sync_rowid`` and orders by it;
+    the cursor is the last row's — or ``None`` when the page came back
+    short, so there is nothing left to read.
+    """
+    if not rows or len(rows) < int(limit):
+        return None
+    return int(rows[-1]["sync_rowid"])

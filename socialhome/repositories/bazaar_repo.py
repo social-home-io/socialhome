@@ -29,7 +29,15 @@ from ..domain.post import (
     BazaarOffer,
     BazaarStatus,
 )
-from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
+from .base import (
+    bool_col,
+    dump_json,
+    load_json,
+    retention_window_sql,
+    row_to_dict,
+    rows_to_dicts,
+    sync_page_cursor,
+)
 
 
 #: §23.15 auction anti-snipe: bids arriving within this window of the
@@ -73,6 +81,22 @@ class AbstractBazaarRepo(Protocol):
     async def list_in_space(
         self, space_id: str, *, limit: int = 500
     ) -> list[BazaarListing]: ...
+    async def list_sync_page(
+        self,
+        space_id: str,
+        *,
+        cutoff: str | None = None,
+        exempt_types: tuple[str, ...] = (),
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[BazaarListing], int | None]:
+        """One page of the space's listings for a §25.6 sync, newest first,
+        whatever their status — only those whose wrapper post is live and
+        inside the space's retention window (the post the receiver needs
+        first; a deleted post's listing never streams). ``(rows,
+        next_cursor)`` paging, keyset on the row id."""
+        ...
+
     async def list_by_seller(self, seller_user_id: str) -> list[BazaarListing]: ...
     async def list_space_media_urls(self, space_id: str) -> list[str]: ...
     async def list_expired(
@@ -326,6 +350,32 @@ class SqliteBazaarRepo:
             (space_id, max(1, min(int(limit), 2000))),
         )
         return [lst for lst in (_row_to_listing(d) for d in rows_to_dicts(rows)) if lst]
+
+    async def list_sync_page(
+        self,
+        space_id: str,
+        *,
+        cutoff: str | None = None,
+        exempt_types: tuple[str, ...] = (),
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[BazaarListing], int | None]:
+        window, window_params = retention_window_sql(
+            "p.created_at", cutoff, type_col="p.type", exempt_types=exempt_types
+        )
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT l.rowid AS sync_rowid, l.* FROM bazaar_listings l"
+                " JOIN space_posts p ON p.id = l.post_id AND p.space_id = l.space_id"
+                " WHERE l.space_id=? AND p.deleted=0"
+                + window
+                + " AND (? IS NULL OR l.rowid < ?)"
+                " ORDER BY l.rowid DESC LIMIT ?",
+                (space_id, *window_params, cursor, cursor, int(limit)),
+            )
+        )
+        listings = [lst for lst in (_row_to_listing(d) for d in rows) if lst]
+        return listings, sync_page_cursor(rows, limit)
 
     async def list_by_seller(
         self,
