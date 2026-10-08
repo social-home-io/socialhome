@@ -15,6 +15,7 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.calendar import CalendarEvent, CalendarEventCopy
+from ..domain.errors import CodedError
 from ..domain.space import CONTENT_AUTHORITY_ROLES, SpaceMember
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
@@ -23,6 +24,7 @@ from ..services.calendar_import_service import (
     AICalendarImportUnavailable,
 )
 from ..services.calendar_service import UNSET_COVER, UNSET_LOCATION
+from ..services.inbound_media_store import verbatim_local_media_ref
 from .base import BaseView
 
 
@@ -67,7 +69,11 @@ def _event_dict(event, *, copies: Sequence[CalendarEventCopy] = ()) -> dict:
         "rrule": event.rrule,
         "capacity": getattr(event, "capacity", None),
         "rsvp_enabled": getattr(event, "rsvp_enabled", False),
-        "cover_url": getattr(event, "cover_url", None),
+        # Only a local media reference ever reaches an ``<img>``: a cover
+        # stored before the local-only rule (or mirrored before inbound
+        # filtering) is served as ``null`` — docs/principles.md "No
+        # third-party fetches from user content".
+        "cover_url": verbatim_local_media_ref(getattr(event, "cover_url", None)),
         "location": getattr(event, "location", None),
         # IANA wall-clock anchor — the SPA uses it to render the
         # event in the host's tz with an optional "your time" hint.
@@ -627,6 +633,10 @@ class SpaceCalendarEventsView(_SpaceCalendarBase):
                 tz=body.get("tz"),
                 announce_in_feed=bool(body.get("announce_in_feed", False)),
             )
+        except CodedError:
+            # ``InvalidMediaRefError`` is also a ``ValueError`` — let
+            # ``BaseView._iter`` answer it with its stable code.
+            raise
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
         # Service publishes CalendarEventCreated internally — don't
@@ -697,6 +707,8 @@ class SpaceCalendarEventDetailView(_SpaceCalendarBase):
             )
         except KeyError:
             return error_response(404, "NOT_FOUND", "Event not found.")
+        except CodedError:
+            raise
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
         return web.json_response(_sign_payload(self.request, _event_dict(event)))

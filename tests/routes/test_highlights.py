@@ -202,7 +202,8 @@ async def test_create_frame_with_external_media_url_is_422(client):
     assert r.status == 422, await r.text()
     body = await r.json()
     assert body["error"]["code"] == "INVALID_MEDIA_URL"
-    assert "example.invalid" not in body["error"]["detail"]
+    assert body["error"]["params"] == {"field": "media_url"}
+    assert "example.invalid" not in str(body)
 
     listed = await client.get("/api/highlights", headers=_auth(client))
     assert await listed.json() == []

@@ -3042,3 +3042,92 @@ async def test_event_cover_must_be_local_media(env):
     # Clearing stays allowed.
     cleared = await env.cal_svc.update_event(ev.id, cover_url=None)
     assert cleared.cover_url is None
+
+
+_LEGACY_COVER = "https://cdn.example/old-cover.jpg"
+
+
+async def _personal_event_with_legacy_cover(env):
+    """A personal event whose stored cover predates the local-only rule."""
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("anna", "uid-anna", "Anna"),
+    )
+    cal = await env.cal_svc.create_calendar(name="Personal", owner_username="anna")
+    now = datetime.now(timezone.utc)
+    ev = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Lunch",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-anna",
+    )
+    await env.db.enqueue(
+        "UPDATE calendar_events SET cover_url=? WHERE id=?", (_LEGACY_COVER, ev.id)
+    )
+    return ev
+
+
+@pytest.mark.parametrize(
+    ("cover_kw", "want_cover"),
+    [
+        ({}, _LEGACY_COVER),
+        ({"cover_url": _LEGACY_COVER}, _LEGACY_COVER),
+        ({"cover_url": None}, None),
+    ],
+)
+async def test_event_with_legacy_external_cover_stays_editable(
+    env, cover_kw, want_cover
+):
+    """An event stored with an external cover before the rule can still be
+    edited: omitting the cover, echoing the stored value back (an older
+    client) or clearing it all succeed — only a *new* non-local cover is
+    refused."""
+    ev = await _personal_event_with_legacy_cover(env)
+    up = await env.cal_svc.update_event(ev.id, summary="Brunch", **cover_kw)
+    assert up.summary == "Brunch"
+    assert up.cover_url == want_cover
+    with pytest.raises(InvalidMediaRefError):
+        await env.cal_svc.update_event(ev.id, cover_url="https://other.example/x.jpg")
+
+
+@pytest.mark.parametrize(
+    ("cover_kw", "want_cover"),
+    [
+        ({}, _LEGACY_COVER),
+        ({"cover_url": _LEGACY_COVER}, _LEGACY_COVER),
+        ({"cover_url": None}, None),
+    ],
+)
+async def test_space_event_with_legacy_external_cover_stays_editable(
+    space_cal_env, cover_kw, want_cover
+):
+    env = space_cal_env
+    now = _SEED
+    ev = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Drinks",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+    )
+    await env.db.enqueue(
+        "UPDATE space_calendar_events SET cover_url=? WHERE id=?",
+        (_LEGACY_COVER, ev.id),
+    )
+    up = await env.space_cal_svc.update_event(
+        ev.id,
+        actor_user_id="u-test",
+        space_id=ev.calendar_id,
+        summary="Dinner",
+        **cover_kw,
+    )
+    assert up.summary == "Dinner"
+    assert up.cover_url == want_cover
+    with pytest.raises(InvalidMediaRefError):
+        await env.space_cal_svc.update_event(
+            ev.id,
+            actor_user_id="u-test",
+            space_id=ev.calendar_id,
+            cover_url="//other.example/x.jpg",
+        )

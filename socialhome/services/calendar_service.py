@@ -127,6 +127,20 @@ def _clean_cover_url(value: str | None) -> str | None:
     return require_local_media_ref(strip_signature_query(value), field="cover_url")
 
 
+def _updated_cover_url(value: str | None, stored: str | None) -> str | None:
+    """:func:`_clean_cover_url` for an edit.
+
+    A value equal to the stored cover is kept unchanged even when it
+    predates the local-only rule: the read path serves such a cover as
+    ``null``, but an older client may still echo the stored value back on
+    every save, and a title / time edit must not 422 because of it. Any
+    *other* value is a new cover and must be a local upload.
+    """
+    if value and value == stored:
+        return stored
+    return _clean_cover_url(value)
+
+
 #: Upper bound on the ``location`` text so a hostile client can't push
 #: a 1 MB blob into every event row. Matches the iCal RFC 5545
 #: practical-limit guidance (line folding kicks in long before this).
@@ -887,7 +901,7 @@ class CalendarService(BusPublisherMixin):
             # but the route layer only ever passes ``str | None`` when
             # the field is present in the body — assert + cast here.
             assert cover_url is None or isinstance(cover_url, str)
-            new_cover = _clean_cover_url(cover_url)
+            new_cover = _updated_cover_url(cover_url, existing.cover_url)
         if location is _UNSET:
             new_location = existing.location
         else:
@@ -1817,7 +1831,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             # but the route layer only ever passes ``str | None`` when
             # the field is present in the body — assert + cast here.
             assert cover_url is None or isinstance(cover_url, str)
-            new_cover = _clean_cover_url(cover_url)
+            new_cover = _updated_cover_url(cover_url, existing.cover_url)
         if location is _UNSET:
             new_location = existing.location
         else:

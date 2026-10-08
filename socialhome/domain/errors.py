@@ -107,7 +107,8 @@ class InvalidMediaRefError(CodedError, ValueError):
     viewer's IP to its host (docs/principles.md "No third-party fetches
     from user content") and would be dropped by every receiving household
     anyway, a ``javascript:`` URL would be stored XSS. The detail names
-    the field and the rule, never the submitted value.
+    the field and the rule (``params.field`` carries the field name), never the
+    submitted value.
     """
 
     status = 422
@@ -115,4 +116,7 @@ class InvalidMediaRefError(CodedError, ValueError):
     detail = "media_url must be a file uploaded via /api/media/upload"
 
     def __init__(self, field: str = "media_url") -> None:
-        super().__init__(f"{field} must be a file uploaded via /api/media/upload")
+        super().__init__(
+            f"{field} must be a file uploaded via /api/media/upload",
+            params={"field": field},
+        )

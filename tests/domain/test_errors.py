@@ -294,7 +294,7 @@ def test_invalid_media_ref_error_is_coded():
     assert isinstance(exc, ValueError)
     assert (exc.status, exc.code) == (422, "INVALID_MEDIA_URL")
     assert exc.detail == "media_url must be a file uploaded via /api/media/upload"
-    assert exc.params == {}
+    assert exc.params == {"field": "media_url"}
 
 
 def test_invalid_media_ref_error_names_the_field():
@@ -302,3 +302,5 @@ def test_invalid_media_ref_error_names_the_field():
     exc = InvalidMediaRefError("cover_url")
     assert (exc.status, exc.code) == (422, "INVALID_MEDIA_URL")
     assert exc.detail == "cover_url must be a file uploaded via /api/media/upload"
+    # The field rides as a param so the SPA can name it; never the value.
+    assert exc.params == {"field": "cover_url"}

@@ -144,6 +144,7 @@ from ..domain.timetable import to_wire_dict as timetable_to_wire_dict
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
 from ..media_signer import MediaUrlSigner, sign_media_urls_in
+from .inbound_media_store import verbatim_local_media_ref
 from .space_bot_service import (
     SpaceBotCreated,
     SpaceBotDeleted,
@@ -1285,13 +1286,13 @@ class RealtimeService:
 
     async def _on_calendar_created(self, event: CalendarEventCreated) -> None:
         await self._broadcast_calendar_event(
-            {"type": "calendar.created", "event": _safe(event.event)},
+            {"type": "calendar.created", "event": _calendar_event_wire(event.event)},
             calendar_id=event.event.calendar_id,
         )
 
     async def _on_calendar_updated(self, event: CalendarEventUpdated) -> None:
         await self._broadcast_calendar_event(
-            {"type": "calendar.updated", "event": _safe(event.event)},
+            {"type": "calendar.updated", "event": _calendar_event_wire(event.event)},
             calendar_id=event.event.calendar_id,
         )
 
@@ -2356,6 +2357,17 @@ def _video_poster_path(media_url: str | None) -> str | None:
     if not base.endswith(".webm"):
         return None
     return base[: -len(".webm")] + ".webp"
+
+
+def _calendar_event_wire(event: Any) -> Any:
+    """:func:`_safe` of a calendar event with its cover cut to a local
+    media reference — like every REST read (``routes/calendar.py``), a
+    cover stored before the local-only rule is ``null``, never an
+    ``<img>`` source (docs/principles.md "No third-party fetches")."""
+    wire = _safe(event)
+    if isinstance(wire, dict) and "cover_url" in wire:
+        wire["cover_url"] = verbatim_local_media_ref(wire["cover_url"])
+    return wire
 
 
 def _safe(value: Any) -> Any:

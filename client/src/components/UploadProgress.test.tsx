@@ -119,6 +119,40 @@ describe('uploadWithProgress', () => {
     expect(events[events.length - 1].phase).toBe('failed')
   })
 
+  it('resolves the local media url, falling back to it for the preview', async () => {
+    const file = new File(['x'], 'photo.jpg', { type: 'image/jpeg' })
+    const p = uploadWithProgress(file)
+    lastXhr!._respondOk({ url: 'api/media/x.webp', filename: 'x.webp' })
+    await expect(p).resolves.toEqual({
+      url: 'api/media/x.webp',
+      signed_url: 'api/media/x.webp',
+      filename: 'x.webp',
+    })
+  })
+
+  it('treats a 2xx without a url as a failed upload (never a bare filename)', async () => {
+    // A bare filename is not a local media reference — the server would
+    // refuse it (422 INVALID_MEDIA_URL) when the post is created, so
+    // fail here, at the upload, where the user can retry.
+    const events: UploadEvent[] = []
+    const file = new File(['x'], 'photo.jpg', { type: 'image/jpeg' })
+    const p = uploadWithProgress(file, (e) => events.push(e))
+    lastXhr!._respondOk({ filename: 'x.webp' })
+    await expect(p).rejects.toThrow(/Upload failed/)
+    expect(events[events.length - 1].phase).toBe('failed')
+  })
+
+  it('treats an unreadable 2xx body as a failed upload', async () => {
+    const events: UploadEvent[] = []
+    const file = new File(['x'], 'photo.jpg', { type: 'image/jpeg' })
+    const p = uploadWithProgress(file, (e) => events.push(e))
+    lastXhr!.status = 201
+    lastXhr!.responseText = 'not json'
+    lastXhr!.onload?.()
+    await expect(p).rejects.toThrow(/Upload failed/)
+    expect(events[events.length - 1].phase).toBe('failed')
+  })
+
   it('rejects + emits a failed event on network error', async () => {
     const events: UploadEvent[] = []
     const file = new File(['x'], 'big.bin', { type: 'application/octet-stream' })

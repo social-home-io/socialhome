@@ -1337,3 +1337,117 @@ async def test_patch_with_uuid_taken_on_same_calendar_is_422(client):
         headers=_auth(client._tok),
     )
     assert r.status == 422, await r.text()
+
+
+# ── Local media only (docs/principles.md "No third-party fetches") ───────
+
+_LEGACY_COVER = "https://cdn.example/old-cover.jpg"
+
+
+def _window(now: datetime) -> str:
+    start_q = (now - timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"
+    end_q = (now + timedelta(hours=2)).replace(tzinfo=None).isoformat() + "Z"
+    return f"start={start_q}&end={end_q}"
+
+
+async def test_legacy_external_event_cover_is_served_null_and_stays_editable(client):
+    """A cover stored before the local-only rule never reaches an ``<img>``
+    (served as ``null`` on every read) and never blocks an edit — whether
+    the client omits ``cover_url``, echoes the stored value or sends null."""
+    h = _auth(client._tok)
+    cid = (
+        await (
+            await client.post("/api/calendars", json={"name": "C"}, headers=h)
+        ).json()
+    )["id"]
+    now = datetime.now(timezone.utc)
+    r = await client.post(
+        f"/api/calendars/{cid}/events",
+        json={
+            "summary": "Picnic",
+            "start": now.isoformat(),
+            "end": (now + timedelta(hours=1)).isoformat(),
+        },
+        headers=h,
+    )
+    eid = (await r.json())["id"]
+    await client._db.enqueue(
+        "UPDATE calendar_events SET cover_url=? WHERE id=?", (_LEGACY_COVER, eid)
+    )
+
+    detail = await (await client.get(f"/api/calendars/events/{eid}", headers=h)).json()
+    assert detail["cover_url"] is None
+    listed = await (
+        await client.get(f"/api/calendars/{cid}/events?{_window(now)}", headers=h)
+    ).json()
+    assert [e["cover_url"] for e in listed if e["id"] == eid] == [None]
+
+    for i, extra in enumerate(({}, {"cover_url": _LEGACY_COVER}, {"cover_url": None})):
+        r = await client.patch(
+            f"/api/calendars/events/{eid}",
+            json={"summary": f"Picnic {i}", **extra},
+            headers=h,
+        )
+        assert r.status == 200, (extra, await r.text())
+        body = await r.json()
+        assert body["summary"] == f"Picnic {i}"
+        assert body["cover_url"] is None
+
+    r = await client.patch(
+        f"/api/calendars/events/{eid}",
+        json={"cover_url": "https://other.example/x.jpg"},
+        headers=h,
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "INVALID_MEDIA_URL"
+
+
+async def test_space_event_cover_must_be_local_and_legacy_is_served_null(client):
+    """Space events: a new external cover is ``INVALID_MEDIA_URL`` (create and
+    edit); a legacy stored one is served as ``null`` and doesn't block edits."""
+    await _seed_space(client)
+    h = _auth(client._tok)
+    now = datetime.now(timezone.utc)
+    base = {
+        "summary": "Stand-up",
+        "start": now.isoformat(),
+        "end": (now + timedelta(minutes=30)).isoformat(),
+    }
+    r = await client.post(
+        "/api/spaces/sp-cal/calendar/events",
+        json={**base, "cover_url": "https://cdn.example/c.jpg"},
+        headers=h,
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "INVALID_MEDIA_URL"
+
+    r = await client.post("/api/spaces/sp-cal/calendar/events", json=base, headers=h)
+    assert r.status == 201
+    eid = (await r.json())["id"]
+    r = await client.patch(
+        f"/api/spaces/sp-cal/calendar/events/{eid}",
+        json={"cover_url": "//evil.example/c.jpg"},
+        headers=h,
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "INVALID_MEDIA_URL"
+
+    await client._db.enqueue(
+        "UPDATE space_calendar_events SET cover_url=? WHERE id=?",
+        (_LEGACY_COVER, eid),
+    )
+    listed = await (
+        await client.get(
+            f"/api/spaces/sp-cal/calendar/events?{_window(now)}", headers=h
+        )
+    ).json()
+    assert [e["cover_url"] for e in listed if e["id"] == eid] == [None]
+    r = await client.patch(
+        f"/api/spaces/sp-cal/calendar/events/{eid}",
+        json={"summary": "Retro", "cover_url": _LEGACY_COVER},
+        headers=h,
+    )
+    assert r.status == 200, await r.text()
+    body = await r.json()
+    assert body["summary"] == "Retro"
+    assert body["cover_url"] is None
