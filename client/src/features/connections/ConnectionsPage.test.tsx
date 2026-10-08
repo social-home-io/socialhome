@@ -209,9 +209,11 @@ describe('ConnectionsPage', () => {
       const icon = container.querySelector('.sh-transport-icon--https')!
       expect(icon.getAttribute('title')).toBe('connections.transport.internet_title')
       expect(icon.getAttribute('aria-label')).toBe('connections.transport.internet')
+      // Direct HTTPS is a globe; the cloud means "through the GFS".
+      expect(icon.querySelector('svg')!.getAttribute('data-glyph')).toBe('globe')
     })
 
-    it('renders the relay glyph labelled "Through the GFS" for transport=gfs_relay', async () => {
+    it('renders the cloud glyph labelled "Through the GFS" for transport=gfs_relay', async () => {
       apiMock.get.mockImplementation((url: string) => {
         if (url === '/api/connections') return Promise.resolve([makeConnection({ transport: 'gfs_relay' })])
         return Promise.resolve([])
@@ -227,6 +229,7 @@ describe('ConnectionsPage', () => {
       const icon = container.querySelector('.sh-transport-icon--gfs-relay')!
       expect(icon.getAttribute('title')).toBe('connections.transport.gfs')
       expect(icon.getAttribute('aria-label')).toBe('connections.transport.gfs')
+      expect(icon.querySelector('svg')!.getAttribute('data-glyph')).toBe('cloud')
       // Not mislabelled as a plain HTTPS peer.
       expect(container.querySelector('.sh-transport-icon--https')).toBeNull()
     })

@@ -225,6 +225,29 @@ describe('FederationMap', () => {
     expect(popup.querySelector('strong')!.textContent).toBe('<img src=x>')
   })
 
+  test.each([
+    ['rtc', '⚡'],
+    ['https', '🌐'],
+    ['gfs_relay', '☁'],
+  ] as const)('a %s peer gets the %s badge on its pin and in its popup', (transport, glyph) => {
+    const marker = L.marker([0, 0])
+    vi.mocked(marker.bindPopup).mockClear()
+    vi.mocked(L.divIcon).mockClear()
+    connections.value = [
+      {
+        instance_id: 'peer-1', display_name: 'Peer', reachable: true,
+        home_lat: 52.52, home_lon: 13.40, transport,
+      } as never,
+    ]
+    render(<FederationMap onManage={() => {}} />)
+    const pinHtml = vi.mocked(L.divIcon).mock.calls[0][0]!.html as string
+    const pin = document.createElement('div')
+    pin.innerHTML = pinHtml
+    expect(pin.querySelector('.sh-fed-pin-tx')!.textContent).toBe(glyph)
+    const popup = vi.mocked(marker.bindPopup).mock.calls[0][0] as HTMLElement
+    expect(popup.textContent).toContain(glyph)
+  })
+
   test('Manage in a peer popup is a real button that opens that peer', () => {
     const marker = L.marker([0, 0])
     vi.mocked(marker.bindPopup).mockClear()
