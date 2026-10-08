@@ -104,6 +104,10 @@ Coded refusals (`socialhome/domain/errors.py` `CodedError` subclasses):
 | `IMAGE_TOO_LARGE` | 422 | `max_mb` | `POST /api/me/picture`, `/api/spaces/{id}/members/me/picture`, `/cover`, `/icon` over the size limit |
 | `PAYLOAD_TOO_LARGE` | 413 | `max_mb` | `POST /api/gallery/albums/{id}/items`, `POST /api/backup/import` over the size limit — refused while streaming, so a chunked body (no `Content-Length`) is bounded too. `POST /api/media/upload` answers the same code without params |
 | `IMAGE_UNREADABLE` | 422 | — | The same picture endpoints and `POST /api/media/upload`, when the file isn't a supported image or the image library can't open it (the library's error text and the file name stay in the server log) |
+| `INVALID_REACH` | 422 | — | `POST /api/pairing/initiate` / `accept` with an unknown pairing `reach` |
+| `GFS_NOT_CONNECTED` | 422 | — | `POST /api/pairing/initiate` with `reach` `url_gfs` / `gfs` and no active GFS connection that relays envelopes |
+| `GFS_NOT_SHARED` | 422 | — | `POST /api/pairing/accept` of a code whose GFS this household is not connected to, when the pairing has to travel through it |
+| `KEYWRAP_INVALID` | 422 | — | `POST /api/pairing/accept` of a GFS-reach code whose key-wrap key is missing, unlabelled or not bound to its identity |
 
 ## HFS — Authentication & self
 
@@ -799,8 +803,8 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/pairing/initiate` | Admin-only. Generate a QR payload. Empty body; base URL comes from the platform adapter (`[standalone].external_url` or the HA integration's pushed base). Returns 422 `NOT_CONFIGURED` if unset. |
-| POST | `/api/pairing/accept` | Admin-only (signed-in; `401` without credentials, `403` for a non-admin). Scanner posts its side of the DH. `422 INVALID_PEER_URL` when the code's inbox URL is not a usable household address. |
+| POST | `/api/pairing/initiate` | Admin-only. Generate a QR payload. Optional body `{reach?: "url" \| "url_gfs" \| "gfs", gfs_id?: string}` — empty / unparseable = `url`, the classic code. The base URL comes from the platform adapter (`[standalone].external_url` or the HA integration's pushed base); `url` / `url_gfs` return 422 `NOT_CONFIGURED` if unset. `url_gfs` / `gfs` name one of this household's active GFS connections that relays envelopes (`gfs_id` when it does, else the first) and add `reach`, `gfs: {url, instance_id}`, `keywrap_pk`, `keywrap_sig`, `keywrap_suite`, `proto_version` to the payload (`gfs`: `inbox_url` is `""`); 422 `GFS_NOT_CONNECTED` without such a connection. Unknown `reach` → 422 `INVALID_REACH`. See [protocol/pairing.md](./protocol/pairing.md#reach--pairing-through-a-gfs). |
+| POST | `/api/pairing/accept` | Admin-only (signed-in; `401` without credentials, `403` for a non-admin). Scanner posts its side of the DH. `422 INVALID_PEER_URL` when the code's inbox URL is not a usable household address. For a GFS-reach code: `422 GFS_NOT_SHARED` when the code has no inbox URL (or this household has none) and this household is not connected to the code's GFS — nothing is sent; `422 KEYWRAP_INVALID` when the code's key-wrap key is not bound to its identity; `422 INVALID_REACH` for an unknown reach. |
 | POST | `/api/pairing/confirm` | Admin-only. Confirm SAS-verified pair. |
 | POST | `/api/pairing/introduce` | Admin-only. Introduce self to an intermediary. |
 | POST | `/api/pairing/auto-pair-via` | Admin-only. Ask a mutual peer to relay. |
@@ -1030,7 +1034,7 @@ integration.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/ha/integration/federation-base` | Current base the addon advertises. Returns `{"base": string \| null}`. |
-| PUT | `/api/ha/integration/federation-base` | Upsert `{"base": "https://..."}`. Validates scheme (http/https) and strips trailing slash. On value change, fans out `URL_UPDATED` to every confirmed peer. Returns `{ok, base, changed, peers_notified}`. |
+| PUT | `/api/ha/integration/federation-base` | Upsert `{"base": "https://..."}`. Validates scheme (http/https) and strips trailing slash. When the adapter's **effective** inbox base changes (the pushed URL + `/api/socialhome/inbox`; an admin-set base wins over it), fans out `URL_UPDATED` with that effective base to every confirmed paired peer (never a link-joined household). Returns `{ok, base, changed, peers_notified}` — `changed` is about the stored pushed value. |
 
 ### WebRTC ICE servers are pulled, not pushed
 

@@ -25,7 +25,9 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.db.database import AsyncDatabase
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.services.federation_inbound import PairingInboundHandlers
 from socialhome.services.peer_unpair_service import PeerUnpairService
 
@@ -464,6 +466,37 @@ async def test_url_updated_rewrites_remote_inbox_url(repo, handlers):
         repo.instances["peer-a"].remote_inbox_url
         == "https://new.example.com/federation/inbox/wh-peer-a"
     )
+
+
+async def test_url_updated_gives_a_gfs_paired_peer_its_first_url(
+    tmp_path, bus, peer_unpair
+):
+    """A peer paired through a GFS had no address (``""``): its first
+    URL_UPDATED is accepted, and the relay opt-in it was paired with stays."""
+    db = AsyncDatabase(tmp_path / "h.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        real = SqliteFederationRepo(db)
+        await real.save_instance(
+            replace(
+                _sample_instance("peer-a", PairingStatus.CONFIRMED),
+                remote_inbox_url="",
+                gfs_relay=True,
+                remote_keywrap_pk="cd" * 32,
+            )
+        )
+        h = PairingInboundHandlers(
+            bus=bus, federation_repo=real, peer_unpair=peer_unpair
+        )
+        url = "https://first.example/federation/inbox/wh-peer-a"
+        await h._on_url_updated(
+            _event(FederationEventType.URL_UPDATED, {"inbox_url": url}),
+        )
+        row = await real.get_instance("peer-a")
+        assert row.remote_inbox_url == url
+        assert row.gfs_relay is True and row.remote_keywrap_pk == "cd" * 32
+    finally:
+        await db.shutdown()
 
 
 async def test_url_updated_rejects_empty(repo, handlers):

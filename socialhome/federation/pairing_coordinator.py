@@ -40,13 +40,25 @@ from ..domain.events import (
 )
 from ..utils.datetime import parse_iso8601_strict
 from .crypto_suite import DEFAULT_SUITE, negotiate
-from .peer_pairing_client import _canonical_body_bytes
+from .peer_pairing_client import PeerPairingResult, _canonical_body_bytes
 from ..peer_url import validate_peer_url
 from ..domain.federation import (
+    PAIRING_REACH_GFS,
+    PAIRING_REACH_URL,
+    FederationEventType,
+    GfsNotConnectedError,
+    GfsNotSharedError,
     InstanceSource,
     PairingSession,
     PairingStatus,
     RemoteInstance,
+)
+from ..domain.federation_capabilities import OURS
+from .pairing_gfs_reach import (
+    PairingGfsReach,
+    gfs_block,
+    parse_reach,
+    verified_peer_keywrap,
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
@@ -63,6 +75,16 @@ PAIRING_TTL_SECONDS = 300
 
 #: Length of the SAS verification code (digits).
 SAS_DIGITS = 6
+
+
+def _relay_result(ok: bool) -> PeerPairingResult:
+    """The outcome of a pairing body handed to the GFS relay (no HTTP status:
+    a ``202`` there is acceptance, not delivery)."""
+    return PeerPairingResult(
+        ok=ok,
+        status_code=None,
+        error=None if ok else "no inbox URL and the GFS relay did not take it",
+    )
 
 
 def _require_fields(data: dict, *fields: str) -> None:
@@ -83,6 +105,7 @@ class PairingCoordinator:
         "_own_sig_suite",
         "_bus",
         "_peer_pairing_client",
+        "_gfs_reach",
     )
 
     def __init__(
@@ -104,6 +127,14 @@ class PairingCoordinator:
         #: (circular-dep-free). ``None`` in unit tests that exercise
         #: ``initiate()`` / ``accept()`` without the outbound wire.
         self._peer_pairing_client: "PeerPairingClient | None" = None
+        #: GFS reach (``url_gfs`` / ``gfs`` codes). ``None`` until the app
+        #: wires the connection-server pieces; a code asking for a GFS
+        #: reach is then refused with ``GFS_NOT_CONNECTED``.
+        self._gfs_reach: PairingGfsReach | None = None
+
+    def attach_gfs_reach(self, reach: PairingGfsReach) -> None:
+        """Enable pairing codes with a ``url_gfs`` / ``gfs`` reach."""
+        self._gfs_reach = reach
 
     def attach_peer_pairing_client(
         self,
@@ -114,7 +145,13 @@ class PairingCoordinator:
         """
         self._peer_pairing_client = client
 
-    async def initiate(self, inbox_base_url: str) -> dict:
+    async def initiate(
+        self,
+        inbox_base_url: str | None,
+        *,
+        reach: str = PAIRING_REACH_URL,
+        gfs_id: str | None = None,
+    ) -> dict:
         """Generate a QR payload for the §11 pairing handshake.
 
         ``inbox_base_url`` is the scheme+host+path prefix peers will
@@ -124,11 +161,33 @@ class PairingCoordinator:
         :attr:`PairingSession.own_local_inbox_id` and later becomes
         :attr:`RemoteInstance.local_inbox_id` when the pair confirms,
         which is how the inbound pipeline resolves the sender.
+
+        ``reach`` (see :mod:`~socialhome.federation.pairing_gfs_reach`):
+        ``url`` is the classic code; ``url_gfs`` adds one bootstrap GFS
+        (our connection ``gfs_id`` when given and relay-capable, else the
+        first relay-capable one); ``gfs`` carries no inbox URL at all
+        (``inbox_base_url`` is ignored). A GFS reach adds our key-wrap
+        key, its binding signature + suite and the bootstrap server's
+        ``{url, instance_id}`` to the code — nothing about any other
+        server. Raises :class:`GfsNotConnectedError` when no connection
+        can carry it, :class:`ValueError` when a URL reach has no base.
         """
+        reach = parse_reach(reach)
+        bootstrap = None
+        if reach != PAIRING_REACH_URL:
+            if self._gfs_reach is None:
+                raise GfsNotConnectedError()
+            bootstrap = await self._gfs_reach.bootstrap_connection(gfs_id)
+        if reach != PAIRING_REACH_GFS and not inbox_base_url:
+            raise ValueError("a URL pairing code needs a federation base URL")
         token = random_token(24)
         dh_kp = generate_x25519_keypair()
         own_local_inbox_id = secrets.token_urlsafe(24)
-        inbox_url = f"{inbox_base_url.rstrip('/')}/{own_local_inbox_id}"
+        inbox_url = (
+            f"{inbox_base_url.rstrip('/')}/{own_local_inbox_id}"
+            if inbox_base_url and reach != PAIRING_REACH_GFS
+            else ""
+        )
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=PAIRING_TTL_SECONDS)).isoformat()
 
@@ -139,6 +198,9 @@ class PairingCoordinator:
             own_dh_sk=dh_kp.private_key.hex(),
             inbox_url=inbox_url,
             own_local_inbox_id=own_local_inbox_id,
+            # The connection the code names: a relayed peer-accept for
+            # this session is honoured only when it arrives through it.
+            relay_via=bootstrap.id if bootstrap is not None else None,
             issued_at=now.isoformat(),
             expires_at=expires_at,
             status=PairingStatus.PENDING_SENT,
@@ -164,6 +226,15 @@ class PairingCoordinator:
             "sig_suite": self._own_sig_suite,
             "display_name": own_display_name,
         }
+        if bootstrap is not None and self._gfs_reach is not None:
+            # Only on a GFS reach: the classic code carries no GFS
+            # information anywhere. ``proto_version`` lets the scanner
+            # probe routes right after the pair confirms (route discovery
+            # is gated on v_53) instead of waiting for our capabilities.
+            payload["reach"] = reach
+            payload["gfs"] = gfs_block(bootstrap)
+            payload["proto_version"] = OURS
+            payload.update(self._gfs_reach.own_keywrap_fields())
         if self._own_pq_pk is not None:
             payload["pq_algorithm"] = "mldsa65"
             payload["pq_identity_pk"] = self._own_pq_pk.hex()
@@ -240,6 +311,15 @@ class PairingCoordinator:
         back to us. Without it the peer-accept body cannot carry our
         own URL and A's :attr:`RemoteInstance.remote_inbox_url` ends
         up pointing back at A itself.
+
+        A code with a GFS reach (``url_gfs`` / ``gfs``) is adopted as is:
+        the code owner's key-wrap key must be bound to its identity (fail
+        closed), and when the code has no inbox URL — or we have none to
+        answer with — we must be connected to the code's bootstrap GFS
+        ourselves (:class:`GfsNotSharedError` otherwise, before any state
+        is written or anything is sent). The pair is then opted into the
+        relay on our side, with our connection to that server seeded as
+        a route, and the peer-accept carries our own key-wrap key.
         """
         _require_fields(
             qr_payload,
@@ -248,26 +328,25 @@ class PairingCoordinator:
             "dh_pk",
             "inbox_url",
         )
+        reach = parse_reach(qr_payload.get("reach"))
+        gfs_reach = reach != PAIRING_REACH_URL
 
         token: str = qr_payload["token"]
         peer_identity_pk_hex: str = qr_payload["identity_pk"]
         peer_dh_pk_hex: str = qr_payload["dh_pk"]
         # The QR's inbox URL is where the signed peer-accept goes next and
         # where every later envelope is delivered — refuse a bad one before
-        # any pairing state exists (raises InvalidPeerUrlError → 422).
-        peer_inbox_url: str = validate_peer_url(
-            qr_payload["inbox_url"],
-            field="inbox_url",
-        )
-
-        # Generate our ephemeral DH keypair.
-        own_dh_kp = generate_x25519_keypair()
-
-        key_self_enc, key_remote_enc = self._derive_directional_keys(
-            own_dh_sk=own_dh_kp.private_key,
-            peer_dh_pk=bytes.fromhex(peer_dh_pk_hex),
-            is_initiator=False,
-        )
+        # any pairing state exists (raises InvalidPeerUrlError → 422). A
+        # ``gfs`` code carries none: the pairing travels through its GFS.
+        if reach == PAIRING_REACH_GFS:
+            if qr_payload["inbox_url"]:
+                raise ValueError("a GFS-only pairing code must not carry an inbox_url")
+            peer_inbox_url = ""
+        else:
+            peer_inbox_url = validate_peer_url(
+                qr_payload["inbox_url"],
+                field="inbox_url",
+            )
 
         # Derive peer instance_id from their identity public key.
         peer_identity_pk_bytes = bytes.fromhex(peer_identity_pk_hex)
@@ -285,6 +364,38 @@ class PairingCoordinator:
                 "refuse to complete handshake",
             )
 
+        peer_keywrap_pk: str | None = None
+        shared_conn_id: str | None = None
+        if gfs_reach:
+            peer_keywrap_pk = verified_peer_keywrap(
+                qr_payload,
+                instance_id=peer_instance_id,
+                identity_pk=peer_identity_pk_hex,
+            )
+            shared = (
+                await self._gfs_reach.shared_connection(qr_payload.get("gfs"))
+                if self._gfs_reach is not None
+                else None
+            )
+            shared_conn_id = shared.id if shared is not None else None
+            # The accept travels through the bootstrap GFS when the code
+            # has no URL, and every later message to us does when we have
+            # none — both need us on that server. Refuse before any state
+            # exists and before anything leaves this household.
+            if shared_conn_id is None and (
+                not peer_inbox_url or not own_inbox_base_url
+            ):
+                raise GfsNotSharedError()
+
+        # Generate our ephemeral DH keypair.
+        own_dh_kp = generate_x25519_keypair()
+
+        key_self_enc, key_remote_enc = self._derive_directional_keys(
+            own_dh_sk=own_dh_kp.private_key,
+            peer_dh_pk=bytes.fromhex(peer_dh_pk_hex),
+            is_initiator=False,
+        )
+
         # Generate an inbox id for the peer to POST to.
         own_local_inbox_id = secrets.token_urlsafe(24)
 
@@ -299,9 +410,12 @@ class PairingCoordinator:
         # (the legacy behaviour) only when the caller didn't supply
         # a base — that path is broken end-to-end and exists only so
         # in-process unit tests that bypass the route layer keep
-        # passing.
+        # passing. A GFS-reach pairing never does that: with no base we
+        # have no address, and A reaches us through the bootstrap GFS.
         if own_inbox_base_url:
             own_inbox_url = f"{own_inbox_base_url.rstrip('/')}/{own_local_inbox_id}"
+        elif gfs_reach:
+            own_inbox_url = ""
         else:
             own_inbox_url = qr_payload.get("inbox_url", "")
 
@@ -316,6 +430,7 @@ class PairingCoordinator:
             peer_inbox_url=peer_inbox_url,
             inbox_url=own_inbox_url,
             own_local_inbox_id=own_local_inbox_id,
+            relay_via=shared_conn_id,
             verification_code=verification_code,
             issued_at=now.isoformat(),
             expires_at=expires_at,
@@ -349,6 +464,8 @@ class PairingCoordinator:
             remote_pq_algorithm=str(peer_pq_alg) if peer_pq_alg else None,
             remote_pq_identity_pk=str(peer_pq_pk) if peer_pq_pk else None,
             sig_suite=negotiated,
+            remote_keywrap_pk=peer_keywrap_pk,
+            gfs_relay=gfs_reach,
             paired_at=now.isoformat(),
             home_lat=(
                 round(float(qr_payload["home_lat"]), 4)
@@ -362,6 +479,14 @@ class PairingCoordinator:
             ),
         )
         await self._repo.save_instance(remote_inst)
+        if gfs_reach:
+            # Before anything is sent: the relayed confirm and every
+            # relayed envelope from A must find the opt-in already set.
+            await self._seat_relay(
+                peer_instance_id,
+                gfs_connection_id=shared_conn_id,
+                proto_version=qr_payload.get("proto_version"),
+            )
 
         # Tell A we accepted. A has a PairingSession but no RemoteInstance
         # yet — delivering our identity + dh keys in this plaintext
@@ -381,6 +506,9 @@ class PairingCoordinator:
                 "display_name": own_display_name,
                 "sig_suite": self._own_sig_suite,
             }
+            if gfs_reach and self._gfs_reach is not None:
+                peer_accept_body.update(self._gfs_reach.own_keywrap_fields())
+                peer_accept_body["proto_version"] = OURS
             if (
                 local
                 and local.get("home_lat") is not None
@@ -394,10 +522,16 @@ class PairingCoordinator:
             # The QR's ``inbox_url`` is A's federation inbox. The
             # peer-accept rides it as a ``PAIRING_PEER_ACCEPT``
             # federation event so the HA integration's existing inbox
-            # proxy is the only path we depend on.
-            result = await self._peer_pairing_client.send_peer_accept(
+            # proxy is the only path we depend on. Without a URL (or when
+            # it fails) a GFS-reach pairing seals the same signed body to
+            # A's key-wrap key and hands it to the bootstrap GFS.
+            result = await self._deliver(
+                FederationEventType.PAIRING_PEER_ACCEPT,
+                peer_accept_body,
                 peer_inbox_url=peer_inbox_url,
-                body=peer_accept_body,
+                peer_instance_id=peer_instance_id,
+                peer_keywrap_pk=peer_keywrap_pk,
+                gfs_connection_id=shared_conn_id,
             )
             if not result.ok:
                 log.warning(
@@ -413,11 +547,87 @@ class PairingCoordinator:
             "own_dh_pk": own_dh_kp.public_key.hex(),
         }
 
+    async def _seat_relay(
+        self,
+        peer_instance_id: str,
+        *,
+        gfs_connection_id: str | None,
+        proto_version: object,
+    ) -> None:
+        """Opt a GFS-reach pair into the relay on our side.
+
+        Sets ``gfs_relay`` (the targeted setter: a re-pair over an existing
+        row must switch it on, and ``save_instance`` never overwrites it),
+        seeds ONE route — our own connection to the bootstrap server the
+        out-of-band code named, never a server a relayed frame merely
+        arrived on — and records the protocol version the peer stated in
+        the code / its signed accept (a high-water mark; its capabilities
+        announcement refines it).
+        """
+        await self._repo.set_gfs_relay(peer_instance_id, enabled=True)
+        if gfs_connection_id is not None:
+            await self._repo.upsert_gfs_route(
+                peer_instance_id,
+                gfs_connection_id,
+                now=datetime.now(timezone.utc).isoformat(),
+            )
+        if isinstance(proto_version, int) and not isinstance(proto_version, bool):
+            if 1 <= proto_version <= OURS:
+                await self._repo.set_proto_version(peer_instance_id, proto_version)
+
+    async def _deliver(
+        self,
+        event_type: FederationEventType,
+        body: dict,
+        *,
+        peer_inbox_url: str,
+        peer_instance_id: str,
+        peer_keywrap_pk: str | None,
+        gfs_connection_id: str | None,
+    ) -> PeerPairingResult:
+        """Send one signed pairing body: the peer's inbox when it has one,
+        else (or when that fails) sealed through the bootstrap GFS."""
+        assert self._peer_pairing_client is not None
+        client = self._peer_pairing_client
+        result: "PeerPairingResult | None" = None
+        if peer_inbox_url:
+            if event_type is FederationEventType.PAIRING_PEER_ACCEPT:
+                result = await client.send_peer_accept(
+                    peer_inbox_url=peer_inbox_url,
+                    body=body,
+                )
+            else:
+                result = await client.send_peer_confirm(
+                    peer_inbox_url=peer_inbox_url,
+                    body=body,
+                )
+            if result.ok:
+                return result
+        if self._gfs_reach is None or gfs_connection_id is None or not peer_keywrap_pk:
+            return result if result is not None else _relay_result(False)
+        try:
+            envelope = client.build_relay_envelope(
+                event_type=event_type,
+                body=body,
+                to_instance_id=peer_instance_id,
+                recipient_keywrap_pk=peer_keywrap_pk,
+            )
+        except ValueError as exc:
+            log.warning("pairing: cannot seal %s: %s", event_type.value, exc)
+            return _relay_result(False)
+        ok = await self._gfs_reach.send_sealed(
+            to_instance_id=peer_instance_id,
+            envelope=envelope,
+            gfs_connection_id=gfs_connection_id,
+        )
+        return _relay_result(ok)
+
     async def handle_peer_accept(
         self,
         body: dict,
         *,
         expected_local_inbox_id: str | None = None,
+        relayed_via: str | None = None,
     ) -> dict:
         """A-side receiver for :meth:`accept`'s outbound ``peer-accept``.
 
@@ -439,6 +649,19 @@ class PairingCoordinator:
         from POSTing to the wrong inbox and the server happily
         accepting it).
 
+        ``relayed_via`` is set when the body arrived through a GFS relay
+        (:class:`~socialhome.services.gfs_relay_inbound.GfsRelayInbound`):
+        our own ``gfs_connections.id`` that delivered it. Such a body is
+        honoured only for a session whose code named exactly that
+        connection — the same checks follow (token, signature, expiry,
+        single use), nothing is skipped.
+
+        A session issued with a GFS reach also takes the scanner's
+        key-wrap key (bound to its identity — fail closed), opts the pair
+        into the relay, and seeds the bootstrap route; the scanner may
+        then have no inbox URL at all. An accept without a key-wrap key
+        (an older scanner) pairs URL-only, as before.
+
         Returns a small status dict on success. Raises ``ValueError``
         on missing fields / bad signature / unknown token / expired
         session / URL-vs-session mismatch.
@@ -456,8 +679,14 @@ class PairingCoordinator:
         peer_identity_pk_hex = str(body["identity_pk"])
         peer_dh_pk_hex = str(body["dh_pk"])
         # B's inbox URL is where our peer-confirm (and every later envelope)
-        # goes — validate before it is stored on the RemoteInstance.
-        peer_inbox_url = validate_peer_url(body["inbox_url"], field="inbox_url")
+        # goes — validate before it is stored on the RemoteInstance. An
+        # empty one is allowed only on a GFS-reach session (checked below).
+        raw_inbox_url = body["inbox_url"]
+        peer_inbox_url = (
+            validate_peer_url(raw_inbox_url, field="inbox_url")
+            if raw_inbox_url != ""
+            else ""
+        )
         verification_code = str(body["verification_code"])
 
         # Look up our PairingSession by token — the invitee's original
@@ -473,6 +702,16 @@ class PairingCoordinator:
             raise ValueError(
                 "peer-accept inbox_id does not match pairing session",
             )
+        if relayed_via is not None and session.relay_via != relayed_via:
+            # Relayed through a server this code did not name (or for a
+            # classic URL code): not the channel the code owner offered.
+            raise ValueError(
+                "relayed peer-accept did not arrive through the pairing's GFS",
+            )
+        if not peer_inbox_url and session.relay_via is None:
+            # A classic code: the scanner must answer with an address
+            # (raises InvalidPeerUrlError, exactly as before reach existed).
+            validate_peer_url(raw_inbox_url, field="inbox_url")
         if session.status is not PairingStatus.PENDING_SENT:
             # Replay-safe idempotency: if the RemoteInstance already
             # exists for this session's peer, accept silently without
@@ -522,6 +761,22 @@ class PairingCoordinator:
                 "peer-accept instance_id does not match identity_pk",
             )
 
+        # GFS reach: the scanner's key-wrap key is what we seal to when it
+        # has no address (and for the relay fallback later). Verified
+        # bound to the identity that just signed the body — fail closed.
+        peer_keywrap_pk: str | None = None
+        if session.relay_via is not None and "keywrap_pk" in body:
+            peer_keywrap_pk = verified_peer_keywrap(
+                body,
+                instance_id=peer_instance_id,
+                identity_pk=peer_identity_pk_hex,
+            )
+        if not peer_inbox_url and peer_keywrap_pk is None:
+            raise ValueError(
+                "Missing required fields: peer-accept has no inbox_url and no "
+                "key-wrap key to reach it through the GFS",
+            )
+
         # Derive the directional keys — our side of ECDH. ``own_dh_sk``
         # was stashed in PENDING_SENT's PairingSession on ``initiate``.
         try:
@@ -556,6 +811,8 @@ class PairingCoordinator:
             remote_pq_algorithm=str(peer_pq_alg) if peer_pq_alg else None,
             remote_pq_identity_pk=str(peer_pq_pk) if peer_pq_pk else None,
             sig_suite=negotiated,
+            remote_keywrap_pk=peer_keywrap_pk,
+            gfs_relay=peer_keywrap_pk is not None,
             paired_at=now.isoformat(),
             home_lat=(
                 round(float(body["home_lat"]), 4)
@@ -569,6 +826,14 @@ class PairingCoordinator:
             ),
         )
         await self._repo.save_instance(remote_inst)
+        if peer_keywrap_pk is not None:
+            # Before the SAS reaches our admin: the relayed confirm path
+            # and B's first relayed envelopes need the opt-in in place.
+            await self._seat_relay(
+                peer_instance_id,
+                gfs_connection_id=session.relay_via,
+                proto_version=body.get("proto_version"),
+            )
 
         # Update the PairingSession with peer data + SAS so ``confirm``
         # (called later when the admin enters the SAS) can proceed.
@@ -610,6 +875,7 @@ class PairingCoordinator:
         body: dict,
         *,
         expected_local_inbox_id: str | None = None,
+        relayed_via: str | None = None,
     ) -> dict:
         """B-side receiver for :meth:`confirm`'s outbound ``peer-confirm``.
 
@@ -619,8 +885,11 @@ class PairingCoordinator:
         local ``RemoteInstance`` status to ``CONFIRMED``, and
         publishes :class:`PairingConfirmed`.
 
-        ``expected_local_inbox_id`` is the URL-path inbox id; see
-        :meth:`handle_peer_accept` for the rationale.
+        ``expected_local_inbox_id`` is the URL-path inbox id and
+        ``relayed_via`` the delivering GFS connection of a relayed body;
+        see :meth:`handle_peer_accept` for the rationale of both. A
+        confirmed GFS-reach pair is handed to route discovery
+        (:meth:`PairingGfsReach.probe`).
         """
         _require_fields(body, "token", "instance_id", "signature")
         token = str(body["token"])
@@ -635,6 +904,10 @@ class PairingCoordinator:
         ):
             raise ValueError(
                 "peer-confirm inbox_id does not match pairing session",
+            )
+        if relayed_via is not None and session.relay_via != relayed_via:
+            raise ValueError(
+                "relayed peer-confirm did not arrive through the pairing's GFS",
             )
 
         instance = await self._repo.get_instance(claimed_instance_id)
@@ -686,6 +959,8 @@ class PairingCoordinator:
             remote_pq_identity_pk=instance.remote_pq_identity_pk,
             sig_suite=instance.sig_suite,
             relay_via=instance.relay_via,
+            remote_keywrap_pk=instance.remote_keywrap_pk,
+            gfs_relay=instance.gfs_relay,
             home_lat=instance.home_lat,
             home_lon=instance.home_lon,
             paired_at=instance.paired_at,
@@ -700,6 +975,8 @@ class PairingCoordinator:
             await self._bus.publish(PairingConfirmed(instance_id=instance.id))
 
         log.info("peer-confirm: instance_id=%s → CONFIRMED", instance.id)
+        if instance.gfs_relay and self._gfs_reach is not None:
+            await self._gfs_reach.probe(instance.id)
         return {"ok": True, "instance_id": instance.id, "replay": False}
 
     async def confirm(
@@ -755,6 +1032,8 @@ class PairingCoordinator:
             remote_pq_algorithm=instance.remote_pq_algorithm,
             remote_pq_identity_pk=instance.remote_pq_identity_pk,
             sig_suite=instance.sig_suite,
+            remote_keywrap_pk=instance.remote_keywrap_pk,
+            gfs_relay=instance.gfs_relay,
             home_lat=instance.home_lat,
             home_lon=instance.home_lon,
             paired_at=instance.paired_at,
@@ -772,9 +1051,18 @@ class PairingCoordinator:
                 "token": token,
                 "instance_id": derive_instance_id(self._own_identity_pk),
             }
-            result = await self._peer_pairing_client.send_peer_confirm(
+            # B's inbox when it has one; else (or when that fails) sealed
+            # to B's key-wrap key through the bootstrap GFS this session's
+            # code named (``relay_via`` — read before the delete above).
+            result = await self._deliver(
+                FederationEventType.PAIRING_PEER_CONFIRM,
+                peer_confirm_body,
                 peer_inbox_url=instance.remote_inbox_url,
-                body=peer_confirm_body,
+                peer_instance_id=instance.id,
+                peer_keywrap_pk=(
+                    instance.remote_keywrap_pk if instance.gfs_relay else None
+                ),
+                gfs_connection_id=session.relay_via,
             )
             if not result.ok:
                 log.warning(
@@ -796,4 +1084,6 @@ class PairingCoordinator:
             )
 
         log.info("Pairing confirmed: instance_id=%s", peer_instance_id)
+        if instance.gfs_relay and self._gfs_reach is not None:
+            await self._gfs_reach.probe(peer_instance_id)
         return confirmed

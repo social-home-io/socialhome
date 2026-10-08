@@ -18,21 +18,28 @@ from socialhome.app_keys import (
     federation_repo_key,
     federation_service_key,
     federation_transport_key,
+    gfs_connection_repo_key,
+    gfs_connection_service_key,
+    instance_keywrap_public_key_key,
     key_manager_key,
     outbox_repo_key,
     peer_home_sharing_service_key,
     peer_unpair_service_key,
+    platform_adapter_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import (
+    b64url_encode,
     derive_instance_id,
     generate_identity_keypair,
     generate_x25519_keypair,
+    sign_ed25519,
 )
 from socialhome.domain.events import PeerUnpaired
 from socialhome.domain.federation import (
     FederationEventType,
+    GfsConnection,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
@@ -149,6 +156,155 @@ async def test_initiate_pairing_bad_json_still_ok(client):
         headers={**_auth(client._tok), "Content-Type": "application/json"},
     )
     assert r.status == 201
+
+
+# ── initiate: the code's reach (url / url_gfs / gfs) ──
+
+
+async def _connect_gfs(client, cid: str, url: str, *, relays: bool = True) -> None:
+    """Seed an active GFS connection; ``relays`` marks its signed
+    ``envelope_relay`` capability as verified (no /gfs/info fetch)."""
+    await client.app[gfs_connection_repo_key].save(
+        GfsConnection(
+            id=cid,
+            gfs_instance_id=f"pinned-{cid}",
+            display_name=cid,
+            public_key="ab" * 32,
+            inbox_url=url,
+            status="active",
+            paired_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    if relays:
+        client.app[gfs_connection_service_key]._envelope_relay[cid] = True
+
+
+async def _initiate(client, body=None):
+    return await client.post(
+        "/api/pairing/initiate",
+        json=body if body is not None else {},
+        headers=_auth(client._tok),
+    )
+
+
+async def test_initiate_url_reach_carries_no_gfs_information(client):
+    await _connect_gfs(client, "g1", "https://gfs-1.example")
+    for body in ({}, {"reach": "url"}):
+        r = await _initiate(client, body)
+        assert r.status == 201
+        data = await r.json()
+        assert data["inbox_url"].startswith("https://test.example/federation/inbox/")
+        for key in ("reach", "gfs", "keywrap_pk", "keywrap_sig", "keywrap_suite"):
+            assert key not in data
+        assert "gfs-1" not in str(data)
+
+
+async def test_initiate_gfs_reach_names_one_relay_capable_gfs(client):
+    await _connect_gfs(client, "g0", "https://gfs-0.example", relays=False)
+    await _connect_gfs(client, "g1", "https://gfs-1.example")
+    r = await _initiate(client, {"reach": "gfs"})
+    assert r.status == 201
+    data = await r.json()
+    assert data["reach"] == "gfs"
+    assert data["inbox_url"] == ""
+    assert data["gfs"] == {"url": "https://gfs-1.example", "instance_id": "pinned-g1"}
+    assert data["keywrap_pk"] == client.app[instance_keywrap_public_key_key].hex()
+    assert data["keywrap_suite"] == "x25519"
+    assert data["keywrap_sig"]
+    assert "gfs-0" not in str(data)
+
+
+async def test_initiate_url_gfs_reach_uses_the_chosen_gfs(client):
+    await _connect_gfs(client, "g1", "https://gfs-1.example")
+    await _connect_gfs(client, "g2", "https://gfs-2.example")
+    r = await _initiate(client, {"reach": "url_gfs", "gfs_id": "g2"})
+    assert r.status == 201
+    data = await r.json()
+    assert data["reach"] == "url_gfs"
+    assert data["inbox_url"].startswith("https://test.example/federation/inbox/")
+    assert data["gfs"]["url"] == "https://gfs-2.example"
+    # An unknown gfs_id falls back to the first eligible connection.
+    r = await _initiate(client, {"reach": "url_gfs", "gfs_id": "nope"})
+    assert (await r.json())["gfs"]["url"] == "https://gfs-1.example"
+
+
+async def test_initiate_gfs_reach_without_a_relay_capable_gfs_is_422(client):
+    await _connect_gfs(client, "g0", "https://gfs-0.example", relays=False)
+    for reach in ("gfs", "url_gfs"):
+        r = await _initiate(client, {"reach": reach})
+        assert r.status == 422
+        assert (await r.json())["error"]["code"] == "GFS_NOT_CONNECTED"
+
+
+async def test_initiate_unknown_reach_is_422(client):
+    r = await _initiate(client, {"reach": "pigeon"})
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "INVALID_REACH"
+
+
+async def test_initiate_non_object_body_is_the_classic_code(client):
+    r = await _initiate(client, ["gfs"])
+    assert r.status == 201
+    assert "reach" not in await r.json()
+
+
+async def test_initiate_without_a_url_only_the_gfs_reach_works(client):
+    class _NoBase:
+        async def get_federation_base(self):
+            return None
+
+    await _connect_gfs(client, "g1", "https://gfs-1.example")
+    client.app[platform_adapter_key] = _NoBase()
+    for reach in ("url", "url_gfs"):
+        r = await _initiate(client, {"reach": reach})
+        assert r.status == 422
+        assert (await r.json())["error"]["code"] == "NOT_CONFIGURED"
+    r = await _initiate(client, {"reach": "gfs"})
+    assert r.status == 201
+    assert (await r.json())["inbox_url"] == ""
+
+
+def _gfs_code(*, gfs_url: str, bind: bool = True) -> dict:
+    """A ``gfs``-reach pairing code from a household we have never met."""
+    kp = generate_identity_keypair()
+    keywrap = generate_x25519_keypair()
+    signer = kp.private_key if bind else generate_identity_keypair().private_key
+    return {
+        "token": "tok-gfs",
+        "instance_id": derive_instance_id(kp.public_key),
+        "identity_pk": kp.public_key.hex(),
+        "dh_pk": generate_x25519_keypair().public_key.hex(),
+        "inbox_url": "",
+        "reach": "gfs",
+        "gfs": {"url": gfs_url, "instance_id": "pinned-elsewhere"},
+        "keywrap_pk": keywrap.public_key.hex(),
+        "keywrap_sig": b64url_encode(sign_ed25519(signer, keywrap.public_key)),
+        "keywrap_suite": "x25519",
+    }
+
+
+async def test_accept_gfs_code_from_a_gfs_we_are_not_on_is_422(client):
+    await _connect_gfs(client, "g1", "https://gfs-1.example")
+    r = await client.post(
+        "/api/pairing/accept",
+        json=_gfs_code(gfs_url="https://other-gfs.example"),
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "GFS_NOT_SHARED"
+    assert await client.app[federation_repo_key].list_instances() == []
+
+
+async def test_accept_gfs_code_with_an_unbound_keywrap_key_is_422(client):
+    await _connect_gfs(client, "g1", "https://gfs-1.example")
+    r = await client.post(
+        "/api/pairing/accept",
+        json=_gfs_code(gfs_url="https://gfs-1.example", bind=False),
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "KEYWRAP_INVALID"
+    assert await client.app[federation_repo_key].list_instances() == []
 
 
 async def test_accept_pairing_rejects_malformed(client):

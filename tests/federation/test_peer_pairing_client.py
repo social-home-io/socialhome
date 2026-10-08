@@ -5,11 +5,20 @@ from __future__ import annotations
 import orjson
 import pytest
 
-from socialhome.crypto import generate_identity_keypair, verify_ed25519
+from socialhome.crypto import (
+    generate_identity_keypair,
+    generate_x25519_keypair,
+    verify_ed25519,
+)
 from socialhome.domain.federation import FederationEventType
+from socialhome.federation.gfs_relay_transport import RELAY_SIZE_BUCKETS
+from socialhome.federation.keywrap_seal import open_keywrap
 from socialhome.federation.peer_pairing_client import (
+    MAX_PAIRING_RELAY_BYTES,
     PeerPairingClient,
     _canonical_body_bytes,
+    is_pairing_relay_body,
+    pairing_body_from_relay,
     sign_peer_body,
 )
 
@@ -288,3 +297,106 @@ async def test_send_does_not_follow_redirects():
     # A 3xx is not success.
     assert result.ok is False
     assert result.status_code == 307
+
+
+# ── relay envelope (pairing through a GFS) ──
+
+
+def _relay_client():
+    kp = generate_identity_keypair()
+
+    async def _no_http():
+        raise AssertionError("a relayed pairing body never touches HTTP")
+
+    return kp, PeerPairingClient(
+        own_identity_seed=kp.private_key, client_factory=_no_http
+    )
+
+
+def test_build_relay_envelope_seals_the_same_signed_body():
+    kp, client = _relay_client()
+    recipient = generate_x25519_keypair()
+    envelope = client.build_relay_envelope(
+        event_type=FederationEventType.PAIRING_PEER_ACCEPT,
+        body={"token": "tok", "inbox_url": ""},
+        to_instance_id="r" * 32,
+        recipient_keywrap_pk=recipient.public_key.hex(),
+    )
+    # Identity-free outer shape: the recipient and the ciphertext only.
+    assert set(envelope) == {"to_instance", "sealed"}
+    assert envelope["to_instance"] == "r" * 32
+    assert "tok" not in orjson.dumps(envelope).decode()
+    plain = orjson.loads(
+        open_keywrap(
+            sealed=envelope["sealed"],
+            recipient_keywrap_priv=recipient.private_key,
+        )
+    )
+    # Padded to a relay size bucket like any relayed envelope.
+    assert (
+        len(
+            open_keywrap(
+                sealed=envelope["sealed"], recipient_keywrap_priv=recipient.private_key
+            )
+        )
+        in RELAY_SIZE_BUCKETS
+    )
+    kind, inner = pairing_body_from_relay(plain)
+    assert kind == "pairing_peer_accept"
+    assert inner["event_type"] == "pairing_peer_accept"
+    assert inner["token"] == "tok"
+    # Exactly the signature the inbox path would carry.
+    assert verify_ed25519(
+        kp.public_key,
+        _canonical_body_bytes(inner),
+        bytes.fromhex(inner["signature"]),
+    )
+
+
+def test_build_relay_envelope_refuses_bad_key_material():
+    _kp, client = _relay_client()
+    with pytest.raises(ValueError, match="malformed"):
+        client.build_relay_envelope(
+            event_type=FederationEventType.PAIRING_PEER_CONFIRM,
+            body={"token": "t"},
+            to_instance_id="r" * 32,
+            recipient_keywrap_pk="zz",
+        )
+
+
+def test_build_relay_envelope_refuses_an_oversized_body():
+    _kp, client = _relay_client()
+    with pytest.raises(ValueError, match="too large"):
+        client.build_relay_envelope(
+            event_type=FederationEventType.PAIRING_PEER_ACCEPT,
+            body={"token": "t", "display_name": "x" * (MAX_PAIRING_RELAY_BYTES + 1)},
+            to_instance_id="r" * 32,
+            recipient_keywrap_pk=generate_x25519_keypair().public_key.hex(),
+        )
+
+
+def test_is_pairing_relay_body():
+    assert is_pairing_relay_body({"kind": "pairing_peer_accept"})
+    assert is_pairing_relay_body({"kind": "pairing_peer_confirm"})
+    assert not is_pairing_relay_body({"kind": "space_relay_envelope"})
+    assert not is_pairing_relay_body(["pairing_peer_accept"])
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ({"kind": "space_relay_envelope"}, "not a relayed pairing body"),
+        ({"kind": "pairing_peer_accept"}, "missing its signed body"),
+        ({"kind": "pairing_peer_accept", "pairing": "x"}, "missing its signed body"),
+        (
+            {
+                "kind": "pairing_peer_accept",
+                "pairing": {"event_type": "pairing_peer_confirm"},
+            },
+            "does not match",
+        ),
+    ],
+)
+def test_pairing_body_from_relay_refuses_malformed_wrappers(body, match):
+    with pytest.raises(ValueError, match=match):
+        pairing_body_from_relay(body)

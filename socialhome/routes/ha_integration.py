@@ -20,8 +20,8 @@ as an SH admin during bootstrap.
 Routes registered here:
 
 * ``PUT /api/ha/integration/federation-base`` — upsert the base URL.
-  Fans out ``URL_UPDATED`` to every confirmed peer if the value
-  changed.
+  Fans out ``URL_UPDATED`` (the adapter's effective inbox base, not the
+  bare pushed URL) to every paired peer if that effective base changed.
 * ``GET /api/ha/integration/federation-base`` — read-only mirror so
   the integration can verify current state on re-bind.
 
@@ -41,7 +41,7 @@ import logging
 
 from aiohttp import web
 
-from ..app_keys import db_key, url_update_outbound_key
+from ..app_keys import db_key, platform_adapter_key, url_update_outbound_key
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..security import error_response
 from .base import BaseView
@@ -106,11 +106,18 @@ class HaIntegrationFederationBaseView(BaseView):
             )
 
         db = self.svc(db_key)
+        adapter = self.svc(platform_adapter_key)
         previous_row = await db.fetchone(
             "SELECT value FROM instance_config WHERE key=?",
             (_INSTANCE_CONFIG_KEY,),
         )
         previous = str(previous_row["value"]) if previous_row is not None else None
+        # What peers actually POST to is the adapter's EFFECTIVE base — the
+        # pushed URL plus the HA-hosted forwarder path
+        # (``/api/socialhome/inbox``), or an admin override that wins over
+        # it. Compare and publish that, never the bare pushed value: a
+        # peer that learnt the bare URL would POST to HA's frontend.
+        effective_before = await self._effective_base(adapter)
 
         await db.enqueue(
             "INSERT INTO instance_config(key, value) VALUES(?,?)"
@@ -118,11 +125,12 @@ class HaIntegrationFederationBaseView(BaseView):
             (_INSTANCE_CONFIG_KEY, cleaned),
         )
 
+        effective_after = await self._effective_base(adapter)
         notified = 0
-        if previous != cleaned:
+        if effective_after and effective_after != effective_before:
             outbound = self.svc(url_update_outbound_key)
             try:
-                notified = await outbound.publish(new_inbox_base_url=cleaned)
+                notified = await outbound.publish(new_inbox_base_url=effective_after)
             except Exception:  # pragma: no cover — defensive
                 log.exception("ha_integration: URL_UPDATED fan-out failed")
 
@@ -134,3 +142,16 @@ class HaIntegrationFederationBaseView(BaseView):
                 "peers_notified": notified,
             }
         )
+
+    @staticmethod
+    async def _effective_base(adapter) -> str | None:
+        """The adapter's resolved federation base, ``None`` on failure.
+
+        A failure is logged at WARNING: a silently skipped URL_UPDATED
+        leaves every peer POSTing to the old address.
+        """
+        try:
+            return await adapter.get_federation_base()
+        except Exception as exc:  # noqa: BLE001 — a read must not 500 the push
+            log.warning("ha_integration: could not resolve federation base: %s", exc)
+            return None

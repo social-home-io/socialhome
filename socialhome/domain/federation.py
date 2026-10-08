@@ -11,6 +11,8 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
+from .errors import CodedError
+
 
 # ─── Event type vocabulary (§24.11) ───────────────────────────────────────
 
@@ -1176,9 +1178,69 @@ class DecryptedPayload:
 # ─── Pairing in-flight state ──────────────────────────────────────────────
 
 
+# ─── Pairing reach (§11, GFS fallback) ────────────────────────────────────
+
+#: How a pairing code tells the scanner to reach its owner. ``url`` is the
+#: classic code (an inbox URL, no GFS information anywhere); ``url_gfs``
+#: adds one bootstrap connection server (GFS) as a relay fallback; ``gfs``
+#: carries no address at all — the pairing travels through that server.
+PAIRING_REACH_URL: str = "url"
+PAIRING_REACH_URL_GFS: str = "url_gfs"
+PAIRING_REACH_GFS: str = "gfs"
+SUPPORTED_PAIRING_REACHES: frozenset[str] = frozenset(
+    {PAIRING_REACH_URL, PAIRING_REACH_URL_GFS, PAIRING_REACH_GFS}
+)
+
+
+class PairingReachInvalidError(CodedError, ValueError):
+    """A pairing code (or initiate request) names a reach this build does
+    not know. Fail closed — never fall back to a default reach."""
+
+    status = 422
+    code = "INVALID_REACH"
+    detail = "Unknown pairing reach."
+
+
+class GfsNotConnectedError(CodedError, ValueError):
+    """A GFS reach was asked for, but this household has no active
+    connection server that can relay envelopes."""
+
+    status = 422
+    code = "GFS_NOT_CONNECTED"
+    detail = "Connect to a GFS that relays envelopes before pairing through one."
+
+
+class GfsNotSharedError(CodedError, ValueError):
+    """The scanned code can only be answered through its bootstrap GFS,
+    and this household is not connected to that server."""
+
+    status = 422
+    code = "GFS_NOT_SHARED"
+    detail = "This household is not connected to the GFS this pairing code uses."
+
+
+class PairingKeywrapInvalidError(CodedError, ValueError):
+    """The peer's key-wrap key is missing, of an unknown suite, or not
+    bound to its identity key — never seal anything to it."""
+
+    status = 422
+    code = "KEYWRAP_INVALID"
+    detail = "The pairing code's keys don't check out — ask for a fresh one."
+
+
 @dataclass(slots=True, frozen=True)
 class PairingSession:
-    """An in-progress pairing handshake (§11)."""
+    """An in-progress pairing handshake (§11).
+
+    ``relay_via`` on a QR session is THIS household's own
+    ``gfs_connections.id`` of the bootstrap GFS when the code's reach
+    includes a GFS (``url_gfs`` / ``gfs``) — on the code owner the server
+    the code named, on the scanner its own connection to that same server.
+    ``None`` for a classic ``url`` code. A relayed pairing body for this
+    session is honoured only when it arrived through exactly that
+    connection. The column predates the QR flow and was never written for
+    QR sessions, so no migration was needed. Never put on a wire.
+    """
 
     token: str  # URL-safe random token from QR
     own_identity_pk: str  # 64 hex

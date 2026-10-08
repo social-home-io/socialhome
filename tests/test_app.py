@@ -12,6 +12,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome._version import __version__
+from socialhome import app_keys as K
 from socialhome.app_keys import gfs_connection_service_key, http_session_key
 from socialhome.app import (
     _build_gfs_relay_inbound,
@@ -42,6 +43,7 @@ from socialhome.infrastructure.gfs_route_discovery_scheduler import (
 )
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.event_dispatch_registry import EventDispatchRegistry
+from socialhome.federation.pairing_gfs_reach import PairingGfsReach
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.outbound_fetch import OutboundFetcher
 from socialhome.services.app_federation_service import AppFederationService
@@ -639,3 +641,17 @@ async def test_a_gfs_connect_triggers_a_route_discovery_round(cfg, monkeypatch):
         except Exception:  # noqa: BLE001 — the heals may refuse an unknown id
             pass
         assert calls == [None]
+
+
+async def test_pairing_gfs_reach_is_wired_with_our_keywrap_key(cfg):
+    """Pairing codes with a GFS reach need the coordinator to know our own
+    key-wrap key + binding signature (never a fresh key) and to hand a
+    freshly confirmed pair to route discovery."""
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        reach = app[K.federation_service_key]._pairing._gfs_reach  # noqa: SLF001
+        assert isinstance(reach, PairingGfsReach)
+        fields = reach.own_keywrap_fields()
+        assert fields["keywrap_pk"] == app[K.instance_keywrap_public_key_key].hex()
+        assert fields["keywrap_sig"] == app[K.instance_keywrap_sig_key]
+        assert reach._probe_peer == app[K.gfs_route_discovery_key].probe_peer  # noqa: SLF001
