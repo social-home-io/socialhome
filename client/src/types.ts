@@ -788,6 +788,10 @@ export interface GfsConnection {
    *  ``ts-skew``); null when connected or never errored.
    *  GFS-controlled — render only via mapped strings or escaped text. */
   last_error?: string | null
+  /** The server proved (signed) that it relays household envelopes — a
+   *  ``url_gfs`` / ``gfs`` pairing code needs one. Cache-backed and only
+   *  ever ``true`` for an ``active`` row; absent on older backends. */
+  envelope_relay?: boolean
 }
 
 export interface GfsSpacePublication {

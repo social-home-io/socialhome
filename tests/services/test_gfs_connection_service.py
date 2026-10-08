@@ -2985,6 +2985,39 @@ async def test_envelope_relay_unreachable_gfs_is_false_and_suppressed(env):
     assert len(session.gets) == 1
 
 
+async def test_envelope_relay_known_is_warmed_by_an_info_fetch_without_probing(env):
+    """``envelope_relay_known`` is cache-only: cold → False with no GET; any
+    ``/gfs/info`` fetch (a WS reconnect's metadata refresh) that carries a
+    SIGNED ``envelope_relay`` warms it."""
+    _db, repo = env
+    conn = _make_conn("er-5", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(
+        info=_signed_info(
+            gfs_instance_id=conn.gfs_instance_id,
+            capabilities={"anonymous_publish": True, "envelope_relay": True},
+        ),
+    )
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    assert svc.envelope_relay_known(conn) is False
+    assert session.gets == []
+    await svc.refresh_connection_metadata(conn.id)
+    assert svc.envelope_relay_known(conn) is True
+    # And the gate answers from the warm cache — no second fetch.
+    assert await svc.envelope_relay_supported(conn) is True
+    assert len(session.gets) == 1
+
+
+async def test_envelope_relay_known_ignores_an_unsigned_flag(env):
+    _db, repo = env
+    conn = _make_conn("er-6", public_key=_GFS_KP.public_key.hex())
+    await repo.save(conn)
+    session = _AnonSession(info={"server_name": "x", "envelope_relay": True})
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)
+    await svc.refresh_connection_metadata(conn.id)
+    assert svc.envelope_relay_known(conn) is False
+
+
 # ── invite links (§24.8.5) ────────────────────────────────────────────────
 
 

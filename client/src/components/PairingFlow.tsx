@@ -43,6 +43,9 @@ import { QrScanner } from './QrScanner'
 type PairingMode = 'household' | 'gfs'
 type PairingRole = 'unset' | 'inviter' | 'scanner'
 type ScanMethod = 'qr' | 'paste'
+/** How the scanner reaches the code owner (``POST /api/pairing/initiate``
+ *  ``reach``): its direct URL, the URL with a GFS fallback, or only a GFS. */
+export type PairingReach = 'url' | 'url_gfs' | 'gfs'
 type PairingStep =
   | 'idle'        // mode picker (inviter / scanner)
   | 'generating'  // inviter: POST /api/pairing/initiate
@@ -77,6 +80,20 @@ const scanError = signal<string | null>(null)
 const justPairedInstanceId = signal<string | null>(null)
 /** Display name of the peer that was just paired — shown in the toggle label. */
 const justPairedDisplayName = signal<string | null>(null)
+
+// ── Reach picker (inviter) ─────────────────────────────────────────────
+/** Active GFS connections that proved ``envelope_relay`` — the only ones a
+ *  ``url_gfs`` / ``gfs`` code can name. Empty → no picker (classic code). */
+const relayGfs = signal<GfsConnection[]>([])
+/** Whether this household has a federation URL; ``null`` = unknown (the
+ *  lookup failed), treated as "has one" so nothing is disabled on a guess. */
+const hasUrl = signal<boolean | null>(null)
+const reach = signal<PairingReach>('url')
+const reachGfsId = signal('')
+/** Bumped per load so a slow answer for an earlier open can't land late. */
+let reachLoadSeq = 0
+/** Scanner: host of the GFS a scanned ``url_gfs`` / ``gfs`` code uses. */
+const scannedGfsHost = signal<string | null>(null)
 
 /**
  * The inviter side can't mint a pairing token until this Social Home
@@ -131,8 +148,26 @@ function notConfiguredHint(): string {
  * needs an external URL configured before the server will mint a
  * pairing token; see {@link notConfiguredHint}).
  */
-function friendlyPairError(err: unknown, stage?: 'initiate'): string {
+function friendlyPairError(
+  err: unknown,
+  stage?: 'initiate',
+  gfsHost?: string | null,
+): string {
   if (err instanceof ApiError) {
+    // The GFS-reach refusals carry their own code — never "malformed",
+    // never the missing-URL hint: each has a different way out.
+    switch (err.code) {
+      case 'GFS_NOT_CONNECTED':
+        return t('pairing.error.gfs_not_connected')
+      case 'GFS_NOT_SHARED':
+        return gfsHost
+          ? t('pairing.error.gfs_not_shared', { host: gfsHost })
+          : t('pairing.error.gfs_not_shared_generic')
+      case 'KEYWRAP_INVALID':
+        return t('pairing.error.keywrap_invalid')
+      case 'INVALID_REACH':
+        return t('pairing.error.invalid_reach')
+    }
     if (stage === 'initiate' && err.status === 422) {
       return notConfiguredHint()
     }
@@ -205,6 +240,130 @@ function decodePairingCode(raw: string): Record<string, unknown> | null {
   return null
 }
 
+/** Host of a scanned code's bootstrap GFS when the code asks to be
+ *  reached through one (``reach`` ``url_gfs`` / ``gfs``), else ``null``.
+ *  Codes from before reach existed carry neither field → ``null``. */
+export function pairingCodeGfsHost(payload: Record<string, unknown>): string | null {
+  if (payload.reach !== 'url_gfs' && payload.reach !== 'gfs') return null
+  const gfs = payload.gfs
+  if (!gfs || typeof gfs !== 'object') return null
+  const url = (gfs as { url?: unknown }).url
+  if (typeof url !== 'string' || !url) return null
+  try {
+    return new URL(url).host || null
+  } catch {
+    return null
+  }
+}
+
+/** ``GET /api/gfs/connections`` + ``GET /api/admin/federation/external-url``
+ *  for the reach picker. Best-effort: any failure leaves the picker hidden
+ *  (no relay GFS) or every option enabled (unknown URL) — today's flow. */
+async function loadReachOptions(): Promise<void> {
+  const seq = ++reachLoadSeq
+  relayGfs.value = []
+  hasUrl.value = null
+  reach.value = 'url'
+  reachGfsId.value = ''
+  let conns: unknown = null
+  let ext: unknown = null
+  try {
+    conns = await api.get<GfsConnection[]>('/api/gfs/connections')
+  } catch {
+    conns = null
+  }
+  try {
+    ext = await api.get('/api/admin/federation/external-url')
+  } catch {
+    ext = null
+  }
+  if (seq !== reachLoadSeq) return
+  const eligible = Array.isArray(conns)
+    ? (conns as GfsConnection[]).filter(c => c.status === 'active' && c.envelope_relay === true)
+    : []
+  const known = ext !== null && typeof ext === 'object'
+    ? Boolean((ext as { effective?: unknown }).effective)
+    : null
+  hasUrl.value = known
+  reachGfsId.value = eligible[0]?.id ?? ''
+  // No URL → "GFS only" is the one option that can work; otherwise the
+  // direct URL stays the default (it is the private one).
+  reach.value = eligible.length > 0 && known === false ? 'gfs' : 'url'
+  relayGfs.value = eligible
+}
+
+/** ``https://gfs.example`` → ``gfs.example`` for labels; the raw value
+ *  when it isn't a URL. */
+function gfsLabel(c: GfsConnection): string {
+  if (c.display_name) return c.display_name
+  try {
+    return new URL(c.inbox_url).host || c.inbox_url
+  } catch {
+    return c.inbox_url
+  }
+}
+
+/**
+ * Inviter-side "How can they reach you?" radio group — rendered only when
+ * this household has an active GFS connection that relays envelopes.
+ * Without a URL the two URL options are disabled with the same
+ * how-to-add-a-URL hint the 422 path shows, and "GFS only" is preselected.
+ */
+function ReachPicker() {
+  const conns = relayGfs.value
+  const urlMissing = hasUrl.value === false
+  const options: { value: PairingReach; label: string; needsUrl: boolean }[] = [
+    { value: 'url', label: t('pairing.reach.url'), needsUrl: true },
+    { value: 'url_gfs', label: t('pairing.reach.url_gfs'), needsUrl: true },
+    { value: 'gfs', label: t('pairing.reach.gfs'), needsUrl: false },
+  ]
+  const usesGfs = reach.value !== 'url'
+  return (
+    <fieldset class="sh-pairing-reach" aria-describedby="sh-pairing-reach-hint">
+      <legend class="sh-pairing-reach__legend">{t('pairing.reach.legend')}</legend>
+      <p id="sh-pairing-reach-hint" class="sh-pairing-reach__hint">
+        {t('pairing.reach.applies')}
+      </p>
+      <div class="sh-pairing-reach__options">
+        {options.map(o => {
+          const disabled = o.needsUrl && urlMissing
+          return (
+            <label key={o.value}
+                   class={`sh-pairing-reach__opt${reach.value === o.value ? ' is-on' : ''}${disabled ? ' is-disabled' : ''}`}>
+              <input type="radio" name="sh-pairing-reach" value={o.value}
+                     checked={reach.value === o.value}
+                     disabled={disabled}
+                     onChange={() => { reach.value = o.value }} />
+              <span>{o.label}</span>
+            </label>
+          )
+        })}
+      </div>
+      {urlMissing && (
+        <p class="sh-pairing-reach__hint" data-testid="pairing-reach-no-url">
+          {notConfiguredHint()}
+        </p>
+      )}
+      {usesGfs && conns.length > 1 && (
+        <label class="sh-pairing-reach__gfs">
+          <span>{t('pairing.reach.gfs_select')}</span>
+          <select value={reachGfsId.value}
+                  onChange={(e) => { reachGfsId.value = (e.target as HTMLSelectElement).value }}>
+            {conns.map(c => (
+              <option key={c.id} value={c.id}>{gfsLabel(c)}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      {usesGfs && (
+        <p class="sh-pairing-reach__note" role="note">
+          {t('pairing.reach.gfs_warning')}
+        </p>
+      )}
+    </fieldset>
+  )
+}
+
 /**
  * Decode a GFS pairing string. Accepts ``socialhome://gfs-pair/{base_url}
  * ?token={token}`` — the URL the GFS landing page renders.
@@ -252,6 +411,9 @@ export function openPairing(pairingMode: PairingMode = 'household') {
   pairingCode.value = ''
   pairingToken.value = ''
   gfsResultStatus.value = 'active'
+  scannedGfsHost.value = null
+  relayGfs.value = []
+  if (pairingMode === 'household') void loadReachOptions()
 }
 
 function SasInput({ autofilled }: { autofilled?: boolean }) {
@@ -577,10 +739,17 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
     peerHint.value = null
     sasAutofilledRef.current = false
     try {
-      // No body: the server sources the inbox base URL from the platform
-      // adapter (HA integration pushes it; standalone reads
-      // [standalone].external_url). Returns 422 NOT_CONFIGURED if unset.
-      const result = await api.post('/api/pairing/initiate', {}) as {
+      // The server sources the inbox base URL from the platform adapter
+      // (HA integration pushes it; standalone reads
+      // [standalone].external_url) — 422 NOT_CONFIGURED if unset. With no
+      // relay-capable GFS there is no picker and the body stays empty:
+      // the classic ``url`` code.
+      const body: Record<string, string> = {}
+      if (relayGfs.value.length > 0) {
+        body.reach = reach.value
+        if (reach.value !== 'url' && reachGfsId.value) body.gfs_id = reachGfsId.value
+      }
+      const result = await api.post('/api/pairing/initiate', body) as {
         token: string; [key: string]: unknown
       }
       const json = JSON.stringify(result)
@@ -643,6 +812,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
       scanError.value = t('pairing.scan_wrong_kind')
       return
     }
+    scannedGfsHost.value = pairingCodeGfsHost(parsed)
     step.value = 'accepting'
     try {
       const result = await api.post('/api/pairing/accept', parsed) as {
@@ -654,7 +824,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
       step.value = 'sas-display'
     } catch (err: unknown) {
       step.value = 'failed'
-      peerHint.value = friendlyPairError(err)
+      peerHint.value = friendlyPairError(err, undefined, scannedGfsHost.value)
     }
   }
 
@@ -708,6 +878,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
     pairingToken.value = ''
     scannedSas.value = ''
     scanError.value = null
+    scannedGfsHost.value = null
     justPairedInstanceId.value = null
     justPairedDisplayName.value = null
     gfsResultStatus.value = 'active'
@@ -766,6 +937,7 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
                 </span>
               </button>
             </div>
+            {relayGfs.value.length > 0 && <ReachPicker />}
           </div>
         )}
 
@@ -854,6 +1026,11 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
           <div class="sh-pairing-accepting">
             <Spinner />
             <p class="sh-muted">{t('pairing.accepting')}</p>
+            {scannedGfsHost.value && (
+              <p class="sh-muted sh-pairing-via-gfs">
+                {t('pairing.scan.uses_gfs', { host: scannedGfsHost.value })}
+              </p>
+            )}
           </div>
         )}
 
@@ -863,6 +1040,11 @@ export function PairingFlow({ onGfsConnected }: { onGfsConnected?: () => void })
             <h3 style={{ margin: 0 }}>{t('pairing.sas_heading')}</h3>
             <p class="sh-muted">{t('pairing.sas_instructions')}</p>
             <SasDisplay code={scannedSas.value} />
+            {scannedGfsHost.value && (
+              <p class="sh-muted sh-pairing-via-gfs">
+                {t('pairing.scan.uses_gfs', { host: scannedGfsHost.value })}
+              </p>
+            )}
             <div class="sh-pairing-waiting" role="status">
               <span class="sh-pairing-pulse" aria-hidden="true" />
               <span>{t('pairing.sas_waiting')}</span>

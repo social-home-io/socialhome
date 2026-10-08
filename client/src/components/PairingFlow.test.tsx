@@ -3,13 +3,14 @@ import { render, fireEvent, screen, cleanup, waitFor } from '@testing-library/pr
 import en from '@/i18n/locales/en.json'
 
 const apiPost = vi.fn()
+const apiGet = vi.fn()
 // The real ``ApiError``: its ``.code`` / ``.message`` drive which words a
 // failure gets, so a stand-in would only test the stand-in.
 vi.mock('@/api', async () => {
   const real = await vi.importActual<typeof import('@/api')>('@/api')
   return {
     api: {
-      get: vi.fn(),
+      get: (...args: unknown[]) => apiGet(...args),
       post: (...args: unknown[]) => apiPost(...args),
       patch: vi.fn(),
       delete: vi.fn(),
@@ -57,7 +58,10 @@ vi.mock('./Toast', () => ({
 }))
 
 vi.mock('@/i18n/i18n', () => ({
-  t: (key: string) => key,
+  // Params are appended so a test can see what was substituted
+  // (``key host`` for ``t(key, {host})``); plain keys render as-is.
+  t: (key: string, params?: Record<string, string>) =>
+    params ? `${key} ${Object.values(params).join(' ')}` : key,
   locale: { value: 'en' },
   setLocale: vi.fn(),
 }))
@@ -82,6 +86,7 @@ Object.assign(navigator, { clipboard: { writeText } })
 beforeEach(() => {
   vi.resetModules()
   apiPost.mockReset()
+  apiGet.mockReset()
   routeSpy.mockReset()
   showToastSpy.mockReset()
   writeText.mockReset().mockResolvedValue(undefined)
@@ -672,5 +677,243 @@ describe('PairingFlow — "external URL not configured" hint per platform', () =
     // one guessed at from nothing.
     const text = await hintAfter422(null)
     expect(hint(text)).toBe(STANDALONE)
+  })
+})
+
+// ─── Reach picker (inviter): direct URL / URL + GFS / GFS only ──────────
+
+const RELAY_GFS = {
+  id: 'gfs-a', gfs_instance_id: 'gi-a', display_name: 'GFS A',
+  inbox_url: 'https://gfs-a.example', status: 'active', paired_at: '',
+  published_space_count: 0, connected: true, envelope_relay: true,
+}
+
+/** Answer the two start-step lookups: the GFS connections list and the
+ *  external-URL read (``effective`` null = no URL configured). */
+function stubReach(conns: unknown[], effective: string | null) {
+  apiGet.mockImplementation((path: string) => {
+    if (path === '/api/gfs/connections') return Promise.resolve(conns)
+    if (path === '/api/admin/federation/external-url') {
+      return Promise.resolve({ base: null, effective, source: effective ? 'auto' : null })
+    }
+    return Promise.resolve(undefined)
+  })
+}
+
+async function openStart() {
+  const { PairingFlow, openPairing } = await import('./PairingFlow')
+  render(<PairingFlow />)
+  openPairing('household')
+  await screen.findByText('pairing.role_show')
+}
+
+const radio = (key: string) =>
+  screen.getByLabelText(key) as HTMLInputElement
+
+describe('PairingFlow — reach picker', () => {
+  it('is not rendered without a relay-capable GFS (today\'s start step)', async () => {
+    stubReach([
+      { ...RELAY_GFS, envelope_relay: false },
+      { ...RELAY_GFS, id: 'gfs-p', status: 'pending', envelope_relay: true },
+    ], 'https://home.example')
+    await openStart()
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/admin/federation/external-url'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(screen.queryByText('pairing.reach.legend')).toBeNull()
+  })
+
+  it('with a URL: "Direct URL" is the default and no GFS warning shows', async () => {
+    stubReach([RELAY_GFS], 'https://home.example')
+    await openStart()
+    await screen.findByText('pairing.reach.legend')
+    expect(radio('pairing.reach.url').checked).toBe(true)
+    expect(radio('pairing.reach.url').disabled).toBe(false)
+    expect(radio('pairing.reach.url_gfs').disabled).toBe(false)
+    expect(screen.queryByRole('note')).toBeNull()
+    expect(screen.queryByTestId('pairing-reach-no-url')).toBeNull()
+  })
+
+  it('without a URL: "GFS only" is preselected, URL options disabled with the how-to hint', async () => {
+    stubReach([RELAY_GFS], null)
+    await openStart()
+    await screen.findByText('pairing.reach.legend')
+    await waitFor(() => expect(radio('pairing.reach.gfs').checked).toBe(true))
+    expect(radio('pairing.reach.url').disabled).toBe(true)
+    expect(radio('pairing.reach.url_gfs').disabled).toBe(true)
+    expect(screen.getByTestId('pairing-reach-no-url').textContent)
+      .toContain('pairing.error.no_url')
+  })
+
+  it('shows the privacy note only while a GFS option is selected', async () => {
+    stubReach([RELAY_GFS], 'https://home.example')
+    await openStart()
+    await screen.findByText('pairing.reach.legend')
+    fireEvent.click(radio('pairing.reach.url_gfs'))
+    expect((await screen.findByRole('note')).textContent).toBe('pairing.reach.gfs_warning')
+    fireEvent.click(radio('pairing.reach.gfs'))
+    expect(screen.getByRole('note')).toBeTruthy()
+    fireEvent.click(radio('pairing.reach.url'))
+    await waitFor(() => expect(screen.queryByRole('note')).toBeNull())
+  })
+
+  it('initiate sends {reach, gfs_id}; a second relay GFS can be picked', async () => {
+    stubReach([RELAY_GFS, { ...RELAY_GFS, id: 'gfs-b', display_name: 'GFS B' }], 'https://home.example')
+    apiPost.mockResolvedValue({ token: 't', identity_pk: 'i', dh_pk: 'd' })
+    await openStart()
+    await screen.findByText('pairing.reach.legend')
+    // Only a GFS option needs the server picker.
+    expect(screen.queryByLabelText('pairing.reach.gfs_select')).toBeNull()
+    fireEvent.click(radio('pairing.reach.gfs'))
+    const select = await screen.findByLabelText('pairing.reach.gfs_select') as HTMLSelectElement
+    expect(select.value).toBe('gfs-a')
+    fireEvent.change(select, { target: { value: 'gfs-b' } })
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/initiate', { reach: 'gfs', gfs_id: 'gfs-b' },
+    ))
+  })
+
+  it('initiate sends {reach: "url"} (no gfs_id) for the direct default', async () => {
+    stubReach([RELAY_GFS], 'https://home.example')
+    apiPost.mockResolvedValue({ token: 't', identity_pk: 'i', dh_pk: 'd' })
+    await openStart()
+    await screen.findByText('pairing.reach.legend')
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/pairing/initiate', { reach: 'url' },
+    ))
+  })
+
+  it('initiate keeps the empty body when there is no picker', async () => {
+    stubReach([], 'https://home.example')
+    apiPost.mockResolvedValue({ token: 't', identity_pk: 'i', dh_pk: 'd' })
+    await openStart()
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/pairing/initiate', {}))
+  })
+})
+
+// ─── GFS-reach refusals get their own words, never "malformed" ──────────
+
+describe('PairingFlow — GFS reach error copy', () => {
+  async function initiateFails(code: string) {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(422, '/api/pairing/initiate', { code, detail: 'x' }))
+    await openStart()
+    fireEvent.click(screen.getByLabelText('pairing.role_show_aria'))
+    await screen.findByText('pairing.failed')
+    return document.body.textContent ?? ''
+  }
+
+  async function acceptFails(code: string, payload: Record<string, unknown>) {
+    const { ApiError } = await import('@/api')
+    apiPost.mockRejectedValueOnce(new ApiError(422, '/api/pairing/accept', { code, detail: 'x' }))
+    const { buildPairingCode } = await import('./PairingFlow')
+    await openStart()
+    fireEvent.click(screen.getByLabelText('pairing.role_scan_aria'))
+    fireEvent.click(await screen.findByText('pairing.method_paste'))
+    const textarea = await screen.findByPlaceholderText('pairing.paste_placeholder')
+    fireEvent.input(textarea, { target: { value: buildPairingCode(JSON.stringify(payload)) } })
+    fireEvent.click(screen.getByText('pairing.paste_submit'))
+    await screen.findByText('pairing.failed')
+    return document.body.textContent ?? ''
+  }
+
+  const GFS_CODE = {
+    token: 't', identity_pk: 'i', dh_pk: 'd', inbox_url: '',
+    reach: 'gfs', gfs: { url: 'https://relay.example.org', instance_id: 'gi' },
+  }
+
+  it('GFS_NOT_CONNECTED at initiate', async () => {
+    const text = await initiateFails('GFS_NOT_CONNECTED')
+    expect(text).toContain('pairing.error.gfs_not_connected')
+    expect(text).not.toContain('pairing.error.no_url')
+    expect(en['pairing.error.gfs_not_connected']).toContain('GFS')
+  })
+
+  it('INVALID_REACH at initiate is not the missing-URL hint', async () => {
+    const text = await initiateFails('INVALID_REACH')
+    expect(text).toContain('pairing.error.invalid_reach')
+    expect(text).not.toContain('pairing.error.no_url')
+  })
+
+  it('NOT_CONFIGURED at initiate keeps the missing-URL hint', async () => {
+    const text = await initiateFails('NOT_CONFIGURED')
+    expect(text).toContain('pairing.error.no_url')
+  })
+
+  it('GFS_NOT_SHARED on accept names the code\'s GFS host', async () => {
+    const text = await acceptFails('GFS_NOT_SHARED', GFS_CODE)
+    expect(text).toContain('pairing.error.gfs_not_shared relay.example.org')
+    expect(text).not.toContain('pairing.error.malformed')
+    expect(en['pairing.error.gfs_not_shared']).toContain('{host}')
+    expect(en['pairing.error.gfs_not_shared']).toContain('direct URL')
+  })
+
+  it('GFS_NOT_SHARED without a host in the code falls back to the generic line', async () => {
+    const text = await acceptFails('GFS_NOT_SHARED', {
+      token: 't', identity_pk: 'i', dh_pk: 'd', inbox_url: '',
+    })
+    expect(text).toContain('pairing.error.gfs_not_shared_generic')
+  })
+
+  it('KEYWRAP_INVALID on accept', async () => {
+    const text = await acceptFails('KEYWRAP_INVALID', GFS_CODE)
+    expect(text).toContain('pairing.error.keywrap_invalid')
+    expect(text).not.toContain('pairing.error.malformed')
+  })
+
+  it('INVALID_REACH on accept', async () => {
+    const text = await acceptFails('INVALID_REACH', { ...GFS_CODE, reach: 'carrier-pigeon' })
+    expect(text).toContain('pairing.error.invalid_reach')
+    expect(text).not.toContain('pairing.error.malformed')
+  })
+
+  it('a plain 422 on accept is still "malformed"', async () => {
+    const text = await acceptFails('UNPROCESSABLE', GFS_CODE)
+    expect(text).toContain('pairing.error.malformed')
+  })
+})
+
+// ─── Scanner: "this pairing also uses the GFS at …" ────────────────────
+
+describe('PairingFlow — scan side names the GFS a code uses', () => {
+  async function scan(payload: Record<string, unknown>) {
+    apiPost.mockResolvedValueOnce({ verification_code: '123456', token: 't' })
+    const { buildPairingCode } = await import('./PairingFlow')
+    await openStart()
+    fireEvent.click(screen.getByLabelText('pairing.role_scan_aria'))
+    fireEvent.click(await screen.findByText('pairing.method_paste'))
+    const textarea = await screen.findByPlaceholderText('pairing.paste_placeholder')
+    fireEvent.input(textarea, { target: { value: buildPairingCode(JSON.stringify(payload)) } })
+    fireEvent.click(screen.getByText('pairing.paste_submit'))
+    await screen.findByText('pairing.sas_heading')
+    return document.body.textContent ?? ''
+  }
+  const base = { token: 't', identity_pk: 'i', dh_pk: 'd', inbox_url: 'https://a.example/inbox' }
+
+  it.each(['url_gfs', 'gfs'])('reach=%s shows the GFS host on the confirm step', async (r) => {
+    const text = await scan({ ...base, reach: r, gfs: { url: 'https://relay.example.org/', instance_id: 'gi' } })
+    expect(text).toContain('pairing.scan.uses_gfs relay.example.org')
+  })
+
+  it('reach=url shows no GFS line', async () => {
+    const text = await scan({ ...base, reach: 'url' })
+    expect(text).not.toContain('pairing.scan.uses_gfs')
+  })
+
+  it('an old code without reach fields still decodes and shows no GFS line', async () => {
+    const text = await scan(base)
+    expect(apiPost).toHaveBeenCalledWith('/api/pairing/accept', base)
+    expect(text).not.toContain('pairing.scan.uses_gfs')
+  })
+
+  it('pairingCodeGfsHost ignores junk', async () => {
+    const { pairingCodeGfsHost } = await import('./PairingFlow')
+    expect(pairingCodeGfsHost({ reach: 'gfs', gfs: { url: 'not a url' } })).toBeNull()
+    expect(pairingCodeGfsHost({ reach: 'gfs', gfs: 'x' })).toBeNull()
+    expect(pairingCodeGfsHost({ reach: 'gfs' })).toBeNull()
+    expect(pairingCodeGfsHost({ reach: 'url', gfs: { url: 'https://x.example' } })).toBeNull()
   })
 })

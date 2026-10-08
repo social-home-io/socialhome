@@ -12861,6 +12861,62 @@ a.sh-welcome-card:hover {
   line-height: 1.35;
 }
 
+/* Inviter "How can they reach you?" — shown under the role cards only when
+ * a relay-capable GFS connection exists. Rows are left-aligned (labels are
+ * sentences) and ≥ 40 px tall; the radio dot stays native for a11y. */
+.sh-pairing-reach {
+  width: 100%;
+  margin: var(--sh-space-sm) 0 0;
+  padding: var(--sh-space-sm) var(--sh-space-md) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  text-align: left;
+  min-width: 0;
+}
+.sh-pairing-reach__legend { font-weight: 600; padding: 0 var(--sh-space-xs); }
+.sh-pairing-reach__hint {
+  margin: 0 0 var(--sh-space-xs);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-xs);
+  line-height: 1.4;
+}
+.sh-pairing-reach__options { display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--sh-space-xs); }
+.sh-pairing-reach__opt {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 40px;
+  padding: 0 var(--sh-space-sm);
+  border-radius: var(--sh-radius-md);
+  cursor: pointer;
+}
+.sh-pairing-reach__opt input { margin: 0; flex: none; width: 18px; height: 18px; accent-color: var(--sh-primary); }
+.sh-pairing-reach__opt.is-on { background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg)); }
+.sh-pairing-reach__opt:has(input:focus-visible) { outline: 2px solid var(--sh-primary); outline-offset: 1px; }
+/* The row carries the ring — no second one on the dot itself. */
+.sh-pairing-reach__opt input:focus,
+.sh-pairing-reach__opt input:focus-visible { outline: none; box-shadow: none; }
+.sh-pairing-reach__opt.is-disabled { cursor: not-allowed; color: var(--sh-text-muted); }
+.sh-pairing-reach__gfs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: var(--sh-space-xs) 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-pairing-reach__gfs select { min-height: 40px; max-width: 100%; }
+/* Informational, not an alarm: neutral surface with a warning-tinted rule. */
+.sh-pairing-reach__note {
+  margin: var(--sh-space-xs) 0 0;
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border-left: 3px solid var(--sh-warning);
+  border-radius: var(--sh-radius-sm);
+  background: var(--sh-bg-secondary);
+  font-size: var(--sh-font-size-xs);
+  line-height: 1.45;
+}
+.sh-pairing-via-gfs { font-size: var(--sh-font-size-xs); margin: 0; text-align: center; }
+
 /* ───── Inviter share row — QR + OR + share-code card ─────────────
  *
  * Side-by-side on desktop so neither half reads as a fallback;

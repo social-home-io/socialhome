@@ -19,7 +19,9 @@ from .base import BaseView
 _DEFAULT_HEALTH: dict = {"connected": False, "last_error": None}
 
 
-def _conn_dict(conn, health: dict | None = None) -> dict:
+def _conn_dict(
+    conn, health: dict | None = None, *, envelope_relay: bool = False
+) -> dict:
     """Public-shape view of a :class:`GfsConnection`.
 
     ``status`` stays the stored PAIRING state (active/pending/suspended).
@@ -27,6 +29,9 @@ def _conn_dict(conn, health: dict | None = None) -> dict:
     (is a socket up right now) + ``last_error`` (the last auth/close
     reason when not connected) — so the SPA reflects real liveness rather
     than treating a stored ``status='active'`` as "connected".
+    ``envelope_relay`` says whether the server has proved (signed) that it
+    relays household envelopes — what a ``url_gfs`` / ``gfs`` pairing
+    code needs; the SPA offers those reach options only when one does.
     """
     d = asdict(conn)
     # Remove sensitive key material from the API response.
@@ -34,6 +39,7 @@ def _conn_dict(conn, health: dict | None = None) -> dict:
     h = health if health is not None else _DEFAULT_HEALTH
     d["connected"] = bool(h.get("connected", False))
     d["last_error"] = h.get("last_error")
+    d["envelope_relay"] = envelope_relay
     return d
 
 
@@ -147,6 +153,9 @@ class GfsConnectionCollectionView(BaseView):
                     supervisor.connection_health(c.id)
                     if supervisor is not None
                     else None,
+                    # Cache only — a list read never probes a GFS. Same
+                    # eligibility as the pairing reach: active + signed.
+                    envelope_relay=c.status == "active" and svc.envelope_relay_known(c),
                 )
                 for c in connections
             ]

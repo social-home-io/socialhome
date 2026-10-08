@@ -875,20 +875,26 @@ class GfsConnectionService:
         The bare top-level ``anonymous_publish`` flag is IGNORED: it rides an
         unauthenticated endpoint, so an on-path attacker could forge or strip
         it. Only the signed block counts.
-        """
-        self._apply_capability(conn, self._verified_anonymous_publish(conn, info))
 
-    def _verified_anonymous_publish(self, conn: GfsConnection, info: dict) -> bool:
-        """Whether *info* carries a VALID capability block granting anonymous
-        publish, verified against the GFS key pinned for *conn*.
-
-        Returns ``False`` — with one WARNING per connection — for a missing
-        block, a bad signature, or a suite this build can't verify. The
-        warning text distinguishes them so an operator can tell "old GFS"
-        from "someone is rewriting my /gfs/info".
+        A signed ``envelope_relay`` is cached too (True only — the same
+        "never a sticky no" rule as :meth:`_signed_capability_supported`),
+        so the connections list can say which servers relay pairing
+        envelopes without probing every GFS on each read.
         """
         caps = self._verified_capabilities(conn, info)
-        return caps is not None and caps.get("anonymous_publish") is True
+        self._apply_capability(
+            conn, caps is not None and caps.get("anonymous_publish") is True
+        )
+        if caps is not None and caps.get("envelope_relay") is True:
+            self._envelope_relay[conn.id] = True
+
+    def envelope_relay_known(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s server has already proved ``envelope_relay``
+        under a valid signature in this process — RAM cache only, never a
+        network probe. Warmed by every ``/gfs/info`` fetch (pair time and
+        each WS reconnect) and by :meth:`envelope_relay_supported`.
+        """
+        return self._envelope_relay.get(conn.id, False)
 
     def _verified_capabilities(self, conn: GfsConnection, info: dict) -> dict | None:
         """The capability block from *info*, or ``None`` if it isn't trustworthy.

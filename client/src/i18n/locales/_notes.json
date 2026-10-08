@@ -421,5 +421,9 @@
   "search.filter.dms": "Search filter chip for direct (private) messages.",
   "moment.archive.hashtag_hint_before": "Split around a code sample: 'Start a hashtag with #yourtag to make it easy to find later.' hashtag_example is the placeholder tag word (no spaces, no #).",
   "moment.archive.empty_tag": "{tag} = hashtag without the leading #. 'Recent' = moments still kept (they expire after 1–7 days).",
-  "moment.time.now": "Compact timestamp in a dense list for something posted under a minute ago. Keep very short."
+  "moment.time.now": "Compact timestamp in a dense list for something posted under a minute ago. Keep very short.",
+  "pairing.reach.legend": "Legend of the radio group on the pairing start screen: how the other household reaches this one (direct URL / via the GFS). GFS = Global Federation Server, never translate the acronym.",
+  "pairing.reach.gfs_warning": "Calm, informational note (not an error) shown when a GFS option is picked. Keep the meaning: the GFS sees timing and volume, never content.",
+  "pairing.scan.uses_gfs": "Shown to the scanning admin. {host} is a server host name such as gfs.example.com.",
+  "pairing.error.gfs_not_shared": "{host} is the GFS host name from the scanned code."
 }
