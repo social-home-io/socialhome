@@ -184,7 +184,7 @@ describe('Transport row', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.getByText('Over the internet (slower)')).toBeTruthy()
+    expect(screen.getByText('Over the internet')).toBeTruthy()
   })
 
   it('omits the Connection row when transport is null', async () => {
@@ -455,7 +455,7 @@ describe('DM path row', () => {
       />,
     )
     // The Transport row should still render — proves the panel didn't crash:
-    expect(screen.getByText('Over the internet (slower)')).toBeTruthy()
+    expect(screen.getByText('Over the internet')).toBeTruthy()
     expect(screen.queryByText(/Your last chat went through/i)).toBeNull()
   })
 })
@@ -847,7 +847,7 @@ describe('ConnectionDetail in German', () => {
     expect(screen.getByText('Verbunden')).toBeTruthy()
     expect(screen.getByText('aktuell ✓')).toBeTruthy()
     expect(screen.getByText('1 Nachricht wartet auf den Versand')).toBeTruthy()
-    expect(screen.getByText('Über das Internet (langsamer)')).toBeTruthy()
+    expect(screen.getByText('Über das Internet')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Verbindung entfernen' })).toBeTruthy()
   })
 })
