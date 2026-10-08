@@ -110,6 +110,9 @@ class SystemChatSummary:
     #: The viewer's own mute while it is still on (UTC ISO 8601), else
     #: ``None``.
     muted_until: str | None = None
+    #: The viewer's read watermark (UTC; SQLite ``datetime('now')`` shape)
+    #: — anchors the thread's "New messages" divider. ``None`` = never read.
+    last_read_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

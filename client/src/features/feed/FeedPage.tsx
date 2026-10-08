@@ -14,7 +14,7 @@ import { useEffect, useMemo, useRef } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { posts, feedLoading, feedHasMore, loadFeed, mergePostEdit } from '@/store/feed'
 import { api } from '@/api'
-import { ws } from '@/ws'
+import { connectionState, ws } from '@/ws'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { useTitle } from '@/store/pageTitle'
 import { PostCard } from '@/components/PostCard'
@@ -40,6 +40,7 @@ import {
 import { instanceConfig } from '@/store/instance'
 import { currentUser } from '@/store/auth'
 import { getLandingPath } from '@/utils/preferences'
+import { isMuteActive } from '@/utils/mute'
 import { t } from '@/i18n/i18n'
 import type { FeedPost } from '@/types'
 import { confirmDialog } from '@/components/confirm'
@@ -95,20 +96,45 @@ export default function FeedPage() {
     // A toggle flip on another device shows / hides the Chat tab live.
     const offCfg = ws.on('household.config_changed', () => { void loadToggles() })
     // Unread on the Chat tab: count other people's new messages while
-    // the Feed tab shows; the open chat reads them itself.
+    // the Feed tab shows; the open chat reads them itself. Nothing while
+    // the viewer muted the chat, and nothing at "Only @mentions": the
+    // frame doesn't say who a message mentions (the server resolves
+    // that), so counting it would light the pill for chatter the viewer
+    // asked not to hear about.
     const offMsg = ws.on('dm.message', (e) => {
       if (!isHouseholdChatFrame(e.data)) return
       if (activeRef.current === 'chat') return
       const d = e.data as { message?: { sender_user_id?: string } }
       if (d.message?.sender_user_id === currentUser.value?.user_id) return
       const chat = householdChat.value
-      if (chat) patchHouseholdChat({ unread: chat.unread + 1 })
+      if (!chat || isMuteActive(chat.muted_until)) return
+      if (chat.notif_level === 'mentions') return
+      patchHouseholdChat({ unread: chat.unread + 1 })
     })
-    return () => { offCfg(); offMsg() }
+    // Frames missed while the socket was down: re-read the summary.
+    let prevConn = connectionState.value
+    const offConn = connectionState.subscribe((next) => {
+      if (prevConn === 'reconnecting' && next === 'open') void loadHouseholdChat()
+      prevConn = next
+    })
+    return () => { offCfg(); offMsg(); offConn() }
   }, [])
+
+  // Leaving the Chat tab: re-read the summary (the server's unread and
+  // read watermark after what the open chat marked read).
+  const prevActive = useRef(active)
+  useEffect(() => {
+    if (prevActive.current === 'chat' && active !== 'chat' && chatToggle !== false) {
+      void loadHouseholdChat()
+    }
+    prevActive.current = active
+  }, [active, chatToggle])
 
   // Viewing the chat reads it (ConversationView posts the watermark).
   const unread = householdChat.value?.unread ?? 0
+  // A muted chat keeps its count on the server but raises no pill —
+  // the same rule as the Chats badge.
+  const muted = isMuteActive(householdChat.value?.muted_until)
   useEffect(() => {
     if (active === 'chat' && unread > 0) patchHouseholdChat({ unread: 0 })
   }, [active, unread])
@@ -134,7 +160,7 @@ export default function FeedPage() {
           activeTab={active}
           visibleTabs={tabs}
           labels={labels}
-          badges={{ chat: active === 'chat' ? 0 : unread }}
+          badges={{ chat: active === 'chat' || muted ? 0 : unread }}
           ariaLabel={t('feed.tabs.aria')}
           onSelectTab={onSelectTab}
         />
@@ -160,13 +186,16 @@ function HouseholdChatTab() {
         muted_until: mutedUntil,
         notif_level: level,
         unread: householdChat.value?.unread ?? 0,
+        last_read_at: householdChat.value?.last_read_at ?? null,
       }
     : null
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- ``unread`` only sizes the first window; clearing it must not rebuild
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- ``unread`` / ``last_read_at`` only place the first window and its divider; a later change must not rebuild
   ), [convId, mutedUntil, level])
 
   if (!convId || !meta) {
-    if (householdChatError.value) {
+    // An error, or an enabled chat the server didn't name (it should
+    // never happen, but a skeleton would spin forever): offer a retry.
+    if (householdChatError.value || (chat?.enabled && !chat.conversation_id)) {
       return (
         <div class="sh-empty-state sh-feed-chat-error" role="alert">
           <p>{t('feed.chat.load_failed')}</p>

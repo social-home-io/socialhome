@@ -2714,6 +2714,9 @@ export function ConversationView({
                 </Fragment>
               )}
             </div>
+            {/* After the row in DOM order = visually above it
+             *  (column-reverse), same as the call-event branch. */}
+            {isUnreadAnchor && <UnreadDivider />}
             </Fragment>
           )
         })}

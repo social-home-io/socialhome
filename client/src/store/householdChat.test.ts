@@ -23,13 +23,13 @@ describe('loadHouseholdChat', () => {
   it('stores the summary from GET /api/household/chat', async () => {
     apiGet.mockResolvedValue({
       enabled: true, conversation_id: 'hc-1', unread: 2,
-      notif_level: 'mentions', muted_until: null,
+      notif_level: 'mentions', muted_until: null, last_read_at: '2026-10-08 12:00:00',
     })
     await loadHouseholdChat()
     expect(apiGet).toHaveBeenCalledWith('/api/household/chat')
     expect(householdChat.value).toEqual({
       enabled: true, conversation_id: 'hc-1', unread: 2,
-      notif_level: 'mentions', muted_until: null,
+      notif_level: 'mentions', muted_until: null, last_read_at: '2026-10-08 12:00:00',
     })
     expect(householdChatError.value).toBe(false)
   })
@@ -39,13 +39,13 @@ describe('loadHouseholdChat', () => {
     await loadHouseholdChat()
     expect(householdChat.value).toEqual({
       enabled: false, conversation_id: null, unread: 0,
-      notif_level: null, muted_until: null,
+      notif_level: null, muted_until: null, last_read_at: null,
     })
   })
 
   it('a failure flags the error and keeps the previous summary', async () => {
     householdChat.value = {
-      enabled: true, conversation_id: 'hc-1', unread: 1, notif_level: 'all', muted_until: null,
+      enabled: true, conversation_id: 'hc-1', unread: 1, notif_level: 'all', muted_until: null, last_read_at: null,
     }
     apiGet.mockRejectedValue(new Error('offline'))
     await loadHouseholdChat()
@@ -59,7 +59,7 @@ describe('patchHouseholdChat', () => {
     patchHouseholdChat({ unread: 5 })
     expect(householdChat.value).toBeNull()
     householdChat.value = {
-      enabled: true, conversation_id: 'hc-1', unread: 1, notif_level: 'all', muted_until: null,
+      enabled: true, conversation_id: 'hc-1', unread: 1, notif_level: 'all', muted_until: null, last_read_at: null,
     }
     patchHouseholdChat({ unread: 0, notif_level: 'mentions' })
     expect(householdChat.value).toMatchObject({ unread: 0, notif_level: 'mentions' })

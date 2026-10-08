@@ -523,6 +523,7 @@ a:focus:not(:focus-visible) { outline: none; }
   border-top: 1px solid var(--sh-border);
   padding: 6px var(--sh-space-xs)
            calc(6px + env(safe-area-inset-bottom, 0));
+  min-height: calc(var(--sh-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
   z-index: var(--sh-z-dropdown);
   justify-content: space-around;
   box-shadow: 0 -1px 0 var(--sh-border),
@@ -4030,14 +4031,25 @@ button.sh-friends-member-chip:not(:disabled):hover {
   min-height: 320px;
 }
 @media (max-width: 768px) {
+  /* On phones the chat ends a small gap above the fixed tab bar: drop
+   * ``.sh-main``'s generic 84 px bottom clearance (sized for scrolling
+   * pages) and subtract the bar's real height instead. */
+  .sh-main:has(.sh-feed-host--chat) { padding-bottom: 0; }
   .sh-feed-host--chat {
-    /* ``.sh-main`` here: md padding on top, 84 px at the bottom that
-     * keeps content clear of the fixed tab bar (plus the iOS inset). */
     height: calc(
-      100dvh - var(--sh-topbar-height) - var(--sh-space-md) - 84px
+      100dvh - var(--sh-topbar-height) - var(--sh-space-md)
+      - var(--sh-mobile-nav-height) - var(--sh-space-sm)
       - env(safe-area-inset-bottom, 0px)
     );
   }
+}
+/* The composer closes the thread card: no gap under it. */
+.sh-feed-host--chat .sh-thread > .sh-composer {
+  margin-bottom: 0;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
 }
 .sh-feed-host--chat > .sh-space-subheader .sh-space-tabs { margin-bottom: 0; }
 .sh-feed-host--chat > .sh-space-subheader { margin-bottom: var(--sh-space-sm); }

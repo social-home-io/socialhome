@@ -21,7 +21,8 @@ vi.mock('@/api', () => ({
 
 type Handler = (e: { type: string; data: Record<string, unknown> }) => void
 const wsHandlers: Record<string, Handler[]> = {}
-vi.mock('@/ws', () => ({
+vi.mock('@/ws', async () => ({
+  connectionState: (await import('@preact/signals')).signal('open'),
   ws: {
     on: (type: string, h: Handler) => {
       ;(wsHandlers[type] ??= []).push(h)
@@ -66,8 +67,11 @@ const TOGGLES = {
 }
 const SUMMARY = {
   enabled: true, conversation_id: 'hc-1', unread: 0,
-  notif_level: 'all', muted_until: null,
+  notif_level: 'all', muted_until: null, last_read_at: '2026-10-08 12:00:00',
 }
+const FOREVER = '9999-12-31T23:59:59+00:00'
+const summaryCalls = () =>
+  apiGet.mock.calls.filter(c => c[0] === '/api/household/chat').length
 
 function wireApi(summary: Record<string, unknown> = SUMMARY): void {
   apiGet.mockImplementation(async (url: string) => {
@@ -283,5 +287,93 @@ describe('FeedPage — Feed | Chat tabs', () => {
     fail = false
     fireEvent.click(await findByRole('button', { name: 'Retry' }))
     expect((await findByTestId('conversation-view')).textContent).toBe('hc-1')
+  })
+
+  it('enabled without a conversation id shows the retry, not an endless skeleton', async () => {
+    wireApi({ ...SUMMARY, conversation_id: null })
+    const { findByText, findByRole, queryByTestId } = await renderAt('/feed?tab=chat')
+    expect(await findByText("Couldn't load the household chat. Try again.")).toBeTruthy()
+    expect(await findByRole('button', { name: 'Retry' })).toBeTruthy()
+    expect(queryByTestId('conversation-view')).toBeNull()
+    expect(document.querySelector('.sh-skeleton')).toBeNull()
+  })
+
+  it('passes the read watermark into meta for the "New messages" divider', async () => {
+    wireApi({ ...SUMMARY, unread: 3 })
+    const { findByTestId } = await renderAt('/feed?tab=chat')
+    await findByTestId('conversation-view')
+    expect(viewProps[viewProps.length - 1].meta).toMatchObject({
+      unread: 3, last_read_at: '2026-10-08 12:00:00',
+    })
+  })
+})
+
+describe('FeedPage — Chat tab pill vs mute and level', () => {
+  async function onFeedWithSummary(summary: Record<string, unknown>) {
+    wireApi(summary)
+    const r = await renderAt('/feed')
+    const { householdChat } = await import('@/store/householdChat')
+    await r.waitFor(() => expect(householdChat.value?.conversation_id).toBe('hc-1'))
+    return { ...r, householdChat }
+  }
+  const frame = (id: string) => ({
+    conversation_id: 'hc-1', system_scope: 'household',
+    message: { id, sender_user_id: 'u-bob', content: 'hi' },
+  })
+
+  it('muted: no pill for the stored count, and frames are not counted', async () => {
+    const { findByRole, householdChat } = await onFeedWithSummary(
+      { ...SUMMARY, unread: 3, muted_until: FOREVER },
+    )
+    const chatTab = await findByRole('tab', { name: 'Chat' })
+    emit('dm.message', frame('m1'))
+    await new Promise(r => setTimeout(r, 20))
+    expect(chatTab.querySelector('.sh-tab-unread')).toBeNull()
+    expect(householdChat.value?.unread).toBe(3)
+  })
+
+  it('a mute that already ended counts again', async () => {
+    const { getByRole, waitFor } = await onFeedWithSummary(
+      { ...SUMMARY, muted_until: '2020-01-01T00:00:00+00:00' },
+    )
+    emit('dm.message', frame('m1'))
+    await waitFor(() => {
+      expect(getByRole('tab', { name: /Chat/ }).querySelector('.sh-tab-unread')?.textContent).toBe('1')
+    })
+  })
+
+  it('"Only @mentions": plain frames are not counted (the frame carries no mention info)', async () => {
+    const { findByRole, householdChat } = await onFeedWithSummary(
+      { ...SUMMARY, notif_level: 'mentions' },
+    )
+    const chatTab = await findByRole('tab', { name: 'Chat' })
+    emit('dm.message', frame('m1'))
+    emit('dm.message', frame('m2'))
+    await new Promise(r => setTimeout(r, 20))
+    expect(householdChat.value?.unread).toBe(0)
+    expect(chatTab.querySelector('.sh-tab-unread')).toBeNull()
+  })
+})
+
+describe('FeedPage — summary drift', () => {
+  it('re-reads the summary when the socket reconnects', async () => {
+    const r = await renderAt('/feed')
+    await r.waitFor(() => expect(summaryCalls()).toBe(1))
+    const { connectionState } = await import('@/ws')
+    wireApi({ ...SUMMARY, unread: 7 })
+    connectionState.value = 'reconnecting'
+    connectionState.value = 'open'
+    await r.waitFor(() => expect(summaryCalls()).toBe(2))
+    await r.waitFor(() => {
+      expect(r.getByRole('tab', { name: /Chat/ }).querySelector('.sh-tab-unread')?.textContent).toBe('7')
+    })
+  })
+
+  it('re-reads the summary when leaving the Chat tab', async () => {
+    const r = await renderAt('/feed?tab=chat')
+    await r.findByTestId('conversation-view')
+    const before = summaryCalls()
+    r.fireEvent.click(await r.findByRole('tab', { name: 'Feed' }))
+    await r.waitFor(() => expect(summaryCalls()).toBe(before + 1))
   })
 })

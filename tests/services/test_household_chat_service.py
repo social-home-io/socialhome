@@ -174,6 +174,19 @@ async def test_summary_reports_unread_level_and_mute(stack):
     assert summary.unread == 1
     assert summary.notif_level == "mentions"
     assert summary.muted_until == MUTED_FOREVER
+    seat = next(
+        m for m in await stack.convos.list_members(chat_id) if m.username == "anna"
+    )
+    # The read watermark anchors the SPA's "New messages" divider.
+    assert summary.last_read_at == seat.last_read_at
+
+
+async def test_summary_last_read_at_follows_mark_read(stack):
+    await stack.provision("anna")
+    await stack.provision("bob")
+    chat_id = (await stack.chat.summary("anna")).conversation_id
+    await stack.convos.set_last_read(chat_id, "anna", at="2026-10-08 12:00:00")
+    assert (await stack.chat.summary("anna")).last_read_at == "2026-10-08 12:00:00"
 
 
 async def test_summary_feature_off_creates_nothing(stack):

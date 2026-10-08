@@ -233,6 +233,7 @@ async def test_household_members_talk_through_the_conversation_routes(client):
     assert r.status == 200
     after = await _chat(client, bob)
     assert after["unread"] == 0 and after["notif_level"] == "mentions"
+    assert after["last_read_at"]
     r = await client.delete(
         f"/api/conversations/{cid}/messages/{mid}", headers=_auth(client._tok)
     )
@@ -287,6 +288,7 @@ async def test_household_chat_off_hides_it_and_refuses_writes(client):
         "unread": 0,
         "notif_level": None,
         "muted_until": None,
+        "last_read_at": None,
     }
     r = await client.post(
         f"/api/conversations/{cid}/messages",

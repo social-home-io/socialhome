@@ -523,6 +523,37 @@ describe('ConversationView — host-given meta (system chats)', () => {
     expect(urls).toContain('/api/conversations/sys-h/members')
   })
 
+  it('meta unread + last_read_at anchor the "New messages" divider', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/conversations/sys-h/messages')) {
+        // Newest first, as the route answers.
+        return [
+          { ...msgRow('new-2', 'NEW-TWO'), created_at: '2026-10-08T12:05:00+00:00' },
+          { ...msgRow('new-1', 'NEW-ONE'), created_at: '2026-10-08T12:04:00+00:00' },
+          { ...msgRow('old-1', 'OLD-ONE'), created_at: '2026-10-08T11:00:00+00:00' },
+        ]
+      }
+      if (url === '/api/conversations/sys-h/members') return roster
+      return {}
+    })
+    // jsdom has no layout: the entry scroll just needs the method.
+    Element.prototype.scrollIntoView = vi.fn()
+    const { render, waitFor, ConversationView } = await setup()
+    const { container } = render(
+      <ConversationView conversationId="sys-h" embedded
+        meta={{ ...META, unread: 2, last_read_at: '2026-10-08 12:00:00' }} />,
+    )
+    // A text message is the first unread: the divider follows its row
+    // in DOM order (= sits visually above it in the column-reverse list).
+    await waitFor(() => {
+      const divider = container.querySelector('.sh-dm-unread-divider')
+      expect(divider).not.toBeNull()
+      expect(divider!.previousElementSibling?.getAttribute('data-msg-id')).toBe('new-1')
+    }, { timeout: RENDER_WAIT })
+    // Deferred read: nothing is marked read until the user scrolls past.
+    expect(apiPost).not.toHaveBeenCalledWith('/api/conversations/sys-h/read')
+  })
+
   it('follows a later meta change without refetching', async () => {
     wireSystemChat()
     const { render, waitFor, ConversationView } = await setup()

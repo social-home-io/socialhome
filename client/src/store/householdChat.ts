@@ -18,6 +18,9 @@ export interface HouseholdChatSummary {
   unread: number
   notif_level: 'all' | 'mentions' | null
   muted_until: string | null
+  /** The viewer's read watermark (UTC) — anchors the "New messages"
+   *  divider; ``null`` = never read. */
+  last_read_at: string | null
 }
 
 /** The latest summary; ``null`` before the first answer. */
@@ -38,6 +41,7 @@ export async function loadHouseholdChat(): Promise<void> {
         ? 'mentions'
         : body?.notif_level === 'all' ? 'all' : null,
       muted_until: body?.muted_until ?? null,
+      last_read_at: body?.last_read_at ?? null,
     }
     householdChatError.value = false
   } catch {

@@ -206,6 +206,10 @@
    * page-level sticky sub-headers (e.g. .sh-space-subheader) that
    * stack directly under the bar. */
   --sh-topbar-height: 56px;
+  /* Height of the phone bottom tab bar (``.sh-mobile-nav``) without the
+   * iOS home-indicator inset — the bar's own ``min-height``, so a
+   * full-height surface above it (the feed's Chat tab) can sit flush. */
+  --sh-mobile-nav-height: 66px;
 
   /* Shimmer highlight stripe used by ``.sh-skeleton`` (Skeleton.tsx).
    * The flat fill is ``--sh-bg-tertiary``; this token defines the
