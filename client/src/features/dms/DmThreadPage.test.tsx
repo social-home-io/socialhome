@@ -184,6 +184,12 @@ interface MockApiResponses {
 function wireApiMock(fixtures: MockApiResponses): void {
   apiGet.mockImplementation(async (url: string) => {
     if (url === '/api/conversations') return fixtures.conversations
+    // The thread reads its own row (``GET /api/conversations/{id}``),
+    // which is the list row for that id.
+    const one = /^\/api\/conversations\/([^/?]+)$/.exec(url)
+    if (one) {
+      return (fixtures.conversations as Array<{ id?: string }>).find(c => c.id === one[1])
+    }
     if (url.startsWith('/api/conversations/conv-test/messages')) {
       return fixtures.messages
     }

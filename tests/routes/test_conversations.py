@@ -1474,3 +1474,110 @@ async def test_edit_that_adds_a_mention_rings_only_that_member(client):
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
     assert (await unread.json())["unread"] == 0
+
+
+# ── GET /api/conversations/{id} ─────────────────────────────────────────
+
+
+async def test_get_one_conversation_matches_its_list_row(client):
+    """The single read ships exactly the caller's list row — group and 1:1,
+    including the caller's own mute / level."""
+    group_id = await _team_with_carol(client)
+    dm_id = await _dm_with_bob(client)
+    await client.put(
+        f"/api/conversations/{dm_id}/mute",
+        json={"duration": "1h"},
+        headers=_auth(client._bob_token),
+    )
+    await client.put(
+        f"/api/conversations/{group_id}/notif-prefs",
+        json={"level": "mentions"},
+        headers=_auth(client._bob_token),
+    )
+    for conv_id in (group_id, dm_id):
+        for token in (client._bob_token, client._admin_token):
+            r = await client.get(f"/api/conversations/{conv_id}", headers=_auth(token))
+            assert r.status == 200
+            assert await r.json() == await _row(client, token, conv_id)
+    r = await client.get(
+        f"/api/conversations/{group_id}", headers=_auth(client._bob_token)
+    )
+    body = await r.json()
+    assert body["type"] == "group_dm"
+    assert body["name"] == "Team"
+    assert body["managed_here"] is True
+    assert body["notif_level"] == "mentions"
+    r = await client.get(
+        f"/api/conversations/{dm_id}", headers=_auth(client._bob_token)
+    )
+    assert (await r.json())["muted_until"] is not None
+
+
+async def test_get_one_conversation_unknown_is_404(client):
+    r = await client.get(
+        "/api/conversations/no-such-conversation",
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 404
+
+
+async def test_get_one_conversation_is_members_only(client):
+    """An outsider, and a member who left the group, get 403."""
+    group_id = await _team_with_carol(client)
+    dm_id = await _dm_with_bob(client)
+    r = await client.get(f"/api/conversations/{dm_id}", headers=_auth("carol-tok"))
+    assert r.status == 403
+
+    r = await client.post(
+        f"/api/conversations/{group_id}/leave", headers=_auth("carol-tok")
+    )
+    assert r.status == 200
+    r = await client.get(f"/api/conversations/{group_id}", headers=_auth("carol-tok"))
+    assert r.status == 403
+
+
+async def test_get_one_conversation_requires_auth(client):
+    dm_id = await _dm_with_bob(client)
+    r = await client.get(f"/api/conversations/{dm_id}")
+    assert r.status == 401
+
+
+async def test_get_one_conversation_hidden_by_a_personal_block_is_403(client):
+    """A 1:1 the caller's personal block hides from their list is 403 here
+    too; the blocked side (whose list still shows it) keeps reading it."""
+    dm_id = await _dm_with_bob(client)
+    r = await client.post(
+        "/api/blocks",
+        json={"user_id": client._bob_uid},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status in (200, 201, 204)
+    r = await client.get(
+        f"/api/conversations/{dm_id}", headers=_auth(client._admin_token)
+    )
+    assert r.status == 403
+    r = await client.get(
+        f"/api/conversations/{dm_id}", headers=_auth(client._bob_token)
+    )
+    assert r.status == 200
+
+
+async def test_get_one_conversation_hidden_by_a_guardian_block_is_403(client):
+    """§CP.F2: a guardian block separating bob (protected) from pascal hides
+    their 1:1 from both lists — and from the single read, either side."""
+    dm_id = await _dm_with_bob(client)
+    db = client.app[_db_key]
+    await db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id=?",
+        (client._bob_uid,),
+    )
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?,?,?)",
+        (client._bob_uid, client._admin_uid, client._admin_uid),
+    )
+    for token in (client._bob_token, client._admin_token):
+        r = await client.get("/api/conversations", headers=_auth(token))
+        assert dm_id not in {row["id"] for row in await r.json()}
+        r = await client.get(f"/api/conversations/{dm_id}", headers=_auth(token))
+        assert r.status == 403

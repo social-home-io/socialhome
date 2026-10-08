@@ -17,13 +17,145 @@ from ..app_keys import (
     online_status_service_key,
     user_repo_key,
 )
-from ..domain.conversation import ConversationType, mute_active
+from ..domain.conversation import Conversation, ConversationType, mute_active
 from ..domain.user import _picture_url
 from ..media_signer import sign_media_urls_in, strip_signature_query
+from ..repositories.conversation_repo import AbstractConversationRepo
+from ..repositories.user_repo import AbstractUserRepo
 from ..services.inbound_media_store import local_media_ref
 from ..security import error_response, sanitise_for_api
+from ..services.dm_service import DmService
 from .base import BaseView
 from .media_status import READY, media_filename, video_poster_path
+
+
+async def _conversation_row(
+    c: Conversation,
+    *,
+    username: str,
+    svc: DmService,
+    repo: AbstractConversationRepo,
+    user_repo: AbstractUserRepo,
+    now: datetime,
+) -> dict | None:
+    """One ``GET /api/conversations`` row for *username*.
+
+    Shared by the list and the single-conversation read so both ship
+    the exact same shape. ``None`` when the caller's own seat is no
+    longer active (removed / left).
+    """
+    members = await repo.list_members(c.id)
+    # Cross-household DMs / group DMs may seat a federated peer
+    # as a :class:`RemoteConversationMember`. The two member
+    # tables share no schema, so this endpoint has to fold both
+    # rosters into a single preview the SPA can render — without
+    # this, a 1:1 DM with a remote peer surfaces as "Direct
+    # message" with no avatar because the local-members list
+    # contains only the caller (filtered out as "self" below).
+    remote_members = await repo.list_remote_members(c.id)
+    preview: list[dict] = []
+    own_last_read_at: str | None = None
+    own_muted_until: str | None = None
+    own_notif_level = "all"
+    own_seat_active = False
+    for m in members:
+        if m.username == username:
+            own_seat_active = m.deleted_at is None
+            own_notif_level = m.notif_level
+            # The caller's own mute, when still on (a past
+            # ``muted_until`` reads as unmuted).
+            if mute_active(m.muted_until, now=now):
+                own_muted_until = m.muted_until
+            # Stash the caller's own read watermark so the SPA can
+            # render a "New messages since you last looked" divider
+            # without a second round-trip.
+            own_last_read_at = m.last_read_at
+            continue
+        u = await user_repo.get(m.username)
+        if u is None:
+            continue
+        preview.append(
+            {
+                "user_id": u.user_id,
+                "username": u.username,
+                "display_name": u.display_name,
+                "picture_url": _picture_url(u.user_id, u.picture_hash),
+            }
+        )
+    for rm in remote_members:
+        ru = await user_repo.get_remote_by_member(
+            rm.instance_id,
+            rm.remote_username,
+        )
+        if ru is None:
+            if rm.user_id is None:
+                # Member row exists but the peer-directory snapshot
+                # hasn't landed yet — skip the preview entry (the
+                # SPA falls back to ``member_count`` for the avatar
+                # stub) rather than synthesising a fake name.
+                continue
+            # A group seat on a household we never paired with:
+            # the authority's roster named them.
+            preview.append(
+                {
+                    "user_id": rm.user_id,
+                    "username": rm.remote_username,
+                    "display_name": rm.display_name or rm.remote_username,
+                    "picture_url": None,
+                }
+            )
+            continue
+        preview.append(
+            {
+                "user_id": ru.user_id,
+                "username": ru.remote_username,
+                "display_name": ru.display_name,
+                "picture_url": _picture_url(ru.user_id, ru.picture_hash),
+            }
+        )
+    if not own_seat_active:
+        # The caller was removed (or left) after ``list_conversations``
+        # took its snapshot — e.g. the group authority's roster update
+        # landed mid-listing. Drop that one row; re-checking membership
+        # per row would 403 the caller's whole inbox instead.
+        return None
+    # Membership is established by the snapshot above, so read the
+    # count straight from the repo (``svc.count_unread`` re-checks it).
+    unread = await repo.count_unread(c.id, username)
+    return {
+        "id": c.id,
+        "type": c.type.value,
+        "name": c.name,
+        "last_message_at": c.last_message_at.isoformat() if c.last_message_at else None,
+        "members": preview,
+        "member_count": len(
+            [
+                m
+                for m in members
+                if m.deleted_at is None or c.type is not ConversationType.GROUP_DM
+            ]
+        )
+        + len(remote_members),
+        # Group conversations: whether this household keeps the
+        # member list (it created the group) — the SPA offers
+        # add / remove / rename only then; anyone can leave.
+        "managed_here": svc.groups.is_authority_here(c.id),
+        "unread": unread,
+        # ISO 8601 timestamp the caller last marked-as-read on
+        # this conversation. ``null`` for brand-new threads.
+        # The SPA uses this to find the first-unread message
+        # in the loaded window and scroll to the "New
+        # messages" divider on entry.
+        "last_read_at": own_last_read_at,
+        # The caller muted this conversation until then (UTC
+        # ISO 8601; ``9999-…`` = until they unmute). ``null``
+        # when not muted. Unread still counts; no bell / push.
+        "muted_until": own_muted_until,
+        # Groups: the caller's own level — ``all`` or
+        # ``mentions`` (only @-mentions ring). Always ``all``
+        # for a 1:1.
+        "notif_level": own_notif_level,
+    }
 
 
 class ConversationCollectionView(BaseView):
@@ -35,131 +167,19 @@ class ConversationCollectionView(BaseView):
         repo = self.svc(conversation_repo_key)
         user_repo = self.svc(user_repo_key)
         convos = await svc.list_conversations(ctx.username)
-
-        # Fold a small member preview into each row so the inbox can
-        # render avatar stacks + a peer-name fallback ("Anna, Bob")
-        # without N+1 follow-up fetches. Self is filtered out so the
-        # preview reads as "the others".
-        rows: list[dict] = []
         now = datetime.now(timezone.utc)
+        rows: list[dict] = []
         for c in convos:
-            members = await repo.list_members(c.id)
-            # Cross-household DMs / group DMs may seat a federated peer
-            # as a :class:`RemoteConversationMember`. The two member
-            # tables share no schema, so this endpoint has to fold both
-            # rosters into a single preview the SPA can render — without
-            # this, a 1:1 DM with a remote peer surfaces as "Direct
-            # message" with no avatar because the local-members list
-            # contains only the caller (filtered out as "self" below).
-            remote_members = await repo.list_remote_members(c.id)
-            preview: list[dict] = []
-            own_last_read_at: str | None = None
-            own_muted_until: str | None = None
-            own_notif_level = "all"
-            own_seat_active = False
-            for m in members:
-                if m.username == ctx.username:
-                    own_seat_active = m.deleted_at is None
-                    own_notif_level = m.notif_level
-                    # The caller's own mute, when still on (a past
-                    # ``muted_until`` reads as unmuted).
-                    if mute_active(m.muted_until, now=now):
-                        own_muted_until = m.muted_until
-                    # Stash the caller's own read watermark so the SPA can
-                    # render a "New messages since you last looked" divider
-                    # without a second round-trip.
-                    own_last_read_at = m.last_read_at
-                    continue
-                u = await user_repo.get(m.username)
-                if u is None:
-                    continue
-                preview.append(
-                    {
-                        "user_id": u.user_id,
-                        "username": u.username,
-                        "display_name": u.display_name,
-                        "picture_url": _picture_url(u.user_id, u.picture_hash),
-                    }
-                )
-            for rm in remote_members:
-                ru = await user_repo.get_remote_by_member(
-                    rm.instance_id,
-                    rm.remote_username,
-                )
-                if ru is None:
-                    if rm.user_id is None:
-                        # Member row exists but the peer-directory snapshot
-                        # hasn't landed yet — skip the preview entry (the
-                        # SPA falls back to ``member_count`` for the avatar
-                        # stub) rather than synthesising a fake name.
-                        continue
-                    # A group seat on a household we never paired with:
-                    # the authority's roster named them.
-                    preview.append(
-                        {
-                            "user_id": rm.user_id,
-                            "username": rm.remote_username,
-                            "display_name": rm.display_name or rm.remote_username,
-                            "picture_url": None,
-                        }
-                    )
-                    continue
-                preview.append(
-                    {
-                        "user_id": ru.user_id,
-                        "username": ru.remote_username,
-                        "display_name": ru.display_name,
-                        "picture_url": _picture_url(ru.user_id, ru.picture_hash),
-                    }
-                )
-            if not own_seat_active:
-                # The caller was removed (or left) after ``list_conversations``
-                # took its snapshot — e.g. the group authority's roster update
-                # landed mid-listing. Drop that one row; re-checking membership
-                # per row would 403 the caller's whole inbox instead.
-                continue
-            # Membership is established by the snapshot above, so read the
-            # count straight from the repo (``svc.count_unread`` re-checks it).
-            unread = await repo.count_unread(c.id, ctx.username)
-            rows.append(
-                {
-                    "id": c.id,
-                    "type": c.type.value,
-                    "name": c.name,
-                    "last_message_at": c.last_message_at.isoformat()
-                    if c.last_message_at
-                    else None,
-                    "members": preview,
-                    "member_count": len(
-                        [
-                            m
-                            for m in members
-                            if m.deleted_at is None
-                            or c.type is not ConversationType.GROUP_DM
-                        ]
-                    )
-                    + len(remote_members),
-                    # Group conversations: whether this household keeps the
-                    # member list (it created the group) — the SPA offers
-                    # add / remove / rename only then; anyone can leave.
-                    "managed_here": svc.groups.is_authority_here(c.id),
-                    "unread": unread,
-                    # ISO 8601 timestamp the caller last marked-as-read on
-                    # this conversation. ``null`` for brand-new threads.
-                    # The SPA uses this to find the first-unread message
-                    # in the loaded window and scroll to the "New
-                    # messages" divider on entry.
-                    "last_read_at": own_last_read_at,
-                    # The caller muted this conversation until then (UTC
-                    # ISO 8601; ``9999-…`` = until they unmute). ``null``
-                    # when not muted. Unread still counts; no bell / push.
-                    "muted_until": own_muted_until,
-                    # Groups: the caller's own level — ``all`` or
-                    # ``mentions`` (only @-mentions ring). Always ``all``
-                    # for a 1:1.
-                    "notif_level": own_notif_level,
-                }
+            row = await _conversation_row(
+                c,
+                username=ctx.username,
+                svc=svc,
+                repo=repo,
+                user_repo=user_repo,
+                now=now,
             )
+            if row is not None:
+                rows.append(row)
         return web.json_response(rows)
 
 
@@ -222,10 +242,42 @@ class ConversationGroupView(BaseView):
 
 
 class ConversationItemView(BaseView):
-    """PATCH /api/conversations/{id} — rename a group (``{"name": str|null}``).
+    """GET / PATCH /api/conversations/{id}.
 
-    Only a member on the group's authority household (403 otherwise).
+    ``GET`` returns the caller's row for one conversation — the exact
+    shape of a ``GET /api/conversations`` row — so a thread can load its
+    own metadata without fetching the whole inbox. 404 when it doesn't
+    exist; 403 when the caller isn't (or is no longer) in it, or it is a
+    1:1 hidden from their list (left, or a block separates them).
+
+    ``PATCH`` renames a group (``{"name": str|null}``). Only a member on
+    the group's authority household (403 otherwise).
     """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(dm_service_key)
+        conv_id = self.match("id")
+        await svc.get_conversation(conv_id)
+        # Reuse the list's visibility rules (left 1:1s, personal and
+        # guardian blocks) rather than re-deriving them for one row.
+        conv = next(
+            (c for c in await svc.list_conversations(ctx.username) if c.id == conv_id),
+            None,
+        )
+        if conv is None:
+            raise PermissionError("not a member of this conversation")
+        row = await _conversation_row(
+            conv,
+            username=ctx.username,
+            svc=svc,
+            repo=self.svc(conversation_repo_key),
+            user_repo=self.svc(user_repo_key),
+            now=datetime.now(timezone.utc),
+        )
+        if row is None:
+            raise PermissionError("not a member of this conversation")
+        return web.json_response(row)
 
     async def patch(self) -> web.Response:
         ctx = self.user
