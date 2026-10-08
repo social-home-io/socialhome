@@ -7,12 +7,13 @@
  * what the surface actually feels like, not just bullet points. The
  * mocks are inert; they exist only to set expectations.
  *
- * Admins get one more step at the end: "Connect to the GFS" — an opt-in,
- * UNCHECKED offer to pair with the household's default GFS
+ * Admins get one more step at the end: "Connect to the GFS" — an opt-out
+ * offer, PRE-TICKED, to pair with the household's default GFS
  * (``[gfs] default_url``) through its open sign-up. Whether to offer it
  * comes from ``GET /api/gfs/connections/default``, which answers from local
- * facts only; nothing reaches a GFS unless the admin ticks the box and
- * presses Connect (``POST /api/gfs/connections/default``).
+ * facts only; nothing reaches a GFS until the admin reaches this step and
+ * presses Connect (``POST /api/gfs/connections/default``) — unticking the
+ * box, or skipping the tour, connects nothing.
  */
 import { type ComponentChildren } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
@@ -239,7 +240,7 @@ function GfsStepBody({ offer, wanted, state, failure, onWantedChange }: GfsStepP
 export function OnboardingFlow({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState(0)
   const [gfsOffer, setGfsOffer] = useState<GfsOffer | null>(null)
-  const [gfsWanted, setGfsWanted] = useState(false)
+  const [gfsWanted, setGfsWanted] = useState(true)
   const [gfsState, setGfsState] = useState<GfsState>('idle')
   const [gfsFailure, setGfsFailure] = useState<GfsFailure | null>(null)
   const isAdmin = !!currentUser.value?.is_admin
@@ -299,8 +300,8 @@ export function OnboardingFlow({ onComplete }: { onComplete: () => void }) {
     }
   }
 
-  // On the GFS step a ticked box turns the primary button into Connect
-  // (or Try again); unticked — the default — it just finishes.
+  // On the GFS step a ticked box — the default — turns the primary button
+  // into Connect (or Try again); unticked, it just finishes.
   const gfsNeedsConnect = onGfsStep && !!gfsOffer?.available && gfsWanted
     && (gfsState === 'idle' || gfsState === 'error')
 

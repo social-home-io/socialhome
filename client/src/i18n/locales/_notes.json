@@ -112,7 +112,7 @@
   "onboarding.step_of": "Screen-reader label of the onboarding progress dots. {n} = current step, {total} = number of steps.",
   "onboarding.gfs.title": "Title of the optional onboarding step. 'GFS' is a product term — keep it untranslated.",
   "onboarding.gfs.intro": "First mention of the GFS on this screen, so it is spelled out once as 'GFS (Global Federation Server)'. Keep 'Global Federation Server' in English.",
-  "onboarding.gfs.checkbox": "Label of the opt-in checkbox (unchecked by default). {server} = the GFS host name, e.g. gfs.social-home.io.",
+  "onboarding.gfs.checkbox": "Label of the opt-out checkbox (ticked by default). {server} = the GFS host name, e.g. gfs.social-home.io.",
   "onboarding.gfs.default_note": "'Settings → Connections' must match the app's navigation labels in your language.",
   "time.expired": "Short status for something whose time ran out (an invite link). Lowercase; may stand alone in a row after a '·'.",
   "time.on_date": "Used for a date more than a month ahead. {date} is a localized short date like 'Jan 5, 2027'. Lowercase; it follows a verb like 'expires' / 'stops working'.",
