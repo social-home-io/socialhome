@@ -655,7 +655,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         return kept
 
     async def get_conversation(self, conversation_id: str) -> Conversation:
-        return await self._require_conversation(conversation_id)
+        """A person-made DM or group; ``KeyError`` (404) for an unknown id
+        and for a system chat (its metadata is ``GET /api/household/chat``)."""
+        return await self._require_dm_conversation(conversation_id)
 
     # ── Messages ───────────────────────────────────────────────────────
 
@@ -813,6 +815,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                     await self._mentions().resolve(conversation_id, content)
                     if type in MENTIONABLE_TYPES
                     else ()
+                ),
+                system_scope=(
+                    conv.system_scope.value if conv.system_scope is not None else None
                 ),
             )
         )

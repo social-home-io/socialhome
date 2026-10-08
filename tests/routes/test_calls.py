@@ -761,3 +761,19 @@ async def test_a_callees_mesh_signalling_is_not_starved_by_quality_samples(clien
         headers=bob,
     )
     assert r.status == 200, r.status
+
+
+# ─── System chats: no calls ───────────────────────────────────────────────
+
+
+async def test_no_call_starts_in_the_household_chat(client):
+    await _seed_bob(client)
+    r = await client.get("/api/household/chat", headers=_auth(client._tok))
+    cid = (await r.json())["conversation_id"]
+    r = await client.post(
+        "/api/calls",
+        json={"conversation_id": cid, "sdp_offer": "v=0\r\n", "call_type": "audio"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 409
+    assert (await r.json())["error"] == "calls_unavailable"

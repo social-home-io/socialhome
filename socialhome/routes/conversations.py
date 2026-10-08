@@ -247,8 +247,9 @@ class ConversationItemView(BaseView):
     ``GET`` returns the caller's row for one conversation — the exact
     shape of a ``GET /api/conversations`` row — so a thread can load its
     own metadata without fetching the whole inbox. 404 when it doesn't
-    exist; 403 when the caller isn't (or is no longer) in it, or it is a
-    1:1 hidden from their list (left, or a block separates them).
+    exist or is a system chat (the household chat); 403 when the caller
+    isn't (or is no longer) in it, or it is a 1:1 hidden from their list
+    (left, or a block separates them).
 
     ``PATCH`` renames a group (``{"name": str|null}``). Only a member on
     the group's authority household (403 otherwise).

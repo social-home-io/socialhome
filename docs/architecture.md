@@ -1074,9 +1074,12 @@ by the existing `/api/conversations/{id}/...` routes.
   yet is seated on first use.
 - **Out of every DM path.** `list_for_user` filters `system_scope IS NULL`
   (inbox, DM badge, the guardian's DM view), the DM GC sweep skips system
-  chats, the group-management calls (rename, add / remove, leave) answer
-  404, `DmService._fan_to_remote` never federates them, and `DmScope` plus
-  the inbound `DM_*` / roster handlers refuse any id that resolves to one.
+  chats, `GET /api/conversations/{id}` and the group-management calls
+  (rename, add / remove, leave) answer 404, calls are refused (409
+  `calls_unavailable`; an inbound `CALL_OFFER` never rings), the HA bridge
+  fires no `socialhome.dm_received` (`DmMessageCreated.system_scope`),
+  `DmService._fan_to_remote` never federates them, and `DmScope` plus the
+  inbound `DM_*` / roster handlers refuse any id that resolves to one.
   `dm.*` WS frames carry `system_scope` / `space_id` so the SPA can route
   them to the feed / space Chat tab.
 - **Child protection.** Being in the household is the consent, so guardian

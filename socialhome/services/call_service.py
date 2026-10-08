@@ -84,6 +84,15 @@ class CallConversationError(ValueError):
     """Raised when the conversation is missing / unknown / unsupported."""
 
 
+class CallInSystemChatError(CallConversationError):
+    """Calls are not offered in a system chat (the household chat, a
+    space's chat) — they are not DMs. The routes answer 409
+    ``calls_unavailable``."""
+
+    def __init__(self) -> None:
+        super().__init__("calls aren't available in this chat")
+
+
 class CallAlreadyAnsweredError(RuntimeError):
     """Raised when a callee who already answered answers again (another
     of their devices)."""
@@ -253,6 +262,7 @@ class CallSignalingService(ProtectionGateMixin):
                 f"Unknown caller user_id {caller_user_id!r}",
             )
         caller_username = caller_user.username
+        await self._refuse_system_chat(conversation_id)
 
         local_callees, remote_callees = await self._resolve_conversation_peers(
             conversation_id,
@@ -733,6 +743,7 @@ class CallSignalingService(ProtectionGateMixin):
         joiner = await self._user_repo.get_by_user_id(joiner_user_id)
         if joiner is None:
             raise PermissionError("Unknown joiner user_id")
+        await self._refuse_system_chat(session.conversation_id)
         members = await self._conv_repo.list_members(session.conversation_id)
         if not any(
             m.username == joiner.username and m.deleted_at is None for m in members
@@ -1077,6 +1088,16 @@ class CallSignalingService(ProtectionGateMixin):
                 self._per_user[u].discard(call_id)
                 if not self._per_user[u]:
                     self._per_user.pop(u, None)
+
+    async def _is_system_chat(self, conversation_id: str) -> bool:
+        """``conversation_id`` is a system chat (household / space chat)."""
+        conv = await self._conv_repo.get(conversation_id)
+        return conv is not None and conv.is_system
+
+    async def _refuse_system_chat(self, conversation_id: str) -> None:
+        """No call starts or grows inside a system chat — it is not a DM."""
+        if conversation_id and await self._is_system_chat(conversation_id):
+            raise CallInSystemChatError()
 
     async def _resolve_conversation_peers(
         self,
@@ -1479,6 +1500,8 @@ class CallSignalingService(ProtectionGateMixin):
             return "guardian block"
         if not conversation_id:
             return "missing conversation_id"
+        if await self._is_system_chat(conversation_id):
+            return "system conversation"
         members = await self._conv_repo.list_members(conversation_id)
         if not any(
             m.username == callee.username and m.deleted_at is None for m in members

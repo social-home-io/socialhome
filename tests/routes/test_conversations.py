@@ -1581,3 +1581,13 @@ async def test_get_one_conversation_hidden_by_a_guardian_block_is_403(client):
         assert dm_id not in {row["id"] for row in await r.json()}
         r = await client.get(f"/api/conversations/{dm_id}", headers=_auth(token))
         assert r.status == 403
+
+
+async def test_get_one_conversation_is_not_found_for_the_household_chat(client):
+    """The household chat is a system chat, not a DM: its metadata comes
+    from ``GET /api/household/chat``; the DM item route never serves it."""
+    r = await client.get("/api/household/chat", headers=_auth(client._bob_token))
+    assert r.status == 200
+    cid = (await r.json())["conversation_id"]
+    r = await client.get(f"/api/conversations/{cid}", headers=_auth(client._bob_token))
+    assert r.status == 404

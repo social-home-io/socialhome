@@ -208,6 +208,7 @@ async def test_members_read_send_edit_react_and_mark_read(stack):
     stack.bus.subscribe(DmMessageCreated, _on)
     msg = await stack.dm.send_message(chat.id, sender_username="anna", content="hi")
     assert events[-1].recipient_user_ids == ((await stack.users.get("bob")).user_id,)
+    assert events[-1].system_scope == "household"
     assert [
         m.content for m in await stack.dm.list_messages(chat.id, reader_username="bob")
     ] == ["hi"]

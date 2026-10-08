@@ -763,7 +763,7 @@ unfederated; space variants (below) fan out `SPACE_POLL_*` /
 | GET | `/api/conversations` | List the caller's conversations. Each row carries `members[]` (other participants only — caller is filtered out) and `member_count` so the inbox renders avatar stacks + peer-name fallbacks (`Anna · Bob`) without N+1 follow-up fetches. Also returns the caller's own `last_read_at` (ISO 8601 or `null`) — the SPA uses it to find the first-unread message in the loaded thread window and anchor the entry scroll on a "New messages" divider. `managed_here` says whether this household keeps a group's member list (it created the group) — the SPA offers add / remove / rename only then. `muted_until` is the caller's own mute (UTC ISO 8601, `9999-12-31T23:59:59+00:00` = until they turn it back on), `null` when not muted or once the time has passed. `notif_level` is the caller's own group level (`"all"` \| `"mentions"`; always `"all"` for a 1:1). System chats (the [household chat](#household-chat)) are never listed here and never count toward the DM badge. |
 | POST | `/api/conversations/dm` | Get-or-create 1:1 DM. Body `{username}`. |
 | POST | `/api/conversations/group` | Create group conversation (≥3 participants total — creator + ≥2 others). Body `{members: [username, ...], member_user_ids?: [user_id, ...], name?: string}`. `member_user_ids` may name people from directly paired households at v_37+ — this household becomes the group's authority (see [cross-household groups](./protocol/dm.md#group-conversations-across-households)). A person who can't join is refused with 422 `GROUP_MEMBER_UNSUPPORTED` and a message naming them and why (not paired / their household needs an update). |
-| GET | `/api/conversations/{id}` | One conversation's metadata for the caller — exactly the shape of a `GET /api/conversations` row (`type`, `name`, `members`, `member_count`, `managed_here`, `unread`, `last_read_at`, `muted_until`, `notif_level`, …), so a thread loads its own header without fetching the whole inbox. 404 when it doesn't exist; 403 when the caller isn't in it (never was, left, or a 1:1 hidden from their list by a block). |
+| GET | `/api/conversations/{id}` | One conversation's metadata for the caller — exactly the shape of a `GET /api/conversations` row (`type`, `name`, `members`, `member_count`, `managed_here`, `unread`, `last_read_at`, `muted_until`, `notif_level`, …), so a thread loads its own header without fetching the whole inbox. 404 when it doesn't exist or is a system chat (the [household chat](#household-chat) — its metadata is `GET /api/household/chat`); 403 when the caller isn't in it (never was, left, or a 1:1 hidden from their list by a block). |
 | PATCH | `/api/conversations/{id}` | Rename a group — body `{name: string \| null}`. Only a member on the group's authority household; 403 otherwise. |
 | POST | `/api/conversations/{id}/members` | Add people to a group — body `{usernames?: [...], user_ids?: [...]}`; 201. Only a member on the group's authority household (403 otherwise); 422 `GROUP_MEMBER_UNSUPPORTED` as above. |
 | DELETE | `/api/conversations/{id}/members/{user_id}` | Remove someone from a group. Only a member on the group's authority household (403 otherwise); 404 when they are not in it. The removed person's household gets the new roster and drops the group. |
@@ -792,8 +792,10 @@ active local user. It is never federated and never appears in
 an active local user while `feat_household_chat` is on — not by seat rows.
 With the toggle off every one of them answers 403 (`FEATURE_DISABLED`,
 section `household_chat`); the messages are kept. The group-management
-routes (`PATCH /api/conversations/{id}`, `POST .../leave`,
-`POST .../members`, `DELETE .../members/{user_id}`) answer 404 for it. A
+routes (`GET` / `PATCH /api/conversations/{id}`, `POST .../leave`,
+`POST .../members`, `DELETE .../members/{user_id}`) answer 404 for it, calls
+answer 409 `calls_unavailable`, and its messages fire no HA
+`socialhome.dm_received` event. A
 bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 
 | Method | Path | Purpose |
@@ -851,7 +853,7 @@ bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/webrtc/ice_servers` | STUN/TURN config (alias: `/api/calls/ice-servers`). |
-| GET / POST | `/api/calls` | List / initiate. Body `{conversation_id, call_type, sdp_offer}` for 1:1, or `sdp_offers: {user_id: sdp}` (one offer per callee) for a group mesh; a callee with no offer is not rung. Response carries `participants` (everyone invited, caller included). 422 `too_many_participants` above 6 people (`MAX_CALL_PARTICIPANTS`). |
+| GET / POST | `/api/calls` | List / initiate. Body `{conversation_id, call_type, sdp_offer}` for 1:1, or `sdp_offers: {user_id: sdp}` (one offer per callee) for a group mesh; a callee with no offer is not rung. Response carries `participants` (everyone invited, caller included). 422 `too_many_participants` above 6 people (`MAX_CALL_PARTICIPANTS`). 409 `calls_unavailable` in a system chat (the household chat) — `POST /api/calls/{id}/join` answers the same, and an inbound `CALL_OFFER` naming one never rings. |
 | GET | `/api/calls/active` | Current active call. |
 | POST | `/api/calls/{id}/{answer\|join\|decline\|hangup}` | Lifecycle. `answer {sdp_answer}` answers the caller; a second answer from the same callee (another device) is 409 `already_answered`. `answer {sdp_answer, to_user}` answers another participant's mesh-leg offer and is relayed to them only. `join {sdp_offers}` offers mesh legs to named participants (`call.peer_join`) — used by a late joiner and by a callee opening legs to higher-id callees. In a group call `decline` / `hangup` take only that participant out (frames carry `by` + `over`); the call closes once fewer than two are left. `to_user` must be another participant (403). |
 | POST | `/api/calls/{id}/ice` | Trickle ICE candidate. Optional `to_user` targets one mesh leg; without it the candidate fans out to every other participant. |
