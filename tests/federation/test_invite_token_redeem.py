@@ -73,6 +73,7 @@ from socialhome.federation.invite_token_redeem import (
 from socialhome.federation.keywrap_seal import seal_to_keywrap
 from socialhome.domain.writer_cert import WRITER_SCOPE_WRITE
 from socialhome.rate_limiter import RateLimiter
+from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 
@@ -1464,7 +1465,7 @@ class _RelayBus:
                 # A real connection server pushes the blob down the
                 # socket it holds, so the receiver learns which server
                 # carried it — and answers on that one.
-                await target.handle_relayed_envelope(envelope, gfs_url=gfs_url)
+                await target.handle_frame(envelope, gfs_url=gfs_url)
                 return True
 
         return _Sender()
@@ -1529,6 +1530,20 @@ def _hint_for(
     )
 
 
+class _NoGfsConnections:
+    async def list_active(self):
+        return []
+
+
+def _relay_inbound(coordinator, federation, party: _Party) -> GfsRelayInbound:
+    return GfsRelayInbound(
+        federation=federation,
+        keywrap_private_key=party.keywrap_priv,
+        invite_coordinator=coordinator,
+        gfs_connection_repo=_NoGfsConnections(),
+    )
+
+
 def _bootstrap_pair(
     *,
     min_age=0,
@@ -1584,12 +1599,18 @@ def _bootstrap_pair(
             keywrap_sig=party.keywrap_sig,
             key_manager=_FakeKeyManager(),
         )
-    relay.coordinators[redeemer_party.instance_id] = redeemer
-    relay.coordinators[issuer_party.instance_id] = issuer
+    # The socket's inbound leg: opens the blob, routes bootstrap bodies to
+    # the coordinator (relayed §24.11 envelopes to the pipeline).
+    redeemer_inbound = _relay_inbound(redeemer, r_fed, redeemer_party)
+    issuer_inbound = _relay_inbound(issuer, i_fed, issuer_party)
+    relay.coordinators[redeemer_party.instance_id] = redeemer_inbound
+    relay.coordinators[issuer_party.instance_id] = issuer_inbound
     return SimpleNamespace(
         relay=relay,
         redeemer=redeemer,
         issuer=issuer,
+        redeemer_inbound=redeemer_inbound,
+        issuer_inbound=issuer_inbound,
         redeemer_party=redeemer_party,
         issuer_party=issuer_party,
         redeemer_repo=r_repo,
@@ -1781,7 +1802,7 @@ async def test_bootstrap_replayed_envelope_is_rejected():
     first_to, first_env = env.relay.envelopes[0]
     assert first_to == env.issuer_party.instance_id
     with pytest.raises(ValueError, match="Replay detected"):
-        await env.issuer.handle_relayed_envelope(first_env)
+        await env.issuer_inbound.handle_frame(first_env)
     # The replay must not have consumed a second use.
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
 
@@ -1814,7 +1835,7 @@ async def test_bootstrap_spoofed_identity_is_rejected():
         ),
     }
     with pytest.raises(ValueError, match="does not match identity_pk"):
-        await env.issuer.handle_relayed_envelope(envelope)
+        await env.issuer_inbound.handle_frame(envelope)
     # Fail-closed: the token was never consumed.
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
     assert env.issuer_repo.saved == []
@@ -1848,7 +1869,7 @@ async def test_bootstrap_unbound_keywrap_key_is_rejected():
         ),
     }
     with pytest.raises(ValueError, match="not bound to its identity"):
-        await env.issuer.handle_relayed_envelope(envelope)
+        await env.issuer_inbound.handle_frame(envelope)
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 1
 
 
@@ -1882,7 +1903,7 @@ async def test_bootstrap_reply_from_another_household_is_dropped():
         ),
     }
     with pytest.raises(ValueError, match="did not address"):
-        await env.redeemer.handle_relayed_envelope(envelope)
+        await env.redeemer_inbound.handle_frame(envelope)
     assert not fut.done()
 
 
@@ -1983,6 +2004,7 @@ async def test_bootstrap_inbound_is_rate_limited_process_wide():
     env = _bootstrap_pair()
     limiter = RateLimiter()
     env.issuer._rate_limiter = limiter
+    env.issuer_inbound._rate_limiter = limiter
     for _ in range(BOOTSTRAP_INBOUND_LIMIT):
         assert limiter.is_allowed(
             "invite-bootstrap:inbound",
@@ -1990,7 +2012,7 @@ async def test_bootstrap_inbound_is_rate_limited_process_wide():
             window_s=BOOTSTRAP_INBOUND_WINDOW_S,
         )
     with pytest.raises(ValueError, match="inbound rate limit"):
-        await env.issuer.handle_relayed_envelope(
+        await env.issuer_inbound.handle_frame(
             {"to_instance": env.issuer_party.instance_id, "sealed": {}},
         )
 
@@ -2033,7 +2055,7 @@ async def test_bootstrap_inbound_is_rate_limited_per_sender():
         ),
     }
     with pytest.raises(ValueError, match="per-sender rate limit"):
-        await env.issuer.handle_relayed_envelope(envelope)
+        await env.issuer_inbound.handle_frame(envelope)
     # Throttled before the token was touched.
     assert env.issuer_spaces.tokens["tok-1"]["uses_remaining"] == 5
 
@@ -2721,8 +2743,9 @@ async def test_concurrent_redeems_of_a_single_use_link_seat_one_household():
     waits for the ACK to leave."""
     env = _atomic_pair()
     other_party = _Party("Second redeemer")
+    other_fed = _BootstrapFederationService(other_party)
     other = _make_coordinator(
-        federation=_BootstrapFederationService(other_party),
+        federation=other_fed,
         federation_repo=_BootstrapFederationRepo(other_party),
         space_repo=_FakeSpaceRepo(),
         timeout=0.2,
@@ -2734,7 +2757,11 @@ async def test_concurrent_redeems_of_a_single_use_link_seat_one_household():
         keywrap_sig=other_party.keywrap_sig,
         key_manager=_FakeKeyManager(),
     )
-    env.relay.coordinators[other_party.instance_id] = other
+    env.relay.coordinators[other_party.instance_id] = _relay_inbound(
+        other,
+        other_fed,
+        other_party,
+    )
 
     async def _redeem_as(coord):
         return await coord.request_redeem(

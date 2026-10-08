@@ -80,7 +80,7 @@ class EnvelopeRelayUnavailable(SpacePermissionError):
     """
 
 
-def _normalize_base(url: str) -> str:
+def normalize_gfs_base(url: str) -> str:
     """Compare-able form of a GFS base URL — scheme + host(+port), no path.
 
     The invite blob's ``gfs_url`` is typed by whoever published it and
@@ -197,8 +197,8 @@ class GfsEnvelopeSender:
         """
         conns = [c for c in await self._repo.list_active() if c.status == "active"]
         if gfs_url:
-            want = _normalize_base(gfs_url)
-            conns = [c for c in conns if _normalize_base(c.inbox_url) == want]
+            want = normalize_gfs_base(gfs_url)
+            conns = [c for c in conns if normalize_gfs_base(c.inbox_url) == want]
             if not conns:
                 raise EnvelopeRelayUnavailable(
                     "this invite goes through a GFS your home isn't "
@@ -224,4 +224,5 @@ __all__ = [
     "GFS_ENVELOPE_PATH",
     "GFS_ENVELOPE_TIMEOUT_S",
     "GfsEnvelopeSender",
+    "normalize_gfs_base",
 ]

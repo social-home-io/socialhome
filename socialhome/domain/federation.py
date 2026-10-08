@@ -1039,10 +1039,12 @@ class RemoteInstance:
     #: The peer's static X25519 **key-wrap** public key, hex — verified
     #: bound to :attr:`remote_identity_pk` at seat time via
     #: :func:`~socialhome.federation.keywrap_seal.verify_keywrap_binding`.
-    #: Set only on :data:`InstanceSource.SPACE_SESSION` rows, where it is
-    #: what every outbound envelope is sealed to before the connection
-    #: server carries it. ``None`` on every ordinary peer (they have an
-    #: address; nothing needs sealing).
+    #: Set on :data:`InstanceSource.SPACE_SESSION` rows, where it is what
+    #: every outbound envelope is sealed to before the connection server
+    #: carries it — and on :data:`InstanceSource.MANUAL` rows that opted
+    #: into the relay fallback (:attr:`gfs_relay`), for the same reason.
+    #: ``None`` on every other peer (they have an address; nothing needs
+    #: sealing).
     remote_keywrap_pk: str | None = None
     home_lat: float | None = None  # 4dp-truncated
     home_lon: float | None = None
@@ -1065,6 +1067,14 @@ class RemoteInstance:
     #: Defaults to ``True`` so existing paired peers keep the pre-toggle
     #: behaviour (share coordinates when the peer supports §4.5).
     share_home: bool = True
+    #: Our opt-in for relaying envelopes to / from this paired peer through
+    #: a connection server (``POST /gfs/envelope``) when neither RTC nor the
+    #: HTTPS inbox reaches it. Local-only, never federated. ``False`` (the
+    #: default) also makes the inbound pipeline refuse a relayed envelope
+    #: from this peer. Meaningful only on :data:`InstanceSource.MANUAL`
+    #: rows — a :data:`InstanceSource.SPACE_SESSION` peer is relay-only by
+    #: construction. The routes it may use are :class:`PeerGfsRoute` rows.
+    gfs_relay: bool = False
 
     def is_reachable(self) -> bool:
         return self.unreachable_since is None
@@ -1417,6 +1427,23 @@ class GfsConnection:
     status: str  # pending | active | suspended
     paired_at: str
     created_at: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class PeerGfsRoute:
+    """One connection server a paired peer was confirmed reachable through.
+
+    Mirrors a ``peer_gfs_routes`` row. ``gfs_connection_id`` is THIS
+    household's own ``gfs_connections.id`` — never the peer's — and none of
+    these fields ever goes on a wire. ``confirmed_at`` is when the route
+    was first proven, ``last_ack_at`` when it last was (expiry reads it);
+    both tz-aware UTC ISO 8601.
+    """
+
+    instance_id: str
+    gfs_connection_id: str
+    confirmed_at: str
+    last_ack_at: str
 
 
 @dataclass(slots=True, frozen=True)

@@ -223,6 +223,33 @@ no code: pair with the other household normally (QR / trust relay), at
 which point the peer row is no longer `space_session` and traffic moves
 back to RTC / HTTPS, or decline invite-link joins.
 
+**Paired households, opt-in only (owner-approved plan 2026-10-07).** The
+same relay can also carry envelopes between two *paired* households, as the
+last-resort tier after RTC and the HTTPS inbox. It is off for every pair
+until this household opts in for that peer (`remote_instances.gfs_relay`);
+without the opt-in nothing is relayed to the peer and a relayed envelope
+from it is refused by the §24.11 pipeline. The wire body is unchanged
+(`{to_instance, sealed}`), and each household stores only its own
+connection-server id per route — no server URL, id or inbox id enters a
+payload. For an opted-in pair the connection server learns:
+
+- **Per envelope:** `to_instance`, the time and the size bucket — and the
+  sending household's IP in its HTTP access log.
+- **That the two households are a pair.** The sender is typically itself
+  registered on the same connection server, so the IP it posts from can be
+  correlated with its own authenticated `/gfs/ws` socket. Sender identity
+  plus `to_instance` is a social-graph edge. This is the same
+  IP/timing-correlation limit stated above for link-joined pairs.
+- **The timing of every connection attempt** for a peer with no inbox URL:
+  the WebRTC offer / answer / ICE signalling is itself an envelope and
+  rides the relay too.
+- **When the pair's direct path is down**, in fallback mode: a pair that
+  normally talks over RTC / HTTPS only appears on the relay while neither
+  works.
+
+Round-robin across several connection servers the pair shares (a follow-up)
+spreads these observations across operators; it does not remove them.
+
 ### Sign-off: in trusted mode the connection server learns who published (v_49)
 
 **Owner decision (2026-10-03), the default for every public/global space.**

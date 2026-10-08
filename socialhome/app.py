@@ -20,6 +20,7 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 import pathlib
 from pathlib import Path
@@ -51,7 +52,11 @@ from .domain.federation import (
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
 from .federation.sync_manager import SyncSessionManager
-from .federation.transport import FederationTransport, HttpsInboxTransport
+from .federation.transport import (
+    FederationTransport,
+    HttpsInboxTransport,
+    https_failure_is_relayable,
+)
 from .hardening import (
     DEFAULT_JSON_MAX_BYTES,
     build_body_size_middleware,
@@ -134,7 +139,11 @@ from .repositories import (
 )
 from .repositories.call_repo import SqliteCallRepo
 from .repositories.cp_repo import SqliteCpRepo
-from .repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from .repositories.federation_repo import AbstractFederationRepo
+from .repositories.gfs_connection_repo import (
+    AbstractGfsConnectionRepo,
+    SqliteGfsConnectionRepo,
+)
 from .repositories.dm_contact_repo import SqliteDmContactRepo
 from .repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
 from .repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
@@ -335,6 +344,7 @@ from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_envelope_sender import GfsEnvelopeSender
+from .services.gfs_relay_inbound import GfsRelayInbound
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
 from .services.link_preview_service import LinkPreviewService
 from .services.map_tile_service import MapTileService
@@ -502,7 +512,13 @@ async def _redeliver_envelope(
         reasoning — the next attempt POSTs identical bytes.
 
     * 5xx, timeout, network error → :attr:`DeliveryOutcome.TRANSIENT`
-      (reschedule with backoff).
+      (reschedule with backoff) — unless the peer is a paired household
+      we opted into the relay with (``RemoteInstance.gfs_relay``): it gets
+      the connection-server relay first, and its acceptance is SUCCESS.
+
+    A household with no inbox URL — seated from an invite link, or paired
+    and opted into the relay — goes straight to the relay
+    (:func:`_redeliver_via_gfs_relay`).
     """
     instance = await federation_repo.get_instance(
         entry.instance_id,
@@ -553,48 +569,25 @@ async def _redeliver_envelope(
         log.warning("outbox: undecodable entry %s — dropping: %s", entry.id, exc)
         return DeliveryOutcome.PERMANENT
 
-    if instance.source is InstanceSource.SPACE_SESSION:
-        # A household seated from an invite link has no inbox URL by
-        # design — re-POSTing would target the empty string on every
-        # attempt until the entry burns through MAX_ATTEMPTS. Its
-        # envelopes ride the connection-server relay, and the transport
-        # facade already knows how to pick it (``FederationTransport
-        # .send``), so redelivery reuses that one selection point rather
-        # than growing a second copy of the rule.
-        transport = federation_service._transport
-        if transport is None:
-            log.warning(
-                "outbox: %s is reachable only through the connection-server "
-                "relay, which is not wired — dropping",
-                entry.instance_id,
-            )
-            return DeliveryOutcome.PERMANENT
-        result = await transport.send(
-            instance=instance,
-            envelope_dict=orjson.loads(body),
+    if instance.source is InstanceSource.SPACE_SESSION or (
+        instance.gfs_relay and not instance.remote_inbox_url
+    ):
+        # A household seated from an invite link — or a paired one that
+        # opted into the relay and has no inbox URL — has nothing to POST
+        # to: re-POSTing would target the empty string on every attempt
+        # until the entry burns through MAX_ATTEMPTS. Its envelopes ride
+        # the connection-server relay.
+        return await _redeliver_via_gfs_relay(
+            federation_service,
+            entry,
+            instance,
+            body,
+            fallback=False,
         )
-        if result.ok:
-            # NO ``mark_reachable`` here. The relay answers a uniform 202
-            # to every well-formed envelope — recipient online, offline,
-            # or not a client of that server at all — because any other
-            # answer would be a presence oracle. That 202 is an
-            # ACCEPTANCE, not a delivery, so it cannot clear the
-            # household's ``unreachable_since``; an inbound envelope
-            # from them is what proves they are there. It IS recorded as
-            # a relay acceptance for the operator's diagnostics.
-            federation_service.note_relay_accepted(entry.instance_id)
-            return DeliveryOutcome.SUCCESS
-        if result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
-            # Deterministic: the frame is over the relay's body cap and
-            # will be on every retry too (media does not ride this
-            # transport). Retrying spends the whole attempt budget
-            # re-deriving one length compare and then reports a
-            # permanent condition as a transient one. The transport
-            # already logged a WARNING naming the peer, event type and
-            # size, so this drop is not silent.
-            return DeliveryOutcome.PERMANENT
-        return DeliveryOutcome.TRANSIENT
 
+    #: The inbox's status, or ``None`` when it never answered — decides
+    #: whether an unanswered attempt may fall back to the relay below.
+    https_status: int | None = None
     try:
         client = await federation_service._get_http_client()
         async with post_to_peer(
@@ -604,6 +597,7 @@ async def _redeliver_envelope(
             headers={"Content-Type": "application/json"},
             timeout=_aiohttp_timeout(10),
         ) as resp:
+            https_status = resp.status
             if 200 <= resp.status < 300:
                 await federation_repo.mark_reachable(entry.instance_id)
                 return DeliveryOutcome.SUCCESS
@@ -722,7 +716,6 @@ async def _redeliver_envelope(
                 resp.status,
                 entry.id,
             )
-            return DeliveryOutcome.TRANSIENT
     except Exception as exc:
         # Same empty-message trap as the transport's send path — and worse
         # here, because this is the line that explains why an envelope is
@@ -733,7 +726,128 @@ async def _redeliver_envelope(
             entry.instance_id,
             describe_exception(exc),
         )
-        return DeliveryOutcome.TRANSIENT
+    # Every 2xx and 4xx answered above. On a network error / timeout or a
+    # 5xx the peer's inbox was NOT reached, so a paired peer we opted into
+    # the relay with gets the relay before the entry is rescheduled (a 4xx
+    # never does: that is the peer's own pipeline answering, and the relay
+    # would earn the identical refusal).
+    if instance.gfs_relay and https_failure_is_relayable(https_status):
+        return await _redeliver_via_gfs_relay(
+            federation_service,
+            entry,
+            instance,
+            body,
+            fallback=True,
+        )
+    return DeliveryOutcome.TRANSIENT
+
+
+async def _redeliver_via_gfs_relay(
+    federation_service: FederationService,
+    entry,
+    instance,
+    body: bytes | str,
+    *,
+    fallback: bool,
+) -> DeliveryOutcome:
+    """Redeliver one outbox entry through the connection-server relay.
+
+    Reaches the transport facade's one relay selection point
+    (:meth:`FederationTransport.send_via_gfs_relay`): a link-joined
+    household goes to the server that introduced the pair, a paired one
+    round-robin over its confirmed routes.
+
+    ``fallback`` says whether the relay is the peer's ONLY tier (``False``
+    — a link-joined household, or a paired one with no inbox URL) or a
+    second attempt after the HTTPS inbox was not reached (``True``). It
+    decides what a failure means: with no other tier a too-large frame is
+    PERMANENT (it can never fit), but after an HTTPS failure the inbox may
+    come back, so every relay failure stays TRANSIENT.
+    """
+    transport = federation_service.transport
+    if transport is None:
+        if fallback:
+            return DeliveryOutcome.TRANSIENT
+        log.warning(
+            "outbox: %s is reachable only through the connection-server "
+            "relay, which is not wired — dropping",
+            entry.instance_id,
+        )
+        return DeliveryOutcome.PERMANENT
+    result = await transport.send_via_gfs_relay(
+        instance=instance,
+        envelope_dict=orjson.loads(body),
+    )
+    if result.ok:
+        # NO ``mark_reachable`` here. The relay answers a uniform 202
+        # to every well-formed envelope — recipient online, offline,
+        # or not a client of that server at all — because any other
+        # answer would be a presence oracle. That 202 is an
+        # ACCEPTANCE, not a delivery, so it cannot clear the
+        # household's ``unreachable_since``; an inbound envelope
+        # from them is what proves they are there. It IS recorded as
+        # a relay acceptance for the operator's diagnostics.
+        federation_service.note_relay_accepted(entry.instance_id)
+        return DeliveryOutcome.SUCCESS
+    if not fallback and result.error == DELIVERY_ERROR_RELAY_TOO_LARGE:
+        # Deterministic: the frame is over the relay's body cap and
+        # will be on every retry too (media does not ride this
+        # transport). Retrying spends the whole attempt budget
+        # re-deriving one length compare and then reports a
+        # permanent condition as a transient one. The transport
+        # already logged a WARNING naming the peer, event type and
+        # size, so this drop is not silent.
+        return DeliveryOutcome.PERMANENT
+    return DeliveryOutcome.TRANSIENT
+
+
+def _build_gfs_route_resolver(
+    *,
+    federation_repo: AbstractFederationRepo,
+    gfs_connection_repo: AbstractGfsConnectionRepo,
+) -> Callable[[str], Awaitable[list[str]]]:
+    """The relay-route resolver :class:`FederationTransport` reads per send.
+
+    Maps a paired peer's confirmed routes (``peer_gfs_routes`` — each one
+    of OUR ``gfs_connections`` ids) to the base URLs of those connections,
+    keeping only connections that are active right now, in the routes'
+    stable order. ``gfs_connections.inbox_url`` is the server's base URL.
+    """
+
+    async def _resolve(instance_id: str) -> list[str]:
+        routes = await federation_repo.list_gfs_routes(instance_id)
+        if not routes:
+            return []
+        active = {
+            conn.id: conn.inbox_url
+            for conn in await gfs_connection_repo.list_active()
+            if conn.status == "active" and conn.inbox_url
+        }
+        return [
+            active[route.gfs_connection_id]
+            for route in routes
+            if route.gfs_connection_id in active
+        ]
+
+    return _resolve
+
+
+def _build_gfs_relay_inbound(
+    *,
+    federation_service: FederationService,
+    keywrap_private_key: bytes,
+    invite_coordinator: SpaceInviteTokenRedeemCoordinator,
+    gfs_connection_repo: AbstractGfsConnectionRepo,
+    rate_limiter: RateLimiter,
+) -> GfsRelayInbound:
+    """Build the inbound leg of the connection-server envelope relay."""
+    return GfsRelayInbound(
+        federation=federation_service,
+        keywrap_private_key=keywrap_private_key,
+        invite_coordinator=invite_coordinator,
+        gfs_connection_repo=gfs_connection_repo,
+        rate_limiter=rate_limiter,
+    )
 
 
 def _wire_space_authority_rotation(
@@ -3365,6 +3479,16 @@ def create_app(config: Config | None = None) -> web.Application:
             key_manager=key_manager,
             rate_limiter=limiter,
         )
+        # Inbound leg of the relay: owns the socket's ``envelope`` frames,
+        # sends relayed §24.11 envelopes (link-joined or paired peers) to
+        # the pipeline and bootstrap bodies to the coordinator above.
+        gfs_relay_inbound = _build_gfs_relay_inbound(
+            federation_service=federation_service,
+            keywrap_private_key=identity.keywrap_private_key,
+            invite_coordinator=invite_redeem_coordinator,
+            gfs_connection_repo=repos.gfs_connection,
+            rate_limiter=limiter,
+        )
         # #117 followup — federate SPACE_POST_CREATED outbound so
         # remote members on other households actually receive posts
         # in spaces they belong to. The inbound side was already
@@ -3463,6 +3587,12 @@ def create_app(config: Config | None = None) -> web.Application:
             # the bootstrap redeem uses — one HTTP client, one capability
             # cache, one footprint on that server.
             gfs_relay=GfsRelayTransport(relay_sender=gfs_envelope_sender),
+            # The same tier as a last-resort fallback for paired peers we
+            # opted into the relay with, over their confirmed routes.
+            gfs_routes=_build_gfs_route_resolver(
+                federation_repo=repos.federation,
+                gfs_connection_repo=repos.gfs_connection,
+            ),
             signaling_send=_signaling_send,
             ice_servers=fed_ice_servers,
             inbound_handler=federation_service.handle_inbound_rtc,
@@ -3554,18 +3684,16 @@ def create_app(config: Config | None = None) -> web.Application:
                 gfs_channels=gfs_channels,
             )
 
-        # §D2b inbound leg — the GFS pushes ``{type:"envelope", sealed}``
+        # Relay inbound leg — the GFS pushes ``{type:"envelope", sealed}``
         # when another household sealed a blob addressed to this one (an
-        # invite redeem from a stranger, or the issuer's sealed reply).
-        # The frame carries nothing else: every check the coordinator runs
-        # reads material from inside the ciphertext. ``gfs_url`` is bound
-        # per connection by the supervisor so the reply goes back out the
-        # server the request arrived on.
+        # invite redeem from a stranger, the issuer's sealed reply, or a
+        # relayed §24.11 envelope from a link-joined or paired peer). The
+        # frame carries nothing else: every check reads material from
+        # inside the ciphertext. ``gfs_url`` is bound per connection by the
+        # supervisor so a reply goes back out the server the request
+        # arrived on.
         async def _on_gfs_envelope(frame: dict, *, gfs_url: str = "") -> None:
-            await invite_redeem_coordinator.handle_relayed_envelope(
-                {"sealed": frame.get("sealed")},
-                gfs_url=gfs_url,
-            )
+            await gfs_relay_inbound.handle_frame(frame, gfs_url=gfs_url)
 
         # Re-fetch the GFS's current server_name on each WS (re)connect and
         # refresh the stored display_name if the operator renamed the

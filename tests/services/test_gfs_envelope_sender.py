@@ -25,7 +25,7 @@ from socialhome.federation.invite_bootstrap import EnvelopeRelayThrottled
 from socialhome.services.gfs_envelope_sender import (
     EnvelopeRelayUnavailable,
     GfsEnvelopeSender,
-    _normalize_base,
+    normalize_gfs_base,
 )
 
 
@@ -140,12 +140,14 @@ def _wire(fake, http_session, *, conns=None):
 
 
 def test_normalize_base_ignores_case_slash_and_path():
-    assert _normalize_base("https://GFS.example.org/") == "https://gfs.example.org"
-    assert _normalize_base("https://gfs.example.org/gfs") == "https://gfs.example.org"
+    assert normalize_gfs_base("https://GFS.example.org/") == "https://gfs.example.org"
+    assert (
+        normalize_gfs_base("https://gfs.example.org/gfs") == "https://gfs.example.org"
+    )
 
 
 def test_normalize_base_keeps_the_port():
-    assert _normalize_base("http://localhost:8124") == "http://localhost:8124"
+    assert normalize_gfs_base("http://localhost:8124") == "http://localhost:8124"
 
 
 # ── Happy path ────────────────────────────────────────────────────────────

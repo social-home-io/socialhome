@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from .pending_seat_buffer import PendingSeatBuffer
     from .route_discovery import RouteDiscoveryService
     from .routed_envelope import SpaceRoutedHandler
+    from .transport import FederationTransport
 
 from ..crypto import (
     REPLAY_CACHE_WINDOW,
@@ -109,6 +110,7 @@ from .inbound_validator import (
     make_check_space_writer,
     make_check_replay,
     make_check_peer_class,
+    make_check_relay_opt_in,
     make_check_timestamp,
     make_check_unpairing,
     make_decrypt_and_parse,
@@ -505,6 +507,10 @@ class FederationService:
             # before any crypto, so an off-vocabulary envelope costs a
             # set lookup.
             make_check_peer_class(),
+            # Relay opt-in gate: a paired peer reaches us over the GFS
+            # relay only when we opted into the relay with it. Also before
+            # any crypto.
+            make_check_relay_opt_in(),
             make_check_timestamp(),
             make_verify_signature(encoder=self._encoder),
             # Unpair tombstone gate: a peer we unpaired while it was offline
@@ -782,6 +788,16 @@ class FederationService:
             FederationEventType.DM_RELAY,
             self._handle_dm_relay,
         )
+
+    @property
+    def transport(self) -> "FederationTransport | None":
+        """The attached :class:`FederationTransport` facade, or ``None``.
+
+        Read by the outbox redelivery, which reaches the relay tier
+        through :meth:`FederationTransport.send_via_gfs_relay` — the one
+        relay selection point — instead of growing a second copy of it.
+        """
+        return self._transport
 
     def attach_transport(self, transport) -> None:
         """Attach a :class:`FederationTransport` facade.

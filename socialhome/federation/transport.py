@@ -1485,6 +1485,29 @@ class _RtcPeer:
 # ─── Facade ────────────────────────────────────────────────────────────────
 
 
+#: A peer with no HTTPS inbox URL, no open DataChannel and no usable relay
+#: route (it did not opt into the relay, or no route is confirmed yet).
+#: Named rather than POSTed at the empty string, so the operator reads
+#: "no way to reach this household" instead of an HTTP failure.
+TRANSPORT_ERROR_NO_ROUTE = "no_route"
+
+#: :meth:`FederationTransport.send_via_gfs_relay` asked to relay to a paired
+#: peer we never opted into the relay with (``RemoteInstance.gfs_relay``).
+TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED = "gfs_relay_not_enabled"
+
+
+def https_failure_is_relayable(status: int | None) -> bool:
+    """Whether an HTTPS-inbox failure may fall back to the relay.
+
+    Only when the peer was NOT reached: a network error / timeout
+    (``None``) or a 5xx from whatever answers in front of it. A 4xx is a
+    deliberate answer from the peer's own pipeline (replay, ban, unknown
+    inbox, throttle) — the relay would hand the identical envelope to the
+    identical pipeline and earn the identical refusal.
+    """
+    return status is None or status >= 500
+
+
 def _relay_failure_reason(status: int | None) -> str:
     """Name a relay failure so the caller can decide whether to retry.
 
@@ -1548,6 +1571,8 @@ class FederationTransport:
         "_ice_prime_timeout_s",
         "_last_retire_at",
         "_closing",
+        "_gfs_routes",
+        "_relay_rr",
     )
 
     def __init__(
@@ -1556,6 +1581,7 @@ class FederationTransport:
         own_instance_id: str,
         https_inbox: HttpsInboxTransport,
         gfs_relay: "GfsRelayTransport | None" = None,
+        gfs_routes: Callable[[str], Awaitable[list[str]]] | None = None,
         signaling_send: Callable[
             [str, FederationEventType, dict], Awaitable[DeliveryResult]
         ],
@@ -1575,9 +1601,21 @@ class FederationTransport:
         #: the ONLY way to reach a household seated from an invite link
         #: (:data:`InstanceSource.SPACE_SESSION`): that pair deliberately
         #: never exchanged an address, so there is nothing for RTC to
-        #: signal towards and nothing for the HTTPS inbox to POST to.
+        #: signal towards and nothing for the HTTPS inbox to POST to. Also
+        #: the last-resort fallback for a paired peer that opted in
+        #: (``RemoteInstance.gfs_relay``), over its confirmed routes.
         #: ``None`` in tests and in builds with no connection server.
         self._gfs_relay = gfs_relay
+        #: ``instance_id`` → the connection-server base URLs of that paired
+        #: peer's confirmed relay routes (our own active connections only).
+        #: Read per send, so a route confirmed or expired a moment ago is
+        #: honoured at once. ``None`` disables the relay fallback for
+        #: paired peers (tests, builds with no connection server).
+        self._gfs_routes = gfs_routes
+        #: ``instance_id`` → next route index for the round-robin over
+        #: that peer's routes. In memory only: a restart starts at the
+        #: first route again, which is harmless.
+        self._relay_rr: dict[str, int] = {}
         self._signaling_send = signaling_send
         self._ice_servers = ice_servers or []
         self._peers: dict[str, _RtcPeer] = {}
@@ -1731,38 +1769,23 @@ class FederationTransport:
         instance: RemoteInstance,
         envelope_dict: dict,
     ) -> _TransportSendResult:
-        """Deliver ``envelope_dict`` to *instance*, RTC first, inbox on fallback.
+        """Deliver ``envelope_dict`` to *instance* over the best tier.
+
+        * A household seated from an invite link rides the relay only
+          (:meth:`send_via_gfs_relay`).
+        * Every other peer: RTC DataChannel first, then the HTTPS inbox,
+          then — only for a peer we opted into the relay with
+          (``RemoteInstance.gfs_relay``) and only when the inbox was not
+          reached or there is no inbox URL — the connection-server relay
+          over its confirmed routes.
 
         The envelope is unchanged across transports — the signature and
         AES-256-GCM payload are already baked in.
         """
-        # A household seated from an invite link has no address AT ALL,
-        # by design (§D2b): ``remote_inbox_url`` is empty and no RTC
-        # signalling can reach it, because signalling itself travels over
-        # the peer relationship this pair does not have. It rides the
-        # connection-server relay or it goes nowhere — never a fall-
-        # through to an HTTPS POST at the empty string.
         if instance.source is InstanceSource.SPACE_SESSION:
-            if self._gfs_relay is None:
-                log.warning(
-                    "fed send to %s needs the connection-server relay, "
-                    "which is not wired on this host",
-                    instance.id,
-                )
-                return _TransportSendResult(
-                    ok=False,
-                    via="gfs_relay",
-                    error="gfs_relay_unavailable",
-                )
-            ok, status = await self._gfs_relay.send(
+            return await self.send_via_gfs_relay(
                 instance=instance,
                 envelope_dict=envelope_dict,
-            )
-            return _TransportSendResult(
-                ok=ok,
-                via="gfs_relay",
-                status_code=status,
-                error=None if ok else _relay_failure_reason(status),
             )
 
         peer = self._peers.get(instance.id)
@@ -1830,18 +1853,177 @@ class FederationTransport:
         # :meth:`_evict_peer`. Without it, every outbound envelope
         # rebuilds the handshake and re-fails, hammering the failing
         # path indefinitely.
+        #
+        # Also for a peer with no inbox URL: its OFFER travels through
+        # ``send_event`` like any envelope, so with a relay route it rides
+        # the connection server and a DataChannel can still come up.
         if peer is None and not self._rtc_suppressed(instance.id):
             await self._ensure_handshake(instance)
+
+        if not instance.remote_inbox_url:
+            # Nothing to POST to — never a POST at the empty string. The
+            # relay is the only remaining tier, and only with our opt-in.
+            if instance.gfs_relay:
+                relayed = await self._send_over_routes(instance, envelope_dict)
+                if relayed is not None:
+                    return relayed
+            log.info(
+                "fed send to %s: no DataChannel, no inbox URL and no relay "
+                "route — queued until one exists",
+                instance.id,
+            )
+            return _TransportSendResult(
+                ok=False,
+                via="https",
+                error=TRANSPORT_ERROR_NO_ROUTE,
+            )
 
         ok, status = await self._https_inbox.send(
             instance=instance,
             envelope_dict=envelope_dict,
         )
+        if not ok and instance.gfs_relay and https_failure_is_relayable(status):
+            # Last-resort tier for a paired peer that opted in: the inbox
+            # did not answer, so try our confirmed relay routes before
+            # queueing the envelope for the outbox. Only an ACCEPTANCE is
+            # returned: a relay failure here (too large, throttled, down)
+            # must not replace the HTTPS outcome — the inbox may come back,
+            # so the caller still marks the peer unreachable and queues the
+            # envelope for retry exactly as without the relay tier.
+            # Too-large is permanent only where the relay is the sole tier.
+            relayed = await self._send_over_routes(instance, envelope_dict)
+            if relayed is not None and relayed.ok:
+                return relayed
         return _TransportSendResult(
             ok=ok,
             via="https",
             status_code=status,
             error=None if ok else "https_inbox_failed",
+        )
+
+    async def send_via_gfs_relay(
+        self,
+        *,
+        instance: RemoteInstance,
+        envelope_dict: dict,
+    ) -> _TransportSendResult:
+        """Deliver ``envelope_dict`` through the connection-server relay only.
+
+        The one relay selection point, shared by :meth:`send` and the
+        outbox redelivery:
+
+        * a household seated from an invite link
+          (:data:`InstanceSource.SPACE_SESSION`) goes to the server that
+          introduced the pair (``relay_via``) — its only transport;
+        * a paired peer goes round-robin over its confirmed routes, and
+          only when we opted into the relay with it
+          (``RemoteInstance.gfs_relay``).
+
+        Never raises; ``via`` is always ``"gfs_relay"``.
+        """
+        if instance.source is InstanceSource.SPACE_SESSION:
+            # A household seated from an invite link has no address AT
+            # ALL, by design (§D2b): ``remote_inbox_url`` is empty and no
+            # RTC signalling can reach it, because signalling itself
+            # travels over the peer relationship this pair does not have.
+            # It rides the connection-server relay or it goes nowhere —
+            # never a fall-through to an HTTPS POST at the empty string.
+            if self._gfs_relay is None:
+                log.warning(
+                    "fed send to %s needs the connection-server relay, "
+                    "which is not wired on this host",
+                    instance.id,
+                )
+                return _TransportSendResult(
+                    ok=False,
+                    via="gfs_relay",
+                    error="gfs_relay_unavailable",
+                )
+            ok, status = await self._gfs_relay.send(
+                instance=instance,
+                envelope_dict=envelope_dict,
+            )
+            return _TransportSendResult(
+                ok=ok,
+                via="gfs_relay",
+                status_code=status,
+                error=None if ok else _relay_failure_reason(status),
+            )
+        if not instance.gfs_relay:
+            return _TransportSendResult(
+                ok=False,
+                via="gfs_relay",
+                error=TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED,
+            )
+        relayed = await self._send_over_routes(instance, envelope_dict)
+        if relayed is not None:
+            return relayed
+        return _TransportSendResult(
+            ok=False,
+            via="gfs_relay",
+            error=TRANSPORT_ERROR_NO_ROUTE,
+        )
+
+    async def _send_over_routes(
+        self,
+        instance: RemoteInstance,
+        envelope_dict: dict,
+    ) -> _TransportSendResult | None:
+        """Round-robin one envelope over a paired peer's relay routes.
+
+        ``None`` when there is nothing to try (no relay tier, no resolver,
+        no confirmed route) so the caller keeps its own failure. Otherwise
+        each route is tried at most once, starting at the peer's rotating
+        index, and the first acceptance wins:
+
+        * :data:`RELAY_STATUS_TOO_LARGE` stops at once — the frame is over
+          the body cap on every server, so another route is a wasted seal;
+        * :data:`RELAY_STATUS_THROTTLED` moves on (the window is per
+          server), and is what the caller sees if no later route accepts,
+          so the send stays *waitable* rather than failed;
+        * anything else moves on and ends as a plain transient failure.
+        """
+        if self._gfs_relay is None or self._gfs_routes is None:
+            return None
+        try:
+            urls = await self._gfs_routes(instance.id)
+        except Exception:  # noqa: BLE001 — a transport must never raise
+            log.warning(
+                "fed relay: could not resolve relay routes for %s",
+                instance.id,
+                exc_info=True,
+            )
+            return None
+        if not urls:
+            return None
+        start = self._relay_rr.get(instance.id, 0) % len(urls)
+        self._relay_rr[instance.id] = (start + 1) % len(urls)
+        throttled = False
+        for offset in range(len(urls)):
+            url = urls[(start + offset) % len(urls)]
+            ok, status = await self._gfs_relay.send(
+                instance=instance,
+                envelope_dict=envelope_dict,
+                gfs_url=url,
+            )
+            if ok:
+                return _TransportSendResult(
+                    ok=True, via="gfs_relay", status_code=status
+                )
+            if status == RELAY_STATUS_TOO_LARGE:
+                return _TransportSendResult(
+                    ok=False,
+                    via="gfs_relay",
+                    status_code=status,
+                    error=_relay_failure_reason(status),
+                )
+            throttled = throttled or status == RELAY_STATUS_THROTTLED
+        status = RELAY_STATUS_THROTTLED if throttled else None
+        return _TransportSendResult(
+            ok=False,
+            via="gfs_relay",
+            status_code=status,
+            error=_relay_failure_reason(status),
         )
 
     async def send_media(

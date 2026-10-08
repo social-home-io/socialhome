@@ -773,7 +773,7 @@ class _RelayOnlyTransport:
         self._result = result
         self.calls = 0
 
-    async def send(self, *, instance, envelope_dict):
+    async def send_via_gfs_relay(self, *, instance, envelope_dict):
         self.calls += 1
         return self._result
 
@@ -860,6 +860,242 @@ async def test_redeliver_throttled_by_the_relay_stays_transient(env):
     outcome = await _redeliver_envelope(svc, fed_repo, entry)
 
     assert outcome is DeliveryOutcome.TRANSIENT
+
+
+# ─── The relay as a fallback for paired households (migration 0081) ──────
+
+
+async def _seat_paired_peer(fed_repo, kek, *, inbox="https://x/wh", gfs_relay=True):
+    """A QR-paired household that opted into the relay fallback."""
+    peer_kp = generate_identity_keypair()
+    wrapped = kek.encrypt(b"\x05" * 32)
+    peer = RemoteInstance(
+        id=derive_instance_id(peer_kp.public_key),
+        display_name="paired-peer",
+        remote_identity_pk=peer_kp.public_key.hex(),
+        key_self_to_remote=wrapped,
+        key_remote_to_self=wrapped,
+        remote_inbox_url=inbox,
+        local_inbox_id=f"wh-paired-{inbox or 'none'}-{gfs_relay}",
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+        remote_keywrap_pk="cc" * 32,
+        gfs_relay=gfs_relay,
+    )
+    await fed_repo.save_instance(peer)
+    return peer
+
+
+class _StatusResp:
+    def __init__(self, status, body='{"error": "unknown_inbox"}'):
+        self.status = status
+        self._body = body
+        self.headers: dict = {}
+
+    async def text(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _StatusClient:
+    def __init__(self, status=None):
+        self._status = status
+        self.posts = 0
+
+    def post(self, url, **kw):
+        self.posts += 1
+        if self._status is None:
+            raise ConnectionError("boom")
+        return _StatusResp(self._status)
+
+
+def _ok_relay():
+    return _RelayOnlyTransport(
+        _TransportSendResult(ok=True, via="gfs_relay", status_code=202),
+    )
+
+
+async def test_redeliver_addressless_paired_peer_rides_the_relay(env):
+    """(i) No inbox URL, opted in: the relay is the only tier — and its
+    202 is an acceptance, never a ``mark_reachable``."""
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, inbox="")
+    await fed_repo.mark_unreachable(peer.id)
+    relay = _ok_relay()
+    svc.attach_transport(relay)
+    client = _StatusClient(204)
+    svc._http_client = client
+    entry = _OutboxEntry(
+        id="e-p-relay",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is DeliveryOutcome.SUCCESS
+    assert relay.calls == 1
+    assert client.posts == 0
+    row = await fed_repo.get_instance(peer.id)
+    assert row is not None and row.unreachable_since is not None
+    assert svc.last_relay_accepted_at(peer.id) is not None
+
+
+async def test_redeliver_addressless_paired_peer_too_large_is_permanent(env):
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, inbox="")
+    svc.attach_transport(
+        _RelayOnlyTransport(
+            _TransportSendResult(
+                ok=False,
+                via="gfs_relay",
+                status_code=413,
+                error=DELIVERY_ERROR_RELAY_TOO_LARGE,
+            ),
+        ),
+    )
+    entry = _OutboxEntry(
+        id="e-p-big",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    assert await _redeliver_envelope(svc, fed_repo, entry) is (
+        DeliveryOutcome.PERMANENT
+    )
+
+
+async def test_redeliver_addressless_peer_without_the_opt_in_never_relays(env):
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, inbox="", gfs_relay=False)
+    relay = _ok_relay()
+    svc.attach_transport(relay)
+    svc._http_client = _StatusClient(None)
+    entry = _OutboxEntry(
+        id="e-p-off",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is DeliveryOutcome.TRANSIENT
+    assert relay.calls == 0
+
+
+@pytest.mark.parametrize("status", [None, 500, 503])
+async def test_redeliver_falls_back_to_the_relay_when_https_is_down(env, status):
+    """(ii) Network error / 5xx on the inbox: the opted-in peer gets the
+    relay before the entry is rescheduled."""
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek)
+    relay = _ok_relay()
+    svc.attach_transport(relay)
+    client = _StatusClient(status)
+    svc._http_client = client
+    entry = _OutboxEntry(
+        id=f"e-p-{status}",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    outcome = await _redeliver_envelope(svc, fed_repo, entry)
+
+    assert outcome is DeliveryOutcome.SUCCESS
+    assert client.posts == 1
+    assert relay.calls == 1
+    assert svc.last_relay_accepted_at(peer.id) is not None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [None, DELIVERY_ERROR_RELAY_TOO_LARGE, DELIVERY_ERROR_RELAY_THROTTLED],
+)
+async def test_redeliver_relay_fallback_failure_stays_transient(env, error):
+    """The inbox may come back: a failed (even too-large) relay attempt
+    after an HTTPS failure keeps the entry's retry."""
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek)
+    relay = _RelayOnlyTransport(
+        _TransportSendResult(ok=False, via="gfs_relay", error=error),
+    )
+    svc.attach_transport(relay)
+    svc._http_client = _StatusClient(502)
+    entry = _OutboxEntry(
+        id=f"e-p-fail-{error}",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    assert await _redeliver_envelope(svc, fed_repo, entry) is (
+        DeliveryOutcome.TRANSIENT
+    )
+    assert relay.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (403, DeliveryOutcome.PERMANENT),
+        (410, DeliveryOutcome.PERMANENT),
+        (404, DeliveryOutcome.TRANSIENT),
+        (429, DeliveryOutcome.TRANSIENT),
+    ],
+)
+async def test_redeliver_a_4xx_never_falls_back_to_the_relay(env, status, expected):
+    """A 4xx is the peer's own deliberate answer — the relay would hand the
+    same bytes to the same pipeline."""
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek)
+    relay = _ok_relay()
+    svc.attach_transport(relay)
+    svc._http_client = _StatusClient(status)
+    entry = _OutboxEntry(
+        id=f"e-p-4xx-{status}",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    assert await _redeliver_envelope(svc, fed_repo, entry) is expected
+    assert relay.calls == 0
+
+
+async def test_redeliver_https_failure_without_the_opt_in_never_relays(env):
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek, gfs_relay=False)
+    relay = _ok_relay()
+    svc.attach_transport(relay)
+    svc._http_client = _StatusClient(None)
+    entry = _OutboxEntry(
+        id="e-p-noopt",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    assert await _redeliver_envelope(svc, fed_repo, entry) is (
+        DeliveryOutcome.TRANSIENT
+    )
+    assert relay.calls == 0
+
+
+async def test_redeliver_https_failure_without_a_transport_stays_transient(env):
+    svc, fed_repo, kek = env
+    peer = await _seat_paired_peer(fed_repo, kek)
+    svc._http_client = _StatusClient(None)
+    entry = _OutboxEntry(
+        id="e-p-notransport",
+        instance_id=peer.id,
+        payload_json=_stored_envelope_json(svc, to_instance=peer.id),
+    )
+
+    assert await _redeliver_envelope(svc, fed_repo, entry) is (
+        DeliveryOutcome.TRANSIENT
+    )
 
 
 async def test_redeliver_does_not_follow_a_redirect_to_another_host(env):

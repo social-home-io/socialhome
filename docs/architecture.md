@@ -221,7 +221,7 @@ event needs and whether the peer is reachable:
 | 1 — hot | WebRTC DataChannel `fed-v1` | Routine, real-time envelopes once the P2P channel is up. |
 | 2 — warm | WebRTC DataChannel `sync-v1` | Bulk content sync (initial sync after pairing, recovery after long offline). |
 | 3 — cold | HTTPS inbox `POST /federation/inbox/{id}` | Fallback before/while DataChannel is down, and for peers behind a blocked UDP path. |
-| 4 — no address | Connection-server envelope relay `POST {gfs}/gfs/envelope` | Households seated from an invite link (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. |
+| 4 — no address / last resort | Connection-server envelope relay `POST {gfs}/gfs/envelope` | Households seated from an invite link (§D2b): the pair never exchanged an address, so tiers 1-3 have nothing to dial. Also the last-resort fallback for a **paired** household this household opted into the relay with (`remote_instances.gfs_relay`), over its confirmed `peer_gfs_routes`. |
 
 **Redirects.** Every outbound POST to a household inbox — tier 3 and outbox
 redelivery (a connection server never POSTs to a household: it holds no
@@ -235,9 +235,31 @@ host names only. Calls to a connection server (and GFS cluster peers) pass
 `allow_redirects=False` outright; `tests/test_peer_http.py` guards both.
 
 Tier 4 is a `TransportStrategy` like the others
-(`federation/gfs_relay_transport.GfsRelayTransport`), selected in
-`FederationTransport.send` on `source = space_session` and never for a
-peer that has an address. Because the connection server is a third party
+(`federation/gfs_relay_transport.GfsRelayTransport`). `FederationTransport`
+selects it in two cases:
+
+- `source = space_session` — the only tier, to the connection server that
+  introduced the pair (`relay_via`).
+- `source = manual` with our `gfs_relay` opt-in on — the **fallback**: RTC
+  if the DataChannel is open, else the HTTPS inbox, and only when the inbox
+  was not reached (network error, timeout, 5xx — never a 4xx, which is the
+  peer's own pipeline answering) or the peer has no inbox URL at all, the
+  relay. Routes are this household's own `gfs_connections` rows confirmed
+  for the peer (`peer_gfs_routes`; only active connections count); sends
+  round-robin over them with a per-peer in-memory index, trying each route
+  at most once, so one send can still land when one server is down. A
+  throttled server moves on to the next route; a too-large frame stops at
+  once. As a fallback only an acceptance counts: any relay failure
+  reports the original HTTPS failure, so the envelope is queued for
+  retry and the peer marked unreachable exactly as without the relay.
+  Only where the relay is the sole tier (no inbox URL) does a throttle
+  surface as the waitable `relay_throttled` and a too-large frame as
+  permanent. With no URL the RTC offer is still kicked — it rides the relay
+  like any other envelope, so a DataChannel can come up later. The outbox
+  redelivery reaches the same selection point
+  (`FederationTransport.send_via_gfs_relay`). Without the opt-in or a
+  route, a paired peer is never relayed, and the §24.11 pipeline refuses a
+  relayed envelope from it (`make_check_relay_opt_in`). Because the connection server is a third party
 — not a household — the whole §24.11 envelope (its routing fields are
 plaintext by construction) is sealed to the peer's static X25519 key-wrap
 key before the relay sees it, so the *wire* carries only `(to_instance,
@@ -272,7 +294,12 @@ validation pipeline (parse → timestamp → instance lookup → ban check
 → Ed25519 verify → replay cache → decrypt → authorize → dispatch).
 Whether an envelope arrives over RTC, HTTPS or the connection-server
 relay is invisible to the per-event handlers; every path lands in
-`federation/inbound_validator.InboundPipeline`.
+`federation/inbound_validator.InboundPipeline`. Relayed frames enter
+through `services/gfs_relay_inbound.GfsRelayInbound`, which throttles,
+unseals with the household's key-wrap key and routes on the sealed
+`kind`: §24.11 envelopes to the pipeline (with `RELAY_DELIVERED_VIA`
+naming our own `gfs_connections.id` for the delivering server during the
+dispatch), invite-bootstrap bodies to the redeem coordinator.
 
 The authorize steps run **after** the replay-id is persisted, so a
 dropped envelope still answers 200 and the sender's outbox stops

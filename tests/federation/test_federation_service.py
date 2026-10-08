@@ -43,7 +43,10 @@ from socialhome.domain.events import ConnectionReachable
 from socialhome.federation import FederationService
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
-from socialhome.federation.transport import _TransportSendResult
+from socialhome.federation.transport import (
+    FederationTransport,
+    _TransportSendResult,
+)
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.media_framing import (
     MEDIA_AEAD_SUITE_AESGCM_256,
@@ -4209,6 +4212,131 @@ async def test_a_relay_acceptance_never_marks_the_peer_reachable():
     assert result.via == "gfs_relay"
     assert fed_repo.reachable_calls == []
     assert seen == []
+
+
+class _DownInbox:
+    """An HTTPS inbox nobody answers (network error)."""
+
+    async def send(self, *, instance, envelope_dict):
+        return False, None
+
+
+class _AcceptingRelay:
+    def __init__(self) -> None:
+        self.urls: list[str | None] = []
+
+    async def send(self, *, instance, envelope_dict, gfs_url=None):
+        self.urls.append(gfs_url)
+        return True, 202
+
+
+@pytest.mark.asyncio
+async def test_a_paired_peer_reached_only_through_the_relay_is_not_marked_reachable():
+    """The relay fallback for an opted-in PAIRED peer goes through the same
+    acceptance-is-not-delivery rule as a link-joined one: the HTTPS inbox
+    failed, the relay took it — ``note_relay_accepted``, never
+    ``mark_reachable``."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, _ = _make_remote_instance(km)
+    inst = dataclasses.replace(
+        inst,
+        source=InstanceSource.MANUAL,
+        gfs_relay=True,
+        remote_keywrap_pk="cc" * 32,
+        unreachable_since="2026-09-18T00:00:00+00:00",
+    )
+    await fed_repo.save_instance(inst)
+
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    relay = _AcceptingRelay()
+
+    async def _routes(_instance_id: str) -> list[str]:
+        return ["https://gfs.example.org"]
+
+    async def _no_signal(*_a, **_kw):
+        return None
+
+    transport = FederationTransport(
+        own_instance_id=svc.own_instance_id,
+        https_inbox=_DownInbox(),
+        gfs_relay=relay,
+        gfs_routes=_routes,
+        signaling_send=_no_signal,
+    )
+    transport.mark_ice_primed()
+    # No RTC in this test — the handshake path is covered elsewhere.
+    transport._rtc_suppressed_until[inst.id] = float("inf")
+    svc.attach_transport(transport)
+
+    result = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.USER_UPDATED,
+        payload={"user_id": "abc"},
+    )
+
+    assert result.ok is True
+    assert result.via == "gfs_relay"
+    assert relay.urls == ["https://gfs.example.org"]
+    assert fed_repo.reachable_calls == []
+    assert svc.last_relay_accepted_at(inst.id) is not None
+
+
+class _TooLargeRelay:
+    async def send(self, *, instance, envelope_dict, gfs_url=None):
+        return False, 413
+
+
+@pytest.mark.asyncio
+async def test_a_too_large_fallback_relay_still_queues_the_envelope():
+    """Review fix: inbox down (network error) + relay refuses the frame as
+    too large → the envelope must be QUEUED for HTTPS retry, and the peer
+    marked unreachable, exactly as before the relay tier existed. Too-large
+    is permanent only when the relay is the peer's sole tier."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, _ = _make_remote_instance(km)
+    inst = dataclasses.replace(
+        inst,
+        source=InstanceSource.MANUAL,
+        gfs_relay=True,
+        remote_keywrap_pk="cc" * 32,
+    )
+    await fed_repo.save_instance(inst)
+    outbox = InMemoryOutboxRepo()
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox,
+        key_manager=km,
+    )
+
+    async def _routes(_instance_id: str) -> list[str]:
+        return ["https://gfs.example.org"]
+
+    async def _no_signal(*_a, **_kw):
+        return None
+
+    transport = FederationTransport(
+        own_instance_id=svc.own_instance_id,
+        https_inbox=_DownInbox(),
+        gfs_relay=_TooLargeRelay(),
+        gfs_routes=_routes,
+        signaling_send=_no_signal,
+    )
+    transport.mark_ice_primed()
+    transport._rtc_suppressed_until[inst.id] = float("inf")
+    svc.attach_transport(transport)
+
+    result = await svc.send_event(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.USER_UPDATED,
+        payload={"user_id": "abc"},
+    )
+
+    assert result.ok is False
+    assert result.error == DELIVERY_ERROR_QUEUED
+    assert fed_repo.unreachable_calls == [inst.id]
+    assert [e["instance_id"] for e in outbox.enqueued] == [inst.id]
 
 
 @pytest.mark.asyncio

@@ -9,12 +9,15 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from socialhome.domain.federation import (
+    GfsConnection,
     InstanceSource,
     PairingSession,
     PairingStatus,
+    PeerGfsRoute,
     RemoteInstance,
 )
 from socialhome.repositories.federation_repo import SqliteFederationRepo
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
 
 @pytest.fixture
@@ -1068,3 +1071,171 @@ async def test_member_version_survives_a_new_seat(env):
     await env.fed_repo.record_space_member_version("d", 51, "ab" * 32)
     await _seat(env, "sp2", "d")
     assert await env.fed_repo.get_space_member_version("d") == (51, "ab" * 32)
+
+
+# ─── GFS relay opt-in + routes (migration 0081) ──────────────────────────
+
+
+def _peer(peer_id: str = "peer-gfs", **kw) -> RemoteInstance:
+    base = dict(
+        id=peer_id,
+        display_name="Peer",
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="k1",
+        key_remote_to_self="k2",
+        remote_inbox_url="",
+        local_inbox_id=f"inbox-{peer_id}",
+        source=InstanceSource.MANUAL,
+    )
+    base.update(kw)
+    return RemoteInstance(**base)
+
+
+async def _gfs(env, gfs_id: str = "gfs-1") -> None:
+    await SqliteGfsConnectionRepo(env.db).save(
+        GfsConnection(
+            id=gfs_id,
+            gfs_instance_id=f"gi-{gfs_id}",
+            display_name="GFS",
+            public_key="pk",
+            inbox_url=f"https://{gfs_id}.example",
+            status="active",
+            paired_at="2026-01-01T00:00:00+00:00",
+        ),
+    )
+
+
+async def test_gfs_relay_defaults_off(env):
+    await env.fed_repo.save_instance(_peer())
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None and got.gfs_relay is False
+
+
+async def test_gfs_relay_round_trips_on_insert(env):
+    await env.fed_repo.save_instance(_peer(gfs_relay=True))
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None and got.gfs_relay is True
+
+
+async def test_set_gfs_relay_toggles(env):
+    await env.fed_repo.save_instance(_peer())
+    await env.fed_repo.set_gfs_relay("peer-gfs", enabled=True)
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None and got.gfs_relay is True
+    await env.fed_repo.set_gfs_relay("peer-gfs", enabled=False)
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None and got.gfs_relay is False
+
+
+async def test_save_instance_does_not_clobber_the_gfs_relay_opt_in(env):
+    """A rebuild-and-save (the pairing confirm does exactly this) must not
+    silently switch the relay off — the opt-in has its own setter."""
+    await env.fed_repo.save_instance(_peer())
+    await env.fed_repo.set_gfs_relay("peer-gfs", enabled=True)
+    await env.fed_repo.save_instance(_peer(display_name="Renamed"))
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None
+    assert got.display_name == "Renamed"
+    assert got.gfs_relay is True
+
+
+async def test_set_remote_keywrap_pk(env):
+    await env.fed_repo.save_instance(_peer())
+    await env.fed_repo.set_remote_keywrap_pk("peer-gfs", "cc" * 32)
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None and got.remote_keywrap_pk == "cc" * 32
+
+
+async def test_gfs_route_upsert_list_delete(env):
+    await env.fed_repo.save_instance(_peer())
+    await _gfs(env, "gfs-1")
+    await _gfs(env, "gfs-2")
+    await env.fed_repo.upsert_gfs_route("peer-gfs", "gfs-2", now="t1")
+    await env.fed_repo.upsert_gfs_route("peer-gfs", "gfs-1", now="t2")
+
+    routes = await env.fed_repo.list_gfs_routes("peer-gfs")
+    assert routes == [
+        PeerGfsRoute("peer-gfs", "gfs-2", confirmed_at="t1", last_ack_at="t1"),
+        PeerGfsRoute("peer-gfs", "gfs-1", confirmed_at="t2", last_ack_at="t2"),
+    ]
+
+    # A re-ack moves only ``last_ack_at``.
+    await env.fed_repo.upsert_gfs_route("peer-gfs", "gfs-2", now="t9")
+    routes = await env.fed_repo.list_gfs_routes("peer-gfs")
+    assert routes[0] == PeerGfsRoute(
+        "peer-gfs", "gfs-2", confirmed_at="t1", last_ack_at="t9"
+    )
+
+    await env.fed_repo.delete_gfs_route("peer-gfs", "gfs-2")
+    assert [
+        r.gfs_connection_id for r in await env.fed_repo.list_gfs_routes("peer-gfs")
+    ] == ["gfs-1"]
+
+
+async def test_gfs_routes_list_is_per_peer(env):
+    await env.fed_repo.save_instance(_peer("p1"))
+    await env.fed_repo.save_instance(_peer("p2"))
+    await _gfs(env)
+    await env.fed_repo.upsert_gfs_route("p1", "gfs-1", now="t1")
+    assert await env.fed_repo.list_gfs_routes("p2") == []
+
+
+async def test_delete_gfs_routes_older_than(env):
+    await env.fed_repo.save_instance(_peer())
+    await _gfs(env, "gfs-1")
+    await _gfs(env, "gfs-2")
+    old = "2026-01-01T00:00:00+00:00"
+    fresh = "2026-06-01T00:00:00+00:00"
+    await env.fed_repo.upsert_gfs_route("peer-gfs", "gfs-1", now=old)
+    await env.fed_repo.upsert_gfs_route("peer-gfs", "gfs-2", now=fresh)
+
+    removed = await env.fed_repo.delete_gfs_routes_older_than(
+        "2026-03-01T00:00:00+00:00"
+    )
+
+    assert removed == 1
+    assert [
+        r.gfs_connection_id for r in await env.fed_repo.list_gfs_routes("peer-gfs")
+    ] == ["gfs-2"]
+
+
+async def test_gfs_routes_cascade_with_the_peer(env):
+    await env.fed_repo.save_instance(_peer())
+    await _gfs(env)
+    await env.fed_repo.upsert_gfs_route("peer-gfs", "gfs-1", now="t1")
+    await env.fed_repo.delete_instance("peer-gfs")
+    await env.fed_repo.save_instance(_peer())
+    assert await env.fed_repo.list_gfs_routes("peer-gfs") == []
+
+
+async def test_gfs_routes_cascade_with_the_gfs_connection(env):
+    await env.fed_repo.save_instance(_peer())
+    await _gfs(env)
+    await env.fed_repo.upsert_gfs_route("peer-gfs", "gfs-1", now="t1")
+    await SqliteGfsConnectionRepo(env.db).delete("gfs-1")
+    assert await env.fed_repo.list_gfs_routes("peer-gfs") == []
+
+
+async def test_save_instance_without_a_keywrap_key_keeps_the_stored_one(env):
+    """A rebuild-and-save that does not carry the key (the pairing confirm
+    rebuilds the row from scratch) must not wipe it while the relay opt-in
+    stays on — the relay would then have nothing to seal to."""
+    await env.fed_repo.save_instance(_peer(remote_keywrap_pk="cc" * 32))
+    await env.fed_repo.set_gfs_relay("peer-gfs", enabled=True)
+    await env.fed_repo.save_instance(_peer(remote_keywrap_pk=None))
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None
+    assert got.remote_keywrap_pk == "cc" * 32
+    assert got.gfs_relay is True
+
+
+async def test_save_instance_with_a_new_keywrap_key_replaces_it(env):
+    """A space-session re-seat brings a freshly verified key — it wins."""
+    await env.fed_repo.save_instance(
+        _peer(source=InstanceSource.SPACE_SESSION, remote_keywrap_pk="cc" * 32),
+    )
+    await env.fed_repo.save_instance(
+        _peer(source=InstanceSource.SPACE_SESSION, remote_keywrap_pk="dd" * 32),
+    )
+    got = await env.fed_repo.get_instance("peer-gfs")
+    assert got is not None and got.remote_keywrap_pk == "dd" * 32

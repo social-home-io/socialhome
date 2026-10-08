@@ -14,6 +14,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from socialhome._version import __version__
 from socialhome.app_keys import gfs_connection_service_key, http_session_key
 from socialhome.app import (
+    _build_gfs_relay_inbound,
+    _build_gfs_route_resolver,
     MAP_TILE_USER_AGENT,
     _build_link_previews,
     create_app,
@@ -24,6 +26,15 @@ from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
 )
 from socialhome.config import Config
+from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation import (
+    GfsConnection,
+    InstanceSource,
+    RemoteInstance,
+)
+from socialhome.repositories.federation_repo import SqliteFederationRepo
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.outbound_fetch import OutboundFetcher
 from socialhome.services.app_federation_service import AppFederationService
@@ -505,3 +516,70 @@ async def test_gfs_publishes_ride_a_cookie_less_session(tmp_dir):
         assert isinstance(publish.cookie_jar, aiohttp.DummyCookieJar)
         assert publish.closed is False
     assert publish.closed is True
+
+
+# ─── GFS relay tier wiring ───────────────────────────────────────────────
+
+
+async def test_gfs_route_resolver_maps_routes_to_active_connection_urls(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "routes.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        fed_repo = SqliteFederationRepo(db)
+        gfs_repo = SqliteGfsConnectionRepo(db)
+        await fed_repo.save_instance(
+            RemoteInstance(
+                id="peer-1",
+                display_name="Peer",
+                remote_identity_pk="aa" * 32,
+                key_self_to_remote="k1",
+                key_remote_to_self="k2",
+                remote_inbox_url="",
+                local_inbox_id="inbox-peer-1",
+                source=InstanceSource.MANUAL,
+            ),
+        )
+        for gfs_id, status in (
+            ("gfs-a", "active"),
+            ("gfs-b", "suspended"),
+            ("gfs-c", "active"),
+        ):
+            await gfs_repo.save(
+                GfsConnection(
+                    id=gfs_id,
+                    gfs_instance_id=f"gi-{gfs_id}",
+                    display_name=gfs_id,
+                    public_key="pk",
+                    inbox_url=f"https://{gfs_id}.example.org",
+                    status=status,
+                    paired_at="2026-01-01T00:00:00+00:00",
+                ),
+            )
+        await fed_repo.upsert_gfs_route("peer-1", "gfs-c", now="2026-01-01")
+        await fed_repo.upsert_gfs_route("peer-1", "gfs-b", now="2026-01-02")
+        await fed_repo.upsert_gfs_route("peer-1", "gfs-a", now="2026-01-03")
+
+        resolve = _build_gfs_route_resolver(
+            federation_repo=fed_repo,
+            gfs_connection_repo=gfs_repo,
+        )
+
+        # Route order kept; the suspended connection dropped.
+        assert await resolve("peer-1") == [
+            "https://gfs-c.example.org",
+            "https://gfs-a.example.org",
+        ]
+        assert await resolve("nobody") == []
+    finally:
+        await db.shutdown()
+
+
+def test_build_gfs_relay_inbound_returns_the_service():
+    svc = _build_gfs_relay_inbound(
+        federation_service=object(),  # type: ignore[arg-type]
+        keywrap_private_key=b"k" * 32,
+        invite_coordinator=object(),  # type: ignore[arg-type]
+        gfs_connection_repo=object(),  # type: ignore[arg-type]
+        rate_limiter=None,  # type: ignore[arg-type]
+    )
+    assert isinstance(svc, GfsRelayInbound)

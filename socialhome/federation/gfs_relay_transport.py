@@ -1,4 +1,4 @@
-"""Deliver §24.11 envelopes to a link-joined household via the GFS relay.
+"""Deliver §24.11 envelopes through the GFS envelope relay.
 
 A household that joined a space from an invite link (§D2b,
 :mod:`socialhome.federation.invite_bootstrap`) is seated on both sides as
@@ -13,6 +13,14 @@ This module is the third transport tier: a
 :class:`~socialhome.federation.strategies.TransportStrategy` that carries
 an ordinary §24.11 envelope over the same opaque
 ``POST {gfs}/gfs/envelope`` relay the invite bootstrap used.
+
+The same tier is the last-resort fallback for a **paired** household
+(``source = manual``) that this household opted into the relay with
+(``RemoteInstance.gfs_relay``), when neither the DataChannel nor the
+HTTPS inbox reaches it. Such a peer may share several connection servers
+with us; the facade passes one confirmed route per attempt as
+``gfs_url`` (round-robin, :class:`~socialhome.federation.transport
+.FederationTransport`).
 
 ## Why the envelope is sealed again
 
@@ -73,12 +81,12 @@ belongs to. The relay leg carries two unrelated things through one
 socket — bootstrap redeem bodies and full federation envelopes — and
 guessing from field shape ("does it have ``msg_id``?") is exactly the
 kind of sniffing that rots. The receiver
-(:meth:`~socialhome.federation.invite_token_redeem
-.SpaceInviteTokenRedeemCoordinator.handle_relayed_envelope`) dispatches
-on this marker and hands the inner envelope to the **unmodified §24.11
-pipeline**: instance lookup by ``from_instance`` → timestamp → signature
-under the pair key → replay → decrypt → idempotency → ban → dispatch.
-Nothing about riding the relay skips a step.
+(:meth:`~socialhome.services.gfs_relay_inbound.GfsRelayInbound
+.handle_frame`) dispatches on this marker and hands the inner envelope to
+the **unmodified §24.11 pipeline**: instance lookup by ``from_instance`` →
+peer-class and relay-opt-in gates → timestamp → signature under the pair
+key → replay → decrypt → idempotency → ban → dispatch. Nothing about
+riding the relay skips a step.
 
 ## What does not fit
 
@@ -204,8 +212,10 @@ class GfsRelayTransport:
     """:class:`TransportStrategy` over the connection server's envelope relay.
 
     Selected by :class:`~socialhome.federation.transport.FederationTransport`
-    for peers seated from an invite link (``source = space_session``);
-    every other peer keeps the RTC-first / HTTPS-fallback path untouched.
+    for peers seated from an invite link (``source = space_session``) —
+    their only transport — and, as the last-resort tier after RTC and the
+    HTTPS inbox, for paired peers that opted into the relay
+    (``RemoteInstance.gfs_relay``), once per confirmed route.
 
     Never raises on a transport-level failure — like every transport it
     answers ``(False, status)`` so the caller records the failure and
@@ -231,22 +241,26 @@ class GfsRelayTransport:
         *,
         instance: RemoteInstance,
         envelope_dict: dict,
+        gfs_url: str | None = None,
     ) -> tuple[bool, int | None]:
         """Seal ``envelope_dict`` to *instance* and hand it to the relay.
 
         ``instance.remote_keywrap_pk`` is the peer's static X25519
         key-wrap key, verified bound to its identity key at seat time
-        (:func:`~socialhome.federation.keywrap_seal.verify_keywrap_binding`);
-        ``instance.relay_via`` names the connection server that
-        introduced the pair. A row missing either cannot be reached and
-        fails closed — never a fall-through to an HTTPS POST at the
-        empty inbox URL.
+        (:func:`~socialhome.federation.keywrap_seal.verify_keywrap_binding`).
+        The connection server is ``gfs_url`` when given — a paired peer's
+        confirmed route, one of THIS household's connection servers —
+        otherwise ``instance.relay_via``, the server that introduced a
+        link-joined pair. A row with no usable key-wrap key cannot be
+        reached and fails closed — never a fall-through to an HTTPS POST
+        at an inbox URL. The server URL only picks which of our
+        connections carries the blob; it never enters the blob.
         """
         keywrap_pk = instance.remote_keywrap_pk or ""
         if not keywrap_pk:
             log.warning(
                 "gfs relay: no key-wrap key stored for %s — cannot seal "
-                "an envelope to a household seated from an invite link",
+                "an envelope for the connection-server relay",
                 instance.id,
             )
             return False, None
@@ -267,8 +281,8 @@ class GfsRelayTransport:
             # frame is structurally too big for this transport".
             log.warning(
                 "gfs relay: refusing a %d-byte %r envelope for %s — the "
-                "relay body cap is %d bytes (media does not flow to "
-                "households seated from an invite link yet)",
+                "relay body cap is %d bytes (media does not flow over the "
+                "connection-server relay)",
                 raw_len,
                 envelope_dict.get("event_type"),
                 instance.id,
@@ -317,12 +331,14 @@ class GfsRelayTransport:
             ok = await self._sender.send_sealed_envelope(
                 to_instance_id=instance.id,
                 envelope={"to_instance": instance.id, "sealed": sealed},
-                # The connection server that introduced this pair — the
-                # only relay known to reach the peer. Empty means "any
-                # relay this household can use", which is correct only
-                # for a single-server household; a stored value keeps a
-                # multi-server household answering where the peer listens.
-                gfs_url=instance.relay_via or "",
+                # An explicit route (a paired peer's confirmed server) or
+                # the connection server that introduced a link-joined
+                # pair — the only relay known to reach the peer. Empty
+                # means "any relay this household can use", which is
+                # correct only for a single-server household; a stored
+                # value keeps a multi-server household answering where
+                # the peer listens.
+                gfs_url=gfs_url if gfs_url is not None else (instance.relay_via or ""),
             )
         except EnvelopeRelayThrottled:
             # Back-pressure, not a failure: the relay is up and the blob

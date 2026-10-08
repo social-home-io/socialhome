@@ -206,9 +206,11 @@ redeemer's key-wrap key — which rode *inside* the request.
   INFO with the server's name and never the blob.
 - **In:** the GFS pushes `{"type":"envelope","sealed":{…}}` on `/gfs/ws`;
   `services/gfs_ws_client.py` routes it to
-  `SpaceInviteTokenRedeemCoordinator.handle_relayed_envelope`, which opens
-  and validates it (the fail-closed order below). Unknown frame types keep
-  being ignored at DEBUG.
+  `services/gfs_relay_inbound.GfsRelayInbound.handle_frame`, which
+  throttles, opens it and routes on the sealed `kind` — bootstrap bodies
+  to `SpaceInviteTokenRedeemCoordinator.handle_bootstrap_body` (the
+  fail-closed order below), relayed §24.11 envelopes to the pipeline.
+  Unknown frame types keep being ignored at DEBUG.
 - **Which server:** the blob is minted per connection server, so the
   redeemer hands its request to the one that served the invite
   (`InviteBootstrapHint.gfs_url`) and the issuer answers on the one the
@@ -738,8 +740,27 @@ federation envelope between such a pair is carried by the same
 (`federation/gfs_relay_transport.py`) — never RTC signalling (which
 itself travels over the peer relationship this pair does not have) and
 never the HTTPS inbox (there is no URL; a fall-through would POST at the
-empty string). Every other peer keeps the unchanged RTC-first /
-HTTPS-fallback path.
+empty string). Every other peer keeps the RTC-first / HTTPS-fallback
+path, with one addition below.
+
+**Paired households may use the same relay as a last resort.** A QR- or
+auto-paired peer (`source = manual`) is relayed only when this household
+opted into the relay with it (`remote_instances.gfs_relay`) and holds at
+least one confirmed route for it (`peer_gfs_routes` — each route is one of
+OUR `gfs_connections` rows; the peer's server ids are never stored). The
+order is RTC → HTTPS inbox → relay: the relay is tried when the inbox was
+not reached (network error, timeout, 5xx; never on a 4xx, which is the
+peer's own pipeline answering) or when the peer has no inbox URL at all,
+round-robin over the routes, each at most once per send. The wire is the
+identical sealed `{to_instance, sealed}` body — the route only picks which
+of our connections carries it, and nothing about it enters the blob. On
+the receiving side the §24.11 pipeline's **relay opt-in** gate
+(`make_check_relay_opt_in`) refuses a relayed envelope from a paired peer
+whose `gfs_relay` is off, so a peer cannot move the pair onto a connection
+server on its own. No new event type, no `proto_version` bump: the
+receiver's inbound path is unchanged. Discovering and confirming routes,
+and opting in at pairing, are separate follow-ups — until they land no
+paired peer has a route, so the fallback is inert.
 
 **The envelope is sealed a second time.** A §24.11 envelope is already
 AES-256-GCM-encrypted under the pair key and Ed25519-signed, but its
@@ -786,11 +807,11 @@ per-recipient byte cap.
 
 The `kind` marker is what lets one socket carry two families — bootstrap
 redeem bodies and full federation envelopes — without either side
-sniffing at field shapes. Inbound, `handle_relayed_envelope` unseals,
+sniffing at field shapes. Inbound, `GfsRelayInbound.handle_frame` unseals,
 reads the marker, and hands a `space_relay_envelope` to the
 **unmodified** §24.11 pipeline (the lookup-by-`instance_id` variant, as a
 relayed envelope carries no inbox id): row lookup → **peer class** →
-timestamp window → Ed25519 verify under the pair key → replay → decrypt
+**relay opt-in** (a paired peer only, below) → timestamp window → Ed25519 verify under the pair key → replay → decrypt
 → idempotency → ban → dispatch. Riding the relay buys no exemption; the
 seal is confidentiality, not authorization. Anyone can read the public
 invite blob and seal a blob to that key-wrap key — the signature is what
@@ -1497,14 +1518,20 @@ Backend (federation + persistence):
   ``_ACK`` / ``_DENY`` round-trip; transparently ships via
   ``SPACE_ROUTED`` for non-paired issuers and falls back to direct
   delivery for paired ones.
-  Also the inbound end of the relay leg: `handle_relayed_envelope`
-  unseals, dispatches bootstrap bodies by `kind`, and hands a
-  `space_relay_envelope` to the §24.11 pipeline.
+  Its `handle_bootstrap_body` validates and answers the bootstrap bodies
+  the relay leg delivers.
+- `socialhome/services/gfs_relay_inbound.py` — the inbound end of the
+  relay leg: `GfsRelayInbound.handle_frame` throttles, unseals, hands a
+  `space_relay_envelope` (from a link-joined or an opted-in paired peer)
+  to the §24.11 pipeline and bootstrap bodies to the coordinator; it
+  exposes the delivering server as `RELAY_DELIVERED_VIA` (our own
+  `gfs_connections.id`) for the duration of the dispatch.
 - `socialhome/federation/gfs_relay_transport.py` — `GfsRelayTransport`,
   the third `TransportStrategy` tier: seals a §24.11 envelope to a
   link-joined peer's key-wrap key and hands it to the connection server
   that introduced the pair. Selected in
-  `socialhome/federation/transport.py` for `source = space_session`.
+  `socialhome/federation/transport.py` for `source = space_session`, and
+  as the last-resort fallback for an opted-in paired peer (below).
 - `socialhome/services/gfs_envelope_sender.py` — the
   `POST {gfs}/gfs/envelope` carrier, shared by the redeem handshake and
   the delivery leg (one HTTP client, one capability cache).
