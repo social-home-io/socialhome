@@ -223,6 +223,20 @@ no code: pair with the other household normally (QR / trust relay), at
 which point the peer row is no longer `space_session` and traffic moves
 back to RTC / HTTPS, or decline invite-link joins.
 
+**Paired households, opt-in only (needs sign-off).** The same relay — and
+therefore exactly the residual above — can also carry envelopes between two
+*paired* households, as the last-resort tier after RTC and the HTTPS inbox,
+when neither reaches the other. It is off for every pair until this
+household opts in for that peer (`remote_instances.gfs_relay`); without the
+opt-in nothing is relayed to the peer and a relayed envelope from it is
+refused by the §24.11 pipeline. The wire is unchanged (`{to_instance,
+sealed}`); the connection server learns, for an opted-in pair, the same
+`(to_instance, time, size bucket)` per envelope plus the sender's IP in its
+access log — and since a paired household normally talks over RTC / HTTPS,
+it learns *when* that pair's direct path is down. Each household stores
+only its own connection-server id per route; no server URL, id or inbox id
+enters a payload.
+
 ### Sign-off: in trusted mode the connection server learns who published (v_49)
 
 **Owner decision (2026-10-03), the default for every public/global space.**

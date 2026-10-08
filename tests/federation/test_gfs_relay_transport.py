@@ -387,3 +387,30 @@ def test_sealing_an_envelope_too_big_for_any_bucket_raises():
             envelope_dict=_sized_envelope(RELAY_MAX_ENVELOPE_BYTES + 1000),
             peer_keywrap_pub=kp.public_key,
         )
+
+
+# ─── Explicit route (paired households, the relay fallback) ──────────────
+
+
+async def test_an_explicit_gfs_url_overrides_relay_via():
+    """A paired household's route names one of OUR connection servers per
+    send; it wins over whatever ``relay_via`` holds (on a paired row that
+    is an auto-pair introducer's instance id, never a URL)."""
+    kp = generate_x25519_keypair()
+    relay = _FakeRelay()
+    transport = GfsRelayTransport(relay_sender=relay)
+
+    ok, status = await transport.send(
+        instance=_instance(
+            kp,
+            source=InstanceSource.MANUAL,
+            relay_via="introducer-instance-id",
+        ),
+        envelope_dict=ENVELOPE,
+        gfs_url="https://route-2.example.org",
+    )
+
+    assert (ok, status) == (True, None)
+    assert relay.calls[0]["gfs_url"] == "https://route-2.example.org"
+    # Still nothing but the recipient and the ciphertext.
+    assert set(relay.calls[0]["envelope"]) == {"to_instance", "sealed"}

@@ -24,6 +24,7 @@ from ..domain.federation import (
     InstanceSource,
     PairingSession,
     PairingStatus,
+    PeerGfsRoute,
     RemoteInstance,
 )
 from .base import bool_col, row_to_dict, rows_to_dicts
@@ -93,6 +94,22 @@ class AbstractFederationRepo(Protocol):
         latitude: float | None,
         longitude: float | None,
     ) -> None: ...
+    async def set_gfs_relay(self, instance_id: str, *, enabled: bool) -> None: ...
+    async def set_remote_keywrap_pk(self, instance_id: str, pk_hex: str) -> None: ...
+    async def list_gfs_routes(self, instance_id: str) -> list[PeerGfsRoute]: ...
+    async def upsert_gfs_route(
+        self,
+        instance_id: str,
+        gfs_connection_id: str,
+        *,
+        now: str,
+    ) -> None: ...
+    async def delete_gfs_route(
+        self,
+        instance_id: str,
+        gfs_connection_id: str,
+    ) -> None: ...
+    async def delete_gfs_routes_older_than(self, cutoff: str) -> int: ...
 
     # Local instance identity (display_name + household coords) ----------
     async def get_local_identity(self) -> dict | None: ...
@@ -518,6 +535,100 @@ class SqliteFederationRepo:
             (lat_db, lon_db, instance_id),
         )
 
+    # ── GFS relay fallback (migration 0081) ────────────────────────────
+
+    async def set_gfs_relay(self, instance_id: str, *, enabled: bool) -> None:
+        """Turn our relay opt-in for this peer on or off.
+
+        The ONLY writer of ``gfs_relay`` after the row exists:
+        :meth:`save_instance` inserts it but deliberately never overwrites
+        it on conflict, so a rebuild-and-save elsewhere (the pairing
+        confirm rebuilds the row from scratch) cannot silently switch the
+        relay off. Local-only — never federated.
+        """
+        await self._db.enqueue(
+            "UPDATE remote_instances SET gfs_relay=? WHERE id=?",
+            (int(enabled), instance_id),
+        )
+
+    async def set_remote_keywrap_pk(self, instance_id: str, pk_hex: str) -> None:
+        """Store the peer's static X25519 key-wrap public key (hex).
+
+        The caller has already verified it bound to the peer's identity
+        key (:func:`~socialhome.federation.keywrap_seal.verify_keywrap_binding`);
+        it is what a relayed envelope is sealed to. A targeted single-column
+        UPDATE so it never clobbers state set elsewhere.
+        """
+        await self._db.enqueue(
+            "UPDATE remote_instances SET remote_keywrap_pk=? WHERE id=?",
+            (pk_hex, instance_id),
+        )
+
+    async def list_gfs_routes(self, instance_id: str) -> list[PeerGfsRoute]:
+        """Confirmed relay routes to *instance_id*, oldest-confirmed first.
+
+        A stable order, so a round-robin over the result is deterministic.
+        """
+        rows = await self._db.fetchall(
+            "SELECT instance_id, gfs_connection_id, confirmed_at, last_ack_at"
+            " FROM peer_gfs_routes WHERE instance_id=?"
+            " ORDER BY confirmed_at, gfs_connection_id",
+            (instance_id,),
+        )
+        return [
+            PeerGfsRoute(
+                instance_id=r["instance_id"],
+                gfs_connection_id=r["gfs_connection_id"],
+                confirmed_at=r["confirmed_at"],
+                last_ack_at=r["last_ack_at"],
+            )
+            for r in rows_to_dicts(rows)
+        ]
+
+    async def upsert_gfs_route(
+        self,
+        instance_id: str,
+        gfs_connection_id: str,
+        *,
+        now: str,
+    ) -> None:
+        """Record that *instance_id* answered through our connection
+        *gfs_connection_id* at *now* (tz-aware UTC ISO 8601).
+
+        A new route stamps both ``confirmed_at`` and ``last_ack_at``; a
+        known one moves only ``last_ack_at``.
+        """
+        await self._db.enqueue(
+            "INSERT INTO peer_gfs_routes(instance_id, gfs_connection_id,"
+            " confirmed_at, last_ack_at) VALUES(?,?,?,?)"
+            " ON CONFLICT(instance_id, gfs_connection_id)"
+            " DO UPDATE SET last_ack_at=excluded.last_ack_at",
+            (instance_id, gfs_connection_id, now, now),
+        )
+
+    async def delete_gfs_route(
+        self,
+        instance_id: str,
+        gfs_connection_id: str,
+    ) -> None:
+        await self._db.enqueue(
+            "DELETE FROM peer_gfs_routes WHERE instance_id=? AND gfs_connection_id=?",
+            (instance_id, gfs_connection_id),
+        )
+
+    async def delete_gfs_routes_older_than(self, cutoff: str) -> int:
+        """Drop every route not re-acknowledged since *cutoff* (same
+        timestamp shape as :meth:`upsert_gfs_route` writes). Returns the
+        number of routes removed."""
+
+        def _run(conn) -> int:
+            return conn.execute(
+                "DELETE FROM peer_gfs_routes WHERE last_ack_at < ?",
+                (cutoff,),
+            ).rowcount
+
+        return int(await self._db.transact(_run) or 0)
+
     async def get_local_identity(self) -> dict | None:
         """Return the local instance's display_name + household coords.
 
@@ -803,8 +914,8 @@ INSERT INTO remote_instances(
     remote_pq_algorithm, remote_pq_identity_pk, sig_suite,
     intro_relay_enabled, relay_via, remote_keywrap_pk,
     home_lat, home_lon, paired_at, created_at,
-    last_reachable_at, unreachable_since, share_home
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?)
+    last_reachable_at, unreachable_since, share_home, gfs_relay
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,COALESCE(?, datetime('now')),?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
     display_name=excluded.display_name,
     remote_identity_pk=excluded.remote_identity_pk,
@@ -827,6 +938,8 @@ ON CONFLICT(id) DO UPDATE SET
     paired_at=excluded.paired_at,
     last_reachable_at=excluded.last_reachable_at,
     unreachable_since=excluded.unreachable_since
+    -- ``share_home`` and ``gfs_relay`` are local opt-ins with their own
+    -- targeted setters; a rebuild-and-save never overwrites them.
 """
 
 
@@ -855,6 +968,7 @@ def _instance_params(inst: RemoteInstance) -> tuple:
         inst.last_reachable_at,
         inst.unreachable_since,
         int(inst.share_home),
+        int(inst.gfs_relay),
     )
 
 
@@ -915,4 +1029,5 @@ def _row_to_instance(row: dict | None) -> RemoteInstance | None:
         local_alias=row.get("local_alias"),
         share_home=bool_col(row.get("share_home", 1)),
         capabilities_seen_at=row.get("capabilities_seen_at"),
+        gfs_relay=bool_col(row.get("gfs_relay", 0)),
     )

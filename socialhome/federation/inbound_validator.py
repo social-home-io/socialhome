@@ -230,6 +230,11 @@ class _InboxInstance:
         """Pairing status — read by the unpair-tombstone gate."""
         return self._inst.status
 
+    @property
+    def gfs_relay(self) -> bool:
+        """Our relay opt-in for this peer — read by the relay gate."""
+        return self._inst.gfs_relay
+
 
 # ─── Individual steps ────────────────────────────────────────────────────
 
@@ -413,6 +418,44 @@ def make_check_peer_class() -> InboundStep:
         )
 
     return check_peer_class
+
+
+def make_check_relay_opt_in() -> InboundStep:
+    """Step 2c: a paired peer may reach us over the GFS relay only if WE
+    opted into the relay with it.
+
+    An envelope that the connection-server relay carried
+    (:data:`TRANSPORT_GFS_RELAY`) from a
+    :data:`~socialhome.domain.federation.InstanceSource.MANUAL` peer whose
+    ``gfs_relay`` opt-in is off is refused: the relay fallback is a
+    per-pair decision of this household, and a peer must not be able to
+    move the pair onto a connection server on its own. A row without the
+    attribute counts as not opted in (fail closed).
+
+    A household seated from an invite link
+    (:data:`~socialhome.domain.federation.InstanceSource.SPACE_SESSION`)
+    is relay-only by construction and is left to
+    :func:`make_check_peer_class`. Live wires (RTC, HTTPS inbox) are not
+    touched. Runs straight after the lookup, before any crypto.
+    """
+
+    async def check_relay_opt_in(ctx: InboundContext) -> None:
+        if ctx.transport != TRANSPORT_GFS_RELAY:
+            return
+        if getattr(ctx.instance, "source", None) is not InstanceSource.MANUAL:
+            return
+        if getattr(ctx.instance, "gfs_relay", False) is True:
+            return
+        # Type + sender only — never the payload.
+        log.info(
+            "inbound: refusing a relayed %r from %s — the GFS relay is not "
+            "enabled for this paired household",
+            ctx.envelope.get("event_type"),
+            getattr(ctx.instance, "from_instance", ""),
+        )
+        raise ValueError("GFS relay is not enabled for this peer")
+
+    return check_relay_opt_in
 
 
 def make_check_unpairing(

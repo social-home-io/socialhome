@@ -14,6 +14,7 @@ crossed it, never saw the token, the space, the users or who was asking.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import json
 import logging
@@ -28,6 +29,7 @@ from aiohttp import web
 from PIL import Image
 from aiohttp.test_utils import TestServer
 
+from socialhome.app import _build_gfs_route_resolver
 from socialhome.capabilities_sig import sign_capabilities
 from socialhome.crypto import (
     b64url_decode,
@@ -77,6 +79,10 @@ from socialhome.federation.transport import (
 )
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
+from socialhome.services.gfs_relay_inbound import (
+    RELAY_DELIVERED_VIA,
+    GfsRelayInbound,
+)
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
@@ -172,7 +178,7 @@ class _FakeGfs:
             # The push leg: a real GFS writes the frame to the household's
             # open socket, so delivery is concurrent with this response.
             task = asyncio.create_task(
-                target.handle_relayed_envelope(
+                target.handle_frame(
                     {"sealed": body.get("sealed")},
                     gfs_url=self.url,
                 ),
@@ -330,6 +336,12 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         own_instance_id=instance_id,
         https_inbox=HttpsInboxTransport(client_factory=_client_factory),
         gfs_relay=GfsRelayTransport(relay_sender=envelope_sender),
+        # Production's resolver: a paired peer's confirmed routes → the
+        # base URLs of our active connections.
+        gfs_routes=_build_gfs_route_resolver(
+            federation_repo=federation_repo,
+            gfs_connection_repo=gfs_repo,
+        ),
         signaling_send=_no_signaling,
     )
     fed_transport.mark_ice_primed()
@@ -350,7 +362,14 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
     ):
         federation._event_registry.register(_evt, _capture)
     space_service.attach_redeem_coordinator(coordinator)
-    gfs.sockets[instance_id] = coordinator
+    # The socket's inbound leg — what the WebSocket supervisor feeds.
+    relay_inbound = GfsRelayInbound(
+        federation=federation,
+        keywrap_private_key=keywrap.private_key,
+        invite_coordinator=coordinator,
+        gfs_connection_repo=gfs_repo,
+    )
+    gfs.sockets[instance_id] = relay_inbound
 
     user_id = f"{name}-user-id"
     await user_repo.save(
@@ -381,6 +400,7 @@ async def _household(tmp_path, name: str, gfs: _FakeGfs, http_session):
         icon_repo=icon_repo,
         space_service=space_service,
         coordinator=coordinator,
+        relay_inbound=relay_inbound,
         user_id=user_id,
         username=f"{name}user",
     )
@@ -412,7 +432,7 @@ async def households(tmp_path, gfs, http_session):
     # ``asyncio.create_task`` (a real server writes the frame to the
     # household's socket while the POST is still returning), so a test that
     # sends a relayed envelope and then simply ends leaves that task mid
-    # ``handle_relayed_envelope`` — which is mid SQLite read on ``a.db``.
+    # ``GfsRelayInbound.handle_frame`` — which is mid SQLite read on ``a.db``.
     # ``households`` depends on ``gfs``, so ``gfs``'s own finalizer runs
     # AFTER this one: draining there would already be too late, with the
     # connection closed underneath the task. Draining here is also what
@@ -1012,7 +1032,7 @@ async def test_a_tampered_blob_is_dropped_at_the_receiver(households, gfs):
     sealed["ciphertext"] = f"{nonce}:{ct[:-4]}AAAA"
 
     with pytest.raises(ValueError):
-        await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+        await a.relay_inbound.handle_frame({"sealed": sealed})
     assert a.received == []
 
 
@@ -1054,7 +1074,7 @@ async def test_an_envelope_from_a_household_that_is_not_this_pair_is_rejected(
 
     with caplog.at_level(logging.INFO):
         with pytest.raises(ValueError, match="signature"):
-            await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+            await a.relay_inbound.handle_frame({"sealed": sealed})
     assert a.received == []
     # A relay envelope that fails validation is dropped — but never
     # silently. The line names the event type, the claimed sender and the
@@ -1357,7 +1377,7 @@ async def test_an_envelope_the_relay_queued_overnight_is_accepted(households, gf
         space_id=space.id,
     )
 
-    await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+    await a.relay_inbound.handle_frame({"sealed": sealed})
 
     assert [e.payload["content"] for e in a.received] == ["queued-overnight"]
 
@@ -1377,13 +1397,13 @@ async def test_a_queued_envelope_replayed_hours_later_is_still_rejected(
         msg_id="replay-me",
         space_id=space.id,
     )
-    await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+    await a.relay_inbound.handle_frame({"sealed": sealed})
     a.received.clear()
 
     # The same bytes again, 10 h into the window a relay capture could
     # replay them in.
     with pytest.raises(ValueError, match="[Rr]eplay"):
-        await a.coordinator.handle_relayed_envelope({"sealed": sealed})
+        await a.relay_inbound.handle_frame({"sealed": sealed})
     assert a.received == []
 
 
@@ -1604,3 +1624,109 @@ async def test_both_households_log_the_successful_redeem(households, gfs, caplog
     for line in issuer_line + redeemer_line:
         assert TOKEN_MARKER not in line
         assert SPACE_NAME not in line
+
+
+# ─── Paired households over the relay fallback (migration 0081) ──────────
+
+
+async def _as_paired_over_the_relay(a, b, gfs, *, a_opts_in=True):
+    """Turn a link-joined pair into a PAIRED one with no addresses at all,
+    reachable only through the shared connection server: both rows become
+    ``manual`` with an empty inbox URL, the sender (b) opts in and holds a
+    confirmed route through its own ``gfs-1`` row. The session keys and
+    key-wrap keys are the ones the invite seat already verified."""
+    space = await _join(a, b, gfs)
+    for me, peer in ((a, b), (b, a)):
+        row = await me.federation_repo.get_instance(peer.instance_id)
+        await me.federation_repo.save_instance(
+            dataclasses.replace(
+                row,
+                source=InstanceSource.MANUAL,
+                remote_inbox_url="",
+                relay_via=None,
+            ),
+        )
+        # No RTC in this fixture.
+        me.transport._rtc_suppressed_until[peer.instance_id] = float("inf")
+    await b.federation_repo.set_gfs_relay(a.instance_id, enabled=True)
+    await b.federation_repo.upsert_gfs_route(
+        a.instance_id,
+        "gfs-1",
+        now=datetime.now(timezone.utc).isoformat(),
+    )
+    await a.federation_repo.set_gfs_relay(b.instance_id, enabled=a_opts_in)
+    return space
+
+
+async def test_a_paired_household_with_no_address_is_reached_over_the_relay(
+    households,
+    gfs,
+):
+    a, b = households
+    space = await _as_paired_over_the_relay(a, b, gfs)
+    delivered_via: list[str | None] = []
+
+    async def _see_via(_event) -> None:
+        delivered_via.append(RELAY_DELIVERED_VIA.get())
+
+    a.federation._event_registry.register(
+        FederationEventType.SPACE_POST_CREATED,
+        _see_via,
+    )
+
+    result = await b.federation.send_event(
+        to_instance_id=a.instance_id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload=_post_payload(),
+        space_id=space.id,
+    )
+    await gfs.drain()
+
+    assert result.ok is True
+    assert result.via == "gfs_relay"
+    assert [e.payload["content"] for e in a.received] == [POST_MARKER]
+    # a's own connection row for the server that carried it.
+    assert delivered_via == ["gfs-1"]
+    # The relay saw only the recipient and the ciphertext.
+    _to, body = gfs.mailbox[-1]
+    assert set(body) == {"to_instance", "sealed"}
+    # Acceptance is not delivery: b's row for a is not marked reachable.
+    row = await b.federation_repo.get_instance(a.instance_id)
+    assert row.last_reachable_at is None
+
+
+async def test_a_relayed_envelope_from_a_peer_we_did_not_opt_in_with_is_refused(
+    households,
+    gfs,
+):
+    a, b = households
+    space = await _as_paired_over_the_relay(a, b, gfs, a_opts_in=False)
+
+    await b.federation.send_event(
+        to_instance_id=a.instance_id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload=_post_payload(),
+        space_id=space.id,
+    )
+    await gfs.drain()
+
+    assert gfs.mailbox, "b relayed it"
+    assert a.received == []
+
+
+async def test_without_a_confirmed_route_a_paired_peer_is_not_relayed(households, gfs):
+    a, b = households
+    space = await _as_paired_over_the_relay(a, b, gfs)
+    await b.federation_repo.delete_gfs_route(a.instance_id, "gfs-1")
+
+    result = await b.federation.send_event(
+        to_instance_id=a.instance_id,
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload=_post_payload(),
+        space_id=space.id,
+    )
+    await gfs.drain()
+
+    assert result.ok is False
+    assert gfs.mailbox == []
+    assert a.received == []

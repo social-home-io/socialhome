@@ -32,6 +32,7 @@ from socialhome.federation.inbound_validator import (
     make_ban_check,
     make_check_deprovisioned_author,
     make_check_peer_class,
+    make_check_relay_opt_in,
     make_check_space_archived,
     make_check_space_writer,
     make_check_replay,
@@ -645,6 +646,91 @@ async def test_peer_class_gate_is_a_step_in_both_shipped_pipelines():
     # Runs AFTER the instance lookup — it reads ``ctx.instance.source``.
     assert names.index("check_peer_class") > names.index("_noop_step")
     assert svc is not None
+
+
+# ─── Relay opt-in gate (paired peers over the GFS relay) ────────────────
+
+
+class _RelayInstance:
+    def __init__(self, source, *, gfs_relay):
+        self.source = source
+        self.gfs_relay = gfs_relay
+        self.from_instance = "remote-iid"
+
+
+async def test_relay_gate_rejects_a_paired_peer_we_never_opted_in_with(caplog):
+    step = make_check_relay_opt_in()
+    ctx = InboundContext(
+        envelope=_minimal_envelope(
+            event_type=FederationEventType.DM_MESSAGE.value,
+            encrypted_payload="secret-ciphertext-marker",
+        ),
+        instance=_RelayInstance(InstanceSource.MANUAL, gfs_relay=False),
+        transport=TRANSPORT_GFS_RELAY,
+    )
+    with caplog.at_level("INFO"):
+        with pytest.raises(ValueError, match="relay"):
+            await step(ctx)
+    assert "remote-iid" in caplog.text
+    assert "secret-ciphertext-marker" not in caplog.text
+
+
+async def test_relay_gate_admits_an_opted_in_paired_peer():
+    step = make_check_relay_opt_in()
+    await step(
+        InboundContext(
+            envelope=_minimal_envelope(),
+            instance=_RelayInstance(InstanceSource.MANUAL, gfs_relay=True),
+            transport=TRANSPORT_GFS_RELAY,
+        )
+    )
+
+
+async def test_relay_gate_ignores_live_wires():
+    """RTC / HTTPS inbox from a non-opted-in peer is ordinary traffic."""
+    step = make_check_relay_opt_in()
+    await step(
+        InboundContext(
+            envelope=_minimal_envelope(),
+            instance=_RelayInstance(InstanceSource.MANUAL, gfs_relay=False),
+        )
+    )
+
+
+async def test_relay_gate_leaves_link_joined_peers_alone():
+    """A household seated from an invite link is relay-only by design."""
+    step = make_check_relay_opt_in()
+    await step(
+        InboundContext(
+            envelope=_minimal_envelope(),
+            instance=_RelayInstance(InstanceSource.SPACE_SESSION, gfs_relay=False),
+            transport=TRANSPORT_GFS_RELAY,
+        )
+    )
+
+
+async def test_relay_gate_treats_a_row_without_the_flag_as_not_opted_in():
+    step = make_check_relay_opt_in()
+    with pytest.raises(ValueError):
+        await step(
+            InboundContext(
+                envelope=_minimal_envelope(),
+                instance=_SourcedInstance(InstanceSource.MANUAL),
+                transport=TRANSPORT_GFS_RELAY,
+            )
+        )
+
+
+async def test_relay_gate_runs_after_the_lookup_and_before_any_crypto():
+    """Mutation guard: the gate has to be IN the chain, where it can read
+    the row and before the signature work it saves."""
+    steps = FederationService._common_pipeline_steps(
+        _StubPipelineOwner(),  # type: ignore[arg-type]
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert names.index("_noop_step") < names.index("check_relay_opt_in")
+    assert names.index("check_relay_opt_in") < names.index("verify_signature")
 
 
 async def test_unpairing_gate_sits_between_signature_and_replay():

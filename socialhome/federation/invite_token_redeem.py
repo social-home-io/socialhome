@@ -47,7 +47,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-import orjson
 
 from ..domain.events import SpaceRemoteSeatLive
 from ..domain.federation import (
@@ -86,8 +85,6 @@ from ..services.space_service import (
     can_seat_remote_stub,
     stub_space_from_metadata,
 )
-from .gfs_relay_transport import is_relay_envelope_body
-from .inbound_validator import TRANSPORT_GFS_RELAY
 from .invite_bootstrap import (
     KIND_REDEEM,
     KIND_REDEEM_ACK,
@@ -96,7 +93,6 @@ from .invite_bootstrap import (
     InviteBootstrapHint,
     derive_space_session_keys,
     seal_bootstrap_envelope,
-    unseal_envelope_body,
     validate_bootstrap_body,
     verify_peer_keywrap,
 )
@@ -1757,90 +1753,37 @@ class SpaceInviteTokenRedeemCoordinator:
             self._bootstrap_hints.pop(nonce, None)
             self._pending_issuer.pop(nonce, None)
 
-    async def handle_relayed_envelope(
+    async def handle_bootstrap_body(
         self,
-        envelope: dict,
+        body: dict,
         *,
         gfs_url: str = "",
     ) -> dict:
-        """Inbound entry point for one relayed §D2b envelope.
+        """Handle one unsealed §D2b bootstrap body from the relay.
+
+        :class:`~socialhome.services.gfs_relay_inbound.GfsRelayInbound`
+        owns the relay frame: it applies the process-wide throttle,
+        unseals the blob with this household's key-wrap key and routes on
+        the inner ``kind`` — relayed §24.11 envelopes straight to the
+        pipeline, bootstrap bodies (``space_invite_bootstrap_redeem`` and
+        its ack / deny) here.
 
         ``gfs_url`` is the connection server the blob arrived on; the
         reply leg goes back out the same way, so a household paired with
         several servers answers on the one the requester can hear.
 
-        The relay hands us an opaque blob with no idea which leg it is
-        (that is the point — it is identity-free), so this one entry
-        point opens it and dispatches on the inner ``kind``.
-
-        Two families ride this socket:
-
-        * **Bootstrap bodies** (``space_invite_bootstrap_redeem`` and its
-          ack / deny). The §24.11 pipeline is deliberately **not** used
-          for these: it resolves signing keys from a CONFIRMED
-          ``remote_instances`` row, which by definition does not exist
-          for a stranger. §11 pairing has the identical problem and
-          solves it the same way — a self-signed, TOFU-verified body
-          dispatched ahead of the pipeline (``docs/protocol/pairing.md``).
-        * **Ordinary §24.11 envelopes** for a household seated from an
-          invite link, sealed by
-          :class:`~socialhome.federation.gfs_relay_transport
-          .GfsRelayTransport` because the pair holds no address for each
-          other. Those go straight into the **unmodified** pipeline
-          (:meth:`FederationService.handle_inbound_rtc` — the
-          lookup-by-instance-id variant, since a relayed envelope carries
-          no inbox id) with every step intact: the row lookup, the
-          peer-class gate, the timestamp window, the Ed25519 verify under
-          the pair key, replay, decrypt, idempotency and the ban check
-          all apply exactly as they do over RTC or the HTTPS inbox.
-          Riding the relay buys no exemption — the one concession is the
-          timestamp step's wider window for this transport, which the
-          relay's own 24 h queue TTL requires and the replay cache's
-          longer retention pays for (see
-          :data:`~socialhome.federation.inbound_validator
-          .RELAY_TIMESTAMP_SKEW_SECONDS`).
-
-        The pipeline itself is untouched for every ordinary event.
+        The §24.11 pipeline is deliberately **not** used for these: it
+        resolves signing keys from a CONFIRMED ``remote_instances`` row,
+        which by definition does not exist for a stranger. §11 pairing has
+        the identical problem and solves it the same way — a self-signed,
+        TOFU-verified body dispatched ahead of the pipeline
+        (``docs/protocol/pairing.md``).
 
         Raises :class:`ValueError` on any validation failure; the caller
         drops the blob.
         """
         if not self._bootstrap_ready():
             raise ValueError("invite bootstrap is not configured on this host")
-        # Process-wide throttle BEFORE the unseal — the cheapest place
-        # to shed a flood, and the only one available before we know
-        # which family the blob belongs to.
-        if self._rate_limiter is not None and not self._rate_limiter.is_allowed(
-            "invite-bootstrap:inbound",
-            limit=BOOTSTRAP_INBOUND_LIMIT,
-            window_s=BOOTSTRAP_INBOUND_WINDOW_S,
-        ):
-            raise ValueError("invite bootstrap inbound rate limit exceeded")
-        body = unseal_envelope_body(
-            envelope=envelope,
-            keywrap_private_key=self._keywrap_private_key,
-        )
-        if is_relay_envelope_body(body):
-            # Its OWN bucket. The two families share this socket but not
-            # their budgets: an active space's relayed traffic (posts,
-            # roster, sync chunks) is orders of magnitude more frequent
-            # than invite redeems, so one shared allowance meant ordinary
-            # space federation could starve every redeem — or a redeem
-            # flood could stall a space.
-            self._check_family_limit(
-                "envelopes",
-                limit=RELAY_ENVELOPE_INBOUND_LIMIT,
-            )
-            # A §24.11 envelope for a link-joined peer. No bootstrap
-            # validation applies (there is no ``redeem_nonce`` and the
-            # inner envelope carries its own signature): hand it to the
-            # pipeline, which is the authority on every check. No
-            # per-sender throttle either — the only id available before
-            # the pipeline runs is the envelope's UNVERIFIED
-            # ``from_instance``, and keying a budget on that would let
-            # anyone starve a household's traffic by claiming its id.
-            # The process-wide limiter above is the shed.
-            return await self._dispatch_relayed_federation_envelope(body)
         self._check_family_limit("bodies", limit=BOOTSTRAP_BODY_INBOUND_LIMIT)
         validate_bootstrap_body(
             body,
@@ -1873,8 +1816,10 @@ class SpaceInviteTokenRedeemCoordinator:
     def _check_family_limit(self, family: str, *, limit: int) -> None:
         """Throttle one traffic family on the shared relay socket.
 
-        ``family`` is ``"bodies"`` (invite-bootstrap) or ``"envelopes"``
-        (relayed §24.11). Separate keys mean separate budgets — see
+        ``family`` is ``"bodies"`` (invite-bootstrap). The ``"envelopes"``
+        family (relayed §24.11) is throttled under the same key scheme by
+        :class:`~socialhome.services.gfs_relay_inbound.GfsRelayInbound`.
+        Separate keys mean separate budgets — see
         :data:`BOOTSTRAP_BODY_INBOUND_LIMIT`.
         """
         if self._rate_limiter is None:
@@ -1886,60 +1831,13 @@ class SpaceInviteTokenRedeemCoordinator:
         ):
             raise ValueError(f"invite bootstrap {family} rate limit exceeded")
 
-    async def _dispatch_relayed_federation_envelope(self, body: dict) -> dict:
-        """Run one relayed §24.11 envelope through the normal pipeline.
-
-        The sender is taken from the envelope's own ``from_instance``
-        and used only to LOOK UP the row; the pipeline's signature step
-        then requires that row's identity key to have signed these exact
-        bytes and rejects anything else, so a claimed id buys nothing.
-        A household that is not this peer — or this peer with a bad
-        signature — is dropped there, not here.
-        """
-        inner = body.get("envelope")
-        if not isinstance(inner, dict):
-            raise ValueError("relayed federation envelope missing envelope body")
-        from_instance = inner.get("from_instance")
-        if not isinstance(from_instance, str) or not from_instance:
-            raise ValueError("relayed federation envelope missing from_instance")
-        log.debug(
-            "gfs_relay: inbound %r envelope from %s",
-            inner.get("event_type"),
-            from_instance,
-        )
-        try:
-            return await self._federation.handle_inbound_rtc(
-                from_instance,
-                orjson.dumps(inner),
-                # These bytes may have sat in the relay's queue for up to
-                # its TTL before the socket came back, so the timestamp
-                # step judges them against the wider relay window rather
-                # than the ±300 s live-wire one.
-                transport=TRANSPORT_GFS_RELAY,
-            )
-        except ValueError as exc:
-            # A relay envelope that fails validation is dropped, and until
-            # now it was dropped with nothing an operator could act on:
-            # the raise travelled up to the WS client's generic
-            # "handler raised" line, which names neither the event type
-            # nor the sender. INFO because a rejection here is a normal,
-            # expected outcome (a stale queued frame, an unknown peer);
-            # the reason and the routing fields only — never the payload.
-            log.info(
-                "gfs_relay: rejected %r envelope from %s: %s",
-                inner.get("event_type"),
-                from_instance,
-                exc,
-            )
-            raise
-
     async def _handle_bootstrap_redeem(self, body: dict, *, gfs_url: str = "") -> dict:
         """Issuer-side: authorize a stranger's sealed redeem, reply sealed.
 
         Every gate above this point (shape caps, ``derive_instance_id``
         anti-tamper, signature, timestamp, replay) already ran in
         :func:`~socialhome.federation.invite_bootstrap
-        .open_bootstrap_envelope` / :meth:`handle_relayed_envelope`.
+        .open_bootstrap_envelope` / :meth:`handle_bootstrap_body`.
         What is left is the authorization itself: an atomic token
         consume, the ban check, and the seating — all shared with the
         §D2 path via :meth:`_consume_seat_and_build_ack`.
