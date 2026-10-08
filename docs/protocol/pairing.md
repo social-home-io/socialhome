@@ -176,7 +176,9 @@ revealed, and only to whoever holds the code.
   or the scan is refused with `GFS_NOT_SHARED` **before any state is
   written or anything is sent**.
 - **Delivery.** A body goes to the other side's inbox when it has one;
-  otherwise (or when that POST fails) the *same signed body* is wrapped
+  otherwise — or when that POST did not reach the peer (network error,
+  timeout, 5xx; never after a 4xx, which is the peer's own answer) and
+  we hold a route to it through the bootstrap server — the *same signed body* is wrapped
   as `{kind: "pairing_peer_accept" | "pairing_peer_confirm", pairing:
   <signed body>}`, padded to a relay size bucket, sealed to the other
   side's key-wrap key and posted to the bootstrap server as the
@@ -188,11 +190,24 @@ revealed, and only to whoever holds the code.
   (`RELAY_DELIVERED_VIA`) must be the one the pairing session was issued
   with (`pending_pairings.relay_via`); anything else is dropped. A frame
   from a server that is not one of our active connections never reaches
-  a handler.
+  a handler. Conversely, for a session on which we offered no address
+  (`gfs` code / scanner without URL) a body on the inbox path is refused
+  — nobody could know our inbox id.
+- **Confirm checks** (inbox or relay): the session must not have expired,
+  and the signer named in the confirm must be the household the token's
+  session was made with (`pending_pairings.peer_identity_pk`).
 - **Both sides opt into the relay.** Whoever writes the peer's row —
   the scanner on scan, the code owner on the accept — sets `gfs_relay`,
   stores the verified `remote_keywrap_pk` and **seeds one route**: its
-  own connection to the bootstrap server. This is not the poisoning case
+  own connection to the bootstrap server — but only where the peer
+  provably reads that server. The scanner always may (the code owner is
+  on it by construction). The code owner seeds only when the accept
+  arrived through the bootstrap server, or the scanner has no URL (a
+  scanner without one refuses a code whose server it is not on). A
+  scanner that answered at our inbox with its own URL may not be on that
+  server at all; a route there would make every fallback a silent `202`
+  and tell the server the scanner's id, so the code owner keeps the
+  opt-in and the key and leaves the routes to discovery. This is not the poisoning case
   of [`gfs-relay.md`](./gfs-relay.md): the server was named in the
   out-of-band code and we are ourselves registered there — never seeded
   from where a relayed frame merely arrived. The row exists with the
@@ -201,6 +216,11 @@ revealed, and only to whoever holds the code.
   stays `""` for a peer with no address; its first `URL_UPDATED` fills it.
 - **After confirm** each side asks route discovery to probe the peer;
   the seeded route expires after 72 h like any route no ack refreshes.
+- **A classic `url` pairing means no GFS**, also when it replaces an
+  earlier GFS pairing with the same household: both sides switch the
+  relay opt-in off and drop that peer's routes.
+- A `proto_version` above our own is recorded as our own (a newer peer
+  is relied on for what we know); a non-integer one is ignored.
 
 ```mermaid
 sequenceDiagram

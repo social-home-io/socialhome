@@ -168,7 +168,14 @@ confirm and the first §24.11 envelopes (capabilities, profiles) can only
 ride the relay. So whoever writes the peer's row during the handshake —
 the scanner on scan, the code owner on the accept — sets `gfs_relay`,
 stores the peer's verified key-wrap key and **seeds one route**: its own
-connection to the server the code named (`last_ack_at` = now).
+connection to the server the code named (`last_ack_at` = now) — only
+when the peer provably reads that server. The scanner always does (the
+code owner is on it). The code owner does when the accept arrived
+through that server or the scanner has no URL (such a scanner refuses a
+code whose server it is not on); a scanner that answered at the inbox
+with its own URL gets no seeded route, since a route through a server
+it never reads turns every fallback into a silent `202` — discovery
+finds the servers the two really share.
 
 This does not reopen the hole the ack rule closes. The rule exists
 because a received relay frame proves nothing about which server the

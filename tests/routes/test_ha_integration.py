@@ -242,3 +242,42 @@ async def test_get_base_requires_admin(client):
 async def test_outbound_service_wired_on_app(client):
     """The UrlUpdateOutbound service is registered under url_update_outbound_key."""
     assert client.app.get(url_update_outbound_key) is not None
+
+
+async def test_put_base_when_the_base_fails_to_resolve_after_the_write(client, caplog):
+    """The push is stored, but the effective base can't be read back:
+    WARNING, no fan-out (never publish a guess), and a normal answer."""
+
+    class _FailsAfterWrite:
+        calls = 0
+
+        async def get_federation_base(self):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                return "https://old.example/api/socialhome/inbox"
+            raise RuntimeError("db gone")
+
+    client.app[platform_adapter_key] = _FailsAfterWrite()
+    outbound = _RecordingOutbound()
+    client.app[url_update_outbound_key] = outbound
+    with caplog.at_level(logging.WARNING, logger="socialhome.routes.ha_integration"):
+        r = await client.put(
+            "/api/ha/integration/federation-base",
+            json={"base": "https://pushed.example"},
+            headers=_auth(client._tok),
+        )
+    assert r.status == 200
+    body = await r.json()
+    assert body == {
+        "ok": True,
+        "base": "https://pushed.example",
+        "changed": True,
+        "peers_notified": 0,
+    }
+    assert outbound.captured == []
+    assert _FailsAfterWrite.calls == 2
+    assert "could not resolve federation base" in caplog.text
+    r = await client.get(
+        "/api/ha/integration/federation-base", headers=_auth(client._tok)
+    )
+    assert (await r.json())["base"] == "https://pushed.example"

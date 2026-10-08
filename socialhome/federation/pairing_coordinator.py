@@ -41,6 +41,7 @@ from ..domain.events import (
 from ..utils.datetime import parse_iso8601_strict
 from .crypto_suite import DEFAULT_SUITE, negotiate
 from .peer_pairing_client import PeerPairingResult, _canonical_body_bytes
+from .transport import https_failure_is_relayable
 from ..peer_url import validate_peer_url
 from ..domain.federation import (
     PAIRING_REACH_GFS,
@@ -487,6 +488,8 @@ class PairingCoordinator:
                 gfs_connection_id=shared_conn_id,
                 proto_version=qr_payload.get("proto_version"),
             )
+        else:
+            await self._clear_stale_relay(peer_instance_id)
 
         # Tell A we accepted. A has a PairingSession but no RemoteInstance
         # yet — delivering our identity + dh keys in this plaintext
@@ -572,8 +575,36 @@ class PairingCoordinator:
                 now=datetime.now(timezone.utc).isoformat(),
             )
         if isinstance(proto_version, int) and not isinstance(proto_version, bool):
-            if 1 <= proto_version <= OURS:
-                await self._repo.set_proto_version(peer_instance_id, proto_version)
+            if proto_version >= 1:
+                # A newer peer states a version we can't know the meaning
+                # of; what we may rely on is everything up to our own.
+                await self._repo.set_proto_version(
+                    peer_instance_id, min(proto_version, OURS)
+                )
+
+    async def _clear_stale_relay(self, peer_instance_id: str) -> None:
+        """A classic ``url`` pairing means no GFS: switch off a relay opt-in
+        and drop routes an earlier GFS pairing with this household left on
+        the row (``save_instance`` never overwrites ``gfs_relay``, and a
+        re-pair over a live row keeps it). A no-op for a fresh row."""
+        row = await self._repo.get_instance(peer_instance_id)
+        if row is None or not row.gfs_relay:
+            return
+        await self._repo.set_gfs_relay(peer_instance_id, enabled=False)
+        for route in await self._repo.list_gfs_routes(peer_instance_id):
+            await self._repo.delete_gfs_route(peer_instance_id, route.gfs_connection_id)
+
+    async def _seeded_route(
+        self, peer_instance_id: str, gfs_connection_id: str | None
+    ) -> str | None:
+        """*gfs_connection_id* iff it is a route to the peer — the only
+        proof we have that the peer reads that server."""
+        if gfs_connection_id is None:
+            return None
+        routes = await self._repo.list_gfs_routes(peer_instance_id)
+        if any(r.gfs_connection_id == gfs_connection_id for r in routes):
+            return gfs_connection_id
+        return None
 
     async def _deliver(
         self,
@@ -601,7 +632,10 @@ class PairingCoordinator:
                     peer_inbox_url=peer_inbox_url,
                     body=body,
                 )
-            if result.ok:
+            # Only when the peer was not reached (network error, timeout,
+            # 5xx): a 4xx is its own pipeline's answer, and the relay would
+            # hand the same body to the same pipeline.
+            if result.ok or not https_failure_is_relayable(result.status_code):
                 return result
         if self._gfs_reach is None or gfs_connection_id is None or not peer_keywrap_pk:
             return result if result is not None else _relay_result(False)
@@ -694,7 +728,7 @@ class PairingCoordinator:
         # the QR. No session → rogue sender.
         session = await self._repo.get_pairing(token)
         if session is None:
-            raise ValueError(f"No pending pairing for token={token!r}")
+            raise ValueError("No pending pairing for this token")
         if (
             expected_local_inbox_id is not None
             and session.own_local_inbox_id != expected_local_inbox_id
@@ -707,6 +741,17 @@ class PairingCoordinator:
             # classic URL code): not the channel the code owner offered.
             raise ValueError(
                 "relayed peer-accept did not arrive through the pairing's GFS",
+            )
+        if (
+            relayed_via is None
+            and session.relay_via is not None
+            and not session.inbox_url
+        ):
+            # We offered no address for this pairing: nobody can know our
+            # inbox id, so a body on the inbox path did not come from the
+            # code. Only the bootstrap GFS carries it.
+            raise ValueError(
+                "peer-accept for a GFS-only pairing must arrive through its GFS",
             )
         if not peer_inbox_url and session.relay_via is None:
             # A classic code: the scanner must answer with an address
@@ -829,11 +874,20 @@ class PairingCoordinator:
         if peer_keywrap_pk is not None:
             # Before the SAS reaches our admin: the relayed confirm path
             # and B's first relayed envelopes need the opt-in in place.
+            # Seed the bootstrap route only when B provably reads that
+            # server: the accept came through it, or B has no address (the
+            # scanner refuses a code it cannot answer through the GFS).
+            # A URL scanner may not be on G at all — a route there would
+            # turn every fallback into a silent 202 and tell G B's id;
+            # route discovery finds the shared servers instead.
+            b_on_gfs = relayed_via is not None or not peer_inbox_url
             await self._seat_relay(
                 peer_instance_id,
-                gfs_connection_id=session.relay_via,
+                gfs_connection_id=session.relay_via if b_on_gfs else None,
                 proto_version=body.get("proto_version"),
             )
+        elif session.relay_via is None:
+            await self._clear_stale_relay(peer_instance_id)
 
         # Update the PairingSession with peer data + SAS so ``confirm``
         # (called later when the admin enters the SAS) can proceed.
@@ -897,7 +951,7 @@ class PairingCoordinator:
 
         session = await self._repo.get_pairing(token)
         if session is None:
-            raise ValueError(f"No pending pairing for token={token!r}")
+            raise ValueError("No pending pairing for this token")
         if (
             expected_local_inbox_id is not None
             and session.own_local_inbox_id != expected_local_inbox_id
@@ -908,6 +962,30 @@ class PairingCoordinator:
         if relayed_via is not None and session.relay_via != relayed_via:
             raise ValueError(
                 "relayed peer-confirm did not arrive through the pairing's GFS",
+            )
+        if (
+            relayed_via is None
+            and session.relay_via is not None
+            and not session.inbox_url
+        ):
+            raise ValueError(
+                "peer-confirm for a GFS-only pairing must arrive through its GFS",
+            )
+        if session.expires_at:
+            expires = parse_iso8601_strict(session.expires_at)
+            if datetime.now(timezone.utc) > expires:
+                raise ValueError("Pairing session has expired")
+        # The token names a session with ONE household: the confirm must be
+        # signed by that household, not by another one we also hold a
+        # pending row for (the signature below is checked against the row
+        # the body names, so without this a third party could confirm its
+        # own pending row with somebody else's token).
+        if session.peer_identity_pk and (
+            derive_instance_id(bytes.fromhex(session.peer_identity_pk))
+            != claimed_instance_id
+        ):
+            raise ValueError(
+                "peer-confirm instance_id does not match stored identity_pk",
             )
 
         instance = await self._repo.get_instance(claimed_instance_id)
@@ -991,7 +1069,7 @@ class PairingCoordinator:
         """
         session = await self._repo.get_pairing(token)
         if session is None:
-            raise ValueError(f"No pending pairing for token={token!r}")
+            raise ValueError("No pending pairing for this token")
 
         if session.verification_code != verification_code:
             raise ValueError("Verification code mismatch")
@@ -1062,7 +1140,9 @@ class PairingCoordinator:
                 peer_keywrap_pk=(
                     instance.remote_keywrap_pk if instance.gfs_relay else None
                 ),
-                gfs_connection_id=session.relay_via,
+                gfs_connection_id=await self._seeded_route(
+                    instance.id, session.relay_via
+                ),
             )
             if not result.ok:
                 log.warning(

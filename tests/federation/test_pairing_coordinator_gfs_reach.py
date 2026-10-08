@@ -225,6 +225,22 @@ async def test_a_scanner_with_a_url_but_not_on_the_gfs_still_pairs_url_gfs(sides
     assert row.remote_keywrap_pk == a.keywrap.public_key.hex()
     assert await b.repo.list_gfs_routes(a.iid) == []  # not on G: nothing seeded
 
+    # A side: B's accept came over HTTP with an address, so nothing proves B
+    # reads G — A opts in and keeps the key, but seeds no route through G
+    # (a relayed send there would be a silent 202 loss) and its confirm
+    # never falls back to G.
+    a.http.status = 503
+    await a.coord.handle_peer_accept(
+        _accept_body(b, qr["token"], inbox_url="https://b.example/inbox/x"),
+    )
+    a_row = await a.repo.get_instance(b.iid)
+    assert a_row.gfs_relay is True
+    assert a_row.remote_keywrap_pk == b.keywrap.public_key.hex()
+    assert await a.repo.list_gfs_routes(b.iid) == []
+    await a.coord.confirm(qr["token"], "123456")
+    assert a.relay.sent == []
+    assert a.probed == [b.iid]  # discovery decides, not the code
+
 
 async def test_a_gfs_code_with_an_inbox_url_is_refused(sides):
     a = await sides("a")
@@ -270,7 +286,25 @@ async def test_a_failed_inbox_post_falls_back_to_the_bootstrap_gfs(sides):
     assert inner["inbox_url"].startswith("https://b.example/inbox/")
 
 
-@pytest.mark.parametrize("bogus", [True, 0, OURS + 1, "53", None])
+async def test_a_newer_stated_proto_version_is_clamped_to_ours(sides):
+    a = await sides("a")
+    b = await sides("b")
+    qr = await a.coord.initiate(None, reach="gfs")
+    await b.coord.accept({**qr, "proto_version": OURS + 7}, None)
+    assert (await b.repo.get_instance(a.iid)).proto_version == OURS
+
+
+async def test_a_refused_inbox_post_does_not_fall_back_to_the_gfs(sides):
+    """A 4xx is the peer's own answer — the relay would earn the same one."""
+    a = await sides("a")
+    b = await sides("b", http_status=403)
+    qr = await a.coord.initiate("https://a.example/inbox", reach="url_gfs")
+    await b.coord.accept(qr, "https://b.example/inbox")
+    assert b.http.posts == [qr["inbox_url"]]
+    assert b.relay.sent == []
+
+
+@pytest.mark.parametrize("bogus", [True, 0, "53", None])
 async def test_a_bogus_stated_proto_version_is_ignored(sides, bogus):
     a = await sides("a")
     b = await sides("b")
@@ -379,9 +413,14 @@ async def test_a_failed_confirm_post_falls_back_to_the_relay_and_probes(sides):
     a = await sides("a", http_status=503)
     b = await sides("b")
     qr = await a.coord.initiate("https://a.example/inbox", reach="url_gfs")
+    # Relayed through G: B provably reads G, so the route is seeded.
     await a.coord.handle_peer_accept(
         _accept_body(b, qr["token"], inbox_url="https://b.example/inbox/x"),
+        relayed_via=a.conn_id,
     )
+    assert [r.gfs_connection_id for r in await a.repo.list_gfs_routes(b.iid)] == [
+        a.conn_id
+    ]
 
     confirmed = await a.coord.confirm(qr["token"], "123456")
 
@@ -417,3 +456,135 @@ async def test_a_relayed_confirm_through_another_connection_is_refused(sides):
     assert row.status is PairingStatus.CONFIRMED
     assert row.gfs_relay is True and row.remote_keywrap_pk is not None
     assert b.probed == [a.iid]
+
+
+# ── review hardening ──
+
+
+async def _route_to(side: _Side, peer: _Side) -> None:
+    await side.repo.upsert_gfs_route(
+        peer.iid, side.conn_id, now="2026-10-08T00:00:00+00:00"
+    )
+
+
+async def test_a_url_re_pair_switches_an_old_relay_opt_in_off_on_both_sides(sides):
+    """``url`` means no GFS: a re-pair over a row that still has the relay
+    opt-in and routes from an earlier GFS pairing clears both."""
+    a = await sides("a")
+    b = await sides("b")
+    qr = await a.coord.initiate(None, reach="gfs")
+    await b.coord.accept(qr, None)
+    await a.coord.handle_peer_accept(
+        _accept_body(b, qr["token"]), relayed_via=a.conn_id
+    )
+    assert (await a.repo.get_instance(b.iid)).gfs_relay is True
+    assert (await b.repo.get_instance(a.iid)).gfs_relay is True
+    await _route_to(a, b)
+
+    qr2 = await a.coord.initiate("https://a.example/inbox")
+    await b.coord.accept(qr2, "https://b.example/inbox")
+    await a.coord.handle_peer_accept(
+        _accept_body(
+            b, qr2["token"], inbox_url="https://b.example/inbox/y", keywrap=False
+        )
+    )
+    await a.coord.confirm(qr2["token"], "123456")
+
+    for me, peer in ((a, b), (b, a)):
+        assert (await me.repo.get_instance(peer.iid)).gfs_relay is False
+        assert await me.repo.list_gfs_routes(peer.iid) == []
+    assert a.probed == [] and a.relay.sent == []
+
+
+async def test_an_http_accept_for_a_gfs_only_session_is_refused(sides):
+    """We offered no address, so the accept can only come through the GFS."""
+    a = await sides("a")
+    b = await sides("b")
+    qr = await a.coord.initiate(None, reach="gfs")
+    with pytest.raises(ValueError, match="through its GFS"):
+        await a.coord.handle_peer_accept(_accept_body(b, qr["token"]))
+    assert await a.repo.get_instance(b.iid) is None
+
+
+async def test_a_keywrap_key_bound_to_another_identity_than_the_signer_is_refused(
+    sides,
+):
+    a = await sides("a")
+    b = await sides("b")
+    c = await sides("c")
+    qr = await a.coord.initiate(None, reach="gfs")
+    c_fields = _accept_body(c, "x")
+    body = _accept_body(b, qr["token"], keywrap=False)
+    body = sign_peer_body(
+        {
+            **{k: v for k, v in body.items() if k != "signature"},
+            "keywrap_pk": c_fields["keywrap_pk"],
+            "keywrap_sig": c_fields["keywrap_sig"],
+            "keywrap_suite": KEM_SUITE_X25519,
+        },
+        own_identity_seed=b.ident.private_key,
+    )
+    with pytest.raises(PairingKeywrapInvalidError):
+        await a.coord.handle_peer_accept(body, relayed_via=a.conn_id)
+    assert await a.repo.get_instance(b.iid) is None
+
+
+def _confirm_body(signer: _Side, token: str, instance_id: str) -> dict:
+    return sign_peer_body(
+        {
+            "event_type": "pairing_peer_confirm",
+            "token": token,
+            "instance_id": instance_id,
+        },
+        own_identity_seed=signer.ident.private_key,
+    )
+
+
+async def test_an_expired_peer_confirm_is_refused(sides):
+    a = await sides("a")
+    b = await sides("b")
+    qr = await a.coord.initiate(None, reach="gfs")
+    await b.coord.accept(qr, None)
+    await b.db.enqueue(
+        "UPDATE pending_pairings SET expires_at=? WHERE token=?",
+        ("2020-01-01T00:00:00+00:00", qr["token"]),
+    )
+    with pytest.raises(ValueError, match="has expired"):
+        await b.coord.handle_peer_confirm(
+            _confirm_body(a, qr["token"], a.iid), relayed_via=b.conn_id
+        )
+    assert (await b.repo.get_instance(a.iid)).status is PairingStatus.PENDING_RECEIVED
+
+
+async def test_a_peer_confirm_from_another_household_is_refused(sides):
+    """The token names a session with A; a confirm signed by C for C's own
+    pending row must not confirm C (nor burn A's session)."""
+    a = await sides("a")
+    b = await sides("b")
+    c = await sides("c")
+    qr_c = await c.coord.initiate(None, reach="gfs")
+    await b.coord.accept(qr_c, None)  # B holds a pending row for C
+    qr = await a.coord.initiate(None, reach="gfs")
+    await b.coord.accept(qr, None)
+
+    with pytest.raises(ValueError, match="does not match stored identity_pk"):
+        await b.coord.handle_peer_confirm(
+            _confirm_body(c, qr["token"], c.iid), relayed_via=b.conn_id
+        )
+    assert (await b.repo.get_instance(c.iid)).status is PairingStatus.PENDING_RECEIVED
+    assert await b.repo.get_pairing(qr["token"]) is not None
+
+
+async def test_pairing_errors_never_carry_the_token(sides):
+    a = await sides("a")
+    b = await sides("b")
+    for call in (
+        lambda: a.coord.handle_peer_accept(_accept_body(b, "secret-token-xyz")),
+        lambda: a.coord.handle_peer_confirm(
+            _confirm_body(b, "secret-token-xyz", b.iid)
+        ),
+        lambda: a.coord.confirm("secret-token-xyz", "123456"),
+    ):
+        with pytest.raises(ValueError) as exc:
+            await call()
+        assert "secret-token-xyz" not in str(exc.value)

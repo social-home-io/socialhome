@@ -505,3 +505,32 @@ async def test_an_old_scanner_fails_closed_on_a_gfs_code(world):
         await b.federation.accept_pairing(old_qr, b.base)
     assert await b.fed_repo.get_instance(a.iid) is None
     assert world.inboxes.posts == []
+
+
+async def test_a_url_scanner_not_on_the_gfs_gets_no_route_through_it(world):
+    """B answers a ``url_gfs`` code at A's inbox and is not on G. Nothing
+    proves B reads G, so A seeds no route there: a relayed fallback through
+    G would be a silent 202 and tell G B's instance id. A keeps the opt-in
+    and B's key; route discovery finds whatever the two really share."""
+    a = await world.household("a", [URL_G], base="https://a.example/federation/inbox")
+    b = await world.household("b", [], base="https://b.example/federation/inbox")
+    qr = await a.federation.initiate_pairing(a.base, reach="url_gfs")
+
+    accepted = await b.federation.accept_pairing(qr, b.base)
+    await world.drain()
+    await a.federation.confirm_pairing(qr["token"], accepted["verification_code"])
+    await world.drain()
+
+    a_row = await a.fed_repo.get_instance(b.iid)
+    assert a_row.status is PairingStatus.CONFIRMED
+    assert a_row.gfs_relay is True
+    assert a_row.remote_keywrap_pk == b.keywrap.public_key.hex()
+    assert await _routes(a, b) == []
+    assert await _routes(b, a) == []
+    # Accept and confirm both went inbox to inbox. The only blob G holds
+    # for B is route discovery's one probe (gfs-relay.md: a server only
+    # the prober uses learns that someone addressed B) — and no route
+    # comes of it, since B never reads G.
+    assert len(world.inboxes.posts) == 2
+    assert a.probed == [b.iid]
+    assert len([x for x in world.net[URL_G].bodies if x["to_instance"] == b.iid]) == 1
