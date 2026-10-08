@@ -751,8 +751,22 @@ python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py verify
+python .claude/skills/federation-demo/harness.py gfs-down
+```
+
+``gfs-reach-pair`` needs **e** to be a stranger to **a**, and the
+``gfs-invite-link*`` steps above seat e in a's space, so the two newest steps
+run as their own chain on a fresh ``up`` (``gfs-fallback-switch`` also needs
+``relay-pair``, a ↔ d):
+
+```bash
+python .claude/skills/federation-demo/harness.py up
+python .claude/skills/federation-demo/harness.py pair
+python .claude/skills/federation-demo/harness.py relay-pair
+python .claude/skills/federation-demo/harness.py gfs-up
+python .claude/skills/federation-demo/harness.py gfs-pair
 python .claude/skills/federation-demo/harness.py gfs-reach-pair
-python .claude/skills/federation-demo/harness.py gfs-fallback-switch   # needs relay-pair (a <-> d)
+python .claude/skills/federation-demo/harness.py gfs-fallback-switch
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
 
