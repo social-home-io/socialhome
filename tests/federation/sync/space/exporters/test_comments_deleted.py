@@ -62,7 +62,7 @@ class _Comments:
 
 async def test_exports_ids_post_and_author_never_content():
     repo = _Comments()
-    exporter = CommentsDeletedExporter(repo, SyncWindows(_Spaces(_SPACE)))  # type: ignore[arg-type]
+    exporter = CommentsDeletedExporter(repo)  # type: ignore[arg-type]
     assert exporter.resource == "comments_deleted"
     assert await exporter.list_records("sp-1") == [
         {
@@ -76,16 +76,18 @@ async def test_exports_ids_post_and_author_never_content():
     assert repo.asked == [(True, None, (), None, SYNC_PAGE_SIZE)]
 
 
-async def test_live_comments_never_include_a_deleted_one_and_share_the_window():
+async def test_live_comments_take_the_window_tombstones_never_do():
     kept = dataclasses.replace(_SPACE, retention_days=3)
     repo = _Comments()
     windows = SyncWindows(_Spaces(kept))  # type: ignore[arg-type]
     live = await CommentsExporter(repo, windows).list_records("sp-1")  # type: ignore[arg-type]
-    await CommentsDeletedExporter(repo, windows).list_records("sp-1")  # type: ignore[arg-type]
+    await CommentsDeletedExporter(repo).list_records("sp-1")  # type: ignore[arg-type]
     assert [r["id"] for r in live] == ["c-live"]
     (live_ask, gone_ask) = repo.asked
     assert live_ask[0] is False and gone_ask[0] is True
-    assert live_ask[1] is not None and live_ask[1] == gone_ask[1]
+    # Live comments follow the retention window; a delete reaches every
+    # household whatever its age (nothing else would tell a member).
+    assert live_ask[1] is not None and gone_ask[1] is None
 
 
 def test_tombstones_stream_after_the_posts_and_before_the_comments():

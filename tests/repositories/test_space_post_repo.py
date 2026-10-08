@@ -138,9 +138,11 @@ async def test_list_sync_page_ships_hidden_anchors_but_not_deleted_posts(env):
     synced = {p.id: p for p in page}
     assert cursor is None
     assert set(synced) == {"sp-sync-vis", "sp-sync-anchor"}
-    # The deleted post is the tombstone page — its row, content cleared.
-    gone_page, _ = await env.repo.list_sync_page(env.space_id, deleted=True)
-    assert [(p.id, p.content) for p in gone_page] == [("sp-sync-gone", None)]
+    # The deleted post is the tombstone page — ids and author, no content.
+    gone_page, _ = await env.repo.list_post_tombstones_page(env.space_id)
+    assert [(t.id, t.author, t.type) for t in gone_page] == [
+        ("sp-sync-gone", "uid-alice", "text")
+    ]
     assert synced["sp-sync-anchor"].hidden_from_feed is True
     # And the feed contract is unchanged: the anchor stays out of it.
     assert "sp-sync-anchor" not in {
@@ -783,10 +785,10 @@ async def test_list_sync_page_keeps_the_retention_window_and_exempt_types(env):
     assert {p.id for p in live} == {"new", "old-poll"}
     live, _ = await env.repo.list_sync_page(env.space_id, cutoff=_cutoff(7))
     assert {p.id for p in live} == {"new"}
-    gone, _ = await env.repo.list_sync_page(
-        env.space_id, deleted=True, cutoff=_cutoff(7)
-    )
-    assert {p.id for p in gone} == {"gone-new"}
+    # Tombstones carry no window: an old delete (or a retention expiry)
+    # must still reach a household that holds the row.
+    gone, _ = await env.repo.list_post_tombstones_page(env.space_id)
+    assert {t.id for t in gone} == {"gone-new", "gone-old"}
     # Keep forever: everything.
     live, _ = await env.repo.list_sync_page(env.space_id)
     assert {p.id for p in live} == {"new", "old", "old-poll"}
@@ -826,3 +828,35 @@ async def test_list_comments_sync_page_splits_live_and_tombstones(env):
     # Another space's comments never appear.
     other, _ = await env.repo.list_comments_sync_page("sp-other")
     assert other == []
+
+
+async def test_list_post_tombstones_page_names_a_moderator_removal(env):
+    await env.repo.save(env.space_id, _aged("mod", days=1, type=PostType.POLL))
+    await env.repo.save(env.space_id, _aged("own", days=1))
+    await env.repo.save(env.space_id, _aged("live", days=1))
+    await env.repo.soft_delete("mod", space_id=env.space_id, moderated_by="u-mod")
+    await env.repo.soft_delete("own", space_id=env.space_id)
+    seen, cursor = [], None
+    while True:
+        page, cursor = await env.repo.list_post_tombstones_page(
+            env.space_id, cursor=cursor, limit=1
+        )
+        seen.extend(page)
+        if cursor is None:
+            break
+    by_id = {t.id: t for t in seen}
+    assert set(by_id) == {"mod", "own"}
+    assert (by_id["mod"].type, by_id["mod"].moderated, by_id["mod"].moderated_by) == (
+        "poll",
+        True,
+        "u-mod",
+    )
+    assert (by_id["own"].moderated, by_id["own"].moderated_by) == (False, None)
+    # A repeated delete never forgets the moderator.
+    await env.repo.soft_delete("mod", space_id=env.space_id)
+    (again,) = [
+        t
+        for t in (await env.repo.list_post_tombstones_page(env.space_id))[0]
+        if t.id == "mod"
+    ]
+    assert again.moderated_by == "u-mod"

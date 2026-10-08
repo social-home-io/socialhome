@@ -1417,8 +1417,11 @@ catch-up stream is held to the same rules unless it comes from the host —
 its tombstone resources (`posts_deleted`, `comments_deleted`,
 `pages_deleted`, `task_lists_deleted`, `tasks_deleted`,
 `chat_messages_deleted`) to the live delete rule. What it streams is the
-space's retention window (everything without retention), read page by
-page in bounded memory — never a fixed count; see
+space's retention window for live posts and chat (everything without
+retention; gallery items and post / comment tombstones always in full),
+read page by page in bounded memory — never a fixed count. The 30-minute
+periodic re-sync is `incremental` (no media re-ship), and a session is
+reaped only when idle, never mid-stream; see
 [`protocol/sync.md`](./protocol/sync.md#what-a-sync-streams).
 Because every author is bound to the roster mirror, the mirror must heal on
 its own: the host sends a v_32 roster snapshot on seat, on a member's

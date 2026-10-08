@@ -12,8 +12,9 @@ Each record names the comment, its post and its author, never content:
 ``{id, comment_id, post_id, author, created_at}``. A separate resource,
 so an older receiver drops it as unknown. Ships after ``posts`` (a stub
 needs its post held) and before ``comments`` in
-:data:`~..exporter.RESOURCE_ORDER`. Window: the parent post's, as for the
-live comments.
+:data:`~..exporter.RESOURCE_ORDER`. No retention window (unlike the live
+comments): a delete must reach every household that holds the comment,
+whatever its age. Oldest stored first (row id order), page by page.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from ..exporter import PagedExporterMixin
-from ..window import SyncWindows
+from ..window import KEEP_FOREVER
 from .comments import iter_comment_pages
 
 if TYPE_CHECKING:
@@ -33,18 +34,14 @@ if TYPE_CHECKING:
 class CommentsDeletedExporter(PagedExporterMixin):
     resource = "comments_deleted"
 
-    __slots__ = ("_repo", "_windows")
+    __slots__ = ("_repo",)
 
-    def __init__(
-        self, space_post_repo: "AbstractSpacePostRepo", windows: SyncWindows
-    ) -> None:
+    def __init__(self, space_post_repo: "AbstractSpacePostRepo") -> None:
         self._repo = space_post_repo
-        self._windows = windows
 
     async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
-        window = await self._windows.for_space(space_id)
         async for comments in iter_comment_pages(
-            self._repo, space_id, window, deleted=True
+            self._repo, space_id, KEEP_FOREVER, deleted=True
         ):
             yield [comment_tombstone_record(c) for c in comments]
 

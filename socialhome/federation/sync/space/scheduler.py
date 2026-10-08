@@ -67,10 +67,11 @@ log = logging.getLogger(__name__)
 #: per (instance, space) rate limit.
 PERIODIC_INTERVAL_SECONDS: float = 30 * 60
 
-#: Age past which an in-memory sync session is considered abandoned and
-#: reaped by the periodic tick (§25.6 backstop for the never-emitted
-#: ``SPACE_SYNC_COMPLETE``). 30 min — far longer than any real sync, so
-#: only genuinely-leaked sessions are torn down. With the periodic tick a
+#: Idle time (no chunk moved — ``SyncSessionRecord.last_activity``) past
+#: which an in-memory sync session is considered abandoned and reaped by
+#: the periodic tick (§25.6 backstop for the never-emitted
+#: ``SPACE_SYNC_COMPLETE``). Idle, not age: a big stream may run longer
+#: than this and is kept while it makes progress. With the periodic tick a
 #: leaked session lives at most ~PERIODIC_INTERVAL_SECONDS + this TTL.
 STALE_SESSION_TTL_SECONDS: float = 1800.0
 
@@ -325,8 +326,15 @@ class SpaceSyncScheduler:
         space_id: str,
         peer_instance_id: str,
         priority: int = P4_DM,
+        sync_mode: str = "initial",
     ) -> None:
         """Queue a sync from us to ``peer_instance_id`` for ``space_id``.
+
+        ``sync_mode`` ``"incremental"`` is the periodic re-sync of a space
+        we already hold: the provider re-streams the rows (cheap to apply,
+        idempotent) but re-ships no media. Everything else — a pairing, a
+        deferred retry, an echo, "Sync now" — is ``"initial"`` and also
+        enqueues the catch-up media.
 
         Fire-and-forget — the actual ``SPACE_SYNC_BEGIN`` send happens
         when the queue worker picks up the task. Callers should not
@@ -360,7 +368,7 @@ class SpaceSyncScheduler:
             payload: dict = {
                 "sync_id": sync_id,
                 "space_id": space_id,
-                "sync_mode": "initial",
+                "sync_mode": sync_mode,
                 "prefer_direct": prefer_direct,
             }
             echo = await self._echo_for(space_id, peer_instance_id)
@@ -459,6 +467,7 @@ class SpaceSyncScheduler:
                     space_id=space_id,
                     peer_instance_id=peer_id,
                     priority=P6_PRODUCTIVITY,
+                    sync_mode="incremental",
                 )
 
     # ─── Mesh catch-up (#648) ───────────────────────────────────────

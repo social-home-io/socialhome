@@ -1279,6 +1279,8 @@ async def test_handle_space_sync_chunk_forwards_to_receiver(svc):
         from_instance="peer-id",
         expected_space_id="sp",
     )
+    # Each chunk is progress: a long stream is not reaped mid-way.
+    svc._sync_manager.touch_session.assert_called_once_with("s")
 
 
 async def test_handle_space_sync_chunk_rejects_wrong_provider(svc):
@@ -1298,6 +1300,7 @@ async def test_handle_space_sync_chunk_rejects_wrong_provider(svc):
         ),
     )
     svc._space_sync_receiver.on_chunk.assert_not_awaited()
+    svc._sync_manager.touch_session.assert_not_called()
 
 
 # ─── _handle_space_sync_answer ─────────────────────────────────────

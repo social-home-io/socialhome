@@ -264,14 +264,24 @@ class SyncSessionManager:
         if sess.rtc is not None:
             sess.rtc.close()
 
-    def reap_stale(self, ttl_seconds: float, *, now: float | None = None) -> int:
-        """Close sessions older than ``ttl_seconds`` (by ``created_at``).
+    def touch_session(self, sync_id: str, *, now: float | None = None) -> None:
+        """Mark progress on ``sync_id`` (a chunk moved); unknown ids are
+        ignored. What :meth:`reap_stale` measures idleness from."""
+        record = self._sessions.get(sync_id)
+        if record is not None:
+            record.touch(now)
 
-        A safety backstop for sessions that never reach an explicit
-        close — a sync stalls mid-stream, the peer vanishes, or a
-        completion signal is missed. ``ttl_seconds`` is generous (well
-        beyond any real sync duration), so this only reaps genuinely
-        abandoned sessions. Returns the number reaped. Uses
+    def reap_stale(self, ttl_seconds: float, *, now: float | None = None) -> int:
+        """Close sessions idle for more than ``ttl_seconds``.
+
+        Idle = since the last chunk moved (``last_activity``, which starts
+        at ``created_at``) — not since the session began: a stream with no
+        fixed size limit may legitimately run longer than the TTL, and
+        reaping it by age tore it down mid-way, so the next BEGIN started
+        from scratch and met the same fate. A safety backstop for sessions
+        that never reach an explicit close — a sync stalls mid-stream, the
+        peer vanishes, or a completion signal is missed. Returns the number
+        reaped. Uses
         :meth:`close_session` for each so rtc handles / watcher tasks are
         torn down, not just dropped from the dict.
         """
@@ -279,7 +289,7 @@ class SyncSessionManager:
         # Snapshot before iterating — close_session mutates _sessions.
         reaped = 0
         for sync_id, record in list(self._sessions.items()):
-            if current - record.created_at > ttl_seconds:
+            if current - max(record.created_at, record.last_activity) > ttl_seconds:
                 self.close_session(sync_id)
                 reaped += 1
         if reaped:

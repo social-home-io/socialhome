@@ -156,8 +156,9 @@ The `chat_messages` sync resource streams the provider's chat messages
 that are not deleted and fall inside the space's retention window (the
 whole chat when the space keeps forever; see
 [`sync.md`](./sync.md#what-a-sync-streams)), oldest first and page by
-page, encrypted under the space content key like every resource
-(`ChatMessagesExporter`). No fixed count cuts it. The
+page in storage order (oldest stored first), encrypted under the space
+content key like every resource (`ChatMessagesExporter`). No fixed count
+cuts it. The
 provider gates it per requester. A requester must be at v_55 and hold a
 writer seat (`SpaceChatAudience.may_receive`). Otherwise it gets no
 exporter: a follower-only household gets the chat by catch-up no more than

@@ -61,15 +61,15 @@ class AbstractGalleryRepo(Protocol):
         self,
         space_id: str,
         *,
-        cutoff: str | None = None,
         cursor: int | None = None,
         limit: int = 200,
     ) -> tuple[list[GalleryItem], int | None]:
         """One page of the space's own gallery items for a §25.6 sync —
         never a mirror of a post's media (``source_post_id``; the receiver
-        re-creates those from the post). ``cutoff`` is the space's
-        retention window; an item in a ``retention_exempt`` album streams
-        at any age. ``(rows, next_cursor)`` paging, keyset on the row id."""
+        re-creates those from the post). Every item, whatever its age:
+        nothing prunes gallery items (the retention sweep touches posts and
+        chat only), so a window would hide photos the space still shows.
+        ``(rows, next_cursor)`` paging, keyset on the row id."""
         ...
 
     async def get_item(self, item_id: str) -> GalleryItem | None: ...
@@ -431,25 +431,16 @@ class SqliteGalleryRepo:
         self,
         space_id: str,
         *,
-        cutoff: str | None = None,
         cursor: int | None = None,
         limit: int = 200,
     ) -> tuple[list[GalleryItem], int | None]:
-        window = ""
-        window_params: tuple = ()
-        if cutoff is not None:
-            window = (
-                " AND (a.retention_exempt=1 OR datetime(i.created_at) >= datetime(?))"
-            )
-            window_params = (cutoff,)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT i.rowid AS sync_rowid, i.* FROM gallery_items i"
                 " JOIN gallery_albums a ON a.id = i.album_id"
                 " WHERE a.space_id=? AND i.source_post_id IS NULL"
-                + window
-                + " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",
-                (space_id, *window_params, cursor or 0, int(limit)),
+                " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",
+                (space_id, cursor or 0, int(limit)),
             )
         )
         return [self._row_to_item(r) for r in rows], sync_page_cursor(rows, limit)

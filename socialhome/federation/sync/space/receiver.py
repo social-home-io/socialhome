@@ -579,12 +579,19 @@ class SpaceSyncReceiver:
         elif resource == "comments_deleted":
             await self._persist_comment_tombstones(records, space_id, provider=provider)
         elif resource == "comments":
+            # An older provider streamed its deleted comments as comment
+            # records (content cleared, ``deleted: true``); stored, one read
+            # as a live empty comment. From the host such a record is the
+            # delete it stands for — applied as a ``comments_deleted``
+            # tombstone; from anyone else it is dropped (a member's deletes
+            # travel as tombstones, judged by the live rule).
+            gone = [r for r in records if r.get("deleted")]
+            if gone and await self._is_host(space_id, provider):
+                await self._persist_comment_tombstones(
+                    gone, space_id, provider=provider
+                )
             for r in records:
                 if r.get("deleted"):
-                    # An older provider streamed its deleted comments as
-                    # comment records (content cleared); stored, they would
-                    # read as a live empty comment. Deletes travel as
-                    # ``comments_deleted`` tombstones.
                     continue
                 comment = _comment_from_record(r)
                 if comment is None or await self._space_post_repo.add_comment(
@@ -890,12 +897,19 @@ class SpaceSyncReceiver:
             post_id = str(r.get("id") or r.get("post_id") or "")
             if not post_id:
                 continue
+            # A moderator removal names its moderator (migration 0084); the
+            # author's own delete names nobody.
+            moderator = (
+                str(r.get("actor_user_id") or "") or None
+                if r.get("moderated")
+                else None
+            )
             held = await self._space_post_repo.get(post_id)
             if held is not None:
                 if held[0] != space_id:
                     cross_space.append(post_id)
                 elif not held[1].deleted and await self._space_post_repo.soft_delete(
-                    post_id, space_id=space_id
+                    post_id, space_id=space_id, moderated_by=moderator
                 ):
                     await self._bus.publish(
                         PostDeleted(
@@ -917,16 +931,27 @@ class SpaceSyncReceiver:
             ):
                 unbound += 1
                 continue
-            await self._space_post_repo.save(
+            try:
+                # The post's own type: a stub of a retention-exempt type
+                # stays exempt here.
+                post_type = PostType(str(r.get("type") or "text"))
+            except ValueError:
+                post_type = PostType.TEXT
+            saved = await self._space_post_repo.save(
                 space_id,
                 Post(
                     id=post_id,
                     author=author,
-                    type=PostType.TEXT,
+                    type=post_type,
                     created_at=_parse_iso(r.get("created_at")),
                     deleted=True,
+                    moderated=bool(r.get("moderated")),
                 ),
             )
+            if saved is not None and moderator is not None:
+                await self._space_post_repo.soft_delete(
+                    post_id, space_id=space_id, moderated_by=moderator
+                )
         _log_tombstone_refusals("post", provider, space_id, cross_space, unbound)
 
     async def _persist_comment_tombstones(
@@ -1345,6 +1370,15 @@ class SpaceSyncReceiver:
         for page_id, seq in highest.items():
             await engine.raise_floor(space_id, page_id, seq, provider=provider)
 
+    async def _is_host(self, space_id: str, provider: str) -> bool:
+        """Is ``provider`` the household hosting ``space_id``?"""
+        space = await self._space_repo.get(space_id)
+        return (
+            bool(provider)
+            and space is not None
+            and (space.owner_instance_id == provider)
+        )
+
     async def _is_host_version(
         self, space_id: str, provider: str, r: dict[str, Any]
     ) -> bool:
@@ -1538,12 +1572,16 @@ class SpaceSyncReceiver:
                 # a post held live here IN THIS SPACE, removed by its
                 # author's household or one with content authority (host /
                 # admin / moderator seat — ``may_mutate``), then the space's
-                # ``posts`` level for the delete. ``space_posts`` records no
-                # deleter, so the record names none: it is the author's own
-                # delete when the provider speaks for the author; from a
-                # moderator household it carries no actor, which only an
-                # ``OPEN`` space (or a pre-v_42 provider) admits — the host's
-                # own stream carries every moderator delete regardless.
+                # ``posts`` level for the delete, for the user who made it:
+                # a moderator removal names its moderator
+                # (``actor_user_id``, migration 0084) — who must be seated
+                # on the provider and pass ``moderates_as`` /
+                # ``admin_as`` there, as the live event's actor does; the
+                # author's own delete names nobody and counts as the
+                # author's when the provider speaks for the author. A
+                # removal recorded before 0084 names nobody: from a
+                # moderator household it passes only an ``OPEN`` level (the
+                # host's own stream carries it regardless).
                 rid = rid or str(r.get("post_id") or "")
                 held_post = await self._space_post_repo.get(rid) if rid else None
                 if (
@@ -1555,13 +1593,21 @@ class SpaceSyncReceiver:
                 author = held_post[1].author
                 if not await auth.may_mutate(event, space_id, author):
                     return False
-                own = await auth.acts_for(event, space_id, author, any_role=True)
+                actor = (
+                    str(r.get("actor_user_id") or "") or None
+                    if r.get("moderated")
+                    else None
+                )
+                if actor is None and await auth.acts_for(
+                    event, space_id, author, any_role=True
+                ):
+                    actor = author
                 return await auth.access_admits(
                     event,
                     space_id,
                     "posts",
                     ContentAction.DELETE,
-                    actor=author if own else None,
+                    actor=actor,
                     row_owner=author,
                     quiet=True,
                 )

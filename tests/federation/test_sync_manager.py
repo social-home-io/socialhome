@@ -620,9 +620,47 @@ def test_reap_stale_closes_session_older_than_ttl():
     ttl = 1800.0
     created = time.time() - ttl - 1
     rec.created_at = created
+    rec.last_activity = created  # idle since it began
     n = mgr.reap_stale(ttl)
     assert n == 1
     assert mgr.get_session("old") is None
+
+
+def test_reap_stale_keeps_a_long_stream_that_is_still_moving():
+    """A big stream outlives the TTL as long as chunks keep flowing: the
+    reaper looks at the last activity, not at when the session began."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    mgr.register_requester_https_session(
+        sync_id="long",
+        space_id="sp-1",
+        requester_instance_id="me",
+        provider_instance_id="host",
+    )
+    rec = mgr.get_session("long")
+    assert rec is not None
+    ttl = 1800.0
+    rec.created_at = time.time() - 3 * ttl
+    rec.touch()
+    assert mgr.reap_stale(ttl) == 0
+    assert mgr.get_session("long") is not None
+    # Idle for longer than the TTL since its last chunk → reaped.
+    assert mgr.reap_stale(ttl, now=rec.last_activity + ttl + 1) == 1
+    assert mgr.get_session("long") is None
+
+
+def test_touch_session_marks_activity_and_ignores_unknown_ids():
+    mgr = SyncSessionManager(_FakeFedRepo())
+    mgr.register_requester_https_session(
+        sync_id="s",
+        space_id="sp-1",
+        requester_instance_id="me",
+        provider_instance_id="host",
+    )
+    rec = mgr.get_session("s")
+    assert rec is not None and rec.last_activity == rec.created_at
+    mgr.touch_session("s", now=rec.created_at + 5)
+    assert rec.last_activity == rec.created_at + 5
+    mgr.touch_session("nope")  # no error
 
 
 def test_reap_stale_keeps_fresh_session_within_ttl():

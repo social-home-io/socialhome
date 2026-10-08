@@ -296,6 +296,9 @@ async def test_periodic_tick_enqueues_for_every_confirmed_peer(
     # One SPACE_SYNC_BEGIN per peer.
     beg = [s for s in fed.sent if s["type"] == FederationEventType.SPACE_SYNC_BEGIN]
     assert {s["to"] for s in beg} == {"peer-a", "peer-b"}
+    # The periodic re-sync is ``incremental``: the provider re-streams the
+    # rows but does not re-ship every media blob every 30 minutes.
+    assert {s["payload"]["sync_mode"] for s in beg} == {"incremental"}
 
 
 async def test_start_stop_idempotent(bus, queue, sync_manager):

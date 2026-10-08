@@ -27,6 +27,7 @@ from ..domain.post import (
     CommentType,
     MAX_DISTINCT_REACTIONS_PER_POST,
     Post,
+    PostTombstone,
     PostType,
 )
 from ..domain.space_item import StaleItemStamp, stamp_to_db
@@ -73,15 +74,13 @@ class AbstractSpacePostRepo(Protocol):
         self,
         space_id: str,
         *,
-        deleted: bool = False,
         cutoff: str | None = None,
         exempt_types: tuple[str, ...] = (),
         cursor: int | None = None,
         limit: int = 200,
     ) -> tuple[list[Post], int | None]:
-        """One page of the space's posts for a §25.6 sync, newest first:
-        the live ones, or (``deleted=True``) the deleted ones — the
-        ``posts_deleted`` tombstones. Anchors included.
+        """One page of the space's live posts for a §25.6 sync, newest
+        first. Anchors included.
 
         The catch-up exporters enumerate posts through this, NOT
         :meth:`list_feed`: the feed query drops ``hidden_from_feed`` rows
@@ -96,6 +95,20 @@ class AbstractSpacePostRepo(Protocol):
         the last page is read, else what to pass as ``cursor`` for the
         next one (keyset on the row id: no page repeats or skips a row).
         """
+        ...
+
+    async def list_post_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[PostTombstone], int | None]:
+        """One page of the space's deleted posts (``posts_deleted``),
+        newest first — every one, whatever its age: a delete, or a retention
+        expiry on the host, must reach every household that holds the row.
+        Identity only (no content). Same ``(rows, next_cursor)`` paging as
+        :meth:`list_sync_page`."""
         ...
 
     async def list_since(
@@ -332,7 +345,6 @@ class SqliteSpacePostRepo:
         self,
         space_id: str,
         *,
-        deleted: bool = False,
         cutoff: str | None = None,
         exempt_types: tuple[str, ...] = (),
         cursor: int | None = None,
@@ -347,14 +359,43 @@ class SqliteSpacePostRepo:
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, * FROM space_posts"
-                " WHERE space_id=? AND deleted=?"
+                " WHERE space_id=? AND deleted=0"
                 + window
                 + " AND (? IS NULL OR rowid < ?)"
                 " ORDER BY rowid DESC LIMIT ?",
-                (space_id, int(deleted), *window_params, cursor, cursor, int(limit)),
+                (space_id, *window_params, cursor, cursor, int(limit)),
             )
         )
         return [_row_to_space_post(d) for d in rows], sync_page_cursor(rows, limit)
+
+    async def list_post_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[PostTombstone], int | None]:
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, id, author, type, created_at,"
+                " moderated, moderated_by FROM space_posts"
+                " WHERE space_id=? AND deleted=1 AND (? IS NULL OR rowid < ?)"
+                " ORDER BY rowid DESC LIMIT ?",
+                (space_id, cursor, cursor, int(limit)),
+            )
+        )
+        tombstones = [
+            PostTombstone(
+                id=d["id"],
+                author=d["author"],
+                type=d["type"],
+                created_at=d["created_at"],
+                moderated=bool_col(d["moderated"]),
+                moderated_by=d["moderated_by"],
+            )
+            for d in rows
+        ]
+        return tombstones, sync_page_cursor(rows, limit)
 
     async def list_since(
         self,
@@ -400,10 +441,11 @@ class SqliteSpacePostRepo:
                 UPDATE space_posts
                    SET deleted=1, content=NULL, media_url=NULL,
                        link_preview_json=NULL,
-                       moderated=CASE WHEN ? IS NOT NULL THEN 1 ELSE moderated END
+                       moderated=CASE WHEN ? IS NOT NULL THEN 1 ELSE moderated END,
+                       moderated_by=COALESCE(?, moderated_by)
                  WHERE id=? AND space_id=?
                 """,
-                (moderated_by, post_id, space_id),
+                (moderated_by, moderated_by, post_id, space_id),
             )
             > 0
         )

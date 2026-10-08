@@ -53,11 +53,22 @@ class _FakeRtc:
 
 
 class _FakeSession:
-    def __init__(self, sync_id="sync-x", space_id="sp-1", requester="peer-r"):
+    def __init__(
+        self,
+        sync_id="sync-x",
+        space_id="sp-1",
+        requester="peer-r",
+        sync_mode="initial",
+    ):
         self.sync_id = sync_id
         self.space_id = space_id
         self.requester_instance_id = requester
+        self.sync_mode = sync_mode
         self.rtc = _FakeRtc()
+        self.touches = 0
+
+    def touch(self) -> None:
+        self.touches += 1
 
 
 @pytest.fixture
@@ -198,6 +209,46 @@ async def test_stream_initial_https_requires_attached_federation(provider):
 # ─── Catch-up media (#PR442) ──────────────────────────────────────────
 
 
+async def test_each_shipped_chunk_marks_the_session_active(provider):
+    """A long stream is alive while chunks flow — the stale reaper reads
+    that, not the session's age."""
+    session = _FakeSession()
+    await provider.stream_initial(session)
+    # Two resource chunks (posts, members); the sentinel is not progress.
+    assert session.touches == 2
+
+
+async def test_an_incremental_resync_ships_no_catchup_media(encoder):
+    """The periodic re-sync re-streams rows but never re-enqueues every
+    media blob in the space — that is the joiner's catch-up only."""
+    from unittest.mock import AsyncMock
+
+    walked: list[str] = []
+
+    class _PostRepo:
+        async def list_sync_page(self, space_id, **_kw):
+            walked.append(space_id)
+            return [], None
+
+    media_sync = AsyncMock()
+    svc = SpaceSyncService(
+        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+        exporters={},
+        sig_suite="ed25519",
+        media_sync=media_sync,
+        space_post_repo=_PostRepo(),
+    )
+    session = _FakeSession(sync_mode="incremental")
+    await svc.stream_initial(session)
+    assert walked == []
+    media_sync.enqueue_for_blob.assert_not_awaited()
+    # An initial (joiner) sync still walks the space for its media.
+    await svc.stream_initial(_FakeSession())
+    assert walked == ["sp-1"]
+    parsed = orjson.loads(session.rtc.sent[-1])
+    assert parsed["resource"] == SENTINEL_RESOURCE
+
+
 async def test_stream_initial_enqueues_catchup_media(encoder):
     """After the metadata sentinel, the provider must also enqueue
     space_media_outbox rows for every referenced post + gallery
@@ -222,7 +273,6 @@ async def test_stream_initial_enqueues_catchup_media(encoder):
 
     class _PostRepo:
         async def list_sync_page(self, space_id, **kw):
-            assert not kw["deleted"]  # never a deleted post's media
             return [
                 _Post(id="post-1", image_urls=("api/media/a.webp",)),
                 _Post(id="post-2", media_url="api/media/v.webm"),
@@ -390,8 +440,14 @@ async def test_catchup_media_follows_the_spaces_retention_window(encoder):
         c.kwargs["correlation_id"] for c in media_sync.enqueue_for_blob.call_args_list
     ]
     assert ids == ["p-1", "p-2"]
-    assert all(kw["cutoff"] == "2026-10-01 00:00:00" for kw in asked)
-    assert len(asked) == 4
+    # Posts and listings follow the window; gallery items carry none
+    # (nothing prunes them).
+    assert [kw.get("cutoff") for kw in asked] == [
+        "2026-10-01 00:00:00",
+        "2026-10-01 00:00:00",
+        None,
+        "2026-10-01 00:00:00",
+    ]
 
 
 async def test_stream_initial_no_bazaar_repo_is_noop(encoder):

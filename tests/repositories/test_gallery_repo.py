@@ -625,6 +625,6 @@ async def test_sync_pages_walk_every_album_and_own_item_in_the_window(env):
         seen.extend(i.id for i in page)
         if cursor is None:
             break
+    # No retention window: nothing prunes gallery items, so every one the
+    # host shows streams, old ones included.
     assert seen == ["it-new", "it-old", "it-old-kept"]
-    windowed, _ = await repo.list_items_sync_page("sp-1", cutoff="2025-01-01 00:00:00")
-    assert [i.id for i in windowed] == ["it-new", "it-old-kept"]

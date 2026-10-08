@@ -233,6 +233,9 @@ class SpaceSyncService:
                 ):
                     sent = await self._send_chunk(session, envelope, waits)
                     if sent:
+                        # Progress: the stale reaper measures idleness, so
+                        # a long stream survives while chunks flow.
+                        session.touch()
                         consecutive_failures = 0
                         continue
                     consecutive_failures += 1
@@ -259,6 +262,14 @@ class SpaceSyncService:
                 sig_suite=self._sig_suite,
             )
             await self._send(session, sentinel)
+            # An ``incremental`` session is the periodic re-sync of a
+            # household that is already caught up (the scheduler's 30-min
+            # tick): it ships no media — the live media outbox already
+            # delivered every blob created since, and re-enqueueing every
+            # blob of the space each tick re-shipped the whole space's bytes
+            # to every peer every 30 minutes.
+            if session.sync_mode == "incremental":
+                return
             # Catch-up media: enumerate every post + gallery item in
             # the space, collect their media URLs, and enqueue
             # ``space_media_outbox`` rows so the requesting peer
@@ -409,9 +420,10 @@ class SpaceSyncService:
                 )
         # Gallery items — the space's own items the ``gallery`` resource
         # streamed (never a post's mirror: its bytes ride with the post).
+        # No window: nothing prunes gallery items.
         if self._gallery_repo is not None:
             try:
-                async for items in self._gallery_item_pages(space_id, window):
+                async for items in self._gallery_item_pages(space_id):
                     for item in items:
                         gallery_urls: list[str] = []
                         if getattr(item, "thumbnail_url", None):
@@ -453,12 +465,12 @@ class SpaceSyncService:
                     space_id,
                 )
 
-    def _gallery_item_pages(self, space_id: str, window: SyncWindow):
+    def _gallery_item_pages(self, space_id: str):
         repo = self._gallery_repo
 
         async def fetch(cursor: int | None):
             return await repo.list_items_sync_page(
-                space_id, cutoff=window.cutoff, cursor=cursor, limit=SYNC_PAGE_SIZE
+                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE
             )
 
         return iter_pages(fetch)

@@ -23,17 +23,14 @@ def iter_post_pages(
     repo: "AbstractSpacePostRepo",
     space_id: str,
     window: SyncWindow,
-    *,
-    deleted: bool = False,
 ) -> AsyncIterator[list["Post"]]:
-    """The space's posts in ``window`` — live, or (``deleted``) the
-    tombstones — page by page. Shared by every exporter that walks posts
-    (posts, posts_deleted, polls, schedules) and the catch-up media."""
+    """The space's live posts in ``window``, page by page. Shared by every
+    exporter that walks posts (posts, polls, schedules) and the catch-up
+    media."""
 
     async def fetch(cursor: int | None) -> tuple[list["Post"], int | None]:
         return await repo.list_sync_page(
             space_id,
-            deleted=deleted,
             cutoff=window.cutoff,
             exempt_types=window.exempt_types,
             cursor=cursor,

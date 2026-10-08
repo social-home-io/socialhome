@@ -2,11 +2,12 @@
 
 Albums + items stream together under the ``gallery`` resource. Every
 album ships first (the receiver files an item only into an album it
-holds), then the items, page by page. Items are those inside the space's
-retention window — an item of a ``retention_exempt`` album at any age —
-and never a mirror of a post's media (``source_post_id``): the source
-post federates on its own and the receiver's ``SystemAlbumBridge``
-re-creates the mirror locally, so shipping it here would duplicate.
+holds), then every item of the space, page by page — no retention window:
+nothing prunes gallery items (the retention sweep touches posts and chat
+only), so windowing them would silently hide from a joiner photos the
+host still shows. A mirror of a post's media (``source_post_id``) never
+ships: the source post federates on its own and the receiver's
+``SystemAlbumBridge`` re-creates the mirror locally.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from dataclasses import asdict
 from typing import Any, TYPE_CHECKING
 
 from ..exporter import PagedExporterMixin
-from ..window import SYNC_PAGE_SIZE, SyncWindows, iter_pages
+from ..window import SYNC_PAGE_SIZE, iter_pages
 
 if TYPE_CHECKING:
     from .....domain.gallery import GalleryAlbum, GalleryItem
@@ -26,13 +27,10 @@ if TYPE_CHECKING:
 class GalleryExporter(PagedExporterMixin):
     resource = "gallery"
 
-    __slots__ = ("_repo", "_windows")
+    __slots__ = ("_repo",)
 
-    def __init__(
-        self, gallery_repo: "AbstractGalleryRepo", windows: SyncWindows
-    ) -> None:
+    def __init__(self, gallery_repo: "AbstractGalleryRepo") -> None:
         self._repo = gallery_repo
-        self._windows = windows
 
     async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
         # The system album rides along so the receiver creates it
@@ -45,11 +43,10 @@ class GalleryExporter(PagedExporterMixin):
 
         async for album_page in iter_pages(albums):
             yield [{"kind": "album", **asdict(a)} for a in album_page]
-        window = await self._windows.for_space(space_id)
 
         async def items(cursor: int | None) -> tuple[list["GalleryItem"], int | None]:
             return await self._repo.list_items_sync_page(
-                space_id, cutoff=window.cutoff, cursor=cursor, limit=SYNC_PAGE_SIZE
+                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE
             )
 
         async for item_page in iter_pages(items):

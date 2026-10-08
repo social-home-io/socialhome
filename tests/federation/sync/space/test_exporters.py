@@ -414,12 +414,12 @@ async def test_gallery_exporter_emits_albums_then_items():
         async def list_albums_sync_page(self, space_id, *, cursor=None, limit=200):
             return [album], None
 
-        async def list_items_sync_page(
-            self, space_id, *, cutoff=None, cursor=None, limit=200
-        ):
+        async def list_items_sync_page(self, space_id, *, cursor=None, limit=200):
+            # No retention window: nothing prunes gallery items, so a joiner
+            # gets every photo the host still shows.
             return [item], None
 
-    recs = await GalleryExporter(_Repo(), _WINDOWS).list_records("sp-1")
+    recs = await GalleryExporter(_Repo()).list_records("sp-1")
     assert len(recs) == 2
     assert recs[0]["kind"] == "album"
     assert recs[1]["kind"] == "item"

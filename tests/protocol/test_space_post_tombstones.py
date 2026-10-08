@@ -40,12 +40,15 @@ from socialhome.app import create_app
 from socialhome.app_keys import (
     db_key,
     event_bus_key,
+    federation_service_key,
     space_sync_receiver_key,
     space_sync_service_key,
 )
 from socialhome.config import Config
 from socialhome.crypto import generate_identity_keypair
 from socialhome.domain.events import CommentDeleted, PostDeleted
+from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.owner_bound_id import (
@@ -309,7 +312,8 @@ async def test_a_caught_up_household_never_re_exports_them_to_a_joiner(houses):
     # rides the tombstone resources.
     gone = await exporters["posts_deleted"].list_records(SPACE)
     assert [r["id"] for r in gone] == [p.id]
-    assert all(set(r) == {"id", "post_id", "author", "created_at"} for r in gone)
+    allowed = {"id", "post_id", "author", "type", "created_at", "moderated"}
+    assert all(set(r) <= allowed | {"actor_user_id"} for r in gone)
     await _sync(c, d, provider=MEMBER)
     assert not await _live(d, p.id)
 
@@ -455,18 +459,83 @@ async def test_a_restricted_posts_level_still_takes_the_authors_own_delete(house
     q = _post(_pid(AUTHOR), AUTHOR)
     p = _post(_pid(OLIVER), OLIVER)
     await _hold((c,), q, p)
-    # A moderator household's tombstone names no deleter: under review it
-    # is refused (the host's own stream carries that delete) …
+    # A moderator household's tombstone that names no deleter: under review
+    # it is refused …
     await _dispatch(c, "posts_deleted", [{"id": q.id, "author": AUTHOR}], provider=MOD)
+    assert await _live(c, q.id)
+    # … nor may it name a moderator it does not seat …
+    await _dispatch(
+        c,
+        "posts_deleted",
+        [{"id": q.id, "author": AUTHOR, "moderated": True, "actor_user_id": OLIVER}],
+        provider=MOD,
+    )
     assert await _live(c, q.id)
     # … while the author's own household removes its own post.
     await _dispatch(
         c, "posts_deleted", [{"id": p.id, "author": OLIVER}], provider=OTHER
     )
     assert not await _live(c, p.id)
-    # The host's stream is taken whole.
-    await _dispatch(c, "posts_deleted", [{"id": q.id, "author": AUTHOR}], provider=HOST)
+    # A moderator removal naming its moderator passes ``moderates_as``, as
+    # the live SPACE_POST_DELETED does — and stays marked moderated.
+    await _dispatch(
+        c,
+        "posts_deleted",
+        [{"id": q.id, "author": AUTHOR, "moderated": True, "actor_user_id": MOLLY}],
+        provider=MOD,
+    )
     assert not await _live(c, q.id)
+    row = await c[db_key].fetchone(
+        "SELECT moderated, moderated_by FROM space_posts WHERE id=?", (q.id,)
+    )
+    assert (row["moderated"], row["moderated_by"]) == (1, MOLLY)
+
+
+async def test_the_host_stream_names_the_moderator_and_keeps_the_type(houses):
+    h, _c, d = houses
+    poll = _post(_pid(CORA), CORA, type=PostType.POLL)
+    own = _post(_pid(CORA), CORA)
+    await _hold((h,), poll, own)
+    assert await _repo(h).soft_delete(poll.id, space_id=SPACE, moderated_by=AUTHOR)
+    assert await _repo(h).soft_delete(own.id, space_id=SPACE)
+    records = {
+        r["id"]: r
+        for r in await h[space_sync_service_key]
+        ._exporters["posts_deleted"]
+        .list_records(SPACE)
+    }
+    assert records[poll.id]["type"] == "poll"
+    assert records[poll.id]["moderated"] is True
+    assert records[poll.id]["actor_user_id"] == AUTHOR
+    assert records[own.id]["moderated"] is False
+    assert "actor_user_id" not in records[own.id]
+    assert not {"content", "media_url"} & set(records[poll.id])
+    # D never held either: the host's stubs keep the type and the flag.
+    await _sync(h, d, provider=HOST, only={"posts_deleted"})
+    row = await d[db_key].fetchone(
+        "SELECT type, deleted, moderated FROM space_posts WHERE id=?", (poll.id,)
+    )
+    assert (row["type"], row["deleted"], row["moderated"]) == ("poll", 1, 1)
+
+
+async def test_an_older_hosts_deleted_comment_record_is_a_tombstone(houses):
+    h, c, _d = houses
+    q = _post(_pid(AUTHOR), AUTHOR)
+    held = _comment(_cid(CORA), q.id, CORA)
+    await _hold((c,), q, comments=(held,))
+    unseen = _cid(CORA)
+    old_shape = [
+        {"id": held.id, "post_id": q.id, "author": CORA, "deleted": True},
+        {"id": unseen, "post_id": q.id, "author": CORA, "deleted": True},
+    ]
+    # From a member household it is dropped …
+    await _dispatch(c, "comments", old_shape, provider=OTHER)
+    assert await _comment_live(c, held.id) and await _comment_row(c, unseen) is None
+    # … from the host it is the delete it stands for.
+    await _dispatch(c, "comments", old_shape, provider=HOST)
+    assert not await _comment_live(c, held.id)
+    row = await _comment_row(c, unseen)
+    assert row is not None and row["deleted"]
 
 
 async def test_tombstones_land_in_a_space_archived_here(houses):
@@ -523,7 +592,8 @@ async def test_a_space_with_retention_syncs_only_its_window(houses):
             "SELECT id FROM space_posts WHERE space_id=? AND deleted=1", (SPACE,)
         )
     }
-    assert stubs == {new_gone.id}
+    # Tombstones carry no window: an old delete reaches D too.
+    assert stubs == {new_gone.id, old_gone.id}
     comments = await d[db_key].fetchall("SELECT post_id FROM space_post_comments")
     assert [r["post_id"] for r in comments] == [new.id]
     # A post type the space exempts from retention streams at any age.
@@ -532,6 +602,43 @@ async def test_a_space_with_retention_syncs_only_its_window(houses):
     )
     await _sync(h, d, provider=HOST)
     assert await _live(d, old_poll.id) and not await _live(d, old.id)
+
+
+async def test_retention_never_hides_gallery_items_nothing_prunes(houses):
+    h, _c, d = houses
+    await h[db_key].enqueue("UPDATE spaces SET retention_days=7 WHERE id=?", (SPACE,))
+    gallery = h[space_sync_service_key]._gallery_repo
+    await gallery.create_album(
+        GalleryAlbum(id="alb-old", space_id=SPACE, owner_user_id=AUTHOR, name="Trip")
+    )
+    await gallery.create_item(
+        GalleryItem(
+            id="it-old",
+            album_id="alb-old",
+            uploaded_by=AUTHOR,
+            item_type="photo",
+            url="api/media/old.webp",
+            thumbnail_url="api/media/old-thumb.webp",
+            width=1,
+            height=1,
+        )
+    )
+    await h[db_key].enqueue(
+        "UPDATE gallery_items SET created_at='2020-01-01 00:00:00' WHERE id='it-old'"
+    )
+    await _sync(h, d, provider=HOST, only={"gallery"})
+    assert await d[db_key].fetchone("SELECT 1 FROM gallery_items WHERE id='it-old'")
+
+
+async def test_a_post_the_hosts_retention_expired_is_deleted_on_a_member(houses):
+    h, c, _d = houses
+    await h[db_key].enqueue("UPDATE spaces SET retention_days=7 WHERE id=?", (SPACE,))
+    old = _post(_pid(CORA), CORA, days=30)
+    await _hold((h, c), old)
+    # What the host's retention sweep does (only the host sweeps).
+    await h[db_key].enqueue("UPDATE space_posts SET deleted=1 WHERE id=?", (old.id,))
+    await _sync(h, c, provider=HOST)
+    assert not await _live(c, old.id)
 
 
 async def _bulk_posts(app, n: int) -> None:
@@ -580,3 +687,44 @@ async def test_without_retention_a_post_1200_back_still_syncs(houses):
     )
     assert row["n"] == 1200
     assert await _live(d, "bulk-00000")
+
+
+async def test_a_live_moderator_removal_is_recorded_so_it_can_be_relayed(houses):
+    """C hears MOD's live removal of AUTHOR's post: C records the moderator,
+    so its own ``posts_deleted`` stream can name them to D later."""
+    _h, c, d = houses
+    q = _post(_pid(AUTHOR), AUTHOR)
+    await _hold((c, d), q)
+    await d[db_key].enqueue(
+        "UPDATE spaces SET posts_access='moderated' WHERE id=?", (SPACE,)
+    )
+    event = FederationEvent(
+        msg_id="ev-mod-del",
+        event_type=FederationEventType.SPACE_POST_DELETED,
+        from_instance=MOD,
+        to_instance=MEMBER,
+        timestamp=_NOW.isoformat(),
+        payload={"post_id": q.id, "space_id": SPACE, "actor_user_id": MOLLY},
+        space_id=SPACE,
+    )
+    registry = c[federation_service_key]._event_registry
+    for handler in registry.handlers_for(FederationEventType.SPACE_POST_DELETED):
+        await handler(event)
+    row = await c[db_key].fetchone(
+        "SELECT deleted, moderated, moderated_by FROM space_posts WHERE id=?",
+        (q.id,),
+    )
+    assert (row["deleted"], row["moderated"], row["moderated_by"]) == (1, 1, MOLLY)
+    # Relayed by C as MOD would: D's moderated level takes it only because
+    # the record names a moderator — MOLLY is seated on MOD, not on C, so
+    # C's relay is refused and D waits for the host or MOD.
+    await _sync(c, d, provider=MEMBER, only={"posts_deleted"})
+    assert await _live(d, q.id)
+    # MOD's own stream of the same row names MOLLY and lands.
+    await _dispatch(
+        d,
+        "posts_deleted",
+        [{"id": q.id, "author": AUTHOR, "moderated": True, "actor_user_id": MOLLY}],
+        provider=MOD,
+    )
+    assert not await _live(d, q.id)

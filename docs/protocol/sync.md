@@ -130,33 +130,70 @@ receiver simply gets nothing from an older provider.
 **No fixed size limit — the space's retention window.** What streams is
 what the space's retention keeps (`federation/sync/space/window.py`):
 
-- `retention_days` set → posts (and the comments, polls, schedules and
-  bazaar listings that hang on them), gallery items and chat messages
-  created at or after `now − retention_days`; post types in
-  `retention_exempt_json` at any age, as the retention sweep keeps them;
-  a gallery item of a `retention_exempt` album at any age. The post,
-  comment and chat tombstones use the same window — a row past retention
-  is gone for every household anyway.
+- `retention_days` set → live posts (and the comments, polls, schedules
+  and bazaar listings that hang on them) and chat messages created at or
+  after `now − retention_days`; post types in `retention_exempt_json` at
+  any age, as the retention sweep keeps them. The chat's deletions use the
+  same window (every household prunes its own chat).
 - no retention (keep forever) → **everything**.
-- pages, task lists and tasks are not governed by retention: their live
-  rows and tombstones always stream in full.
+- **always in full**, whatever the retention:
+  - **gallery** items — nothing prunes them (the retention sweep touches
+    posts and chat only), so a window would hide from a joiner photos the
+    host still shows;
+  - the **post and comment tombstones** — only the host runs the post
+    sweep, which soft-deletes expired posts without telling anyone; a
+    member household never sweeps, so these tombstones are how a
+    retention expiry (or any old delete) reaches it;
+  - pages, task lists and tasks (and their tombstones) — not governed by
+    retention.
 
 **Bounded memory.** Exporters read their repo in keyset pages of
 `SYNC_PAGE_SIZE` (200) rows — on the row id, or `(deleted_at, id)` for
 the page / task tombstones — so a page never repeats or skips a row, and
 `ChunkBuilder` turns each page into ≤ 8 KB chunks (halving a page until a
 chunk fits) before the next page is read. `seq_start` / `seq_end` run on
-across pages. The provider's catch-up media walks the same window the
-same way. No export holds a whole resource in memory, however big the
-space, so there is no safety ceiling on the count.
+across pages. The provider's catch-up media walks the same rows the same
+way. No export holds a whole resource in memory, however big the space,
+so there is no safety ceiling on the count.
+
+**Order is storage order.** Keyset paging orders by the row id: posts and
+the post tombstones newest-stored first; comments, their tombstones and
+the chat (messages and deletions) **oldest-stored first** — a reply is
+stored after what it answers, so it streams after it (before paging the
+chat streamed by `created_at`, which can differ for a message relayed
+late).
+
+**Periodic re-syncs ship no media.** The scheduler re-syncs every
+(confirmed peer × shared space) every 30 minutes. Those BEGINs carry
+`sync_mode: "incremental"`; the provider then re-streams the rows but
+skips the catch-up media walk — the live media outbox already delivered
+every blob created since, and re-enqueueing every post / gallery /
+listing blob of the space per peer per tick re-shipped the whole space's
+bytes. Pairing, a deferred retry, an authority echo, mesh catch-up and
+"Sync now" stay `"initial"` and enqueue the media. An older provider
+treats `"incremental"` as it always did (a full stream with media).
+*Known remaining cost* (follow-up): an incremental session still re-reads
+and re-encrypts every row in the window (idempotent on the receiver).
+Streaming only rows changed since the last completed sync needs a
+per-row change stamp the tables lack (reactions, deletes and moderation
+leave no timestamp) plus a per-peer watermark.
+
+**Long streams are not reaped mid-way.** A session's `last_activity` is
+stamped on every chunk (the provider on each shipped chunk, the requester
+on each received one); `SyncSessionManager.reap_stale` closes sessions
+**idle** for `STALE_SESSION_TTL_SECONDS` (30 min) rather than ones that
+began that long ago, so a big stream outliving the TTL keeps going instead
+of being torn down and restarted from scratch.
 
 ### Post and comment tombstones
 
 A post or comment delete keeps the row (`deleted = 1`, content cleared):
 the same soft-deleted row a member-published delete that overtook its
 create leaves (v_49). `posts_deleted` streams `{id, post_id, author,
-created_at}` and `comments_deleted` `{id, comment_id, post_id, author,
-created_at}` — never content. Before them, a household that missed a
+type, created_at, moderated}` — plus `actor_user_id`, the moderator, for
+a moderator removal (`space_posts.moderated_by`, migration 0084) — and
+`comments_deleted` `{id, comment_id, post_id, author, created_at}`; never
+content. Before them, a household that missed a
 `SPACE_POST_DELETED` / `SPACE_COMMENT_DELETED` kept the row forever and,
 as a catch-up provider, re-spread it to every joiner. On the receiver
 (`SpaceSyncReceiver._persist_post_tombstones` /
@@ -167,20 +204,28 @@ as a catch-up provider, re-spread it to every joiner. On the receiver
   published with the provider as origin, so nothing is re-broadcast;
 - a **member** household's record is admitted only under the live
   delete rule: the held row's author's household or one with content
-  authority (`may_mutate`), and for a post the space's `posts` level.
-  `space_posts` records no deleter, so the record names none: it is the
-  author's own delete when the provider speaks for the author; a
-  moderator household's actor-less record passes only an `OPEN` level (or
-  a pre-v_42 provider) — the host's stream carries that delete anyway;
+  authority (`may_mutate`), and for a post the space's `posts` level for
+  the user who made it — exactly the live event's `actor_user_id` check:
+  a moderator removal names its moderator, who must be seated on the
+  provider and pass `moderates_as` (`admin_as` under `ADMIN_ONLY`); the
+  author's own delete names nobody and counts as the author's when the
+  provider speaks for the author. A removal recorded before 0084 names
+  nobody and passes a restricted level only from the host;
 - from the **host**, an id never held gets the soft-deleted row — only
   for an id owner-bound to the record's `author` in **this** space (and,
   for a comment, on a post held here), so a stale copy streamed later
-  cannot create it and no space's id can be squatted. A member household's
-  record never stubs.
+  cannot create it and no space's id can be squatted. A post stub keeps
+  the record's `type` (so a retention-exempt type stays exempt) and its
+  moderator. A member household's record never stubs.
+
+A live `SPACE_POST_DELETED` whose `actor_user_id` is not the author records
+that moderator too, so the household can name them when it relays the
+delete later.
 
 A comment record carrying `deleted: true` from an older provider (which
-streamed deleted comments as plain records) is skipped instead of being
-stored as a live empty comment.
+streamed deleted comments as plain records) is never stored as a live
+empty comment: from the host it is applied as a `comments_deleted`
+tombstone, from anyone else it is dropped.
 
 Tripwire: `tests/protocol/test_space_post_tombstones.py` (§27.9).
 
