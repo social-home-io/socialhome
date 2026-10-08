@@ -465,7 +465,9 @@ class DmGroupService:
             return
         assert isinstance(version, int) and isinstance(raw_members, list)
         existing = await self._convos.get(conv_id)
-        if existing is not None and existing.type is not ConversationType.GROUP_DM:
+        if existing is not None and (
+            existing.type is not ConversationType.GROUP_DM or existing.is_system
+        ):
             refuse(event, "conversation is not a group", conversation=conv_id)
             return
         seats = await self._seats_from(event, conv_id, raw_members)
@@ -629,7 +631,7 @@ class DmGroupService:
         conv = await self._convos.get(conv_id) if conv_id else None
         reason: str | None = None
         seat: RemoteConversationMember | None = None
-        if conv is None or conv.type is not ConversationType.GROUP_DM:
+        if conv is None or conv.type is not ConversationType.GROUP_DM or conv.is_system:
             reason = "no such group here"
         elif not is_owner_bound(conv_id) or not self.is_authority_here(conv_id):
             reason = "this household is not the group's authority"

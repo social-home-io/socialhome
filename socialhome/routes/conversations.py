@@ -343,6 +343,9 @@ class ConversationNotifPrefsView(BaseView):
 
     async def get(self) -> web.Response:
         conv_id = self.match("id")
+        # Seats or, for a system chat, the live policy (which seats a
+        # caller it allows on the spot).
+        await self.svc(dm_service_key).require_member(conv_id, self.user.username)
         members = await self.svc(conversation_repo_key).list_members(conv_id)
         for m in members:
             if m.username == self.user.username and m.deleted_at is None:
@@ -545,12 +548,10 @@ class ConversationMembersView(BaseView):
         ctx = self.user
         conv_id = self.match("id")
         repo = self.svc(conversation_repo_key)
+        # Members only: the roster names people on other households. A
+        # system chat answers from the live policy, not its seats.
+        await self.svc(dm_service_key).require_member(conv_id, ctx.username)
         members = await repo.list_members(conv_id)
-        # Members only: the roster names people on other households.
-        if not any(
-            m.username == ctx.username and m.deleted_at is None for m in members
-        ):
-            raise PermissionError("not a member of this conversation")
         conv = await repo.get(conv_id)
         if conv is not None and conv.type is ConversationType.GROUP_DM:
             # Somebody who left a group is no longer on its roster.

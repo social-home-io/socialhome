@@ -136,7 +136,7 @@ from .gallery import (
     SpaceAlbumCollectionView,
 )
 from .health import HealthView
-from .household import HouseholdPreferencesView
+from .household import HouseholdChatView, HouseholdPreferencesView
 from .apps import (
     AppCatalogView,
     AppCollectionView,
@@ -1228,6 +1228,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
 
     # ── Household preferences ────────────────────────────────────────────
     app.router.add_view("/api/household/preferences", HouseholdPreferencesView)
+    app.router.add_view("/api/household/chat", HouseholdChatView)
 
     # ── User preferences ─────────────────────────────────────────────────
     app.router.add_view("/api/me/preferences", MePreferencesView)

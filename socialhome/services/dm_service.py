@@ -62,6 +62,7 @@ from .visibility import VisibilityMixin
 if TYPE_CHECKING:
     from .audio_transcription_service import AudioTranscriptionService  # noqa: F401
     from .dm_media_sync_service import DmMediaSyncService  # noqa: F401
+    from .system_chat_policy import SystemChatPolicy
     from ..federation.federation_service import FederationService
     from ..repositories.dm_routing_repo import AbstractDmRoutingRepo
     from ..repositories.federation_repo import AbstractFederationRepo
@@ -167,6 +168,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         "_pending_transcribe_tasks",
         "_own_instance_id",
         "_groups",
+        "_system_chats",
     )
 
     def __init__(
@@ -214,6 +216,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         self._own_instance_id = own_instance_id
         self._visibility_repo = visibility_repo
         self._child_protection = None
+        #: Live access rules for system chats (household / space); without
+        #: it every system chat is refused (fail closed).
+        self._system_chats: "SystemChatPolicy | None" = None
         #: Group-conversation membership authority (v_37). Always present —
         #: a local-only group needs it too; federation is attached later.
         self._groups = DmGroupService(
@@ -239,6 +244,14 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         binding so the wiring order in ``app.py`` stays linear.
         """
         self._audio_transcription = service
+
+    def attach_system_chats(self, policy: "SystemChatPolicy") -> None:
+        """Wire the access rules of system chats (household / space chat).
+
+        Every membership check on a conversation with ``system_scope`` set
+        defers to ``policy`` instead of the seat rows.
+        """
+        self._system_chats = policy
 
     def attach_federation(
         self,
@@ -454,7 +467,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         actor_username: str,
     ) -> Conversation:
         """A group this household manages, changed by one of its members."""
-        conv = await self._require_conversation(conversation_id)
+        conv = await self._require_dm_conversation(conversation_id)
         if conv.type is not ConversationType.GROUP_DM:
             raise ValueError("cannot change the members of a 1:1 DM")
         await self._require_membership(conversation_id, actor_username)
@@ -667,7 +680,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         responsibility.
         """
         conv = await self._require_conversation(conversation_id)
-        await self._require_membership(conversation_id, sender_username)
+        await self._require_membership(conversation_id, sender_username, write=True)
         sender = await self._require_user(sender_username)
         # §CP.F2 guardian blocks — every seat, local or remote, 1:1 or group.
         # ``withheld`` are the local members this message must not reach.
@@ -749,9 +762,16 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         for m in await self._convos.list_members(conversation_id):
             if m.username == sender_username:
                 continue
+            if m.deleted_at is not None and conv.is_system:
+                continue
             u = await self._users.get(m.username)
-            if u is not None and u.user_id not in withheld:
-                recipients.append(u.user_id)
+            if u is None or u.user_id in withheld:
+                continue
+            if conv.is_system and u.state != "active":
+                # A seat the reconciler has not taken out yet never rings
+                # a deactivated account.
+                continue
+            recipients.append(u.user_id)
         # Resolve each remote member's ``user_id`` via the
         # ``remote_users`` mirror so the federation envelope carries
         # the full recipient set. ``RemoteConversationMember`` only
@@ -1023,6 +1043,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         ``ValueError`` (422); anyone but the sender is refused (403).
         """
         msg = await self._require_message(message_id, conversation_id)
+        await self._require_system_write(msg.conversation_id, editor_username)
         editor = await self._require_user(editor_username)
         if msg.sender_user_id != editor.user_id:
             raise PermissionError("only the sender can edit a message")
@@ -1096,6 +1117,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         conversation_id: str | None = None,
     ) -> None:
         msg = await self._require_message(message_id, conversation_id)
+        await self._require_system_write(msg.conversation_id, actor_username)
         actor = await self._require_user(actor_username)
         if msg.sender_user_id != actor.user_id:
             raise PermissionError("only the sender can delete a message")
@@ -1303,7 +1325,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         emoji: str,
     ) -> None:
         msg = await self._require_message(message_id)
-        await self._require_membership(msg.conversation_id, username)
+        await self._require_membership(msg.conversation_id, username, write=True)
         actor = await self._require_user(username)
         # §CP.F2: a reaction is a message too — same rule as a send, and
         # never onto a message the reader isn't shown.
@@ -1342,7 +1364,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         emoji: str,
     ) -> None:
         msg = await self._require_message(message_id)
-        await self._require_membership(msg.conversation_id, username)
+        await self._require_membership(msg.conversation_id, username, write=True)
         actor = await self._require_user(username)
         clean = emoji.strip()
         if not clean:
@@ -1418,8 +1440,8 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         background sweeper hard-deletes the conversation once every member
         has left.
         """
+        conv = await self._require_dm_conversation(conversation_id)
         await self._require_membership(conversation_id, username)
-        conv = await self._require_conversation(conversation_id)
         if conv.type is not ConversationType.GROUP_DM:
             await self._convos.soft_leave(conversation_id, username)
             return
@@ -1506,6 +1528,14 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         seated = blocked & set(await self._seat_user_ids(conv.id))
         if not seated:
             return frozenset()
+        if conv.is_system:
+            # A system chat (household / space) is not a group anyone chose
+            # to share: being in the household or the space is the consent,
+            # so nobody is refused for who else is in it. The protected
+            # account is just never shown — or rung by — the blocked
+            # person's messages (``withheld`` here, ``list_messages`` on
+            # read).
+            return frozenset(seated)
         if conv.type is ConversationType.DM:
             raise RecipientBlockedError(await self._guardian_block_detail(sender_id))
         if await self._is_protected(sender_id):
@@ -1567,16 +1597,75 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             raise KeyError(f"conversation {conversation_id!r} not found")
         return conv
 
+    async def _require_dm_conversation(self, conversation_id: str) -> Conversation:
+        """A person-made DM or group — a system chat reads as not found
+        (404): it has no members to manage and nobody can leave it."""
+        conv = await self._require_conversation(conversation_id)
+        if conv.is_system:
+            raise KeyError(f"conversation {conversation_id!r} not found")
+        return conv
+
     async def _require_membership(
         self,
         conversation_id: str,
         username: str,
+        *,
+        write: bool = False,
     ) -> ConversationMember:
+        """The caller's active seat, or :class:`PermissionError`.
+
+        A system chat asks :class:`SystemChatPolicy` instead of the seat
+        rows (``write`` = posting, reacting, editing, deleting); a caller it
+        allows who has no seat yet is seated on the spot, so per-user state
+        (read watermark, mute, level) always has a row to live in.
+        """
+        conv = await self._convos.get(conversation_id)
+        if conv is not None and conv.is_system:
+            return await self._require_system_seat(conv, username, write=write)
         members = await self._convos.list_members(conversation_id)
         for m in members:
             if m.username == username and m.deleted_at is None:
                 return m
         raise PermissionError(f"user {username!r} is not a member of this conversation")
+
+    async def require_member(self, conversation_id: str, username: str) -> None:
+        """Public read check for routes that read a conversation's seats
+        directly (roster, notification level)."""
+        await self._require_membership(conversation_id, username)
+
+    async def _require_system_seat(
+        self,
+        conv: Conversation,
+        username: str,
+        *,
+        write: bool,
+    ) -> ConversationMember:
+        if self._system_chats is None:
+            raise PermissionError("system chats are not available")
+        user = await self._users.get(username)
+        if user is None:
+            raise PermissionError(f"user {username!r} is not a member of this chat")
+        await self._system_chats.require(conv, user.user_id, write=write)
+        for _ in range(2):
+            for m in await self._convos.list_members(conv.id):
+                if m.username == username and m.deleted_at is None:
+                    return m
+            await self._convos.upsert_seat(
+                conv.id,
+                username,
+                notif_level=self._system_chats.default_notif_level(conv),
+            )
+        raise PermissionError(  # pragma: no cover - the upsert seats them
+            f"user {username!r} could not be seated"
+        )
+
+    async def _require_system_write(self, conversation_id: str, username: str) -> None:
+        """Edits and deletes check only the sender for DMs; in a system chat
+        the author must still be allowed to post there (chat on, still a
+        member)."""
+        conv = await self._convos.get(conversation_id)
+        if conv is not None and conv.is_system:
+            await self._require_system_seat(conv, username, write=True)
 
     async def _require_message(
         self,
@@ -1617,13 +1706,18 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         """
         if self._federation is None:
             return
+        conv = await self._convos.get(conversation_id)
+        if conv is not None and conv.is_system:
+            # System chats never travel as DM events: the household chat
+            # stays on this household, a space chat has its own events.
+            log.debug("%s for system chat %s not federated", event_type.value, conv.id)
+            return
         try:
             remote_members = await self._convos.list_remote_members(
                 conversation_id,
             )
         except Exception:  # pragma: no cover
             return
-        conv = await self._convos.get(conversation_id)
         is_group = conv is not None and conv.type is ConversationType.GROUP_DM
         seen: set[str] = set()
         for rm in remote_members:

@@ -35,6 +35,7 @@ PREFERENCE_SCOPE: dict[str, str] = {
     "feat_presence": "household",
     "feat_gallery": "household",
     "feat_timetable": "household",
+    "feat_household_chat": "household",
     "allow_text": "household",
     "allow_image": "household",
     "allow_video": "household",
@@ -72,6 +73,7 @@ SECTIONS: tuple[str, ...] = (
     "presence",
     "gallery",
     "timetable",
+    "household_chat",
 )
 
 #: Post types mapped to their ``allow_*`` attribute names. Bazaar
@@ -126,6 +128,10 @@ class HouseholdPreferences:
     #: School timetables (Stundenplan) — ``/api/timetables``. Column from
     #: migration ``0063_timetables.sql``.
     feat_timetable: bool = True
+    #: The household chat (a system group chat of every local user, shown
+    #: as the feed's Chat tab) — ``/api/household/chat``. Column from
+    #: migration ``0082_system_chats.sql``.
+    feat_household_chat: bool = True
 
     allow_text: bool = True
     allow_image: bool = True

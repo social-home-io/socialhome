@@ -22,6 +22,23 @@ class ConversationType(StrEnum):
     GROUP_DM = "group_dm"  # 3+ participants; may carry an optional name
 
 
+class SystemChatScope(StrEnum):
+    """What a *system chat* belongs to (``conversations.system_scope``).
+
+    A system chat is a ``group_dm`` the household creates itself — never a
+    person — reusing the whole group-DM machinery (messages, seats with
+    their read watermark / mute / level, reactions, edit / delete). Who may
+    read and write it is decided live by
+    :class:`~socialhome.services.system_chat_policy.SystemChatPolicy`; it is
+    kept out of the DM inbox and the DM badge. Mirrors the column CHECK.
+    """
+
+    #: Every active local user; never federated.
+    HOUSEHOLD = "household"
+    #: One per space (``Conversation.space_id``).
+    SPACE = "space"
+
+
 # Allowed ``type`` values for a :class:`ConversationMessage`.
 #
 # Media attachments (``image`` / ``video`` / ``file`` / ``audio``)
@@ -66,6 +83,33 @@ class Conversation:
     #: conversation id is bound to) on every membership change; a
     #: receiver applies a ``DM_GROUP_ROSTER`` only when it is newer.
     membership_version: int = 0
+    #: ``None`` for a person-made DM or group; set for a system chat
+    #: (:class:`SystemChatScope`).
+    system_scope: SystemChatScope | None = None
+    #: The space a :attr:`SystemChatScope.SPACE` chat belongs to.
+    space_id: str | None = None
+
+    @property
+    def is_system(self) -> bool:
+        """A system chat (household / space), not a person-made DM."""
+        return self.system_scope is not None
+
+
+@dataclass(slots=True, frozen=True)
+class SystemChatSummary:
+    """What the SPA needs to show one system chat for one viewer.
+
+    ``enabled=False`` (the household / space turned the chat off) carries
+    no conversation: the chat is hidden, its data kept.
+    """
+
+    enabled: bool
+    conversation_id: str | None = None
+    unread: int = 0
+    notif_level: str | None = None
+    #: The viewer's own mute while it is still on (UTC ISO 8601), else
+    #: ``None``.
+    muted_until: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

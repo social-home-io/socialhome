@@ -14,6 +14,7 @@ from socialhome.domain.conversation import (
     Conversation,
     ConversationMember,
     ConversationType,
+    SystemChatScope,
 )
 from socialhome.domain.events import (
     CommentAdded,
@@ -2719,3 +2720,68 @@ async def test_space_report_about_the_sole_owner_still_tells_them(stack):
     )
     anna_n = await stack.notif_repo.list(anna.user_id, limit=50)
     assert any(n.type == "space_report" for n in anna_n)
+
+
+# ── Household chat (system chat on group-DM storage) ──────────────────────
+
+
+async def _household_chat(stack, *users) -> str:
+    chat = await stack.conv_repo.create_system_chat(SystemChatScope.HOUSEHOLD)
+    for u in users:
+        await stack.conv_repo.upsert_seat(chat.id, u.username, notif_level="all")
+    return chat.id
+
+
+async def test_household_chat_bell_names_the_chat_and_opens_the_chat_tab(stack):
+    anna = await stack.provision_user("anna-h")
+    bob = await stack.provision_user("bob-h")
+    carl = await stack.provision_user("carl-h")
+    chat_id = await _household_chat(stack, anna, bob, carl)
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl], mentions=[_m(bob)]))
+    assert [
+        (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(carl.user_id)
+    ] == [("dm_message", "anna-h in Household chat", "/?tab=chat")]
+    assert [
+        (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(bob.user_id)
+    ] == [("dm_mention", "anna-h mentioned you in Household chat", "/?tab=chat")]
+    # §25.3: the push is the title only — never the message.
+    for _ids, payload in push.calls:
+        assert not getattr(payload, "body", None)
+    # Opening the chat clears its bell (same link).
+    await stack.notif_svc.mark_read_for_dm(carl.user_id, chat_id)
+    assert await stack.notif_repo.count_unread(carl.user_id) == 0
+
+
+async def test_household_chat_respects_mute_and_level(stack):
+    anna = await stack.provision_user("anna-hm")
+    bob = await stack.provision_user("bob-hm")
+    carl = await stack.provision_user("carl-hm")
+    chat_id = await _household_chat(stack, anna, bob, carl)
+    await stack.conv_repo.set_muted_until(chat_id, bob.username, MUTED_FOREVER)
+    await stack.conv_repo.set_notif_level(chat_id, carl.username, "mentions")
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl]))
+    assert await stack.notif_repo.list(bob.user_id) == []
+    assert await stack.notif_repo.list(carl.user_id) == []
+
+
+async def test_household_chat_edit_mention_links_to_the_chat_tab(stack):
+    anna = await stack.provision_user("anna-he")
+    bob = await stack.provision_user("bob-he")
+    chat_id = await _household_chat(stack, anna, bob)
+    await stack.bus.publish(
+        DmMessageUpdated(
+            conversation_id=chat_id,
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            recipient_user_ids=(bob.user_id,),
+            content="@bob-he",
+            edited_at=datetime.now(timezone.utc),
+            new_mentions=(_m(bob),),
+            sender_display_name="Anna",
+        )
+    )
+    assert [
+        (n.title, n.link_url) for n in await stack.notif_repo.list(bob.user_id)
+    ] == [("Anna mentioned you in Household chat", "/?tab=chat")]

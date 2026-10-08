@@ -47,6 +47,10 @@ class _FakeConvRepo:
     async def list_members(self, conversation_id: str) -> list:
         return list(self._members)
 
+    async def get(self, conversation_id):
+        # Plain DMs only: no system chat (``DmScope`` asks).
+        return None
+
     async def list_remote_members(self, conversation_id: str) -> list:
         return [
             SimpleNamespace(instance_id=i, remote_username="x") for i in self._seats

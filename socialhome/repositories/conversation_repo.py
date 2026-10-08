@@ -28,6 +28,7 @@ from ..domain.conversation import (
     GroupRosterChange,
     MessageReaction,
     RemoteConversationMember,
+    SystemChatScope,
 )
 from .base import bool_col, row_to_dict, rows_to_dicts
 from .cp_repo import guardian_block_counterparts_sql
@@ -39,6 +40,14 @@ class AbstractConversationRepo(Protocol):
     async def create(self, conv: Conversation) -> Conversation: ...
     async def get(self, conversation_id: str) -> Conversation | None: ...
     async def list_for_user(self, username: str) -> list[Conversation]: ...
+    async def get_household_chat(self) -> Conversation | None: ...
+    async def create_system_chat(
+        self,
+        scope: SystemChatScope,
+        *,
+        space_id: str | None = None,
+        name: str | None = None,
+    ) -> Conversation: ...
     async def touch_last_message(
         self,
         conversation_id: str,
@@ -49,6 +58,21 @@ class AbstractConversationRepo(Protocol):
     # Members -------------------------------------------------------------
     async def add_member(self, member: ConversationMember) -> None: ...
     async def add_remote_member(self, member: RemoteConversationMember) -> None: ...
+    async def upsert_seat(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        notif_level: str,
+        at: str | None = None,
+    ) -> None: ...
+    async def remove_seat(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        at: str | None = None,
+    ) -> None: ...
     async def list_members(self, conversation_id: str) -> list[ConversationMember]: ...
     async def list_remote_members(
         self,
@@ -197,8 +221,8 @@ class SqliteConversationRepo:
             """
             INSERT INTO conversations(
                 id, type, name, created_at, last_message_at, bot_enabled,
-                membership_version
-            ) VALUES(?,?,?, COALESCE(?, datetime('now')), ?, ?, ?)
+                membership_version, system_scope, space_id
+            ) VALUES(?,?,?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?)
             """,
             (
                 conv.id,
@@ -208,6 +232,8 @@ class SqliteConversationRepo:
                 _iso(conv.last_message_at),
                 int(conv.bot_enabled),
                 int(conv.membership_version),
+                conv.system_scope.value if conv.system_scope is not None else None,
+                conv.space_id,
             ),
         )
         return conv
@@ -238,6 +264,7 @@ class SqliteConversationRepo:
             SELECT c.* FROM conversations c
               JOIN conversation_members m ON m.conversation_id = c.id
              WHERE m.username = ? AND m.deleted_at IS NULL
+               AND c.system_scope IS NULL
                AND NOT (
                    c.type = 'dm'
                    AND EXISTS (
@@ -260,6 +287,65 @@ class SqliteConversationRepo:
             (username,),
         )
         return [c for c in (_row_to_conv(d) for d in rows_to_dicts(rows)) if c]
+
+    async def get_household_chat(self) -> Conversation | None:
+        """The household chat, or ``None`` before it was first created."""
+        row = await self._db.fetchone(
+            "SELECT * FROM conversations WHERE system_scope=?",
+            (SystemChatScope.HOUSEHOLD.value,),
+        )
+        return _row_to_conv(row_to_dict(row))
+
+    async def create_system_chat(
+        self,
+        scope: SystemChatScope,
+        *,
+        space_id: str | None = None,
+        name: str | None = None,
+    ) -> Conversation:
+        """Create the system chat for ``scope`` (and ``space_id``) unless it
+        exists; return the one stored.
+
+        Idempotent and race-safe: the partial unique indexes from migration
+        0082 (one household chat, one chat per space) turn a concurrent
+        second insert into a no-op, and the row read back is the winner.
+        """
+        if (scope is SystemChatScope.SPACE) != (space_id is not None):
+            raise ValueError("a space chat needs a space_id, and only it")
+        conv_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _run(conn) -> dict | None:
+            conn.execute(
+                "INSERT OR IGNORE INTO conversations(id, type, name, created_at,"
+                " system_scope, space_id) VALUES(?,?,?,?,?,?)",
+                (
+                    conv_id,
+                    ConversationType.GROUP_DM.value,
+                    name,
+                    now,
+                    scope.value,
+                    space_id,
+                ),
+            )
+            if space_id is not None:
+                cur = conn.execute(
+                    "SELECT * FROM conversations WHERE space_id=?", (space_id,)
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM conversations WHERE system_scope=?",
+                    (scope.value,),
+                )
+            row = cur.fetchone()
+            if row is None:  # pragma: no cover - the insert or the winner is there
+                return None
+            return dict(zip([c[0] for c in cur.description], row))
+
+        conv = _row_to_conv(await self._db.transact(_run))
+        if conv is None:  # pragma: no cover - see above
+            raise RuntimeError("system chat was not stored")
+        return conv
 
     async def touch_last_message(
         self,
@@ -322,6 +408,56 @@ class SqliteConversationRepo:
                 member.user_id,
                 member.display_name,
             ),
+        )
+
+    async def upsert_seat(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        notif_level: str,
+        at: str | None = None,
+    ) -> None:
+        """Seat ``username`` in a system chat, or bring a removed seat back.
+
+        A new seat starts at ``notif_level`` with its read watermark at
+        ``at`` (default now), so a newcomer doesn't inherit the whole
+        backlog as unread. An active seat is left exactly as it is; a
+        removed one (``deleted_at``) is reactivated with the watermark at
+        ``at`` and keeps the member's own level and mute.
+        """
+        stamp = at or datetime.now(timezone.utc).isoformat()
+        await self._db.enqueue(
+            """
+            INSERT INTO conversation_members(
+                conversation_id, username, joined_at, last_read_at, notif_level
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id, username) DO UPDATE SET
+                last_read_at=excluded.last_read_at,
+                joined_at=excluded.joined_at,
+                deleted_at=NULL,
+                left_version=NULL
+             WHERE conversation_members.deleted_at IS NOT NULL
+            """,
+            (conversation_id, username, stamp, stamp, notif_level),
+        )
+
+    async def remove_seat(
+        self,
+        conversation_id: str,
+        username: str,
+        *,
+        at: str | None = None,
+    ) -> None:
+        """Take ``username``'s seat out of a system chat (soft: the row and
+        the member's messages stay; :meth:`upsert_seat` brings it back)."""
+        await self._db.enqueue(
+            """
+            UPDATE conversation_members
+               SET deleted_at=COALESCE(?, datetime('now'))
+             WHERE conversation_id=? AND username=? AND deleted_at IS NULL
+            """,
+            (at, conversation_id, username),
         )
 
     async def list_members(
@@ -588,12 +724,15 @@ class SqliteConversationRepo:
     async def list_fully_left_conversation_ids(self) -> list[str]:
         """Conversations whose every local member has ``deleted_at`` set
         and that have no remote members (§23.47c). Federated conversations
-        are skipped — their lifecycle is owned by the federation peer.
+        are skipped — their lifecycle is owned by the federation peer. So
+        are system chats: a household chat nobody is seated in right now
+        (every user deactivated) is kept, not swept.
         """
         rows = await self._db.fetchall(
             """
             SELECT c.id FROM conversations c
-            WHERE NOT EXISTS (
+            WHERE c.system_scope IS NULL
+            AND NOT EXISTS (
                 SELECT 1 FROM conversation_members m
                 WHERE m.conversation_id = c.id AND m.deleted_at IS NULL
             )
@@ -1219,6 +1358,10 @@ def _row_to_conv(row: dict | None) -> Conversation | None:
         last_message_at=_parse(row.get("last_message_at")),
         bot_enabled=bool_col(row.get("bot_enabled", 0)),
         membership_version=int(row.get("membership_version") or 0),
+        system_scope=(
+            SystemChatScope(row["system_scope"]) if row.get("system_scope") else None
+        ),
+        space_id=row.get("space_id"),
     )
 
 

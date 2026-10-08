@@ -35,6 +35,10 @@ class _FakeConvoRepo:
     async def list_members(self, cid):
         return self._m
 
+    async def get(self, conversation_id):
+        # Plain DMs only: no system chat (``DmScope`` asks).
+        return None
+
     async def list_remote_members(self, cid):
         return self._r
 
