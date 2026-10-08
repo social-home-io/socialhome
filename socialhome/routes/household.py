@@ -35,7 +35,8 @@ class HouseholdPreferencesView(BaseView):
 class HouseholdChatView(BaseView):
     """``GET /api/household/chat`` — the household chat for the caller.
 
-    ``{enabled, conversation_id, unread, notif_level, muted_until}``. Any
+    ``{enabled, conversation_id, unread, notif_level, muted_until,
+    last_read_at}``. Any
     active local user; the chat (a system group conversation of every
     local user) is created and its seats reconciled on the way. While
     ``feat_household_chat`` is off: ``{"enabled": false,

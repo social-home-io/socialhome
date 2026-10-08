@@ -127,6 +127,7 @@ class HouseholdChatService:
             unread=await self._convos.count_unread(chat.id, username),
             notif_level=seat.notif_level if seat is not None else None,
             muted_until=muted_until,
+            last_read_at=seat.last_read_at if seat is not None else None,
         )
 
     async def _on_user_provisioned(self, event: UserProvisioned) -> None:

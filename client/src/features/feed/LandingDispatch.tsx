@@ -14,12 +14,14 @@
 import { useEffect } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { getLandingPath } from '@/utils/preferences'
-import FeedPage from './FeedPage'
+import FeedPage, { feedTabFromUrl } from './FeedPage'
 import WelcomePage from '@/features/welcome/WelcomePage'
 
 export default function LandingDispatch() {
-  const { route } = useLocation()
-  const choice = getLandingPath()
+  const { route, url } = useLocation()
+  // ``/?tab=chat`` — the household chat's notification link — always
+  // opens the feed's Chat tab, whatever the landing preference.
+  const choice = feedTabFromUrl(url) === 'chat' ? '/feed' : getLandingPath()
 
   useEffect(() => {
     if (choice === '/dashboard') {

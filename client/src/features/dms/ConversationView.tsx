@@ -307,6 +307,23 @@ interface ConversationRow {
   notif_level?: string
 }
 
+/** A thread's metadata handed in by the host instead of fetched — for a
+ *  conversation ``GET /api/conversations/{id}`` doesn't serve (a system
+ *  chat such as the household chat answers 404 there; its host already
+ *  read the same fields from its own summary route). */
+export interface ConversationMeta {
+  type: string
+  name: string | null
+  managed_here?: boolean
+  muted_until: string | null
+  notif_level: 'all' | 'mentions'
+  /** The viewer's unread count — sizes the first message window. */
+  unread?: number
+  /** The viewer's read watermark — anchors the "New messages" divider.
+   *  Without it the view opens at the latest message. */
+  last_read_at?: string | null
+}
+
 /** The thread's metadata from its row; ``null`` when the response isn't
  *  a conversation row at all. */
 function toThreadInfo(row: ConversationRow | null | undefined): ThreadInfo | null {
@@ -317,6 +334,16 @@ function toThreadInfo(row: ConversationRow | null | undefined): ThreadInfo | nul
     managed_here: row.managed_here === true,
     muted_until: row.muted_until ?? null,
     notif_level: row.notif_level === 'mentions' ? 'mentions' : 'all',
+  }
+}
+
+function metaToThreadInfo(meta: ConversationMeta): ThreadInfo {
+  return {
+    type: meta.type,
+    name: meta.name,
+    managed_here: meta.managed_here === true,
+    muted_until: meta.muted_until,
+    notif_level: meta.notif_level,
   }
 }
 
@@ -622,6 +649,10 @@ export interface ConversationViewProps {
   /** The viewer left the conversation or was removed from it. The
    *  routed page (default) goes back to the chat list. */
   onLeave?: () => void
+  /** The thread's metadata from the host. Given, the view never calls
+   *  ``GET /api/conversations/{id}`` (a system chat 404s there) and
+   *  follows later changes to it (the host's own mute control). */
+  meta?: ConversationMeta
 }
 
 /** One conversation's thread — header, message list, composer — usable
@@ -636,6 +667,7 @@ export function ConversationView({
   showGroupInfo = true,
   allowCalls = true,
   onLeave,
+  meta,
 }: ConversationViewProps) {
   const convId = conversationId
   const location = useLocation()
@@ -653,6 +685,10 @@ export function ConversationView({
   }
   const afterLeaveRef = useRef(afterLeave)
   afterLeaveRef.current = afterLeave
+  /** The host's metadata, read by the load effect and the WS handlers
+   *  without re-subscribing them. */
+  const metaRef = useRef(meta)
+  metaRef.current = meta
   const {
     messages, loading, loadError, reloadNonce, hasMoreHistory, isLoadingOlder, unreadAnchor,
     newSinceScrollUp, composerHasContent, locationPickerOpen,
@@ -662,6 +698,16 @@ export function ConversationView({
     reactionPickerFor, gaps,
   } = s
   const reloadKey = reloadNonce.value
+  // A host-given ``meta`` changed (its own mute / level control): keep
+  // the header and Group info in step without a refetch.
+  const metaMuted = meta?.muted_until
+  const metaLevel = meta?.notif_level
+  const metaName = meta?.name
+  useEffect(() => {
+    if (!metaRef.current || !threadInfo.value) return
+    threadInfo.value = metaToThreadInfo(metaRef.current)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- store signals are fixed per ``convId``; ``meta`` is tracked by its fields
+  }, [metaMuted, metaLevel, metaName])
   /** The viewer muted / unmuted this thread (header bell or Group info). */
   const setThreadMute = (mutedUntil: string | null): void => {
     if (threadInfo.value) threadInfo.value = { ...threadInfo.value, muted_until: mutedUntil }
@@ -899,18 +945,26 @@ export function ConversationView({
     let lastReadAt: string | null = null
     threadInfo.value = null
     groupInfoOpen.value = false
-    const summaryPromise = api.get(`/api/conversations/${convId}`).then(
-      (row: ConversationRow | null) => {
-        const info = toThreadInfo(row)
-        if (row && info) {
-          unreadHint = Math.max(0, row.unread ?? 0)
-          lastReadAt = row.last_read_at ?? null
-          if (!cancelled) threadInfo.value = info
-        }
-      },
-    ).catch(() => {
-      /* fall through with the defaults */
-    })
+    // A host-given ``meta`` (system chats) stands in for the row.
+    const given = metaRef.current
+    const summaryPromise: Promise<void> = given
+      ? Promise.resolve().then(() => {
+          unreadHint = Math.max(0, given.unread ?? 0)
+          lastReadAt = given.last_read_at ?? null
+          if (!cancelled) threadInfo.value = metaToThreadInfo(given)
+        })
+      : api.get(`/api/conversations/${convId}`).then(
+          (row: ConversationRow | null) => {
+            const info = toThreadInfo(row)
+            if (row && info) {
+              unreadHint = Math.max(0, row.unread ?? 0)
+              lastReadAt = row.last_read_at ?? null
+              if (!cancelled) threadInfo.value = info
+            }
+          },
+        ).catch(() => {
+          /* fall through with the defaults */
+        })
 
     summaryPromise.then(() => {
       if (cancelled) return
@@ -1205,7 +1259,7 @@ export function ConversationView({
     const offGroupUpdated = ws.on('dm.group.updated', (e) => {
       const d = e.data as { conversation_id?: string }
       if (d.conversation_id !== convId) return
-      void fetchThreadInfo(s, convId)
+      if (!metaRef.current) void fetchThreadInfo(s, convId)
       void fetchRoster(s, convId).then((stillIn) => {
         if (stillIn || cancelled) return
         groupInfoOpen.value = false
@@ -2660,6 +2714,9 @@ export function ConversationView({
                 </Fragment>
               )}
             </div>
+            {/* After the row in DOM order = visually above it
+             *  (column-reverse), same as the call-event branch. */}
+            {isUnreadAnchor && <UnreadDivider />}
             </Fragment>
           )
         })}
@@ -2864,7 +2921,7 @@ export function ConversationView({
           members={threadMembers.value}
           onClose={() => { groupInfoOpen.value = false }}
           onChanged={() => {
-            void fetchThreadInfo(s, convId)
+            if (!metaRef.current) void fetchThreadInfo(s, convId)
             void fetchRoster(s, convId)
           }}
           onLeft={() => {

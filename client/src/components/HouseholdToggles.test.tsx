@@ -13,7 +13,7 @@ vi.mock('@/api', () => ({
     get: vi.fn().mockResolvedValue({
       feat_feed: true, feat_pages: true, feat_tasks: true,
       feat_stickies: true, feat_calendar: true,
-      feat_presence: true, feat_gallery: true, feat_timetable: true,
+      feat_presence: true, feat_gallery: true, feat_timetable: true, feat_household_chat: true,
       allow_text: true, allow_image: true, allow_video: true,
       allow_file: true, allow_poll: true, allow_schedule: true,
       allow_highlight_share: true,
@@ -83,9 +83,9 @@ describe('HouseholdToggles', () => {
     expect(getByText('Text')).toBeTruthy()
     expect(getByText('Allow text posts in the feed')).toBeTruthy()
     expect(getByText('Shared highlight')).toBeTruthy()
-    // 8 features + 7 post types + 1 link-preview switch = 16 cards
+    // 9 features + 7 post types + 1 link-preview switch = 17 cards
     const cards = container.querySelectorAll('.sh-radio-card')
-    expect(cards).toHaveLength(16)
+    expect(cards).toHaveLength(17)
   })
 
   it('the admin can switch link previews off', async () => {
@@ -137,6 +137,24 @@ describe('HouseholdToggles', () => {
     fireEvent.click(card.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
     expect(api.put).toHaveBeenCalledWith('/api/household/preferences', {
       toggles: { feat_timetable: false },
+    })
+  })
+
+  it('lists the household chat after Timetable and toggles feat_household_chat', async () => {
+    const { api } = await import('@/api')
+    vi.mocked(api.put).mockClear()
+    const { HouseholdToggles, loadToggles } = await import('./HouseholdToggles')
+    await loadToggles()
+    const { getByText, container } = render(<HouseholdToggles />)
+    const titles = Array.from(container.querySelectorAll('.sh-radio-card__title'))
+      .map(el => el.textContent)
+    expect(titles.indexOf('Household chat')).toBe(titles.indexOf('Timetable') + 1)
+    expect(getByText('A chat for everyone at home, next to the feed')).toBeTruthy()
+    const card = getByText('Household chat').closest('.sh-radio-card')!
+    expect(card.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true)
+    fireEvent.click(card.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    expect(api.put).toHaveBeenCalledWith('/api/household/preferences', {
+      toggles: { feat_household_chat: false },
     })
   })
 })

@@ -12,10 +12,12 @@ import { showToast } from './Toast'
 import { CheckboxCardGroup, type CheckboxCardOption } from './CheckboxCardGroup'
 import { t } from '@/i18n/i18n'
 
-interface Toggles {
+export interface Toggles {
   feat_feed: boolean; feat_pages: boolean; feat_tasks: boolean
   feat_stickies: boolean; feat_calendar: boolean; feat_presence: boolean
   feat_gallery: boolean; feat_timetable: boolean
+  /** The household chat — the feed's Chat tab (default on). */
+  feat_household_chat: boolean
   allow_text: boolean; allow_image: boolean; allow_video: boolean
   allow_file: boolean; allow_poll: boolean; allow_schedule: boolean
   allow_highlight_share: boolean
@@ -67,6 +69,7 @@ export function HouseholdToggles() {
     { value: 'feat_stickies', icon: '📝', title: t('nav.stickies'), subtitle: t('household.toggles.stickies_hint') },
     { value: 'feat_calendar', icon: '🗓', title: t('nav.calendar'), subtitle: t('household.toggles.calendar_hint') },
     { value: 'feat_timetable', icon: '🏫', title: t('nav.timetable'), subtitle: t('household.toggles.timetable_hint') },
+    { value: 'feat_household_chat', icon: '💬', title: t('household.toggles.household_chat'), subtitle: t('household.toggles.household_chat_hint') },
     { value: 'feat_presence', icon: '👥', title: t('nav.presence'), subtitle: t('household.toggles.presence_hint') },
     { value: 'feat_gallery', icon: '🖼', title: t('nav.gallery'), subtitle: t('household.toggles.gallery_hint') },
   ]

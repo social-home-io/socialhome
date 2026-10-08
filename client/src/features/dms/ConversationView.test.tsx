@@ -483,3 +483,93 @@ describe('ConversationView — older history across a switch', () => {
     expect(container.querySelector('.sh-dm-load-older')).toBeNull()
   })
 })
+
+describe('ConversationView — host-given meta (system chats)', () => {
+  /** The household chat: ``GET /api/conversations/{id}`` 404s for it,
+   *  the rest of the per-conversation routes answer. */
+  function wireSystemChat(): void {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/conversations/sys-h') {
+        throw Object.assign(new Error('not found'), { status: 404 })
+      }
+      if (url.startsWith('/api/conversations/sys-h/messages')) {
+        return [msgRow('sys-bob', 'HELLO-HOUSEHOLD')]
+      }
+      if (url === '/api/conversations/sys-h/members') return roster
+      return {}
+    })
+  }
+  const META = {
+    type: 'group_dm', name: null, managed_here: false,
+    muted_until: null, notif_level: 'mentions' as const, unread: 1,
+  }
+
+  it('never fetches the conversation row and renders from meta', async () => {
+    wireSystemChat()
+    const { render, waitFor, ConversationView } = await setup()
+    const { container, getByText } = render(
+      <ConversationView conversationId="sys-h" embedded meta={META} />,
+    )
+    await waitFor(() => expect(getByText('HELLO-HOUSEHOLD')).toBeTruthy(),
+      { timeout: RENDER_WAIT })
+    // A group thread from meta: the sender's name shows, and the header
+    // bell reflects the meta's level.
+    await waitFor(() => expect(getByText('Bob')).toBeTruthy())
+    await waitFor(() => {
+      expect(container.querySelector('.sh-thread-mute-btn--mentions')).not.toBeNull()
+    })
+    const urls = apiGet.mock.calls.map(c => c[0])
+    expect(urls).not.toContain('/api/conversations/sys-h')
+    expect(urls).toContain('/api/conversations/sys-h/members')
+  })
+
+  it('meta unread + last_read_at anchor the "New messages" divider', async () => {
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/conversations/sys-h/messages')) {
+        // Newest first, as the route answers.
+        return [
+          { ...msgRow('new-2', 'NEW-TWO'), created_at: '2026-10-08T12:05:00+00:00' },
+          { ...msgRow('new-1', 'NEW-ONE'), created_at: '2026-10-08T12:04:00+00:00' },
+          { ...msgRow('old-1', 'OLD-ONE'), created_at: '2026-10-08T11:00:00+00:00' },
+        ]
+      }
+      if (url === '/api/conversations/sys-h/members') return roster
+      return {}
+    })
+    // jsdom has no layout: the entry scroll just needs the method.
+    Element.prototype.scrollIntoView = vi.fn()
+    const { render, waitFor, ConversationView } = await setup()
+    const { container } = render(
+      <ConversationView conversationId="sys-h" embedded
+        meta={{ ...META, unread: 2, last_read_at: '2026-10-08 12:00:00' }} />,
+    )
+    // A text message is the first unread: the divider follows its row
+    // in DOM order (= sits visually above it in the column-reverse list).
+    await waitFor(() => {
+      const divider = container.querySelector('.sh-dm-unread-divider')
+      expect(divider).not.toBeNull()
+      expect(divider!.previousElementSibling?.getAttribute('data-msg-id')).toBe('new-1')
+    }, { timeout: RENDER_WAIT })
+    // Deferred read: nothing is marked read until the user scrolls past.
+    expect(apiPost).not.toHaveBeenCalledWith('/api/conversations/sys-h/read')
+  })
+
+  it('follows a later meta change without refetching', async () => {
+    wireSystemChat()
+    const { render, waitFor, ConversationView } = await setup()
+    const { container, rerender } = render(
+      <ConversationView conversationId="sys-h" embedded meta={META} />,
+    )
+    await waitFor(() => {
+      expect(container.querySelector('.sh-thread-mute-btn--mentions')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    rerender(
+      <ConversationView conversationId="sys-h" embedded
+        meta={{ ...META, muted_until: '9999-12-31T23:59:59+00:00' }} />,
+    )
+    await waitFor(() => {
+      expect(container.querySelector('.sh-thread-mute-btn--muted')).not.toBeNull()
+    })
+    expect(apiGet.mock.calls.map(c => c[0])).not.toContain('/api/conversations/sys-h')
+  })
+})

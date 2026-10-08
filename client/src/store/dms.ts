@@ -169,6 +169,12 @@ export async function loadDmUnread(): Promise<void> {
   }
 }
 
+/** A ``dm.*`` frame for a system chat (``system_scope`` set). */
+export function isSystemChatFrame(data: unknown): boolean {
+  const scope = (data as { system_scope?: unknown } | null)?.system_scope
+  return typeof scope === 'string' && scope !== ''
+}
+
 export function wireDmWs(): void {
   ws.on('dm.message', (e) => {
     // The real frame nests the message: ``{type, conversation_id,
@@ -179,6 +185,7 @@ export function wireDmWs(): void {
     // ``DmThreadPage``'s working ``offNewMsg`` shape.
     const d = e.data as {
       conversation_id?: string
+      system_scope?: string | null
       sender_display?: string
       message?: {
         id?: string
@@ -190,6 +197,11 @@ export function wireDmWs(): void {
     }
     const msg = d.message
     if (!d.conversation_id || !msg?.id) return
+    // A system chat (the household chat, a space's chat) rides the DM
+    // frames but lives on its own tab: never in the inbox, never in the
+    // Chats badge (the server leaves it out of ``GET /api/conversations``
+    // too, so a refetch here would only cost a request).
+    if (isSystemChatFrame(d)) return
     append(d.conversation_id, {
       message_id:      msg.id,
       conversation_id: d.conversation_id,

@@ -3,6 +3,13 @@
   "__comment": "Translator context notes (spec §30.2). Keys mirror en.json; values are short hints shown to translators in the Weblate editor. This file is NOT rendered in the UI. When a key in en.json has no matching entry here, Weblate falls back to the English source as sole context.",
 
   "app.title": "Product name — never translate.",
+  "feed.tabs.aria": "Screen-reader name of the Feed | Chat tab strip on the household home page.",
+  "feed.tabs.feed": "Tab label on the household home page — the posts timeline. Keep short; match nav.feed.",
+  "feed.tabs.chat": "Tab label on the household home page — one group chat with everyone in the household. Keep short (one word).",
+  "feed.chat.audience": "Note above the household chat. {household} is the household's name (e.g. 'Home', 'Casa Vizeli').",
+  "feed.chat.load_failed": "Shown in the Chat tab when the household chat can't be loaded; a Retry button follows.",
+  "household.toggles.household_chat": "Admin feature toggle title: the household's shared group chat on the home page.",
+  "household.toggles.household_chat_hint": "Subtitle under the 'Household chat' feature toggle in admin settings.",
 
   "nav.feed": "Top-level nav label — keep short (≤ 10 chars). 'Feed' as in 'timeline', not 'food'.",
   "nav.spaces": "'Spaces' = shared rooms / communities. Keep short.",

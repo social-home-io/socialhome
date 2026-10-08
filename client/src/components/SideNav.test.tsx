@@ -19,7 +19,7 @@ import { setLocale } from '@/i18n/i18n'
 const ALL_FEATURES_ON = {
   feat_feed: true, feat_pages: true, feat_tasks: true,
   feat_stickies: true, feat_calendar: true,
-  feat_presence: true, feat_gallery: true, feat_timetable: true,
+  feat_presence: true, feat_gallery: true, feat_timetable: true, feat_household_chat: true,
   allow_text: true, allow_image: true, allow_video: true,
   allow_file: true, allow_poll: true, allow_schedule: true,
   allow_highlight_share: true,

@@ -21,6 +21,7 @@ import {
   useScrollActiveTabIntoView,
   useTabStripOverflow,
 } from './TabStripOverflow'
+import { t } from '@/i18n/i18n'
 
 interface TabHeaderProps<T extends string> {
   /** Identifier of the tab the page treats as active. */
@@ -36,6 +37,9 @@ interface TabHeaderProps<T extends string> {
   ariaLabel: string
   /** Optional trailing slot — header action buttons, badges, etc. */
   actions?: ComponentChildren
+  /** Optional unread count per tab — a pill after the label (hidden
+   *  at zero), announced as "N unread". */
+  badges?: Partial<Readonly<Record<T, number>>>
 }
 
 
@@ -46,6 +50,7 @@ export function TabHeader<T extends string>({
   onSelectTab,
   ariaLabel,
   actions,
+  badges,
 }: TabHeaderProps<T>) {
   const stripRef = useRef<HTMLElement | null>(null)
   const overflowing = useTabStripOverflow(stripRef, [visibleTabs])
@@ -71,6 +76,16 @@ export function TabHeader<T extends string>({
             onClick={() => onSelectTab(tab)}
           >
             {labels[tab]}
+            {(badges?.[tab] ?? 0) > 0 && (
+              <>
+                <span class="sh-tab-unread" aria-hidden="true">
+                  {badges![tab]! > 99 ? '99+' : badges![tab]}
+                </span>
+                <span class="sr-only">
+                  {` (${t('nav.unread', { count: String(badges![tab]) })})`}
+                </span>
+              </>
+            )}
           </button>
         ))}
       </nav>

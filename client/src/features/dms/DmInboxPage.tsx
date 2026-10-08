@@ -13,7 +13,7 @@ import { signal, computed } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { ws } from '@/ws'
-import { alertingUnread, dmUnreadTotal } from '@/store/dms'
+import { alertingUnread, dmUnreadTotal, isSystemChatFrame } from '@/store/dms'
 import type { Conversation } from '@/types'
 import { DmInboxSkeleton } from '@/components/Skeleton'
 import { Button } from '@/components/Button'
@@ -75,7 +75,8 @@ export default function DmInboxPage() {
     void reload().finally(() => { loading.value = false })
     // Refresh on any DM frame the server fans out — new conversations
     // and new messages both bump ``last_message_at`` ordering.
-    const offMsg  = ws.on('dm.message',              () => { void reload() })
+    // A system chat (household / space) is never in the inbox.
+    const offMsg  = ws.on('dm.message', (e) => { if (!isSystemChatFrame(e.data)) void reload() })
     const offConv = ws.on('dm.conversation.created', () => { void reload() })
     return () => { offMsg(); offConv() }
   }, [])
