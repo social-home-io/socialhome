@@ -190,6 +190,24 @@ async def test_create_frame_validates_inputs(client):
     assert r.status == 400
 
 
+async def test_create_frame_with_external_media_url_is_422(client):
+    """A third-party ``media_url`` is refused with the coded envelope —
+    viewers would fetch it (IP leak) and receivers drop it, so the
+    highlight would never federate. Nothing is created."""
+    r = await client.post(
+        "/api/highlights/frames",
+        json={"frame_type": "image", "media_url": "https://example.invalid/img.jpg"},
+        headers=_auth(client),
+    )
+    assert r.status == 422, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "INVALID_MEDIA_URL"
+    assert "example.invalid" not in body["error"]["detail"]
+
+    listed = await client.get("/api/highlights", headers=_auth(client))
+    assert await listed.json() == []
+
+
 async def test_get_highlight_with_views_and_reactions(client):
     """Author GET returns inline views + reactions per frame."""
     resp = await client.post(

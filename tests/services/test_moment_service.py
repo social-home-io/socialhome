@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.moment import Moment
 from socialhome.federation.owner_bound_id import (
     MOMENT_KIND,
@@ -405,3 +406,51 @@ async def test_expire_due_drops_expired(stack):
     assert pruned == 1
     assert await stack.moment_repo.get("m-stale") is None
     assert await stack.moment_repo.get(fresh.id) is not None
+
+
+# ── Local media only (docs/principles.md "No third-party fetches") ───────
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    ["https://example.invalid/img.jpg", "//evil.example/x.webp", "/media/x.webp"],
+)
+async def test_moment_with_non_local_media_is_refused(stack, bad_url):
+    """A moment's media must be a local upload: a third-party URL leaks
+    every viewer's IP and receivers drop it, so it would never federate."""
+    a = await stack.provision("alice")
+    captured: list[MomentCreated] = []
+    stack.bus.subscribe(MomentCreated, captured.append)
+    with pytest.raises(InvalidMediaRefError) as ei:
+        await stack.moment_svc.create_moment(
+            author_user_id=a.user_id,
+            content="look",
+            media_url=bad_url,
+            media_type="image",
+        )
+    assert (ei.value.status, ei.value.code) == (422, "INVALID_MEDIA_URL")
+    assert captured == []
+
+
+async def test_moment_keeps_local_media_ref_verbatim(stack):
+    a = await stack.provision("alice")
+    m = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id,
+        content="",
+        media_url="api/media/pic.webp",
+        media_type="image",
+    )
+    assert m.media_url == "api/media/pic.webp"
+
+
+async def test_moment_empty_media_url_counts_as_no_media(stack):
+    """An empty ``media_url`` is "no media", not a bad reference."""
+    a = await stack.provision("alice")
+    m = await stack.moment_svc.create_moment(
+        author_user_id=a.user_id, content="text only", media_url=""
+    )
+    assert m.media_url is None
+    with pytest.raises(ValueError):
+        await stack.moment_svc.create_moment(
+            author_user_id=a.user_id, content="", media_url=""
+        )

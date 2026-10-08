@@ -27,6 +27,7 @@ __all__ = [
     "CodedError",
     "ImageTooLargeError",
     "ImageUnreadableError",
+    "InvalidMediaRefError",
     "PayloadTooLargeError",
 ]
 
@@ -95,3 +96,23 @@ class ImageUnreadableError(CodedError, ValueError):
     status = 422
     code = "IMAGE_UNREADABLE"
     detail = "This image couldn't be opened."
+
+
+class InvalidMediaRefError(CodedError, ValueError):
+    """A media field that is not a local upload (422 ``INVALID_MEDIA_URL``).
+
+    Only ``api/media/<name>`` — the shape ``POST /api/media/upload``
+    returns — is stored for a field the SPA renders as an ``<img>`` /
+    ``<video>`` source or a link target: a remote URL would leak every
+    viewer's IP to its host (docs/principles.md "No third-party fetches
+    from user content") and would be dropped by every receiving household
+    anyway, a ``javascript:`` URL would be stored XSS. The detail names
+    the field and the rule, never the submitted value.
+    """
+
+    status = 422
+    code = "INVALID_MEDIA_URL"
+    detail = "media_url must be a file uploaded via /api/media/upload"
+
+    def __init__(self, field: str = "media_url") -> None:
+        super().__init__(f"{field} must be a file uploaded via /api/media/upload")

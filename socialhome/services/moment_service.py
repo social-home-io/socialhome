@@ -35,6 +35,7 @@ from ..domain.moment import (
 )
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
+from .inbound_media_store import optional_local_media_ref
 from .user_preferences import parse_moment_preferences
 
 if TYPE_CHECKING:
@@ -113,6 +114,9 @@ class MomentService:
         is_public: bool = False,
     ) -> Moment:
         content = (content or "").strip()
+        # Media is optional; when present it must be a local upload — a
+        # remote URL would leak every viewer's IP, and receivers drop it.
+        media_url = optional_local_media_ref(media_url)
         if len(content) > MOMENT_MAX_CONTENT_LEN:
             raise ValueError(
                 f"Moment text exceeds {MOMENT_MAX_CONTENT_LEN} characters."

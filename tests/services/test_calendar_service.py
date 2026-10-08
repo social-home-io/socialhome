@@ -11,6 +11,7 @@ import pytest
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import (
     RsvpPastError,
@@ -1550,7 +1551,7 @@ async def test_create_event_publishes_federation_event(space_cal_env):
         start=now.isoformat(),
         end=(now + timedelta(hours=2)).isoformat(),
         created_by="uid-alice",
-        cover_url="https://cdn.example/cover.jpg",
+        cover_url="api/media/cover.webp",
         location="Pier 39",
     )
     created_calls = [
@@ -1566,7 +1567,7 @@ async def test_create_event_publishes_federation_event(space_cal_env):
     assert payload["start"] == now.isoformat()
     assert payload["end"] == (now + timedelta(hours=2)).isoformat()
     assert payload["created_by"] == "uid-alice"
-    assert payload["cover_url"] == "https://cdn.example/cover.jpg"
+    assert payload["cover_url"] == "api/media/cover.webp"
     assert payload["location"] == "Pier 39"
     # See the RSVP test above: the payload carries the space so a
     # mesh-relayed envelope stays attributable.
@@ -3003,3 +3004,41 @@ async def test_can_edit_events_hints_each_row_by_ownership(env):
     )
     assert await svc.can_edit_events("cal-ao", "u-member", events) == [False, False]
     assert await svc.can_edit_events("cal-ao", "u-admin", []) == []
+
+
+# ── Local media only (docs/principles.md "No third-party fetches") ───────
+
+
+async def test_event_cover_must_be_local_media(env):
+    """An event cover is an ``<img>`` source for every viewer and receivers
+    drop a remote one — create and edit refuse it (422)."""
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("anna", "uid-anna", "Anna"),
+    )
+    cal = await env.cal_svc.create_calendar(name="Personal", owner_username="anna")
+    now = datetime.now(timezone.utc)
+    with pytest.raises(InvalidMediaRefError) as ei:
+        await env.cal_svc.create_event(
+            calendar_id=cal.id,
+            summary="Lunch",
+            start=now.isoformat(),
+            end=(now + timedelta(hours=1)).isoformat(),
+            created_by="uid-anna",
+            cover_url="https://cdn.example/cover.jpg",
+        )
+    assert ei.value.detail.startswith("cover_url ")
+    ev = await env.cal_svc.create_event(
+        calendar_id=cal.id,
+        summary="Lunch",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=1)).isoformat(),
+        created_by="uid-anna",
+        cover_url="/api/media/c.webp?exp=1&sig=x",
+    )
+    assert ev.cover_url == "/api/media/c.webp"
+    with pytest.raises(InvalidMediaRefError):
+        await env.cal_svc.update_event(ev.id, cover_url="//evil.example/c.jpg")
+    # Clearing stays allowed.
+    cleared = await env.cal_svc.update_event(ev.id, cover_url=None)
+    assert cleared.cover_url is None

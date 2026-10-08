@@ -36,6 +36,8 @@ import re
 
 import aiofiles.os
 
+from ..domain.errors import InvalidMediaRefError
+
 log = logging.getLogger(__name__)
 
 #: A peer-supplied media file name / id that becomes one path component.
@@ -99,6 +101,36 @@ def verbatim_local_media_ref(value: object) -> str | None:
     over the sender's own copy still matches.
     """
     return value if isinstance(value, str) and local_media_ref(value) else None
+
+
+def require_local_media_ref(value: str, *, field: str = "media_url") -> str:
+    """``value`` unchanged when it is a local media reference, else raise.
+
+    The local-write twin of :func:`verbatim_local_media_ref`: a create /
+    edit path for a field rendered as an ``<img>`` / ``<video>`` source
+    refuses what a receiving household would drop, so a row the author
+    sees always federates and never points at a third-party host.
+
+    :raises InvalidMediaRefError: (422 ``INVALID_MEDIA_URL``) otherwise.
+    """
+    if verbatim_local_media_ref(value) is None:
+        raise InvalidMediaRefError(field)
+    return value
+
+
+def optional_local_media_ref(
+    value: str | None, *, field: str = "media_url"
+) -> str | None:
+    """:func:`require_local_media_ref` for an optional field: an empty /
+    missing value is ``None`` ("no media"), anything else must be local."""
+    return require_local_media_ref(value, field=field) if value else None
+
+
+def require_local_media_refs(
+    values: tuple[str, ...] | list[str], *, field: str = "image_urls"
+) -> tuple[str, ...]:
+    """:func:`require_local_media_ref` over every entry of a media list."""
+    return tuple(require_local_media_ref(v, field=field) for v in values)
 
 
 def local_media_refs(values: object, *, limit: int) -> tuple[str, ...]:

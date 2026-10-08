@@ -1537,7 +1537,7 @@ async def test_space_page_patch_and_delete(client):
         json={
             "title": "P2",
             "content": "b",
-            "cover_image_url": "/m/c.webp",
+            "cover_image_url": "/api/media/c.webp",
         },
         headers=_auth(client._tok),
     )

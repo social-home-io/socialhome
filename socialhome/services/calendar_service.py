@@ -62,6 +62,7 @@ from ..repositories.calendar_repo import AbstractCalendarRepo, AbstractSpaceCale
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..utils.rrule import expand_rrule
 from ..utils.timezones import is_valid_tz
+from .inbound_media_store import require_local_media_ref
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .moderation_release import with_release
@@ -122,7 +123,8 @@ def _clean_cover_url(value: str | None) -> str | None:
     """
     if not value:
         return None
-    return strip_signature_query(value)
+    # Local uploads only (docs/principles.md "No third-party fetches").
+    return require_local_media_ref(strip_signature_query(value), field="cover_url")
 
 
 #: Upper bound on the ``location`` text so a hostile client can't push

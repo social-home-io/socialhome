@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import PageCreated, PageDeleted, PageUpdated
 from socialhome.domain.space import (
@@ -570,3 +571,31 @@ async def test_moderated_moderator_writes_directly(env):
     await _moderated(env)
     page = await env.svc.create("sp-a", actor_user_id="u-mod", title="T", content="x")
     assert (await env.svc.get("sp-a", page.id)).created_by == "u-mod"
+
+
+# ── Local media only (docs/principles.md "No third-party fetches") ───────
+
+
+async def test_page_cover_must_be_local_media(env):
+    """Receivers drop a remote cover and every reader's browser would fetch
+    it — create and edit refuse it (422); clearing stays allowed."""
+    with pytest.raises(InvalidMediaRefError):
+        await env.svc.create(
+            "sp-a",
+            actor_user_id="u-member",
+            title="T",
+            cover_image_url="https://cdn.example/c.jpg",
+        )
+    page = await env.svc.create("sp-a", actor_user_id="u-member", title="T")
+    with pytest.raises(InvalidMediaRefError) as ei:
+        await env.svc.update(
+            "sp-a",
+            page.id,
+            actor_user_id="u-member",
+            cover_image_url="//evil.example/c.jpg",
+        )
+    assert ei.value.detail.startswith("cover_image_url ")
+    cleared = await env.svc.update(
+        "sp-a", page.id, actor_user_id="u-member", cover_image_url=None
+    )
+    assert cleared.cover_image_url is None

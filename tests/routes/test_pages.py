@@ -488,19 +488,31 @@ async def test_cover_image_url_signed_on_read(client):
 
 
 async def test_cover_image_url_that_is_not_local_media_is_never_served(client):
-    """F7: a page cover that is not a local media reference — set over the
-    API or mirrored from another household before inbound filtering — is
-    served as ``null``: the stored value stays (it is part of the page
-    version hash members and host agree on) but never reaches an ``<img>``."""
+    """F7: a page cover that is not a local media reference — stored before
+    the API refused one, or mirrored from another household before inbound
+    filtering — is served as ``null``: the stored value stays (it is part
+    of the page version hash members and host agree on) but never reaches
+    an ``<img>``. The API itself refuses such a cover (422)."""
     h = _auth(client._tok)
     r = await client.post(
         "/api/pages", json={"title": "Cover", "content": "x"}, headers=h
     )
     pid = (await r.json())["id"]
-    await client.patch(
+    refused = await client.patch(
         f"/api/pages/{pid}",
         json={"cover_image_url": "https://tracker.example/pixel.png"},
         headers=h,
+    )
+    assert refused.status == 422
+    assert (await refused.json())["error"]["code"] == "INVALID_MEDIA_URL"
+    # A legacy row that already holds one (written before the API refused
+    # it); the local edit leaves the version snapshot asserted below.
+    await client.patch(
+        f"/api/pages/{pid}", json={"cover_image_url": "api/media/c.webp"}, headers=h
+    )
+    await client._db.enqueue(
+        "UPDATE pages SET cover_image_url=? WHERE id=?",
+        ("https://tracker.example/pixel.png", pid),
     )
     detail = await (await client.get(f"/api/pages/{pid}", headers=h)).json()
     assert detail["cover_image_url"] is None

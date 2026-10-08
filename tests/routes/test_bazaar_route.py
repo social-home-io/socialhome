@@ -604,3 +604,24 @@ async def test_list_my_saved_returns_both(client):
     # Per-row saved_at has 1-second SQLite resolution — don't assert
     # relative ordering within a single test second.
     assert {s["post_id"] for s in body["saved"]} == {"lst-s1", "lst-s2"}
+
+
+async def test_create_listing_with_non_local_image_is_422(client):
+    """Listing photos must be local uploads (``INVALID_MEDIA_URL``)."""
+    space_id = await _seed_space(client)
+    r = await client.post(
+        "/api/bazaar",
+        json={
+            "space_id": space_id,
+            "title": "Classic bike",
+            "mode": "fixed",
+            "price": 5000,
+            "currency": "USD",
+            "image_urls": ["api/media/ok.webp", "https://cdn.example/bike.jpg"],
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "INVALID_MEDIA_URL"
+    assert body["error"]["detail"].startswith("image_urls ")

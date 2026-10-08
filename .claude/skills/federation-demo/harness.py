@@ -237,6 +237,25 @@ def _make_demo_webp() -> bytes:
     return buf.getvalue()
 
 
+def _upload_demo_image(base_url: str, *, token: str, label: str) -> str:
+    """Upload :func:`_make_demo_webp` and return the local media URL.
+
+    Highlight frames, moments and other media fields only take a local
+    upload (``api/media/<name>``): the author's household refuses a
+    third-party URL with 422 ``INVALID_MEDIA_URL`` and every receiver
+    drops one, so a demo frame must point at real uploaded bytes.
+    """
+    s, up = _upload_file(
+        f"{base_url}/api/media/upload",
+        token=token,
+        filename="demo.webp",
+        content=_make_demo_webp(),
+        content_type="image/webp",
+    )
+    _must(f"media upload({label})", s, up, ok=(200, 201))
+    return str(up["url"])
+
+
 def _make_noisy_png(width: int, height: int) -> bytes:
     """A PNG of pure noise — WebP's worst case, so the space cover the
     backend transcodes from a 1200x800 one is ~500 KiB, the size that used
@@ -5942,7 +5961,7 @@ def cmd_traffic() -> None:
             token=token,
             method="POST",
             body={
-                "media_url": "https://example.invalid/img.jpg",
+                "media_url": _upload_demo_image(url, token=token, label=label),
                 "frame_type": "image",
                 "caption_text": f"[{label}] highlight — audience all_paired",
                 "audience_kind": "all_paired",
@@ -8594,7 +8613,9 @@ def cmd_visibility() -> None:
         token=ada_token,
         method="POST",
         body={
-            "media_url": "https://example.invalid/ada-pre.jpg",
+            "media_url": _upload_demo_image(
+                a_url, token=ada_token, label="ada pre-hide"
+            ),
             "frame_type": "image",
             "caption_text": f"[ada pre-hide] highlight {pre_needle}",
             "audience_kind": "all_paired",
@@ -8744,7 +8765,7 @@ def cmd_visibility() -> None:
         token=ada_token,
         method="POST",
         body={
-            "media_url": "https://example.invalid/ada.jpg",
+            "media_url": _upload_demo_image(a_url, token=ada_token, label="ada"),
             "frame_type": "image",
             "caption_text": f"[ada hidden] highlight {needle}",
             "audience_kind": "all_paired",
@@ -9142,7 +9163,9 @@ def cmd_replay() -> None:
         token=a["token"],
         method="POST",
         body={
-            "media_url": "https://example.invalid/replay.jpg",
+            "media_url": _upload_demo_image(
+                f"http://127.0.0.1:{a['port']}", token=a["token"], label="replay"
+            ),
             "frame_type": "image",
             "caption_text": caption,
             "audience_kind": "all_paired",

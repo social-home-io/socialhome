@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.services import inbound_media_store as store
 
 
@@ -204,3 +205,21 @@ def test_verbatim_local_media_ref(value, expected):
     """F7: a peer value is kept byte-for-byte when it is a local media
     reference (so hashes / signatures over it still match), else ``None``."""
     assert store.verbatim_local_media_ref(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value", ["api/media/0f3a9c.webp", "/api/media/0f3a9c.webp", "api/media/a.webp?x=1"]
+)
+def test_require_local_media_ref_returns_value_verbatim(value):
+    """The local-write twin of :func:`verbatim_local_media_ref`."""
+    assert store.require_local_media_ref(value) == value
+
+
+@pytest.mark.parametrize(
+    "value", ["https://tracker.example/pixel.png", "javascript:alert(1)", ""]
+)
+def test_require_local_media_ref_refuses_with_field_name(value):
+    with pytest.raises(InvalidMediaRefError) as ei:
+        store.require_local_media_ref(value, field="cover_url")
+    assert ei.value.code == "INVALID_MEDIA_URL"
+    assert ei.value.detail.startswith("cover_url ")

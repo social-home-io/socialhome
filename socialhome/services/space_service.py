@@ -114,6 +114,7 @@ from ..domain.federation_capabilities import (
     space_features_missing_below,
 )
 from ..media.cleanup import unlink_unreferenced
+from .inbound_media_store import optional_local_media_ref, require_local_media_refs
 from .space_purge import purge_space_and_media
 from .protection_gate import ProtectionGateMixin
 from .content_access import ContentAccessMixin
@@ -6514,6 +6515,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             location,
             image_urls_tuple,
         )
+        # Local uploads only (docs/principles.md "No third-party fetches"):
+        # a remote URL leaks every member's IP and receivers drop it.
+        media_url = optional_local_media_ref(media_url)
+        image_urls_tuple = require_local_media_refs(image_urls_tuple)
         clean_attachments = self._post_attachments.validate(post_type, attachments)
         # ``posts_access`` is enforced on EVERY household from its own copy
         # of the features — the host and each member household's stub
@@ -6926,6 +6931,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 raise ValueError("comment content required")
         elif ctype is CommentType.IMAGE and not media_url:
             raise ValueError("image comment requires media_url")
+        media_url = optional_local_media_ref(media_url)
         if parent_id is not None:
             parent = await self._posts.get_comment(parent_id)
             if parent is None or parent.post_id != post_id:

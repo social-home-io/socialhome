@@ -48,6 +48,7 @@ from ..repositories.bazaar_repo import (
     new_bid,
     new_offer,
 )
+from .inbound_media_store import require_local_media_refs
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
@@ -231,6 +232,7 @@ class BazaarService(ProtectionGateMixin):
             raise ValueError(
                 f"too many images (max {BAZAAR_MAX_IMAGES})",
             )
+        image_urls = require_local_media_refs(image_urls)
         _validate_price_fields(mode_val, price, start_price, step_price)
 
         caption = f"🛍 {title_clean}" + (

@@ -12,8 +12,8 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import (
     MUTED_FOREVER,
     ConversationType,
-    InvalidMediaRefError,
 )
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import DmMessageCreated, DmMessageUpdated
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.link_preview import LinkPreview
+from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.post import FileMeta, Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
@@ -374,13 +375,13 @@ async def test_image_post_accepted(stack):
     p = await stack.feed_svc.create_post(
         author_user_id=u.user_id,
         type="image",
-        image_urls=("/media/x.webp",),
+        image_urls=("/api/media/x.webp",),
         content="caption",
     )
     assert p.type is PostType.IMAGE
     # Image posts use ``image_urls`` exclusively — ``media_url`` stays None.
     assert p.media_url is None
-    assert p.image_urls == ("/media/x.webp",)
+    assert p.image_urls == ("/api/media/x.webp",)
 
 
 async def test_image_post_multi_url_accepted(stack):
@@ -388,12 +389,12 @@ async def test_image_post_multi_url_accepted(stack):
     p = await stack.feed_svc.create_post(
         author_user_id=u.user_id,
         type="image",
-        image_urls=("/media/a.webp", "/media/b.webp", "/media/c.webp"),
+        image_urls=("/api/media/a.webp", "/api/media/b.webp", "/api/media/c.webp"),
     )
     assert p.image_urls == (
-        "/media/a.webp",
-        "/media/b.webp",
-        "/media/c.webp",
+        "/api/media/a.webp",
+        "/api/media/b.webp",
+        "/api/media/c.webp",
     )
 
 
@@ -410,7 +411,7 @@ async def test_image_post_caps_at_max(stack):
     from socialhome.domain.post import FEED_POST_MAX_IMAGES
 
     u = await stack.provision_user("a")
-    too_many = tuple(f"/media/{i}.webp" for i in range(FEED_POST_MAX_IMAGES + 1))
+    too_many = tuple(f"/api/media/{i}.webp" for i in range(FEED_POST_MAX_IMAGES + 1))
     with pytest.raises(ValueError, match="at most"):
         await stack.feed_svc.create_post(
             author_user_id=u.user_id,
@@ -426,7 +427,7 @@ async def test_text_post_rejects_image_urls(stack):
             author_user_id=u.user_id,
             type="text",
             content="hi",
-            image_urls=("/media/x.webp",),
+            image_urls=("/api/media/x.webp",),
         )
 
 
@@ -663,3 +664,45 @@ async def test_delete_removes_the_card_image(tmp_dir):
     svc = FeedService(posts, users, EventBus(), media_dir=media, media_refs=refs)
     await svc.delete_post("p1", actor_user_id="u")
     assert not (media / "lp.webp").exists()
+
+
+# ── Local media only (docs/principles.md "No third-party fetches") ───────
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"type": "image", "image_urls": ("https://cdn.example/x.jpg",)}, "image_urls"),
+        (
+            {"type": "image", "image_urls": ("api/media/ok.webp", "//evil/x.webp")},
+            "image_urls",
+        ),
+        ({"type": "video", "media_url": "https://cdn.example/x.webm"}, "media_url"),
+    ],
+)
+async def test_post_with_non_local_media_is_refused(stack, kwargs, field):
+    u = await stack.provision_user("a")
+    with pytest.raises(InvalidMediaRefError) as ei:
+        await stack.feed_svc.create_post(author_user_id=u.user_id, **kwargs)
+    assert ei.value.detail.startswith(f"{field} ")
+
+
+async def test_comment_with_non_local_media_is_refused(stack):
+    u = await stack.provision_user("a")
+    p = await stack.feed_svc.create_post(
+        author_user_id=u.user_id, type=PostType.TEXT, content="x"
+    )
+    with pytest.raises(InvalidMediaRefError):
+        await stack.feed_svc.add_comment(
+            p.id,
+            author_user_id=u.user_id,
+            comment_type="image",
+            media_url="https://cdn.example/x.jpg",
+        )
+    c = await stack.feed_svc.add_comment(
+        p.id,
+        author_user_id=u.user_id,
+        comment_type="image",
+        media_url="api/media/ok.webp",
+    )
+    assert c.media_url == "api/media/ok.webp"

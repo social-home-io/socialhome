@@ -11,6 +11,7 @@ from ..app_keys import (
     space_repo_key,
 )
 from ..domain.child_protection import AccountProtectedError
+from ..domain.errors import CodedError
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..repositories.bazaar_repo import BidStateError, OfferStateError
 from ..security import error_response
@@ -168,6 +169,10 @@ class BazaarCollectionView(BaseView):
                 step_price=_int_or_none(body.get("step_price")),
                 announce_in_feed=bool(body.get("announce_in_feed", False)),
             )
+        except CodedError:
+            # ``InvalidMediaRefError`` is also a ``ValueError`` — let
+            # ``BaseView._iter`` answer it with its stable code.
+            raise
         except ValueError as exc:
             return error_response(422, "UNPROCESSABLE", str(exc))
         return web.json_response(

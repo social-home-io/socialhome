@@ -54,6 +54,7 @@ from ..domain.space import (
 )
 from ..media_signer import strip_signature_query, strip_signed_media_in_markdown
 from ..repositories.page_repo import mint_page_id, new_page
+from .inbound_media_store import optional_local_media_ref
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .page_conflict_service import (
@@ -198,7 +199,10 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
         item minted. The page stays the actor's."""
         clean_title = _title(title)
         body = strip_signed_media_in_markdown(content or "") or ""
-        cover = strip_signature_query(cover_image_url) if cover_image_url else None
+        cover = optional_local_media_ref(
+            strip_signature_query(cover_image_url) if cover_image_url else None,
+            field="cover_image_url",
+        )
         decision = await self._gate(
             space_id,
             approved_by or actor_user_id,
@@ -556,8 +560,11 @@ def _page_patch(*, title: object, content: object, cover_image_url: object) -> d
             content if isinstance(content, str) else None
         )
     if not isinstance(cover_image_url, _Unset):
-        patch["cover_image_url"] = strip_signature_query(
-            cover_image_url if isinstance(cover_image_url, str) else None
+        patch["cover_image_url"] = optional_local_media_ref(
+            strip_signature_query(
+                cover_image_url if isinstance(cover_image_url, str) else None
+            ),
+            field="cover_image_url",
         )
     return patch
 

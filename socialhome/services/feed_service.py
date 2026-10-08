@@ -49,6 +49,8 @@ from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.post_repo import AbstractPostRepo
 from ..repositories.user_repo import AbstractUserRepo
 
+from .inbound_media_store import optional_local_media_ref, require_local_media_refs
+
 if TYPE_CHECKING:
     import pathlib
 
@@ -160,6 +162,9 @@ class FeedService:
             location,
             image_urls_tuple,
         )
+        # Local uploads only (docs/principles.md "No third-party fetches").
+        media_url = optional_local_media_ref(media_url)
+        image_urls_tuple = require_local_media_refs(image_urls_tuple)
         # Truncate to 4dp at the service boundary regardless of what the
         # client sent — the column never holds higher precision than the
         # federated form (§GPS truncation).
@@ -366,6 +371,7 @@ class FeedService:
             _validate_text_length(content, limit=MAX_COMMENT_LENGTH)
         elif ctype is CommentType.IMAGE and not media_url:
             raise ValueError("image comment requires media_url")
+        media_url = optional_local_media_ref(media_url)
 
         if parent_id is not None:
             parent = await self._posts.get_comment(parent_id)

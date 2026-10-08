@@ -70,6 +70,21 @@ async def test_create_empty_rejected(client):
     assert r.status == 422
 
 
+async def test_create_with_external_media_url_is_422(client):
+    """A moment's media must be a local upload (``INVALID_MEDIA_URL``)."""
+    r = await client.post(
+        "/api/moments",
+        json={
+            "content": "look",
+            "media_url": "https://example.invalid/img.jpg",
+            "media_type": "image",
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422, await r.text()
+    assert (await r.json())["error"]["code"] == "INVALID_MEDIA_URL"
+
+
 async def test_rate_limit_429_within_window(client):
     r = await client.post(
         "/api/moments",

@@ -89,7 +89,7 @@ Coded refusals (`socialhome/domain/errors.py` `CodedError` subclasses):
 | `DM_SELF` | 422 | — | `POST /api/conversations/dm` to yourself |
 | `GROUP_TOO_SMALL` | 422 | `min` | `POST /api/conversations/group` with fewer than 3 people |
 | `DM_TOO_LONG` | 422 | `max` | Sending / editing a message over the length cap |
-| `INVALID_MEDIA_URL` | 422 | — | `POST /api/conversations/{id}/messages` with a `media_url` that isn't a local upload (`api/media/<name>`); the detail names the rule, never the value |
+| `INVALID_MEDIA_URL` | 422 | — | A media field that isn't a local upload (`api/media/<name>`, the `url` `POST /api/media/upload` returns): `media_url` on `POST /api/conversations/{id}/messages`, `POST /api/highlights/frames`, `POST /api/moments`, feed / space posts and comments; `image_urls` on feed / space posts and `POST /api/bazaar`; `cover_url` on calendar events; `cover_image_url` on pages. A third-party URL would leak every viewer's IP and every receiving household drops it (see [principles](principles.md#no-third-party-fetches-from-user-content)). The detail names the field and the rule, never the value |
 | `DM_BLOCKED` | 403 | — | The recipient blocked you (a guardian block reads the same) |
 | `DM_YOU_BLOCKED` | 403 | — | You blocked the recipient |
 | `DM_NOT_ALLOWED` | 403 | — | A protected account messaging someone its guardian blocked |
@@ -176,7 +176,7 @@ Household-broadcast posts that fan to a 3-hop peer mesh. Replies are themselves 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/moments` | List visible moments (block-aware, follow-aware). |
-| POST | `/api/moments` | Create a moment. Body: `{content, media_url?, media_type?, duration_ms?, parent_moment_id?}`. |
+| POST | `/api/moments` | Create a moment. Body: `{content, media_url?, media_type?, duration_ms?, parent_moment_id?}`. `media_url`, when present, must be a local upload (`api/media/<name>`) — anything else is `422 INVALID_MEDIA_URL`. |
 | GET | `/api/moments/archive` | Full retention-window list. Optional `?tag=<name>` filters to moments tagged with that hashtag (lowercase, no leading `#`). |
 | GET | `/api/moments/hashtags` | Trending hashtags inside the viewer's visibility window. Returns `{"hashtags": [{"tag", "count"}, …]}`; `?limit=N` (default 20, capped at 50). |
 | GET | `/api/moments/{id}` | Detail incl. replies + reactions. |
@@ -666,7 +666,7 @@ in-process retention scheduler prunes expired and over-quota rows.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST   | `/api/highlights/frames` | Create or append today's frame. Body: `{frame_type, media_url, caption_text?, caption_emoji?, duration_ms?, audience_kind?, audience?[]}`. Returns `{highlight, frame}`. |
+| POST   | `/api/highlights/frames` | Create or append today's frame. Body: `{frame_type, media_url, caption_text?, caption_emoji?, duration_ms?, audience_kind?, audience?[]}`. Returns `{highlight, frame}`. `media_url` must be a local upload (`api/media/<name>`) — anything else is `422 INVALID_MEDIA_URL` and nothing is created. |
 | GET    | `/api/highlights` | List highlights visible to the caller (mine + peers'). Returns `[{highlight, frames, unseen_count}]`. |
 | GET    | `/api/highlights/{id}` | Highlight detail with frames. Authors get per-frame `views` and `reactions` keyed by frame id inline. |
 | DELETE | `/api/highlights/{id}` | Author removes the whole highlight. Cascades to frames / views / reactions. |
