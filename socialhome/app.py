@@ -109,6 +109,7 @@ from .infrastructure.app_pending_session_scheduler import (
     AppPendingSessionPruneScheduler,
 )
 from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
+from .infrastructure.gfs_route_discovery_scheduler import GfsRouteDiscoveryScheduler
 from .infrastructure.moderation_expiry_scheduler import ModerationExpiryScheduler
 from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
 from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
@@ -345,6 +346,7 @@ from .services.presence_service import PresenceService
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_relay_inbound import GfsRelayInbound
+from .services.gfs_route_discovery_service import GfsRouteDiscoveryService
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
 from .services.link_preview_service import LinkPreviewService
 from .services.map_tile_service import MapTileService
@@ -848,6 +850,30 @@ def _build_gfs_relay_inbound(
         gfs_connection_repo=gfs_connection_repo,
         rate_limiter=rate_limiter,
     )
+
+
+def _build_gfs_route_discovery(
+    *,
+    federation_service: FederationService,
+    federation_repo: AbstractFederationRepo,
+    gfs_connection_repo: AbstractGfsConnectionRepo,
+    gfs_connection_service: GfsConnectionService,
+) -> tuple[GfsRouteDiscoveryService, GfsRouteDiscoveryScheduler]:
+    """Shared-GFS route discovery (v_53): the probe / ack service, its
+    inbound handlers on the registry, and the scheduler that drives it.
+
+    Probes go only through our own connections whose server proved the
+    ``envelope_relay`` capability — the same signed-capability check the
+    relay sender uses.
+    """
+    service = GfsRouteDiscoveryService(
+        federation=federation_service,
+        federation_repo=federation_repo,
+        gfs_connection_repo=gfs_connection_repo,
+        envelope_relay_supported=gfs_connection_service.envelope_relay_supported,
+    )
+    service.attach_to(federation_service)
+    return service, GfsRouteDiscoveryScheduler(service)
 
 
 def _wire_space_authority_rotation(
@@ -2727,6 +2753,7 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
     routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
+    gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
     moderation_expiry_scheduler: ModerationExpiryScheduler | None = None
     app_pending_session_scheduler: AppPendingSessionPruneScheduler | None = None
     audio_transcript_scheduler: AudioTranscriptScheduler | None = None
@@ -3489,6 +3516,19 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_connection_repo=repos.gfs_connection,
             rate_limiter=limiter,
         )
+        # v_53 — which connection servers we share with each opted-in
+        # paired peer, found by probing through each of our own servers
+        # (``docs/protocol/gfs-relay.md``). Started with the other
+        # schedulers below; a GFS (re)connect triggers an early round.
+        nonlocal gfs_route_discovery_scheduler
+        gfs_route_discovery, gfs_route_discovery_scheduler = _build_gfs_route_discovery(
+            federation_service=federation_service,
+            federation_repo=repos.federation,
+            gfs_connection_repo=repos.gfs_connection,
+            gfs_connection_service=gfs_connection_service,
+        )
+        app[K.gfs_route_discovery_key] = gfs_route_discovery
+        app[K.gfs_route_discovery_scheduler_key] = gfs_route_discovery_scheduler
         # #117 followup — federate SPACE_POST_CREATED outbound so
         # remote members on other households actually receive posts
         # in spaces they belong to. The inbound side was already
@@ -3699,6 +3739,12 @@ def create_app(config: Config | None = None) -> web.Application:
         # refresh the stored display_name if the operator renamed the
         # server (a rename typically restarts the GFS → forces a reconnect).
         async def _on_gfs_connected(gfs_id: str) -> None:
+            # v_53 — a connection came up: re-learn which servers we share
+            # with our opted-in peers. First, and non-blocking, so a failing
+            # self-heal below never swallows it; coalesced and gap-limited,
+            # so a reconnect storm or a flapping socket costs one round.
+            if gfs_route_discovery_scheduler is not None:
+                gfs_route_discovery_scheduler.trigger()
             await gfs_connection_service.refresh_connection_metadata(gfs_id)
             # Self-heal the space-authority pins on the GFS: ``/gfs/publish``
             # authorizes a relay on the space's TOFU-pinned authority key
@@ -3849,6 +3895,8 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo, window=REPLAY_CACHE_WINDOW
         )
         await replay_cache_scheduler.start()
+        if gfs_route_discovery_scheduler is not None:
+            await gfs_route_discovery_scheduler.start()
 
         # Failed GFS publishes (``POST /gfs/publish``) wait in an in-memory,
         # bounded retry queue owned by the connection service.
@@ -4145,6 +4193,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await moment_public_signaling_handler.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        if gfs_route_discovery_scheduler is not None:
+            await gfs_route_discovery_scheduler.stop()
         page_forwarder = app.get(K.page_proposal_forwarder_key)
         if page_forwarder is not None:
             await page_forwarder.stop()

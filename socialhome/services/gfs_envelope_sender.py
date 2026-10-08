@@ -173,7 +173,7 @@ class GfsEnvelopeSender:
                 # about shape and budget, and the payload is somebody's
                 # invite. The server's name is what an operator needs.
                 log.info(
-                    "gfs.envelope: %r (%s) rejected an invite envelope — HTTP %d",
+                    "gfs.envelope: %r (%s) rejected a relayed envelope — HTTP %d",
                     conn.display_name,
                     conn.inbox_url,
                     resp.status,

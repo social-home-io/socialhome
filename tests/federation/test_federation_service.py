@@ -4951,3 +4951,135 @@ async def test_delivered_and_given_up_items_return_their_bytes(no_margin):
         assert svc._deferred_mesh_bytes > 0
         await _drain_deferred(svc)
     assert svc._deferred_mesh_bytes == 0
+
+
+# ─── send_event_via_gfs — one named connection server (v_53) ─────────────
+
+
+class _OneServerRelay:
+    def __init__(self, result: tuple[bool, int | None] = (True, 202)) -> None:
+        self.result = result
+        self.calls: list[tuple[str | None, dict]] = []
+
+    async def send(self, *, instance, envelope_dict, gfs_url=None):
+        self.calls.append((gfs_url, envelope_dict))
+        return self.result
+
+
+async def _svc_for_one_server(relay):
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, session_key = _make_remote_instance(km)
+    inst = dataclasses.replace(
+        inst,
+        source=InstanceSource.MANUAL,
+        gfs_relay=True,
+        remote_keywrap_pk="cc" * 32,
+    )
+    await fed_repo.save_instance(inst)
+    outbox = InMemoryOutboxRepo()
+    svc, _ = _make_service(federation_repo=fed_repo, outbox_repo=outbox, key_manager=km)
+
+    async def _no_signal(*_a, **_kw):
+        return None
+
+    async def _routes(_iid: str) -> list[str]:
+        return ["https://round-robin.example"]
+
+    transport = FederationTransport(
+        own_instance_id=svc.own_instance_id,
+        https_inbox=_DownInbox(),
+        gfs_relay=relay,
+        gfs_routes=_routes,
+        signaling_send=_no_signal,
+    )
+    transport.mark_ice_primed()
+    svc.attach_transport(transport)
+    return svc, inst, session_key, fed_repo, outbox
+
+
+@pytest.mark.asyncio
+async def test_send_event_via_gfs_seals_like_send_event_and_uses_only_that_server():
+    relay = _OneServerRelay()
+    svc, inst, session_key, fed_repo, outbox = await _svc_for_one_server(relay)
+
+    result = await svc.send_event_via_gfs(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.GFS_RELAY_PROBE,
+        payload={"nonce": "n" * 22},
+        gfs_url="https://chosen.example",
+    )
+
+    assert result.ok is True and result.via == "gfs_relay"
+    [(url, env)] = relay.calls
+    assert url == "https://chosen.example"
+    assert env["event_type"] == "gfs_relay_probe"
+    assert env["to_instance"] == inst.id
+    assert env["space_id"] is None
+    assert "signatures" in env
+    plain = svc._decrypt_payload(env["encrypted_payload"], session_key)
+    assert json.loads(plain) == {"nonce": "n" * 22}
+    # Acceptance is not delivery; nothing queued, reachability untouched.
+    # And a probe's 202 is not traffic: every GFS answers 202 to every
+    # probe, so recording it would paint a healthy direct peer "relay only"
+    # after each discovery round.
+    assert svc.last_relay_accepted_at(inst.id) is None
+    assert fed_repo.reachable_calls == [] and fed_repo.unreachable_calls == []
+    assert outbox.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_send_event_via_gfs_failure_is_best_effort():
+    relay = _OneServerRelay((False, None))
+    svc, inst, _key, fed_repo, outbox = await _svc_for_one_server(relay)
+
+    result = await svc.send_event_via_gfs(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.GFS_RELAY_PROBE_ACK,
+        payload={"nonce": "n" * 22},
+        gfs_url="https://chosen.example",
+    )
+
+    assert result.ok is False and result.error == "gfs_relay_failed"
+    assert outbox.enqueued == []
+    assert fed_repo.unreachable_calls == []
+    assert svc.last_relay_accepted_at(inst.id) is None
+
+
+@pytest.mark.asyncio
+async def test_send_event_via_gfs_unknown_peer_no_transport_and_bad_key():
+    svc, _ = _make_service()
+    result = await svc.send_event_via_gfs(
+        to_instance_id="nobody",
+        event_type=FederationEventType.GFS_RELAY_PROBE,
+        payload={"nonce": "n" * 22},
+        gfs_url="https://x",
+    )
+    assert result.error == "unknown_instance"
+
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    inst, _ = _make_remote_instance(km)
+    await fed_repo.save_instance(inst)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    result = await svc.send_event_via_gfs(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.GFS_RELAY_PROBE,
+        payload={"nonce": "n" * 22},
+        gfs_url="https://x",
+    )
+    assert result.error == "gfs_relay_unavailable"
+
+    relay = _OneServerRelay()
+    svc, inst, _k, fed_repo, _o = await _svc_for_one_server(relay)
+    await fed_repo.save_instance(
+        dataclasses.replace(inst, key_self_to_remote="not-a-ciphertext")
+    )
+    result = await svc.send_event_via_gfs(
+        to_instance_id=inst.id,
+        event_type=FederationEventType.GFS_RELAY_PROBE,
+        payload={"nonce": "n" * 22},
+        gfs_url="https://x",
+    )
+    assert result.error == "key_decrypt_error"
+    assert relay.calls == []

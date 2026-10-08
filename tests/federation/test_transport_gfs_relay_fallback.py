@@ -460,3 +460,72 @@ async def test_a_404_from_the_inbox_is_not_relayed():
 
     assert result.via == "https" and result.status_code == 404
     assert relay.calls == []
+
+
+# ─── send_via_gfs_url — one named server, for route discovery (v_53) ─────
+
+
+async def test_send_via_gfs_url_targets_exactly_that_server_with_no_round_robin():
+    relay = _Relay()
+    https = _Https()
+    t = _transport(https=https, relay=relay, routes=(ROUTE_A, ROUTE_B))
+
+    for _ in range(2):
+        result = await t.send_via_gfs_url(
+            instance=_paired(),
+            envelope_dict={"msg_id": "m"},
+            gfs_url=ROUTE_C,
+        )
+        assert result.ok and result.via == "gfs_relay"
+
+    assert [url for url, _ in relay.calls] == [ROUTE_C, ROUTE_C]
+    assert https.calls == []
+
+
+async def test_send_via_gfs_url_reports_a_relay_refusal():
+    relay = _Relay({ROUTE_A: (False, RELAY_STATUS_THROTTLED)})
+    t = _transport(relay=relay)
+
+    result = await t.send_via_gfs_url(
+        instance=_paired(), envelope_dict={}, gfs_url=ROUTE_A
+    )
+
+    assert result.ok is False
+    assert result.status_code == RELAY_STATUS_THROTTLED
+    assert result.error == DELIVERY_ERROR_RELAY_THROTTLED
+
+
+@pytest.mark.parametrize("which", ["not-opted-in", "link-joined"])
+async def test_send_via_gfs_url_refuses_a_peer_without_our_opt_in(which):
+    relay = _Relay()
+    t = _transport(relay=relay)
+    peer = (
+        _paired(gfs_relay=False)
+        if which == "not-opted-in"
+        else dataclasses.replace(_paired(), source=InstanceSource.SPACE_SESSION)
+    )
+
+    result = await t.send_via_gfs_url(instance=peer, envelope_dict={}, gfs_url=ROUTE_A)
+
+    assert result.ok is False
+    assert result.error == TRANSPORT_ERROR_GFS_RELAY_NOT_ENABLED
+    assert relay.calls == []
+
+
+async def test_send_via_gfs_url_needs_a_relay_tier_and_a_url():
+    t = FederationTransport(
+        own_instance_id="self-iid",
+        https_inbox=_Https(),
+        signaling_send=_Signaler(),
+    )
+    result = await t.send_via_gfs_url(
+        instance=_paired(), envelope_dict={}, gfs_url=ROUTE_A
+    )
+    assert result.ok is False and result.error == "gfs_relay_unavailable"
+
+    relay = _Relay()
+    result = await _transport(relay=relay).send_via_gfs_url(
+        instance=_paired(), envelope_dict={}, gfs_url=""
+    )
+    assert result.ok is False and result.error == "gfs_relay_unavailable"
+    assert relay.calls == []

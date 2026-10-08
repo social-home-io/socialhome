@@ -259,7 +259,17 @@ selects it in two cases:
   redelivery reaches the same selection point
   (`FederationTransport.send_via_gfs_relay`). Without the opt-in or a
   route, a paired peer is never relayed, and the §24.11 pipeline refuses a
-  relayed envelope from it (`make_check_relay_opt_in`). Because the connection server is a third party
+  relayed envelope from it (`make_check_relay_opt_in`). Routes are
+  *discovered*, never configured (v_53,
+  `services/gfs_route_discovery_service.py`): we probe the peer through
+  each of our own connection servers, it acks through the one each probe
+  arrived on and probes back, and each side records a server only when
+  an ack to ITS OWN probe came back through it (a received probe proves
+  nothing — a malicious server can re-post it elsewhere). No server is
+  ever named on the wire.
+  `infrastructure/gfs_route_discovery_scheduler.py` re-probes every
+  24 h ± 1 h and on a GFS reconnect (coalesced, at most one triggered
+  round per 10 min), and drops routes not refreshed for 72 h; see [`protocol/gfs-relay.md`](./protocol/gfs-relay.md). Because the connection server is a third party
 — not a household — the whole §24.11 envelope (its routing fields are
 plaintext by construction) is sealed to the peer's static X25519 key-wrap
 key before the relay sees it, so the *wire* carries only `(to_instance,
@@ -661,7 +671,8 @@ Every background loop in `socialhome/infrastructure/` follows the
 same lifecycle: `_stop: asyncio.Event` set in `stop()`, drained in
 `start()`, body is `while not self._stop.is_set()`. Reference
 template: `replay_cache_scheduler.py`. Schedulers cover replay-cache
-eviction, outbox processing, calendar reminders, page-lock expiry,
+eviction, shared-GFS relay route discovery and expiry
+(`gfs_route_discovery_scheduler.py`), outbox processing, calendar reminders, page-lock expiry,
 post-draft GC, pairing-relay flush, post-rotation tasks, space
 retention, task deadlines, recurring-task spawning, password-reset-token
 GC, auth-audit-log pruning (`auth_audit_cleanup_scheduler.py` drops

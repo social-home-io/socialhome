@@ -2280,6 +2280,7 @@
   "capability.anonymous_gfs_posting": "Anoniem posten via de GFS",
   "capability.private_gfs_spaces": "Privéruimtes via de GFS",
   "capability.forwarded_invite_links": "Uitnodigingslinks van lid-huishoudens",
+  "capability.shared_gfs_relay": "Een gekoppeld huishouden bereiken via een gedeelde GFS",
   "settings.tab.security": "Beveiliging",
   "settings.could_not_save": "Kon niet opslaan: {error}",
   "settings.profile.save_failed": "Opslaan mislukt: {error}",

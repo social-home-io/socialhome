@@ -1532,6 +1532,69 @@ class FederationService:
             error=DELIVERY_ERROR_QUEUED,
         )
 
+    async def send_event_via_gfs(
+        self,
+        *,
+        to_instance_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+        gfs_url: str,
+    ) -> DeliveryResult:
+        """Seal one event exactly like :meth:`send_event` and hand it to ONE
+        named connection server's relay (``gfs_url``, the base URL of one of
+        our own ``gfs_connections``).
+
+        The narrow path shared-GFS route discovery needs: a probe must cross
+        exactly the server it tests. Best-effort by design — no outbox
+        enqueue (a probe re-sent hours later through another path would
+        prove nothing), no reachability change either way (a relay ``202``
+        is acceptance, not delivery; a refusal says nothing about the peer),
+        and no :meth:`note_relay_accepted` (a uniform ``202`` per probe
+        would flip a direct peer to "relay only").
+        """
+        instance = await self._federation_repo.get_instance(to_instance_id)
+        if instance is None:
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                error="unknown_instance",
+            )
+        if self._transport is None:
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                error="gfs_relay_unavailable",
+                via="gfs_relay",
+            )
+        envelope_dict = self._seal_envelope(
+            instance,
+            event_type=event_type,
+            payload=payload,
+            space_id=None,
+        )
+        if envelope_dict is None:
+            return DeliveryResult(
+                instance_id=to_instance_id,
+                ok=False,
+                error="key_decrypt_error",
+            )
+        result = await self._transport.send_via_gfs_url(
+            instance=instance,
+            envelope_dict=envelope_dict,
+            gfs_url=gfs_url,
+        )
+        # No ``note_relay_accepted``: every GFS answers 202 to every probe
+        # (uniform, by design), so recording it would mark a healthy direct
+        # peer "relay only" after each discovery round. Probes are not
+        # traffic the operator needs to see.
+        return DeliveryResult(
+            instance_id=to_instance_id,
+            ok=result.ok,
+            status_code=result.status_code,
+            error=result.error,
+            via="gfs_relay",
+        )
+
     def _seal_envelope(
         self,
         instance: RemoteInstance,

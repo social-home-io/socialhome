@@ -114,6 +114,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
 
 - **Handshake**
   - [Pairing](./pairing.md) — one-time QR-based identity + session key exchange.
+  - [GFS relay for paired households](./gfs-relay.md) — last-resort relay through a connection server two paired households both use, and the probe / ack that finds those shared servers without either side naming one (`GFS_RELAY_PROBE` / `GFS_RELAY_PROBE_ACK`, capability v_53).
   - [Capabilities](./capabilities.md) — monotonic `proto_version` exchange so senders can gate optional fields on what the receiving peer's build actually understands.
   - [Independent user identity](./user-identity.md) — per-user Ed25519 key + dual-signed binding carried on `USERS_SYNC` / `USER_UPDATED` (Phase 1, capability v_25); behaviour-neutral, legacy `user_id` stays canonical.
   - [Move-out](./move-out.md) — signed link redirecting `old_id@old_home` → `new_id@new_home` for a person who left a household (`USER_MOVED` push + `USER_IDENTITY_RESOLVE` pull backstop, capability v_27); `user_id` stays household-scoped, dual consent to accept.

@@ -2307,6 +2307,7 @@
   "capability.anonymous_gfs_posting": "Publicar de forma anónima a través del GFS",
   "capability.private_gfs_spaces": "Espacios privados a través del GFS",
   "capability.forwarded_invite_links": "Enlaces de invitación de hogares miembros",
+  "capability.shared_gfs_relay": "Llegar a un hogar emparejado a través de un GFS compartido",
   "settings.tab.security": "Seguridad",
   "settings.could_not_save": "No se pudo guardar: {error}",
   "settings.profile.save_failed": "Error al guardar: {error}",
