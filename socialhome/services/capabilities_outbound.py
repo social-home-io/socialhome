@@ -25,9 +25,9 @@ outbound fields on the version we actually run. Three trigger points:
 A failed send to a single peer lands in the outbox retry queue; we
 never raise.
 
-**Key-wrap key for opted-in peers (v_54).** To a directly paired peer we
-opted into the GFS relay with (``remote_instances.gfs_relay``), the
-payload also carries our static key-wrap key — ``keywrap_pk`` /
+**Relay opt-in and key-wrap key (v_54).** To a directly paired peer the
+payload carries ``gfs_relay`` — our opt-in (a ``false`` makes the peer drop
+its relay routes to us). Opted in, it also carries our static key-wrap key — ``keywrap_pk`` /
 ``keywrap_sig`` / ``keywrap_suite``, the very material ``/gfs/info`` and a
 GFS-reach pairing code carry, never a fresh key — so a pair made without
 a GFS reach can switch the fallback on later. It rides the encrypted
@@ -182,7 +182,7 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         name = (local or {}).get("display_name")
         if isinstance(name, str) and name.strip():
             payload["display_name"] = name.strip()
-        payload.update(await self._keywrap_fields_for(instance_id))
+        payload.update(await self._relay_fields_for(instance_id))
         await self._federation.send_event(
             to_instance_id=instance_id,
             event_type=FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
@@ -195,21 +195,30 @@ class CapabilitiesOutbound(ConfirmedPeerBroadcaster):
         )
         return True
 
-    async def _keywrap_fields_for(self, instance_id: str) -> dict[str, str]:
-        """Our key-wrap fields for *instance_id*, or ``{}``.
+    async def _relay_fields_for(self, instance_id: str) -> dict[str, object]:
+        """Our GFS-relay fields for *instance_id*, or ``{}`` (v_54).
 
-        Only for a directly paired peer we opted into the GFS relay with:
-        it needs the key to seal a relayed envelope (or a probe ack) to us.
-        A link-joined household already has it from the invite bootstrap.
+        Directly paired peers only (a link-joined household got our key
+        from the invite bootstrap and rides the relay by construction):
+
+        * opted in — ``gfs_relay: true`` plus our key-wrap key, which the
+          peer needs to seal a relayed envelope (or a probe ack) to us;
+        * not opted in — ``gfs_relay: false``, so a peer that still holds
+          routes to us drops them: our inbound gate refuses its relayed
+          envelopes, while the relay answers 202 to each one, so they would
+          count as delivered and never be queued.
         """
         if not self._keywrap_public_key or not self._keywrap_sig:
             return {}
         peer = await self._federation_repo.get_instance(instance_id)
-        if peer is None or not peer.gfs_relay:
+        if peer is None or peer.source is not InstanceSource.MANUAL:
             return {}
-        if peer.source is not InstanceSource.MANUAL:
-            return {}
-        return keywrap_wire_fields(self._keywrap_public_key, self._keywrap_sig)
+        if not peer.gfs_relay:
+            return {"gfs_relay": False}
+        return {
+            "gfs_relay": True,
+            **keywrap_wire_fields(self._keywrap_public_key, self._keywrap_sig),
+        }
 
     async def announce_to_mesh_host(self, host_instance_id: str) -> bool:
         """Tell a space host we reach only over the mesh our version.

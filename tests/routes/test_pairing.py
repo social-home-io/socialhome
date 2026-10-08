@@ -1928,7 +1928,7 @@ class _SwitchCalls:
 def _record_switch(client) -> _SwitchCalls:
     calls = _SwitchCalls()
     svc = client.app[peer_gfs_relay_service_key]
-    svc._send_keywrap = calls.send_keywrap
+    svc._send_capabilities = calls.send_keywrap
     svc._probe_peer = calls.probe
     return calls
 
@@ -2018,8 +2018,8 @@ async def test_patch_gfs_relay_off_drops_routes_and_opt_in(client):
     assert (body["gfs_relay"], body["gfs_routes"]) == (False, 0)
     assert (await repo.get_instance("peer-gr-2")).gfs_relay is False
     assert await repo.list_gfs_routes("peer-gr-2") == []
-    # Off sends nothing and probes nothing.
-    assert calls.keywrap_to == [] and calls.probed == []
+    # Off tells the peer (``gfs_relay: false``) and probes nothing.
+    assert calls.keywrap_to == ["peer-gr-2"] and calls.probed == []
 
 
 async def test_patch_gfs_relay_requires_admin(client):
@@ -2100,3 +2100,81 @@ async def test_get_connections_reports_gfs_fallback_availability(client):
     for row in rows.values():
         assert row["gfs_relay"] is False
         assert row["gfs_routes"] == 0
+
+
+async def _patch_both(client, iid: str, body: dict):
+    return await client.patch(
+        f"/api/pairing/connections/{iid}",
+        json=body,
+        headers=_auth(client._tok),
+    )
+
+
+async def test_patch_both_fields_a_bad_share_home_applies_neither(client):
+    await _seed_peer(client, "peer-both-1", proto_version=54)
+    calls = _record_switch(client)
+
+    r = await _patch_both(
+        client, "peer-both-1", {"share_home": "no", "gfs_relay": True}
+    )
+
+    assert r.status == 422
+    row = await client.app[federation_repo_key].get_instance("peer-both-1")
+    assert row.gfs_relay is False
+    assert calls.keywrap_to == [] and calls.probed == []
+
+
+async def test_patch_both_fields_a_bad_gfs_relay_applies_neither(client):
+    await _seed_peer(client, "peer-both-2", proto_version=54)
+    stub = _CapturingShareHomeSvc()
+    client.app[peer_home_sharing_service_key] = stub
+
+    r = await _patch_both(
+        client, "peer-both-2", {"share_home": False, "gfs_relay": "yes"}
+    )
+
+    assert r.status == 422
+    assert stub.calls == []
+
+
+async def test_patch_both_fields_a_refused_switch_applies_neither(client):
+    """409 for a link-joined household must not leave home sharing flipped."""
+    await _seed_peer(
+        client,
+        "peer-both-3",
+        source=InstanceSource.SPACE_SESSION,
+        remote_inbox_url="",
+    )
+    stub = _CapturingShareHomeSvc()
+    client.app[peer_home_sharing_service_key] = stub
+
+    r = await _patch_both(
+        client, "peer-both-3", {"share_home": False, "gfs_relay": True}
+    )
+
+    assert r.status == 409
+    assert stub.calls == []
+
+
+async def test_managing_connections_has_its_own_rate_limit_bucket(client):
+    """Opening Manage spends two ``/api/pairing/connections/*`` reads and a
+    switch one more; in the 5/min handshake bucket that 429'd after two
+    opens and a toggle. Connection management gets 30/min of its own."""
+    await _seed_peer(client, "peer-rl", proto_version=54)
+    _record_switch(client)
+    for _ in range(4):
+        r = await client.get(
+            "/api/pairing/connections/peer-rl/transport-detail",
+            headers=_auth(client._tok),
+        )
+        assert r.status == 200
+        r = await client.get(
+            "/api/pairing/connections/peer-rl/visible-users",
+            headers=_auth(client._tok),
+        )
+        assert r.status == 200
+    r = await _patch_relay(client, "peer-rl", True)
+    assert r.status == 200
+    # …while the handshake endpoints keep the tight bucket of their own.
+    statuses = [(await _initiate(client)).status for _ in range(6)]
+    assert statuses[-1] == 429

@@ -583,38 +583,35 @@ class PairingConnectionDetailView(BaseView):
         instance_id = self.match("instance_id")
         body = await self.body()
 
-        if "share_home" in body:
-            value = body["share_home"]
-            if not isinstance(value, bool):
+        # Validate every field before applying any, so a combined body never
+        # leaves one change applied and answers an error for the other.
+        for field in ("share_home", "gfs_relay"):
+            if field in body and not isinstance(body[field], bool):
                 return error_response(
                     422,
                     "UNPROCESSABLE",
-                    "share_home must be a boolean.",
+                    f"{field} must be a boolean.",
                 )
+
+        if "gfs_relay" in body:
+            # First: it is the one that can still refuse (unknown peer →
+            # 404, not a direct pair → 409 — coded errors mapped by
+            # ``BaseView``) — before home sharing has changed anything.
+            await self.svc(peer_gfs_relay_service_key).set_gfs_relay(
+                instance_id,
+                enabled=body["gfs_relay"],
+                set_by=user.user_id,
+            )
+
+        if "share_home" in body:
             try:
                 await self.svc(peer_home_sharing_service_key).set_share_home(
                     instance_id,
-                    value=value,
+                    value=body["share_home"],
                     set_by=user.user_id,
                 )
             except UnknownInstanceError:
                 return error_response(404, "NOT_FOUND", "Peer not found.")
-
-        if "gfs_relay" in body:
-            relay = body["gfs_relay"]
-            if not isinstance(relay, bool):
-                return error_response(
-                    422,
-                    "UNPROCESSABLE",
-                    "gfs_relay must be a boolean.",
-                )
-            # Unknown peer → 404, not a direct pair → 409: coded errors,
-            # mapped by ``BaseView``.
-            await self.svc(peer_gfs_relay_service_key).set_gfs_relay(
-                instance_id,
-                enabled=relay,
-                set_by=user.user_id,
-            )
 
         # Re-read so the response reflects the persisted state.
         inst = await self.svc(federation_repo_key).get_instance(instance_id)

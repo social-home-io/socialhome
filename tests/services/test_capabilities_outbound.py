@@ -310,7 +310,35 @@ async def test_an_opted_in_paired_peer_gets_our_keywrap_key():
     assert payload["keywrap_pk"] == _OUR_KEYWRAP.hex()
     assert payload["keywrap_sig"] == "sig-b64"
     assert payload["keywrap_suite"] == "x25519"
+    assert payload["gfs_relay"] is True
     assert payload["proto_version"] == OUR_PROTO_VERSION
+
+
+@pytest.mark.asyncio
+async def test_a_paired_peer_we_did_not_opt_in_with_is_told_so():
+    """``gfs_relay: false`` makes the peer drop its routes to us — our
+    inbound gate refuses its relayed envelopes, and the relay would answer
+    202 to every one of them (silent loss)."""
+    out, fed = _keyed_outbound(_peer("inst-a"))
+
+    await out.resend_to("inst-a")
+
+    payload = fed.send_event.await_args.kwargs["payload"]
+    assert payload["gfs_relay"] is False
+    assert "keywrap_pk" not in payload
+
+
+@pytest.mark.asyncio
+async def test_a_link_joined_household_gets_no_relay_marker():
+    out, fed = _keyed_outbound(
+        dataclasses.replace(
+            _peer("inst-a"), gfs_relay=True, source=InstanceSource.SPACE_SESSION
+        )
+    )
+
+    await out.resend_to("inst-a")
+
+    assert "gfs_relay" not in fed.send_event.await_args.kwargs["payload"]
 
 
 @pytest.mark.asyncio

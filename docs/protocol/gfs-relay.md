@@ -147,9 +147,13 @@ after each round.
   round per 10 min. A scheduler stop lands between peers, never mid-POST.
 - **On demand:** `probe_peer(instance_id)` probes one peer at once (for
   a fresh pairing or a newly enabled opt-in; same per-peer cap). The
-  admin's own switch (v_54) probes without opening that window: its probe
+  admin switching the fallback from off to on (v_54) probes past that
+  window — even right after another probe — and opens none: its probe
   usually goes unanswered (the other side has not switched on yet), and
-  our probe-back when the other side does must not be swallowed by it.
+  our probe-back when the other side does must not be swallowed by it. A
+  repeated "on" is an ordinary, throttled probe. Either side switching
+  off clears the probe and answer windows for that peer, so the next
+  switch-on starts fresh.
 - **Expiry:** a route whose `last_ack_at` is older than 72 h (three
   intervals) is deleted, so one missed round never costs a working route
   but a peer that left a server stops being relayed there. Until then —
@@ -157,6 +161,8 @@ after each round.
   send through that server is answered `202` and lost (the relay cannot
   say the recipient is gone without becoming a presence oracle). Removing
   one of OUR connection servers deletes its routes at once (FK cascade).
+  A peer switching its fallback **off** does not wait for expiry: it tells
+  us (`gfs_relay: false`, below) and we drop our routes to it at once.
 - **Caps:** at most 1024 outstanding probes (oldest forgotten first, with
   a WARNING — its ack will be ignored), a
   15 min ack window, and at most one ack per peer per server every 30 s —
@@ -208,9 +214,10 @@ a fallback" switch). Since v_54
   also carries `keywrap_pk` / `keywrap_sig` / `keywrap_suite` — our
   static key-wrap key (the one `/gfs/info` and a GFS-reach code carry),
   its identity binding signature and the `"x25519"` suite tag — inside
-  the AES-256-GCM payload. Switching on sends it to that one peer at
-  once; the startup fan-out repeats it while the switch stays on. A peer
-  we did not opt in with never gets it.
+  the AES-256-GCM payload, next to `gfs_relay: true`. Switching on sends
+  it to that one peer at once; the startup fan-out repeats it while the
+  switch stays on. A peer we did not opt in with never gets the key — its
+  announcement says `gfs_relay: false` instead.
 - **The receiver checks it against the pinned identity.** The suite must
   be known (unknown or missing → refused, never defaulted) and the key
   self-signed by the identity key pinned for that household at pairing
@@ -223,11 +230,23 @@ a fallback" switch). Since v_54
   did not opt in with — so with only one side on, no relay body is ever
   posted. When the second side switches on, its key reaches the first
   side, which probes at once (a newly learned key triggers `probe_peer`);
-  the second side probes too. Discovery then runs exactly as above.
-- **Off** clears our opt-in and deletes that peer's routes at once: the
-  transport stops relaying to it and the inbound gate refuses its relayed
-  envelopes. The keys stay (public, bound to the identity key, needed if
-  the switch comes back on); the peer's routes to us expire after 72 h.
+  the second side probes too. Discovery then runs exactly as above. A
+  probe that overtakes the announcement carrying its sender's key (the
+  probe rides the GFS, the key the direct link) cannot be acked — we have
+  nothing to seal to — so it is ignored without opening the 30 s answer
+  window; the sender's next probe, triggered by ours, is answered.
+- **Off** clears our opt-in, deletes that peer's routes and our probes in
+  flight to it (a late ack re-creates nothing — the ack handler re-reads
+  the opt-in), and re-sends our capabilities with `gfs_relay: false`. The
+  receiver (directly paired peers only; an explicit `false`, never a
+  missing field) drops **its** routes to us and its probe state for us,
+  without touching its own opt-in. Without that it would keep relaying to
+  us for up to 72 h: the relay answers `202`, so those envelopes count as
+  delivered and are never queued, while our gate refuses every one. Now
+  its next send takes RTC / the HTTPS inbox and, failing those, its
+  outbox. The keys stay (public, bound to the identity key, needed if the
+  switch comes back on); switching on again runs the key / probe flow and
+  restores the routes on both sides.
 - **Older peers.** A v_53 peer never sends its key, so the switch cannot
   complete with it unless we already hold its key from a GFS-reach
   pairing; the connections API says so (`gfs_relay_available: false`)
@@ -259,6 +278,10 @@ sequenceDiagram
     Y->>A: WS frame {sealed}
     A->>A: route (B, conn A·Y)
     Note over A,B: B probes too (its own switch, and the probe-back) → route (A, conn B·Y)
+    Note over A,B: later — A's admin switches off
+    A->>A: gfs_relay = 0, delete routes to B, forget probes to B
+    A->>B: INSTANCE_CAPABILITIES_UPDATED {…, gfs_relay: false} — encrypted
+    B->>B: drop routes to A (B's own gfs_relay stays 1)<br/>next send to A: RTC / HTTPS / outbox, never the relay
 ```
 
 ## Privacy — who learns what

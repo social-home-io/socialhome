@@ -1502,6 +1502,11 @@ class PeerCapabilitiesAdvertised(DomainEvent):
 
     instance_id: str
     keywrap_learned: bool = False
+    #: The household's own GFS fallback switch as it announced it (v_54):
+    #: ``False`` — it switched off, so our relay routes to it lead into a
+    #: closed gate and are dropped; ``None`` — it did not say (older build,
+    #: or not a directly paired household).
+    peer_gfs_relay: bool | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

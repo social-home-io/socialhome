@@ -913,8 +913,9 @@ def _build_peer_gfs_relay(
     discovery probes it — and again as soon as the peer's key arrives."""
     service = PeerGfsRelayService(
         federation_repo=federation_repo,
-        send_keywrap=capabilities_outbound.resend_to,
+        send_capabilities=capabilities_outbound.resend_to,
         probe_peer=route_discovery.probe_peer,
+        forget_probes=route_discovery.forget_peer,
         bus=bus,
     )
     service.wire()
@@ -2052,6 +2053,12 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             "/api/link-preview": (30, 60),
             "/api/presence/location": (10, 60),  # GPS pings
             "/api/calls": (10, 60),  # initiate / signal
+            # Connection management — per-peer reads (visible users,
+            # transport detail), admin toggles (home sharing, GFS fallback)
+            # and unpair. Opening one Manage panel spends two requests, so
+            # the 5/min handshake bucket below 429'd after two opens and a
+            # toggle. The longest matching prefix wins.
+            "/api/pairing/connections": (30, 60),
             "/api/pairing": (5, 60),  # pairing handshakes
         },
     )

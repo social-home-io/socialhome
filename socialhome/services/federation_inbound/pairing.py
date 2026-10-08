@@ -322,6 +322,7 @@ class PairingInboundHandlers(ProtectionGateMixin):
             PeerCapabilitiesAdvertised(
                 instance_id=event.from_instance,
                 keywrap_learned=keywrap_learned,
+                peer_gfs_relay=self._peer_relay_marker(instance, event.payload),
             )
         )
         # A rename re-broadcast carries the SAME proto_version but a NEW
@@ -428,6 +429,21 @@ class PairingInboundHandlers(ProtectionGateMixin):
             instance.id,
         )
         return True
+
+    @staticmethod
+    def _peer_relay_marker(instance: "RemoteInstance", payload: dict) -> bool | None:
+        """The peer's own GFS fallback switch as it announced it (v_54).
+
+        ``False`` means its §24.11 relay opt-in gate now refuses our relayed
+        envelopes — :class:`~socialhome.services.peer_gfs_relay_service
+        .PeerGfsRelayService` then drops our routes to it. ``None`` when
+        the peer did not say (an older build) or is not a directly paired
+        household; only a real bool counts.
+        """
+        if instance.source is not InstanceSource.MANUAL:
+            return None
+        marker = payload.get("gfs_relay")
+        return marker if isinstance(marker, bool) else None
 
     async def _on_contact_request(self, event: "FederationEvent") -> None:
         """§23.47: pre-pairing DM handshake — a remote user wants to start

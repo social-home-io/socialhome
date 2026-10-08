@@ -109,8 +109,24 @@ class _LoopbackInbox:
         self._world = world
         self._me = me
         self.posted: list[dict] = []
+        #: The peer's inbox is unreachable (network error, no status).
+        self.down = False
+        #: Accept but deliver later (a slow link): see :meth:`release`.
+        self.hold = False
+        self._held: list[tuple] = []
+
+    async def release(self) -> None:
+        held, self._held = self._held, []
+        self.hold = False
+        for instance, envelope_dict in held:
+            await self.send(instance=instance, envelope_dict=envelope_dict)
 
     async def send(self, *, instance, envelope_dict):
+        if self.down:
+            return False, None
+        if self.hold:
+            self._held.append((instance, envelope_dict))
+            return True, 200
         peer = next(h for h in self._world.values() if h.iid == instance.id)
         me = self._world[self._me]
         self.posted.append(envelope_dict)
@@ -148,10 +164,11 @@ async def _household(tmp_path, name, net, urls, world, tasks):
     bus = EventBus()
     fed_repo = SqliteFederationRepo(db)
     gfs_repo = SqliteGfsConnectionRepo(db)
+    outbox = SqliteOutboxRepo(db)
     federation = FederationService(
         db,
         fed_repo,
-        SqliteOutboxRepo(db),
+        outbox,
         km,
         bus,
         iid,
@@ -219,14 +236,16 @@ async def _household(tmp_path, name, net, urls, world, tasks):
     )
     switch = PeerGfsRelayService(
         federation_repo=fed_repo,
-        send_keywrap=capabilities.resend_to,
+        send_capabilities=capabilities.resend_to,
         probe_peer=discovery.probe_peer,
+        forget_probes=discovery.forget_peer,
         bus=bus,
     )
     switch.wire()
     h = SimpleNamespace(
         name=name,
         db=db,
+        outbox=outbox,
         iid=iid,
         ident=ident,
         keywrap=keywrap,
@@ -391,8 +410,29 @@ async def test_switching_off_drops_the_routes_and_refuses_relayed_traffic(world)
     await a.switch.set_gfs_relay(b.iid, enabled=False)
     await world.drain()
     assert await _route_ids(a, b) == []
+    # a told b (``gfs_relay: false`` in its encrypted capabilities): b drops
+    # its routes to a at once instead of relaying into a's closed gate for
+    # up to 72 h. b's own switch stays on — that is b's admin's call.
+    assert await _route_ids(b, a) == []
+    assert (await b.fed_repo.get_instance(a.iid)).gfs_relay is True
 
-    # b still has its route and relays a probe through Y — a's §24.11
+    # b's next send to a, with a's inbox unreachable, is queued in b's
+    # outbox for a later retry — not handed to a relay that would answer
+    # 202 while a refuses it (counted delivered, silently lost).
+    b.inbox.down = True
+    before_y = len(world.net[URL_Y].bodies)
+    result = await b.federation.send_event(
+        to_instance_id=a.iid,
+        event_type=FederationEventType.PRESENCE_UPDATED,
+        payload={"username": "bea", "state": "home"},
+    )
+    await world.drain()
+    assert result.via != "gfs_relay"
+    assert len(world.net[URL_Y].bodies) == before_y
+    assert await b.outbox.count_pending_for(a.iid) == 1
+    b.inbox.down = False
+
+    # b still relays a probe through Y — a's §24.11
     # relay opt-in gate drops it before any handler runs: no ack, no new
     # route on a's side.
     b.discovery._last_probe_at.clear()
@@ -406,6 +446,46 @@ async def test_switching_off_drops_the_routes_and_refuses_relayed_traffic(world)
     ]
     assert to_b == []
     assert await _route_ids(a, b) == []
+
+
+async def test_a_switch_on_probe_that_overtakes_the_key_still_ends_in_routes(world):
+    """b switches on; its capabilities (with its key) travel a slow direct
+    link while its probe races ahead through the GFS. a cannot seal an ack
+    yet — and must not let that unanswerable probe throttle b's next one."""
+    a, b = world.a, world.b
+    await _url_pair(a, b)
+    await a.switch.set_gfs_relay(b.iid, enabled=True)
+    await world.drain()
+
+    b.inbox.hold = True
+    await b.switch.set_gfs_relay(a.iid, enabled=True)
+    await world.drain()
+    assert await _route_ids(a, b) == []
+    assert await _route_ids(b, a) == []
+
+    await b.inbox.release()
+    await world.drain()
+
+    assert await _route_ids(a, b) == [a.conn_ids[URL_Y]]
+    assert await _route_ids(b, a) == [b.conn_ids[URL_Y]]
+
+
+async def test_switching_back_on_restores_the_routes_on_both_sides(world):
+    a, b = world.a, world.b
+    await _url_pair(a, b)
+    await a.switch.set_gfs_relay(b.iid, enabled=True)
+    await world.drain()
+    await b.switch.set_gfs_relay(a.iid, enabled=True)
+    await world.drain()
+    await a.switch.set_gfs_relay(b.iid, enabled=False)
+    await world.drain()
+    assert await _route_ids(b, a) == []
+
+    await a.switch.set_gfs_relay(b.iid, enabled=True)
+    await world.drain()
+
+    assert await _route_ids(a, b) == [a.conn_ids[URL_Y]]
+    assert await _route_ids(b, a) == [b.conn_ids[URL_Y]]
 
 
 async def test_a_key_not_signed_by_the_paired_identity_is_never_stored(world):

@@ -5226,7 +5226,7 @@ def cmd_gfs_fallback_switch() -> None:
     sides must end with a route through the shared GFS. b (paired with a,
     not on any GFS) must read ``gfs_relay_available`` but no route. Finally
     both switch it off again and the routes must be gone, so the step can
-    run again (after a minute: probes are throttled per peer).
+    run again at once (switching off clears the pair's probe throttles).
 
     Prereqs: ``up`` + ``pair`` + ``relay-pair`` + ``gfs-up`` + ``gfs-pair``.
     """
@@ -5281,6 +5281,20 @@ def cmd_gfs_fallback_switch() -> None:
             raise SystemExit(
                 f"gfs-fallback-switch: b has no GFS, yet a route: {b_row!r}"
             )
+
+        # a switches off: its encrypted capabilities say ``gfs_relay:
+        # false`` and d drops ITS routes to a (no relaying into a closed
+        # gate), while d's own switch stays on.
+        _switch_gfs_fallback("a", d_iid, False)
+        print("  a: GFS fallback off for d")
+        row_d = _wait_row(
+            "d", a_iid, lambda r: not r.get("gfs_routes"), "its routes to a dropped"
+        )
+        if row_d.get("gfs_relay") is not True:
+            raise SystemExit(
+                f"gfs-fallback-switch: a's off must not flip d's switch: {row_d!r}"
+            )
+        print("  d dropped its route to a; d's own switch stays on ✓")
     finally:
         for label, peer in (("a", d_iid), ("d", a_iid)):
             try:

@@ -936,3 +936,40 @@ async def test_capabilities_without_keywrap_fields_change_no_key(bus, repo, hand
 
     assert repo.instances[row.id].remote_keywrap_pk is None
     assert [e.keywrap_learned for e in seen] == [False]
+
+
+# ─── ``gfs_relay`` — the peer's own GFS fallback switch (v_54) ────────────
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({"gfs_relay": False}, False),
+        ({"gfs_relay": True}, True),
+        ({}, None),
+        ({"gfs_relay": "false"}, None),
+        ({"gfs_relay": 0}, None),
+    ],
+)
+async def test_the_peers_switch_is_announced_only_as_a_real_bool(
+    bus, repo, handlers, extra, expected
+):
+    row, _keywrap, _fields = _bound_peer()
+    repo.instances[row.id] = row
+    seen: list[PeerCapabilitiesAdvertised] = []
+    bus.subscribe(PeerCapabilitiesAdvertised, seen.append)
+
+    await _announce(handlers, row.id, extra)
+
+    assert [e.peer_gfs_relay for e in seen] == [expected]
+
+
+async def test_a_link_joined_household_reports_no_switch(bus, repo, handlers):
+    row, _keywrap, _fields = _bound_peer(source=InstanceSource.SPACE_SESSION)
+    repo.instances[row.id] = row
+    seen: list[PeerCapabilitiesAdvertised] = []
+    bus.subscribe(PeerCapabilitiesAdvertised, seen.append)
+
+    await _announce(handlers, row.id, {"gfs_relay": False})
+
+    assert [e.peer_gfs_relay for e in seen] == [None]

@@ -15,10 +15,14 @@ the admin's switch for one such pair:
   capabilities announcement brings us its key
   (:class:`~socialhome.domain.events.PeerCapabilitiesAdvertised`
   ``keywrap_learned``) and we probe again at once.
-* **Off** — clear our opt-in and forget this peer's relay routes. The
-  transport stops relaying to it at once and the inbound gate refuses any
-  relayed envelope from it. The keys stay: they are public, bound to the
-  identity key, and needed again if the switch comes back on.
+* **Off** — clear our opt-in, forget this peer's relay routes and our
+  probes in flight, and tell the peer: our capabilities now carry
+  ``gfs_relay: false``, so it drops ITS routes to us. Without that, it
+  would keep relaying to us for up to 72 h; the relay answers 202, so the
+  envelopes count as delivered and are never queued, while our inbound
+  gate refuses every one of them. The transport stops relaying to the
+  peer at once. The keys stay: they are public, bound to the identity key,
+  and needed again if the switch comes back on.
 
 Only for a confirmed, directly paired household (``source = manual``): a
 household met through an invite link already rides the GFS that introduced
@@ -51,24 +55,35 @@ log = logging.getLogger(__name__)
 class PeerGfsRelayService:
     """Turn the GFS relay fallback on or off for one paired household."""
 
-    __slots__ = ("_federation_repo", "_send_keywrap", "_probe_peer", "_bus")
+    __slots__ = (
+        "_federation_repo",
+        "_send_capabilities",
+        "_probe_peer",
+        "_forget_probes",
+        "_bus",
+    )
 
     def __init__(
         self,
         *,
         federation_repo: AbstractFederationRepo,
-        send_keywrap: Callable[[str], Awaitable[bool]],
+        send_capabilities: Callable[[str], Awaitable[bool]],
         probe_peer: Callable[..., Awaitable[int]],
+        forget_probes: Callable[[str], None],
         bus: "EventBus | None" = None,
     ) -> None:
         self._federation_repo = federation_repo
-        #: Re-sends our capabilities (with our key-wrap key, now that the
-        #: opt-in is on) to one peer — ``CapabilitiesOutbound.resend_to``.
-        self._send_keywrap = send_keywrap
+        #: Re-sends our capabilities to one peer —
+        #: ``CapabilitiesOutbound.resend_to``. They carry our key-wrap key
+        #: and ``gfs_relay: true`` while the opt-in is on, ``gfs_relay:
+        #: false`` once it is off.
+        self._send_capabilities = send_capabilities
         #: ``GfsRouteDiscoveryService.probe_peer`` — eligibility-gated and
-        #: throttled per peer, so calling it more than needed is harmless.
-        #: The admin's own switch passes ``hold_throttle=False`` (see there).
+        #: throttled per peer. An off → on switch passes ``throttled=False``.
         self._probe_peer = probe_peer
+        #: ``GfsRouteDiscoveryService.forget_peer`` — drops our pending
+        #: probe nonces (a late ack must not re-create a route).
+        self._forget_probes = forget_probes
         self._bus = bus
 
     def wire(self) -> None:
@@ -88,7 +103,9 @@ class PeerGfsRelayService:
         """Switch the relay fallback for *instance_id*; return the row.
 
         Re-sending while already on is a retry, not a no-op: it repeats the
-        key hand-over and asks for a probe (throttled per peer).
+        key hand-over and asks for an ordinary, throttled probe. Only an
+        off → on transition probes past the per-peer throttle, so repeated
+        PATCHes cannot make us post a probe through every GFS each time.
 
         Raises :class:`GfsRelayPeerNotFoundError` for an unknown peer and
         :class:`GfsRelayNotAllowedError` for one that is not a confirmed,
@@ -102,6 +119,7 @@ class PeerGfsRelayService:
             or peer.source is not InstanceSource.MANUAL
         ):
             raise GfsRelayNotAllowedError()
+        was_on = peer.gfs_relay
         await self._federation_repo.set_gfs_relay(instance_id, enabled=enabled)
         log.info(
             "GFS fallback for %s turned %s by %s",
@@ -110,41 +128,57 @@ class PeerGfsRelayService:
             set_by or "<unknown>",
         )
         if enabled:
-            await self._switch_on(instance_id)
+            await self._switch_on(instance_id, transition=not was_on)
         else:
-            await self._drop_routes(instance_id)
+            await self._switch_off(instance_id)
         updated = await self._federation_repo.get_instance(instance_id)
         return updated if updated is not None else peer
 
-    async def _switch_on(self, instance_id: str) -> None:
+    async def _switch_on(self, instance_id: str, *, transition: bool) -> None:
         # Key first: the peer needs it to answer our probes (and to relay
         # to us at all). ``send_event`` falls back to the outbox, so a peer
         # that is offline right now still gets it.
-        try:
-            await self._send_keywrap(instance_id)
-        except Exception:  # noqa: BLE001 — the switch is saved; retry later
-            log.warning(
-                "GFS fallback: could not send our key-wrap key to %s",
-                instance_id,
-                exc_info=True,
-            )
-        # Usually unanswered (the other household has not switched on yet):
-        # it must not open the per-peer throttle window that would swallow
-        # our probe-back once the other side does.
-        await self._probe(instance_id, hold_throttle=False)
+        await self._tell_peer(instance_id)
+        # An off → on switch always probes, and opens no throttle window:
+        # it is usually unanswered (the other household has not switched on
+        # yet), and must not swallow our probe-back once the other side
+        # does. A repeat "on" is an ordinary, throttled probe.
+        await self._probe(instance_id, throttled=not transition)
 
-    async def _drop_routes(self, instance_id: str) -> None:
-        for route in await self._federation_repo.list_gfs_routes(instance_id):
+    async def _switch_off(self, instance_id: str) -> None:
+        await self._forget_routes(instance_id)
+        # ``gfs_relay: false`` in our capabilities: the peer drops its
+        # routes to us instead of relaying into our closed gate.
+        await self._tell_peer(instance_id)
+
+    async def _forget_routes(self, instance_id: str) -> int:
+        """Delete our routes to *instance_id* and our probes in flight to it
+        (a late ack must not re-create a route; a stale throttle window must
+        not swallow the probe-back once the fallback comes back on)."""
+        routes = await self._federation_repo.list_gfs_routes(instance_id)
+        for route in routes:
             await self._federation_repo.delete_gfs_route(
                 instance_id, route.gfs_connection_id
             )
+        self._forget_probes(instance_id)
+        return len(routes)
 
-    async def _probe(self, instance_id: str, *, hold_throttle: bool = True) -> None:
+    async def _tell_peer(self, instance_id: str) -> None:
         try:
-            if hold_throttle:
+            await self._send_capabilities(instance_id)
+        except Exception:  # noqa: BLE001 — the switch is saved; retry later
+            log.warning(
+                "GFS fallback: could not tell %s about the switch",
+                instance_id,
+                exc_info=True,
+            )
+
+    async def _probe(self, instance_id: str, *, throttled: bool = True) -> None:
+        try:
+            if throttled:
                 await self._probe_peer(instance_id)
             else:
-                await self._probe_peer(instance_id, hold_throttle=False)
+                await self._probe_peer(instance_id, throttled=False)
         except Exception:  # noqa: BLE001 — discovery retries on its own timer
             log.warning(
                 "GFS fallback: route probe for %s failed",
@@ -153,6 +187,21 @@ class PeerGfsRelayService:
             )
 
     async def _on_advertised(self, event: PeerCapabilitiesAdvertised) -> None:
+        if event.peer_gfs_relay is False:
+            # The other household switched its fallback off: its relay
+            # opt-in gate refuses our relayed envelopes, and the relay would
+            # answer 202 to each — counted delivered, never queued. Drop the
+            # routes so our traffic goes back to RTC / HTTPS / the outbox.
+            # Our own opt-in stays (our admin's switch); its next switch-on
+            # probe restores the routes.
+            dropped = await self._forget_routes(event.instance_id)
+            if dropped:
+                log.info(
+                    "GFS fallback: %s switched it off — dropped %d route(s)",
+                    event.instance_id,
+                    dropped,
+                )
+            return
         # ``probe_peer`` checks our own opt-in, so a key from a household we
         # did not switch on for is stored and nothing is sent.
         if event.keywrap_learned:

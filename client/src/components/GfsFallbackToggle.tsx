@@ -7,11 +7,12 @@
  * is never shown — the backend only counts the routes it found.
  *
  * Optimistic flip + PATCH /api/pairing/connections/{id} {gfs_relay}, revert
- * + toast on error. After switching on, the status is re-read once a few
- * seconds later: route discovery answers in the background.
+ * + toast on error. After switching on, the status is re-read a few times
+ * with back-off (route discovery answers in the background), until a shared
+ * GFS turns up or the steps run out; closing the panel cancels them.
  */
 import { useEffect, useState } from 'preact/hooks'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
 import { showToast } from './Toast'
 import { t, isOne } from '@/i18n/i18n'
 
@@ -33,11 +34,17 @@ export interface GfsFallbackToggleProps {
   initial: GfsFallbackState
 }
 
-/** How long after switching on the status is re-read once. */
-export const GFS_FALLBACK_RECHECK_MS = 4000
+/** Delays between the status re-reads after switching on (~22 s in all):
+ *  a probe and its ack cross the GFS twice, and the other household's
+ *  probe back may trail by a few seconds. */
+export const GFS_FALLBACK_RECHECK_DELAYS_MS = [3000, 7000, 12000] as const
 
 function statusText(s: GfsFallbackState, peer: string): string {
-  if (!s.gfs_relay_available) return t('gfs_fallback.unavailable', { peer })
+  if (!s.gfs_relay_available) {
+    // Still on (e.g. the other household rolled back): say so — "not
+    // available" next to a ticked box reads as a contradiction.
+    return t(s.gfs_relay ? 'gfs_fallback.unavailable_on' : 'gfs_fallback.unavailable', { peer })
+  }
   if (!s.gfs_relay) return t('gfs_fallback.off', { peer })
   if (s.gfs_routes > 0) {
     return t(isOne(s.gfs_routes) ? 'gfs_fallback.on_routes_one' : 'gfs_fallback.on_routes', {
@@ -69,16 +76,27 @@ export function GfsFallbackToggle({ instanceId, peerName, initial }: GfsFallback
   useEffect(() => {
     if (recheck === 0) return
     let cancelled = false
-    const timer = setTimeout(() => {
-      api.get('/api/connections')
-        .then((rows: unknown) => {
-          if (cancelled || !Array.isArray(rows)) return
-          const row = rows.find((r: { instance_id?: string }) => r?.instance_id === instanceId)
-          if (row) setState(prev => pick(row, prev))
-        })
-        .catch(() => { /* the line keeps its last known state */ })
-    }, GFS_FALLBACK_RECHECK_MS)
-    return () => { cancelled = true; clearTimeout(timer) }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const step = (i: number) => {
+      if (i >= GFS_FALLBACK_RECHECK_DELAYS_MS.length) return
+      timer = setTimeout(() => {
+        api.get('/api/connections')
+          .then((rows: unknown) => {
+            if (cancelled || !Array.isArray(rows)) return
+            const row = rows.find((r: { instance_id?: string }) => r?.instance_id === instanceId)
+            const next = row ? pick(row, state) : state
+            if (row) setState(prev => pick(row, prev))
+            // Done once a shared GFS turned up or the switch went off.
+            if (next.gfs_routes > 0 || !next.gfs_relay) return
+            step(i + 1)
+          })
+          .catch(() => { if (!cancelled) step(i + 1) })
+      }, GFS_FALLBACK_RECHECK_DELAYS_MS[i])
+    }
+    step(0)
+    return () => { cancelled = true; if (timer !== undefined) clearTimeout(timer) }
+    // ``state`` is read only as a fallback for a missing row.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recheck, instanceId])
 
   const toggle = async () => {
@@ -93,7 +111,13 @@ export function GfsFallbackToggle({ instanceId, peerName, initial }: GfsFallback
       if (next) setRecheck(n => n + 1)
     } catch (e: any) {
       setState(before)
-      showToast(e?.message || t('gfs_fallback.failed'), 'error')
+      // ``ApiError.message`` is already the translated line for a coded
+      // refusal (``apiErrors.ts``); anything else (offline, a bug) gets
+      // the friendly fallback, never a raw error string.
+      showToast(
+        e instanceof ApiError && e.message ? e.message : t('gfs_fallback.failed'),
+        'error',
+      )
     } finally {
       setBusy(false)
     }

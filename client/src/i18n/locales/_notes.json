@@ -430,6 +430,7 @@
   "gfs_fallback.on_routes": "{n} is 2 or more. GFS is an acronym; pluralise it the way your language does for acronyms (or not at all).",
   "gfs_fallback.searching": "Shown when the switch is on but no shared GFS was found yet. {peer} is the other household's name.",
   "gfs_fallback.unavailable": "The other household runs an older Social Home that cannot take part yet. {peer} is its name.",
+  "gfs_fallback.unavailable_on": "The GFS fallback switch is ticked, but the other household now runs a Social Home too old to take part. {peer} is its name.",
   "capability.gfs_fallback_later": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters.",
   "pairing.scan.uses_gfs": "Shown to the scanning admin. {host} is a server host name such as gfs.example.com.",
   "pairing.error.gfs_not_shared": "{host} is the GFS host name from the scanned code.",

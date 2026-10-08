@@ -265,18 +265,20 @@ async def test_probes_to_one_peer_are_rate_capped():
     assert len(fed.sent) == 4
 
 
-async def test_an_admin_switch_probe_opens_no_throttle_window():
-    """v_54: the admin switching the fallback on probes without starting
-    the per-peer window, so the probe-back the other household's first
-    probe triggers seconds later is not swallowed — but a window another
-    trigger opened still holds the admin's probe back."""
+async def test_an_admin_switch_probe_neither_waits_for_nor_opens_the_window():
+    """v_54: the admin switching the fallback on (off → on) always probes —
+    even right after another trigger's probe — and opens no per-peer
+    window, so the probe-back the other household's first probe triggers
+    seconds later is not swallowed."""
     svc, fed, _repo, _gfs, clock = _svc(_peer())
 
-    assert await svc.probe_peer(PEER, hold_throttle=False) == 2
-    assert await svc.probe_peer(PEER) == 2  # not throttled
+    assert await svc.probe_peer(PEER) == 2  # a timer / pairing probe
     clock.t += 1
-    assert await svc.probe_peer(PEER, hold_throttle=False) == 0  # window holds
-    assert len(fed.sent) == 4
+    assert await svc.probe_peer(PEER, throttled=False) == 2  # still goes out
+    clock.t += PROBE_PEER_MIN_INTERVAL_S
+    assert await svc.probe_peer(PEER, throttled=False) == 2
+    assert await svc.probe_peer(PEER) == 2  # no window was opened
+    assert len(fed.sent) == 8
 
 
 async def test_a_probe_the_relay_did_not_accept_is_forgotten():
@@ -499,6 +501,85 @@ async def test_an_ack_over_the_probed_server_confirms_the_route():
 
     assert repo.routes == {(PEER, "a-y"): "2026-10-08T12:00:00+00:00"}
     assert svc.pending_count == 1
+
+
+async def test_an_ack_that_lands_after_the_switch_went_off_records_no_route():
+    """The race: our probe is out, the admin switches the fallback off (the
+    routes are deleted), then the ack lands — it must not re-create one."""
+    svc, fed, repo, *_ = _svc(_peer())
+    nonces = await _probed(svc, fed)
+    repo.peers[PEER] = dataclasses.replace(repo.peers[PEER], gfs_relay=False)
+
+    await _deliver(
+        svc._on_probe_ack,
+        _event(FederationEventType.GFS_RELAY_PROBE_ACK, {"nonce": nonces["a-y"]}),
+        via="a-y",
+    )
+
+    assert repo.routes == {}
+
+
+async def test_forget_peer_drops_its_pending_probes_and_throttle():
+    svc, fed, repo, *_ = _svc(_peer(), _peer(OTHER))
+    nonces = await _probed(svc, fed)
+    await svc.probe_peer(OTHER)
+    assert svc.pending_count == 4
+
+    svc.forget_peer(PEER)
+
+    assert svc.pending_count == 2
+    await _deliver(
+        svc._on_probe_ack,
+        _event(FederationEventType.GFS_RELAY_PROBE_ACK, {"nonce": nonces["a-y"]}),
+        via="a-y",
+    )
+    assert repo.routes == {}
+    # Its throttle window is gone too: the next switch-on probes at once.
+    assert await svc.probe_peer(PEER) == 2
+
+
+async def test_a_probe_before_the_peers_key_arrived_does_not_open_the_answer_window():
+    """The peer's switch-on probe overtook the capabilities announcement
+    carrying its key: we cannot seal an ack, so we post nothing — and must
+    not throttle its next probe, or it holds no route to us for a day."""
+    svc, fed, repo, *_ = _svc(_peer(remote_keywrap_pk=None))
+    probe = _event(FederationEventType.GFS_RELAY_PROBE, {"nonce": "n" * 22})
+
+    await _deliver(svc._on_probe, probe, via="a-y")
+    assert fed.sent == []
+
+    repo.peers[PEER] = dataclasses.replace(
+        repo.peers[PEER], remote_keywrap_pk="dd" * 32
+    )
+    await _deliver(svc._on_probe, probe, via="a-y")
+
+    assert [s["event_type"] for s in fed.sent][:1] == [
+        FederationEventType.GFS_RELAY_PROBE_ACK
+    ]
+
+
+async def test_forget_peer_clears_its_answer_throttle():
+    """After the peer switched off and on again, its fresh probe must be
+    answered even inside the 30 s answer window of the old exchange."""
+    svc, fed, *_ = _svc(_peer(), _peer(OTHER))
+    probe = _event(FederationEventType.GFS_RELAY_PROBE, {"nonce": "n" * 22})
+    await _deliver(svc._on_probe, probe, via="a-x")
+    other = _event(
+        FederationEventType.GFS_RELAY_PROBE, {"nonce": "o" * 22}, sender=OTHER
+    )
+    await _deliver(svc._on_probe, other, via="a-x")
+    fed.sent.clear()
+
+    svc.forget_peer(PEER)
+    await _deliver(svc._on_probe, probe, via="a-x")
+    await _deliver(svc._on_probe, other, via="a-x")
+
+    acks = [
+        s
+        for s in fed.sent
+        if s["event_type"] is FederationEventType.GFS_RELAY_PROBE_ACK
+    ]
+    assert [a["to_instance_id"] for a in acks] == [PEER]
 
 
 async def test_an_ack_is_accepted_once():

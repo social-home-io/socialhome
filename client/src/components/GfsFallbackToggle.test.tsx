@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, screen, waitFor, act } from '@testing-library/preact'
 import {
   GfsFallbackToggle,
-  GFS_FALLBACK_RECHECK_MS,
+  GFS_FALLBACK_RECHECK_DELAYS_MS,
   type GfsFallbackState,
 } from './GfsFallbackToggle'
 
@@ -13,6 +13,10 @@ vi.mock('@/api', () => ({
   api: {
     patch: (...a: unknown[]) => mockPatch(...a),
     get: (...a: unknown[]) => mockGet(...a),
+  },
+  // ``message`` is what ``apiErrors`` already turned into words.
+  ApiError: class ApiError extends Error {
+    constructor(public status: number, message: string) { super(message) }
   },
 }))
 
@@ -93,10 +97,13 @@ describe('GfsFallbackToggle', () => {
     expect(screen.queryByRole('note')).toBeNull()
   })
 
-  it('not available but already on: can still be turned off', () => {
+  it('on but no longer available: says it is on yet cannot work, and can be turned off', () => {
     renderToggle({ gfs_relay: true, gfs_relay_available: false })
     expect(checkbox().disabled).toBe(false)
     expect(checkbox().checked).toBe(true)
+    expect(status()).toBe(
+      "On, but it can't work right now: The Smiths needs a newer Social Home.",
+    )
   })
 
   it('switching on PATCHes gfs_relay and shows the server answer', async () => {
@@ -114,13 +121,18 @@ describe('GfsFallbackToggle', () => {
     expect(checkbox().checked).toBe(true)
   })
 
-  it('re-reads the status once after switching on (routes form in the background)', async () => {
+  it('re-reads the status a few times with back-off after switching on', async () => {
     vi.useFakeTimers()
     mockPatch.mockResolvedValue({ ...OFF, gfs_relay: true, peer_keywrap_known: true })
-    mockGet.mockResolvedValue([
-      { instance_id: 'other', gfs_routes: 9 },
-      { instance_id: 'peer-1', gfs_relay: true, gfs_routes: 1, peer_keywrap_known: true },
-    ])
+    const noRouteYet = [
+      { instance_id: 'peer-1', gfs_relay: true, gfs_routes: 0, peer_keywrap_known: true },
+    ]
+    mockGet
+      .mockResolvedValueOnce(noRouteYet)
+      .mockResolvedValueOnce([
+        { instance_id: 'other', gfs_routes: 9 },
+        { instance_id: 'peer-1', gfs_relay: true, gfs_routes: 1, peer_keywrap_known: true },
+      ])
     renderToggle()
 
     fireEvent.change(checkbox())
@@ -128,11 +140,54 @@ describe('GfsFallbackToggle', () => {
     expect(mockGet).not.toHaveBeenCalled()
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(GFS_FALLBACK_RECHECK_MS)
+      await vi.advanceTimersByTimeAsync(GFS_FALLBACK_RECHECK_DELAYS_MS[0])
+    })
+    expect(mockGet).toHaveBeenCalledTimes(1)
+    expect(status()).toContain('no GFS you both use found yet')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GFS_FALLBACK_RECHECK_DELAYS_MS[1])
+    })
+    expect(mockGet).toHaveBeenCalledTimes(2)
+    expect(mockGet).toHaveBeenLastCalledWith('/api/connections')
+    expect(status()).toBe('On — The Smiths can be reached through 1 GFS you both use.')
+
+    // A route was found: no further re-reads.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+    expect(mockGet).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops re-reading after the last back-off step', async () => {
+    vi.useFakeTimers()
+    mockPatch.mockResolvedValue({ ...OFF, gfs_relay: true })
+    mockGet.mockResolvedValue([{ instance_id: 'peer-1', gfs_relay: true, gfs_routes: 0 }])
+    renderToggle()
+
+    fireEvent.change(checkbox())
+    await act(async () => { await Promise.resolve() })
+    for (const delay of GFS_FALLBACK_RECHECK_DELAYS_MS) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(delay) })
+    }
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+
+    expect(mockGet).toHaveBeenCalledTimes(GFS_FALLBACK_RECHECK_DELAYS_MS.length)
+  })
+
+  it('cancels the re-reads when the panel closes', async () => {
+    vi.useFakeTimers()
+    mockPatch.mockResolvedValue({ ...OFF, gfs_relay: true })
+    const { unmount } = renderToggle()
+
+    fireEvent.change(checkbox())
+    await act(async () => { await Promise.resolve() })
+    unmount()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
     })
 
-    expect(mockGet).toHaveBeenCalledWith('/api/connections')
-    expect(status()).toBe('On — The Smiths can be reached through 1 GFS you both use.')
+    expect(mockGet).not.toHaveBeenCalled()
   })
 
   it('switching off PATCHes false and drops the route count', async () => {
@@ -148,6 +203,40 @@ describe('GfsFallbackToggle', () => {
       expect(status()).toBe('Off — messages to The Smiths only travel directly.')
     })
     expect(mockGet).not.toHaveBeenCalled()
+  })
+
+  it('a coded refusal shows the translated message, never "API 409"', async () => {
+    const { ApiError } = await import('@/api') as unknown as {
+      ApiError: new (status: number, message: string) => Error
+    }
+    mockPatch.mockRejectedValue(
+      new ApiError(409, 'Only households you paired with directly can use the GFS fallback.'),
+    )
+    renderToggle()
+
+    fireEvent.change(checkbox())
+
+    await waitFor(() => {
+      expect(mockShowToast).toHaveBeenCalledWith(
+        'Only households you paired with directly can use the GFS fallback.',
+        'error',
+      )
+    })
+    expect(checkbox().checked).toBe(false)
+  })
+
+  it('a network failure shows the friendly line, not the raw error', async () => {
+    mockPatch.mockRejectedValue(new TypeError('Failed to fetch'))
+    renderToggle()
+
+    fireEvent.change(checkbox())
+
+    await waitFor(() => {
+      expect(mockShowToast).toHaveBeenCalledWith(
+        "Couldn't change the GFS fallback",
+        'error',
+      )
+    })
   })
 
   it('reverts and toasts when the PATCH fails', async () => {

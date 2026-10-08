@@ -845,10 +845,12 @@ encrypted ``INSTANCE_CAPABILITIES_UPDATED`` and d checks it against a's
 pinned identity key — while d's own switch stays off and no route forms
 on either side. Then d turns it on for a: a learns d's key, probes at
 once, and both ``GET /api/connections`` rows must reach ``gfs_routes >= 1``
-within 45 s. a's row for b (b is on no GFS) must show no route. Both
+within 45 s. a's row for b (b is on no GFS) must show no route. Then a
+switches off: its ``gfs_relay: false`` announcement must make d drop its
+route to a while d's own switch stays on. Both
 switches go off again at the end and the routes must be gone, so the
-step can be re-run — after a minute, since route discovery probes a peer
-at most once per minute.
+step can be re-run at once (switching off clears both sides' probe
+throttles for the pair).
 
 ### ``gfs-reach-pair`` — pairing a household that offers no address (pairing ``reach``)
 

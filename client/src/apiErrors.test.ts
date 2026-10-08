@@ -11,6 +11,13 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("You can't start a conversation with yourself. Pick someone else.")
   })
 
+  it('translates the GFS fallback refusal for a household not paired directly', () => {
+    expect(apiErrorMessage(409, '/api/pairing/connections/p1', {
+      code: 'GFS_RELAY_NOT_ALLOWED',
+      detail: 'The GFS fallback is only for confirmed, directly paired households.',
+    })).toBe('Only households you paired with directly can use the GFS fallback.')
+  })
+
   it('fills params into the translated message', () => {
     expect(apiErrorMessage(422, '/x', {
       code: 'DM_TOO_LONG', detail: 'message content exceeds 1000 chars', params: { max: 1000 },
