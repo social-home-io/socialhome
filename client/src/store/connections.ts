@@ -78,6 +78,14 @@ export interface Connection {
    *  Defaults to true in the UI when the backend omits the field
    *  (older peer that hasn't sent the field yet). */
   share_home?: boolean
+  /** GFS fallback (v_54): our own opt-in for this household. */
+  gfs_relay?: boolean
+  /** GFSes both households were proven to use — a count, never a list. */
+  gfs_routes?: number
+  /** We hold the other household's key-wrap key (it turned the switch on). */
+  peer_keywrap_known?: boolean
+  /** The switch can work with this household at all. */
+  gfs_relay_available?: boolean
 }
 
 export const connections = signal<Connection[]>([])

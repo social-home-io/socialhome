@@ -265,6 +265,20 @@ async def test_probes_to_one_peer_are_rate_capped():
     assert len(fed.sent) == 4
 
 
+async def test_an_admin_switch_probe_opens_no_throttle_window():
+    """v_54: the admin switching the fallback on probes without starting
+    the per-peer window, so the probe-back the other household's first
+    probe triggers seconds later is not swallowed — but a window another
+    trigger opened still holds the admin's probe back."""
+    svc, fed, _repo, _gfs, clock = _svc(_peer())
+
+    assert await svc.probe_peer(PEER, hold_throttle=False) == 2
+    assert await svc.probe_peer(PEER) == 2  # not throttled
+    clock.t += 1
+    assert await svc.probe_peer(PEER, hold_throttle=False) == 0  # window holds
+    assert len(fed.sent) == 4
+
+
 async def test_a_probe_the_relay_did_not_accept_is_forgotten():
     svc, fed, *_ = _svc(_peer(), ok=False)
 

@@ -211,20 +211,35 @@ class GfsRouteDiscoveryService:
             sent += await self._probe(peer)
         return sent
 
-    async def probe_peer(self, instance_id: str) -> int:
+    async def probe_peer(
+        self,
+        instance_id: str,
+        *,
+        hold_throttle: bool = True,
+    ) -> int:
         """Probe one peer through each of our relay-capable connections.
 
         Public trigger for a fresh pairing / a newly enabled opt-in. A peer
         that is not eligible (not confirmed, not opted in, no key-wrap key,
         below v_53) or was probed within :data:`PROBE_PEER_MIN_INTERVAL_S`
         gets nothing. Returns the number of probes sent.
+
+        ``hold_throttle=False`` sends without starting the per-peer
+        throttle window. Only for the admin switching the GFS fallback on
+        (v_54): that probe usually goes unanswered — the other household's
+        relay opt-in gate refuses it until ITS admin switches on too — and
+        when that happens seconds later, our probe-back to its first probe
+        must not be swallowed by the window our own unanswered probe just
+        opened (we would hold no route until the next round, a day later).
+        An admin action is rare and admin-only, so it needs no throttle of
+        its own; every peer- or timer-driven trigger keeps the window.
         """
         peer = await self._federation_repo.get_instance(instance_id)
         if peer is None:
             return 0
-        return await self._probe(peer)
+        return await self._probe(peer, hold_throttle=hold_throttle)
 
-    async def _probe(self, peer: RemoteInstance) -> int:
+    async def _probe(self, peer: RemoteInstance, *, hold_throttle: bool = True) -> int:
         if not await self._eligible(peer):
             return 0
         now = self._clock()
@@ -235,7 +250,8 @@ class GfsRouteDiscoveryService:
         conns = await self._relay_connections()
         if not conns:
             return 0
-        self._last_probe_at[peer.id] = now
+        if hold_throttle:
+            self._last_probe_at[peer.id] = now
         sent = 0
         for conn in conns:
             nonce = secrets.token_urlsafe(PROBE_NONCE_BYTES)

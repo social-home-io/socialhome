@@ -48,7 +48,7 @@ from ..domain.federation import (
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..services.gfs_envelope_sender import normalize_gfs_base
 from .invite_bootstrap import RelayEnvelopeSender, verify_peer_keywrap
-from .keywrap_seal import KEM_SUITE_X25519, SUPPORTED_KEM_SUITES
+from .keywrap_seal import SUPPORTED_KEM_SUITES, keywrap_wire_fields
 
 log = logging.getLogger(__name__)
 
@@ -139,11 +139,7 @@ class PairingGfsReach:
     def own_keywrap_fields(self) -> dict[str, str]:
         """Our static key-wrap key, its binding signature and suite tag —
         the same material ``/gfs/info`` serves; never a fresh key."""
-        return {
-            "keywrap_pk": self._keywrap_public_key.hex(),
-            "keywrap_sig": self._keywrap_sig,
-            "keywrap_suite": KEM_SUITE_X25519,
-        }
+        return keywrap_wire_fields(self._keywrap_public_key, self._keywrap_sig)
 
     async def _relay_connections(self) -> list[GfsConnection]:
         """Our active connections whose server proved ``envelope_relay``."""

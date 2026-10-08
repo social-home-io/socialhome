@@ -33,6 +33,7 @@ from ..app_keys import (
     federation_transport_key,
     outbox_repo_key,
     pairing_relay_queue_key,
+    peer_gfs_relay_service_key,
     peer_home_sharing_service_key,
     peer_user_visibility_repo_key,
     peer_unpair_service_key,
@@ -45,6 +46,7 @@ from ..domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    gfs_relay_available,
     is_relay_only,
 )
 from ..federation.pairing_gfs_reach import parse_reach
@@ -63,6 +65,7 @@ def _instance_dict(
     queued_envelopes: int,
     dropped_envelopes: int,
     last_relay_accepted_at: str | None,
+    gfs_routes: int,
 ) -> dict:
     """Public-shape view of a :class:`RemoteInstance`.
 
@@ -99,6 +102,13 @@ def _instance_dict(
     only). Acceptance is not delivery, so it never feeds
     ``last_reachable_at``; ``relay_only`` is derived from the two via
     :func:`~socialhome.domain.federation.is_relay_only`.
+
+    ``gfs_routes`` is the number of confirmed relay routes to this peer
+    (``peer_gfs_routes`` rows — GFSes both households were proven to use).
+    Required for the same reason as the envelope counts. Together with
+    ``gfs_relay`` (our own opt-in), ``peer_keywrap_known`` and
+    ``gfs_relay_available`` it lets the SPA say "on — reachable through N
+    GFS", "on — waiting for the other household" or "not available".
     """
     status = (
         inst.status.value if isinstance(inst.status, PairingStatus) else inst.status
@@ -125,6 +135,17 @@ def _instance_dict(
         # Per-peer home-location sharing toggle (§share_home).  Default True.
         # Listed next to local_alias because both are per-pair local toggles.
         "share_home": getattr(inst, "share_home", True),
+        # GFS fallback (v_54 switch). ``gfs_relay`` is OUR opt-in for this
+        # peer; ``gfs_routes`` the GFSes both sides were proven to share;
+        # ``peer_keywrap_known`` whether we can seal to the peer at all
+        # (it sends its key when ITS admin turns the switch on);
+        # ``gfs_relay_available`` whether the switch can ever work with
+        # this peer (confirmed, directly paired, new enough). Never names
+        # a GFS — the routes are counted, not listed.
+        "gfs_relay": bool(getattr(inst, "gfs_relay", False)),
+        "gfs_routes": gfs_routes,
+        "peer_keywrap_known": bool(getattr(inst, "remote_keywrap_pk", None)),
+        "gfs_relay_available": gfs_relay_available(inst),
         "status": status,
         "reachable": reachable,
         "transport": transport_state,
@@ -164,6 +185,12 @@ def _instance_dict(
         "home_lat": getattr(inst, "home_lat", None),
         "home_lon": getattr(inst, "home_lon", None),
     }
+
+
+async def _gfs_route_count(view: BaseView, instance_id: str) -> int:
+    """Confirmed GFS relay routes to *instance_id* (a count, never a list:
+    which GFS they go through is nobody's business but ours)."""
+    return len(await view.svc(federation_repo_key).list_gfs_routes(instance_id))
 
 
 class PairingInitiateView(BaseView):
@@ -283,6 +310,7 @@ class PairingConfirmView(BaseView):
                 queued_envelopes=await outbox.count_pending_for(instance.id),
                 dropped_envelopes=await outbox.count_failed_for(instance.id),
                 last_relay_accepted_at=fed.last_relay_accepted_at(instance.id),
+                gfs_routes=await _gfs_route_count(self, instance.id),
             )
         )
 
@@ -383,6 +411,7 @@ class PairingConnectionCollectionView(BaseView):
                     queued_envelopes=queued,
                     dropped_envelopes=dropped,
                     last_relay_accepted_at=fed.last_relay_accepted_at(inst.id),
+                    gfs_routes=await _gfs_route_count(self, inst.id),
                 )
             )
         return web.json_response(rows)
@@ -538,6 +567,10 @@ class PairingConnectionDetailView(BaseView):
     PATCH accepts one or both of:
     - ``{"share_home": bool}`` — enable / disable home-location sharing with
       this peer.  Handled by :class:`PeerHomeSharingService`.
+    - ``{"gfs_relay": bool}`` — turn the GFS fallback on / off for this
+      peer (v_54). Confirmed, directly paired households only (409
+      ``GFS_RELAY_NOT_ALLOWED`` otherwise). Handled by
+      :class:`~socialhome.services.peer_gfs_relay_service.PeerGfsRelayService`.
 
     Both fields are optional and may be combined in a single request.
     Both methods are admin-only.
@@ -567,6 +600,22 @@ class PairingConnectionDetailView(BaseView):
             except UnknownInstanceError:
                 return error_response(404, "NOT_FOUND", "Peer not found.")
 
+        if "gfs_relay" in body:
+            relay = body["gfs_relay"]
+            if not isinstance(relay, bool):
+                return error_response(
+                    422,
+                    "UNPROCESSABLE",
+                    "gfs_relay must be a boolean.",
+                )
+            # Unknown peer → 404, not a direct pair → 409: coded errors,
+            # mapped by ``BaseView``.
+            await self.svc(peer_gfs_relay_service_key).set_gfs_relay(
+                instance_id,
+                enabled=relay,
+                set_by=user.user_id,
+            )
+
         # Re-read so the response reflects the persisted state.
         inst = await self.svc(federation_repo_key).get_instance(instance_id)
         if inst is None:
@@ -580,6 +629,7 @@ class PairingConnectionDetailView(BaseView):
                 last_relay_accepted_at=self.svc(
                     federation_service_key
                 ).last_relay_accepted_at(instance_id),
+                gfs_routes=await _gfs_route_count(self, instance_id),
             )
         )
 

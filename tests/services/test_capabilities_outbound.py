@@ -278,3 +278,76 @@ async def test_paired_host_needs_no_mesh_announcement():
     fed.send_with_mesh_fallback.assert_not_awaited()
     assert await out.announce_to_mesh_host("inst-self") is True
     fed.send_with_mesh_fallback.assert_not_awaited()
+
+
+# ─── v_54: our key-wrap key for peers we opted into the GFS relay with ────
+
+_OUR_KEYWRAP = bytes(range(32))
+
+
+def _keyed_outbound(row: RemoteInstance | None):
+    repo = SimpleNamespace(
+        get_instance=AsyncMock(return_value=row),
+        get_local_identity=AsyncMock(return_value={"display_name": "Home"}),
+    )
+    fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
+    out = CapabilitiesOutbound(
+        federation_service=fed,
+        federation_repo=repo,
+        keywrap_public_key=_OUR_KEYWRAP,
+        keywrap_sig="sig-b64",
+    )
+    return out, fed
+
+
+@pytest.mark.asyncio
+async def test_an_opted_in_paired_peer_gets_our_keywrap_key():
+    out, fed = _keyed_outbound(dataclasses.replace(_peer("inst-a"), gfs_relay=True))
+
+    assert await out.resend_to("inst-a") is True
+
+    payload = fed.send_event.await_args.kwargs["payload"]
+    assert payload["keywrap_pk"] == _OUR_KEYWRAP.hex()
+    assert payload["keywrap_sig"] == "sig-b64"
+    assert payload["keywrap_suite"] == "x25519"
+    assert payload["proto_version"] == OUR_PROTO_VERSION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row",
+    [
+        _peer("inst-a"),  # not opted in
+        dataclasses.replace(
+            _peer("inst-a"),
+            gfs_relay=True,
+            source=InstanceSource.SPACE_SESSION,
+        ),
+        None,  # row vanished between the trigger and the send
+    ],
+    ids=["not-opted-in", "link-joined", "no-row"],
+)
+async def test_no_keywrap_key_for_a_peer_we_did_not_opt_in_with(row):
+    out, fed = _keyed_outbound(row)
+
+    await out.resend_to("inst-a")
+
+    payload = fed.send_event.await_args.kwargs["payload"]
+    assert not {"keywrap_pk", "keywrap_sig", "keywrap_suite"} & payload.keys()
+
+
+@pytest.mark.asyncio
+async def test_no_keywrap_key_when_none_is_configured():
+    repo = SimpleNamespace(
+        get_instance=AsyncMock(
+            return_value=dataclasses.replace(_peer("inst-a"), gfs_relay=True),
+        ),
+        get_local_identity=AsyncMock(return_value=None),
+    )
+    fed = SimpleNamespace(_own_instance_id="inst-self", send_event=AsyncMock())
+    out = CapabilitiesOutbound(federation_service=fed, federation_repo=repo)
+
+    await out.resend_to("inst-a")
+
+    assert "keywrap_pk" not in fed.send_event.await_args.kwargs["payload"]
+    repo.get_instance.assert_not_awaited()

@@ -888,6 +888,41 @@ class GfsConnectionService:
         if caps is not None and caps.get("envelope_relay") is True:
             self._envelope_relay[conn.id] = True
 
+    async def warm_capabilities(
+        self,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> int:
+        """Fetch ``/gfs/info`` once for every active connection whose server
+        has not yet proved ``envelope_relay`` in this process.
+
+        The cache is RAM-only, so after a restart every connection reads
+        cold until something fetches ``/gfs/info`` — until now only the
+        GFS WebSocket's (re)connect hook, so the pairing picker and the
+        GFS fallback switch stayed hidden for as long as that socket took
+        to come up (reconnect back-off, a server refusing the socket while
+        its HTTP side answers, a fetch that failed on the one connect).
+        The startup warm-up (:class:`~socialhome.infrastructure
+        .gfs_capability_warmup.GfsCapabilityWarmup`) calls this once,
+        independent of the socket. List reads still never fetch.
+
+        Sequential and fail-soft: a failing server records only the short
+        negative TTL, exactly as any other fetch; ``should_stop`` is checked
+        before each fetch so a shutdown lands between requests. Returns how
+        many connections are known relay-capable afterwards.
+        """
+        for conn in await self._repo.list_active():
+            if should_stop is not None and should_stop():
+                break
+            if conn.status != "active" or not conn.inbox_url:
+                continue
+            if self._envelope_relay.get(conn.id):
+                continue
+            await self._fetch_gfs_info(conn)
+        return sum(
+            1 for c in await self._repo.list_active() if self._envelope_relay.get(c.id)
+        )
+
     def envelope_relay_known(self, conn: GfsConnection) -> bool:
         """Whether *conn*'s server has already proved ``envelope_relay``
         under a valid signature in this process — RAM cache only, never a

@@ -150,6 +150,8 @@ calendar_service_key: AppKey = AppKey("calendar_service")
 space_cal_service_key: AppKey = AppKey("space_cal_service")
 shopping_service_key: AppKey = AppKey("shopping_service")
 peer_home_sharing_service_key: AppKey = AppKey("peer_home_sharing_service")
+#: v_54 — the per-connection GFS fallback switch (PATCH ``gfs_relay``).
+peer_gfs_relay_service_key: AppKey = AppKey("peer_gfs_relay_service")
 
 # ── Repos (exposed for routes / federation / inboxs) ───────────────────
 user_repo_key: AppKey = AppKey("user_repo")

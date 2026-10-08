@@ -173,6 +173,22 @@ def open_keywrap(
     )
 
 
+def keywrap_wire_fields(public_key: bytes, keywrap_sig: str) -> dict[str, str]:
+    """The ``keywrap_pk`` / ``keywrap_sig`` / ``keywrap_suite`` fields a
+    household ships so a peer can seal to its static key-wrap key.
+
+    One shape for every carrier — a GFS-reach pairing code, a signed
+    peer-accept and ``INSTANCE_CAPABILITIES_UPDATED`` (v_54) — so the
+    receiver's check (suite known, key bound to the identity key) is the
+    same everywhere. Always suite-tagged.
+    """
+    return {
+        "keywrap_pk": public_key.hex(),
+        "keywrap_sig": keywrap_sig,
+        "keywrap_suite": KEM_SUITE_X25519,
+    }
+
+
 def verify_keywrap_binding(
     *,
     instance_id: str,
@@ -221,6 +237,7 @@ __all__ = [
     "KEM_SUITE_X25519",
     "SUPPORTED_KEM_SUITES",
     "UnsupportedKemSuite",
+    "keywrap_wire_fields",
     "open_keywrap",
     "seal_to_keywrap",
     "verify_keywrap_binding",

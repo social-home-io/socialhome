@@ -9,12 +9,19 @@ from datetime import datetime, timezone
 
 import pytest
 
-from socialhome.crypto import derive_instance_id
+from socialhome.crypto import (
+    b64url_encode,
+    derive_instance_id,
+    generate_identity_keypair,
+    generate_x25519_keypair,
+    sign_ed25519,
+)
 from socialhome.domain.events import (
     PairingAborted,
     PairingAcceptReceived,
     PairingConfirmed,
     PairingIntroReceived,
+    PeerCapabilitiesAdvertised,
     PeerUnpaired,
 )
 from socialhome.domain.federation import (
@@ -113,6 +120,12 @@ class _FakeFederationRepo:
         # Targeted single-column update — only the advertised display_name,
         # never local_alias (mirrors the real repo's UPDATE).
         self.instances[instance_id] = replace(inst, display_name=name)
+
+    async def set_remote_keywrap_pk(self, instance_id: str, pk_hex: str) -> None:
+        inst = self.instances.get(instance_id)
+        if inst is None:
+            return
+        self.instances[instance_id] = replace(inst, remote_keywrap_pk=pk_hex)
 
 
 def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
@@ -792,3 +805,134 @@ async def test_every_capability_advertisement_is_announced_on_the_bus(
             )
         )
     assert [e.instance_id for e in seen] == ["peer-a", "peer-a"]
+
+
+# ─── INSTANCE_CAPABILITIES_UPDATED carries the key-wrap key (v_54) ────────
+
+
+def _bound_peer(*, source=InstanceSource.MANUAL):
+    """A confirmed peer row pinned to a real identity key, plus a key-wrap
+    key and a factory for its capabilities key fields."""
+    ident = generate_identity_keypair()
+    iid = derive_instance_id(ident.public_key)
+    keywrap = generate_x25519_keypair()
+    row = replace(
+        _sample_instance(iid, PairingStatus.CONFIRMED),
+        remote_identity_pk=ident.public_key.hex(),
+        source=source,
+    )
+
+    def fields(*, signer=None, suite="x25519") -> dict:
+        key = keywrap.public_key
+        return {
+            "keywrap_pk": key.hex(),
+            "keywrap_sig": b64url_encode(
+                sign_ed25519(signer or ident.private_key, key),
+            ),
+            "keywrap_suite": suite,
+        }
+
+    return row, keywrap, fields
+
+
+async def _announce(handlers, iid: str, extra: dict) -> None:
+    await handlers._on_capabilities_updated(
+        _event(
+            FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
+            {"proto_version": 54, **extra},
+            from_instance=iid,
+        )
+    )
+
+
+async def test_capabilities_keywrap_key_bound_to_the_peer_is_stored(
+    bus, repo, handlers
+):
+    row, keywrap, fields = _bound_peer()
+    repo.instances[row.id] = row
+    seen: list[PeerCapabilitiesAdvertised] = []
+    bus.subscribe(PeerCapabilitiesAdvertised, seen.append)
+
+    await _announce(handlers, row.id, fields())
+
+    assert repo.instances[row.id].remote_keywrap_pk == keywrap.public_key.hex()
+    assert [(e.instance_id, e.keywrap_learned) for e in seen] == [(row.id, True)]
+
+
+async def test_capabilities_same_keywrap_key_again_is_not_learned_twice(
+    bus, repo, handlers
+):
+    row, keywrap, fields = _bound_peer()
+    repo.instances[row.id] = replace(row, remote_keywrap_pk=keywrap.public_key.hex())
+    seen: list[PeerCapabilitiesAdvertised] = []
+    bus.subscribe(PeerCapabilitiesAdvertised, seen.append)
+
+    await _announce(handlers, row.id, fields())
+
+    assert [e.keywrap_learned for e in seen] == [False]
+
+
+async def test_capabilities_keywrap_key_signed_by_another_identity_is_refused(
+    bus, repo, handlers, caplog
+):
+    """A key the peer's pinned identity did not sign — a GFS or a relay
+    could otherwise slip in a key it can open — is dropped, fail closed."""
+    row, _keywrap, fields = _bound_peer()
+    repo.instances[row.id] = replace(row, remote_keywrap_pk="cd" * 32)
+    seen: list[PeerCapabilitiesAdvertised] = []
+    bus.subscribe(PeerCapabilitiesAdvertised, seen.append)
+
+    with caplog.at_level(logging.WARNING):
+        await _announce(
+            handlers,
+            row.id,
+            fields(signer=generate_identity_keypair().private_key),
+        )
+
+    assert repo.instances[row.id].remote_keywrap_pk == "cd" * 32
+    assert [e.keywrap_learned for e in seen] == [False]
+    assert "key-wrap key refused" in caplog.text
+    # The rest of the announcement still applies.
+    assert repo.instances[row.id].proto_version == 54
+
+
+@pytest.mark.parametrize("suite", ["x25519+mlkem768", "", None])
+async def test_capabilities_keywrap_key_with_unknown_or_missing_suite_is_refused(
+    repo, handlers, suite
+):
+    row, _keywrap, fields = _bound_peer()
+    repo.instances[row.id] = row
+    extra = fields()
+    if suite is None:
+        del extra["keywrap_suite"]
+    else:
+        extra["keywrap_suite"] = suite
+
+    await _announce(handlers, row.id, extra)
+
+    assert repo.instances[row.id].remote_keywrap_pk is None
+
+
+async def test_capabilities_keywrap_key_ignored_for_a_link_joined_household(
+    repo, handlers
+):
+    """A link-joined household's key comes from the invite bootstrap; the
+    capabilities path is only for directly paired households."""
+    row, _keywrap, fields = _bound_peer(source=InstanceSource.SPACE_SESSION)
+    repo.instances[row.id] = replace(row, remote_keywrap_pk="ef" * 32)
+
+    await _announce(handlers, row.id, fields())
+
+    assert repo.instances[row.id].remote_keywrap_pk == "ef" * 32
+
+
+async def test_capabilities_without_keywrap_fields_change_no_key(bus, repo, handlers):
+    row, _keywrap, _fields = _bound_peer()
+    repo.instances[row.id] = row
+    seen: list[PeerCapabilitiesAdvertised] = []
+    bus.subscribe(PeerCapabilitiesAdvertised, seen.append)
+
+    await _announce(handlers, row.id, {})
+
+    assert repo.instances[row.id].remote_keywrap_pk is None
+    assert [e.keywrap_learned for e in seen] == [False]
