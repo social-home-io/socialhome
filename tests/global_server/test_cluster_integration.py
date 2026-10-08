@@ -1880,4 +1880,12 @@ async def test_a_drain_hint_flushes_an_envelope_queued_by_another_node(client):
         frame = await asyncio.wait_for(ws.receive_json(), timeout=5)
 
     assert frame == {"type": "envelope", "sealed": sealed}
-    assert await app[gfs_envelope_queue_repo_key].count_for(_HOUSEHOLD) == 0
+    # The drain deletes a row only AFTER its frame went out (at-least-once),
+    # so the frame can reach the socket before the delete commits. Wait for
+    # the delete rather than reading the count in that gap.
+    queue = app[gfs_envelope_queue_repo_key]
+    for _ in range(500):
+        if await queue.count_for(_HOUSEHOLD) == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert await queue.count_for(_HOUSEHOLD) == 0

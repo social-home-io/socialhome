@@ -163,6 +163,12 @@ async def test_offline_recipient_is_queued_then_drained_in_order_on_hello(gfs):
 
     assert [f["sealed"]["ciphertext"] for f in frames] == ["ct-0", "ct-1", "ct-2"]
     assert all(set(f) == {"type", "sealed"} for f in frames)
+    # The drain deletes each row only AFTER its frame went out (at-least-once),
+    # so the last frame can arrive before its delete commits.
+    for _ in range(500):
+        if await queue_repo.count_for("recipient2home2222222222222222aa") == 0:
+            break
+        await asyncio.sleep(0.01)
     assert await queue_repo.count_for("recipient2home2222222222222222aa") == 0
 
 
