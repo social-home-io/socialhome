@@ -83,6 +83,13 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # Space timetables (v_39). Self-contained rows; an older receiver drops
     # the unknown resource.
     "timetables",
+    # The space chat's recent messages (v_55). Sent only to a writer
+    # household at v_55+ (the provider gates it per requester); a reply
+    # names a message streamed earlier in the same resource (oldest first).
+    # Its deletions ship first: a household that missed a delete drops (or
+    # tombstones) the message before any stream could bring it back.
+    "chat_messages_deleted",
+    "chat_messages",
 )
 
 
@@ -102,7 +109,7 @@ ROSTER_RESOURCES: frozenset[str] = frozenset({"bans", "members", "member_picture
 #: ``ARCHIVED_ALLOWED_REMOVAL_TYPES``, they still land in a space that is
 #: archived here — a delete must not outlive itself on the snapshot.
 REMOVAL_RESOURCES: frozenset[str] = frozenset(
-    {"task_lists_deleted", "tasks_deleted", "pages_deleted"}
+    {"task_lists_deleted", "tasks_deleted", "pages_deleted", "chat_messages_deleted"}
 )
 
 

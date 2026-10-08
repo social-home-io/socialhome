@@ -2295,6 +2295,7 @@
   "capability.forwarded_invite_links": "Einladungslinks aus Mitglieds-Haushalten",
   "capability.shared_gfs_relay": "Gekoppelte Haushalte über einen gemeinsamen GFS erreichen",
   "capability.gfs_fallback_later": "GFS-Ausweichweg nachträglich einschalten",
+  "capability.space_chat": "Chat in Räumen",
   "settings.tab.security": "Sicherheit",
   "settings.could_not_save": "Speichern fehlgeschlagen: {error}",
   "settings.profile.save_failed": "Speichern fehlgeschlagen: {error}",

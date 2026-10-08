@@ -89,6 +89,7 @@ def test_space_features_wire_roundtrip_every_field_non_default():
         gallery=False,  # default True
         bazaar=False,  # default True
         timetable=True,  # default False
+        chat=False,  # default True
         posts_access=SpaceFeatureAccess.MODERATED,  # default OPEN
         pages_access=SpaceFeatureAccess.ADMIN_ONLY,  # default OPEN
         stickies_access=SpaceFeatureAccess.MODERATED,  # default OPEN
@@ -107,6 +108,22 @@ def test_space_features_from_wire_dict_defaults_on_partial():
     rather than raising, and an unknown access level degrades to OPEN."""
     f = SpaceFeatures.from_wire_dict({"name_only": 1, "posts_access": "bogus"})
     assert f == SpaceFeatures()  # every field defaulted
+
+
+def test_space_features_chat_defaults_on_and_round_trips():
+    """The space chat is on everywhere (owner decision): on by default, on
+    for a row or a wire dict that predates it, and an admin's off survives
+    both round-trips and a partial edit."""
+    assert SpaceFeatures().chat is True
+    assert SpaceFeatures.from_row({}).chat is True
+    assert SpaceFeatures.from_wire_dict({}).chat is True
+    off = SpaceFeatures(chat=False)
+    assert off.to_columns()["feature_chat"] == 0
+    assert SpaceFeatures.from_row(off.to_columns()).chat is False
+    assert off.to_wire_dict()["chat"] is False
+    assert SpaceFeatures.from_wire_dict(off.to_wire_dict()).chat is False
+    # A partial edit leaves the current value alone.
+    assert not SpaceFeatures.from_wire_dict({"bazaar": False}, defaults=off).chat
 
 
 def test_space_features_timetable_defaults_off_and_round_trips():

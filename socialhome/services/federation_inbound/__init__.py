@@ -13,6 +13,7 @@ from .resync import ResyncInboundHandlers
 from .space_membership import SpaceMembershipInboundHandlers
 from .space_invites import SpaceInviteInboundHandlers
 from .space_content import SpaceContentInboundHandlers
+from .space_chat import SpaceChatInboundHandlers
 
 __all__ = [
     "PairingInboundHandlers",
@@ -21,4 +22,5 @@ __all__ = [
     "SpaceMembershipInboundHandlers",
     "SpaceInviteInboundHandlers",
     "SpaceContentInboundHandlers",
+    "SpaceChatInboundHandlers",
 ]

@@ -23,7 +23,7 @@ import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -2301,8 +2301,17 @@ class FederationService:
         legacy_payload: dict | None = None,
         legacy_below: int | None = None,
         per_peer: Callable[[str, dict], Awaitable[dict]] | None = None,
+        only_instances: Collection[str] | None = None,
     ) -> BroadcastResult:
         """Fan out to every member household of ``space_id``.
+
+        ``only_instances``, when given, narrows the fan-out to the member
+        households it names (still minus bans, still per-peer mesh-routed):
+        a household outside it is skipped silently, as if it were not a
+        member. For content only part of the space may see — the v_55 space
+        chat goes only to households holding a WRITER seat, never to a
+        follower-only household. It never ADDS a target: a household that
+        is not a member of ``space_id`` gets nothing whatever it lists.
 
         ``per_peer``, when given, is awaited with ``(instance_id, payload)``
         for each target AFTER the legacy / relay variant is picked and
@@ -2362,6 +2371,10 @@ class FederationService:
                 # (and a negative cooldown keyed on self) on EVERY broadcast.
                 # Skip at the loop — the repo's contract stays "all member
                 # households" — and keep self out of attempted/failed/results.
+                continue
+            if only_instances is not None and iid not in only_instances:
+                # Not in the caller's audience (e.g. a follower-only
+                # household for the space chat) — skip, like a non-member.
                 continue
             if min_proto_version is not None and not await self.peer_supports(
                 iid,

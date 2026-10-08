@@ -1056,7 +1056,7 @@ AEAD suite details.
 
 ## System chats on group-DM storage
 
-The household chat (and, later, one chat per space) is not a new chat
+The household chat and each space's chat are not a new chat
 system: it is a `group_dm` conversation the household creates itself,
 marked by `conversations.system_scope` (`household` / `space`, migration
 0082). Messages, edit / delete, reactions, mentions, unread, mute and the
@@ -1066,7 +1066,11 @@ by the existing `/api/conversations/{id}/...` routes.
 - **Access is computed, seats are state.** `SystemChatPolicy`
   (`services/system_chat_policy.py`) answers read / write live with one
   access strategy per scope — household: an active local user while
-  `feat_household_chat` is on; a scope without registered rules is refused.
+  `feat_household_chat` is on; space (`SpaceChatAccess`): a local
+  `space_members` seat with a writer role (never a follower), not banned,
+  `features.chat` on, the space not dissolved — posting also needs it not
+  archived, and its owner / admins / moderators may delete anyone's
+  message; a scope without registered rules is refused.
   `DmService._require_membership` defers to it whenever `system_scope` is
   set. Seat rows only hold per-user state; `HouseholdChatService`
   reconciles them on `UserProvisioned` / `UserDeprovisioned` and lazily on
@@ -1087,7 +1091,25 @@ by the existing `/api/conversations/{id}/...` routes.
   account; the blocked person's messages are withheld from it (recipients,
   `list_messages`, unread, notifications) instead.
 - **Notifications** link the household chat to `/?tab=chat` and read
-  "{sender} in Household chat" (title only, §25.3).
+  "{sender} in Household chat"; a space chat links to
+  `/spaces/{id}?view=chat` and reads "{sender} in {space}" (title only,
+  §25.3). New space-chat seats start at notification level `mentions`.
+- **Space chats federate, as their own events.** A space chat never
+  rides the DM path. `SpaceChatService` keeps its seats in step with the
+  live policy (on member join / leave, role change, ban, feature toggle,
+  and lazily on `GET /api/spaces/{id}/chat`). Each local fan-out also
+  asks the policy, so a seat the reconciler has not caught up on yet
+  never receives anything. `SpaceChatOutbound` ships
+  `SPACE_CHAT_*` (v_55) to the households holding a writer seat
+  (`broadcast_to_space_members(..., only_instances=…)`); a follower-only
+  household gets nothing. Every field but `space_id` is encrypted and no
+  conversation id travels, because each household keeps its own chat for
+  the space. Message ids are owner-bound (`space-chat-message`). The
+  inbound handlers (`federation_inbound/space_chat.py`) re-check
+  authorship on the space roster. The `chat_messages` catch-up resource
+  carries the last 500 messages to a v_55 writer household, and the
+  space's retention prunes every household's copy. See
+  [`protocol/space-chat.md`](./protocol/space-chat.md).
 
 ## Map tiles
 

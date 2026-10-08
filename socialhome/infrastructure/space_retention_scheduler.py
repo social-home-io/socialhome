@@ -14,6 +14,15 @@ Soft-delete sets ``space_posts.deleted = 1`` so the existing
 moderation/feed-rendering paths keep working unchanged. Comments on a
 purged post cascade via the row's foreign key.
 
+The space's **chat** (v_55) is pruned by the same horizon, on EVERY
+household that holds a chat for the space — not only the host: each
+household keeps its own copy of the chat (no household re-streams old
+messages beyond the catch-up window), so a member's copy would otherwise
+outlive the space's retention forever. Expired chat messages are
+soft-deleted exactly like ``DmService.delete_message`` does (content and
+media cleared, the row kept for reply links); ``retention_exempt_json``
+names post types and does not apply to chat.
+
 Mirrors the start/stop pattern of :class:`PageLockExpiryScheduler` so
 it plugs into the existing app-startup hook list.
 """
@@ -22,11 +31,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
 import orjson
 
 from ..db import AsyncDatabase
+from ..repositories.conversation_repo import AbstractConversationRepo
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +45,15 @@ log = logging.getLogger(__name__)
 class SpaceRetentionScheduler:
     """Background loop that prunes expired space content per space."""
 
-    __slots__ = ("_db", "_own_instance_id", "_interval", "_task", "_stop")
+    __slots__ = (
+        "_db",
+        "_own_instance_id",
+        "_interval",
+        "_task",
+        "_stop",
+        "_convos",
+        "_on_chat_pruned",
+    )
 
     def __init__(
         self,
@@ -42,8 +61,14 @@ class SpaceRetentionScheduler:
         *,
         own_instance_id: str,
         interval_seconds: float = 3600.0,
+        conversation_repo: AbstractConversationRepo | None = None,
+        on_chat_pruned: Callable[[list[str]], Awaitable[None]] | None = None,
     ) -> None:
         self._db = db
+        #: Where the space chats live; ``None`` prunes no chat.
+        self._convos = conversation_repo
+        #: Told the ids of pruned chat messages (drops them from search).
+        self._on_chat_pruned = on_chat_pruned
         self._own_instance_id = own_instance_id
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
@@ -70,7 +95,7 @@ class SpaceRetentionScheduler:
                 pruned = await self._prune_once()
                 if pruned:
                     log.info(
-                        "space-retention: soft-deleted %d posts",
+                        "space-retention: soft-deleted %d posts / chat messages",
                         pruned,
                     )
             except Exception as exc:  # pragma: no cover
@@ -149,4 +174,18 @@ class SpaceRetentionScheduler:
                     (s["id"], cutoff),
                 )
             total += int(row["n"]) if row else 0
+        total += await self._prune_chats()
         return total
+
+    async def _prune_chats(self) -> int:
+        """Soft-delete space-chat messages past their space's retention
+        horizon, on every space this household holds a chat for, and tell
+        ``on_chat_pruned`` (the search index) which ones went."""
+        if self._convos is None:
+            return 0
+        pruned = await self._convos.prune_space_chat_messages(
+            now=datetime.now(timezone.utc)
+        )
+        if pruned and self._on_chat_pruned is not None:
+            await self._on_chat_pruned(pruned)
+        return len(pruned)

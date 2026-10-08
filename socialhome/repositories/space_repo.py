@@ -502,7 +502,7 @@ class SqliteSpaceRepo:
                 retention_days, retention_exempt_json,
                 feature_calendar, feature_todo, feature_location, location_mode,
                 feature_stickies, feature_pages, feature_gallery, feature_bazaar,
-                feature_timetable,
+                feature_timetable, feature_chat,
                 posts_access, pages_access, stickies_access,
                 calendar_access, tasks_access,
                 allow_subscribers,
@@ -516,7 +516,7 @@ class SqliteSpaceRepo:
                 dissolved, archived, archived_reason, about_markdown, cover_hash, tz,
                 min_age, category
             ) VALUES(
-                -- 59 placeholders, one per column listed above.
+                -- 60 placeholders, one per column listed above.
                 ?, ?, ?, ?,                   -- id, name, description, emoji
                 ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
                 ?, ?, ?,                      -- config_sequence, roster_sequence, config_hlc
@@ -524,7 +524,7 @@ class SqliteSpaceRepo:
                 ?, ?,                         -- retention_days, retention_exempt_json
                 ?, ?, ?, ?,                   -- feature_calendar, feature_todo, feature_location, location_mode
                 ?, ?, ?, ?,                   -- feature_stickies, feature_pages, feature_gallery, feature_bazaar
-                ?,                            -- feature_timetable
+                ?, ?,                         -- feature_timetable, feature_chat
                 ?, ?, ?,                      -- posts_access, pages_access, stickies_access
                 ?, ?,                         -- calendar_access, tasks_access
                 ?,                            -- allow_subscribers
@@ -559,6 +559,7 @@ class SqliteSpaceRepo:
                 feature_gallery=excluded.feature_gallery,
                 feature_bazaar=excluded.feature_bazaar,
                 feature_timetable=excluded.feature_timetable,
+                feature_chat=excluded.feature_chat,
                 posts_access=excluded.posts_access,
                 pages_access=excluded.pages_access,
                 stickies_access=excluded.stickies_access,
@@ -620,6 +621,7 @@ class SqliteSpaceRepo:
                 cols["feature_gallery"],
                 cols["feature_bazaar"],
                 cols["feature_timetable"],
+                cols["feature_chat"],
                 cols["posts_access"],
                 cols["pages_access"],
                 cols["stickies_access"],

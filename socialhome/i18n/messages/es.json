@@ -23,6 +23,7 @@
   "notification.dm.mention_unnamed": "{author} te mencionó en un chat de grupo",
   "notification.household_chat.message": "{author} en {chat_name}",
   "notification.household_chat.name": "Chat del hogar",
+  "notification.space_chat.name": "un espacio",
   "notification.space.moderation.approved": "Tu envío en {space_name} fue aprobado",
   "notification.space.moderation.rejected": "Tu envío en {space_name} no fue aprobado",
   "notification.space.moderation.expired": "Tu envío en {space_name} caducó sin revisión",

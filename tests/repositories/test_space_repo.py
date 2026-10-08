@@ -1350,6 +1350,16 @@ async def test_feature_timetable_round_trips(env):
     assert off is not None and off.features.timetable is False
 
 
+async def test_feature_chat_round_trips(env):
+    """The space chat toggle persists; a space that never set it is on."""
+    await env.repo.save(replace(_space("sp-chat"), features=SpaceFeatures(chat=False)))
+    fetched = await env.repo.get("sp-chat")
+    assert fetched is not None and fetched.features.chat is False
+    await env.repo.save(_space("sp-chat-on"))
+    on = await env.repo.get("sp-chat-on")
+    assert on is not None and on.features.chat is True
+
+
 # ── Moderation queue ───────────────────────────────────────────────────────
 
 

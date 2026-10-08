@@ -39,6 +39,12 @@ class SystemChatScope(StrEnum):
     SPACE = "space"
 
 
+#: ``type`` of a space-chat **tombstone** row (v_55): a deleted message
+#: this household never held, recorded when its authorised delete arrives
+#: first so a late create or catch-up of that id is refused. Never listed,
+#: never counted, never exported as a message — only as a deletion.
+TOMBSTONE_MESSAGE_TYPE = "tombstone"
+
 # Allowed ``type`` values for a :class:`ConversationMessage`.
 #
 # Media attachments (``image`` / ``video`` / ``file`` / ``audio``)

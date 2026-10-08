@@ -22,8 +22,9 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 54
+    assert OURS == 55
     assert FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE == 54
+    assert FederationCapability.MIN_FOR_SPACE_CHAT == 55
     assert FederationCapability.MIN_FOR_FORWARDED_INVITE_LINK == 52
     assert FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH == 50
     assert FederationCapability.MIN_FOR_PRIVATE_CHANNELS == 51
@@ -167,6 +168,7 @@ def test_space_features_missing_below_v13():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 
@@ -197,6 +199,7 @@ def test_space_features_missing_below_v16():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 
@@ -224,6 +227,7 @@ def test_space_features_missing_below_v22():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 
@@ -249,6 +253,7 @@ def test_space_features_missing_below_v23():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 
@@ -275,6 +280,7 @@ def test_space_features_missing_below_v24():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(27) == [
         "Noticing when a path through other households breaks",
@@ -295,6 +301,7 @@ def test_space_features_missing_below_v24():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 
@@ -323,6 +330,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(29) == [
         "Followers from other households",
@@ -341,6 +349,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(30) == [
         "Checking who sent a passed-on message",
@@ -358,6 +367,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(31) == [
         "Up-to-date member lists for every household",
@@ -374,6 +384,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(32) == [
         "Shared gallery albums",
@@ -389,6 +400,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(33) == [
         "Albums tied to their creator",
@@ -403,6 +415,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(34) == [
         "Posts tied to their creator",
@@ -416,6 +429,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(35) == [
         "Posts tied to their creator",
@@ -429,6 +443,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(36) == [
         "Space timetables",
@@ -441,6 +456,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(38) == [
         "Space timetables",
@@ -453,6 +469,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(39) == [
         "Task priority and labels",
@@ -464,6 +481,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(40) == [
         "Space moderators",
@@ -474,6 +492,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(41) == [
         "Admin-only space features",
@@ -483,6 +502,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(42) == [
         "Reviewing posts from other households",
@@ -491,6 +511,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(43) == [
         "Locking out removed admins",
@@ -498,21 +519,25 @@ def test_space_features_missing_below_v32_is_empty():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(44) == [
         "Space reports for moderators",
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(45) == [
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert space_features_missing_below(46) == [
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 

@@ -36,6 +36,7 @@ from ..domain.conversation import (
     ConversationType,
     MESSAGE_TYPES,
     RemoteConversationMember,
+    SystemChatScope,
     mute_until_for,
 )
 from ..domain.errors import CodedError, InvalidMediaRefError
@@ -43,11 +44,13 @@ from ..domain.dm_location import normalise_location_content
 from ..domain.events import (
     DmConversationCreated,
     DmMessageCreated,
+    DmMessageDeleted,
     DmMessageReactionChanged,
     DmMessageUpdated,
 )
 from ..domain.federation import FederationEventType
 from ..federation import compat
+from ..federation.owner_bound_id import SPACE_CHAT_MESSAGE_KIND, mint_owner_bound_id
 from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
@@ -702,6 +705,15 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                 await self._guard_block_pair(sender.user_id, peer.user_id)
         if type not in MESSAGE_TYPES:
             raise ValueError(f"invalid message type {type!r}")
+        space_chat = conv.system_scope is SystemChatScope.SPACE
+        if space_chat:
+            await self._check_space_chat_message(
+                conversation_id,
+                type=type,
+                media_url=media_url,
+                reply_to_id=reply_to_id,
+                highlight_reply=reply_to_highlight_frame_id is not None,
+            )
         is_media = type in ("image", "video", "file", "audio")
         # ``text`` requires content; media types carry the bytes via
         # ``media_url`` instead so an empty caption (or, for audio, an
@@ -738,7 +750,18 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             await self._reject_media_on_relay_only_conversation(conversation_id)
 
         msg = ConversationMessage(
-            id=uuid.uuid4().hex,
+            # A space chat message travels to the space's other households
+            # (v_55), so its id commits to its author (owner-bound): no
+            # other household can claim it for anyone else.
+            id=(
+                mint_owner_bound_id(
+                    SPACE_CHAT_MESSAGE_KIND,
+                    space_id=conv.space_id or "",
+                    owner_user_id=sender.user_id,
+                )
+                if space_chat
+                else uuid.uuid4().hex
+            ),
             conversation_id=conversation_id,
             sender_user_id=sender.user_id,
             content=content,
@@ -768,6 +791,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                 conversation_id,
                 actor_user_id=sender.user_id,
                 withheld=withheld,
+                policy=self._system_chats,
             )
         )
         # Resolve each remote member's ``user_id`` via the
@@ -1070,6 +1094,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             msg.conversation_id,
             actor_user_id=editor.user_id,
             withheld=await self._guardian_block_counterparts(editor.user_id),
+            policy=self._system_chats,
         )
         await self._bus.publish(
             DmMessageUpdated(
@@ -1087,6 +1112,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                     else ()
                 ),
                 sender_display_name=editor.display_name,
+                is_edit=True,
             )
         )
         # Receiver upserts on message_id (save_message ON CONFLICT UPDATE),
@@ -1118,12 +1144,49 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         actor_username: str,
         conversation_id: str | None = None,
     ) -> None:
+        """Delete a message (soft: its content and media are cleared).
+
+        The sender may delete their own; in a space chat the space's owner,
+        admins and moderators may delete anyone's (content authority, asked
+        of :class:`SystemChatPolicy`). In a system chat the actor must still
+        be able to read it (chat on, still a writer member) — but, like a
+        post in an archived space, an archived space's chat still takes
+        deletes.
+        """
         msg = await self._require_message(message_id, conversation_id)
-        await self._require_system_write(msg.conversation_id, actor_username)
+        conv = await self._convos.get(msg.conversation_id)
+        if conv is not None and conv.is_system:
+            await self._require_system_seat(conv, actor_username, write=False)
         actor = await self._require_user(actor_username)
-        if msg.sender_user_id != actor.user_id:
+        if msg.sender_user_id != actor.user_id and not (
+            conv is not None
+            and conv.is_system
+            and self._system_chats is not None
+            and await self._system_chats.may_moderate(conv, actor.user_id)
+        ):
             raise PermissionError("only the sender can delete a message")
         await self._convos.soft_delete_message(message_id)
+        await self._bus.publish(
+            DmMessageDeleted(
+                conversation_id=msg.conversation_id,
+                message_id=msg.id,
+                sender_user_id=msg.sender_user_id,
+                actor_user_id=actor.user_id,
+                recipient_user_ids=await local_audience(
+                    self._convos,
+                    self._users,
+                    msg.conversation_id,
+                    actor_user_id=actor.user_id,
+                    include_actor=True,
+                    policy=self._system_chats,
+                ),
+                system_scope=(
+                    conv.system_scope.value
+                    if conv is not None and conv.system_scope is not None
+                    else None
+                ),
+            )
+        )
         # The row's media is cleared; drop the backing file too unless
         # another row still references it. Best effort: a missing file
         # never blocks the delete.
@@ -1420,6 +1483,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             actor_user_id=actor_user_id,
             withheld=withheld,
             include_actor=True,
+            policy=self._system_chats,
         )
         await self._bus.publish(
             DmMessageReactionChanged(
@@ -1673,6 +1737,26 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         conv = await self._convos.get(conversation_id)
         if conv is not None and conv.is_system:
             await self._require_system_seat(conv, username, write=True)
+
+    async def _check_space_chat_message(
+        self,
+        conversation_id: str,
+        *,
+        type: str,
+        media_url: str | None,
+        reply_to_id: str | None,
+        highlight_reply: bool,
+    ) -> None:
+        """A space chat takes text only for now (v_55: text, a reply and
+        @-mentions; media, voice notes, locations and highlight replies are
+        refused rather than silently kept from the other households), and a
+        reply must name a message of the same chat."""
+        if type != "text" or media_url or highlight_reply:
+            raise ValueError("space chat messages are text only")
+        if reply_to_id is not None:
+            target = await self._convos.get_message(reply_to_id)
+            if target is None or target.conversation_id != conversation_id:
+                raise ValueError("reply_to_id is not a message of this chat")
 
     async def _require_message(
         self,

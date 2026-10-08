@@ -40,7 +40,8 @@ with an owner — space posts (and so the bazaar / poll / schedule rows
 hung off a wrapper post) and comments, gallery items, calendar events,
 tasks, pages, stickies — and moments. v_39 space timetables are bound
 from their first release (:data:`SPACE_TIMETABLE_KIND`), so a receiver
-refuses a timetable id of any other shape outright. A moment belongs to no space, so
+refuses a timetable id of any other shape outright; v_55 space chat
+messages likewise (:data:`SPACE_CHAT_MESSAGE_KIND`). A moment belongs to no space, so
 its kind is **unscoped** (:data:`UNSCOPED_KINDS`): the space component is
 the empty string and the commitment covers only the kind, the author and
 the nonce — the author's ``user_id`` already derives from its home
@@ -76,6 +77,10 @@ SPACE_STICKY_KIND: str = "space-sticky"
 #: A space timetable (v_39). Its owner is the admin who created it.
 SPACE_TIMETABLE_KIND: str = "space-timetable"
 MOMENT_KIND: str = "moment"
+#: A space chat message (v_55). Its owner is the member who wrote it. Bound
+#: from its first release, like timetables: a receiver refuses a chat
+#: message id of any other shape (a legacy id included).
+SPACE_CHAT_MESSAGE_KIND: str = "space-chat-message"
 #: A group conversation (v_37). Its "owner" is the **authority household**
 #: — the ``instance_id`` that created the group and alone may change its
 #: member list — not a user: the commitment is over that instance id, so

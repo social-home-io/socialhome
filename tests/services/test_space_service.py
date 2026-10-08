@@ -3864,6 +3864,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -3896,6 +3897,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     )
 
 
@@ -3957,6 +3959,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -4016,6 +4019,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     )
     assert "Apps that work across households" not in c.lagging_features
     assert "Apps that reach the right person" not in c.lagging_features

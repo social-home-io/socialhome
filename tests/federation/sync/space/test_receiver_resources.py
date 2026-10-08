@@ -19,6 +19,7 @@ from socialhome.domain.task import Task, TaskPriority, TaskStatus
 from socialhome.domain.timetable import Timetable, to_wire_dict
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.owner_bound_id import (
+    SPACE_CHAT_MESSAGE_KIND,
     SPACE_TIMETABLE_KIND,
     mint_owner_bound_id,
 )
@@ -1756,3 +1757,47 @@ async def test_space_zones_coordinates_truncated_to_4dp(setup):
         [dict(_GOOD_ZONE_RECORD, latitude=47.376912345, longitude=-8.541789)],
     )
     assert (c.zones[0].latitude, c.zones[0].longitude) == (47.3769, -8.5418)
+
+
+# ── v_55 space chat: records go to the chat sink (the live create rule) ──
+
+
+class _ChatSink:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list, str]] = []
+
+    async def apply_sync_records(self, space_id, records, *, provider):
+        self.calls.append((space_id, list(records), provider))
+
+
+def _chat_record(owner: str = "u-a", space_id: str = "sp-1") -> dict:
+    mid = mint_owner_bound_id(
+        SPACE_CHAT_MESSAGE_KIND, space_id=space_id, owner_user_id=owner
+    )
+    return {"id": mid, "message_id": mid, "author_user_id": owner, "content": "hi"}
+
+
+async def test_chat_records_reach_the_chat_sink(setup):
+    r, _collector, kp = setup
+    sink = _ChatSink()
+    r.attach_chat_sink(sink)
+    good = _chat_record()
+    await _send(r, kp, "chat_messages", [good])
+    assert sink.calls == [("sp-1", [good], "peer-a")]
+
+
+async def test_a_chat_record_claiming_another_authors_id_never_reaches_the_sink(
+    setup,
+):
+    r, _collector, kp = setup
+    sink = _ChatSink()
+    r.attach_chat_sink(sink)
+    squatted = {**_chat_record("u-a"), "author_user_id": "u-b"}
+    good = _chat_record("u-b")
+    await _send(r, kp, "chat_messages", [squatted, good])
+    assert sink.calls == [("sp-1", [good], "peer-a")]
+
+
+async def test_chat_records_are_dropped_without_a_sink(setup):
+    r, _collector, kp = setup
+    await _send(r, kp, "chat_messages", [_chat_record()])  # no raise

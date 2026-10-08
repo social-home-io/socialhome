@@ -8,7 +8,20 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 54
+    assert fc.OURS == 55
+
+
+def test_space_chat_capability_threshold():
+    """v_55 — the four ``SPACE_CHAT_*`` events and the ``chat_messages``
+    catch-up resource. Space-scoped: a lagging member household misses the
+    space's chat."""
+    assert fc.FederationCapability.MIN_FOR_SPACE_CHAT == 55
+    assert fc.FederationCapability.MIN_FOR_SPACE_CHAT in fc.SPACE_SCOPED_MIN_VERSIONS
+    assert fc.features_missing_below(54) == ["Chat in spaces"]
+    assert fc.features_missing_below(55) == []
+    assert fc.space_features_missing_below(54) == ["Chat in spaces"]
+    assert fc.space_feature_keys_missing_below(54) == ["space_chat"]
+    assert fc.CAPABILITY_FEATURE_KEYS[55] == "space_chat"
 
 
 def test_gfs_relay_key_exchange_capability_threshold():
@@ -20,9 +33,10 @@ def test_gfs_relay_key_exchange_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(53) == [
-        "Turning on the GFS fallback for an existing connection"
+        "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
-    assert fc.features_missing_below(54) == []
+    assert fc.features_missing_below(54) == ["Chat in spaces"]
 
 
 def test_gfs_relay_routes_capability_threshold():
@@ -36,9 +50,11 @@ def test_gfs_relay_routes_capability_threshold():
     assert fc.features_missing_below(52) == [
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
     assert fc.features_missing_below(53) == [
-        "Turning on the GFS fallback for an existing connection"
+        "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -52,6 +68,7 @@ def test_forwarded_invite_link_capability_threshold():
     assert fc.features_missing_below(52) == [
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -71,6 +88,7 @@ def test_space_authority_rotation_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert fc.features_missing_below(45) == [
         "Catching up on missed security updates",
@@ -82,6 +100,7 @@ def test_space_authority_rotation_capability_threshold():
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -92,6 +111,7 @@ def test_space_authority_rotation_capability_threshold():
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -108,6 +128,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -118,6 +139,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -133,6 +155,7 @@ def test_space_report_scope_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 
@@ -152,6 +175,7 @@ def test_federated_moderation_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert "Reviewing posts from other households" not in fc.features_missing_below(43)
 
@@ -173,6 +197,7 @@ def test_content_access_enforcement_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert "Admin-only space features" not in fc.features_missing_below(42)
 
@@ -195,6 +220,7 @@ def test_space_moderator_role_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert "Space moderators" not in fc.features_missing_below(41)
 
@@ -218,6 +244,7 @@ def test_task_priority_labels_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert "Task priority and labels" not in fc.features_missing_below(40)
 
@@ -281,6 +308,7 @@ def test_owner_bound_content_id_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 
@@ -306,6 +334,7 @@ def test_moment_origin_signature_capability_threshold():
         "Catching up on missed security updates",
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
 
 
@@ -607,6 +636,7 @@ def test_forwarded_role_change_capability_threshold():
     assert fc.space_features_missing_below(46) == [
         "Role changes from member households",
         "Shared pages without lost edits",
+        "Chat in spaces",
     ]
     assert fc.features_missing_below(47) == [
         "Shared pages without lost edits",
@@ -616,6 +646,7 @@ def test_forwarded_role_change_capability_threshold():
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -627,7 +658,10 @@ def test_host_sequenced_pages_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.space_features_missing_below(47) == ["Shared pages without lost edits"]
+    assert fc.space_features_missing_below(47) == [
+        "Shared pages without lost edits",
+        "Chat in spaces",
+    ]
     assert fc.features_missing_below(48) == [
         "Members can post without the host",
         "Anonymous posting through the GFS",
@@ -635,6 +669,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -652,6 +687,7 @@ def test_member_gfs_publish_capability_threshold():
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -668,6 +704,7 @@ def test_strict_member_publish_capability_threshold():
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -684,6 +721,7 @@ def test_private_channels_capability_threshold():
         "Invite links from member households",
         "Reaching a paired household through a shared GFS",
         "Turning on the GFS fallback for an existing connection",
+        "Chat in spaces",
     ]
 
 
@@ -743,6 +781,7 @@ _PINNED_FEATURE_KEYS = {
     52: "forwarded_invite_links",
     53: "shared_gfs_relay",
     54: "gfs_fallback_later",
+    55: "space_chat",
 }
 
 

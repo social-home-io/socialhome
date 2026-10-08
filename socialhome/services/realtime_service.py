@@ -62,6 +62,7 @@ from ..domain.events import (
     DmConversationCreated,
     DmGroupRosterChanged,
     DmMessageCreated,
+    DmMessageDeleted,
     DmMessageReactionChanged,
     DmMessageUpdated,
     HouseholdConfigChanged,
@@ -399,6 +400,7 @@ class RealtimeService:
         )
         self._bus.subscribe(DmMessageCreated, self._on_dm_message_created)
         self._bus.subscribe(DmMessageUpdated, self._on_dm_message_updated)
+        self._bus.subscribe(DmMessageDeleted, self._on_dm_message_deleted)
         self._bus.subscribe(
             DmMessageReactionChanged,
             self._on_dm_message_reaction_changed,
@@ -2187,6 +2189,23 @@ class RealtimeService:
                 continue
             seen.add(user_id)
             await self._ws.broadcast_to_user(user_id, payload)
+
+    async def _on_dm_message_deleted(self, event: DmMessageDeleted) -> None:
+        """Push ``dm.message_deleted`` so open threads drop the bubble's
+        content in place (a DM, the household chat or a space chat — a
+        moderator's delete included). Only ids: what was said never rides
+        the frame. Goes to the event's local audience (the actor's own other
+        sessions included), which the publisher filtered by the live policy.
+        """
+        payload = {
+            "type": "dm.message_deleted",
+            "conversation_id": event.conversation_id,
+            **await self._system_chat_fields(event.conversation_id),
+            "message_id": event.message_id,
+        }
+        for user_id in dict.fromkeys(event.recipient_user_ids):
+            if user_id:
+                await self._ws.broadcast_to_user(user_id, payload)
 
     async def _on_dm_message_reaction_changed(
         self,

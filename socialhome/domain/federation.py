@@ -274,6 +274,18 @@ class FederationEventType(str, enum.Enum):
     # authored by a moderator seated on the sending household.
     SPACE_TIMETABLE_UPSERTED = "space_timetable_upserted"
     SPACE_TIMETABLE_DELETED = "space_timetable_deleted"
+    # ── Space chat (v_55) — the space's own group chat (a system
+    # conversation on group-DM storage, one per space). Each household
+    # keeps its own chat for the space; the wire names the space, never a
+    # conversation id. Fanned out only to households holding at least one
+    # WRITER seat (never a follower-only household). Message ids are
+    # owner-bound (``space-chat-message``) to the author. Read receipts,
+    # delivery state and typing are never federated. See
+    # ``docs/protocol/space-chat.md``.
+    SPACE_CHAT_MESSAGE_CREATED = "space_chat_message_created"
+    SPACE_CHAT_MESSAGE_UPDATED = "space_chat_message_updated"
+    SPACE_CHAT_MESSAGE_DELETED = "space_chat_message_deleted"
+    SPACE_CHAT_REACTION = "space_chat_reaction"
     # ── Federated moderation (v_43, §4.3 ``MODERATED``). A member's pending
     # item travels from the submitter's household to the households that may
     # review it — the host and every household holding a live admin /
@@ -659,6 +671,13 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: The space's shared timetables (v_39) — space content like tasks.
         FederationEventType.SPACE_TIMETABLE_UPSERTED,
         FederationEventType.SPACE_TIMETABLE_DELETED,
+        #: The space's chat (v_55) — space content like comments: a
+        #: link-joined MEMBER household talks in it (a follower-only one
+        #: is never sent it, and its writes die at the writer gate).
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_UPDATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_DELETED,
+        FederationEventType.SPACE_CHAT_REACTION,
         #: Moderation reports raised inside the space.
         FederationEventType.SPACE_REPORT,
         #: A reviewer's verdict on one (v_45) — a link-joined moderator decides.
@@ -825,6 +844,11 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         # ── Shared timetables (admin-authored) ──
         FederationEventType.SPACE_TIMETABLE_UPSERTED,
         FederationEventType.SPACE_TIMETABLE_DELETED,
+        # ── Space chat (v_55): followers neither read nor write it ──
+        FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_UPDATED,
+        FederationEventType.SPACE_CHAT_MESSAGE_DELETED,
+        FederationEventType.SPACE_CHAT_REACTION,
         # ── Federated moderation (v_43) ──
         #: A member's pending item: content, so a Follower household may not
         #: submit one and an archived space takes none.
@@ -859,6 +883,7 @@ ARCHIVED_ALLOWED_REMOVAL_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_GALLERY_ITEM_DELETED,
         FederationEventType.SPACE_ZONE_DELETED,
         FederationEventType.SPACE_TIMETABLE_DELETED,
+        FederationEventType.SPACE_CHAT_MESSAGE_DELETED,
     }
 )
 

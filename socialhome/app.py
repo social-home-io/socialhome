@@ -282,12 +282,15 @@ from .services.federation_inbound import (
     PairingInboundHandlers,
     PersonalCalendarInboundHandlers,
     ResyncInboundHandlers,
+    SpaceChatInboundHandlers,
     SpaceContentInboundHandlers,
     SpaceInviteInboundHandlers,
     SpaceMembershipInboundHandlers,
 )
 from .federation.sync import (
     BansExporter,
+    ChatMessagesDeletedExporter,
+    ChatMessagesExporter,
     BazaarExporter,
     CalendarExporter,
     ChunkBuilder,
@@ -317,6 +320,7 @@ from .federation.sync.dm_history import (
     DmHistoryReceiver,
     DmHistoryScheduler,
 )
+from .domain.conversation import SystemChatScope
 from .domain.events import PeerProtoVersionRaised
 from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from .domain.space import ContentAction
@@ -337,7 +341,13 @@ from .services.app_service import AppService
 from .services.resync_on_upgrade import request_capability_resync_if_upgraded
 from .services.preferences_service import PreferencesService
 from .services.household_chat_service import HouseholdChatService
-from .services.system_chat_policy import HouseholdChatAccess, SystemChatPolicy
+from .services.space_chat_outbound import SpaceChatAudience, SpaceChatOutbound
+from .services.space_chat_service import SpaceChatService
+from .services.system_chat_policy import (
+    HouseholdChatAccess,
+    SpaceChatAccess,
+    SystemChatPolicy,
+)
 from .services.page_conflict_service import PageConflictService
 from .services.page_proposal_forwarder import PageProposalForwarder
 from .services.space_page_service import PageModerationHandler, SpacePageService
@@ -1508,6 +1518,12 @@ def _wire_federation_stack(
         "space_zones": ZonesExporter(space_zone_repo),
         "bazaar": BazaarExporter(bazaar_repo),
         "timetables": TimetablesExporter(space_timetable_repo),
+        # v_55 — streamed only to a writer household (the chat gate is
+        # attached with the space chat, ``_build_space_chat_federation``).
+        "chat_messages_deleted": ChatMessagesDeletedExporter(
+            conversation_repo, space_repo
+        ),
+        "chat_messages": ChatMessagesExporter(conversation_repo, space_repo),
     }
     chunk_builder = ChunkBuilder(
         encoder=federation_service._encoder,
@@ -1910,6 +1926,52 @@ def _build_space_timetables(
     """A space's shared timetables — members read, owners / admins edit,
     behind the space's ``timetable`` feature."""
     return SpaceTimetableService(repos.space_timetable, repos.space, bus)
+
+
+def _build_space_chat_federation(
+    *,
+    app: web.Application,
+    bus: EventBus,
+    federation_service: "FederationService",
+    authorship: SpaceAuthorship,
+    space_repo,
+    remote_member_repo,
+    conversation_repo,
+    user_repo,
+    chat_service: SpaceChatService,
+    policy: SystemChatPolicy,
+    child_protection: ChildProtectionService,
+    own_instance_id: str,
+) -> None:
+    """Wire a space's chat to the other member households (v_55).
+
+    Outbound ``SPACE_CHAT_*`` to the households holding a writer seat; the
+    inbound handlers on the event registry; and the §25.6 catch-up — the
+    ``chat_messages`` exporter (gated per requester to the same writer
+    households) and the receiver's chat sink (the live create rule).
+    """
+    audience = SpaceChatAudience(remote_member_repo, own_instance_id=own_instance_id)
+    SpaceChatOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        conversation_repo=conversation_repo,
+        audience=audience,
+    ).wire()
+    handlers = SpaceChatInboundHandlers(
+        bus=bus,
+        authorship=authorship,
+        space_repo=space_repo,
+        remote_member_repo=remote_member_repo,
+        conversation_repo=conversation_repo,
+        user_repo=user_repo,
+        chat_service=chat_service,
+        policy=policy,
+    )
+    # §CP.F2: a guardian-blocked sender is withheld from the protected reader.
+    handlers.attach_child_protection(child_protection)
+    handlers.attach_to(federation_service)
+    app[K.space_sync_service_key].attach_chat_gate(audience.may_receive)
+    app[K.space_sync_receiver_key].attach_chat_sink(handlers)
 
 
 def _build_link_previews(
@@ -2445,6 +2507,20 @@ def create_app(config: Config | None = None) -> web.Application:
         conversation_repo, user_repo, household_chat_access, bus
     )
     household_chat_service.wire()
+    # A space's chat: its local writer seats while ``features.chat`` is on
+    # (the federation half is wired with the federation stack, see
+    # ``_build_space_chat_federation``).
+    space_chat_access = SpaceChatAccess(space_repo)
+    system_chat_policy.register(SystemChatScope.SPACE, space_chat_access)
+    space_chat_service = SpaceChatService(
+        conversation_repo,
+        user_repo,
+        space_repo,
+        space_chat_access,
+        system_chat_policy,
+        bus,
+    )
+    space_chat_service.wire()
 
     # ── Link previews (author-side, SSRF-guarded) ────────────────────────
     link_preview_service = _build_link_previews(config, preferences_service)
@@ -2883,6 +2959,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.typing_service_key] = typing_service
     app[K.preferences_service_key] = preferences_service
     app[K.household_chat_service_key] = household_chat_service
+    app[K.space_chat_service_key] = space_chat_service
     app[K.link_preview_service_key] = link_preview_service
     app[K.app_service_key] = app_service
     app[K.alias_service_key] = alias_service
@@ -3427,6 +3504,21 @@ def create_app(config: Config | None = None) -> web.Application:
         fed.space_authorship.attach_moderation(
             held_rows=space_moderation.held_row,
             on_release=space_moderation.note_release,
+        )
+        # v_55 — the space chat between member households (writers only).
+        _build_space_chat_federation(
+            app=app,
+            bus=bus,
+            federation_service=federation_service,
+            authorship=fed.space_authorship,
+            space_repo=space_repo,
+            remote_member_repo=repos.space_remote_member,
+            conversation_repo=conversation_repo,
+            user_repo=user_repo,
+            chat_service=space_chat_service,
+            policy=system_chat_policy,
+            child_protection=child_protection_service,
+            own_instance_id=real_instance_id,
         )
         # v_49 — member households check a member-published ``space_item``
         # against their own roster and access levels too.
@@ -4168,7 +4260,11 @@ def create_app(config: Config | None = None) -> web.Application:
         await page_lock_scheduler.start()
 
         space_retention_scheduler = SpaceRetentionScheduler(
-            db, own_instance_id=real_instance_id
+            db,
+            own_instance_id=real_instance_id,
+            # The space chats too (v_55); a pruned message leaves search.
+            conversation_repo=conversation_repo,
+            on_chat_pruned=app[K.search_service_key].remove_messages,
         )
         await space_retention_scheduler.start()
 

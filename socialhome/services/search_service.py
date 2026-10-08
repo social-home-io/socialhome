@@ -19,6 +19,7 @@ from ..domain.dm_location import parse_location_content
 from ..domain.events import (
     CommentAdded,
     DmMessageCreated,
+    DmMessageDeleted,
     PageCreated,
     PageDeleted,
     PageUpdated,
@@ -86,6 +87,7 @@ class SearchService:
         self._bus.subscribe(PageUpdated, self._on_page_updated)
         self._bus.subscribe(PageDeleted, self._on_page_deleted)
         self._bus.subscribe(DmMessageCreated, self._on_dm_message)
+        self._bus.subscribe(DmMessageDeleted, self._on_dm_message_deleted)
         self._bus.subscribe(UserProvisioned, self._on_user_provisioned)
         self._bus.subscribe(UserDeprovisioned, self._on_user_deprovisioned)
 
@@ -161,6 +163,15 @@ class SearchService:
             title=event.sender_display_name or "",
             body=body,
         )
+
+    async def _on_dm_message_deleted(self, event: DmMessageDeleted) -> None:
+        """A deleted message (DM or chat) leaves the index."""
+        await self._repo.delete(scope=SCOPE_MESSAGE, ref_id=event.message_id)
+
+    async def remove_messages(self, message_ids: list[str]) -> None:
+        """Drop messages cleared without an event (space-chat retention)."""
+        for message_id in message_ids:
+            await self._repo.delete(scope=SCOPE_MESSAGE, ref_id=message_id)
 
     # ─── User / space indexing (§23.2) ────────────────────────────────────
     #

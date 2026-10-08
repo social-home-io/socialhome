@@ -17,6 +17,7 @@ from socialhome.domain.events import (
     DmConversationCreated,
     DmGroupRosterChanged,
     DmMessageCreated,
+    DmMessageDeleted,
     DmMessageReactionChanged,
     DmMessageUpdated,
     GalleryAlbumCreated,
@@ -1331,6 +1332,15 @@ async def test_dm_frames_carry_system_scope(conv_id, scope):
             conversation_id=conv_id, name=None, notify_user_ids=("u-anna",)
         )
     )
+    await bus.publish(
+        DmMessageDeleted(
+            conversation_id=conv_id,
+            message_id="m",
+            sender_user_id="u-anna",
+            actor_user_id="u-anna",
+            recipient_user_ids=("u-bob",),
+        )
+    )
     await svc.broadcast_dm_media_ready(
         message_id="m", conversation_id=conv_id, media_url="api/media/x.webp"
     )
@@ -1338,6 +1348,7 @@ async def test_dm_frames_carry_system_scope(conv_id, scope):
     assert types == {
         "dm.message",
         "dm.message_updated",
+        "dm.message_deleted",
         "dm.message_reaction",
         "dm.conversation.created",
         "dm.group.updated",
@@ -1346,3 +1357,40 @@ async def test_dm_frames_carry_system_scope(conv_id, scope):
     for frame in ws.frames:
         assert frame["system_scope"] == scope
         assert frame["space_id"] is None
+
+
+async def test_a_delete_reaches_only_its_audience_with_ids_only():
+    """``dm.message_deleted`` goes to the event's (policy-filtered) local
+    audience, once each, and carries ids only — never what was said."""
+    bus = EventBus()
+    sent: list[tuple[str, dict]] = []
+
+    class _Ws:
+        async def broadcast_to_user(self, user_id: str, payload: dict) -> None:
+            sent.append((user_id, payload))
+
+    svc = RealtimeService(
+        bus=bus,
+        ws=_Ws(),
+        user_repo=_SysUsers(),
+        space_repo=object(),
+        conversation_repo=_SysConvos(),
+    )
+    svc.wire()
+    await bus.publish(
+        DmMessageDeleted(
+            conversation_id="dm",
+            message_id="m-9",
+            sender_user_id="u-anna",
+            actor_user_id="u-anna",
+            recipient_user_ids=("u-anna", "u-bob", "u-bob", ""),
+        )
+    )
+    assert [u for u, _f in sent] == ["u-anna", "u-bob"]
+    assert sent[0][1] == {
+        "type": "dm.message_deleted",
+        "conversation_id": "dm",
+        "system_scope": None,
+        "space_id": None,
+        "message_id": "m-9",
+    }

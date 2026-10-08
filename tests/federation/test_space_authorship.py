@@ -1201,3 +1201,53 @@ async def test_item_seat_admits_a_follower_only_when_asked():
     auth = _access_authorship()
     assert not await _seat_ok(auth, AUTHOR_HOUSE, "u-sub")
     assert await _seat_ok(auth, AUTHOR_HOUSE, "u-sub", subscriber_ok=True)
+
+
+# ── may_author_writer: the strict create rule of the v_55 space chat ───
+
+
+async def test_writer_create_by_the_authors_own_household(authorship) -> None:
+    assert await authorship.may_author_writer(_ev(AUTHOR_HOUSE), SPACE, "u-author")
+    assert not await authorship.may_author_writer(_ev(OTHER_HOUSE), SPACE, "u-author")
+
+
+async def test_writer_create_relayed_by_the_host_needs_a_live_writer_seat() -> None:
+    a = SpaceAuthorship(
+        space_repo=_Spaces({SPACE: _Space(owner_instance_id=HOST)}),
+        remote_member_repo=_Seats(
+            [
+                _seat(AUTHOR_HOUSE, "u-author"),
+                _seat(AUTHOR_HOUSE, "u-follower", role="subscriber"),
+                _seat(AUTHOR_HOUSE, "u-gone", tombstoned=True),
+                _seat(HOST, "u-host"),
+            ]
+        ),
+        user_repo=_Users({"u-local"}),
+    )
+    assert await a.may_author_writer(_ev(HOST), SPACE, "u-author")
+    # A follower, a removed seat, or a user the space never had: never.
+    for user in ("u-follower", "u-gone", "u-unknown"):
+        assert not await a.may_author_writer(_ev(HOST), SPACE, user), user
+    # The host's own member is its own (acts_for), not a relay.
+    assert await a.may_author_writer(_ev(HOST), SPACE, "u-host")
+    # A non-host household never relays.
+    assert not await a.may_author_writer(_ev(OTHER_HOUSE), SPACE, "u-author")
+
+
+async def test_writer_create_never_for_a_follower_local_bot_banned_or_blank() -> None:
+    a = SpaceAuthorship(
+        space_repo=_Spaces(
+            {SPACE: _Space(owner_instance_id=HOST)}, banned={(SPACE, "u-banned")}
+        ),
+        remote_member_repo=_Seats(
+            [
+                _seat(AUTHOR_HOUSE, "u-follower", role="subscriber"),
+                _seat(AUTHOR_HOUSE, "u-banned"),
+                _seat(AUTHOR_HOUSE, "u-local"),
+            ]
+        ),
+        user_repo=_Users({"u-local"}),
+    )
+    for user in ("u-follower", "u-banned", "u-local", SYSTEM_AUTHOR, ""):
+        assert not await a.may_author_writer(_ev(AUTHOR_HOUSE), SPACE, user), user
+    assert not await a.may_author_writer(_ev(AUTHOR_HOUSE), "", "u-follower")

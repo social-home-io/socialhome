@@ -339,6 +339,7 @@ act as one — only moderation (below) reaches a local user's rows.
 | Bazaar listing | the seller seated on the sender, on the seller's own wrapper post, once (a re-send is a no-op) | status (sold / expired / cancelled) and offer acceptance: the seller's household only (a non-seller's expiry of an ended listing is DEBUG noise — every household sweeps expiries, only the seller's announces) | — |
 | Zones | settings authority only — the host or a live `admin` seat; a `moderator` seat is refused (the local service is admin-only); a new zone's `created_by` bound like a create | same | same |
 | Timetables (v_39) | an admin household, recording the edit as **an admin** (`SpaceAuthorship.admin_as`: `updated_by` holds a live `admin` seat on the sender — never a `moderator`; from the host, the roster authority, any live writer seat on the host — the owner is mirrored as a member — or a relayed remote user with a live `admin` seat; never a follower); the id must be owner-bound to `created_by` in this space (no legacy window) and a new row's `created_by` bound like a create | same — last-writer-wins on `version` (a jump > 10 000 or a version near the cap refused); a tombstoned id never comes back | same, bound to `deleted_by`; an unseen id is tombstoned only when owner-bound to the payload's `created_by` in this space — see [`timetables.md`](./timetables.md) |
+| Space chat (v_55) | the author holds a live **writer** seat on the sender (`SpaceAuthorship.may_author_writer`), or the host relays a remote writer's message on catch-up; never a follower, a banned user, one of OUR users or the bot; the id must be owner-bound (`space-chat-message`) to the author in this space, no legacy window; the receiver itself holds a writer seat and has `features.chat` on | the author's household only (`acts_for`, writer seat) | the author's household, or content authority acting as a named `actor_user_id` (`moderates_as`) — see [`space-chat.md`](./space-chat.md) |
 
 **Creator-bound ids (v_34 albums, v_36 everything else).** The rules
 above bind the user a payload names to the signing household, but a new
@@ -906,6 +907,10 @@ is opt-in:
   payload so member households mirror the same feed visibility. Absent on
   an older sender → the receiver defaults to **visible**. Additive +
   fail-soft — **no new event type or capability bump**.
+
+## Chat (on by default)
+
+`SpaceFeatures.chat` (column `spaces.feature_chat`, default **on** in every existing and new space, federated in `space_meta.features.chat`, an owner or admin turns it off) gives the space a chat next to its feed — its writers only, never a follower. Each household keeps its own copy (a system conversation); messages travel as `SPACE_CHAT_*` (v_55) to the households holding a writer seat, so a follower-only household receives nothing. Full flow, authorization table and catch-up: [`space-chat.md`](./space-chat.md).
 
 ## Timetable tab (opt-in)
 

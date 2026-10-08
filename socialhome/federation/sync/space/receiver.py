@@ -22,7 +22,7 @@ import base64
 import logging
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
 import orjson as _orjson
 
@@ -67,6 +67,7 @@ from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
     SPACE_CALENDAR_EVENT_KIND,
+    SPACE_CHAT_MESSAGE_KIND,
     SPACE_COMMENT_KIND,
     SPACE_PAGE_KIND,
     SPACE_POST_KIND,
@@ -117,6 +118,19 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+class ChatSyncSink(Protocol):
+    """Where streamed space-chat messages (v_55) go — the space-chat inbound
+    handlers, which apply each record with the live create rule."""
+
+    async def apply_sync_records(
+        self, space_id: str, records: list[dict[str, Any]], *, provider: str
+    ) -> None: ...
+
+    async def apply_sync_tombstones(
+        self, space_id: str, records: list[dict[str, Any]], *, provider: str
+    ) -> None: ...
+
+
 def _parse_iso(value: Any) -> datetime:
     if isinstance(value, str) and value:
         try:
@@ -150,6 +164,7 @@ class SpaceSyncReceiver:
         "_gallery_tombstones",
         "_timetable_repo",
         "_page_conflicts",
+        "_chat_sink",
     )
 
     def __init__(
@@ -178,6 +193,10 @@ class SpaceSyncReceiver:
     ) -> None:
         self._bus = bus
         self._timetable_repo = timetable_repo
+        #: v_55 — where ``chat_messages`` records go: the space-chat inbound
+        #: handlers, which run each through the live create rule. ``None``
+        #: drops the resource (see :meth:`attach_chat_sink`).
+        self._chat_sink: "ChatSyncSink | None" = None
         #: v_48 — a ``pages`` record for a page held here (only the host's
         #: chunks get that far) is another version of it: fast-forward,
         #: stale, merge or conflict. ``None``: upserted (last write wins).
@@ -209,6 +228,10 @@ class SpaceSyncReceiver:
         #: ``(space_id, epoch)`` (#122). Without it, missing-key
         #: chunks log + drop (legacy behaviour).
         self._pending_decrypts = pending_decrypts
+
+    def attach_chat_sink(self, sink: "ChatSyncSink") -> None:
+        """Wire where streamed space-chat messages (v_55) are applied."""
+        self._chat_sink = sink
 
     async def on_chunk(
         self,
@@ -767,6 +790,21 @@ class SpaceSyncReceiver:
 
         elif resource == "timetables":
             await self._persist_timetables(records, space_id, provider=provider)
+        elif resource == "chat_messages_deleted":
+            if self._chat_sink is not None:
+                await self._chat_sink.apply_sync_tombstones(
+                    space_id, records, provider=provider
+                )
+        elif resource == "chat_messages":
+            if self._chat_sink is None:
+                log.debug(
+                    "received %d chat records — no chat sink wired, skipping",
+                    len(records),
+                )
+                return
+            await self._chat_sink.apply_sync_records(
+                space_id, records, provider=provider
+            )
 
     async def _persist_timetables(
         self, records: list[dict[str, Any]], space_id: str, *, provider: str
@@ -1500,6 +1538,12 @@ class SpaceSyncReceiver:
                 return await auth.may_author(
                     event, space_id, str(r.get("created_by") or "")
                 )
+            case "chat_messages" | "chat_messages_deleted":
+                # Judged record by record by the chat sink with the live
+                # ``SPACE_CHAT_MESSAGE_CREATED`` rule (owner-bound id, the
+                # author a writer this provider speaks for, held already →
+                # skipped), whoever streams it.
+                return True
             case "bazaar":
                 post_id = str(r.get("post_id") or "")
                 if self._bazaar_repo is None or not post_id:
@@ -1634,6 +1678,8 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "pages": (SPACE_PAGE_KIND, ("created_by",)),
     "stickies": (SPACE_STICKY_KIND, ("author", "created_by")),
     "timetables": (SPACE_TIMETABLE_KIND, ("created_by",)),
+    "chat_messages": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
+    "chat_messages_deleted": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
 }
 
 

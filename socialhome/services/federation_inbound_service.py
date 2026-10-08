@@ -39,6 +39,7 @@ from ..domain.events import (
     CommentDeleted,
     CommentUpdated,
     DmMessageCreated,
+    DmMessageDeleted,
     DmMessageReactionChanged,
     DmMessageUpdated,
     MomentCreated,
@@ -129,6 +130,7 @@ from .inbound_media_store import (
     remove_quietly,
 )
 from .protection_gate import ProtectionGateMixin
+from .dm_audience import local_audience
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .space_mentions import SpaceMentionResolver
 from .space_authority_pin import AuthorityCertOutcome, apply_authority_cert
@@ -1593,6 +1595,22 @@ class FederationInboundService(ProtectionGateMixin):
             refuse(event, reason, conversation=conv_id, message=message_id)
             return
         await self._conversation_repo.soft_delete_message(message_id)
+        # Open threads drop the bubble; a bell left with nothing unread clears.
+        await self._bus.publish(
+            DmMessageDeleted(
+                conversation_id=msg.conversation_id,
+                message_id=message_id,
+                sender_user_id=msg.sender_user_id,
+                actor_user_id=msg.sender_user_id,
+                origin_instance_id=event.from_instance,
+                recipient_user_ids=await local_audience(
+                    self._conversation_repo,
+                    self._user_repo,
+                    msg.conversation_id,
+                    actor_user_id=msg.sender_user_id,
+                ),
+            )
+        )
 
     async def _on_dm_reaction(self, event: "FederationEvent") -> None:
         p = event.payload

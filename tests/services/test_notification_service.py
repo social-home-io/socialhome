@@ -20,6 +20,7 @@ from socialhome.domain.events import (
     CommentAdded,
     CommentUpdated,
     DmMessageCreated,
+    DmMessageDeleted,
     DmMessageUpdated,
     PostEdited,
     SpacePostCreated,
@@ -2785,3 +2786,85 @@ async def test_household_chat_edit_mention_links_to_the_chat_tab(stack):
     assert [
         (n.title, n.link_url) for n in await stack.notif_repo.list(bob.user_id)
     ] == [("Anna mentioned you in Household chat", "/?tab=chat")]
+
+
+# ── Space chat (system chat of a space, v_55) ─────────────────────────────
+
+
+async def _space_chat(stack, *users) -> str:
+    await stack.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-chat', 'Choir', 'iid', 'anna', ?)",
+        ("ab" * 32,),
+    )
+    chat = await stack.conv_repo.create_system_chat(
+        SystemChatScope.SPACE, space_id="sp-chat"
+    )
+    for u in users:
+        await stack.conv_repo.upsert_seat(chat.id, u.username, notif_level="all")
+    return chat.id
+
+
+async def test_space_chat_bell_names_the_space_and_opens_its_chat(stack):
+    anna = await stack.provision_user("anna-s")
+    bob = await stack.provision_user("bob-s")
+    carl = await stack.provision_user("carl-s")
+    chat_id = await _space_chat(stack, anna, bob, carl)
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl], mentions=[_m(bob)]))
+    link = "/spaces/sp-chat?view=chat"
+    assert [
+        (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(carl.user_id)
+    ] == [("dm_message", "anna-s in Choir", link)]
+    assert [
+        (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(bob.user_id)
+    ] == [("dm_mention", "anna-s mentioned you in Choir", link)]
+    # §25.3: the push is the title only — never the message.
+    for _ids, payload in push.calls:
+        assert not getattr(payload, "body", None)
+    await stack.notif_svc.mark_read_for_dm(carl.user_id, chat_id)
+    assert await stack.notif_repo.count_unread(carl.user_id) == 0
+
+
+async def test_space_chat_respects_the_mentions_level(stack):
+    anna = await stack.provision_user("anna-sl")
+    bob = await stack.provision_user("bob-sl")
+    chat_id = await _space_chat(stack, anna, bob)
+    await stack.conv_repo.set_notif_level(chat_id, bob.username, "mentions")
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob]))
+    assert await stack.notif_repo.list(bob.user_id) == []
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob], mentions=[_m(bob)]))
+    assert [n.type for n in await stack.notif_repo.list(bob.user_id)] == ["dm_mention"]
+
+
+async def test_a_deleted_message_clears_the_bell_once_nothing_is_unread(stack):
+    """``DmMessageDeleted``: a member with nothing left unread in the chat
+    has its bell row for it marked read; one with other unread messages
+    keeps it."""
+    anna = await stack.provision_user("anna-d")
+    bob = await stack.provision_user("bob-d")
+    carl = await stack.provision_user("carl-d")
+    chat_id = await _space_chat(stack, anna, bob, carl)
+    await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl]))
+    assert await stack.notif_repo.count_unread(bob.user_id) == 1
+    # carl still has an unread message in the chat; bob has none.
+    await stack.db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, created_at) VALUES('m-left', ?, ?, 'still here', ?)",
+        (chat_id, anna.user_id, "2999-01-01T00:00:00+00:00"),
+    )
+    await stack.conv_repo.set_last_read(
+        chat_id, bob.username, at="2999-06-01T00:00:00+00:00"
+    )
+    await stack.bus.publish(
+        DmMessageDeleted(
+            conversation_id=chat_id,
+            message_id="m-1",
+            sender_user_id=anna.user_id,
+            actor_user_id=anna.user_id,
+            recipient_user_ids=(bob.user_id, carl.user_id, "u-remote"),
+        )
+    )
+    assert await stack.notif_repo.count_unread(bob.user_id) == 0
+    assert await stack.notif_repo.count_unread(carl.user_id) == 1

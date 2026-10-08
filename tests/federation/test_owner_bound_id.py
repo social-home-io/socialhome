@@ -13,6 +13,7 @@ from socialhome.federation.owner_bound_id import (
     MOMENT_KIND,
     OWNER_BOUND_ID_SUITE_SHA256,
     SPACE_CALENDAR_EVENT_KIND,
+    SPACE_CHAT_MESSAGE_KIND,
     SPACE_COMMENT_KIND,
     SPACE_PAGE_KIND,
     SPACE_POST_KIND,
@@ -133,6 +134,8 @@ _SCOPED_KINDS = [
     SPACE_TASK_LIST_KIND,
     SPACE_PAGE_KIND,
     SPACE_STICKY_KIND,
+    # v_55 — a space chat message, bound to its author in its space.
+    SPACE_CHAT_MESSAGE_KIND,
 ]
 
 

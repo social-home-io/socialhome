@@ -11,7 +11,10 @@ indicator — so none of them can drift from the others:
   those of the message's author;
 * in a system chat (household / space chat, ``Conversation.is_system``) a
   removed seat or an account that is no longer active is skipped: its seat
-  rows are only per-user state, kept by a reconciler that may trail.
+  rows are only per-user state, kept by a reconciler that may trail. With
+  the live ``policy`` given, a seat whose user may no longer read the chat
+  right now (a space member demoted to follower, banned, the chat turned
+  off) is skipped too — the policy, not the seat, decides.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from collections.abc import Collection
 
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .system_chat_policy import SystemChatPolicy
 
 
 async def local_audience(
@@ -30,6 +34,7 @@ async def local_audience(
     actor_user_id: str,
     withheld: Collection[str] = (),
     include_actor: bool = False,
+    policy: SystemChatPolicy | None = None,
 ) -> tuple[str, ...]:
     """``user_id`` of every local member the event for ``conversation_id``
     goes to, in seat order, without duplicates."""
@@ -45,6 +50,13 @@ async def local_audience(
         if user.user_id == actor_user_id and not include_actor:
             continue
         if system and (user.state != "active" or user.deleted_at is not None):
+            continue
+        if (
+            system
+            and policy is not None
+            and conv is not None
+            and not await policy.can_read(conv, user.user_id)
+        ):
             continue
         out.append(user.user_id)
     return tuple(out)

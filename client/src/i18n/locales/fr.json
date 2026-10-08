@@ -2290,6 +2290,7 @@
   "capability.forwarded_invite_links": "Liens d'invitation des foyers membres",
   "capability.shared_gfs_relay": "Joindre un foyer associé via un GFS commun",
   "capability.gfs_fallback_later": "Activer le GFS en secours après coup",
+  "capability.space_chat": "Discussion dans les espaces",
   "settings.tab.security": "Sécurité",
   "settings.could_not_save": "Impossible d'enregistrer : {error}",
   "settings.profile.save_failed": "Échec de l'enregistrement : {error}",
