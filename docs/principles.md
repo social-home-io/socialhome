@@ -182,27 +182,29 @@ viewer routes** follow the same rule:
   `Cache-Control: no-store`. Status, body and headers are the same, and so is
   the work: every branch runs the same lookup and the same connection check.
   The viewers show it as "This isn't available right now."
-- **Timing.** The relay GETs answer every failure only when the 30 s
-  author-connect budget runs out. That budget is how long the
-  "online but never streamed" branch has to wait, so without the floor an
-  instant 503 would mean "offline". The offers get no floor. Their failure
-  branches do the same database lookup and the same in-memory check, and
-  what is left differs by microseconds, well below network jitter. A floor
-  there would hold anonymous requests open and hide nothing that success
-  doesn't reveal anyway (next item).
+- **Failures are uniform, so they can't be told apart.** Unknown,
+  revoked and offline all get the same reply. A caller who gets a 503 learns
+  only that this request did not succeed. They cannot tell whether the item
+  exists, whether the token was ever valid, or whether the author is offline.
+- **No added delay.** Failures answer at once. The relay GET's
+  "online but never streamed" branch still waits for its 30 s connect
+  budget, because that is how long the author's household gets to start
+  streaming. No other failure is held to match it. A delay would hide
+  nothing: anyone who can call a relay can call the matching offer, which
+  answers `201` or `503` immediately. A delay would also let anonymous
+  callers hold a task and a socket open for 30 s each.
 
-**The residual we can't remove: success shows presence.** The content is
-streamed live from the author's household, and the GFS can only broker to a
-household that is connected. So a **successful** stream means the author's
-household was connected at that moment. That covers an offer accepted with
-`201`, even one that is never answered (the GFS only pushes offers to a
-connected household), and a relay that delivers bytes. The same goes for a
-viewer holding a valid share link or visiting a registered public-moments
-user. This is inherent to serving live content from the author's household
-rather than storing it on the GFS. No other public route adds to it. The
-public-moments directory itself lists opted-in users by design, so whether a
-user is *registered* is public, but whether they are *online* is not
-exposed beyond the success residual.
+**The residual we can't remove: a successful offer shows the author is
+online.** The content is streamed live from the author's household, and the
+GFS only pushes an offer to a household that is connected. So an offer
+accepted with `201` shows that the author's household is connected at that
+moment, even if the offer is never answered. A relay that delivers bytes
+shows the same. Anyone who holds a valid share link, or visits a registered
+public-moments user, can learn this. It is inherent to serving live content
+from the author's household instead of storing it on the GFS, and no other
+public route reveals more. The public-moments directory lists opted-in users
+by design, so whether a user is *registered* is public. Whether they are
+*online* is revealed only by a successful offer.
 
 ### Sign-off: the connection server learns the recipients of a link-joined pair
 

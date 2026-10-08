@@ -50,7 +50,7 @@ Public (no signature):
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/highlight/{instance_id}/{highlight_id}/{token}` | SSR landing page. Always `200` with the same viewer shell. The GFS does not look up the token or check whether the author is online here (see "Not a presence oracle" below). The viewer's offer call is the first point that consults state. |
+| GET | `/highlight/{instance_id}/{highlight_id}/{token}` | SSR landing page. Always `200` with the same viewer shell and `Cache-Control: no-store` (the URL carries the share token). The GFS does not look up the token or check whether the author is online here (see "Not a presence oracle" below). The viewer's offer call is the first point that consults state. |
 
 Public-viewer WebRTC signalling (added in PR2):
 
@@ -68,7 +68,7 @@ GFS-relay fallback (used when the direct DataChannel can't connect — see
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anonymous, token-gated (same token as the offer flow). Chunked `application/octet-stream`: the GFS pushes a `highlight_signal kind=relay_offer` to the author and pipes the framed bytes the author streams back. Every non-success state (bad / expired token, URL mismatch, author offline, relay capacity, author never connects) gets the uniform `503 {"error":"unavailable"}`, sent only once the 30 s author-connect budget has elapsed. `422` (missing token). |
+| GET | `/gfs/highlight_rtc/relay/{instance_id}/{highlight_id}?token=...` | Anonymous, token-gated (same token as the offer flow). Chunked `application/octet-stream`: the GFS pushes a `highlight_signal kind=relay_offer` to the author and pipes the framed bytes the author streams back. Every non-success state (bad / expired token, URL mismatch, author offline, relay capacity, author never connects) gets the uniform `503 {"error":"unavailable"}`, sent at once (only the never-connects branch waits its 30 s budget). `422` (missing token). |
 | POST | `/gfs/highlight_rtc/relay-stream/{relay_id}` | Author SH only. Header-auth: `X-SH-Instance` + `X-SH-Signature` (Ed25519 over canonical `{"instance_id","relay_id"}`); body is the raw framed byte stream. `403` (relay's target instance != signer), `404` (unknown relay), `401` (bad signature), `422` (missing headers). |
 
 The viewer DataChannel has label `highlight-public-v1` and uses the
@@ -101,13 +101,19 @@ probe ([`principles.md`](../principles.md#the-gfs-is-not-an-author-presence-orac
   connection into one boolean
   (`routes/highlight_rtc.py:_servable`). Both checks run on every branch,
   and every failure gets `global_server/public_unavailable.py`'s uniform
-  `503 {"error":"unavailable"}` + `Cache-Control: no-store`. The relay
-  sends that reply only once `RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS` (30 s)
-  has elapsed, on every failure branch, so an offline author can't be told
-  from an online one that never streams.
-* The viewer renders it as "This isn't available right now." with a
-  *Try again* button. The 10 s auto-refresh of the old offline page is gone,
-  because that page itself was the oracle.
+  `503 {"error":"unavailable"}` + `Cache-Control: no-store`. Unknown,
+  revoked and offline can't be told apart.
+  Failures are answered at once, with no added delay. A delay would hide
+  nothing, because the matching offer already answers `201` or `503`
+  immediately, and it would let anonymous callers hold a socket open for
+  30 s. Only the relay's never-streams branch waits, for its 30 s connect
+  budget.
+* The landing page itself is sent with `Cache-Control: no-store`, because
+  its URL carries the share token.
+* The viewer renders it as "This isn't available right now." in a
+  `role="alert"` region and moves focus to a *Try again* button. It retries
+  on its own after 10 s, 30 s and 60 s, then stops. The old offline page
+  reloaded every 10 s forever, and that page was itself the oracle.
 
 **Residual:** success shows that the author's household was connected at
 that moment. That means a `201` offer (answered or not), or a relay that
@@ -135,8 +141,9 @@ The GFS stores **zero** content bytes — the `RelayBridge` is purely an
 in-memory pipe between the inbound author POST and the outbound viewer
 GET. If the token doesn't resolve, the author is offline (no live WS),
 relay capacity is full, or the author never connects the relay-stream,
-the viewer GET returns the same uniform `503` once the 30 s budget has
-elapsed. See "Not a presence oracle" above.
+the viewer GET returns the same uniform `503`. It is sent at once, except
+on the never-connects branch, which first waits the 30 s budget. See "Not a
+presence oracle" above.
 
 ## DataChannel framing
 

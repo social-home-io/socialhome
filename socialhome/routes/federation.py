@@ -35,6 +35,7 @@ import orjson
 from aiohttp import web
 
 from .. import app_keys as K
+from ..rate_limiter import client_bucket
 from ..domain.federation import FederationEventType
 from .base import BaseView
 
@@ -186,7 +187,7 @@ class FederationInboxView(BaseView):
         # a missing peername still hits *some* shared bucket.
         limiter = self.request.app.get(K.rate_limiter_key)
         if limiter is not None:
-            client_ip = self.request.remote or "unknown"
+            client_ip = client_bucket(self.request.remote)
             bucket = f"federation-inbox:{client_ip}"
             if not limiter.is_allowed(
                 bucket,

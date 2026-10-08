@@ -738,6 +738,62 @@ async def test_publish_limiter_buckets_per_client_behind_a_trusted_proxy(
         assert resp.status == 429
 
 
+def test_resolver_bucket_collapses_ipv6_to_its_64():
+    """The rate-limit key for an IPv6 client is its /64 — one subscriber
+    holds the whole prefix and could otherwise rotate past every limit."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    a = resolve.bucket(_fake_request("127.0.0.1", "2001:db8:5:6::1"))
+    b = resolve.bucket(_fake_request("127.0.0.1", "2001:db8:5:6:dead:beef::9"))
+    c = resolve.bucket(_fake_request("127.0.0.1", "2001:db8:5:7::1"))
+    assert a == b == "2001:db8:5:6::/64"
+    assert c != a
+
+
+def test_resolver_bucket_leaves_ipv4_and_unmaps_mapped():
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    assert resolve.bucket(_fake_request("203.0.113.9", None)) == "203.0.113.9"
+    assert (
+        resolve.bucket(_fake_request("127.0.0.1", "::ffff:198.51.100.7"))
+        == "198.51.100.7"
+    )
+
+
+def test_resolver_call_still_returns_the_full_address():
+    """The audit trail (``admin_ip``) keeps the exact client address — only
+    the rate-limit key is coarsened."""
+    resolve = ClientIpResolver(DEFAULT_TRUSTED_PROXIES)
+    assert resolve(_fake_request("127.0.0.1", "2001:db8:5:6::1")) == "2001:db8:5:6::1"
+
+
+@pytest.mark.security
+async def test_publish_limiter_buckets_ipv6_clients_by_64(tmp_dir):
+    """Rotating through a /64 behind a trusted proxy hits ONE bucket; a
+    different /64 keeps its own budget."""
+    app = create_gfs_app(_config(tmp_dir))
+    async with TestClient(TestServer(app)) as tc:
+        body = {
+            "space_id": "sp-v6",
+            "event_type": "space_post_public",
+            "payload": {"authority_sig": "x"},
+        }
+        statuses = []
+        for i in range(PUBLISH_MAX_PER_MINUTE + 1):
+            resp = await tc.post(
+                "/gfs/publish",
+                json=body,
+                headers={"X-Forwarded-For": f"2001:db8:9:9::{i + 1:x}"},
+            )
+            statuses.append(resp.status)
+        assert 429 not in statuses[:-1]
+        assert statuses[-1] == 429
+        resp = await tc.post(
+            "/gfs/publish",
+            json=body,
+            headers={"X-Forwarded-For": "2001:db8:9:a::1"},
+        )
+        assert resp.status != 429
+
+
 # ─── Strict CSP on every public page ──────────────────────────────────
 
 

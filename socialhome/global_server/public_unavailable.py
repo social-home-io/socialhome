@@ -1,26 +1,25 @@
 """The one uniform "not available" reply for the anonymous public-content
 streaming routes (§highlights_public, §Momentum-public).
 
-The GFS must not be an author-presence oracle. The anonymous viewer
-routes (``/gfs/highlight_rtc/{offer,relay}``, ``/gfs/moment_rtc/{offer,relay}``)
-therefore answer every non-success state — unknown author, unknown or
-withdrawn item, author's household not connected, stream could not be
-brokered, author never started streaming — with the SAME response: same
-status, same body, same headers. Only genuine success differs, and that is
-the irreducible residual: content streamed live from the author's
-household shows the household was connected at that moment
-(``docs/principles.md``).
+The anonymous viewer routes (``/gfs/highlight_rtc/{offer,relay}``,
+``/gfs/moment_rtc/{offer,relay}``) answer every failure with the SAME
+response: same status, same body, same headers. That covers an unknown
+author, an unknown or withdrawn item, an author's household that is not
+connected, a stream that could not be brokered, and an author that never
+started streaming. So unknown, revoked and offline cannot be told apart.
 
-:func:`unavailable_at` additionally holds the reply until a caller-chosen
-deadline. The relay GETs use it so every failure lands after the same
-author-connect budget the online-but-stalled branch has to wait anyway —
-otherwise "offline" (instant) and "online, never streamed" (the full
-budget) would be told apart by latency alone.
+Success is different, and that can't be avoided: an offer accepted with
+``201`` shows the author's household is connected, because the GFS only
+pushes offers to a connected household (``docs/principles.md``).
+
+The failure reply goes out at once, with no added delay. Anyone who can
+call a relay can call the matching offer, which already answers 201
+(online) or 503 immediately. A latency floor would therefore hide nothing,
+and it would let anonymous callers hold a task and a socket open for the
+whole budget.
 """
 
 from __future__ import annotations
-
-import asyncio
 
 from aiohttp import web
 
@@ -43,13 +42,3 @@ def unavailable_response() -> web.Response:
         status=UNAVAILABLE_STATUS,
         headers={"Cache-Control": "no-store"},
     )
-
-
-async def unavailable_at(deadline: float) -> web.Response:
-    """Sleep until the event-loop time ``deadline``, then return
-    :func:`unavailable_response`. A deadline already in the past returns
-    immediately."""
-    remaining = deadline - asyncio.get_running_loop().time()
-    if remaining > 0:
-        await asyncio.sleep(remaining)
-    return unavailable_response()

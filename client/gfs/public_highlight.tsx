@@ -15,6 +15,7 @@
 import { render } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { humanizeViewerError } from './viewer_errors'
+import { RetryHost, ViewerError, type RetryControl } from './viewer_retry'
 
 const CHANNEL_LABEL = 'highlight-public-v1'
 const FRAME_DURATION_MS = 6000
@@ -101,7 +102,7 @@ function takeFrame(
 }
 
 
-function PublicHighlightViewer({ boot }: { boot: BootPayload }) {
+function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: RetryControl }) {
   const [state, setState] = useState<ViewerState>({
     status: 'connecting',
     message: 'Connecting…',
@@ -317,12 +318,11 @@ function PublicHighlightViewer({ boot }: { boot: BootPayload }) {
 
   if (state.status === 'error') {
     return (
-      <div class="highlight-error">
-        <p>{state.message || 'Couldn’t connect.'}</p>
-        <button type="button" class="viewer-retry" onClick={() => location.reload()}>
-          Try again
-        </button>
-      </div>
+      <ViewerError
+        className="highlight-error"
+        message={state.message || 'Couldn’t connect.'}
+        retry={retry}
+      />
     )
   }
 
@@ -414,5 +414,12 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     root.textContent = 'Missing boot context.'
     return
   }
-  render(<PublicHighlightViewer boot={boot} />, root)
+  render(
+    <RetryHost
+      render={(retry, attempt) => (
+        <PublicHighlightViewer key={attempt} boot={boot} retry={retry} />
+      )}
+    />,
+    root,
+  )
 })()

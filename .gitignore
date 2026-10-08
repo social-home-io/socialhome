@@ -50,6 +50,7 @@ socialhome/static/*
 socialhome/global_server/static/admin.css
 socialhome/global_server/static/admin.js
 socialhome/global_server/static/highlight_public_viewer.js
+socialhome/global_server/static/moment_public_viewer.js
 socialhome/global_server/static/*.module-*.js
 *.tsbuildinfo
 

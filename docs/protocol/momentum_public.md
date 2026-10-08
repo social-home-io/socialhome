@@ -291,7 +291,7 @@ These mirror the public-highlight `/gfs/highlight_rtc/*` endpoints.
 | POST | `/gfs/moment_rtc/ice/viewer` | Anonymous. Trickle the viewer's ICE candidate. |
 | POST | `/gfs/moment_rtc/answer` | Author SH only (Ed25519-signed). Authority guard: `session.initiator_id` must match the signer. |
 | POST | `/gfs/moment_rtc/ice/author` | Author SH only (signed). Same authority guard. |
-| GET | `/gfs/moment_rtc/relay/{user_id}` | Anonymous chunked relay fallback (registration-gated). Every non-success state (unregistered, author offline, relay capacity, author never connects) gets the uniform `503 {"error":"unavailable"}`, sent only once the 30 s author-connect budget has elapsed. |
+| GET | `/gfs/moment_rtc/relay/{user_id}` | Anonymous chunked relay fallback (registration-gated). Every non-success state (unregistered, author offline, relay capacity, author never connects) gets the uniform `503 {"error":"unavailable"}`, sent at once (only the never-connects branch waits its 30 s budget). |
 | POST | `/gfs/moment_rtc/relay-stream/{relay_id}` | Author SH only. Header-auth (`X-SH-Instance` + `X-SH-Signature` over canonical `{"instance_id","relay_id"}`) — same scheme as the highlight relay-stream. Body is the raw framed byte stream. |
 
 The author SH handles a new `moment_signal` WS frame with `kind` ∈
@@ -347,15 +347,19 @@ household is connected
 `routes/moment_rtc.py:_servable_author` does the registration lookup and
 the connection check on every request and folds both into one answer. Every
 failure gets `global_server/public_unavailable.py`'s uniform
-`503 {"error":"unavailable"}` + `Cache-Control: no-store`. The relay GET
-sends that reply only once the 30 s author-connect budget has elapsed, on
-every failure branch, so an offline author can't be told from an online one
-that never streams. The viewer shows "This isn't available right now." with a
-*Try again* button.
+`503 {"error":"unavailable"}` + `Cache-Control: no-store`, so unknown,
+deregistered and offline can't be told apart. Failures are answered at once, with no added delay. A delay would hide
+nothing, because the matching offer already answers `201` or `503`
+immediately, and it would let anonymous callers hold a socket open for
+30 s. Only the relay's never-streams branch waits, for its 30 s connect
+budget. The viewer shows
+"This isn't available right now." in a `role="alert"` region and moves focus
+to a *Try again* button. It retries on its own after 10 s, 30 s and 60 s,
+then stops.
 
 Whether a user is *registered* is public anyway (the directory lists them).
-The **residual** is success: a `201` offer or a relay that streams bytes
-shows the author's household was connected at that moment. Content served
+The **residual** is success: a `201` offer (answered or not) or a relay
+that streams bytes shows that the author's household is online. Content served
 live from that household can't hide this.
 
 ## Implementation pointers

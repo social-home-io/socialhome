@@ -529,15 +529,16 @@ async def test_relay_missing_token_returns_422(client):
 
 @pytest.mark.security
 @pytest.mark.parametrize(("label", "setup", "override"), _FAILURE_STATES)
-async def test_relay_failure_is_uniform_in_shape_and_latency(
+async def test_relay_failure_is_uniform_and_immediate(
     client, monkeypatch, label, setup, override
 ):
-    """Every relay failure — including the author-online-but-never-streams
-    branch — answers the same ``503 unavailable`` only after the same
-    author-connect budget, so neither the bytes nor the latency say
-    whether the author's household is connected."""
+    """Every relay failure answers the same ``503 unavailable`` as the
+    author-online-but-never-streams branch, and answers it at once: no
+    failure is held open for the author-connect budget (a floor would hide
+    nothing — the matching offer already says 201 vs 503 instantly — while
+    letting anonymous callers pin a task for 30 s)."""
 
-    budget = 0.3
+    budget = 2.0
     monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", budget)
     instance_id = override.get("instance_id", "inst-author")
     highlight_id = override.get("highlight_id", "s-1")
@@ -571,23 +572,23 @@ async def test_relay_failure_is_uniform_in_shape_and_latency(
     assert got == want, label
     assert want[0] == 503
     assert json.loads(want[1]) == {"error": "unavailable"}
-    assert elapsed >= budget, (label, elapsed)
+    assert elapsed < budget / 2, (label, elapsed)
     assert ref_elapsed >= budget
 
 
 @pytest.mark.security
 async def test_relay_bridge_full_is_uniform(client, monkeypatch):
     """The live-channel ceiling ("could not be brokered") is the same
-    response after the same budget."""
+    uniform response, sent at once."""
 
-    monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", 2.0)
     monkeypatch.setattr(relay_bridge, "MAX_LIVE_CHANNELS", 0)
     loop = asyncio.get_running_loop()
     t0 = loop.time()
     resp = await client.get(
         f"/gfs/highlight_rtc/relay/inst-author/s-1?token={client._token}",
     )
-    assert loop.time() - t0 >= 0.2
+    assert loop.time() - t0 < 1.0
     assert resp.status == 503
     assert await resp.json() == {"error": "unavailable"}
 

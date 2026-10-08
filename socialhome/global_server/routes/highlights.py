@@ -192,7 +192,11 @@ class HighlightPublicLandingView(GfsBaseView):
             "<script type='module' src='static/highlight_public_viewer.js'></script>"
             "</body></html>"
         )
-        return html_response(body, inline_styles=[_VIEWER_CSS])
+        resp = html_response(body, inline_styles=[_VIEWER_CSS])
+        # The URL and the boot JSON carry the share token — a bearer
+        # credential — so neither a shared nor a browser cache may keep it.
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
 
 # ─── Internal helpers ────────────────────────────────────────────────────

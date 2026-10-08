@@ -346,6 +346,14 @@ async def test_unpublish_unknown_returns_404(client):
 # ── Strict CSP on the viewer + its fallback pages ───────────────────────
 
 
+async def test_viewer_page_is_not_cached(client):
+    """The URL (and the boot JSON in the body) carries the share token — a
+    bearer credential — so no shared or browser cache may keep the page."""
+    resp = await client.get("/highlight/inst-author/s-1/some-token")
+    assert resp.status == 200
+    assert resp.headers["Cache-Control"] == "no-store"
+
+
 async def test_viewer_page_has_strict_csp(client):
     resp = await client.get("/highlight/inst-author/s-csp/nope")
     assert resp.status == 200

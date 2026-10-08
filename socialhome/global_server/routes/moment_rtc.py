@@ -27,7 +27,7 @@ import logging
 from aiohttp import web
 
 from .. import app_keys as K
-from ..public_unavailable import unavailable_at, unavailable_response
+from ..public_unavailable import unavailable_response
 from .base import GfsBaseView
 from .rtc import _rtc_authenticate, authenticate_relay_stream
 
@@ -36,8 +36,8 @@ log = logging.getLogger(__name__)
 #: How long the guest's relay GET waits for the author SH to start
 #: streaming before giving up with the uniform 503. Matches the viewer's
 #: WebRTC poll budget so the fallback doesn't hang far longer than the
-#: primary. It is also the latency of EVERY relay failure (unknown, offline,
-#: never streamed, bridge full), so timing can't reveal author presence.
+#: primary. Only this branch waits: every other failure answers the same 503
+#: at once (no latency floor — see :mod:`..public_unavailable`).
 RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS: float = 30.0
 
 #: Author body is read in chunks this size and piped straight to the
@@ -168,21 +168,15 @@ class MomentRelayStreamView(GfsBaseView):
     """
 
     async def get(self) -> web.StreamResponse:
-        # Every failure answers only at this deadline — the same budget the
-        # online-but-never-streams branch waits — so latency can't tell an
-        # offline author from an online one (see :mod:`..public_unavailable`).
-        deadline = (
-            asyncio.get_running_loop().time() + RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS
-        )
         user_id = self.match("user_id")
         author_instance_id = await _servable_author(self, user_id)
         if author_instance_id is None:
-            return await unavailable_at(deadline)
+            return unavailable_response()
 
         bridge = self.svc(K.gfs_relay_bridge_key)
         relay_id = bridge.create(target_instance_id=author_instance_id, scope=user_id)
         if relay_id is None:
-            return await unavailable_at(deadline)
+            return unavailable_response()
         channel = bridge.get(relay_id)
         assert channel is not None  # just created
 
@@ -204,11 +198,11 @@ class MomentRelayStreamView(GfsBaseView):
         try:
             await asyncio.wait_for(
                 channel.connected.wait(),
-                timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+                timeout=RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError, TimeoutError:
             bridge.close(relay_id)
-            return await unavailable_at(deadline)
+            return unavailable_response()
 
         resp = web.StreamResponse(
             status=200,

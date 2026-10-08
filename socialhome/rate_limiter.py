@@ -11,6 +11,7 @@ no background cleanup task is required.
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import math
 import time
 from collections.abc import Callable
@@ -18,6 +19,38 @@ from collections.abc import Callable
 from aiohttp import web
 
 from .security import error_response
+
+#: Prefix length an IPv6 client is bucketed by. One subscriber (a home, a
+#: VPS) is routinely handed a whole /64 and can source requests from any of
+#: its 2^64 addresses, so a per-address key gives it unlimited buckets.
+IPV6_BUCKET_PREFIX: int = 64
+
+
+def client_bucket(raw: str | None) -> str:
+    """The per-client rate-limit key for the address ``raw``.
+
+    IPv4 stays the exact address; IPv6 collapses to its /64 network
+    (``2001:db8:1:2::/64``); an IPv4-mapped IPv6 address (``::ffff:a.b.c.d``)
+    is the IPv4 host it names; an IPv6 zone (``%eth0``) is dropped. A missing
+    address is ``"unknown"`` (one shared bucket, never unlimited), and a
+    non-address peer string (e.g. a unix socket) is passed through as-is.
+
+    The ONE derivation every per-address limiter uses — the household's
+    unauthenticated routes and the GFS's limiters alike — so a client can't
+    find a limiter that buckets it more finely than the rest.
+    """
+    if not raw:
+        return "unknown"
+    text = raw.strip().split("%", 1)[0]
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return raw
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((addr, IPV6_BUCKET_PREFIX), strict=False))
+    return str(addr)
 
 
 class RateLimiter:

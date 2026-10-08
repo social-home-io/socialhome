@@ -18,6 +18,7 @@
 import { render } from 'preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { humanizeViewerError as humanizeError } from './viewer_errors'
+import { RetryHost, ViewerError, type RetryControl } from './viewer_retry'
 
 const CHANNEL_LABEL = 'moment-public-v1'
 const POLL_INTERVAL_MS = 1000
@@ -91,7 +92,7 @@ function takeFrame(
 }
 
 
-function PublicMomentsViewer({ boot }: { boot: BootPayload }) {
+function PublicMomentsViewer({ boot, retry }: { boot: BootPayload; retry: RetryControl }) {
   const [state, setState] = useState<ViewerState>({
     status: 'connecting',
     message: 'Connecting…',
@@ -264,12 +265,11 @@ function PublicMomentsViewer({ boot }: { boot: BootPayload }) {
 
   if (state.status === 'error') {
     return (
-      <div class="moments-error">
-        <p>{state.message || 'Couldn’t connect.'}</p>
-        <button type="button" class="viewer-retry" onClick={() => location.reload()}>
-          Try again
-        </button>
-      </div>
+      <ViewerError
+        className="moments-error"
+        message={state.message || 'Couldn’t connect.'}
+        retry={retry}
+      />
     )
   }
   if (state.status !== 'ready') {
@@ -337,5 +337,12 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     root.textContent = 'Missing boot context.'
     return
   }
-  render(<PublicMomentsViewer boot={boot} />, root)
+  render(
+    <RetryHost
+      render={(retry, attempt) => (
+        <PublicMomentsViewer key={attempt} boot={boot} retry={retry} />
+      )}
+    />,
+    root,
+  )
 })()

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+from aiohttp.web_request import BaseRequest
 
 from socialhome.platform.standalone import StandaloneAdapter
+from socialhome.routes.users import AUTH_TOKEN_RATE_LIMIT
 
 
 async def _seed_platform_user(client, username: str, password: str):
@@ -97,8 +100,6 @@ def test_verify_password_rejects_non_scrypt_stored():
 
 async def test_auth_token_rate_limit_returns_429_after_budget(client):
     """§25.7 — a 6th login attempt from the same IP returns 429."""
-    from socialhome.routes.users import AUTH_TOKEN_RATE_LIMIT
-
     # Burn the budget with bad credentials — all should 401, then 429.
     for _ in range(AUTH_TOKEN_RATE_LIMIT):
         r = await client.post(
@@ -111,3 +112,30 @@ async def test_auth_token_rate_limit_returns_429_after_budget(client):
         json={"username": "ghost", "password": "wrong"},
     )
     assert r.status == 429
+
+
+@pytest.mark.security
+async def test_auth_token_rate_limit_buckets_ipv6_by_64(client, monkeypatch):
+    """Rotating through addresses in one IPv6 /64 must not buy fresh login
+    budgets — the /64 is one subscriber. Another /64 is unaffected."""
+    monkeypatch.setattr(
+        BaseRequest,
+        "remote",
+        property(lambda self: self.headers.get("X-Test-Peer", "127.0.0.1")),
+    )
+    statuses = []
+    for i in range(AUTH_TOKEN_RATE_LIMIT + 1):
+        r = await client.post(
+            "/api/auth/token",
+            json={"username": "ghost", "password": "wrong"},
+            headers={"X-Test-Peer": f"2001:db8:1:2::{i + 1:x}"},
+        )
+        statuses.append(r.status)
+    assert statuses[:-1] == [401] * AUTH_TOKEN_RATE_LIMIT
+    assert statuses[-1] == 429
+    r = await client.post(
+        "/api/auth/token",
+        json={"username": "ghost", "password": "wrong"},
+        headers={"X-Test-Peer": "2001:db8:1:3::1"},
+    )
+    assert r.status == 401
