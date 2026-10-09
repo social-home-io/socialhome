@@ -101,10 +101,11 @@ function wire(opts: {
   role?: string | null
   features?: Record<string, unknown>
   summary?: Record<string, unknown> | 'fail'
+  archived?: boolean
 } = {}) {
-  const { role = 'member', features = {}, summary = SUMMARY } = opts
+  const { role = 'member', features = {}, summary = SUMMARY, archived = false } = opts
   apiGet.mockImplementation(async (url: string) => {
-    if (url === '/api/spaces/s1') return { id: 's1', name: 'Choir', features }
+    if (url === '/api/spaces/s1') return { id: 's1', name: 'Choir', features, archived }
     if (url === '/api/spaces/s1/members') return role ? [{ user_id: 'u1', role }] : []
     if (url === '/api/spaces/s1/chat') {
       if (summary === 'fail') throw new Error('offline')
@@ -280,6 +281,28 @@ describe('SpaceFeedPage — Feed | Chat switch', () => {
     await r.waitFor(() => expect(summaryCalls()).toBe(2))
     r.fireEvent.click(r.getByRole('button', { name: 'Feed' }))
     await r.waitFor(() => expect(summaryCalls()).toBe(3))
+  })
+
+  it('an archived space shows its chat read-only', async () => {
+    setQuery({ view: 'chat' })
+    wire({ archived: true })
+    const r = await renderPage()
+    await r.waitFor(() => expect(r.getByTestId('conversation-view')).toBeTruthy())
+    await r.waitFor(() => expect(viewProps.at(-1)!.readOnly).toBe(true))
+    expect(viewProps.at(-1)).toMatchObject({
+      readOnly: true,
+      readOnlyNote: 'This space is archived. The chat is read-only.',
+      // Deleting stays: the server still takes it in an archived space.
+      allowDelete: true,
+    })
+  })
+
+  it('a live space keeps the composer', async () => {
+    setQuery({ view: 'chat' })
+    wire()
+    const r = await renderPage()
+    await r.waitFor(() => expect(r.getByTestId('conversation-view')).toBeTruthy())
+    expect(viewProps.at(-1)!.readOnly).toBe(false)
   })
 })
 

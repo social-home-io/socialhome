@@ -96,11 +96,14 @@ class DmMentionResolver:
         group = conv.type is ConversationType.GROUP_DM
         out: list[MentionCandidate] = []
         seen: set[str] = set()
+        # One read each for the local and the remote side, never one lookup
+        # per seat — a chat badge counts mentions for many busy chats.
+        active = {u.username: u for u in await self._users.list_active()}
         for m in await self._convos.list_members(conversation_id):
             if group and m.deleted_at is not None:
                 continue
-            user = await self._users.get(m.username)
-            if user is None or not user.is_active() or user.user_id in seen:
+            user = active.get(m.username)
+            if user is None or user.user_id in seen:
                 continue
             seen.add(user.user_id)
             out.append(
@@ -109,13 +112,20 @@ class DmMentionResolver:
                     handles=_names(user.handle, user.username),
                 )
             )
-        for rm in await self.remote_seats(conv):
+        remote = await self.remote_seats(conv)
+        by_id = {
+            ru.user_id: ru
+            for ru in await self._users.list_remote_by_ids(
+                {rm.user_id for rm in remote if not rm.remote_username and rm.user_id}
+            )
+        }
+        for rm in remote:
             ru = (
                 await self._users.get_remote_by_member(
                     rm.instance_id, rm.remote_username
                 )
                 if rm.remote_username
-                else await self._users.get_remote(rm.user_id or "")
+                else by_id.get(rm.user_id or "")
             )
             if ru is not None:
                 if ru.deprovisioned_at or ru.user_id in seen:

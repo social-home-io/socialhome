@@ -973,3 +973,62 @@ async def test_prune_space_chat_messages_clears_only_expired_chat_rows(env):
     old = await env.repo.get_message("old")
     assert old is not None and old.deleted and old.content == ""
     assert await env.repo.prune_space_chat_messages(now=now) == []
+
+
+_WRITERS = frozenset({"owner", "admin", "moderator", "member"})
+
+
+async def _space_with_chat(env, sid: str, *, bob_role: str = "member") -> str:
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?,'S','host','alice','ab')",
+        (sid,),
+    )
+    await env.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,?)",
+        (sid, "uid-bob", bob_role),
+    )
+    chat = await env.repo.create_system_chat(SystemChatScope.SPACE, space_id=sid)
+    await env.repo.upsert_seat(
+        chat.id, "bob", notif_level="mentions", at="2000-01-01T00:00:00+00:00"
+    )
+    return chat.id
+
+
+async def test_list_space_chat_unread_one_row_per_live_seat(env):
+    one = await _space_with_chat(env, "sp1")
+    two = await _space_with_chat(env, "sp2")
+    for i in range(3):
+        await env.repo.save_message(_message(f"s1-{i}", one))
+    await env.repo.save_message(_message("s1-own", one, sender="uid-bob"))
+    await env.repo.save_message(_message("s2-0", two))
+    await env.repo.set_last_read(two, "bob", at=datetime.now(timezone.utc).isoformat())
+    rows = await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS)
+    assert [(r.space_id, r.conversation_id, r.unread) for r in rows] == [
+        ("sp1", one, 3),
+        ("sp2", two, 0),
+    ]
+    assert rows[0].notif_level == "mentions" and rows[0].muted_until is None
+    # Nobody else has a seat; no roles → nothing.
+    assert await env.repo.list_space_chat_unread("alice", writer_roles=_WRITERS) == []
+    assert await env.repo.list_space_chat_unread("bob", writer_roles=frozenset()) == []
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        "UPDATE spaces SET feature_chat=0 WHERE id='sp1'",
+        "UPDATE spaces SET dissolved=1 WHERE id='sp1'",
+        "UPDATE space_members SET role='subscriber' WHERE space_id='sp1'",
+        "DELETE FROM space_members WHERE space_id='sp1'",
+        "INSERT INTO space_bans(space_id, user_id, banned_by) "
+        "VALUES('sp1','uid-bob','uid-alice')",
+        "UPDATE conversation_members SET deleted_at=datetime('now')",
+    ],
+)
+async def test_list_space_chat_unread_skips_seats_access_refuses(env, spoil):
+    chat = await _space_with_chat(env, "sp1")
+    await env.repo.save_message(_message("m1", chat))
+    assert len(await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS))
+    await env.db.enqueue(spoil)
+    assert await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS) == []

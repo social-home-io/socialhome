@@ -122,6 +122,21 @@ class SystemChatSummary:
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceChatSeatUnread:
+    """One viewer's seat in one space's chat, with its raw unread count.
+
+    ``unread`` counts every unread message (the ``count_unread`` rules);
+    the service narrows it to what the seat's level and mute hear.
+    """
+
+    space_id: str
+    conversation_id: str
+    notif_level: str
+    muted_until: str | None
+    unread: int
+
+
+@dataclass(slots=True, frozen=True)
 class ConversationMessage:
     id: str
     conversation_id: str

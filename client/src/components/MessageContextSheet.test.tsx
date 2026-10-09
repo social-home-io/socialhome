@@ -83,3 +83,17 @@ describe('MessageContextSheet', () => {
     expect(onClose).toHaveBeenCalled()
   })
 })
+
+describe('MessageContextSheet — read-only thread', () => {
+  it('no onReact: no reaction row, the actions stay', () => {
+    render(
+      <MessageContextSheet
+        actions={[{ label: 'Copy text', glyph: '⧉', onClick: () => {} }]}
+        onClose={() => {}}
+      />
+    )
+    expect(screen.queryAllByRole('button', { name: /React with /i })).toHaveLength(0)
+    expect(screen.queryByRole('group')).toBeNull()
+    expect(screen.getByRole('button', { name: /Copy text/i })).toBeTruthy()
+  })
+})

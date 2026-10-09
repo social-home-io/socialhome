@@ -59,6 +59,7 @@ class AbstractUserRepo(Protocol):
 
     # Remote users --------------------------------------------------------
     async def get_remote(self, user_id: str) -> RemoteUser | None: ...
+    async def list_remote_by_ids(self, user_ids: set[str]) -> list[RemoteUser]: ...
     async def get_remote_by_member(
         self,
         instance_id: str,
@@ -511,6 +512,18 @@ class SqliteUserRepo:
             (user_id,),
         )
         return _row_to_remote_user(row_to_dict(row))
+
+    async def list_remote_by_ids(self, user_ids: set[str]) -> list[RemoteUser]:
+        """The ``remote_users`` rows of ``user_ids`` in one query (unknown
+        ids are simply absent) — :meth:`get_remote` for a whole roster."""
+        if not user_ids:
+            return []
+        marks = ",".join("?" for _ in user_ids)
+        rows = await self._db.fetchall(
+            f"SELECT * FROM remote_users WHERE user_id IN ({marks})",
+            tuple(sorted(user_ids)),
+        )
+        return [r for r in (_row_to_remote_user(d) for d in rows_to_dicts(rows)) if r]
 
     async def get_remote_by_member(
         self,

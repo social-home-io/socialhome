@@ -250,3 +250,76 @@ async def test_moderators_delete_anyones_message_members_do_not(stack):
     assert set(deleted[0].recipient_user_ids) == {"u-anna", "u-bob", "u-mod"}
     stored = await stack.convos.get_message(by_bob.id)
     assert stored is not None and stored.deleted
+
+
+# ── Unread by space (the spaces list) ─────────────────────────────────────
+
+
+async def test_unread_by_space_follows_level_and_mute(stack):
+    assert await stack.chat.unread_by_space("bob") == {}
+    chat_id = (await stack.chat.summary(SP, "bob")).conversation_id
+    await stack.dm.send_message(chat_id, sender_username="anna", content="hi all")
+    await stack.dm.send_message(chat_id, sender_username="anna", content="@bob 7pm?")
+    row = (await stack.chat.unread_by_space("bob"))[SP]
+    assert row.conversation_id == chat_id
+    assert (row.unread, row.notif_level, row.muted_until) == (1, "mentions", None)
+    await stack.dm.set_notif_level(chat_id, username="bob", level="all")
+    assert (await stack.chat.unread_by_space("bob"))[SP].unread == 2
+    await stack.dm.mute(chat_id, username="bob", duration="forever")
+    muted = (await stack.chat.unread_by_space("bob"))[SP]
+    assert muted.unread == 0 and muted.muted_until == MUTED_FOREVER
+    # The sender's own messages never count; a follower has no seat.
+    assert (await stack.chat.unread_by_space("anna"))[SP].unread == 0
+    assert await stack.chat.unread_by_space("finn") == {}
+
+
+async def test_unread_by_space_skips_the_mention_parse_without_unread(stack):
+    chat_id = (await stack.chat.summary(SP, "bob")).conversation_id
+    await stack.dm.mark_read(chat_id, username="bob")
+    calls: list[str] = []
+    original = stack.convos.list_unread_contents
+
+    async def spy(conversation_id, username, **kw):
+        calls.append(conversation_id)
+        return await original(conversation_id, username, **kw)
+
+    stack.convos.list_unread_contents = spy  # type: ignore[method-assign]
+    assert (await stack.chat.unread_by_space("bob"))[SP].unread == 0
+    assert calls == []
+
+
+async def test_unread_by_space_is_empty_for_unknown_and_inactive_users(stack):
+    await stack.chat.reconcile(SP)
+    assert await stack.chat.unread_by_space("nobody") == {}
+    await stack.db.enqueue("UPDATE users SET state='inactive' WHERE username='bob'")
+    assert await stack.chat.unread_by_space("bob") == {}
+
+
+async def test_unread_by_space_reads_the_roster_in_batches(stack):
+    """The @-mention count resolves names with one users read and one
+    remote-users read per chat — never one lookup per member."""
+    for i in range(6):
+        name = f"extra{i}"
+        await stack.db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (name, f"u-{name}", name.title()),
+        )
+        await stack.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'member')",
+            (SP, f"u-{name}"),
+        )
+    chat_id = (await stack.chat.summary(SP, "bob")).conversation_id
+    await stack.dm.send_message(chat_id, sender_username="anna", content="@bob hi")
+    await stack.dm.send_message(chat_id, sender_username="extra1", content="@bob yo")
+    counts: dict[str, int] = {}
+    for name in ("get", "get_by_user_id", "get_remote", "get_remote_by_member"):
+        original = getattr(stack.users, name)
+
+        def spy(*a, _o=original, _n=name, **kw):
+            counts[_n] = counts.get(_n, 0) + 1
+            return _o(*a, **kw)
+
+        setattr(stack.users, name, spy)
+    assert (await stack.chat.unread_by_space("bob"))[SP].unread == 2
+    # Only the viewer's own lookup — none per seated member or remote seat.
+    assert counts == {"get": 1}

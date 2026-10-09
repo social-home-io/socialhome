@@ -88,6 +88,25 @@ async def test_unread_and_mark_read(stack):
     assert await stack.dm_svc.count_unread(dm.id, username="bob") == 0
 
 
+async def test_mark_read_without_receipt_moves_only_the_watermark(stack):
+    """Read receipts off: the reader's own unread clears, but the sender
+    sees no read tick (no ``read`` delivery state)."""
+    await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    await stack.dm_svc.send_message(dm.id, sender_username="anna", content="hi")
+    marked = await stack.dm_svc.mark_read(dm.id, username="bob", receipt=False)
+    assert marked == 0
+    assert await stack.dm_svc.count_unread(dm.id, username="bob") == 0
+    states = await stack.dm_svc.list_delivery_states(dm.id, username="anna")
+    assert [s for s in states if s["state"] == "read"] == []
+    # With the receipt (the default) the tick appears.
+    await stack.dm_svc.send_message(dm.id, sender_username="anna", content="again")
+    assert await stack.dm_svc.mark_read(dm.id, username="bob") >= 1
+    states = await stack.dm_svc.list_delivery_states(dm.id, username="anna")
+    assert any(s["state"] == "read" for s in states)
+
+
 async def _mute_of(stack, conv_id: str, username: str) -> str | None:
     members = await stack.dm_svc._convos.list_members(conv_id)
     return next(m.muted_until for m in members if m.username == username)

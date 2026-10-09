@@ -942,3 +942,21 @@ async def test_revoke_api_token_for_user_only_revokes_the_owners_token(env):
     assert await env.user_repo.get_user_by_token_hash("hash-own") is not None
     await env.user_repo.revoke_api_token_for_user(alice.user_id, tid)
     assert await env.user_repo.get_user_by_token_hash("hash-own") is None
+
+
+async def test_list_remote_by_ids_reads_a_roster_in_one_go(env):
+    from socialhome.domain.user import RemoteUser
+
+    await _seed_peer_instance(env, "peer-b")
+    for uid in ("u-a", "u-b"):
+        await env.user_repo.upsert_remote(
+            RemoteUser(
+                user_id=uid,
+                instance_id="peer-b",
+                remote_username=uid,
+                display_name=uid.upper(),
+            ),
+        )
+    got = await env.user_repo.list_remote_by_ids({"u-a", "u-b", "u-nobody"})
+    assert sorted(r.user_id for r in got) == ["u-a", "u-b"]
+    assert await env.user_repo.list_remote_by_ids(set()) == []

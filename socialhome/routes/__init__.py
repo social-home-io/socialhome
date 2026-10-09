@@ -274,6 +274,7 @@ from .spaces import (
     SpaceLinkCollectionView,
     SpaceLinkDetailView,
     SpaceNotifPrefsView,
+    SpaceChatUnreadView,
     SpaceChatView,
     SpaceMemberLocationSharingView,
     SpacePresenceView,
@@ -553,6 +554,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/admin/spaces", AdminSpaceCollectionView)
     app.router.add_view("/api/spaces", SpaceCollectionView)
     app.router.add_view("/api/spaces/join", SpaceJoinView)
+    app.router.add_view("/api/spaces/chat-unread", SpaceChatUnreadView)
     app.router.add_view("/api/spaces/{id}", SpaceDetailView)
     app.router.add_view("/api/spaces/{id}/proposals", SpaceProposalsView)
     app.router.add_view(
