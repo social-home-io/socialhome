@@ -62,6 +62,24 @@ async def test_sync_windows_reads_the_space_when_asked():
     assert await windows.for_space("sp-1") == KEEP_FOREVER
 
 
+async def test_retention_key_names_the_retention_an_incremental_shape_needs():
+    class _Spaces:
+        space: Space | None = _SPACE
+
+        async def get(self, space_id):
+            return self.space
+
+    spaces = _Spaces()
+    windows = SyncWindows(spaces)  # type: ignore[arg-type]
+    assert await windows.retention_key("sp-1") == ""
+    spaces.space = dataclasses.replace(
+        _SPACE, retention_days=30, retention_exempt_types=("schedule", "poll")
+    )
+    assert await windows.retention_key("sp-1") == "30:poll,schedule"
+    spaces.space = dataclasses.replace(_SPACE, retention_days=7)
+    assert await windows.retention_key("sp-1") == "7:"
+
+
 async def test_iter_pages_follows_the_cursor_to_the_end():
     asked: list[int | None] = []
 
