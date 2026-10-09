@@ -119,9 +119,15 @@ live resource preceded by its tombstones:
 
 `posts_deleted`, `posts`, `comments_deleted`, `comments`, `task_lists`,
 `task_lists_deleted`, `tasks_deleted`, `tasks`, `tasks_archived`,
-`pages_deleted`, `pages`, `stickies`, `calendar`, `gallery`, `polls`,
-`schedules`, `space_zones`, `bazaar`, `timetables`,
-`chat_messages_deleted`, `chat_messages`.
+`pages_deleted`, `pages`, `stickies_deleted`, `stickies`,
+`calendar_deleted`, `calendar`, `gallery_albums_deleted`, `gallery`,
+`gallery_items_deleted`, `polls`, `schedules`, `space_zones_deleted`,
+`space_zones`, `bazaar`, `timetables`, `chat_messages_deleted`,
+`chat_messages`.
+
+(Comment tombstones follow the posts, and gallery-item tombstones the
+gallery, because a host stub for an id never held needs its parent — the
+post, the album — held here first.)
 
 A receiver drops a resource it does not know (DEBUG), so a new resource
 needs no capability gate: an older receiver ignores it, and a newer
@@ -145,7 +151,9 @@ what the space's retention keeps (`federation/sync/space/window.py`):
     member household never sweeps, so these tombstones are how a
     retention expiry (or any old delete) reaches it;
   - pages, task lists and tasks (and their tombstones) — not governed by
-    retention.
+    retention;
+  - the sticky, calendar-event, gallery and zone tombstones (migration
+    0085) — none of these types is swept by retention.
 
 **Bounded memory.** Exporters read their repo in keyset pages of
 `SYNC_PAGE_SIZE` (200) rows — on the row id, or `(deleted_at, id)` for
@@ -228,6 +236,76 @@ empty comment: from the host it is applied as a `comments_deleted`
 tombstone, from anyone else it is dropped.
 
 Tripwire: `tests/protocol/test_space_post_tombstones.py` (§27.9).
+
+### Sticky, calendar-event, gallery and zone tombstones
+
+A space sticky, calendar event, gallery album / item or zone delete keeps
+its row (migration 0085): `deleted_at` / `deleted_by` set, content blanked
+(a sticky's text, an event's summary / times / location / cover, an
+album's name, an item's files and caption, a zone's name and circle). An
+event's RSVPs and reminders go with it, and an album's items are
+tombstoned in place (both by trigger). Every read skips a tombstone, every
+upsert refuses one, so an id never comes back. Household stickies and
+albums never federate and are still deleted outright.
+
+Each type streams its tombstones as its own resource
+(`exporters/{stickies_deleted,calendar_deleted,gallery_deleted,zones_deleted}.py`,
+shared shape in `row_tombstones.py`), keyset-paged on the row id, never
+windowed. A record is identity only: `{id, <owner>, created_at}` — the
+owner under the live record's key (`author` / `created_by` /
+`owner_user_id` / `uploaded_by` / `created_by`), plus `album_id` for an
+item and `actor_user_id` (the tombstone's `deleted_by`) when one is
+recorded; never content, never a coordinate. On the receiver
+(`SpaceSyncReceiver._persist_{sticky,calendar,album,item,zone}_tombstones`):
+
+- a row held live **in this space** is tombstoned exactly as the live
+  `*_DELETED` does — an event publishes `CalendarEventDeleted` (the feed
+  bridge removes its announcement post), an album / item publishes
+  `GalleryAlbumDeleted` / `GalleryItemDeleted` with the provider as origin
+  and unlinks the files no other row still names;
+- a **member** household's record is admitted only under the type's live
+  delete rule, reused, not forked: stickies / calendar events — a writer
+  household, the space's `stickies` / `calendar` level for the
+  `actor_user_id` it names, who must be seated on it
+  (`_writer_delete_admits`, shared with tasks, task lists and pages); an
+  item — its uploader's household or content authority (`may_mutate`); an
+  album — its owner's household or settings authority (host / admin, not a
+  moderator); a zone — an admin household;
+- from the **host**, an id never held gets a content-free stub — only for
+  an id owner-bound to the record's owner in **this** space (an item also
+  only under an album held live here), so a stale copy streamed later
+  cannot create it and no space's id can be squatted. Zone ids are not
+  owner-bound (`z_<random>`): a zone is never stubbed — a stale copy an
+  admin household streams to a joiner lands, and the host's next stream
+  tombstones it. A member household's record never stubs.
+
+A live `SPACE_GALLERY_ALBUM_DELETED` for an album not held here yet (the
+delete overtook the create) from the owner's household or an admin
+household leaves the same durable tombstone — but only for an id
+owner-bound to the payload's `owner_user_id` in this space. A **legacy**
+(unbound) id, or an **owner-less** v_33 delete from an admin household,
+proves no space, and a durable row for it could squat another space's
+album id for good; those are kept in a bounded, restart-scoped in-memory
+record instead (`services/legacy_album_deletes.py`, the pre-0085
+`GalleryAlbumTombstones` semantics), which the live create path and the
+`gallery` sync resource consult — the create that follows is refused as
+before. The resume replay re-sends album deletes since `since` from the
+tombstone rows, with the owner.
+
+The album / item / zone delete rules name no actor, so a member household's
+record naming one is not refused for it — but `deleted_by` keeps the
+`actor_user_id` only when the provider speaks for that user, else NULL.
+
+**A deleted post holds no poll.** Soft-deleting a space post (by its
+author, a moderator, the retention sweep, a live `SPACE_POST_DELETED` or a
+`posts_deleted` tombstone) drops its reply poll (options, votes) and
+schedule poll (meta, slots, responses) by trigger, and a deleted post
+takes no new one — a `schedules` record streamed for it is refused.
+
+No protocol bump: an older receiver drops the unknown resources (and keeps
+the gap these close).
+
+Tripwire: `tests/protocol/test_space_more_tombstones.py` (§27.9).
 
 ## Backpressure
 
@@ -320,6 +398,8 @@ host of a *reversibly* archived space; a terminated copy (`archived_reason`
 set) takes content from nobody. Removals still land: the tombstone resources
 (`REMOVAL_RESOURCES` — `posts_deleted`, `comments_deleted`,
 `task_lists_deleted`, `tasks_deleted`, `pages_deleted`,
+`stickies_deleted`, `calendar_deleted`, `gallery_albums_deleted`,
+`gallery_items_deleted`, `space_zones_deleted`,
 `chat_messages_deleted`) pass the archive gate as live `*_DELETED`
 events do. The resume replay above is a burst of live
 events, so the §24.11 `check_space_archived` gate refuses it the same way.
@@ -476,6 +556,9 @@ and the sync handlers make no HTTP request.
 - `socialhome/federation/sync/space/exporters/{posts_deleted,comments_deleted}.py`
   and `receiver.py` (`_persist_post_tombstones`,
   `_persist_comment_tombstones`) — post / comment tombstones.
+- `socialhome/federation/sync/space/exporters/{row_tombstones,stickies_deleted,calendar_deleted,gallery_deleted,zones_deleted}.py`
+  and `receiver.py` (`_persist_{sticky,calendar,album,item,zone}_tombstones`,
+  `_writer_delete_admits`) — the migration-0085 tombstones.
 
 ## Spec references
 

@@ -316,9 +316,12 @@ class GalleryService:
             )
         await self._require_album_owner_or_admin(album, actor_user_id)
         media = await self._repo.list_album_media(album_id)
-        await self._repo.delete_album(album_id)
-        # The cascade took the item rows; drop their files unless another
-        # row still names them (same rule as ``delete_item``).
+        # A space album keeps a tombstone (§25.6 ``gallery_albums_deleted``);
+        # a household album is removed.
+        await self._repo.delete_album(album_id, deleted_by=actor_user_id)
+        # The item rows are gone (household) or file-free tombstones (space):
+        # drop their files unless another row still names them (same rule as
+        # ``delete_item``).
         await unlink_unreferenced(self._media_dir, self._media_refs, media)
         await self._bus.publish(
             GalleryAlbumDeleted(
@@ -460,7 +463,9 @@ class GalleryService:
                 raise GalleryPermissionError(
                     "Only the uploader or a space moderator may delete this item"
                 )
-        await self._repo.delete_item(item_id)
+        # A space item keeps a file-free tombstone (§25.6
+        # ``gallery_items_deleted``); a household item is removed.
+        await self._repo.delete_item(item_id, deleted_by=actor_user_id)
         await self._repo.increment_item_count(item.album_id, -1)
         # Drop the backing file(s) unless another row still references
         # them (an item synced from another household may name a file

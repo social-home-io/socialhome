@@ -69,3 +69,42 @@ async def test_delete_is_scoped(repo):
     assert await repo.get("z-b") is not None
     assert await repo.delete("z-b", space_id="sp-b")
     assert await repo.get("z-b") is None
+
+
+# ─── Tombstones (migration 0085, §25.6 ``space_zones_deleted``) ──────
+
+
+async def _row(repo, zone_id):
+    row = await repo._db.fetchone("SELECT * FROM space_zones WHERE id=?", (zone_id,))
+    return dict(row) if row is not None else None
+
+
+async def test_a_zone_delete_keeps_a_tombstone_that_frees_its_name(repo):
+    assert await repo.delete("z-a", space_id="sp-a", deleted_by="uid-adm")
+    row = await _row(repo, "z-a")
+    assert row is not None and row["deleted_at"] and row["deleted_by"] == "uid-adm"
+    # The name and the coordinates are content: gone.
+    assert row["name"] != "Home" and row["latitude"] == 0 and row["longitude"] == 0
+    assert await repo.get("z-a") is None
+    assert await repo.list_for_space("sp-a") == []
+    assert await repo.count_for_space("sp-a") == 0
+    assert await repo.get_by_name("sp-a", "Home") is None
+    assert await repo.is_deleted("z-a", space_id="sp-a")
+    assert not await repo.is_deleted("z-a", space_id="sp-b")
+    assert not await repo.delete("z-a", space_id="sp-a")
+    # The name is free for a new zone; the tombstoned id never comes back.
+    assert await repo.upsert(_zone("z-a2", "sp-a"), space_id="sp-a")
+    assert not await repo.upsert(_zone("z-a", "sp-a", name="Back"), space_id="sp-a")
+    assert (await _row(repo, "z-a"))["deleted_at"] is not None
+
+
+async def test_zone_tombstones_page_per_space(repo):
+    for zid in ("z-1", "z-2", "z-3"):
+        await repo.upsert(_zone(zid, "sp-a", name=zid), space_id="sp-a")
+        await repo.delete(zid, space_id="sp-a")
+    page, cursor = await repo.list_tombstones_page("sp-a", limit=2)
+    assert [t.id for t in page] == ["z-1", "z-2"] and cursor is not None
+    rest, end = await repo.list_tombstones_page("sp-a", cursor=cursor, limit=2)
+    assert [t.id for t in rest] == ["z-3"] and end is None
+    assert rest[0].owner == "uid-alice" and rest[0].deleted_by == ""
+    assert await repo.list_tombstones_page("sp-b") == ([], None)

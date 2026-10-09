@@ -82,13 +82,26 @@ RESOURCE_ORDER: tuple[str, ...] = (
     # resource.
     "pages_deleted",
     "pages",
+    # Sticky, calendar-event, gallery and zone tombstones (migration 0085)
+    # each ship before their live resource, like the page tombstones: a
+    # household that missed the delete drops its copy, and a host stub
+    # keeps a stale copy streamed later out. Album tombstones before the
+    # live gallery (an album delete takes its items); item tombstones after
+    # it, like the comment tombstones after the posts — a stub for an item
+    # never held needs its album held here, and a joiner gets the albums
+    # from ``gallery``. An older receiver drops the unknown resources.
+    "stickies_deleted",
     "stickies",
+    "calendar_deleted",
     "calendar",
+    "gallery_albums_deleted",
     "gallery",
+    "gallery_items_deleted",
     "polls",
     # Schedules ship AFTER posts because ``space_schedule_poll_meta``
     # has an FK to ``space_posts(id)``. (F5)
     "schedules",
+    "space_zones_deleted",
     "space_zones",
     # Bazaar listings ship AFTER posts because the BazaarListing row
     # has an FK to space_posts(id) — the wrapper post must already be
@@ -129,6 +142,11 @@ REMOVAL_RESOURCES: frozenset[str] = frozenset(
         "task_lists_deleted",
         "tasks_deleted",
         "pages_deleted",
+        "stickies_deleted",
+        "calendar_deleted",
+        "gallery_albums_deleted",
+        "gallery_items_deleted",
+        "space_zones_deleted",
         "chat_messages_deleted",
     }
 )

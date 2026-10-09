@@ -24,7 +24,6 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.federation.sync.space.exporter import serialise_chunk
-from socialhome.services.gallery_tombstones import GalleryAlbumTombstones
 from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.infrastructure.event_bus import EventBus
 
@@ -71,6 +70,8 @@ class _FakeRepos:
         self.gallery_items = []
         self.zones = []
         self.bazaar_listings = []
+        #: ``(space_id, album_id)`` of the album tombstones held here.
+        self.deleted_albums: set[tuple[str, str]] = set()
 
     # space_repo
     async def save_member(self, member):
@@ -183,6 +184,9 @@ class _StickyRepoStub:
         self._c.stickies.append(sticky)
         return True
 
+    async def is_deleted(self, sticky_id, *, space_id):
+        return False
+
 
 class _CalendarRepoStub:
     def __init__(self, collector):
@@ -191,6 +195,9 @@ class _CalendarRepoStub:
     async def save_event(self, event, *, space_id):
         self._c.calendar.append((space_id, event))
         return True
+
+    async def is_event_deleted(self, event_id, *, space_id):
+        return False
 
 
 class _GalleryRepoStub:
@@ -204,6 +211,12 @@ class _GalleryRepoStub:
         self._c.gallery_items.append(item)
         return True
 
+    async def is_album_deleted(self, album_id, *, space_id):
+        return (space_id, album_id) in self._c.deleted_albums
+
+    async def is_item_deleted(self, item_id, *, space_id):
+        return False
+
 
 class _ZoneRepoStub:
     def __init__(self, collector):
@@ -212,6 +225,9 @@ class _ZoneRepoStub:
     async def upsert(self, zone, *, space_id):
         self._c.zones.append(zone)
         return True
+
+    async def is_deleted(self, zone_id, *, space_id):
+        return False
 
 
 class _BazaarRepoStub:
@@ -276,12 +292,7 @@ def peer():
 
 
 @pytest.fixture
-def tombstones():
-    return GalleryAlbumTombstones()
-
-
-@pytest.fixture
-def setup(bus, peer, tombstones):
+def setup(bus, peer):
     peer_inst, peer_kp = peer
     collector = _FakeRepos()
     self_kp = generate_identity_keypair()
@@ -299,7 +310,6 @@ def setup(bus, peer, tombstones):
         gallery_repo=_GalleryRepoStub(collector),
         zone_repo=_ZoneRepoStub(collector),
         bazaar_repo=_BazaarRepoStub(collector),
-        gallery_tombstones=tombstones,
     )
     return r, collector, peer_kp
 
@@ -1417,11 +1427,11 @@ async def test_schedules_skipped_when_no_poll_repo_wired(bus, peer):
     )
 
 
-async def test_a_synced_album_deleted_here_is_not_brought_back(setup, tombstones):
+async def test_a_synced_album_deleted_here_is_not_brought_back(setup):
     """A sync from a household that missed the delete re-sends the album and
     its items; neither comes back."""
     r, c, kp = setup
-    tombstones.record("sp-1", "a-gone")
+    c.deleted_albums.add(("sp-1", "a-gone"))
     await _send(
         r,
         kp,

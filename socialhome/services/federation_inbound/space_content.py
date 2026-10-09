@@ -138,8 +138,8 @@ if TYPE_CHECKING:
     import pathlib
 
     from ...repositories.gallery_repo import AbstractGalleryRepo
+    from ..legacy_album_deletes import LegacyAlbumDeletes
     from ...repositories.media_reference_repo import AbstractMediaReferenceRepo
-    from ..gallery_tombstones import GalleryAlbumTombstones
     from ...repositories.page_repo import AbstractPageRepo
     from ..page_conflict_service import PageConflictService
     from ...repositories.space_poll_repo import AbstractSpacePollRepo
@@ -208,7 +208,7 @@ class SpaceContentInboundHandlers:
         "_timetable_repo",
         "_media_dir",
         "_media_refs",
-        "_album_tombstones",
+        "_legacy_album_deletes",
         "_page_conflicts",
     )
 
@@ -229,7 +229,7 @@ class SpaceContentInboundHandlers:
         timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
         media_dir: "pathlib.Path | None" = None,
         media_refs: "AbstractMediaReferenceRepo | None" = None,
-        gallery_tombstones: "GalleryAlbumTombstones | None" = None,
+        legacy_album_deletes: "LegacyAlbumDeletes | None" = None,
         page_conflicts: "PageConflictService | None" = None,
     ) -> None:
         self._bus = bus
@@ -251,9 +251,9 @@ class SpaceContentInboundHandlers:
         #: unreferenced. Without both, files are kept for the orphan sweep.
         self._media_dir = media_dir
         self._media_refs = media_refs
-        #: Space albums deleted here — a replayed or overtaken create must
-        #: not bring one back.
-        self._album_tombstones = gallery_tombstones
+        #: Overtaking album deletes no tombstone row can prove (a legacy id,
+        #: an owner-less v_33 delete) — restart-scoped, bounded.
+        self._legacy_album_deletes = legacy_album_deletes
 
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry
@@ -1266,6 +1266,12 @@ class SpaceContentInboundHandlers:
                 space_id,
                 MAX_STICKY_CONTENT_LENGTH,
             )
+        if await self._sticky_repo.is_deleted(sticky_id, space_id=space_id):
+            # Migration 0085: a deleted sticky's id never comes back.
+            log_not_applied(
+                event, what="sticky", row_id=sticky_id, reason="deleted here already"
+            )
+            return
         existing = await self._sticky_repo.get(sticky_id)
         if existing is not None and existing.space_id != space_id:
             log_cross_space_refusal(
@@ -1348,7 +1354,9 @@ class SpaceContentInboundHandlers:
             row_owner=existing.author,
         ):
             return
-        if not await self._sticky_repo.delete(sticky_id, space_id=space_id):
+        if not await self._sticky_repo.delete(
+            sticky_id, space_id=space_id, deleted_by=payload_actor(event) or ""
+        ):
             log_cross_space_refusal(
                 event, space_id=space_id, what="sticky", row_id=sticky_id
             )
@@ -1408,6 +1416,15 @@ class SpaceContentInboundHandlers:
             # behaviour for events from un-upgraded peers.
             announce_in_feed=bool(p.get("announce_in_feed", True)),
         )
+        if await self._calendar_repo.is_event_deleted(event_id, space_id=space_id):
+            # Migration 0085: a deleted event's id never comes back.
+            log_not_applied(
+                event,
+                what="calendar event",
+                row_id=event_id,
+                reason="deleted here already",
+            )
+            return
         existing = await self._calendar_repo.get_event(event_id)
         is_new = existing is None
         if existing is not None and existing[0] != space_id:
@@ -1481,7 +1498,9 @@ class SpaceContentInboundHandlers:
             row_owner=existing[1].created_by,
         ):
             return
-        if not await self._calendar_repo.delete_event(event_id, space_id=space_id):
+        if not await self._calendar_repo.delete_event(
+            event_id, space_id=space_id, deleted_by=payload_actor(event) or ""
+        ):
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id
             )
@@ -1843,8 +1862,9 @@ class SpaceContentInboundHandlers:
                 album_id,
             )
             return
-        if self._album_tombstones is not None and self._album_tombstones.is_deleted(
-            space_id, album_id
+        if await self._gallery_repo.is_album_deleted(album_id, space_id=space_id) or (
+            self._legacy_album_deletes is not None
+            and self._legacy_album_deletes.is_deleted(space_id, album_id)
         ):
             log_not_applied(
                 event,
@@ -1991,31 +2011,45 @@ class SpaceContentInboundHandlers:
             )
         )
 
-    async def _may_tombstone(
+    async def _remember_overtaking_delete(
         self, event: "FederationEvent", space_id: str, album_id: str
-    ) -> bool:
-        """May this delete of an album not held here yet be remembered?
+    ) -> None:
+        """Remember a delete of an album not held here yet, so the create it
+        overtook does not bring the album back.
 
-        Remembering it refuses the album's create later, so for an
-        owner-bound id (v_34) only a household that could delete the album
-        once it lands may do it: an admin household (settings authority —
-        not a moderator seat), or the owner's own household
-        — the payload's ``owner_user_id`` must be the one the id commits to
-        and be seated on the sender. A legacy id carries no owner to check
-        and keeps the v_33 behaviour.
+        Only a household that could delete the album once it lands may do
+        that — an admin household (settings authority, not a moderator
+        seat), or the owner's own household. Where it is remembered:
+
+        * an id owner-bound (v_34) to the payload's ``owner_user_id`` in THIS
+          space → a durable tombstone row (migration 0085), for good;
+        * a legacy (unbound) id — any sender, as v_33 did — or an owner-less
+          (v_33) / mismatched delete from an admin household → the bounded,
+          restart-scoped :class:`LegacyAlbumDeletes` record only: album ids
+          are global, and a durable row for an id that proves no space could
+          squat another space's album here for good.
         """
         owner = str(event.payload.get("owner_user_id") or "")
         binding = check_owner_bound_id(
             GALLERY_ALBUM_KIND, album_id, space_id=space_id, owner_user_id=owner
         )
-        if binding is OwnerBinding.LEGACY:
-            return True
-        if await self._authorship.is_admin_household(event, space_id):
-            return True
-        if binding is OwnerBinding.VALID and await self._authorship.acts_for(
-            event, space_id, owner, any_role=True
+        is_admin = await self._authorship.is_admin_household(event, space_id)
+        if binding is OwnerBinding.VALID and (
+            is_admin
+            or await self._authorship.acts_for(event, space_id, owner, any_role=True)
         ):
-            return True
+            assert self._gallery_repo is not None
+            await self._gallery_repo.tombstone_album(
+                album_id,
+                space_id=space_id,
+                owner_user_id=owner,
+                deleted_by=payload_actor(event) or "",
+            )
+            return
+        if binding is OwnerBinding.LEGACY or is_admin:
+            if self._legacy_album_deletes is not None:
+                self._legacy_album_deletes.record(space_id, album_id)
+            return
         log.warning(
             "%s from %s: delete of gallery album %s, not held here, comes "
             "from neither its owner's household nor a moderator — not "
@@ -2024,7 +2058,6 @@ class SpaceContentInboundHandlers:
             event.from_instance,
             album_id,
         )
-        return False
 
     async def _on_gallery_album_deleted(self, event: "FederationEvent") -> None:
         """Remove a member's album — and, by cascade, the items in it, with
@@ -2039,16 +2072,17 @@ class SpaceContentInboundHandlers:
         album_id = str(event.payload.get("id") or "")
         if not space_id or not album_id:
             return
-        if await self._gallery_repo.get_album(album_id) is None:
-            if self._album_tombstones is not None and await self._may_tombstone(
-                event, space_id, album_id
-            ):
-                self._album_tombstones.record(space_id, album_id)
+        if await self._gallery_repo.get_album(
+            album_id
+        ) is None and not await self._gallery_repo.is_album_deleted(
+            album_id, space_id=space_id
+        ):
+            await self._remember_overtaking_delete(event, space_id, album_id)
         if not await self._gallery_album_mutable(event, space_id, album_id):
             return
         media = await self._gallery_repo.list_album_media(album_id)
         if not await self._gallery_repo.delete_album_in_space(
-            album_id, space_id=space_id
+            album_id, space_id=space_id, deleted_by=payload_actor(event) or ""
         ):
             log_cross_space_refusal(
                 event, space_id=space_id, what="gallery album", row_id=album_id
@@ -2121,6 +2155,16 @@ class SpaceContentInboundHandlers:
                 user_id=uploaded_by,
             )
             return
+        if await self._gallery_repo.is_item_deleted(item_id, space_id=space_id):
+            # Migration 0085: a deleted item's id never comes back (and is
+            # not announced as a new upload).
+            log_not_applied(
+                event,
+                what="gallery item",
+                row_id=item_id,
+                reason="deleted here already",
+            )
+            return
         is_new = await self._gallery_repo.get_item(item_id) is None
         try:
             if not await self._gallery_repo.create_item_in_space(
@@ -2187,7 +2231,7 @@ class SpaceContentInboundHandlers:
         # transaction — only when the item's album lives in the gated
         # space. A duplicate delete from the chunked path finds nothing.
         if not await self._gallery_repo.delete_item_in_space(
-            item_id, space_id=space_id
+            item_id, space_id=space_id, deleted_by=payload_actor(event) or ""
         ):
             log_cross_space_refusal(
                 event, space_id=space_id, what="gallery item", row_id=item_id
@@ -2297,7 +2341,10 @@ class SpaceContentInboundHandlers:
             return
         if not await self._zone_write_allowed(event, space_id, zone_id):
             return
-        if not await self._zone_repo.delete(zone_id, space_id=space_id):
+        actor = payload_actor(event) or str(event.payload.get("deleted_by") or "")
+        if not await self._zone_repo.delete(
+            zone_id, space_id=space_id, deleted_by=actor
+        ):
             log_cross_space_refusal(
                 event, space_id=space_id, what="zone", row_id=zone_id
             )

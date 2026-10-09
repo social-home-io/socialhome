@@ -27,6 +27,7 @@ from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.services.federation_inbound.space_content import _deleter
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.federation.owner_bound_id import (
+    GALLERY_ALBUM_KIND,
     SPACE_TASK_LIST_KIND,
     mint_owner_bound_id,
 )
@@ -35,12 +36,12 @@ from socialhome.domain.post import BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
 from socialhome.domain.user import SYSTEM_AUTHOR
+from socialhome.services.legacy_album_deletes import LegacyAlbumDeletes
 from socialhome.services.gallery_service import (
     ALBUMS_PER_SPACE,
     DESCRIPTION_MAX,
     NAME_MAX,
 )
-from socialhome.services.gallery_tombstones import GalleryAlbumTombstones
 
 
 class _FakeRegistry:
@@ -216,10 +217,16 @@ class _FakeStickyRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        self.deleted_by: list[str] = []
         self.rows = _ScopedRows()
+        #: ``(sticky_id, space_id)`` of the tombstones held here (0085).
+        self.tombstones: set[tuple[str, str]] = set()
 
     async def get(self, sticky_id):
         return self.rows.row(sticky_id)
+
+    async def is_deleted(self, sticky_id, *, space_id):
+        return (sticky_id, space_id) in self.tombstones
 
     async def save(self, sticky, *, space_id):
         if not self.rows.claim(sticky.id, space_id):
@@ -227,10 +234,11 @@ class _FakeStickyRepo:
         self.saved.append(sticky)
         return True
 
-    async def delete(self, sticky_id, *, space_id):
+    async def delete(self, sticky_id, *, space_id, deleted_by=""):
         if not self.rows.drop(sticky_id, space_id):
             return False
         self.deleted.append(sticky_id)
+        self.deleted_by.append(deleted_by)
         return True
 
 
@@ -323,6 +331,7 @@ class _FakeSpaceCalendarRepo:
     def __init__(self) -> None:
         self.saved = []
         self.deleted = []
+        self.deleted_by: list[str] = []
         # Per-event store keyed by event_id → (space_id, event)
         self._events: dict = {}
         # In-memory RSVP store keyed by (event_id, user_id, occurrence_at)
@@ -330,6 +339,11 @@ class _FakeSpaceCalendarRepo:
         # Buffer keyed the same way; status="removed" means apply-as-delete on flush.
         self.buffer: dict = {}
         self.flush_calls: list[str] = []
+        #: ``(event_id, space_id)`` of the tombstones held here (0085).
+        self.tombstones: set[tuple[str, str]] = set()
+
+    async def is_event_deleted(self, event_id, *, space_id):
+        return (event_id, space_id) in self.tombstones
 
     async def save_event(self, event, *, space_id):
         owner = self._events.get(event.id)
@@ -342,11 +356,12 @@ class _FakeSpaceCalendarRepo:
     async def get_event(self, event_id):
         return self._events.get(event_id)
 
-    async def delete_event(self, event_id, *, space_id):
+    async def delete_event(self, event_id, *, space_id, deleted_by=""):
         owner = self._events.get(event_id)
         if owner is None or owner[0] != space_id:
             return False
         self.deleted.append(event_id)
+        self.deleted_by.append(deleted_by)
         self._events.pop(event_id, None)
         return True
 
@@ -1877,6 +1892,14 @@ class _FakeGalleryRepo:
         self.missing: set[str] = {"alb-new", "alb-late"}
         self.space_album_count = 0
         self.album_media: dict[str, list[str]] = {}
+        #: album id → (space_id, deleted_by) of the album tombstones here.
+        self.tombstoned_albums: dict[str, tuple[str, str]] = {}
+        self.stubbed_albums: list[tuple[str, str]] = []
+        self.item_deleted_by: list[str] = []
+        self.tombstoned_items: set[str] = set()
+
+    async def is_item_deleted(self, item_id, *, space_id):
+        return item_id in self.tombstoned_items
 
     def _album_in(self, album_id, space_id) -> bool:
         return self.album_space.get(album_id, "sp-1") == space_id
@@ -1925,12 +1948,26 @@ class _FakeGalleryRepo:
         self.album_patches.append((album_id, dict(patch)))
         return True
 
-    async def delete_album_in_space(self, album_id, *, space_id):
+    async def delete_album_in_space(self, album_id, *, space_id, deleted_by=""):
         album = await self.get_album(album_id)
         if album is None or album.space_id != space_id or album.is_system:
             return False
         self.albums.pop(album_id, None)
         self.albums_deleted.append(album_id)
+        self.tombstoned_albums[album_id] = (space_id, deleted_by)
+        return True
+
+    async def is_album_deleted(self, album_id, *, space_id):
+        held = self.tombstoned_albums.get(album_id)
+        return held is not None and held[0] == space_id
+
+    async def tombstone_album(
+        self, album_id, *, space_id, owner_user_id, created_at="", deleted_by=""
+    ):
+        if album_id in self.tombstoned_albums or album_id in self.albums:
+            return False
+        self.tombstoned_albums[album_id] = (space_id, deleted_by)
+        self.stubbed_albums.append((album_id, owner_user_id))
         return True
 
     async def create_item_in_space(self, item, *, space_id, bump_count=True):
@@ -1944,11 +1981,12 @@ class _FakeGalleryRepo:
             self.counts[item.album_id] = self.counts.get(item.album_id, 0) + 1
         return True
 
-    async def delete_item_in_space(self, item_id, *, space_id):
+    async def delete_item_in_space(self, item_id, *, space_id, deleted_by=""):
         item = self.items_by_id.get(item_id)
         if item is None or not self._album_in(item.album_id, space_id):
             return False
         self.deleted.append(item_id)
+        self.item_deleted_by.append(deleted_by)
         self.items_by_id.pop(item_id, None)
         self.counts[item.album_id] = self.counts.get(item.album_id, 0) - 1
         return True
@@ -3435,6 +3473,7 @@ class _FakeZoneRepo:
         self.rows = _ScopedRows()
         self.upserted: list = []
         self.deleted: list[str] = []
+        self.deleted_by: list[str] = []
 
     async def get(self, zone_id):
         return self.rows.row(zone_id)
@@ -3445,10 +3484,11 @@ class _FakeZoneRepo:
         self.upserted.append(zone)
         return True
 
-    async def delete(self, zone_id, *, space_id):
+    async def delete(self, zone_id, *, space_id, deleted_by=""):
         if not self.rows.drop(zone_id, space_id):
             return False
         self.deleted.append(zone_id)
+        self.deleted_by.append(deleted_by)
         return True
 
 
@@ -4306,11 +4346,9 @@ async def test_an_expiry_from_a_non_seller_household_is_debug_noise(full, caplog
 
 @pytest.fixture
 def gallery_env(bus, repos, tmp_path):
-    """Handlers with media cleanup + tombstones wired, and the bus events
-    they publish captured."""
+    """Handlers with media cleanup wired, and the bus events they publish
+    captured."""
     gallery = _FakeGalleryRepo()
-    tombstones = GalleryAlbumTombstones()
-    tombstones.wire(bus)
     media = tmp_path / "media"
     media.mkdir()
     h = SpaceContentInboundHandlers(
@@ -4324,7 +4362,7 @@ def gallery_env(bus, repos, tmp_path):
         gallery_repo=gallery,
         media_dir=media,
         media_refs=_NoRefs(),
-        gallery_tombstones=tombstones,
+        legacy_album_deletes=LegacyAlbumDeletes(),
     )
     seen: list[object] = []
 
@@ -4401,22 +4439,65 @@ async def test_a_held_album_claimed_for_another_owner_is_refused(gallery_env, ca
     assert seen == []
 
 
+def _bound_album(owner: str = "u-remote", space: str = "sp-1") -> str:
+    return mint_owner_bound_id(GALLERY_ALBUM_KIND, space_id=space, owner_user_id=owner)
+
+
 async def test_a_delete_that_overtakes_its_create_keeps_the_album_away(gallery_env):
+    """Migration 0085: the overtaking delete leaves a durable tombstone for
+    an id bound to its owner here, naming the deleter."""
     handlers, gallery, _media, _seen = gallery_env
+    album_id = _bound_album()
+    gallery.missing.add(album_id)
     await handlers._on_gallery_album_deleted(
         _event(
             FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
-            {"id": "alb-new"},
+            {"id": album_id, "owner_user_id": "u-remote", "actor_user_id": "u-x"},
             space_id="sp-1",
         )
     )
-    await handlers._on_gallery_album_created(_created())
+    assert gallery.stubbed_albums == [(album_id, "u-remote")]
+    assert gallery.tombstoned_albums[album_id] == ("sp-1", "u-x")
+    await handlers._on_gallery_album_created(
+        _created(id=album_id, owner_user_id="u-remote")
+    )
     assert gallery.albums == {}
 
 
-async def test_an_album_deleted_here_is_not_brought_back_by_a_replay(bus, gallery_env):
+@pytest.mark.parametrize(
+    "album_id",
+    [
+        pytest.param("alb-new", id="legacy"),
+        pytest.param(_bound_album(space="sp-2"), id="another-space"),
+        pytest.param(_bound_album(owner="u-other"), id="another-owner"),
+    ],
+)
+async def test_an_overtaking_delete_of_an_id_not_bound_here_stays_in_memory(
+    gallery_env, album_id
+):
+    """No durable tombstone for an id that proves no space — the bounded
+    in-memory record keeps the create that follows out instead (the test
+    authorship admits every household as a moderator)."""
     handlers, gallery, _media, _seen = gallery_env
-    await bus.publish(GalleryAlbumDeleted(album_id="alb-new", space_id="sp-1"))
+    gallery.missing.add(album_id)
+    await handlers._on_gallery_album_deleted(
+        _event(
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            {"id": album_id, "owner_user_id": "u-remote"},
+            space_id="sp-1",
+        )
+    )
+    assert gallery.stubbed_albums == []
+    assert handlers._legacy_album_deletes.is_deleted("sp-1", album_id)
+    await handlers._on_gallery_album_created(
+        _created(id=album_id, owner_user_id="u-remote")
+    )
+    assert gallery.albums == {}
+
+
+async def test_an_album_deleted_here_is_not_brought_back_by_a_replay(gallery_env):
+    handlers, gallery, _media, _seen = gallery_env
+    gallery.tombstoned_albums["alb-new"] = ("sp-1", "u-a")
     await handlers._on_gallery_album_created(_created())
     assert gallery.albums == {}
 
@@ -5059,3 +5140,70 @@ async def test_calendar_event_keeps_only_a_local_cover(
     )
     assert len(repos["calendar"].saved) == 1
     assert repos["calendar"].saved[0][1].cover_url == expected
+
+
+# ─── Migration 0085: a tombstoned id never comes back by a live create ──
+
+
+async def test_a_tombstoned_sticky_is_not_recreated(bus, repos, caplog):
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+    )
+    repos["sticky"].tombstones.add(("st-gone", "sp-1"))
+    with caplog.at_level("DEBUG"):
+        await h._on_sticky_saved(
+            _event(
+                FederationEventType.SPACE_STICKY_CREATED,
+                {"id": "st-gone", "author": "u-a", "content": "back"},
+                space_id="sp-1",
+            )
+        )
+    assert repos["sticky"].saved == []
+    assert "deleted here already" in caplog.text
+
+
+async def test_a_tombstoned_calendar_event_is_not_recreated(bus, repos):
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+    )
+    repos["calendar"].tombstones.add(("ev-gone", "sp-1"))
+    await h._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "ev-gone",
+                "calendar_id": "sp-1",
+                "summary": "Back",
+                "created_by": "u-a",
+                "start": "2026-06-01T10:00:00+00:00",
+                "end": "2026-06-01T11:00:00+00:00",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert repos["calendar"].saved == []
+
+
+async def test_a_tombstoned_gallery_item_is_not_recreated_or_announced(gallery_env):
+    handlers, gallery, _media, seen = gallery_env
+    gallery.tombstoned_items.add("gi-gone")
+    await handlers._on_gallery_item_saved(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+            {"id": "gi-gone", "album_id": "alb-1", "uploaded_by": "u-remote"},
+            space_id="sp-1",
+        )
+    )
+    assert gallery.created == [] and seen == []

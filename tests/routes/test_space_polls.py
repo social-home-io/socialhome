@@ -452,3 +452,47 @@ async def test_admin_only_posts_still_take_a_members_vote(client):
         headers=mem,
     )
     assert r.status in (200, 201), await r.text()
+
+
+async def test_a_vote_on_a_deleted_posts_poll_is_a_clean_404(client):
+    """Migration 0085: deleting a post drops its poll; a vote that arrives
+    afterwards (a stale tab) is a 404, never an integrity error / 500."""
+    await _seed_space(client)
+    await _seed_poll(client)
+    await client._db.enqueue(
+        "UPDATE space_posts SET deleted=1 WHERE id='sp-post-1'", ()
+    )
+    r = await client.post(
+        "/api/spaces/sp-polls/posts/sp-post-1/poll/vote",
+        json={"option_id": "opt-y"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 404
+    assert await client._db.fetchall("SELECT * FROM space_poll_votes", ()) == []
+
+
+async def test_a_vote_racing_the_post_delete_is_a_clean_404(client, monkeypatch):
+    """The post is deleted between the poll read and the vote write: the
+    vote lands nowhere (its option is gone) and the answer is a 404."""
+    from socialhome.app_keys import space_poll_service_key
+
+    await _seed_space(client)
+    await _seed_poll(client)
+    svc = client.server.app[space_poll_service_key]
+    cls = type(svc._repo)
+    real = cls.list_user_votes
+
+    async def _delete_then_list(self, *args, **kwargs):
+        await client._db.enqueue(
+            "UPDATE space_posts SET deleted=1 WHERE id='sp-post-1'", ()
+        )
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(cls, "list_user_votes", _delete_then_list)
+    r = await client.post(
+        "/api/spaces/sp-polls/posts/sp-post-1/poll/vote",
+        json={"option_id": "opt-y"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 404
+    assert await client._db.fetchall("SELECT * FROM space_poll_votes", ()) == []

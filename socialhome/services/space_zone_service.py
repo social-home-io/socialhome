@@ -243,7 +243,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         actor = await self._users.get(actor_username)
         if actor is None:
             raise KeyError(f"actor {actor_username!r} not found")
-        await self._zones.delete(zone_id, space_id=space_id)
+        await self._zones.delete(zone_id, space_id=space_id, deleted_by=actor.user_id)
         await self._emit(
             SpaceZoneDeleted(
                 space_id=space_id,

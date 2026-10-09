@@ -24,7 +24,7 @@ from socialhome.domain.task import (
     TaskPriority,
     TaskStatus,
 )
-from socialhome.services.gallery_tombstones import GalleryAlbumTombstones
+from socialhome.domain.tombstone import SpaceRowTombstone
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
     SpaceSyncResumeProvider,
@@ -171,9 +171,21 @@ class _FakeListSinceRepo:
 class _FakeGalleryRepo(_FakeListSinceRepo):
     """``list_items_since`` plus ``get_album`` for the album-before-item replay."""
 
-    def __init__(self, rows: list, albums: dict[str, GalleryAlbum]) -> None:
+    def __init__(
+        self,
+        rows: list,
+        albums: dict[str, GalleryAlbum],
+        tombstones: list[SpaceRowTombstone] | None = None,
+    ) -> None:
         super().__init__(rows)
         self._albums = albums
+        self._tombstones = tombstones or []
+
+    async def list_album_tombstones_since(self, space_id, since):
+        cutoff = datetime.fromisoformat(since)
+        return [
+            t for t in self._tombstones if datetime.fromisoformat(t.deleted_at) > cutoff
+        ]
 
     async def get_album(self, album_id: str) -> GalleryAlbum | None:
         return self._albums.get(album_id)
@@ -318,11 +330,12 @@ def provider_factory():
                 _FakeListSinceRepo(cal_events) if cal_events is not None else None
             ),
             gallery_repo=(
-                _FakeGalleryRepo(gallery_items, gallery_albums or {})
+                _FakeGalleryRepo(
+                    gallery_items, gallery_albums or {}, gallery_tombstones
+                )
                 if gallery_items is not None
                 else None
             ),
-            gallery_tombstones=gallery_tombstones,
         )
         return provider, fed, post_repo
 
@@ -1076,9 +1089,18 @@ async def test_resume_replays_every_album_state_the_peer_may_have_missed(
             id="alb-elsewhere", space_id="sp-2", owner_user_id="u-a", name="X"
         ),
     }
-    tombstones = GalleryAlbumTombstones()
-    tombstones.record("sp-1", "alb-gone", at=base + timedelta(minutes=1))
-    tombstones.record("sp-1", "alb-gone-long-ago", at=base - timedelta(days=2))
+    tombstones = [
+        SpaceRowTombstone(
+            id=album_id,
+            owner="u-a",
+            created_at=earlier,
+            deleted_at=at.isoformat(),
+        )
+        for album_id, at in (
+            ("alb-gone", base + timedelta(minutes=1)),
+            ("alb-gone-long-ago", base - timedelta(days=2)),
+        )
+    ]
     provider, fed, _ = provider_factory(
         gallery_items=[],
         gallery_albums=albums,
@@ -1089,6 +1111,9 @@ async def test_resume_replays_every_album_state_the_peer_may_have_missed(
         _event("peer-a", {"space_id": "sp-1", "since": since}),
     )
     got = [(s["type"], s["payload"]["id"]) for s in fed.sent]
+    # The replayed delete names the owner, so a receiver that never held the
+    # album can bind its owner-bound id before remembering the delete.
+    assert fed.sent[0]["payload"] == {"id": "alb-gone", "owner_user_id": "u-a"}
     assert got == [
         (FederationEventType.SPACE_GALLERY_ALBUM_DELETED, "alb-gone"),
         (FederationEventType.SPACE_GALLERY_ALBUM_CREATED, "alb-empty"),

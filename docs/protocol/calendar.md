@@ -270,6 +270,25 @@ without `occurrence_at` are rejected at the service layer; the
 frontend always sends one (defaulting to the next-upcoming
 occurrence).
 
+## Deleting a space event
+
+A space event delete — local, or a live `SPACE_CALENDAR_EVENT_DELETED` —
+keeps the row as a tombstone (migration 0085): `deleted_at` /
+`deleted_by` (the deleter, or the approver of a reviewed delete) set,
+summary / times / description / location / cover blanked. Its RSVPs and
+RSVP reminders go with it (trigger), and the feed bridge removes the
+announcement post. A recurring event is one row, so the tombstone covers
+the whole series; RSVPs are per occurrence and all go. No read returns a
+tombstone and no create, update, RSVP or sync record brings the id back.
+
+A household that missed the delete learns it from the §25.6
+`calendar_deleted` resource (`{id, created_by, created_at,
+actor_user_id}` — never content), applied under the live delete rule: a
+writer household, the space's `calendar` level for the actor. Only the
+host's stream stubs an event never held here, and only for an id
+owner-bound to its `created_by` in this space. See
+[`sync.md`](./sync.md#sticky-calendar-event-gallery-and-zone-tombstones).
+
 ## AI-assisted import
 
 `import_image` and `import_prompt` endpoints call an LLM to extract
@@ -379,6 +398,8 @@ so it never becomes an `<img src>` that leaks members' IPs.
 - `socialhome/services/federation_inbound/personal_calendar.py` —
   `PERSONAL_CALENDAR_EVENT_*` and `PERSONAL_CALENDAR_RSVP_*`.
 - `socialhome/repositories/calendar_repo.py`.
+- `socialhome/federation/sync/space/exporters/calendar_deleted.py` and
+  `receiver.py` (`_persist_calendar_tombstones`) — the event tombstones.
 - `socialhome/routes/calendar_routes.py`.
 
 ## Spec references

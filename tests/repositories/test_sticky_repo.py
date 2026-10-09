@@ -314,3 +314,76 @@ async def test_read_never_returns_a_legacy_non_hex_color(env):
     s = await env.repo.get("legacy")
     assert s is not None and s.color == DEFAULT_COLOR
     assert [x.color for x in await env.repo.list(space_id=None)] == [DEFAULT_COLOR]
+
+
+# ─── Tombstones (migration 0085, §25.6 ``stickies_deleted``) ─────────
+
+
+async def test_a_space_delete_keeps_a_content_free_tombstone(two_spaces):
+    env = two_spaces
+    assert await env.repo.delete("st-a", space_id="space-a", deleted_by="u-del")
+    row = await _snapshot(env, "st-a")
+    assert row is not None and row["deleted_at"] and row["deleted_by"] == "u-del"
+    assert row["content"] == ""
+    # Every read treats it as gone …
+    assert await env.repo.get("st-a") is None
+    assert await env.repo.get_scoped("st-a", space_id="space-a") is None
+    assert [s.id for s in await env.repo.list(space_id="space-a")] == []
+    assert await env.repo.list_since("space-a", "1970-01-01T00:00:00+00:00") == []
+    assert await env.repo.is_deleted("st-a", space_id="space-a")
+    assert not await env.repo.is_deleted("st-a", space_id="space-b")
+    # … a second delete finds nothing …
+    assert not await env.repo.delete("st-a", space_id="space-a")
+    # … and no write brings it back.
+    assert not await env.repo.update_content("st-a", "back", space_id="space-a")
+    assert not await env.repo.update_position("st-a", 1, 1, space_id="space-a")
+    assert not await env.repo.update_color("st-a", "#000000", space_id="space-a")
+    from socialhome.domain.sticky import Sticky
+
+    revived = Sticky(
+        id="st-a",
+        author="uid-owner",
+        content="back",
+        color="#FFF9B1",
+        position_x=0.0,
+        position_y=0.0,
+        created_at="",
+        updated_at="",
+        space_id="space-a",
+    )
+    assert not await env.repo.save(revived, space_id="space-a")
+    assert (await _snapshot(env, "st-a"))["content"] == ""
+
+
+async def test_a_household_delete_still_removes_the_row(two_spaces):
+    env = two_spaces
+    assert await env.repo.delete("st-hh", space_id=None, deleted_by="u")
+    assert await _snapshot(env, "st-hh") is None
+
+
+async def test_tombstones_page_per_space_by_keyset(two_spaces):
+    env = two_spaces
+    ids = []
+    for i in range(5):
+        s = await env.repo.add(author="u-a", content=f"n{i}", space_id="space-a")
+        ids.append(s.id)
+        await env.repo.delete(s.id, space_id="space-a", deleted_by="u-a")
+    await env.repo.delete("st-b", space_id="space-b")
+    page, cursor = await env.repo.list_tombstones_page("space-a", limit=3)
+    assert [t.id for t in page] == ids[:3] and cursor is not None
+    rest, end = await env.repo.list_tombstones_page("space-a", cursor=cursor, limit=3)
+    assert [t.id for t in rest] == ids[3:] and end is None
+    first = page[0]
+    assert (first.owner, first.deleted_by) == ("u-a", "u-a")
+    assert first.created_at and first.deleted_at
+
+
+async def test_a_stub_tombstone_is_insert_only(two_spaces):
+    env = two_spaces
+    assert await env.repo.tombstone(
+        "st-new", space_id="space-a", author="u-a", created_at="c", deleted_by="u-m"
+    )
+    assert await env.repo.is_deleted("st-new", space_id="space-a")
+    # An id held already (live, or in another space) is never touched.
+    assert not await env.repo.tombstone("st-b", space_id="space-a", author="u-a")
+    assert (await _snapshot(env, "st-b"))["deleted_at"] is None

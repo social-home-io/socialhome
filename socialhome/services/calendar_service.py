@@ -1741,7 +1741,11 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
                 )
             }
         )
-        if not await self._repo.delete_event(event_id, space_id=space_id):
+        # The event keeps a tombstone naming who authorised the delete (the
+        # approver of a reviewed one) — §25.6 ``calendar_deleted``.
+        if not await self._repo.delete_event(
+            event_id, space_id=space_id, deleted_by=approved_by or actor_user_id
+        ):
             raise KeyError(f"space calendar event {event_id!r} not found in this space")
         await self._emit(
             CalendarEventDeleted(

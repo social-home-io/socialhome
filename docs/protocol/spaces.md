@@ -129,10 +129,17 @@ updated_at}` inside the encrypted payload. The receiver:
   from a moderator or from the owner's household (the delete now carries
   `owner_user_id`, which must be the owner the id commits to and be seated
   on the sender), so nobody else can pre-empt the album with a delete;
-- remembers album deletes (a bounded in-memory record,
-  `services/gallery_tombstones.py` — no table), so a delete that overtakes
-  its create, or a replay / sync from a household that missed the delete,
-  does not bring the album back;
+- remembers album deletes as tombstone rows (migration 0085:
+  `gallery_albums.deleted_at`, the album's items tombstoned with it), so a
+  delete that overtakes its create, or a replay / sync from a household
+  that missed the delete, does not bring the album back — across restarts,
+  and streamed to households that missed it (`gallery_albums_deleted`, see
+  [`sync.md`](./sync.md#sticky-calendar-event-gallery-and-zone-tombstones)).
+  A delete of an album not held here yet leaves a tombstone row only for
+  an id owner-bound to the payload's `owner_user_id` in this space; a
+  legacy (unbound) id, or an owner-less v_33 delete from an admin
+  household, is remembered in a bounded in-memory record until restart
+  (`services/legacy_album_deletes.py`), as before 0085;
 - ignores an edit's `cover_item_id` when it names an item of another album,
   keeps one naming an item not held yet (rendered once it lands in this
   album), and clears the cover on an explicit `null`;
@@ -402,6 +409,18 @@ stand), each attributed to a member seated on that provider; the roster
 and bans are the host's alone, and zones an admin household's (never a
 v_41 `moderator` seat); timetables an admin household's, recorded as its
 admin (`SpaceSyncReceiver._admit`).
+
+Deletes stream too. A deleted space sticky, calendar event, gallery album /
+item or zone keeps its row as a content-free tombstone (migration 0085),
+like posts, comments, pages and tasks; the `*_deleted` resources carry the
+tombstones to a household that missed the live `*_DELETED`, judged by that
+event's own rule — a writer household under the `stickies` / `calendar`
+level for stickies and events, the uploader's household or content
+authority for an item, the owner's household or settings authority for an
+album, an admin household for a zone. Only the host's record stubs an id
+never held here, and only an owner-bound one (zone ids are not, so a zone
+is never stubbed). See
+[`sync.md`](./sync.md#sticky-calendar-event-gallery-and-zone-tombstones).
 
 ### Keeping the roster mirror complete
 
@@ -793,8 +812,12 @@ post or comment in an archived space locally; if every peer dropped that
 delete, the row would outlive its deletion on every other copy. Passing the
 archive gate is not an authorization: the handler's authorship /
 `may_mutate` check still decides whether that sender may remove that row.
-The §25.6 sync stream carries no tombstones (the exporters ship live rows
-only), so there is no sync-side removal to let through.
+The §25.6 sync stream's tombstone resources (`REMOVAL_RESOURCES`:
+`posts_deleted`, `comments_deleted`, `task_lists_deleted`, `tasks_deleted`,
+`pages_deleted`, `stickies_deleted`, `calendar_deleted`,
+`gallery_albums_deleted`, `gallery_items_deleted`, `space_zones_deleted`,
+`chat_messages_deleted`) pass the receiver's archive gate the same way —
+see [`sync.md`](./sync.md#what-a-sync-streams).
 
 Receiver-side only — no protocol version bump: no wire shape changes, and
 a sender of any version gets the same `status: ok` it gets for any other
@@ -2467,9 +2490,11 @@ fields.
 Retention also bounds §25.6 sync on **every** provider, host or member: a
 space with `retention_days` streams only the live posts and chat that
 retention keeps (exempt post types at any age), a space without it streams
-everything — there is no fixed size limit. Gallery items and the post /
-comment tombstones always stream in full; the tombstones are how the host's
-retention expiry reaches member households, which never sweep. See
+everything — there is no fixed size limit. Gallery items and every
+tombstone resource (post / comment, and the sticky / calendar-event /
+gallery / zone tombstones of migration 0085) always stream in full; the
+post tombstones are how the host's retention expiry reaches member
+households, which never sweep. See
 [`sync.md`](./sync.md#what-a-sync-streams).
 
 ```mermaid

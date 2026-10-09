@@ -1321,3 +1321,81 @@ async def test_pending_rsvp_of_another_space_is_not_overwritten(two_space_calend
     )
     flushed = await env.space_cal_repo.flush_pending_rsvps("cev-late", space_id="cs-b")
     assert [r.status for r in flushed] == [RSVPStatus.GOING]
+
+
+# ─── Tombstones (migration 0085, §25.6 ``calendar_deleted``) ─────────
+
+
+def _ev(eid: str, sid: str, *, summary: str = "back") -> CalendarEvent:
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    return CalendarEvent(
+        id=eid,
+        calendar_id=sid,
+        summary=summary,
+        start=start,
+        end=start,
+        created_by="uid-alice",
+    )
+
+
+async def test_a_space_event_delete_keeps_a_content_free_tombstone(
+    two_space_calendars,
+):
+    env = two_space_calendars
+    repo = env.space_cal_repo
+    assert await repo.delete_event("cev-a", space_id="cs-a", deleted_by="uid-bob")
+    row = await _event_row(env, "cev-a")
+    assert row is not None and row["deleted_at"] and row["deleted_by"] == "uid-bob"
+    assert row["summary"] == "" and row["description"] is None
+    assert row["location"] is None and row["cover_url"] is None
+    # The RSVPs went with it (the 0085 trigger).
+    assert await repo.list_rsvps("cev-a") == []
+    # Every read treats it as gone …
+    assert await repo.get_event("cev-a") is None
+    wide = (
+        datetime(2000, 1, 1, tzinfo=timezone.utc),
+        datetime(2100, 1, 1, tzinfo=timezone.utc),
+    )
+    assert await repo.list_events_in_range("cs-a", start=wide[0], end=wide[1]) == []
+    assert await repo.list_events_since("cs-a", "1970-01-01 00:00:00") == []
+    assert await repo.is_event_deleted("cev-a", space_id="cs-a")
+    assert not await repo.is_event_deleted("cev-a", space_id="cs-b")
+    # … nothing deletes it twice, nothing brings it back, no RSVP lands.
+    assert not await repo.delete_event("cev-a", space_id="cs-a")
+    assert not await repo.save_event(_ev("cev-a", "cs-a"), space_id="cs-a")
+    assert (await _event_row(env, "cev-a"))["summary"] == ""
+    assert not await repo.upsert_rsvp(
+        CalendarRSVP(
+            event_id="cev-a",
+            user_id="uid-bob",
+            status=RSVPStatus.GOING,
+            updated_at="2026-06-02T00:00:00",
+            occurrence_at=datetime(2026, 7, 1, tzinfo=timezone.utc).isoformat(),
+        ),
+        space_id="cs-a",
+    )
+
+
+async def test_calendar_tombstones_page_per_space_and_stubs_are_insert_only(
+    two_space_calendars,
+):
+    env = two_space_calendars
+    repo = env.space_cal_repo
+    await repo.delete_event("cev-a", space_id="cs-a", deleted_by="uid-alice")
+    page, cursor = await repo.list_event_tombstones_page("cs-a", limit=5)
+    assert [t.id for t in page] == ["cev-a"] and cursor is None
+    assert (page[0].owner, page[0].deleted_by) == ("uid-alice", "uid-alice")
+    assert await repo.list_event_tombstones_page("cs-b") == ([], None)
+    assert await repo.tombstone_event(
+        "cev-new", space_id="cs-a", created_by="uid-alice", deleted_by="uid-bob"
+    )
+    assert await repo.is_event_deleted("cev-new", space_id="cs-a")
+    # A held id (live, another space) is never touched.
+    assert not await repo.tombstone_event("cev-b", space_id="cs-a", created_by="x")
+    assert (await _event_row(env, "cev-b"))["deleted_at"] is None
+    for i in range(3):
+        await repo.tombstone_event(f"cev-p{i}", space_id="cs-b", created_by="u")
+    first, nxt = await repo.list_event_tombstones_page("cs-b", limit=2)
+    assert [t.id for t in first] == ["cev-p0", "cev-p1"] and nxt is not None
+    rest, end = await repo.list_event_tombstones_page("cs-b", cursor=nxt, limit=2)
+    assert [t.id for t in rest] == ["cev-p2"] and end is None

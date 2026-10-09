@@ -73,7 +73,6 @@ if TYPE_CHECKING:
     from ....domain.sticky import Sticky
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
-    from ....services.gallery_tombstones import GalleryAlbumTombstones
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
@@ -116,7 +115,6 @@ class SpaceSyncResumeProvider:
         "_sticky_repo",
         "_space_calendar_repo",
         "_gallery_repo",
-        "_gallery_tombstones",
     )
 
     def __init__(
@@ -130,7 +128,6 @@ class SpaceSyncResumeProvider:
         sticky_repo: "AbstractStickyRepo | None" = None,
         space_calendar_repo: "AbstractSpaceCalendarRepo | None" = None,
         gallery_repo: "AbstractGalleryRepo | None" = None,
-        gallery_tombstones: "GalleryAlbumTombstones | None" = None,
     ) -> None:
         self._federation = federation_service
         self._space_repo = space_repo
@@ -140,7 +137,6 @@ class SpaceSyncResumeProvider:
         self._sticky_repo = sticky_repo
         self._space_calendar_repo = space_calendar_repo
         self._gallery_repo = gallery_repo
-        self._gallery_tombstones = gallery_tombstones
 
     # ── Outbound (requester side) ─────────────────────────────────────
 
@@ -548,7 +544,8 @@ class SpaceSyncResumeProvider:
         So, in order:
 
         * every album delete recorded since ``since`` as
-          ``SPACE_GALLERY_ALBUM_DELETED`` (:class:`GalleryAlbumTombstones`);
+          ``SPACE_GALLERY_ALBUM_DELETED`` (the album tombstones, migration
+          0085);
         * every non-system album of the space as
           ``SPACE_GALLERY_ALBUM_CREATED`` — an idempotent no-op for one the
           receiver holds;
@@ -561,19 +558,20 @@ class SpaceSyncResumeProvider:
         if self._gallery_repo is None:
             return 0
         sent = 0
-        if self._gallery_tombstones is not None:
-            sent += await self._send_each(
-                [
-                    {"id": album_id}
-                    for album_id in self._gallery_tombstones.deleted_since(
-                        space_id, since
-                    )
-                ],
-                FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
-                dict,
-                space_id=space_id,
-                to=to,
-            )
+        sent += await self._send_each(
+            [
+                # The owner lets a receiver that never held the album bind
+                # its owner-bound id before remembering the delete.
+                {"id": t.id, "owner_user_id": t.owner}
+                for t in await self._gallery_repo.list_album_tombstones_since(
+                    space_id, since
+                )
+            ],
+            FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
+            dict,
+            space_id=space_id,
+            to=to,
+        )
         albums = [
             a
             for a in await self._gallery_repo.list_albums(

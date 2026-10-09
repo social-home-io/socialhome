@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import pathlib
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Protocol, TYPE_CHECKING
@@ -56,7 +57,10 @@ from ....domain.space import (
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
 from ....domain.events import (
+    CalendarEventDeleted,
     CommentDeleted,
+    GalleryAlbumDeleted,
+    GalleryItemDeleted,
     PageDeleted,
     PostDeleted,
     TaskDeleted,
@@ -70,6 +74,7 @@ from ....domain.timetable import (
     validate,
 )
 from ....infrastructure.event_bus import EventBus
+from ....media.cleanup import unlink_unreferenced
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -104,7 +109,8 @@ if TYPE_CHECKING:
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.federation_repo import AbstractFederationRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
-    from ....services.gallery_tombstones import GalleryAlbumTombstones
+    from ....repositories.media_reference_repo import AbstractMediaReferenceRepo
+    from ....services.legacy_album_deletes import LegacyAlbumDeletes
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_poll_repo import AbstractSpacePollRepo
     from ....repositories.profile_picture_repo import (
@@ -168,7 +174,9 @@ class SpaceSyncReceiver:
         "_poll_repo",
         "_pending_decrypts",
         "_authorship",
-        "_gallery_tombstones",
+        "_media_dir",
+        "_media_refs",
+        "_legacy_album_deletes",
         "_timetable_repo",
         "_page_conflicts",
         "_chat_sink",
@@ -194,7 +202,9 @@ class SpaceSyncReceiver:
         poll_repo: "AbstractSpacePollRepo | None" = None,
         pending_decrypts: "PendingDecryptsCache | None" = None,
         authorship: "SpaceAuthorship | None" = None,
-        gallery_tombstones: "GalleryAlbumTombstones | None" = None,
+        media_dir: pathlib.Path | None = None,
+        media_refs: "AbstractMediaReferenceRepo | None" = None,
+        legacy_album_deletes: "LegacyAlbumDeletes | None" = None,
         timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
         page_conflicts: "PageConflictService | None" = None,
     ) -> None:
@@ -208,9 +218,14 @@ class SpaceSyncReceiver:
         #: chunks get that far) is another version of it: fast-forward,
         #: stale, merge or conflict. ``None``: upserted (last write wins).
         self._page_conflicts = page_conflicts
-        #: Space albums deleted here — a sync from a household that missed
-        #: the delete must not bring one (or its items) back.
-        self._gallery_tombstones = gallery_tombstones
+        #: A streamed gallery delete removes the files it leaves unused —
+        #: the rule of the live delete (``unlink_unreferenced``). ``None``
+        #: keeps them for the orphan sweep.
+        self._media_dir = media_dir
+        self._media_refs = media_refs
+        #: Overtaking album deletes no tombstone row proves (a legacy id, an
+        #: owner-less v_33 delete): a streamed album must not undo them.
+        self._legacy_album_deletes = legacy_album_deletes
         #: §24.11 authorship for a chunk streamed by a household that is NOT
         #: the space's host (see :meth:`_admit`). ``None`` refuses such
         #: chunks outright rather than trusting them.
@@ -685,20 +700,43 @@ class SpaceSyncReceiver:
                     continue
                 if not await self._page_repo.save(page, space_id=space_id):
                     _log_sync_refusal("page", page.id, space_id)
+        elif resource == "stickies_deleted":
+            await self._persist_sticky_tombstones(records, space_id, provider=provider)
         elif resource == "stickies":
             for r in records:
                 sticky = _sticky_from_record(r, space_id)
-                if sticky is not None and not await self._sticky_repo.save(
-                    sticky, space_id=space_id
-                ):
+                if sticky is None:
+                    continue
+                if await self._sticky_repo.is_deleted(sticky.id, space_id=space_id):
+                    # Deleted here — a provider that missed the delete still
+                    # streams it; the tombstone wins (its id is never
+                    # reused), and its own tombstone stream will tell it.
+                    log.debug("sync: sticky %s was deleted here — skipped", sticky.id)
+                    continue
+                if not await self._sticky_repo.save(sticky, space_id=space_id):
                     _log_sync_refusal("sticky", sticky.id, space_id)
+        elif resource == "calendar_deleted":
+            await self._persist_calendar_tombstones(
+                records, space_id, provider=provider
+            )
         elif resource == "calendar":
             for r in records:
                 event = _calendar_from_record(r)
-                if event is not None and not await self._space_calendar_repo.save_event(
+                if event is None:
+                    continue
+                if await self._space_calendar_repo.is_event_deleted(
+                    event.id, space_id=space_id
+                ):
+                    log.debug("sync: event %s was deleted here — skipped", event.id)
+                    continue
+                if not await self._space_calendar_repo.save_event(
                     event, space_id=space_id
                 ):
                     _log_sync_refusal("calendar event", event.id, space_id)
+        elif resource == "gallery_albums_deleted":
+            await self._persist_album_tombstones(records, space_id, provider=provider)
+        elif resource == "gallery_items_deleted":
+            await self._persist_item_tombstones(records, space_id, provider=provider)
         elif resource == "gallery":
             # Albums first, then items — preserve the exporter's order.
             for r in records:
@@ -753,6 +791,8 @@ class SpaceSyncReceiver:
                         post_id,
                         exc,
                     )
+        elif resource == "space_zones_deleted":
+            await self._persist_zone_tombstones(records, space_id, provider=provider)
         elif resource == "space_zones":
             # §23.8.7: per-space zone catalogue. Receiver may be
             # configured without a zone repo (older deployments) — in
@@ -765,9 +805,12 @@ class SpaceSyncReceiver:
                 return
             for r in records:
                 zone = _zone_from_record(r, space_id, provider=provider)
-                if zone is not None and not await self._zone_repo.upsert(
-                    zone, space_id=space_id
-                ):
+                if zone is None:
+                    continue
+                if await self._zone_repo.is_deleted(zone.id, space_id=space_id):
+                    log.debug("sync: zone %s was deleted here — skipped", zone.id)
+                    continue
+                if not await self._zone_repo.upsert(zone, space_id=space_id):
                     log.warning(
                         "space sync: zone %s already exists in another space "
                         "— refusing the write for %s",
@@ -1324,6 +1367,323 @@ class SpaceSyncReceiver:
                 space_id,
             )
 
+    async def _persist_sticky_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed sticky deletes (``stickies_deleted``, migration
+        0085).
+
+        A sticky held live here in this space is tombstoned (``deleted_by``
+        from the record's ``actor_user_id``), as a live
+        ``SPACE_STICKY_DELETED`` does. A member household's records were
+        admitted only under the live rule (:meth:`_authored_record`). From
+        the **host**, an id never held here gets a stub tombstone — only
+        when the id is owner-bound to its ``author`` in THIS space (sticky
+        ids are global: a stub for another space's id would block that
+        space's real sticky here). Refusals are summarised once per chunk.
+        """
+        from_host = await self._is_host(space_id, provider)
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            sticky_id = str(r.get("id") or r.get("sticky_id") or "")
+            if not sticky_id:
+                continue
+            deleted_by = str(r.get("actor_user_id") or "")
+            held = await self._sticky_repo.get(sticky_id)
+            if held is not None:
+                if held.space_id != space_id:
+                    cross_space.append(sticky_id)
+                else:
+                    await self._sticky_repo.delete(
+                        sticky_id, space_id=space_id, deleted_by=deleted_by
+                    )
+                continue
+            if not from_host or await self._sticky_repo.is_deleted(
+                sticky_id, space_id=space_id
+            ):
+                continue
+            author = str(r.get("author") or "")
+            if not _bound_here(SPACE_STICKY_KIND, sticky_id, space_id, author):
+                unbound += 1
+                continue
+            await self._sticky_repo.tombstone(
+                sticky_id,
+                space_id=space_id,
+                author=author,
+                created_at=str(r.get("created_at") or ""),
+                deleted_by=deleted_by,
+            )
+        _log_tombstone_refusals("sticky", provider, space_id, cross_space, unbound)
+
+    async def _persist_calendar_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed calendar-event deletes (``calendar_deleted``,
+        migration 0085).
+
+        An event held live here in this space is tombstoned — its RSVPs and
+        reminders go with it — and ``CalendarEventDeleted`` is published as
+        for a live ``SPACE_CALENDAR_EVENT_DELETED`` (the feed bridge removes
+        the event's announcement post). A member household's records were
+        admitted only under the live rule. From the **host**, an id never
+        held here gets a stub tombstone when the id is owner-bound to its
+        ``created_by`` in THIS space.
+        """
+        from_host = await self._is_host(space_id, provider)
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            event_id = str(r.get("id") or r.get("event_id") or "")
+            if not event_id:
+                continue
+            deleted_by = str(r.get("actor_user_id") or "")
+            held = await self._space_calendar_repo.get_event(event_id)
+            if held is not None:
+                if held[0] != space_id:
+                    cross_space.append(event_id)
+                elif await self._space_calendar_repo.delete_event(
+                    event_id, space_id=space_id, deleted_by=deleted_by
+                ):
+                    await self._bus.publish(
+                        CalendarEventDeleted(event_id=event_id, space_id=space_id)
+                    )
+                continue
+            if not from_host or await self._space_calendar_repo.is_event_deleted(
+                event_id, space_id=space_id
+            ):
+                continue
+            created_by = str(r.get("created_by") or "")
+            if not _bound_here(
+                SPACE_CALENDAR_EVENT_KIND, event_id, space_id, created_by
+            ):
+                unbound += 1
+                continue
+            await self._space_calendar_repo.tombstone_event(
+                event_id,
+                space_id=space_id,
+                created_by=created_by,
+                created_at=str(r.get("created_at") or ""),
+                deleted_by=deleted_by,
+            )
+        _log_tombstone_refusals(
+            "calendar event", provider, space_id, cross_space, unbound
+        )
+
+    async def _persist_album_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed gallery-album deletes (``gallery_albums_deleted``,
+        migration 0085).
+
+        A user album held live here in this space is tombstoned with its
+        items (the 0085 trigger), their files unlinked unless another row
+        still names them, and ``GalleryAlbumDeleted`` published — what a
+        live ``SPACE_GALLERY_ALBUM_DELETED`` does (its origin the provider,
+        so nothing is re-broadcast). A member household's records were
+        admitted only under the live rule. From the **host**, an id never
+        held here gets a stub tombstone when the id is owner-bound to its
+        ``owner_user_id`` in THIS space.
+        """
+        from_host = await self._is_host(space_id, provider)
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            album_id = str(r.get("id") or r.get("album_id") or "")
+            if not album_id:
+                continue
+            deleted_by = await self._vetted_actor(r, space_id, provider, from_host)
+            held = await self._gallery_repo.get_album(album_id)
+            if held is not None:
+                if held.space_id != space_id or held.is_system:
+                    cross_space.append(album_id)
+                    continue
+                media = await self._gallery_repo.list_album_media(album_id)
+                if await self._gallery_repo.delete_album_in_space(
+                    album_id, space_id=space_id, deleted_by=deleted_by
+                ):
+                    await unlink_unreferenced(self._media_dir, self._media_refs, media)
+                    await self._bus.publish(
+                        GalleryAlbumDeleted(
+                            album_id=album_id,
+                            space_id=space_id,
+                            owner_id=held.owner_user_id,
+                            origin_instance_id=provider,
+                        )
+                    )
+                continue
+            if not from_host or await self._gallery_repo.is_album_deleted(
+                album_id, space_id=space_id
+            ):
+                continue
+            owner = str(r.get("owner_user_id") or "")
+            if not _bound_here(GALLERY_ALBUM_KIND, album_id, space_id, owner):
+                unbound += 1
+                continue
+            await self._gallery_repo.tombstone_album(
+                album_id,
+                space_id=space_id,
+                owner_user_id=owner,
+                created_at=str(r.get("created_at") or ""),
+                deleted_by=deleted_by,
+            )
+        _log_tombstone_refusals(
+            "gallery album", provider, space_id, cross_space, unbound
+        )
+
+    async def _persist_item_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed gallery-item deletes (``gallery_items_deleted``,
+        migration 0085).
+
+        An item held live here in an album of this space is tombstoned, its
+        album's count lowered, its files unlinked unless another row still
+        names them, and ``GalleryItemDeleted`` published — what a live
+        ``SPACE_GALLERY_ITEM_DELETED`` does. A member household's records
+        were admitted only under the live rule. From the **host**, an id
+        never held here gets a stub tombstone when the id is owner-bound to
+        its ``uploaded_by`` in THIS space and its album is held live here in
+        this space (``album_id`` is a FK); under an album tombstoned here it
+        needs nothing — the album's tombstone covers it.
+        """
+        from_host = await self._is_host(space_id, provider)
+        cross_space: list[str] = []
+        unbound = 0
+        for r in records:
+            item_id = str(r.get("id") or r.get("item_id") or "")
+            if not item_id:
+                continue
+            deleted_by = await self._vetted_actor(r, space_id, provider, from_host)
+            held = await self._gallery_repo.get_item(item_id)
+            if held is not None:
+                if await self._gallery_repo.delete_item_in_space(
+                    item_id, space_id=space_id, deleted_by=deleted_by
+                ):
+                    await unlink_unreferenced(
+                        self._media_dir,
+                        self._media_refs,
+                        [held.url, held.thumbnail_url],
+                    )
+                    await self._bus.publish(
+                        GalleryItemDeleted(
+                            item_id=item_id,
+                            album_id=held.album_id,
+                            space_id=space_id,
+                            origin_instance_id=provider,
+                        )
+                    )
+                else:
+                    cross_space.append(item_id)
+                continue
+            if not from_host or await self._gallery_repo.is_item_deleted(
+                item_id, space_id=space_id
+            ):
+                continue
+            uploader = str(r.get("uploaded_by") or "")
+            album_id = str(r.get("album_id") or "")
+            if not album_id or await self._gallery_repo.is_album_deleted(
+                album_id, space_id=space_id
+            ):
+                continue  # gone with its album; the album tombstone wins
+            if not _bound_here(GALLERY_ITEM_KIND, item_id, space_id, uploader):
+                unbound += 1
+                continue
+            if not await self._gallery_repo.tombstone_item(
+                item_id,
+                space_id=space_id,
+                album_id=album_id,
+                uploaded_by=uploader,
+                created_at=str(r.get("created_at") or ""),
+                deleted_by=deleted_by,
+            ):
+                unbound += 1  # its album is not held live in this space
+        _log_tombstone_refusals(
+            "gallery item", provider, space_id, cross_space, unbound
+        )
+
+    async def _persist_zone_tombstones(
+        self,
+        records: list[dict[str, Any]],
+        space_id: str,
+        *,
+        provider: str,
+    ) -> None:
+        """Apply streamed zone deletes (``space_zones_deleted``, migration
+        0085): a zone held live here in this space is tombstoned, as a live
+        ``SPACE_ZONE_DELETED`` does. A member household's records were
+        admitted only from an admin household (the live rule).
+
+        No stub for a zone never held here: zone ids are not owner-bound
+        (``z_<random>``), so nothing proves an id is this space's — a stub
+        could squat another space's zone. A stale copy a household streams
+        later lands, and the host's next tombstone stream removes it.
+        """
+        if self._zone_repo is None:
+            return
+        from_host = await self._is_host(space_id, provider)
+        cross_space: list[str] = []
+        for r in records:
+            zone_id = str(r.get("id") or r.get("zone_id") or "")
+            if not zone_id:
+                continue
+            held = await self._zone_repo.get(zone_id)
+            if held is None:
+                continue
+            if held.space_id != space_id:
+                cross_space.append(zone_id)
+                continue
+            await self._zone_repo.delete(
+                zone_id,
+                space_id=space_id,
+                deleted_by=await self._vetted_actor(r, space_id, provider, from_host),
+            )
+        _log_tombstone_refusals("zone", provider, space_id, cross_space, 0)
+
+    async def _vetted_actor(
+        self, r: dict[str, Any], space_id: str, provider: str, from_host: bool
+    ) -> str:
+        """The ``actor_user_id`` a gallery / zone tombstone may record as its
+        ``deleted_by``. Those live delete rules judge the household, not an
+        actor, so a record naming a stranger is not refused — but from a
+        member household the name is kept only when the provider speaks for
+        that user (seated on it, as ``_writer_delete_admits`` requires for
+        stickies / events); otherwise the delete is recorded as nobody's.
+        The host's stream is taken whole, like every host record."""
+        actor = str(r.get("actor_user_id") or "")
+        if not actor or from_host:
+            return actor
+        if self._authorship is None:
+            return ""
+        event = FederationEvent(
+            msg_id=f"sync:{space_id}:actor",
+            event_type=FederationEventType.SPACE_SYNC_CHUNK,
+            from_instance=provider,
+            to_instance="",
+            timestamp="",
+            payload={},
+            space_id=space_id,
+        )
+        if await self._authorship.acts_for(event, space_id, actor, any_role=True):
+            return actor
+        return ""
+
     async def _page_seq_hints(
         self, records: list[dict[str, Any]], space_id: str, *, provider: str
     ) -> None:
@@ -1650,59 +2010,25 @@ class SpaceSyncReceiver:
                     event, space_id, str(r.get("created_by") or "")
                 )
             case "task_lists_deleted":
-                # The live SPACE_TASK_LIST_DELETED rule: a writer household
-                # removes a list held live here IN THIS SPACE, if the
-                # space's ``tasks`` level admits the delete for the user who
-                # made it (``actor_user_id``, the tombstone's ``deleted_by``),
-                # who must be seated on the provider. Refusals are counted
-                # in :meth:`_admit`'s one summary line (``quiet``), not
-                # logged per record on every scheduler tick.
+                # The live SPACE_TASK_LIST_DELETED rule
+                # (:meth:`_writer_delete_admits`) for a list held live here
+                # IN THIS SPACE.
                 rid = rid or str(r.get("list_id") or "")
                 held = await self._space_task_repo.get_list(rid) if rid else None
                 if held is None or held[0] != space_id:
                     return False
-                if not await auth.writes_here(event, space_id):
-                    return False
-                actor = str(r.get("actor_user_id") or "") or None
-                if actor is not None and not await auth.acts_for(
-                    event, space_id, actor, any_role=True
-                ):
-                    return False
-                return await auth.access_admits(
-                    event,
-                    space_id,
-                    "tasks",
-                    ContentAction.DELETE,
-                    actor=actor,
-                    row_owner=held[1].created_by,
-                    quiet=True,
+                return await self._writer_delete_admits(
+                    event, space_id, "tasks", r, row_owner=held[1].created_by
                 )
             case "tasks_deleted":
-                # The live SPACE_TASK_DELETED rule, as for
-                # ``task_lists_deleted``: a writer household removes a task
-                # held live here IN THIS SPACE, if the space's ``tasks``
-                # level admits the delete for the user who made it
-                # (``actor_user_id``), who must be seated on the provider.
-                # Refusals are counted in :meth:`_admit`'s one summary line.
+                # The live SPACE_TASK_DELETED rule for a task held live here
+                # IN THIS SPACE.
                 rid = rid or str(r.get("task_id") or "")
                 held_task = await self._space_task_repo.get(rid) if rid else None
                 if held_task is None or held_task[0] != space_id:
                     return False
-                if not await auth.writes_here(event, space_id):
-                    return False
-                actor = str(r.get("actor_user_id") or "") or None
-                if actor is not None and not await auth.acts_for(
-                    event, space_id, actor, any_role=True
-                ):
-                    return False
-                return await auth.access_admits(
-                    event,
-                    space_id,
-                    "tasks",
-                    ContentAction.DELETE,
-                    actor=actor,
-                    row_owner=held_task[1].created_by,
-                    quiet=True,
+                return await self._writer_delete_admits(
+                    event, space_id, "tasks", r, row_owner=held_task[1].created_by
                 )
             case "tasks" | "tasks_archived":
                 if not rid or await self._space_task_repo.get(rid) is not None:
@@ -1722,21 +2048,8 @@ class SpaceSyncReceiver:
                 held_page = await self._page_repo.get(rid) if rid else None
                 if held_page is None or held_page.space_id != space_id:
                     return False
-                if not await auth.writes_here(event, space_id):
-                    return False
-                actor = str(r.get("actor_user_id") or "") or None
-                if actor is not None and not await auth.acts_for(
-                    event, space_id, actor, any_role=True
-                ):
-                    return False
-                return await auth.access_admits(
-                    event,
-                    space_id,
-                    "pages",
-                    ContentAction.DELETE,
-                    actor=actor,
-                    row_owner=held_page.created_by,
-                    quiet=True,
+                return await self._writer_delete_admits(
+                    event, space_id, "pages", r, row_owner=held_page.created_by
                 )
             case "pages":
                 if not rid or await self._page_repo.get(rid) is not None:
@@ -1747,11 +2060,38 @@ class SpaceSyncReceiver:
                 if creator:
                     return await auth.may_author(event, space_id, creator)
                 return await auth.writes_here(event, space_id)
+            case "stickies_deleted":
+                # The live SPACE_STICKY_DELETED rule
+                # (``_collaborative_write_allowed``, feature ``stickies``)
+                # for a sticky held live here IN THIS SPACE.
+                held_sticky = await self._sticky_repo.get(rid) if rid else None
+                if held_sticky is None or held_sticky.space_id != space_id:
+                    return False
+                return await self._writer_delete_admits(
+                    event, space_id, "stickies", r, row_owner=held_sticky.author
+                )
             case "stickies":
                 if not rid or await self._sticky_repo.get(rid) is not None:
                     return False
+                if await self._sticky_repo.is_deleted(rid, space_id=space_id):
+                    return False  # deleted here; the tombstone wins
                 return await auth.may_author(
                     event, space_id, str(r.get("author") or r.get("created_by") or "")
+                )
+            case "calendar_deleted":
+                # The live SPACE_CALENDAR_EVENT_DELETED rule (feature
+                # ``calendar``) for an event held live here IN THIS SPACE.
+                held_event = (
+                    await self._space_calendar_repo.get_event(rid) if rid else None
+                )
+                if held_event is None or held_event[0] != space_id:
+                    return False
+                return await self._writer_delete_admits(
+                    event,
+                    space_id,
+                    "calendar",
+                    r,
+                    row_owner=held_event[1].created_by,
                 )
             case "calendar":
                 if (
@@ -1759,9 +2099,39 @@ class SpaceSyncReceiver:
                     or await self._space_calendar_repo.get_event(rid) is not None
                 ):
                     return False
+                if await self._space_calendar_repo.is_event_deleted(
+                    rid, space_id=space_id
+                ):
+                    return False  # deleted here; the tombstone wins
                 return await auth.may_author(
                     event, space_id, str(r.get("created_by") or "")
                 )
+            case "gallery_albums_deleted":
+                # The live SPACE_GALLERY_ALBUM_DELETED rule
+                # (``_gallery_album_mutable``): a user album held live here
+                # IN THIS SPACE, deleted by its owner's household or one
+                # with settings authority (host / admin — not a moderator).
+                held_album = await self._gallery_repo.get_album(rid) if rid else None
+                if (
+                    held_album is None
+                    or held_album.space_id != space_id
+                    or held_album.is_system
+                ):
+                    return False
+                return await auth.may_mutate(
+                    event, space_id, held_album.owner_user_id or "", settings=True
+                )
+            case "gallery_items_deleted":
+                # The live SPACE_GALLERY_ITEM_DELETED rule: an item held live
+                # here in an album of THIS SPACE, deleted by its uploader's
+                # household or one with content authority.
+                held_item = await self._gallery_repo.get_item(rid) if rid else None
+                if held_item is None:
+                    return False
+                item_album = await self._gallery_repo.get_album(held_item.album_id)
+                if item_album is None or item_album.space_id != space_id:
+                    return False
+                return await auth.may_mutate(event, space_id, held_item.uploaded_by)
             case "gallery":
                 if r.get("kind") == "album":
                     if r.get("is_system"):
@@ -1770,6 +2140,8 @@ class SpaceSyncReceiver:
                     return await auth.acts_for(event, space_id, owner)
                 if not rid or await self._gallery_repo.get_item(rid) is not None:
                     return False
+                if await self._gallery_repo.is_item_deleted(rid, space_id=space_id):
+                    return False  # deleted here; the tombstone wins
                 return await auth.may_author(
                     event,
                     space_id,
@@ -1782,7 +2154,25 @@ class SpaceSyncReceiver:
                 if await self._poll_repo.get_schedule_meta(post_id) is not None:
                     return False
                 return await self._anchor_author_ok(event, space_id, post_id)
+            case "space_zones_deleted":
+                # The live SPACE_ZONE_DELETED rule: an admin household
+                # (zones are admin-only) removes a zone held live here IN
+                # THIS SPACE.
+                held_zone = (
+                    await self._zone_repo.get(rid)
+                    if rid and self._zone_repo is not None
+                    else None
+                )
+                if held_zone is None or held_zone.space_id != space_id:
+                    return False
+                return await auth.is_admin_household(event, space_id)
             case "space_zones":
+                if (
+                    rid
+                    and self._zone_repo is not None
+                    and await self._zone_repo.is_deleted(rid, space_id=space_id)
+                ):
+                    return False  # deleted here; the tombstone wins
                 return await auth.is_admin_household(event, space_id)
             case "timetables":
                 # Moderator-only, per user, like the live event: the
@@ -1820,6 +2210,43 @@ class SpaceSyncReceiver:
                 return await auth.may_author(event, space_id, seller)
         return False
 
+    async def _writer_delete_admits(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        feature: str,
+        r: dict[str, Any],
+        *,
+        row_owner: str,
+    ) -> bool:
+        """The live delete rule of the collaborative features (tasks, task
+        lists, pages, stickies, calendar events —
+        ``_collaborative_write_allowed`` for ``ContentAction.DELETE``) for a
+        streamed tombstone of a row held live here: a **writer** household
+        removes it, if the space's ``feature`` level admits the delete for
+        the user who made it (``actor_user_id``, the tombstone's
+        ``deleted_by``), who must be seated on the provider. Refusals are
+        counted in :meth:`_admit`'s one summary line (``quiet``), not logged
+        per record on every scheduler tick."""
+        auth = self._authorship
+        assert auth is not None
+        if not await auth.writes_here(event, space_id):
+            return False
+        actor = str(r.get("actor_user_id") or "") or None
+        if actor is not None and not await auth.acts_for(
+            event, space_id, actor, any_role=True
+        ):
+            return False
+        return await auth.access_admits(
+            event,
+            space_id,
+            feature,
+            ContentAction.DELETE,
+            actor=actor,
+            row_owner=row_owner,
+            quiet=True,
+        )
+
     async def _anchor_author_ok(
         self, event: FederationEvent, space_id: str, post_id: str
     ) -> bool:
@@ -1829,13 +2256,17 @@ class SpaceSyncReceiver:
             return False
         return await self._authorship.may_author(event, space_id, got[1].author)
 
-    def _album_deleted_here(self, space_id: str, album_id: str) -> bool:
-        return self._gallery_tombstones is not None and (
-            self._gallery_tombstones.is_deleted(space_id, album_id)
+    def _legacy_album_deleted(self, space_id: str, album_id: str) -> bool:
+        return self._legacy_album_deletes is not None and (
+            self._legacy_album_deletes.is_deleted(space_id, album_id)
         )
 
     async def _persist_album(self, record: dict[str, Any], space_id: str) -> None:
-        if self._album_deleted_here(space_id, str(record["id"])):
+        if self._legacy_album_deleted(
+            space_id, str(record["id"])
+        ) or await self._gallery_repo.is_album_deleted(
+            str(record["id"]), space_id=space_id
+        ):
             log.debug("sync: gallery album %s was deleted here — skipped", record["id"])
             return
         # The album lands in the space this sync stream was gated for —
@@ -1884,8 +2315,15 @@ class SpaceSyncReceiver:
         space_id: str,
     ) -> None:
         album_id = str(record.get("album_id") or "")
-        if self._album_deleted_here(space_id, album_id):
+        if self._legacy_album_deleted(
+            space_id, album_id
+        ) or await self._gallery_repo.is_album_deleted(album_id, space_id=space_id):
             return  # its album was deleted here; so was the item
+        if await self._gallery_repo.is_item_deleted(
+            str(record["id"]), space_id=space_id
+        ):
+            log.debug("sync: gallery item %s was deleted here — skipped", record["id"])
+            return
         item = GalleryItem(
             id=str(record["id"]),
             album_id=album_id,
@@ -1942,6 +2380,10 @@ _BOUND_RESOURCES: dict[str, tuple[str, tuple[str, ...]]] = {
     "tasks_archived": (SPACE_TASK_KIND, ("created_by",)),
     "pages": (SPACE_PAGE_KIND, ("created_by",)),
     "stickies": (SPACE_STICKY_KIND, ("author", "created_by")),
+    "stickies_deleted": (SPACE_STICKY_KIND, ("author",)),
+    "calendar_deleted": (SPACE_CALENDAR_EVENT_KIND, ("created_by",)),
+    "gallery_albums_deleted": (GALLERY_ALBUM_KIND, ("owner_user_id",)),
+    "gallery_items_deleted": (GALLERY_ITEM_KIND, ("uploaded_by",)),
     "timetables": (SPACE_TIMETABLE_KIND, ("created_by",)),
     "chat_messages": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
     "chat_messages_deleted": (SPACE_CHAT_MESSAGE_KIND, ("author_user_id",)),
@@ -1978,6 +2420,16 @@ def _claims_bound_id(resource: str, space_id: str, r: dict[str, Any]) -> bool:
     )
 
 
+def _bound_here(kind: str, row_id: str, space_id: str, owner: str) -> bool:
+    """Is ``row_id`` owner-bound to ``owner`` in ``space_id``? The condition
+    for a host stub of an id never held here: ids are global, so a stub for
+    another space's id (or a legacy, unbound one) would block a real row."""
+    return (
+        check_owner_bound_id(kind, row_id, space_id=space_id, owner_user_id=owner)
+        is OwnerBinding.VALID
+    )
+
+
 def _log_tombstone_refusals(
     what: str, provider: str, space_id: str, cross_space: list[str], unbound: int
 ) -> None:
@@ -1997,7 +2449,8 @@ def _log_tombstone_refusals(
         log.info(
             "space sync: %d %s tombstone(s) from %s for %s name a %s never "
             "held here whose id is not bound to this space (or, for a "
-            "comment, whose post is not held here) — no stub recorded",
+            "comment / gallery item, whose post / album is not held here) — "
+            "no stub recorded",
             unbound,
             what,
             provider,

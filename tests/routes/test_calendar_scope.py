@@ -334,7 +334,9 @@ async def test_space_calendar_member_writes_are_allowed(client):
     assert r.status == 200
     r = await client.delete(f"/api/spaces/sp-b/calendar/events/{eid}", headers=bob)
     assert r.status == 200
-    assert await _event_rows(client, "sp-b") == []
+    # A content-free tombstone stays (migration 0085); its RSVPs are gone.
+    assert await _event_rows(client, "sp-b") == [(eid, "sp-b", "", "", None)]
+    assert await _rsvp_rows(client) == []
 
 
 # ─── Archived spaces are read-only ───────────────────────────────────────

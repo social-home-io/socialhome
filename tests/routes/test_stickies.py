@@ -204,7 +204,12 @@ async def test_space_sticky_member_writes_are_allowed(client):
     body = await r.json()
     assert body["content"] == "hi2" and body["position_x"] == 3.0
     assert (await client.delete(f"{base}/{stid}", headers=bob)).status == 200
-    assert await _row(client, stid) is None
+    # A content-free tombstone stays (migration 0085), naming the deleter.
+    assert await _row(client, stid) == ("sp-m", "", "#FFF9B1", 3.0)
+    gone = await client._db.fetchone(
+        "SELECT deleted_at, deleted_by FROM stickies WHERE id=?", (stid,)
+    )
+    assert gone["deleted_at"] is not None and gone["deleted_by"]
 
 
 async def test_space_sticky_writes_in_an_archived_space_are_403(client):

@@ -130,6 +130,12 @@ class _Stub:
         self.saved.append(("item", item))
         return True
 
+    async def is_album_deleted(self, album_id, *, space_id):
+        return False
+
+    async def is_item_deleted(self, item_id, *, space_id):
+        return False
+
 
 def _make_peer() -> tuple[RemoteInstance, object]:
     kp = generate_identity_keypair()

@@ -213,3 +213,37 @@ async def test_export_includes_own_moderation_submissions_only(env):
     assert all("current_snapshot" not in r and "reviewed_by" not in r for r in rows)
     bob = await svc.export_for_user("bob-id")
     assert [r["id"] for r in bob.tables["space_moderation_queue"]] == ["m3"]
+
+
+# ─── Tombstones (migration 0085) are not the subject's content ──────────
+
+
+async def test_export_leaves_out_deleted_stickies_and_gallery_rows(env):
+    db, svc = env
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp','S','h','alice','ab')"
+    )
+    for sid, deleted in (("st-live", None), ("st-gone", "2026-01-01 00:00:00")):
+        await db.enqueue(
+            "INSERT INTO stickies(id, space_id, author, content, deleted_at)"
+            " VALUES(?, 'sp', 'alice-id', 'x', ?)",
+            (sid, deleted),
+        )
+    for aid, deleted in (("al-live", None), ("al-gone", "2026-01-01 00:00:00")):
+        await db.enqueue(
+            "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
+            " deleted_at) VALUES(?, 'sp', 'alice-id', 'A', ?)",
+            (aid, deleted),
+        )
+    for iid, deleted in (("it-live", None), ("it-gone", "2026-01-01 00:00:00")):
+        await db.enqueue(
+            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+            " filename, thumbnail_filename, width, height, deleted_at)"
+            " VALUES(?, 'al-live', 'alice-id', 'photo', 'f', 't', 1, 1, ?)",
+            (iid, deleted),
+        )
+    out = await svc.export_for_user("alice-id")
+    assert [r["id"] for r in out.tables["stickies"]] == ["st-live"]
+    assert [r["id"] for r in out.tables["gallery_albums"]] == ["al-live"]
+    assert [r["id"] for r in out.tables["gallery_items"]] == ["it-live"]

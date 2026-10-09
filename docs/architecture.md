@@ -1416,9 +1416,11 @@ writer household; the host may relay a remote member's create. The §25.6
 catch-up stream is held to the same rules unless it comes from the host —
 its tombstone resources (`posts_deleted`, `comments_deleted`,
 `pages_deleted`, `task_lists_deleted`, `tasks_deleted`,
+`stickies_deleted`, `calendar_deleted`, `gallery_albums_deleted`,
+`gallery_items_deleted`, `space_zones_deleted`,
 `chat_messages_deleted`) to the live delete rule. What it streams is the
 space's retention window for live posts and chat (everything without
-retention; gallery items and post / comment tombstones always in full),
+retention; gallery items and every tombstone resource always in full),
 read page by page in bounded memory — never a fixed count. The 30-minute
 periodic re-sync is `incremental` (no media re-ship), and a session is
 reaped only when idle, never mid-stream; see
