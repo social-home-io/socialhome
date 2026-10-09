@@ -27,8 +27,16 @@ from ..domain.calendar import (
     EventReminder,
     RSVPStatus,
 )
+from ..domain.tombstone import SpaceRowTombstone
 from ..utils.rrule import expand_rrule
-from .base import bool_col, dump_json, load_json, row_to_dict, rows_to_dicts
+from .base import (
+    bool_col,
+    dump_json,
+    load_json,
+    row_to_dict,
+    rows_to_dicts,
+    sync_page_cursor,
+)
 
 
 def _expand_window(
@@ -607,7 +615,29 @@ class AbstractSpaceCalendarRepo(Protocol):
         *,
         limit: int = 500,
     ) -> list[CalendarEvent]: ...
-    async def delete_event(self, event_id: str, *, space_id: str) -> bool: ...
+    async def delete_event(
+        self, event_id: str, *, space_id: str, deleted_by: str = ""
+    ) -> bool: ...
+    async def is_event_deleted(self, event_id: str, *, space_id: str) -> bool: ...
+    async def tombstone_event(
+        self,
+        event_id: str,
+        *,
+        space_id: str,
+        created_by: str,
+        created_at: str = "",
+        deleted_by: str = "",
+    ) -> bool: ...
+    async def list_event_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[SpaceRowTombstone], int | None]:
+        """One page of the space's event tombstones for the §25.6
+        ``calendar_deleted`` resource, keyset on the row id."""
+        ...
 
     async def upsert_rsvp(self, rsvp: CalendarRSVP, *, space_id: str) -> bool: ...
     async def remove_rsvp(
@@ -746,6 +776,7 @@ class SqliteSpaceCalendarRepo:
                 announce_in_feed=excluded.announce_in_feed,
                 updated_at=datetime('now')
             WHERE space_calendar_events.space_id = excluded.space_id
+              AND space_calendar_events.deleted_at IS NULL
             """,
             (
                 event.id,
@@ -774,7 +805,7 @@ class SqliteSpaceCalendarRepo:
         event_id: str,
     ) -> tuple[str, CalendarEvent] | None:
         row = await self._db.fetchone(
-            "SELECT * FROM space_calendar_events WHERE id=?",
+            "SELECT * FROM space_calendar_events WHERE id=? AND deleted_at IS NULL",
             (event_id,),
         )
         d = row_to_dict(row)
@@ -792,7 +823,7 @@ class SqliteSpaceCalendarRepo:
         rows = await self._db.fetchall(
             """
             SELECT * FROM space_calendar_events
-             WHERE space_id=?
+             WHERE space_id=? AND deleted_at IS NULL
                AND (
                     (rrule IS NULL AND start_dt < ? AND end_dt > ?)
                  OR (rrule IS NOT NULL AND start_dt < ?)
@@ -829,18 +860,97 @@ class SqliteSpaceCalendarRepo:
         """
         rows = await self._db.fetchall(
             "SELECT * FROM space_calendar_events "
-            "WHERE space_id=? AND updated_at > ? "
+            "WHERE space_id=? AND updated_at > ? AND deleted_at IS NULL "
             "ORDER BY updated_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )
         return [_row_to_space_event(d) for d in rows_to_dicts(rows)]
 
-    async def delete_event(self, event_id: str, *, space_id: str) -> bool:
+    async def delete_event(
+        self, event_id: str, *, space_id: str, deleted_by: str = ""
+    ) -> bool:
+        """Delete an event of ``space_id``. ``False`` = not live there.
+
+        The row stays as a tombstone (migration 0085): content blanked,
+        ``deleted_at`` / ``deleted_by`` set — the §25.6 ``calendar_deleted``
+        resource streams it to a household that missed the delete, and no
+        upsert brings the id back. Its RSVPs and reminders go with it (the
+        0085 trigger).
+        """
         n = await self._db.enqueue_rowcount(
-            "DELETE FROM space_calendar_events WHERE id=? AND space_id=?",
-            (event_id, space_id),
+            """
+            UPDATE space_calendar_events
+               SET deleted_at=datetime('now'), deleted_by=?,
+                   summary='', description=NULL, start_dt='', end_dt='',
+                   attendees_json='[]', rrule=NULL, capacity=NULL,
+                   notify_before_minutes=NULL, cover_url=NULL, location=NULL
+             WHERE id=? AND space_id=? AND deleted_at IS NULL
+            """,
+            (deleted_by or None, event_id, space_id),
         )
         return n > 0
+
+    async def is_event_deleted(self, event_id: str, *, space_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM space_calendar_events WHERE id=? AND space_id=?"
+            " AND deleted_at IS NOT NULL",
+            (event_id, space_id),
+        )
+        return row is not None
+
+    async def tombstone_event(
+        self,
+        event_id: str,
+        *,
+        space_id: str,
+        created_by: str,
+        created_at: str = "",
+        deleted_by: str = "",
+    ) -> bool:
+        """Record a delete of an event never held here: a content-free stub
+        row, so a stale copy streamed later cannot create it.
+
+        Insert-only — an id held already (live or tombstoned, any space) is
+        never touched; ``False`` says nothing was written. The caller must
+        have proven the id is this space's (owner-bound to ``created_by`` in
+        ``space_id``): event ids are global.
+        """
+        n = await self._db.enqueue_rowcount(
+            "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
+            " end_dt, created_by, created_at, deleted_at, deleted_by)"
+            " VALUES(?, ?, '', '', '', ?, COALESCE(NULLIF(?, ''), datetime('now')),"
+            " datetime('now'), ?)"
+            " ON CONFLICT(id) DO NOTHING",
+            (event_id, space_id, created_by, created_at, deleted_by or None),
+        )
+        return n > 0
+
+    async def list_event_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[SpaceRowTombstone], int | None]:
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, id, created_by, created_at,"
+                " deleted_at, deleted_by FROM space_calendar_events"
+                " WHERE space_id=? AND deleted_at IS NOT NULL AND rowid > ?"
+                " ORDER BY rowid LIMIT ?",
+                (space_id, cursor or 0, int(limit)),
+            )
+        )
+        return [
+            SpaceRowTombstone(
+                id=r["id"],
+                owner=r["created_by"],
+                created_at=r["created_at"] or "",
+                deleted_at=r["deleted_at"],
+                deleted_by=r["deleted_by"] or "",
+            )
+            for r in rows
+        ], sync_page_cursor(rows, limit)
 
     # ── RSVPs ──────────────────────────────────────────────────────────
 
@@ -864,7 +974,8 @@ class SqliteSpaceCalendarRepo:
             )
             SELECT ?, ?, ?, ?, COALESCE(?, datetime('now'))
              WHERE EXISTS (
-                 SELECT 1 FROM space_calendar_events WHERE id=? AND space_id=?
+                 SELECT 1 FROM space_calendar_events
+                  WHERE id=? AND space_id=? AND deleted_at IS NULL
              )
             ON CONFLICT(event_id, user_id, occurrence_at) DO UPDATE SET
                 status=excluded.status,

@@ -15,8 +15,9 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.sticky import DEFAULT_STICKY_COLOR, Sticky, normalize_sticky_color
+from ..domain.tombstone import SpaceRowTombstone
 from ..federation.owner_bound_id import SPACE_STICKY_KIND, mint_owner_bound_id
-from .base import row_to_dict, rows_to_dicts
+from .base import row_to_dict, rows_to_dicts, sync_page_cursor
 
 
 # Domain dataclass + field rules live in ``socialhome/domain/sticky.py``;
@@ -81,8 +82,30 @@ class AbstractStickyRepo(Protocol):
         *,
         space_id: str | None,
     ) -> bool: ...
-    async def delete(self, sticky_id: str, *, space_id: str | None) -> bool: ...
+    async def delete(
+        self, sticky_id: str, *, space_id: str | None, deleted_by: str = ""
+    ) -> bool: ...
     async def save(self, sticky: Sticky, *, space_id: str | None) -> bool: ...
+    async def is_deleted(self, sticky_id: str, *, space_id: str) -> bool: ...
+    async def tombstone(
+        self,
+        sticky_id: str,
+        *,
+        space_id: str,
+        author: str,
+        created_at: str = "",
+        deleted_by: str = "",
+    ) -> bool: ...
+    async def list_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[builtins.list[SpaceRowTombstone], int | None]:
+        """One page of the space's sticky tombstones for the §25.6
+        ``stickies_deleted`` resource, keyset on the row id."""
+        ...
 
 
 class SqliteStickyRepo:
@@ -151,7 +174,7 @@ class SqliteStickyRepo:
 
     async def get(self, sticky_id: str) -> Sticky | None:
         row = await self._db.fetchone(
-            "SELECT * FROM stickies WHERE id=?",
+            "SELECT * FROM stickies WHERE id=? AND deleted_at IS NULL",
             (sticky_id,),
         )
         return _row_to_sticky(row_to_dict(row))
@@ -172,7 +195,8 @@ class SqliteStickyRepo:
         cross-space id apart from a missing one.
         """
         row = await self._db.fetchone(
-            "SELECT * FROM stickies WHERE id=? AND space_id IS ?",
+            "SELECT * FROM stickies WHERE id=? AND space_id IS ?"
+            " AND deleted_at IS NULL",
             (sticky_id, space_id),
         )
         return _row_to_sticky(row_to_dict(row))
@@ -188,7 +212,8 @@ class SqliteStickyRepo:
             )
         else:
             rows = await self._db.fetchall(
-                "SELECT * FROM stickies WHERE space_id=? ORDER BY created_at",
+                "SELECT * FROM stickies WHERE space_id=? AND deleted_at IS NULL"
+                " ORDER BY created_at",
                 (space_id,),
             )
         return [s for s in (_row_to_sticky(d) for d in rows_to_dicts(rows)) if s]
@@ -216,7 +241,7 @@ class SqliteStickyRepo:
         """
         rows = await self._db.fetchall(
             "SELECT * FROM stickies "
-            "WHERE space_id=? AND updated_at > ? "
+            "WHERE space_id=? AND updated_at > ? AND deleted_at IS NULL "
             "ORDER BY updated_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )
@@ -234,7 +259,7 @@ class SqliteStickyRepo:
             raise ValueError("sticky content must not be empty")
         n = await self._db.enqueue_rowcount(
             "UPDATE stickies SET content=?, updated_at=datetime('now') "
-            "WHERE id=? AND space_id IS ?",
+            "WHERE id=? AND space_id IS ? AND deleted_at IS NULL",
             (content, sticky_id, space_id),
         )
         return n > 0
@@ -249,7 +274,8 @@ class SqliteStickyRepo:
     ) -> bool:
         n = await self._db.enqueue_rowcount(
             "UPDATE stickies SET position_x=?, position_y=?, "
-            "updated_at=datetime('now') WHERE id=? AND space_id IS ?",
+            "updated_at=datetime('now') WHERE id=? AND space_id IS ?"
+            " AND deleted_at IS NULL",
             (float(x), float(y), sticky_id, space_id),
         )
         return n > 0
@@ -263,7 +289,7 @@ class SqliteStickyRepo:
     ) -> bool:
         n = await self._db.enqueue_rowcount(
             "UPDATE stickies SET color=?, updated_at=datetime('now') "
-            "WHERE id=? AND space_id IS ?",
+            "WHERE id=? AND space_id IS ? AND deleted_at IS NULL",
             (color, sticky_id, space_id),
         )
         return n > 0
@@ -296,6 +322,7 @@ class SqliteStickyRepo:
                 position_y=excluded.position_y,
                 updated_at=excluded.updated_at
             WHERE stickies.space_id IS excluded.space_id
+              AND stickies.deleted_at IS NULL
             """,
             (
                 sticky.id,
@@ -311,12 +338,91 @@ class SqliteStickyRepo:
         )
         return n > 0
 
-    async def delete(self, sticky_id: str, *, space_id: str | None) -> bool:
+    async def delete(
+        self, sticky_id: str, *, space_id: str | None, deleted_by: str = ""
+    ) -> bool:
+        """Delete a sticky of ``space_id``. ``False`` = not live there.
+
+        A space sticky keeps its row as a tombstone (migration 0085): the
+        content blanked, ``deleted_at`` / ``deleted_by`` set — the §25.6
+        ``stickies_deleted`` resource streams it to a household that missed
+        the delete, and no upsert brings the id back. A household sticky
+        never federates and is removed outright.
+        """
+        if space_id is None:
+            n = await self._db.enqueue_rowcount(
+                "DELETE FROM stickies WHERE id=? AND space_id IS NULL",
+                (sticky_id,),
+            )
+            return n > 0
         n = await self._db.enqueue_rowcount(
-            "DELETE FROM stickies WHERE id=? AND space_id IS ?",
-            (sticky_id, space_id),
+            "UPDATE stickies SET deleted_at=datetime('now'), deleted_by=?,"
+            " content='' WHERE id=? AND space_id=? AND deleted_at IS NULL",
+            (deleted_by or None, sticky_id, space_id),
         )
         return n > 0
+
+    async def is_deleted(self, sticky_id: str, *, space_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM stickies WHERE id=? AND space_id=?"
+            " AND deleted_at IS NOT NULL",
+            (sticky_id, space_id),
+        )
+        return row is not None
+
+    async def tombstone(
+        self,
+        sticky_id: str,
+        *,
+        space_id: str,
+        author: str,
+        created_at: str = "",
+        deleted_by: str = "",
+    ) -> bool:
+        """Record a delete of a sticky never held here: a content-free stub
+        row, so a stale copy streamed later cannot create it.
+
+        Insert-only — an id held already (live or tombstoned, in any scope)
+        is never touched; ``False`` says nothing was written. The caller
+        must have proven the id is this space's (owner-bound to ``author``
+        in ``space_id``): sticky ids are global.
+        """
+        n = await self._db.enqueue_rowcount(
+            "INSERT INTO stickies(id, space_id, author, content, created_at,"
+            " updated_at, deleted_at, deleted_by)"
+            " VALUES(?, ?, ?, '', COALESCE(NULLIF(?, ''), datetime('now')),"
+            " datetime('now'), datetime('now'), ?)"
+            " ON CONFLICT(id) DO NOTHING",
+            (sticky_id, space_id, author, created_at, deleted_by or None),
+        )
+        return n > 0
+
+    async def list_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[builtins.list[SpaceRowTombstone], int | None]:
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, id, author, created_at, deleted_at,"
+                " deleted_by FROM stickies"
+                " WHERE space_id=? AND deleted_at IS NOT NULL AND rowid > ?"
+                " ORDER BY rowid LIMIT ?",
+                (space_id, cursor or 0, int(limit)),
+            )
+        )
+        return [
+            SpaceRowTombstone(
+                id=r["id"],
+                owner=r["author"],
+                created_at=r["created_at"] or "",
+                deleted_at=r["deleted_at"],
+                deleted_by=r["deleted_by"] or "",
+            )
+            for r in rows
+        ], sync_page_cursor(rows, limit)
 
 
 def _row_to_sticky(row: dict | None) -> Sticky | None:

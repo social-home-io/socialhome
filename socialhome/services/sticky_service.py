@@ -332,7 +332,11 @@ class StickyService(BusPublisherMixin, ContentAccessMixin):
                     payload={"entity": "sticky", "target_id": sticky.id},
                     snapshot=_sticky_dict(sticky),
                 )
-        if not await self._repo.delete(sticky_id, space_id=space_id):
+        # A space sticky keeps a tombstone naming who authorised the delete
+        # (the approver of a reviewed one) — §25.6 ``stickies_deleted``.
+        if not await self._repo.delete(
+            sticky_id, space_id=space_id, deleted_by=approved_by or actor_user_id
+        ):
             raise KeyError(f"sticky {sticky_id!r} not found")
         await self._emit(
             StickyDeleted(

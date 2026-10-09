@@ -521,7 +521,8 @@ class SqliteSpacePollRepo:
     ) -> bool:
         """Upsert schedule-poll meta + slots onto a post of ``space_id``.
 
-        Refused (``False``) when the wrapper post is not in that space.
+        Refused (``False``) when the wrapper post is not in that space, or
+        is deleted (a deleted post holds no poll — migration 0085).
         A slot id already owned by a *different* post is left alone —
         the slot upsert only updates a row whose ``post_id`` matches — so
         naming another poll's slot ids cannot rewrite that poll.
@@ -530,7 +531,7 @@ class SqliteSpacePollRepo:
         def _run(conn) -> bool:
             if (
                 conn.execute(
-                    "SELECT 1 FROM space_posts WHERE id=? AND space_id=?",
+                    "SELECT 1 FROM space_posts WHERE id=? AND space_id=? AND deleted=0",
                     (post_id, space_id),
                 ).fetchone()
                 is None

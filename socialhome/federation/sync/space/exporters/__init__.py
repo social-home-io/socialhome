@@ -13,10 +13,15 @@ resource id to :data:`RESOURCE_ORDER` in the exporter framework.
 from .bans import BansExporter
 from .bazaar import BazaarExporter
 from .calendar import CalendarExporter
+from .calendar_deleted import CalendarDeletedExporter
 from .chat_messages import ChatMessagesDeletedExporter, ChatMessagesExporter
 from .comments import CommentsExporter
 from .comments_deleted import CommentsDeletedExporter
 from .gallery import GalleryExporter
+from .gallery_deleted import (
+    GalleryAlbumsDeletedExporter,
+    GalleryItemsDeletedExporter,
+)
 from .member_pictures import MemberPicturesExporter
 from .members import MembersExporter
 from .pages import PagesExporter
@@ -26,6 +31,7 @@ from .posts import PostsExporter
 from .posts_deleted import PostsDeletedExporter
 from .schedules import SchedulesExporter
 from .stickies import StickiesExporter
+from .stickies_deleted import StickiesDeletedExporter
 from .task_lists import TaskListsExporter
 from .task_lists_deleted import TaskListsDeletedExporter
 from .tasks import TasksExporter
@@ -33,16 +39,20 @@ from .tasks_deleted import TasksDeletedExporter
 from .tasks_archived import TasksArchivedExporter
 from .timetables import TimetablesExporter
 from .zones import ZonesExporter
+from .zones_deleted import ZonesDeletedExporter
 
 __all__ = [
     "BansExporter",
     "BazaarExporter",
+    "CalendarDeletedExporter",
     "CalendarExporter",
     "ChatMessagesDeletedExporter",
     "ChatMessagesExporter",
     "CommentsDeletedExporter",
     "CommentsExporter",
+    "GalleryAlbumsDeletedExporter",
     "GalleryExporter",
+    "GalleryItemsDeletedExporter",
     "MemberPicturesExporter",
     "MembersExporter",
     "PagesDeletedExporter",
@@ -51,6 +61,7 @@ __all__ = [
     "PostsDeletedExporter",
     "PostsExporter",
     "SchedulesExporter",
+    "StickiesDeletedExporter",
     "StickiesExporter",
     "TaskListsDeletedExporter",
     "TaskListsExporter",
@@ -58,5 +69,6 @@ __all__ = [
     "TasksArchivedExporter",
     "TasksDeletedExporter",
     "TimetablesExporter",
+    "ZonesDeletedExporter",
     "ZonesExporter",
 ]

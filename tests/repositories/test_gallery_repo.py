@@ -628,3 +628,139 @@ async def test_sync_pages_walk_every_album_and_own_item_in_the_window(env):
     # No retention window: nothing prunes gallery items, so every one the
     # host shows streams, old ones included.
     assert seen == ["it-new", "it-old", "it-old-kept"]
+
+
+# ─── Tombstones (migration 0085, §25.6 ``gallery_*_deleted``) ─────────
+
+
+async def _item_row(db, item_id):
+    row = await db.fetchone("SELECT * FROM gallery_items WHERE id=?", (item_id,))
+    return dict(row) if row is not None else None
+
+
+async def _album_row(db, album_id):
+    row = await db.fetchone("SELECT * FROM gallery_albums WHERE id=?", (album_id,))
+    return dict(row) if row is not None else None
+
+
+async def test_a_space_item_delete_keeps_a_file_free_tombstone(two_spaces):
+    db, repo = two_spaces
+    assert await repo.delete_item_in_space("it-2", space_id="sp-2", deleted_by="u-m")
+    row = await _item_row(db, "it-2")
+    assert row is not None and row["deleted_at"] and row["deleted_by"] == "u-m"
+    # The files are blanked: no media reference left (the blobs may go).
+    assert (row["filename"], row["thumbnail_filename"], row["caption"]) == (
+        "",
+        "",
+        None,
+    )
+    assert await repo.get_item("it-2") is None
+    assert await repo.list_items("alb-2") == []
+    assert await repo.list_items_since("sp-2", "1970-01-01") == []
+    assert await repo.list_items_sync_page("sp-2") == ([], None)
+    assert await repo.recount_items("alb-2") == 0
+    assert await repo.get_first_item_thumbnail("alb-2") is None
+    assert await repo.is_item_deleted("it-2", space_id="sp-2")
+    assert not await repo.is_item_deleted("it-2", space_id="sp-1")
+    # Nothing deletes it twice or brings it back.
+    assert not await repo.delete_item_in_space("it-2", space_id="sp-2")
+    assert await repo.create_item_in_space(
+        _item("it-2", album_id="alb-2"), space_id="sp-2"
+    )
+    assert (await _item_row(db, "it-2"))["deleted_at"] is not None
+    assert await repo.get_item("it-2") is None
+
+
+async def test_the_service_deletes_tombstone_space_rows_and_remove_household_ones(
+    two_spaces,
+):
+    db, repo = two_spaces
+    await repo.create_item(_item("it-home", album_id="alb-home"))
+    await repo.delete_item("it-home", deleted_by="a-id")
+    assert await _item_row(db, "it-home") is None
+    await repo.delete_item("it-2", deleted_by="a-id")
+    assert (await _item_row(db, "it-2"))["deleted_by"] == "a-id"
+    await repo.delete_album("alb-home", deleted_by="a-id")
+    assert await _album_row(db, "alb-home") is None
+    await repo.delete_album("alb-1", deleted_by="a-id")
+    row = await _album_row(db, "alb-1")
+    assert row["deleted_at"] and row["deleted_by"] == "a-id" and row["name"] == ""
+
+
+async def test_an_album_tombstone_takes_its_items_and_is_never_revived(two_spaces):
+    db, repo = two_spaces
+    assert await repo.delete_album_in_space("alb-2", space_id="sp-2", deleted_by="u")
+    assert (await _item_row(db, "it-2"))["deleted_at"] is not None
+    assert await repo.get_album("alb-2") is None
+    assert await repo.list_albums("sp-2") == []
+    assert await repo.list_albums_sync_page("sp-2") == ([], None)
+    assert await repo.is_album_deleted("alb-2", space_id="sp-2")
+    assert not await repo.is_album_deleted("alb-2", space_id="sp-1")
+    # No create brings it back, no item lands in it, no edit touches it.
+    await repo.create_album(_album("alb-2", space_id="sp-2"))
+    assert not await repo.create_album_in_space(
+        _album("alb-2", space_id="sp-2"), space_id="sp-2"
+    )
+    assert not await repo.update_album_in_space(
+        "alb-2", {"name": "Back"}, space_id="sp-2"
+    )
+    assert not await repo.create_item_in_space(
+        _item("it-late", album_id="alb-2"), space_id="sp-2"
+    )
+    assert (await _album_row(db, "alb-2"))["name"] == ""
+    # Its items are not streamed as item tombstones: the album's covers them.
+    assert await repo.list_item_tombstones_page("sp-2") == ([], None)
+    albums, _ = await repo.list_album_tombstones_page("sp-2")
+    assert [(a.id, a.owner, a.deleted_by) for a in albums] == [("alb-2", "a-id", "u")]
+
+
+async def test_item_tombstones_page_and_name_their_album(two_spaces):
+    _db, repo = two_spaces
+    for i in range(3):
+        await repo.create_item_in_space(
+            _item(f"it-{i}x", album_id="alb-1"), space_id="sp-1"
+        )
+        await repo.delete_item_in_space(f"it-{i}x", space_id="sp-1")
+    page, cursor = await repo.list_item_tombstones_page("sp-1", limit=2)
+    assert [t.id for t in page] == ["it-0x", "it-1x"] and cursor is not None
+    rest, end = await repo.list_item_tombstones_page("sp-1", cursor=cursor, limit=2)
+    assert [t.id for t in rest] == ["it-2x"] and end is None
+    assert (rest[0].owner, rest[0].parent_id) == ("a-id", "alb-1")
+
+
+async def test_stub_tombstones_are_insert_only_and_scoped(two_spaces):
+    db, repo = two_spaces
+    assert await repo.tombstone_album(
+        "alb-new", space_id="sp-1", owner_user_id="a-id", deleted_by="u"
+    )
+    assert await repo.is_album_deleted("alb-new", space_id="sp-1")
+    assert not await repo.tombstone_album(
+        "alb-2", space_id="sp-1", owner_user_id="a-id"
+    )
+    assert await repo.tombstone_item(
+        "it-new", space_id="sp-1", album_id="alb-1", uploaded_by="a-id"
+    )
+    assert await repo.is_item_deleted("it-new", space_id="sp-1")
+    # Only under an album live in this space; never over a held id.
+    assert not await repo.tombstone_item(
+        "it-x", space_id="sp-1", album_id="alb-2", uploaded_by="a-id"
+    )
+    assert not await repo.tombstone_item(
+        "it-y", space_id="sp-1", album_id="alb-new", uploaded_by="a-id"
+    )
+    assert not await repo.tombstone_item(
+        "it-2", space_id="sp-2", album_id="alb-2", uploaded_by="a-id"
+    )
+    assert await _item_row(db, "it-x") is None
+    assert (await _item_row(db, "it-2"))["deleted_at"] is None
+
+
+async def test_album_tombstones_since_list_recent_deletes(two_spaces):
+    _db, repo = two_spaces
+    await repo.delete_album_in_space("alb-1", space_id="sp-1")
+    recent = await repo.list_album_tombstones_since("sp-1", "1970-01-01")
+    assert [(t.id, t.owner) for t in recent] == [("alb-1", "a-id")]
+    assert await repo.list_album_tombstones_since("sp-1", "2999-01-01") == []
+    # An unparsable ``since`` lists them all: replaying twice is harmless.
+    every = await repo.list_album_tombstones_since("sp-1", "garbage")
+    assert [t.id for t in every] == ["alb-1"]

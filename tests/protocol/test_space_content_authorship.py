@@ -57,10 +57,13 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
     SPACE_CHAT_MESSAGE_KIND,
     SPACE_COMMENT_KIND,
     SPACE_PAGE_KIND,
     SPACE_POST_KIND,
+    SPACE_STICKY_KIND,
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
     SPACE_TIMETABLE_KIND,
@@ -134,6 +137,26 @@ _POST_ELSEWHERE = mint_owner_bound_id(
 _CMT_SYNC = mint_owner_bound_id(SPACE_COMMENT_KIND, space_id=SP, owner_user_id="u-a")
 _CMT_ELSEWHERE = mint_owner_bound_id(
     SPACE_COMMENT_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
+)
+#: The migration-0085 twins: sticky / event ids bound to u-a, album /
+#: item ids bound to u-g — in SP, and in another space.
+_STICKY_SYNC = mint_owner_bound_id(SPACE_STICKY_KIND, space_id=SP, owner_user_id="u-a")
+_STICKY_ELSEWHERE = mint_owner_bound_id(
+    SPACE_STICKY_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
+)
+_EVENT_SYNC = mint_owner_bound_id(
+    SPACE_CALENDAR_EVENT_KIND, space_id=SP, owner_user_id="u-a"
+)
+_EVENT_ELSEWHERE = mint_owner_bound_id(
+    SPACE_CALENDAR_EVENT_KIND, space_id="sp-elsewhere", owner_user_id="u-a"
+)
+_ALBUM_SYNC = mint_owner_bound_id(GALLERY_ALBUM_KIND, space_id=SP, owner_user_id="u-g")
+_ALBUM_ELSEWHERE = mint_owner_bound_id(
+    GALLERY_ALBUM_KIND, space_id="sp-elsewhere", owner_user_id="u-g"
+)
+_ITEM_SYNC = mint_owner_bound_id(GALLERY_ITEM_KIND, space_id=SP, owner_user_id="u-g")
+_ITEM_ELSEWHERE = mint_owner_bound_id(
+    GALLERY_ITEM_KIND, space_id="sp-elsewhere", owner_user_id="u-g"
 )
 _TT_FOR_U_A = mint_owner_bound_id(
     SPACE_TIMETABLE_KIND, space_id=SP, owner_user_id="u-a"
@@ -1344,15 +1367,34 @@ async def test_a_redelivered_album_from_its_owners_household_is_quiet(env, caplo
 
 
 async def test_an_album_delete_that_overtakes_its_create_keeps_it_deleted(env):
+    """Migration 0085: the overtaking delete leaves a durable tombstone, so
+    the create that follows (or one replayed after a restart) is refused."""
     app, db = env
+    album_id = _bound_album("u-g")
     await _deliver(
-        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-racy"}, sender=AUTHOR
+        app,
+        FET.SPACE_GALLERY_ALBUM_DELETED,
+        {"id": album_id, "owner_user_id": "u-g"},
+        sender=AUTHOR,
     )
     await _deliver(
         app,
         FET.SPACE_GALLERY_ALBUM_CREATED,
-        {"id": "album-racy", "owner_user_id": "u-g", "name": "Late"},
+        {"id": album_id, "owner_user_id": "u-g", "name": "Late"},
         sender=AUTHOR,
+    )
+    assert await _album_owner(db, album_id) is None
+
+
+async def test_an_overtaking_delete_of_a_legacy_album_id_is_not_remembered(env):
+    """The tombstone is durable: it is written only for an id owner-bound to
+    this space. A legacy (unbound) id proves no space, so a delete of one
+    not held here records nothing — a stub could squat another space's
+    album id on this household for good. (The in-memory record this
+    replaced kept such ids until the next restart.)"""
+    app, db = env
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-racy"}, sender=AUTHOR
     )
     assert (
         await db.fetchone("SELECT 1 FROM gallery_albums WHERE id='album-racy'", ())
@@ -1446,8 +1488,11 @@ def _bound_album(owner: str = "u-g") -> str:
 
 
 async def _album_owner(db, album_id: str) -> str | None:
+    """The owner of the LIVE album ``album_id`` (a tombstone — migration
+    0085 — is no album)."""
     row = await db.fetchone(
-        "SELECT owner_user_id FROM gallery_albums WHERE id=?", (album_id,)
+        "SELECT owner_user_id FROM gallery_albums WHERE id=? AND deleted_at IS NULL",
+        (album_id,),
     )
     return None if row is None else row["owner_user_id"]
 
@@ -1570,8 +1615,11 @@ async def test_another_household_cannot_delete_a_new_album_before_it_lands(
     ("sender", "payload"),
     [
         (AUTHOR, {"owner_user_id": "u-g"}),  # the owner's household
-        (HOST, {}),  # a moderator, even without the owner
-        (ADMIN, {}),
+        # A moderator for anybody's album — naming the owner the id commits
+        # to, as every v_34 sender does: the durable tombstone (0085) is
+        # written only for an id proven to be this space's.
+        (HOST, {"owner_user_id": "u-g"}),
+        (ADMIN, {"owner_user_id": "u-g"}),
     ],
     ids=["owner", "host", "admin"],
 )
@@ -2148,6 +2196,140 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         [{"id": "pg-legacy-tomb", "space_id": SP, "created_by": "u-a"}],
         (),
         (HOST, AUTHOR),
+    ),
+    # ── Migration 0085 tombstones: the live delete rule of each type ──
+    (
+        "stickies_deleted",
+        "delete u-a's sticky (a delete the provider heard, we missed)",
+        [{"id": "sticky-a", "author": "u-a"}],
+        (HOST, AUTHOR, OTHER),
+        (STRANGER,),
+    ),
+    (
+        "stickies_deleted",
+        "tombstone a sticky id not held here",
+        [{"id": _STICKY_SYNC, "author": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "stickies_deleted",
+        "stub a sticky id bound to another space (a cross-space squat)",
+        [{"id": _STICKY_ELSEWHERE, "author": "u-a"}],
+        (),
+        (HOST, AUTHOR, OTHER),
+    ),
+    (
+        "stickies_deleted",
+        "stub a legacy (unbound) sticky id never held here",
+        [{"id": "st-legacy-tomb", "author": "u-a"}],
+        (),
+        (HOST, AUTHOR),
+    ),
+    (
+        "calendar_deleted",
+        "delete u-a's event (a delete the provider heard, we missed)",
+        [{"id": "ev-a", "created_by": "u-a"}],
+        (HOST, AUTHOR, OTHER),
+        (STRANGER,),
+    ),
+    (
+        "calendar_deleted",
+        "tombstone an event id not held here",
+        [{"id": _EVENT_SYNC, "created_by": "u-a"}],
+        (HOST,),
+        (AUTHOR, OTHER),
+    ),
+    (
+        "calendar_deleted",
+        "stub an event id bound to another space (a cross-space squat)",
+        [{"id": _EVENT_ELSEWHERE, "created_by": "u-a"}],
+        (),
+        (HOST, AUTHOR, OTHER),
+    ),
+    (
+        "calendar_deleted",
+        "stub a legacy (unbound) event id never held here",
+        [{"id": "ev-legacy-tomb", "created_by": "u-a"}],
+        (),
+        (HOST, AUTHOR),
+    ),
+    (
+        "gallery_albums_deleted",
+        "delete u-g's album (settings authority, not a moderator)",
+        [{"id": "album-g", "owner_user_id": "u-g"}],
+        (HOST, AUTHOR, ADMIN),
+        (OTHER, STRANGER, MOD),
+    ),
+    (
+        "gallery_albums_deleted",
+        "tombstone an album id not held here",
+        [{"id": _ALBUM_SYNC, "owner_user_id": "u-g"}],
+        (HOST,),
+        (AUTHOR, ADMIN),
+    ),
+    (
+        "gallery_albums_deleted",
+        "stub an album id bound to another space (a cross-space squat)",
+        [{"id": _ALBUM_ELSEWHERE, "owner_user_id": "u-g"}],
+        (),
+        (HOST, AUTHOR),
+    ),
+    (
+        "gallery_albums_deleted",
+        "stub a legacy (unbound) album id never held here",
+        [{"id": "album-legacy-tomb", "owner_user_id": "u-g"}],
+        (),
+        (HOST, AUTHOR),
+    ),
+    (
+        "gallery_items_deleted",
+        "delete u-g's upload (the uploader or content authority)",
+        [{"id": "gi-a", "uploaded_by": "u-g", "album_id": "album-a"}],
+        (HOST, AUTHOR, ADMIN, MOD),
+        (OTHER, STRANGER),
+    ),
+    (
+        "gallery_items_deleted",
+        "delete u-g's upload claiming another uploader",
+        [{"id": "gi-a", "uploaded_by": "u-o", "album_id": "album-a"}],
+        (HOST,),
+        (OTHER,),
+    ),
+    (
+        "gallery_items_deleted",
+        "tombstone an item id not held here",
+        [{"id": _ITEM_SYNC, "uploaded_by": "u-g", "album_id": "album-a"}],
+        (HOST,),
+        (AUTHOR, MOD),
+    ),
+    (
+        "gallery_items_deleted",
+        "stub an item id bound to another space (a cross-space squat)",
+        [{"id": _ITEM_ELSEWHERE, "uploaded_by": "u-g", "album_id": "album-a"}],
+        (),
+        (HOST, AUTHOR),
+    ),
+    (
+        "gallery_items_deleted",
+        "stub an item under an album not held here",
+        [{"id": _ITEM_SYNC, "uploaded_by": "u-g", "album_id": "album-nowhere"}],
+        (),
+        (HOST,),
+    ),
+    (
+        "space_zones_deleted",
+        "delete the zone (an admin household)",
+        [{"id": "zone-a", "created_by": "u-adm"}],
+        (ADMIN, HOST),
+        (AUTHOR, OTHER, MOD),
+    ),
+    (
+        "space_zones_deleted",
+        "tombstone a zone not held here (zone ids are not owner-bound)",
+        [{"id": "zone-nowhere", "created_by": "u-adm"}],
+        (),
+        (HOST, ADMIN),
     ),
     (
         "stickies",

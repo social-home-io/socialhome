@@ -7,7 +7,24 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..domain.gallery import GalleryAlbum, GalleryItem
+from ..domain.tombstone import SpaceRowTombstone
 from .base import rows_to_dicts, sync_page_cursor
+
+#: What a gallery item tombstone keeps of its row (migration 0085): no
+#: file, no caption, no date — the media reference scan then sees no file
+#: of it, so the delete path unlinks the blobs. Shared with the 0085
+#: album-tombstone trigger, which applies the same blanking.
+_ITEM_TOMBSTONE_SET = (
+    "deleted_at=datetime('now'), deleted_by=?, filename='',"
+    " thumbnail_filename='', width=0, height=0, duration_s=NULL,"
+    " caption=NULL, taken_at=NULL"
+)
+
+#: What an album tombstone keeps of its row: no name, description or cover.
+_ALBUM_TOMBSTONE_SET = (
+    "deleted_at=datetime('now'), deleted_by=?, name='', description=NULL,"
+    " cover_item_id=NULL, item_count=0"
+)
 
 
 @runtime_checkable
@@ -23,14 +40,16 @@ class AbstractGalleryRepo(Protocol):
     async def get_system_album(self, space_id: str | None) -> GalleryAlbum | None: ...
     async def create_album(self, album: GalleryAlbum) -> GalleryAlbum: ...
     async def update_album(self, album_id: str, patch: dict) -> None: ...
-    async def delete_album(self, album_id: str) -> None: ...
+    async def delete_album(self, album_id: str, *, deleted_by: str = "") -> None: ...
     async def create_album_in_space(
         self, album: GalleryAlbum, *, space_id: str
     ) -> bool: ...
     async def update_album_in_space(
         self, album_id: str, patch: dict, *, space_id: str
     ) -> bool: ...
-    async def delete_album_in_space(self, album_id: str, *, space_id: str) -> bool: ...
+    async def delete_album_in_space(
+        self, album_id: str, *, space_id: str, deleted_by: str = ""
+    ) -> bool: ...
     async def list_album_media(self, album_id: str) -> list[str]: ...
     async def list_items(
         self,
@@ -78,7 +97,7 @@ class AbstractGalleryRepo(Protocol):
         post_id: str,
     ) -> list[GalleryItem]: ...
     async def create_item(self, item: GalleryItem) -> GalleryItem: ...
-    async def delete_item(self, item_id: str) -> None: ...
+    async def delete_item(self, item_id: str, *, deleted_by: str = "") -> None: ...
     async def create_item_in_space(
         self,
         item: GalleryItem,
@@ -86,7 +105,9 @@ class AbstractGalleryRepo(Protocol):
         space_id: str,
         bump_count: bool = True,
     ) -> bool: ...
-    async def delete_item_in_space(self, item_id: str, *, space_id: str) -> bool: ...
+    async def delete_item_in_space(
+        self, item_id: str, *, space_id: str, deleted_by: str = ""
+    ) -> bool: ...
     async def delete_items_by_source_post(
         self,
         post_id: str,
@@ -102,6 +123,46 @@ class AbstractGalleryRepo(Protocol):
         *,
         space_id: str | None = None,
     ) -> None: ...
+
+    # ── Tombstones (migration 0085, §25.6 ``gallery_*_deleted``) ──────
+    async def is_album_deleted(self, album_id: str, *, space_id: str) -> bool: ...
+    async def is_item_deleted(self, item_id: str, *, space_id: str) -> bool: ...
+    async def tombstone_album(
+        self,
+        album_id: str,
+        *,
+        space_id: str,
+        owner_user_id: str,
+        created_at: str = "",
+        deleted_by: str = "",
+    ) -> bool: ...
+    async def tombstone_item(
+        self,
+        item_id: str,
+        *,
+        space_id: str,
+        album_id: str,
+        uploaded_by: str,
+        created_at: str = "",
+        deleted_by: str = "",
+    ) -> bool: ...
+    async def list_album_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[SpaceRowTombstone], int | None]: ...
+    async def list_item_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[SpaceRowTombstone], int | None]: ...
+    async def list_album_tombstones_since(
+        self, space_id: str, since: str
+    ) -> list[SpaceRowTombstone]: ...
 
 
 class SqliteGalleryRepo:
@@ -143,12 +204,14 @@ class SqliteGalleryRepo:
         if before:
             rows = await self._db.fetchall(
                 "SELECT * FROM gallery_albums WHERE space_id IS ? AND created_at < ? "
+                "AND deleted_at IS NULL "
                 "ORDER BY is_system DESC, created_at DESC LIMIT ?",
                 (space_id, before, limit),
             )
         else:
             rows = await self._db.fetchall(
                 "SELECT * FROM gallery_albums WHERE space_id IS ? "
+                "AND deleted_at IS NULL "
                 "ORDER BY is_system DESC, created_at DESC LIMIT ?",
                 (space_id, limit),
             )
@@ -173,7 +236,7 @@ class SqliteGalleryRepo:
 
     async def get_album(self, album_id: str) -> GalleryAlbum | None:
         row = await self._db.fetchone(
-            "SELECT * FROM gallery_albums WHERE id=?",
+            "SELECT * FROM gallery_albums WHERE id=? AND deleted_at IS NULL",
             (album_id,),
         )
         return self._row_to_album(dict(row)) if row else None
@@ -215,15 +278,29 @@ class SqliteGalleryRepo:
             return
         set_clause = ", ".join(f"{k}=?" for k in safe)
         await self._db.enqueue(
-            f"UPDATE gallery_albums SET {set_clause}, updated_at=? WHERE id=?",
+            f"UPDATE gallery_albums SET {set_clause}, updated_at=?"
+            " WHERE id=? AND deleted_at IS NULL",
             (*safe.values(), datetime.now(timezone.utc).isoformat(), album_id),
         )
 
-    async def delete_album(self, album_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM gallery_albums WHERE id=?",
-            (album_id,),
-        )
+    async def delete_album(self, album_id: str, *, deleted_by: str = "") -> None:
+        """Delete an album and its items. A household album (and its items,
+        by cascade) is removed; a space album is tombstoned (migration 0085)
+        and its items with it (the 0085 trigger) — the §25.6
+        ``gallery_albums_deleted`` resource streams it."""
+
+        def _run(conn) -> None:
+            conn.execute(
+                "DELETE FROM gallery_albums WHERE id=? AND space_id IS NULL",
+                (album_id,),
+            )
+            conn.execute(
+                f"UPDATE gallery_albums SET {_ALBUM_TOMBSTONE_SET}"
+                " WHERE id=? AND space_id IS NOT NULL AND deleted_at IS NULL",
+                (deleted_by or None, album_id),
+            )
+
+        await self._db.transact(_run)
 
     # ─── §24.11 space-scoped album writes (federation inbound) ────────────
 
@@ -245,11 +322,17 @@ class SqliteGalleryRepo:
 
         def _run(conn) -> bool:
             row = conn.execute(
-                "SELECT space_id, owner_user_id FROM gallery_albums WHERE id=?",
+                "SELECT space_id, owner_user_id, deleted_at FROM gallery_albums"
+                " WHERE id=?",
                 (album.id,),
             ).fetchone()
             if row is not None:
-                return row[0] == space_id and row[1] == album.owner_user_id
+                # A tombstone is never taken over: the album stays deleted.
+                return (
+                    row[0] == space_id
+                    and row[1] == album.owner_user_id
+                    and row[2] is None
+                )
             conn.execute(
                 """
                 INSERT INTO gallery_albums(
@@ -292,7 +375,8 @@ class SqliteGalleryRepo:
             if (
                 conn.execute(
                     "SELECT 1 FROM gallery_albums"
-                    " WHERE id=? AND space_id=? AND is_system=0",
+                    " WHERE id=? AND space_id=? AND is_system=0"
+                    " AND deleted_at IS NULL",
                     (album_id, space_id),
                 ).fetchone()
                 is None
@@ -325,7 +409,8 @@ class SqliteGalleryRepo:
         """The ``api/media/`` references of every item file in the album —
         what an album delete leaves behind for the media cleanup."""
         rows = await self._db.fetchall(
-            "SELECT filename, thumbnail_filename FROM gallery_items WHERE album_id=?",
+            "SELECT filename, thumbnail_filename FROM gallery_items"
+            " WHERE album_id=? AND deleted_at IS NULL",
             (album_id,),
         )
         out: list[str] = []
@@ -335,17 +420,22 @@ class SqliteGalleryRepo:
                     out.append(f"api/media/{name}")
         return out
 
-    async def delete_album_in_space(self, album_id: str, *, space_id: str) -> bool:
-        """Delete a user album of ``space_id`` and (by cascade) its items.
+    async def delete_album_in_space(
+        self, album_id: str, *, space_id: str, deleted_by: str = ""
+    ) -> bool:
+        """Tombstone a user album of ``space_id`` and its items (migration
+        0085: the album row stays, content blanked, and the 0085 trigger
+        tombstones its items in place).
 
-        ``False`` when the album is unknown, lives elsewhere, or is the
-        system album.
+        ``False`` when the album is unknown, lives elsewhere, is the system
+        album, or is a tombstone already.
         """
 
         def _run(conn) -> bool:
             cur = conn.execute(
-                "DELETE FROM gallery_albums WHERE id=? AND space_id=? AND is_system=0",
-                (album_id, space_id),
+                f"UPDATE gallery_albums SET {_ALBUM_TOMBSTONE_SET}"
+                " WHERE id=? AND space_id=? AND is_system=0 AND deleted_at IS NULL",
+                (deleted_by or None, album_id, space_id),
             )
             return bool(cur.rowcount)
 
@@ -400,12 +490,14 @@ class SqliteGalleryRepo:
         if before:
             rows = await self._db.fetchall(
                 "SELECT * FROM gallery_items WHERE album_id=? AND created_at < ? "
+                "AND deleted_at IS NULL "
                 "ORDER BY sort_order, created_at LIMIT ?",
                 (album_id, before, limit),
             )
         else:
             rows = await self._db.fetchall(
                 "SELECT * FROM gallery_items WHERE album_id=? "
+                "AND deleted_at IS NULL "
                 "ORDER BY sort_order, created_at LIMIT ?",
                 (album_id, limit),
             )
@@ -421,7 +513,8 @@ class SqliteGalleryRepo:
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, * FROM gallery_albums"
-                " WHERE space_id=? AND rowid > ? ORDER BY rowid LIMIT ?",
+                " WHERE space_id=? AND deleted_at IS NULL AND rowid > ?"
+                " ORDER BY rowid LIMIT ?",
                 (space_id, cursor or 0, int(limit)),
             )
         )
@@ -439,6 +532,7 @@ class SqliteGalleryRepo:
                 "SELECT i.rowid AS sync_rowid, i.* FROM gallery_items i"
                 " JOIN gallery_albums a ON a.id = i.album_id"
                 " WHERE a.space_id=? AND i.source_post_id IS NULL"
+                " AND i.deleted_at IS NULL AND a.deleted_at IS NULL"
                 " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",
                 (space_id, cursor or 0, int(limit)),
             )
@@ -447,7 +541,7 @@ class SqliteGalleryRepo:
 
     async def get_item(self, item_id: str) -> GalleryItem | None:
         row = await self._db.fetchone(
-            "SELECT * FROM gallery_items WHERE id=?",
+            "SELECT * FROM gallery_items WHERE id=? AND deleted_at IS NULL",
             (item_id,),
         )
         return self._row_to_item(dict(row)) if row else None
@@ -472,6 +566,7 @@ class SqliteGalleryRepo:
             "SELECT i.* FROM gallery_items i "
             "JOIN gallery_albums a ON a.id = i.album_id "
             "WHERE a.space_id=? AND i.created_at > ? "
+            "AND i.deleted_at IS NULL AND a.deleted_at IS NULL "
             "ORDER BY i.created_at ASC LIMIT ?",
             (space_id, since, int(limit)),
         )
@@ -488,7 +583,7 @@ class SqliteGalleryRepo:
         on an image post short-circuit without churning rows.
         """
         rows = await self._db.fetchall(
-            "SELECT * FROM gallery_items WHERE source_post_id=?",
+            "SELECT * FROM gallery_items WHERE source_post_id=? AND deleted_at IS NULL",
             (post_id,),
         )
         return [self._row_to_item(r) for r in rows_to_dicts(rows)]
@@ -533,11 +628,26 @@ class SqliteGalleryRepo:
             item.created_at or datetime.now(timezone.utc).isoformat(),
         )
 
-    async def delete_item(self, item_id: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM gallery_items WHERE id=?",
-            (item_id,),
-        )
+    async def delete_item(self, item_id: str, *, deleted_by: str = "") -> None:
+        """Delete an item. One in a household album is removed; one in a
+        space album is tombstoned (migration 0085) — files blanked, so the
+        caller's media cleanup unlinks the blobs, and the §25.6
+        ``gallery_items_deleted`` resource streams it."""
+
+        def _run(conn) -> None:
+            conn.execute(
+                "DELETE FROM gallery_items WHERE id=? AND album_id IN"
+                " (SELECT id FROM gallery_albums WHERE space_id IS NULL)",
+                (item_id,),
+            )
+            conn.execute(
+                f"UPDATE gallery_items SET {_ITEM_TOMBSTONE_SET}"
+                " WHERE id=? AND deleted_at IS NULL AND album_id IN"
+                " (SELECT id FROM gallery_albums WHERE space_id IS NOT NULL)",
+                (deleted_by or None, item_id),
+            )
+
+        await self._db.transact(_run)
 
     async def create_item_in_space(
         self,
@@ -563,7 +673,8 @@ class SqliteGalleryRepo:
         def _run(conn) -> bool:
             if (
                 conn.execute(
-                    "SELECT 1 FROM gallery_albums WHERE id=? AND space_id=?",
+                    "SELECT 1 FROM gallery_albums WHERE id=? AND space_id=?"
+                    " AND deleted_at IS NULL",
                     (item.album_id, space_id),
                 ).fetchone()
                 is None
@@ -591,24 +702,30 @@ class SqliteGalleryRepo:
 
         return bool(await self._db.transact(_run))
 
-    async def delete_item_in_space(self, item_id: str, *, space_id: str) -> bool:
-        """Delete an item whose album lives in ``space_id`` (federation).
+    async def delete_item_in_space(
+        self, item_id: str, *, space_id: str, deleted_by: str = ""
+    ) -> bool:
+        """Tombstone an item whose album lives in ``space_id`` (migration
+        0085: files blanked, ``deleted_at`` / ``deleted_by`` set).
 
-        ``False`` when the item is unknown or sits in an album of another
-        space / the household gallery. Decrements the album's
-        ``item_count`` in the same transaction.
+        ``False`` when the item is unknown, a tombstone already, or sits in
+        an album of another space / the household gallery. Decrements the
+        album's ``item_count`` in the same transaction.
         """
 
         def _run(conn) -> bool:
             row = conn.execute(
                 "SELECT i.album_id FROM gallery_items i"
                 " JOIN gallery_albums a ON a.id = i.album_id"
-                " WHERE i.id=? AND a.space_id=?",
+                " WHERE i.id=? AND a.space_id=? AND i.deleted_at IS NULL",
                 (item_id, space_id),
             ).fetchone()
             if row is None:
                 return False
-            conn.execute("DELETE FROM gallery_items WHERE id=?", (item_id,))
+            conn.execute(
+                f"UPDATE gallery_items SET {_ITEM_TOMBSTONE_SET} WHERE id=?",
+                (deleted_by or None, item_id),
+            )
             conn.execute(
                 "UPDATE gallery_albums SET item_count=MAX(0, item_count - 1) "
                 "WHERE id=? AND space_id=?",
@@ -656,7 +773,8 @@ class SqliteGalleryRepo:
         Returns the new count.
         """
         row = await self._db.fetchone(
-            "SELECT COUNT(*) AS n FROM gallery_items WHERE album_id=?",
+            "SELECT COUNT(*) AS n FROM gallery_items"
+            " WHERE album_id=? AND deleted_at IS NULL",
             (album_id,),
         )
         n = int(row["n"]) if row else 0
@@ -669,6 +787,7 @@ class SqliteGalleryRepo:
     async def get_first_item_thumbnail(self, album_id: str) -> str | None:
         row = await self._db.fetchone(
             "SELECT thumbnail_filename FROM gallery_items WHERE album_id=? "
+            "AND deleted_at IS NULL "
             "ORDER BY sort_order, created_at LIMIT 1",
             (album_id,),
         )
@@ -700,6 +819,178 @@ class SqliteGalleryRepo:
             if r["thumbnail_filename"]:
                 out.append(r["thumbnail_filename"])
         return out
+
+    # ─── Tombstones (migration 0085, §25.6 ``gallery_*_deleted``) ─────────
+
+    async def is_album_deleted(self, album_id: str, *, space_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gallery_albums WHERE id=? AND space_id=?"
+            " AND deleted_at IS NOT NULL",
+            (album_id, space_id),
+        )
+        return row is not None
+
+    async def is_item_deleted(self, item_id: str, *, space_id: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE i.id=? AND a.space_id=? AND i.deleted_at IS NOT NULL",
+            (item_id, space_id),
+        )
+        return row is not None
+
+    async def tombstone_album(
+        self,
+        album_id: str,
+        *,
+        space_id: str,
+        owner_user_id: str,
+        created_at: str = "",
+        deleted_by: str = "",
+    ) -> bool:
+        """Record a delete of an album never held here: a content-free stub
+        row, so a create (or a stale copy streamed) later cannot bring it.
+
+        Insert-only — an id held already (live or tombstoned, any space) is
+        never touched; ``False`` says nothing was written. The caller must
+        have proven the id is this space's (owner-bound to
+        ``owner_user_id`` in ``space_id``): album ids are global.
+        """
+        n = await self._db.enqueue_rowcount(
+            "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
+            " created_at, updated_at, deleted_at, deleted_by)"
+            " VALUES(?, ?, ?, '', COALESCE(NULLIF(?, ''), datetime('now')),"
+            " datetime('now'), datetime('now'), ?)"
+            " ON CONFLICT DO NOTHING",
+            (album_id, space_id, owner_user_id, created_at, deleted_by or None),
+        )
+        return n > 0
+
+    async def tombstone_item(
+        self,
+        item_id: str,
+        *,
+        space_id: str,
+        album_id: str,
+        uploaded_by: str,
+        created_at: str = "",
+        deleted_by: str = "",
+    ) -> bool:
+        """Record a delete of an item never held here — insert-only, and only
+        under an album live here IN ``space_id`` (``album_id`` is a FK, and
+        an item is never filed under another space's album). An item of an
+        album tombstoned here needs nothing: the album's tombstone covers
+        it. ``False`` says nothing was written. The caller must have proven
+        the id is this space's (owner-bound to ``uploaded_by``).
+        """
+        n = await self._db.enqueue_rowcount(
+            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+            " filename, thumbnail_filename, width, height, created_at,"
+            " deleted_at, deleted_by)"
+            " SELECT ?, ?, ?, 'photo', '', '', 0, 0,"
+            " COALESCE(NULLIF(?, ''), datetime('now')), datetime('now'), ?"
+            " WHERE EXISTS (SELECT 1 FROM gallery_albums"
+            "   WHERE id=? AND space_id=? AND deleted_at IS NULL)"
+            " ON CONFLICT DO NOTHING",
+            (
+                item_id,
+                album_id,
+                uploaded_by,
+                created_at,
+                deleted_by or None,
+                album_id,
+                space_id,
+            ),
+        )
+        return n > 0
+
+    async def list_album_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[SpaceRowTombstone], int | None]:
+        """One page of the space's album tombstones, keyset on the row id."""
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, id, owner_user_id, created_at,"
+                " deleted_at, deleted_by FROM gallery_albums"
+                " WHERE space_id=? AND deleted_at IS NOT NULL AND rowid > ?"
+                " ORDER BY rowid LIMIT ?",
+                (space_id, cursor or 0, int(limit)),
+            )
+        )
+        return [
+            SpaceRowTombstone(
+                id=r["id"],
+                owner=r["owner_user_id"] or "",
+                created_at=r["created_at"] or "",
+                deleted_at=r["deleted_at"],
+                deleted_by=r["deleted_by"] or "",
+            )
+            for r in rows
+        ], sync_page_cursor(rows, limit)
+
+    async def list_item_tombstones_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+    ) -> tuple[list[SpaceRowTombstone], int | None]:
+        """One page of the space's single-item tombstones, keyset on the row
+        id. Items of a tombstoned album are left out — the album's own
+        tombstone tells a household that missed it, and its trigger
+        tombstones the items there too."""
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT i.rowid AS sync_rowid, i.id, i.album_id, i.uploaded_by,"
+                " i.created_at, i.deleted_at, i.deleted_by FROM gallery_items i"
+                " JOIN gallery_albums a ON a.id = i.album_id"
+                " WHERE a.space_id=? AND a.deleted_at IS NULL"
+                " AND i.deleted_at IS NOT NULL AND i.rowid > ?"
+                " ORDER BY i.rowid LIMIT ?",
+                (space_id, cursor or 0, int(limit)),
+            )
+        )
+        return [
+            SpaceRowTombstone(
+                id=r["id"],
+                owner=r["uploaded_by"],
+                created_at=r["created_at"] or "",
+                deleted_at=r["deleted_at"],
+                deleted_by=r["deleted_by"] or "",
+                parent_id=r["album_id"],
+            )
+            for r in rows
+        ], sync_page_cursor(rows, limit)
+
+    async def list_album_tombstones_since(
+        self, space_id: str, since: str
+    ) -> list[SpaceRowTombstone]:
+        """Albums of ``space_id`` tombstoned after ``since`` (ISO 8601) —
+        the resume replay's ``SPACE_GALLERY_ALBUM_DELETED`` list. An
+        unparsable ``since`` lists every album tombstone of the space:
+        replaying a delete twice is harmless, missing one is not."""
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT id, owner_user_id, created_at, deleted_at, deleted_by"
+                " FROM gallery_albums WHERE space_id=? AND deleted_at IS NOT NULL"
+                " AND (datetime(?) IS NULL OR datetime(deleted_at) > datetime(?))"
+                " ORDER BY rowid",
+                (space_id, since, since),
+            )
+        )
+        return [
+            SpaceRowTombstone(
+                id=r["id"],
+                owner=r["owner_user_id"] or "",
+                created_at=r["created_at"] or "",
+                deleted_at=r["deleted_at"],
+                deleted_by=r["deleted_by"] or "",
+            )
+            for r in rows
+        ]
 
 
 def _basename(url: str) -> str:

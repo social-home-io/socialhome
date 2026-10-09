@@ -904,12 +904,23 @@ async def test_the_victims_rows_are_still_writable_by_their_own_space(env):
             )
     post = await db.fetchone("SELECT content FROM space_posts WHERE id='post-b'", ())
     assert post["content"] == "edited"
-    assert await db.fetchone("SELECT 1 FROM space_zones WHERE id='zone-b'", ()) is None
+    # Deleted: a tombstone is left (migration 0085), no live row.
+    assert (
+        await db.fetchone(
+            "SELECT 1 FROM space_zones WHERE id='zone-b' AND deleted_at IS NULL", ()
+        )
+        is None
+    )
     poll = await db.fetchone(
         "SELECT closed FROM space_polls WHERE post_id='post-b'", ()
     )
     assert poll["closed"] == 1
-    assert await db.fetchone("SELECT 1 FROM gallery_items WHERE id='gi-b'", ()) is None
+    assert (
+        await db.fetchone(
+            "SELECT 1 FROM gallery_items WHERE id='gi-b' AND deleted_at IS NULL", ()
+        )
+        is None
+    )
     listing = await db.fetchone(
         "SELECT status FROM bazaar_listings WHERE post_id='post-b-listing'", ()
     )

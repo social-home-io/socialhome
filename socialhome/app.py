@@ -292,11 +292,14 @@ from .federation.sync import (
     ChatMessagesDeletedExporter,
     ChatMessagesExporter,
     BazaarExporter,
+    CalendarDeletedExporter,
     CalendarExporter,
     ChunkBuilder,
     CommentsDeletedExporter,
     CommentsExporter,
+    GalleryAlbumsDeletedExporter,
     GalleryExporter,
+    GalleryItemsDeletedExporter,
     MemberPicturesExporter,
     MembersExporter,
     PagesDeletedExporter,
@@ -308,6 +311,7 @@ from .federation.sync import (
     SpaceSyncReceiver,
     SpaceSyncScheduler,
     SpaceSyncService,
+    StickiesDeletedExporter,
     StickiesExporter,
     SyncWindows,
     TaskListsDeletedExporter,
@@ -316,6 +320,7 @@ from .federation.sync import (
     TasksDeletedExporter,
     TasksExporter,
     TimetablesExporter,
+    ZonesDeletedExporter,
     ZonesExporter,
 )
 from .federation.sync.dm_history import (
@@ -331,7 +336,6 @@ from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
 from .services.gallery_service import GalleryService
-from .services.gallery_tombstones import GalleryAlbumTombstones
 from .services.media_transcode_service import MediaTranscodeService
 from .media.image_processor import ImageProcessor
 from .media.video_processor import VideoProcessor
@@ -1463,10 +1467,6 @@ def _wire_federation_stack(
     )
     private_invite_handler.attach_to(federation_service)
     app[K.private_invite_handler_key] = private_invite_handler
-    # Space albums deleted during this process's life — an overtaken or
-    # replayed create must not bring one back (see gallery_tombstones).
-    gallery_tombstones = GalleryAlbumTombstones()
-    gallery_tombstones.wire(bus)
     SpaceContentInboundHandlers(
         bus=bus,
         # §24.11 authorship — the users a content payload names must be
@@ -1485,7 +1485,6 @@ def _wire_federation_stack(
         # A federated gallery delete removes the files it leaves unused.
         media_dir=pathlib.Path(config.media_path),
         media_refs=media_reference_repo,
-        gallery_tombstones=gallery_tombstones,
         # v_48: another household's version of a held page — fast-forward,
         # merge or conflict instead of last write wins.
         page_conflicts=page_conflict_service,
@@ -1518,11 +1517,16 @@ def _wire_federation_stack(
         "tasks_archived": TasksArchivedExporter(space_task_repo),
         "pages_deleted": PagesDeletedExporter(page_repo),
         "pages": PagesExporter(page_repo),
+        "stickies_deleted": StickiesDeletedExporter(sticky_repo),
         "stickies": StickiesExporter(sticky_repo),
+        "calendar_deleted": CalendarDeletedExporter(space_calendar_repo),
         "calendar": CalendarExporter(space_calendar_repo),
+        "gallery_albums_deleted": GalleryAlbumsDeletedExporter(gallery_repo),
+        "gallery_items_deleted": GalleryItemsDeletedExporter(gallery_repo),
         "gallery": GalleryExporter(gallery_repo),
         "polls": PollsExporter(space_poll_repo, space_post_repo, sync_windows),
         "schedules": SchedulesExporter(space_poll_repo, space_post_repo, sync_windows),
+        "space_zones_deleted": ZonesDeletedExporter(space_zone_repo),
         "space_zones": ZonesExporter(space_zone_repo),
         "bazaar": BazaarExporter(bazaar_repo, sync_windows),
         "timetables": TimetablesExporter(space_timetable_repo),
@@ -1569,7 +1573,9 @@ def _wire_federation_stack(
         poll_repo=space_poll_repo,
         pending_decrypts=app[K.pending_decrypts_cache_key],
         authorship=space_authorship,
-        gallery_tombstones=gallery_tombstones,
+        # A streamed gallery delete removes the files it leaves unused.
+        media_dir=pathlib.Path(config.media_path),
+        media_refs=media_reference_repo,
         timetable_repo=space_timetable_repo,
         page_conflicts=page_conflict_service,
     )
@@ -1853,7 +1859,6 @@ def _wire_federation_stack(
         sticky_repo=sticky_repo,
         space_calendar_repo=space_calendar_repo,
         gallery_repo=gallery_repo,
-        gallery_tombstones=gallery_tombstones,
     )
 
     async def _space_sync_resume(event) -> None:

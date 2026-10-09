@@ -421,3 +421,38 @@ async def test_create_schedule_poll_if_absent_creates_once_even_when_racing(env)
         "SELECT id FROM space_schedule_slots WHERE post_id='post-1'"
     )
     assert len(rows) == 2
+
+
+# ─── A deleted post holds no poll (migration 0085) ───────────────────
+
+
+async def test_a_post_soft_delete_drops_its_poll_and_schedule(two_spaces):
+    env = two_spaces
+    await env.db.enqueue("UPDATE space_posts SET deleted=1 WHERE id='post-2'")
+    assert await env.repo.get_meta("post-2") is None
+    assert await env.repo.get_schedule_meta("post-2") is None
+    assert await env.repo.list_schedule_slots("post-2") == []
+    # post-1's stay.
+    assert await env.repo.get_schedule_meta("post-1") is not None
+
+
+async def test_a_deleted_post_takes_no_schedule_from_the_wire(two_spaces):
+    env = two_spaces
+    await env.db.enqueue("UPDATE space_posts SET deleted=1 WHERE id='post-2'")
+    assert not await env.repo.create_schedule_poll_in_space(
+        space_id="sp-2",
+        post_id="post-2",
+        title="Back?",
+        deadline=None,
+        slots=[{"id": "s-new", "slot_date": "2026-06-02"}],
+    )
+    assert await env.repo.get_schedule_meta("post-2") is None
+    assert await env.repo.list_schedule_slots("post-2") == []
+    assert not await env.repo.create_poll_if_absent(
+        post_id="post-2",
+        question="Q",
+        closes_at=None,
+        allow_multiple=False,
+        options=[{"id": "o-new", "text": "x"}],
+    )
+    assert await env.repo.get_meta("post-2") is None
