@@ -34,6 +34,7 @@ from ..domain.space_item import StaleItemStamp, stamp_to_db
 from ..utils.datetime import parse_iso8601_optional
 from .base import (
     bool_col,
+    changed_since_sql,
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
@@ -78,6 +79,7 @@ class AbstractSpacePostRepo(Protocol):
         exempt_types: tuple[str, ...] = (),
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[Post], int | None]:
         """One page of the space's live posts for a §25.6 sync, newest
         first. Anchors included.
@@ -103,6 +105,7 @@ class AbstractSpacePostRepo(Protocol):
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[PostTombstone], int | None]:
         """One page of the space's deleted posts (``posts_deleted``),
         newest first — every one, whatever its age: a delete, or a retention
@@ -187,6 +190,7 @@ class AbstractSpacePostRepo(Protocol):
         exempt_types: tuple[str, ...] = (),
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[Comment], int | None]:
         """One page of the space's comments for a §25.6 sync, oldest
         stored first (a reply never before its parent): the live ones on
@@ -349,6 +353,7 @@ class SqliteSpacePostRepo:
         exempt_types: tuple[str, ...] = (),
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[Post], int | None]:
         # No ``hidden_from_feed`` filter — see the protocol docstring. The
         # receiver stores the flag with the row, so the joiner's feed stays
@@ -356,14 +361,23 @@ class SqliteSpacePostRepo:
         window, window_params = retention_window_sql(
             "created_at", cutoff, type_col="type", exempt_types=exempt_types
         )
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, * FROM space_posts"
                 " WHERE space_id=? AND deleted=0"
                 + window
+                + changed
                 + " AND (? IS NULL OR rowid < ?)"
                 " ORDER BY rowid DESC LIMIT ?",
-                (space_id, *window_params, cursor, cursor, int(limit)),
+                (
+                    space_id,
+                    *window_params,
+                    *changed_params,
+                    cursor,
+                    cursor,
+                    int(limit),
+                ),
             )
         )
         return [_row_to_space_post(d) for d in rows], sync_page_cursor(rows, limit)
@@ -374,14 +388,17 @@ class SqliteSpacePostRepo:
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[PostTombstone], int | None]:
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, id, author, type, created_at,"
                 " moderated, moderated_by FROM space_posts"
-                " WHERE space_id=? AND deleted=1 AND (? IS NULL OR rowid < ?)"
-                " ORDER BY rowid DESC LIMIT ?",
-                (space_id, cursor, cursor, int(limit)),
+                " WHERE space_id=? AND deleted=1"
+                + changed
+                + " AND (? IS NULL OR rowid < ?) ORDER BY rowid DESC LIMIT ?",
+                (space_id, *changed_params, cursor, cursor, int(limit)),
             )
         )
         tombstones = [
@@ -780,10 +797,12 @@ class SqliteSpacePostRepo:
         exempt_types: tuple[str, ...] = (),
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[Comment], int | None]:
         window, window_params = retention_window_sql(
             "p.created_at", cutoff, type_col="p.type", exempt_types=exempt_types
         )
+        changed, changed_params = changed_since_sql("c.sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT c.rowid AS sync_rowid, c.* FROM space_post_comments c"
@@ -791,8 +810,16 @@ class SqliteSpacePostRepo:
                 " WHERE p.space_id=? AND c.deleted=?"
                 + ("" if deleted else " AND p.deleted=0")
                 + window
+                + changed
                 + " AND c.rowid > ? ORDER BY c.rowid LIMIT ?",
-                (space_id, int(deleted), *window_params, cursor or 0, int(limit)),
+                (
+                    space_id,
+                    int(deleted),
+                    *window_params,
+                    *changed_params,
+                    cursor or 0,
+                    int(limit),
+                ),
             )
         )
         comments = [c for c in (_row_to_space_comment(d) for d in rows) if c]

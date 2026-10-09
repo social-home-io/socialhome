@@ -154,6 +154,7 @@ def _mesh_service(repo):
 
     svc.record_mesh_member_claim = bind("record_mesh_member_claim")
     svc.space_member_supports = bind("space_member_supports")
+    svc.space_member_version = bind("space_member_version")
     svc.mesh_member_identity_pk = bind("mesh_member_identity_pk")
     return svc
 
@@ -292,3 +293,16 @@ async def test_claim_without_notify_records_but_publishes_nothing():
     )
     assert await svc.space_member_supports(MESH, min_version=OURS)
     assert svc._bus.events == []
+
+
+@pytest.mark.asyncio
+async def test_space_member_version_reads_the_row_then_the_mesh_claim():
+    """The version a §25.6 session shape records: a paired household's
+    advertised one, a mesh-only member's claim, else 0."""
+    paired = _mesh_service(_MeshRepo(rows={"p": _peer("p", proto_version=42)}))
+    assert await paired.space_member_version("p") == 42
+    mesh = _mesh_service(_MeshRepo(seated={MESH}, claims={MESH: (51, None)}))
+    assert await mesh.space_member_version(MESH) == 51
+    nobody = _mesh_service(_MeshRepo())
+    assert await nobody.space_member_version(MESH) == 0
+    assert await nobody.space_member_version("") == 0

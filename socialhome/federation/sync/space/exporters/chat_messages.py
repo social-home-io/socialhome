@@ -47,6 +47,7 @@ def _iter_chat_pages(
     cutoff: str | None,
     *,
     deleted: bool,
+    since: int | None = None,
 ) -> AsyncIterator[list["ConversationMessage"]]:
     async def fetch(
         cursor: int | None,
@@ -57,6 +58,7 @@ def _iter_chat_pages(
             cutoff=cutoff,
             cursor=cursor,
             limit=SYNC_PAGE_SIZE,
+            since=since,
         )
 
     return iter_pages(fetch)
@@ -75,7 +77,17 @@ class ChatMessagesExporter(PagedExporterMixin):
         self._convos = conversation_repo
         self._spaces = space_repo
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved or not space.features.chat:
             return
@@ -84,7 +96,7 @@ class ChatMessagesExporter(PagedExporterMixin):
             return
         cutoff = window_for_space(space).cutoff
         async for page in _iter_chat_pages(
-            self._convos, chat.id, cutoff, deleted=False
+            self._convos, chat.id, cutoff, deleted=False, since=since
         ):
             yield [
                 {
@@ -119,7 +131,17 @@ class ChatMessagesDeletedExporter(PagedExporterMixin):
         self._convos = conversation_repo
         self._spaces = space_repo
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
             return
@@ -127,7 +149,9 @@ class ChatMessagesDeletedExporter(PagedExporterMixin):
         if chat is None:
             return
         cutoff = window_for_space(space).cutoff
-        async for page in _iter_chat_pages(self._convos, chat.id, cutoff, deleted=True):
+        async for page in _iter_chat_pages(
+            self._convos, chat.id, cutoff, deleted=True, since=since
+        ):
             yield [
                 {"id": m.id, "message_id": m.id, "author_user_id": m.sender_user_id}
                 for m in page

@@ -267,10 +267,37 @@ async def test_handle_space_sync_complete_only_from_the_requester(svc):
     svc._sync_manager.get_session = MagicMock(
         return_value=SimpleNamespace(requester_instance_id="peer-a")
     )
+    svc._space_sync_service = MagicMock()
+    svc._space_sync_service.confirm_complete = AsyncMock()
     await svc._handle_space_sync_complete(
         _event("SPACE_SYNC_COMPLETE", {"sync_id": "s1"}, from_instance="peer-b"),
     )
     svc._sync_manager.close_session.assert_not_called()
+    # A forged completion never advances the requester's §25.6 watermark.
+    svc._space_sync_service.confirm_complete.assert_not_awaited()
+
+
+async def test_handle_space_sync_complete_confirms_the_stream_before_closing(svc):
+    """The requester's completion is what advances its incremental-sync
+    watermark — recorded from the session, before the session is freed."""
+    session = SimpleNamespace(requester_instance_id="peer-a")
+    order: list[str] = []
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.get_session = MagicMock(return_value=session)
+    svc._sync_manager.close_session = MagicMock(
+        side_effect=lambda _sid: order.append("close")
+    )
+    svc._space_sync_service = MagicMock()
+
+    async def _confirm(record):
+        assert record is session
+        order.append("confirm")
+
+    svc._space_sync_service.confirm_complete = _confirm
+    await svc._handle_space_sync_complete(
+        _event("SPACE_SYNC_COMPLETE", {"sync_id": "s1"}, from_instance="peer-a"),
+    )
+    assert order == ["confirm", "close"]
 
 
 async def test_a_landed_stream_frees_both_sessions(svc):

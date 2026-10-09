@@ -23,10 +23,14 @@ def iter_post_pages(
     repo: "AbstractSpacePostRepo",
     space_id: str,
     window: SyncWindow,
+    *,
+    since: int | None = None,
 ) -> AsyncIterator[list["Post"]]:
     """The space's live posts in ``window``, page by page. Shared by every
     exporter that walks posts (posts, polls, schedules) and the catch-up
-    media."""
+    media. ``since``: only the posts changed after that stamp (an
+    incremental session) — a reaction, a vote, a poll / schedule / listing
+    change touches the post (migration 0086)."""
 
     async def fetch(cursor: int | None) -> tuple[list["Post"], int | None]:
         return await repo.list_sync_page(
@@ -35,6 +39,7 @@ def iter_post_pages(
             exempt_types=window.exempt_types,
             cursor=cursor,
             limit=SYNC_PAGE_SIZE,
+            since=since,
         )
 
     return iter_pages(fetch)
@@ -53,9 +58,19 @@ class PostsExporter(PagedExporterMixin):
         self._repo = space_post_repo
         self._windows = windows
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         window = await self._windows.for_space(space_id)
-        async for posts in iter_post_pages(self._repo, space_id, window):
+        async for posts in iter_post_pages(self._repo, space_id, window, since=since):
             yield [_post_to_dict(p) for p in posts]
 
 

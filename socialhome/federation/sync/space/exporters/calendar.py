@@ -7,6 +7,7 @@ reasonable household calendar.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
@@ -27,11 +28,23 @@ class CalendarExporter:
         self._repo = space_calendar_repo
 
     async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return await self._records(space_id, None)
+
+    async def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """The events changed after ``since`` (an incremental session),
+        expanded as the full stream expands them. RSVPs are not part of the
+        record, so an RSVP change streams nothing here."""
+        yield await self._records(space_id, since)
+
+    async def _records(self, space_id: str, since: int | None) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
         events = await self._repo.list_events_in_range(
             space_id,
             start=now - _WIDE_WINDOW,
             end=now + _WIDE_WINDOW,
+            since=since,
         )
         return [_event_to_dict(e) for e in events]
 

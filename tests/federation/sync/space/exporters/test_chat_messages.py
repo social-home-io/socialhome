@@ -59,7 +59,7 @@ class _Convos:
         self.asked: list[tuple] = []
 
     async def list_messages_sync_page(
-        self, conversation_id, *, deleted, cutoff, cursor, limit
+        self, conversation_id, *, deleted, cutoff, cursor, limit, since=None
     ):
         assert conversation_id == "chat-1"
         self.asked.append((deleted, cutoff, cursor, limit))
@@ -222,7 +222,7 @@ class _PagedConvos(_Convos):
         ]
 
     async def list_messages_sync_page(
-        self, conversation_id, *, deleted, cutoff, cursor, limit
+        self, conversation_id, *, deleted, cutoff, cursor, limit, since=None
     ):
         self.asked.append((deleted, cutoff, cursor, limit))
         start = cursor or 0

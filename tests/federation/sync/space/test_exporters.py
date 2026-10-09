@@ -18,6 +18,36 @@ from socialhome.domain.space import SpaceMember
 from socialhome.domain.sticky import Sticky
 from socialhome.domain.task import RecurrenceRule, Task, TaskPriority, TaskStatus
 from socialhome.federation.sync.space.window import SyncWindows
+from socialhome.domain.conversation import ConversationMessage, SystemChatScope
+from socialhome.federation.sync.space.exporter import (
+    IncrementalExporter,
+    collect_batches,
+    record_batches,
+)
+from socialhome.federation.sync.space.exporters import (
+    BazaarExporter,
+    CalendarDeletedExporter,
+    CalendarExporter,
+    ChatMessagesDeletedExporter,
+    ChatMessagesExporter,
+    CommentsDeletedExporter,
+    CommentsExporter,
+    GalleryExporter,
+    PollsExporter,
+    PostsDeletedExporter,
+    PostsExporter,
+    SchedulesExporter,
+    StickiesDeletedExporter,
+    StickiesExporter,
+)
+from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
+from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
+from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.space_poll_repo import SqliteSpacePollRepo
+from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.sticky_repo import SqliteStickyRepo
 
 
 class _NoSpaces:
@@ -49,6 +79,7 @@ class _FakeSpacePostRepo:
         exempt_types=(),
         cursor=None,
         limit=200,
+        since=None,
     ):
         return ([] if deleted else self._posts + self._anchors), None
 
@@ -61,6 +92,7 @@ class _FakeSpacePostRepo:
         exempt_types=(),
         cursor=None,
         limit=200,
+        since=None,
     ):
         rows = [c for cs in self._comments_by_post.values() for c in cs]
         return [c for c in rows if c.deleted == deleted], None
@@ -381,7 +413,7 @@ async def test_calendar_exporter_serialises_datetimes():
     )
 
     class _Repo:
-        async def list_events_in_range(self, space_id, *, start, end):
+        async def list_events_in_range(self, space_id, *, start, end, since=None):
             return [event]
 
     recs = await CalendarExporter(_Repo()).list_records("sp-1")
@@ -411,10 +443,14 @@ async def test_gallery_exporter_emits_albums_then_items():
     )
 
     class _Repo:
-        async def list_albums_sync_page(self, space_id, *, cursor=None, limit=200):
+        async def list_albums_sync_page(
+            self, space_id, *, cursor=None, limit=200, since=None
+        ):
             return [album], None
 
-        async def list_items_sync_page(self, space_id, *, cursor=None, limit=200):
+        async def list_items_sync_page(
+            self, space_id, *, cursor=None, limit=200, since=None
+        ):
             # No retention window: nothing prunes gallery items, so a joiner
             # gets every photo the host still shows.
             return [item], None
@@ -670,3 +706,140 @@ async def test_schedules_exporter_emits_slot_defs():
     assert len(r["slots"]) == 2
     assert r["slots"][0]["id"] == "s1"
     assert r["slots"][1]["start_time"] is None
+
+
+# ── §25.6 incremental sessions (migration 0086 change stamps) ────────────
+
+
+async def _seq(db) -> int:
+    row = await db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    return int(row["seq"])
+
+
+async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
+    """Every covered resource's ``iter_changed`` streams exactly the rows
+    stamped above ``since``; ``record_batches`` without ``since`` (or for a
+    resource kept full) streams everything, as before."""
+
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp','S','host','anna','ab')"
+    )
+    posts = SqliteSpacePostRepo(db)
+    polls = SqliteSpacePollRepo(db)
+    windows = SyncWindows(SqliteSpaceRepo(db))
+    for pid in ("p-quiet", "p-edit", "p-vote", "p-gone"):
+        await posts.save(
+            "sp",
+            Post(
+                id=pid,
+                author="u",
+                type=PostType.TEXT,
+                created_at=datetime.now(timezone.utc),
+                content=pid,
+            ),
+        )
+    await polls.create_poll(
+        post_id="p-vote",
+        question="Q?",
+        closes_at=None,
+        allow_multiple=False,
+        options=[{"id": "o-1", "text": "A"}],
+    )
+    for cid, pid in (("k-quiet", "p-quiet"), ("k-gone", "p-quiet")):
+        await posts.add_comment(
+            Comment(
+                id=cid,
+                post_id=pid,
+                author="u",
+                type=CommentType.TEXT,
+                created_at=datetime.now(timezone.utc),
+                content=cid,
+            ),
+            space_id="sp",
+        )
+    gallery = SqliteGalleryRepo(db)
+    cal = SqliteSpaceCalendarRepo(db)
+    stickies = SqliteStickyRepo(db)
+    sticky = await stickies.add(author="u", content="note", space_id="sp")
+    await db.enqueue(
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
+        " end_dt, created_by) VALUES('ev','sp','Party','2026-07-01T10:00:00',"
+        " '2026-07-01T11:00:00','u')"
+    )
+    mark = await _seq(db)
+
+    await posts.edit("p-edit", "edited", space_id="sp")
+    assert await polls.cast_vote_in_space(
+        space_id="sp", post_id="p-vote", option_id="o-1", voter_user_id="u2"
+    )
+    await posts.soft_delete("p-gone", space_id="sp")
+    await posts.soft_delete_comment("k-gone", space_id="sp")
+    await stickies.delete(sticky.id, space_id="sp", deleted_by="u")
+
+    async def changed(exporter) -> list[dict]:
+        assert isinstance(exporter, IncrementalExporter), exporter
+        return await collect_batches(record_batches(exporter, "sp", since=mark))
+
+    assert {r["id"] for r in await changed(PostsExporter(posts, windows))} == {
+        "p-edit",
+        "p-vote",
+    }
+    assert [r["id"] for r in await changed(PostsDeletedExporter(posts))] == ["p-gone"]
+    assert [
+        r["post_id"] for r in await changed(PollsExporter(polls, posts, windows))
+    ] == ["p-vote"]
+    assert await changed(SchedulesExporter(polls, posts, windows)) == []
+    assert await changed(CommentsExporter(posts, windows)) == []
+    assert [r["id"] for r in await changed(CommentsDeletedExporter(posts))] == [
+        "k-gone"
+    ]
+    assert await changed(GalleryExporter(gallery)) == []
+    assert await changed(BazaarExporter(SqliteBazaarRepo(db), windows)) == []
+    assert await changed(CalendarExporter(cal)) == []
+    assert await changed(CalendarDeletedExporter(cal)) == []
+    assert [r["id"] for r in await changed(StickiesDeletedExporter(stickies))] == [
+        sticky.id
+    ]
+    # A resource kept full streams whole even with ``since``.
+    full_stickies = StickiesExporter(stickies)
+    assert not isinstance(full_stickies, IncrementalExporter)
+    assert await collect_batches(
+        record_batches(full_stickies, "sp", since=mark)
+    ) == await full_stickies.list_records("sp")
+    # ``since=None`` is the full stream.
+    full = await collect_batches(
+        record_batches(PostsExporter(posts, windows), "sp", since=None)
+    )
+    assert {r["id"] for r in full} == {"p-quiet", "p-edit", "p-vote"}
+    # The calendar's changed events, once one changes.
+    await db.enqueue("UPDATE space_calendar_events SET summary='Bash' WHERE id='ev'")
+    assert [r["id"] for r in await changed(CalendarExporter(cal))] == ["ev"]
+
+
+async def test_chat_exporters_stream_only_changed_messages(db):
+
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp','S','host','anna','ab')"
+    )
+    spaces = SqliteSpaceRepo(db)
+    convos = SqliteConversationRepo(db)
+    chat = await convos.create_system_chat(SystemChatScope.SPACE, space_id="sp")
+    for i in range(3):
+        await convos.save_message(
+            ConversationMessage(
+                id=f"m{i}",
+                conversation_id=chat.id,
+                sender_user_id="u",
+                content=f"hi {i}",
+                created_at=datetime(2026, 1, 1, 0, i, tzinfo=timezone.utc),
+            )
+        )
+    mark = await _seq(db)
+    await convos.soft_delete_message("m1")
+    messages = ChatMessagesExporter(convos, spaces)
+    deletions = ChatMessagesDeletedExporter(convos, spaces)
+    live = await collect_batches(record_batches(messages, "sp", since=mark))
+    gone = await collect_batches(record_batches(deletions, "sp", since=mark))
+    assert live == [] and [r["id"] for r in gone] == ["m1"]

@@ -1032,3 +1032,29 @@ async def test_list_space_chat_unread_skips_seats_access_refuses(env, spoil):
     assert len(await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS))
     await env.db.enqueue(spoil)
     assert await env.repo.list_space_chat_unread("bob", writer_roles=_WRITERS) == []
+
+
+async def test_list_messages_sync_page_since_a_stamp(env):
+    await env.repo.create(_conv("c-inc", ConversationType.GROUP_DM))
+    for i in range(3):
+        await env.repo.save_message(
+            ConversationMessage(
+                id=f"i{i}",
+                conversation_id="c-inc",
+                sender_user_id="uid-alice",
+                content=f"hi {i}",
+                created_at=datetime(2026, 1, 1, 0, i, tzinfo=timezone.utc),
+            )
+        )
+    row = await env.db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    await env.repo.soft_delete_message("i1")
+    await env.db.enqueue("UPDATE conversation_messages SET content='x' WHERE id='i2'")
+    # A local download-state change is not a change to the message.
+    await env.db.enqueue(
+        "UPDATE conversation_messages SET media_sync_status='pending' WHERE id='i0'"
+    )
+    live, _ = await env.repo.list_messages_sync_page("c-inc", since=mark)
+    assert [m.id for m in live] == ["i2"]
+    gone, _ = await env.repo.list_messages_sync_page("c-inc", deleted=True, since=mark)
+    assert [m.id for m in gone] == ["i1"]

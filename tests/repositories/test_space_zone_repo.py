@@ -108,3 +108,15 @@ async def test_zone_tombstones_page_per_space(repo):
     assert [t.id for t in rest] == ["z-3"] and end is None
     assert rest[0].owner == "uid-alice" and rest[0].deleted_by == ""
     assert await repo.list_tombstones_page("sp-b") == ([], None)
+
+
+async def test_zone_tombstones_page_since_a_stamp(repo):
+    for zid in ("z-1", "z-2"):
+        await repo.upsert(_zone(zid, "sp-a", name=zid), space_id="sp-a")
+    await repo.delete("z-1", space_id="sp-a")
+    row = await repo._db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    assert await repo.list_tombstones_page("sp-a", since=mark) == ([], None)
+    await repo.delete("z-2", space_id="sp-a")
+    page, _ = await repo.list_tombstones_page("sp-a", since=mark)
+    assert [t.id for t in page] == ["z-2"]

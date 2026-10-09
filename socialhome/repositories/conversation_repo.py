@@ -34,6 +34,7 @@ from ..domain.conversation import (
 )
 from .base import (
     bool_col,
+    changed_since_sql,
     retention_window_sql,
     row_to_dict,
     rows_to_dicts,
@@ -156,6 +157,7 @@ class AbstractConversationRepo(Protocol):
         cutoff: str | None = None,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[ConversationMessage], int | None]: ...
     async def insert_tombstone(
         self,
@@ -1055,6 +1057,7 @@ class SqliteConversationRepo:
         cutoff: str | None = None,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[ConversationMessage], int | None]:
         """One page of a space chat for a §25.6 sync, oldest stored first
         (a reply after the message it names): the live messages, or
@@ -1065,16 +1068,19 @@ class SqliteConversationRepo:
         ``next_cursor`` is ``None`` after the last page (keyset on the row
         id: no page repeats or skips a row)."""
         window, window_params = retention_window_sql("created_at", cutoff)
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, * FROM conversation_messages"
                 " WHERE conversation_id=? AND deleted=?"
                 + window
+                + changed
                 + " AND rowid > ? ORDER BY rowid LIMIT ?",
                 (
                     conversation_id,
                     int(deleted),
                     *window_params,
+                    *changed_params,
                     cursor or 0,
                     int(limit),
                 ),

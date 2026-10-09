@@ -32,7 +32,7 @@ async def test_pages_through_the_fetch_until_the_cursor_ends():
     asked: list[tuple] = []
     pages = {None: ([_t(1, by="u-d"), _t(2)], 7), 7: ([_t(3)], None)}
 
-    async def fetch(space_id, *, cursor, limit):
+    async def fetch(space_id, *, cursor, limit, since=None):
         asked.append((space_id, cursor, limit))
         return pages[cursor]
 
@@ -59,7 +59,7 @@ async def test_no_parent_key_no_parent_field():
         owner_key = "author"
         __slots__ = ()
 
-    async def fetch(space_id, *, cursor, limit):
+    async def fetch(space_id, *, cursor, limit, since=None):
         return [_t(1)], None
 
     assert await _Flat(fetch).list_records("sp") == [

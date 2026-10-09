@@ -1422,9 +1422,19 @@ its tombstone resources (`posts_deleted`, `comments_deleted`,
 space's retention window for live posts and chat (everything without
 retention; gallery items and every tombstone resource always in full),
 read page by page in bounded memory — never a fixed count. The 30-minute
-periodic re-sync is `incremental` (no media re-ship), and a session is
-reaped only when idle, never mid-stream; see
-[`protocol/sync.md`](./protocol/sync.md#what-a-sync-streams).
+periodic re-sync is `incremental`: no media re-ship, and — for the
+history-growing resources (posts and their polls / schedules / listings,
+comments, chat, gallery, calendar and the 0085 tombstones) — only the rows
+changed since the stream the household last confirmed. Each covered row
+carries a trigger-maintained change stamp from one monotonic per-household
+counter (migration 0086), and the provider keeps, on the household's
+`space_instances` row, the counter snapshot of its last confirmed stream;
+no watermark, a changed session shape (record shape, the household's
+version, retention, its resource set) or a last full stream older than a
+day falls back to the whole window. A session is reaped only when idle,
+never mid-stream; see
+[`protocol/sync.md`](./protocol/sync.md#what-a-sync-streams) and
+[incremental sessions](./protocol/sync.md#incremental-sessions-change-stamps--per-household-watermark).
 Because every author is bound to the roster mirror, the mirror must heal on
 its own: the host sends a v_32 roster snapshot on seat, on a member's
 upgrade and on the periodic sync tick, and a write that beat the gossip

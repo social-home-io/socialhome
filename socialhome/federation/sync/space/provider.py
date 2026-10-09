@@ -31,11 +31,13 @@ from ....domain.federation_capabilities import FederationCapability
 from .exporter import ChunkBuilder, RESOURCE_ORDER, serialise_chunk
 from .exporters.members import PreModeratorMembersExporter
 from .exporters.posts import iter_post_pages
+from .watermark import session_shape
 from .window import KEEP_FOREVER, SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
 
 if TYPE_CHECKING:
     from ...sync_manager import SyncSessionRecord
     from .exporter import ResourceExporter
+    from .watermark import SyncWatermarks
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +114,7 @@ class SpaceSyncService:
         "_federation",
         "_chat_gate",
         "_windows",
+        "_watermarks",
     )
 
     def __init__(
@@ -125,8 +128,13 @@ class SpaceSyncService:
         gallery_repo=None,
         bazaar_repo=None,
         windows: SyncWindows | None = None,
+        watermarks: "SyncWatermarks | None" = None,
     ) -> None:
         self._builder = builder
+        #: §25.6 incremental sessions (migration 0086): the per-household
+        #: watermark a periodic session streams covered rows above. ``None``
+        #: (not wired): every session streams in full, as before.
+        self._watermarks = watermarks
         #: The space's retention window bounds the catch-up media as it
         #: bounds the metadata chunks (the exporters hold their own).
         #: ``None``: no window known — everything (keep forever).
@@ -216,20 +224,23 @@ class SpaceSyncService:
         sync_id = session.sync_id
         space_id = session.space_id
         consecutive_failures = 0
+        # Any failed chunk — even one the stream recovered from — means the
+        # requester may lack a row, so the stream may not advance its
+        # watermark (it still completes; the next session re-streams).
+        any_failure = False
         # Per-stream patience, one count per waitable reason — see
         # :meth:`_send_chunk`.
         waits: dict[str, int] = {}
+        session.stream_clean = False
         try:
-            for resource in RESOURCE_ORDER:
-                exporter = await self._exporter_for(resource, session)
-                if exporter is None:
-                    log.debug("no exporter for resource %s — skipping", resource)
-                    continue
+            plan = await self._plan(session)
+            for exporter in plan:
                 async for envelope in self._builder.build_chunks(
                     exporter=exporter,
                     space_id=space_id,
                     sync_id=sync_id,
                     sig_suite=self._sig_suite,
+                    since=session.since_seq,
                 ):
                     sent = await self._send_chunk(session, envelope, waits)
                     if sent:
@@ -238,6 +249,7 @@ class SpaceSyncService:
                         session.touch()
                         consecutive_failures = 0
                         continue
+                    any_failure = True
                     consecutive_failures += 1
                     if consecutive_failures >= MAX_CONSECUTIVE_CHUNK_FAILURES:
                         log.warning(
@@ -261,7 +273,12 @@ class SpaceSyncService:
                 sync_id=sync_id,
                 sig_suite=self._sig_suite,
             )
-            await self._send(session, sentinel)
+            # Marked before the sentinel ships: the requester's
+            # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.
+            session.stream_clean = not any_failure
+            sent_sentinel = await self._send(session, sentinel)
+            if not sent_sentinel.ok:
+                session.stream_clean = False
             # An ``incremental`` session is the periodic re-sync of a
             # household that is already caught up (the scheduler's 30-min
             # tick): it ships no media — the live media outbox already
@@ -292,6 +309,89 @@ class SpaceSyncService:
             # Same reasoning as the abandon path above — a session whose
             # stream died is garbage, and holding it blocks the retry.
             self._close_session(sync_id)
+
+    async def _plan(self, session: "SyncSessionRecord") -> list["ResourceExporter"]:
+        """The exporters this session streams, in :data:`RESOURCE_ORDER`,
+        and — with watermarks wired — its snapshot, shape and ``since``.
+
+        The snapshot is read before any exporter reads a row: a row changed
+        while the stream runs is stamped above it, so it streams next time
+        whether or not this stream's keyset paging caught it.
+        """
+        exporters: list["ResourceExporter"] = []
+        for resource in RESOURCE_ORDER:
+            exporter = await self._exporter_for(resource, session)
+            if exporter is None:
+                log.debug("no exporter for resource %s — skipping", resource)
+                continue
+            exporters.append(exporter)
+        session.snapshot_seq = None
+        session.since_seq = None
+        session.shape = ""
+        if self._watermarks is None:
+            return exporters
+        session.snapshot_seq = await self._watermarks.snapshot()
+        session.shape = session_shape(
+            peer_version=await self._peer_version(session.requester_instance_id),
+            retention=(
+                await self._windows.retention_key(session.space_id)
+                if self._windows is not None
+                else ""
+            ),
+            resources=(e.resource for e in exporters),
+        )
+        session.since_seq = await self._watermarks.since_for(
+            space_id=session.space_id,
+            instance_id=session.requester_instance_id,
+            shape=session.shape,
+            sync_mode=session.sync_mode,
+        )
+        log.info(
+            "sync %s: %s stream of space %s to %s (snapshot %d%s)",
+            session.sync_id,
+            "full" if session.since_seq is None else "incremental",
+            session.space_id,
+            session.requester_instance_id,
+            session.snapshot_seq,
+            "" if session.since_seq is None else f", since {session.since_seq}",
+        )
+        return exporters
+
+    async def _peer_version(self, instance_id: str) -> int:
+        """The requester's protocol version, part of the session shape — a
+        household that upgrades gets one full stream (it may now take
+        resources it dropped as unknown)."""
+        if self._federation is None:
+            return 0
+        return int(await self._federation.space_member_version(instance_id))
+
+    async def confirm_complete(self, session: "SyncSessionRecord") -> None:
+        """The requester confirmed our stream (``SPACE_SYNC_COMPLETE`` from
+        the household it went to): advance its watermark to the session's
+        snapshot — only for a stream that shipped every chunk. Fail-soft: a
+        watermark not recorded only means the next session streams more."""
+        snapshot = getattr(session, "snapshot_seq", None)
+        if (
+            self._watermarks is None
+            or not getattr(session, "stream_clean", False)
+            or snapshot is None
+        ):
+            return
+        try:
+            await self._watermarks.confirm(
+                space_id=session.space_id,
+                instance_id=session.requester_instance_id,
+                seq=int(snapshot),
+                shape=session.shape,
+                full=session.since_seq is None,
+            )
+        except Exception:  # pragma: no cover — bookkeeping must not break sync
+            log.exception(
+                "sync %s: recording the watermark of %s for space %s failed",
+                session.sync_id,
+                session.requester_instance_id,
+                session.space_id,
+            )
 
     async def _send_chunk(
         self,

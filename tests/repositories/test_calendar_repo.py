@@ -1399,3 +1399,27 @@ async def test_calendar_tombstones_page_per_space_and_stubs_are_insert_only(
     assert [t.id for t in first] == ["cev-p0", "cev-p1"] and nxt is not None
     rest, end = await repo.list_event_tombstones_page("cs-b", cursor=nxt, limit=2)
     assert [t.id for t in rest] == ["cev-p2"] and end is None
+
+
+async def test_space_calendar_reads_since_a_stamp(two_space_calendars):
+    """§25.6 incremental: only the events / tombstones stamped after the
+    mark; an RSVP is not part of the event record and stamps nothing."""
+    env = two_space_calendars
+    repo = env.space_cal_repo
+    row = await env.db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    lo = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    hi = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    assert await repo.list_events_in_range("cs-a", start=lo, end=hi, since=mark) == []
+    await env.db.enqueue(
+        "UPDATE space_calendar_events SET summary='moved' WHERE id='cev-a'"
+    )
+    changed = await repo.list_events_in_range("cs-a", start=lo, end=hi, since=mark)
+    assert [e.id for e in changed] == ["cev-a"]
+    assert await repo.list_event_tombstones_page("cs-b", since=mark) == ([], None)
+    await repo.delete_event("cev-b", space_id="cs-b", deleted_by="uid-alice")
+    page, _ = await repo.list_event_tombstones_page("cs-b", since=mark)
+    assert [t.id for t in page] == ["cev-b"]
+    # Without ``since`` every live event in range, as before.
+    every = await repo.list_events_in_range("cs-a", start=lo, end=hi)
+    assert [e.id for e in every] == ["cev-a"]

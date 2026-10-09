@@ -17,7 +17,7 @@ from typing import Protocol, runtime_checkable
 from ..db import AsyncDatabase
 from ..domain.space import SpaceZone
 from ..domain.tombstone import SpaceRowTombstone
-from .base import rows_to_dicts, sync_page_cursor
+from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
 
 
 @runtime_checkable
@@ -37,6 +37,7 @@ class AbstractSpaceZoneRepo(Protocol):
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[SpaceRowTombstone], int | None]:
         """One page of the space's zone tombstones for the §25.6
         ``space_zones_deleted`` resource, keyset on the row id."""
@@ -174,14 +175,17 @@ class SqliteSpaceZoneRepo:
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[SpaceRowTombstone], int | None]:
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, id, created_by, created_at,"
                 " deleted_at, deleted_by FROM space_zones"
-                " WHERE space_id=? AND deleted_at IS NOT NULL AND rowid > ?"
-                " ORDER BY rowid LIMIT ?",
-                (space_id, cursor or 0, int(limit)),
+                " WHERE space_id=? AND deleted_at IS NOT NULL"
+                + changed
+                + " AND rowid > ? ORDER BY rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
             )
         )
         return [

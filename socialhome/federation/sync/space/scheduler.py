@@ -331,8 +331,9 @@ class SpaceSyncScheduler:
         """Queue a sync from us to ``peer_instance_id`` for ``space_id``.
 
         ``sync_mode`` ``"incremental"`` is the periodic re-sync of a space
-        we already hold: the provider re-streams the rows (cheap to apply,
-        idempotent) but re-ships no media. Everything else — a pairing, a
+        we already hold: the provider re-ships no media and streams only the
+        rows changed since the last stream we confirmed (its per-household
+        watermark, migration 0086 — a full stream when it has none). Everything else — a pairing, a
         deferred retry, an echo, "Sync now" — is ``"initial"`` and also
         enqueues the catch-up media.
 

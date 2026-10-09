@@ -764,3 +764,32 @@ async def test_album_tombstones_since_list_recent_deletes(two_spaces):
     # An unparsable ``since`` lists them all: replaying twice is harmless.
     every = await repo.list_album_tombstones_since("sp-1", "garbage")
     assert [t.id for t in every] == ["alb-1"]
+
+
+async def test_sync_pages_since_a_stamp(env):
+    """§25.6 incremental: only the albums / items / tombstones stamped after
+    the mark — an album tombstone stamps the items it tombstones too."""
+    db, repo = env
+    await repo.create_album(_album("alb-a"))
+    await repo.create_album(_album("alb-b"))
+    await repo.create_item(_item("it-a", album_id="alb-a"))
+    await repo.create_item(_item("it-b", album_id="alb-a"))
+    await repo.create_item(_item("it-c", album_id="alb-b"))
+    row = await db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    assert await repo.list_albums_sync_page("sp-1", since=mark) == ([], None)
+    assert await repo.list_items_sync_page("sp-1", since=mark) == ([], None)
+    await db.enqueue("UPDATE gallery_items SET caption='new' WHERE id='it-a'")
+    await db.enqueue(
+        "UPDATE gallery_items SET deleted_at='2026-01-01', filename='' WHERE id='it-b'"
+    )
+    await db.enqueue(
+        "UPDATE gallery_albums SET deleted_at='2026-01-01', name='' WHERE id='alb-b'"
+    )
+    items, _ = await repo.list_items_sync_page("sp-1", since=mark)
+    assert [i.id for i in items] == ["it-a"]
+    gone_items, _ = await repo.list_item_tombstones_page("sp-1", since=mark)
+    assert [t.id for t in gone_items] == ["it-b"]
+    gone_albums, _ = await repo.list_album_tombstones_page("sp-1", since=mark)
+    assert [t.id for t in gone_albums] == ["alb-b"]
+    assert await repo.list_albums_sync_page("sp-1", since=mark) == ([], None)

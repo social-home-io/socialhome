@@ -8,7 +8,7 @@ from typing import Protocol, runtime_checkable
 from ..db import AsyncDatabase
 from ..domain.gallery import GalleryAlbum, GalleryItem
 from ..domain.tombstone import SpaceRowTombstone
-from .base import rows_to_dicts, sync_page_cursor
+from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
 
 #: What a gallery item tombstone keeps of its row (migration 0085): no
 #: file, no caption, no date — the media reference scan then sees no file
@@ -71,6 +71,7 @@ class AbstractGalleryRepo(Protocol):
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[GalleryAlbum], int | None]:
         """One page of the space's albums (the system album included) for a
         §25.6 sync. ``(rows, next_cursor)`` paging, keyset on the row id."""
@@ -82,6 +83,7 @@ class AbstractGalleryRepo(Protocol):
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[GalleryItem], int | None]:
         """One page of the space's own gallery items for a §25.6 sync —
         never a mirror of a post's media (``source_post_id``; the receiver
@@ -152,6 +154,7 @@ class AbstractGalleryRepo(Protocol):
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[SpaceRowTombstone], int | None]: ...
     async def list_item_tombstones_page(
         self,
@@ -159,6 +162,7 @@ class AbstractGalleryRepo(Protocol):
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[SpaceRowTombstone], int | None]: ...
     async def list_album_tombstones_since(
         self, space_id: str, since: str
@@ -509,13 +513,16 @@ class SqliteGalleryRepo:
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[GalleryAlbum], int | None]:
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, * FROM gallery_albums"
-                " WHERE space_id=? AND deleted_at IS NULL AND rowid > ?"
-                " ORDER BY rowid LIMIT ?",
-                (space_id, cursor or 0, int(limit)),
+                " WHERE space_id=? AND deleted_at IS NULL"
+                + changed
+                + " AND rowid > ? ORDER BY rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
             )
         )
         return [self._row_to_album(r) for r in rows], sync_page_cursor(rows, limit)
@@ -526,15 +533,18 @@ class SqliteGalleryRepo:
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[GalleryItem], int | None]:
+        changed, changed_params = changed_since_sql("i.sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT i.rowid AS sync_rowid, i.* FROM gallery_items i"
                 " JOIN gallery_albums a ON a.id = i.album_id"
                 " WHERE a.space_id=? AND i.source_post_id IS NULL"
                 " AND i.deleted_at IS NULL AND a.deleted_at IS NULL"
-                " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",
-                (space_id, cursor or 0, int(limit)),
+                + changed
+                + " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
             )
         )
         return [self._row_to_item(r) for r in rows], sync_page_cursor(rows, limit)
@@ -909,15 +919,18 @@ class SqliteGalleryRepo:
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[SpaceRowTombstone], int | None]:
         """One page of the space's album tombstones, keyset on the row id."""
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, id, owner_user_id, created_at,"
                 " deleted_at, deleted_by FROM gallery_albums"
-                " WHERE space_id=? AND deleted_at IS NOT NULL AND rowid > ?"
-                " ORDER BY rowid LIMIT ?",
-                (space_id, cursor or 0, int(limit)),
+                " WHERE space_id=? AND deleted_at IS NOT NULL"
+                + changed
+                + " AND rowid > ? ORDER BY rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
             )
         )
         return [
@@ -937,20 +950,23 @@ class SqliteGalleryRepo:
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[SpaceRowTombstone], int | None]:
         """One page of the space's single-item tombstones, keyset on the row
         id. Items of a tombstoned album are left out — the album's own
         tombstone tells a household that missed it, and its trigger
         tombstones the items there too."""
+        changed, changed_params = changed_since_sql("i.sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT i.rowid AS sync_rowid, i.id, i.album_id, i.uploaded_by,"
                 " i.created_at, i.deleted_at, i.deleted_by FROM gallery_items i"
                 " JOIN gallery_albums a ON a.id = i.album_id"
                 " WHERE a.space_id=? AND a.deleted_at IS NULL"
-                " AND i.deleted_at IS NOT NULL AND i.rowid > ?"
-                " ORDER BY i.rowid LIMIT ?",
-                (space_id, cursor or 0, int(limit)),
+                " AND i.deleted_at IS NOT NULL"
+                + changed
+                + " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
             )
         )
         return [
