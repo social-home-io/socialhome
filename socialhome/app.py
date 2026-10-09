@@ -335,6 +335,7 @@ from .domain.space import ContentAction
 from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
+from .services.legacy_album_deletes import LegacyAlbumDeletes
 from .services.gallery_service import GalleryService
 from .services.media_transcode_service import MediaTranscodeService
 from .media.image_processor import ImageProcessor
@@ -1467,6 +1468,9 @@ def _wire_federation_stack(
     )
     private_invite_handler.attach_to(federation_service)
     app[K.private_invite_handler_key] = private_invite_handler
+    # Overtaking album deletes no tombstone row can prove (legacy ids,
+    # owner-less v_33 deletes) — restart-scoped; see legacy_album_deletes.
+    legacy_album_deletes = LegacyAlbumDeletes()
     SpaceContentInboundHandlers(
         bus=bus,
         # §24.11 authorship — the users a content payload names must be
@@ -1485,6 +1489,7 @@ def _wire_federation_stack(
         # A federated gallery delete removes the files it leaves unused.
         media_dir=pathlib.Path(config.media_path),
         media_refs=media_reference_repo,
+        legacy_album_deletes=legacy_album_deletes,
         # v_48: another household's version of a held page — fast-forward,
         # merge or conflict instead of last write wins.
         page_conflicts=page_conflict_service,
@@ -1576,6 +1581,7 @@ def _wire_federation_stack(
         # A streamed gallery delete removes the files it leaves unused.
         media_dir=pathlib.Path(config.media_path),
         media_refs=media_reference_repo,
+        legacy_album_deletes=legacy_album_deletes,
         timetable_repo=space_timetable_repo,
         page_conflicts=page_conflict_service,
     )

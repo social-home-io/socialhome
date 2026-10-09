@@ -110,6 +110,7 @@ if TYPE_CHECKING:
     from ....repositories.federation_repo import AbstractFederationRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
     from ....repositories.media_reference_repo import AbstractMediaReferenceRepo
+    from ....services.legacy_album_deletes import LegacyAlbumDeletes
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_poll_repo import AbstractSpacePollRepo
     from ....repositories.profile_picture_repo import (
@@ -175,6 +176,7 @@ class SpaceSyncReceiver:
         "_authorship",
         "_media_dir",
         "_media_refs",
+        "_legacy_album_deletes",
         "_timetable_repo",
         "_page_conflicts",
         "_chat_sink",
@@ -202,6 +204,7 @@ class SpaceSyncReceiver:
         authorship: "SpaceAuthorship | None" = None,
         media_dir: pathlib.Path | None = None,
         media_refs: "AbstractMediaReferenceRepo | None" = None,
+        legacy_album_deletes: "LegacyAlbumDeletes | None" = None,
         timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
         page_conflicts: "PageConflictService | None" = None,
     ) -> None:
@@ -220,6 +223,9 @@ class SpaceSyncReceiver:
         #: keeps them for the orphan sweep.
         self._media_dir = media_dir
         self._media_refs = media_refs
+        #: Overtaking album deletes no tombstone row proves (a legacy id, an
+        #: owner-less v_33 delete): a streamed album must not undo them.
+        self._legacy_album_deletes = legacy_album_deletes
         #: §24.11 authorship for a chunk streamed by a household that is NOT
         #: the space's host (see :meth:`_admit`). ``None`` refuses such
         #: chunks outright rather than trusting them.
@@ -1498,7 +1504,7 @@ class SpaceSyncReceiver:
             album_id = str(r.get("id") or r.get("album_id") or "")
             if not album_id:
                 continue
-            deleted_by = str(r.get("actor_user_id") or "")
+            deleted_by = await self._vetted_actor(r, space_id, provider, from_host)
             held = await self._gallery_repo.get_album(album_id)
             if held is not None:
                 if held.space_id != space_id or held.is_system:
@@ -1564,7 +1570,7 @@ class SpaceSyncReceiver:
             item_id = str(r.get("id") or r.get("item_id") or "")
             if not item_id:
                 continue
-            deleted_by = str(r.get("actor_user_id") or "")
+            deleted_by = await self._vetted_actor(r, space_id, provider, from_host)
             held = await self._gallery_repo.get_item(item_id)
             if held is not None:
                 if await self._gallery_repo.delete_item_in_space(
@@ -1631,6 +1637,7 @@ class SpaceSyncReceiver:
         """
         if self._zone_repo is None:
             return
+        from_host = await self._is_host(space_id, provider)
         cross_space: list[str] = []
         for r in records:
             zone_id = str(r.get("id") or r.get("zone_id") or "")
@@ -1645,9 +1652,37 @@ class SpaceSyncReceiver:
             await self._zone_repo.delete(
                 zone_id,
                 space_id=space_id,
-                deleted_by=str(r.get("actor_user_id") or ""),
+                deleted_by=await self._vetted_actor(r, space_id, provider, from_host),
             )
         _log_tombstone_refusals("zone", provider, space_id, cross_space, 0)
+
+    async def _vetted_actor(
+        self, r: dict[str, Any], space_id: str, provider: str, from_host: bool
+    ) -> str:
+        """The ``actor_user_id`` a gallery / zone tombstone may record as its
+        ``deleted_by``. Those live delete rules judge the household, not an
+        actor, so a record naming a stranger is not refused — but from a
+        member household the name is kept only when the provider speaks for
+        that user (seated on it, as ``_writer_delete_admits`` requires for
+        stickies / events); otherwise the delete is recorded as nobody's.
+        The host's stream is taken whole, like every host record."""
+        actor = str(r.get("actor_user_id") or "")
+        if not actor or from_host:
+            return actor
+        if self._authorship is None:
+            return ""
+        event = FederationEvent(
+            msg_id=f"sync:{space_id}:actor",
+            event_type=FederationEventType.SPACE_SYNC_CHUNK,
+            from_instance=provider,
+            to_instance="",
+            timestamp="",
+            payload={},
+            space_id=space_id,
+        )
+        if await self._authorship.acts_for(event, space_id, actor, any_role=True):
+            return actor
+        return ""
 
     async def _page_seq_hints(
         self, records: list[dict[str, Any]], space_id: str, *, provider: str
@@ -2221,8 +2256,15 @@ class SpaceSyncReceiver:
             return False
         return await self._authorship.may_author(event, space_id, got[1].author)
 
+    def _legacy_album_deleted(self, space_id: str, album_id: str) -> bool:
+        return self._legacy_album_deletes is not None and (
+            self._legacy_album_deletes.is_deleted(space_id, album_id)
+        )
+
     async def _persist_album(self, record: dict[str, Any], space_id: str) -> None:
-        if await self._gallery_repo.is_album_deleted(
+        if self._legacy_album_deleted(
+            space_id, str(record["id"])
+        ) or await self._gallery_repo.is_album_deleted(
             str(record["id"]), space_id=space_id
         ):
             log.debug("sync: gallery album %s was deleted here — skipped", record["id"])
@@ -2273,7 +2315,9 @@ class SpaceSyncReceiver:
         space_id: str,
     ) -> None:
         album_id = str(record.get("album_id") or "")
-        if await self._gallery_repo.is_album_deleted(album_id, space_id=space_id):
+        if self._legacy_album_deleted(
+            space_id, album_id
+        ) or await self._gallery_repo.is_album_deleted(album_id, space_id=space_id):
             return  # its album was deleted here; so was the item
         if await self._gallery_repo.is_item_deleted(
             str(record["id"]), space_id=space_id

@@ -36,6 +36,7 @@ from socialhome.domain.post import BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
 from socialhome.domain.user import SYSTEM_AUTHOR
+from socialhome.services.legacy_album_deletes import LegacyAlbumDeletes
 from socialhome.services.gallery_service import (
     ALBUMS_PER_SPACE,
     DESCRIPTION_MAX,
@@ -4361,6 +4362,7 @@ def gallery_env(bus, repos, tmp_path):
         gallery_repo=gallery,
         media_dir=media,
         media_refs=_NoRefs(),
+        legacy_album_deletes=LegacyAlbumDeletes(),
     )
     seen: list[object] = []
 
@@ -4470,9 +4472,12 @@ async def test_a_delete_that_overtakes_its_create_keeps_the_album_away(gallery_e
         pytest.param(_bound_album(owner="u-other"), id="another-owner"),
     ],
 )
-async def test_an_overtaking_delete_of_an_id_not_bound_here_is_not_remembered(
+async def test_an_overtaking_delete_of_an_id_not_bound_here_stays_in_memory(
     gallery_env, album_id
 ):
+    """No durable tombstone for an id that proves no space — the bounded
+    in-memory record keeps the create that follows out instead (the test
+    authorship admits every household as a moderator)."""
     handlers, gallery, _media, _seen = gallery_env
     gallery.missing.add(album_id)
     await handlers._on_gallery_album_deleted(
@@ -4483,6 +4488,11 @@ async def test_an_overtaking_delete_of_an_id_not_bound_here_is_not_remembered(
         )
     )
     assert gallery.stubbed_albums == []
+    assert handlers._legacy_album_deletes.is_deleted("sp-1", album_id)
+    await handlers._on_gallery_album_created(
+        _created(id=album_id, owner_user_id="u-remote")
+    )
+    assert gallery.albums == {}
 
 
 async def test_an_album_deleted_here_is_not_brought_back_by_a_replay(gallery_env):

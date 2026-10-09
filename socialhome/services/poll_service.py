@@ -206,6 +206,10 @@ class PollService(BusPublisherMixin):
                 option_id=option_id,
                 voter_user_id=voter_user_id,
             )
+        # The post may have been deleted meanwhile — which drops its poll
+        # (a space post, migration 0085): the vote landed nowhere.
+        if await self._repo.get_meta(post_id) is None:
+            raise PollNotFoundError(post_id)
         if self._bus is not None:
             new_votes = tuple(
                 await self._repo.list_user_votes(post_id, voter_user_id),

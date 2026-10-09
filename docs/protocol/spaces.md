@@ -135,10 +135,11 @@ updated_at}` inside the encrypted payload. The receiver:
   that missed the delete, does not bring the album back — across restarts,
   and streamed to households that missed it (`gallery_albums_deleted`, see
   [`sync.md`](./sync.md#sticky-calendar-event-gallery-and-zone-tombstones)).
-  A delete of an album not held here yet is remembered only for an id
-  owner-bound to the payload's `owner_user_id` in this space; a legacy
-  (unbound) id is no longer remembered — the in-memory record it replaced
-  kept one until the next restart;
+  A delete of an album not held here yet leaves a tombstone row only for
+  an id owner-bound to the payload's `owner_user_id` in this space; a
+  legacy (unbound) id, or an owner-less v_33 delete from an admin
+  household, is remembered in a bounded in-memory record until restart
+  (`services/legacy_album_deletes.py`), as before 0085;
 - ignores an edit's `cover_item_id` when it names an item of another album,
   keeps one naming an item not held yet (rendered once it lands in this
   album), and clears the cover on an explicit `null`;

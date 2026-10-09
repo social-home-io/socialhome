@@ -1386,12 +1386,14 @@ async def test_an_album_delete_that_overtakes_its_create_keeps_it_deleted(env):
     assert await _album_owner(db, album_id) is None
 
 
-async def test_an_overtaking_delete_of_a_legacy_album_id_is_not_remembered(env):
-    """The tombstone is durable: it is written only for an id owner-bound to
-    this space. A legacy (unbound) id proves no space, so a delete of one
-    not held here records nothing — a stub could squat another space's
-    album id on this household for good. (The in-memory record this
-    replaced kept such ids until the next restart.)"""
+async def test_a_legacy_album_delete_that_overtakes_its_create_keeps_it_deleted(
+    env,
+):
+    """A legacy (unbound) id proves no space, so its overtaking delete
+    writes no durable tombstone (a stub could squat another space's album
+    id here for good) — it is remembered in memory instead, for this
+    process's life, as v_33 did: the create that follows is refused, and so
+    is a member household's sync of the album."""
     app, db = env
     await _deliver(
         app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-racy"}, sender=AUTHOR
@@ -1400,6 +1402,47 @@ async def test_an_overtaking_delete_of_a_legacy_album_id_is_not_remembered(env):
         await db.fetchone("SELECT 1 FROM gallery_albums WHERE id='album-racy'", ())
         is None
     )
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": "album-racy", "owner_user_id": "u-g", "name": "Late"},
+        sender=AUTHOR,
+    )
+    await app[space_sync_receiver_key]._dispatch(
+        "gallery",
+        SP,
+        [{"kind": "album", "id": "album-racy", "owner_user_id": "u-g", "name": "L"}],
+        provider=AUTHOR,
+    )
+    assert (
+        await db.fetchone("SELECT 1 FROM gallery_albums WHERE id='album-racy'", ())
+        is None
+    )
+
+
+@pytest.mark.parametrize("sender", [HOST, ADMIN])
+async def test_an_owner_less_v33_delete_that_overtakes_a_create_keeps_it_deleted(
+    env, sender
+):
+    """A v_33 moderator household's delete names no owner, so it cannot
+    prove a bound id is this space's — no durable tombstone, but the
+    in-memory record still refuses the create that follows."""
+    app, db = env
+    album_id = _bound_album("u-g")
+    await _deliver(
+        app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": album_id}, sender=sender
+    )
+    assert (
+        await db.fetchone("SELECT 1 FROM gallery_albums WHERE id=?", (album_id,))
+        is None
+    )
+    await _deliver(
+        app,
+        FET.SPACE_GALLERY_ALBUM_CREATED,
+        {"id": album_id, "owner_user_id": "u-g", "name": "Trip"},
+        sender=AUTHOR,
+    )
+    assert await _album_owner(db, album_id) is None
 
 
 async def test_federated_gallery_deletes_remove_the_files(env, tmp_dir):

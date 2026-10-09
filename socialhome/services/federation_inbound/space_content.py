@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     import pathlib
 
     from ...repositories.gallery_repo import AbstractGalleryRepo
+    from ..legacy_album_deletes import LegacyAlbumDeletes
     from ...repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ...repositories.page_repo import AbstractPageRepo
     from ..page_conflict_service import PageConflictService
@@ -207,6 +208,7 @@ class SpaceContentInboundHandlers:
         "_timetable_repo",
         "_media_dir",
         "_media_refs",
+        "_legacy_album_deletes",
         "_page_conflicts",
     )
 
@@ -227,6 +229,7 @@ class SpaceContentInboundHandlers:
         timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
         media_dir: "pathlib.Path | None" = None,
         media_refs: "AbstractMediaReferenceRepo | None" = None,
+        legacy_album_deletes: "LegacyAlbumDeletes | None" = None,
         page_conflicts: "PageConflictService | None" = None,
     ) -> None:
         self._bus = bus
@@ -248,6 +251,9 @@ class SpaceContentInboundHandlers:
         #: unreferenced. Without both, files are kept for the orphan sweep.
         self._media_dir = media_dir
         self._media_refs = media_refs
+        #: Overtaking album deletes no tombstone row can prove (a legacy id,
+        #: an owner-less v_33 delete) — restart-scoped, bounded.
+        self._legacy_album_deletes = legacy_album_deletes
 
     def attach_to(self, federation_service: "FederationService") -> None:
         registry = federation_service._event_registry
@@ -1856,7 +1862,10 @@ class SpaceContentInboundHandlers:
                 album_id,
             )
             return
-        if await self._gallery_repo.is_album_deleted(album_id, space_id=space_id):
+        if await self._gallery_repo.is_album_deleted(album_id, space_id=space_id) or (
+            self._legacy_album_deletes is not None
+            and self._legacy_album_deletes.is_deleted(space_id, album_id)
+        ):
             log_not_applied(
                 event,
                 what="gallery album",
@@ -2002,37 +2011,45 @@ class SpaceContentInboundHandlers:
             )
         )
 
-    async def _may_tombstone(
+    async def _remember_overtaking_delete(
         self, event: "FederationEvent", space_id: str, album_id: str
-    ) -> bool:
-        """May this delete of an album not held here yet be remembered?
+    ) -> None:
+        """Remember a delete of an album not held here yet, so the create it
+        overtook does not bring the album back.
 
-        Remembering it writes the album's tombstone (migration 0085), which
-        refuses its create later — for good, so only for an id owner-bound
-        (v_34) to the payload's ``owner_user_id`` in THIS space (album ids
-        are global: a tombstone for another space's id, or a legacy unbound
-        one, would block a real album here), and only from a household that
-        could delete the album once it lands: an admin household (settings
-        authority — not a moderator seat), or the owner's own household.
+        Only a household that could delete the album once it lands may do
+        that — an admin household (settings authority, not a moderator
+        seat), or the owner's own household. Where it is remembered:
+
+        * an id owner-bound (v_34) to the payload's ``owner_user_id`` in THIS
+          space → a durable tombstone row (migration 0085), for good;
+        * a legacy (unbound) id — any sender, as v_33 did — or an owner-less
+          (v_33) / mismatched delete from an admin household → the bounded,
+          restart-scoped :class:`LegacyAlbumDeletes` record only: album ids
+          are global, and a durable row for an id that proves no space could
+          squat another space's album here for good.
         """
         owner = str(event.payload.get("owner_user_id") or "")
         binding = check_owner_bound_id(
             GALLERY_ALBUM_KIND, album_id, space_id=space_id, owner_user_id=owner
         )
-        if binding is not OwnerBinding.VALID:
-            log.info(
-                "%s from %s: delete of gallery album %s, not held here, names "
-                "an id not bound to its owner in space %s — not remembered",
-                event.event_type,
-                event.from_instance,
+        is_admin = await self._authorship.is_admin_household(event, space_id)
+        if binding is OwnerBinding.VALID and (
+            is_admin
+            or await self._authorship.acts_for(event, space_id, owner, any_role=True)
+        ):
+            assert self._gallery_repo is not None
+            await self._gallery_repo.tombstone_album(
                 album_id,
-                space_id,
+                space_id=space_id,
+                owner_user_id=owner,
+                deleted_by=payload_actor(event) or "",
             )
-            return False
-        if await self._authorship.is_admin_household(event, space_id):
-            return True
-        if await self._authorship.acts_for(event, space_id, owner, any_role=True):
-            return True
+            return
+        if binding is OwnerBinding.LEGACY or is_admin:
+            if self._legacy_album_deletes is not None:
+                self._legacy_album_deletes.record(space_id, album_id)
+            return
         log.warning(
             "%s from %s: delete of gallery album %s, not held here, comes "
             "from neither its owner's household nor a moderator — not "
@@ -2041,7 +2058,6 @@ class SpaceContentInboundHandlers:
             event.from_instance,
             album_id,
         )
-        return False
 
     async def _on_gallery_album_deleted(self, event: "FederationEvent") -> None:
         """Remove a member's album — and, by cascade, the items in it, with
@@ -2056,19 +2072,12 @@ class SpaceContentInboundHandlers:
         album_id = str(event.payload.get("id") or "")
         if not space_id or not album_id:
             return
-        if (
-            await self._gallery_repo.get_album(album_id) is None
-            and not await self._gallery_repo.is_album_deleted(
-                album_id, space_id=space_id
-            )
-            and await self._may_tombstone(event, space_id, album_id)
+        if await self._gallery_repo.get_album(
+            album_id
+        ) is None and not await self._gallery_repo.is_album_deleted(
+            album_id, space_id=space_id
         ):
-            await self._gallery_repo.tombstone_album(
-                album_id,
-                space_id=space_id,
-                owner_user_id=str(event.payload.get("owner_user_id") or ""),
-                deleted_by=payload_actor(event) or "",
-            )
+            await self._remember_overtaking_delete(event, space_id, album_id)
         if not await self._gallery_album_mutable(event, space_id, album_id):
             return
         media = await self._gallery_repo.list_album_media(album_id)

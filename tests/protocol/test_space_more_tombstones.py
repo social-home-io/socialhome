@@ -678,3 +678,28 @@ async def test_a_post_tombstone_takes_its_poll_and_schedule(houses):
         provider=HOST,
     )
     assert await polls.get_schedule_meta(pid) is None
+
+
+@pytest.mark.parametrize(
+    ("kind_name", "seated"),
+    [("gallery item", MOLLY), ("gallery album", ADAM), ("zone", ADAM)],
+)
+async def test_a_member_tombstone_records_only_an_actor_seated_on_it(
+    houses, kind_name, seated
+):
+    """The album / item / zone delete rules name no actor, so a member
+    household's record is not refused for one — but ``deleted_by`` keeps it
+    only when the provider speaks for that user; another household's user
+    is stored as nobody."""
+    _h, c, _d = houses
+    kind = next(k for k in KINDS if k.name == kind_name)
+    for actor, expected in ((OLIVER, None), (seated, seated)):
+        row_id = kind.new_id()
+        await kind.hold((c,), row_id)
+        record = {**_record_for(kind, row_id), "actor_user_id": actor}
+        await _dispatch(c, kind.tomb, [record], provider=kind.rightful)
+        row = await c[db_key].fetchone(
+            f"SELECT deleted_at, deleted_by FROM {kind.table} WHERE id=?", (row_id,)
+        )
+        assert row["deleted_at"] is not None
+        assert row["deleted_by"] == expected, actor

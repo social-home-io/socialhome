@@ -280,12 +280,21 @@ recorded; never content, never a coordinate. On the receiver
   tombstones it. A member household's record never stubs.
 
 A live `SPACE_GALLERY_ALBUM_DELETED` for an album not held here yet (the
-delete overtook the create) now leaves the same durable tombstone — under
-the same owner-bound rule — instead of the in-memory record it replaced
-(`GalleryAlbumTombstones`, forgotten on restart); a legacy (unbound) id,
-or one sent without the owner it commits to, is no longer remembered. The
-resume replay re-sends album deletes since `since` from these rows, with
-the owner.
+delete overtook the create) from the owner's household or an admin
+household leaves the same durable tombstone — but only for an id
+owner-bound to the payload's `owner_user_id` in this space. A **legacy**
+(unbound) id, or an **owner-less** v_33 delete from an admin household,
+proves no space, and a durable row for it could squat another space's
+album id for good; those are kept in a bounded, restart-scoped in-memory
+record instead (`services/legacy_album_deletes.py`, the pre-0085
+`GalleryAlbumTombstones` semantics), which the live create path and the
+`gallery` sync resource consult — the create that follows is refused as
+before. The resume replay re-sends album deletes since `since` from the
+tombstone rows, with the owner.
+
+The album / item / zone delete rules name no actor, so a member household's
+record naming one is not refused for it — but `deleted_by` keeps the
+`actor_user_id` only when the provider speaks for that user, else NULL.
 
 **A deleted post holds no poll.** Soft-deleting a space post (by its
 author, a moderator, the retention sweep, a live `SPACE_POST_DELETED` or a

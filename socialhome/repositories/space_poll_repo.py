@@ -256,9 +256,14 @@ class SqliteSpacePollRepo:
         option_id: str,
         voter_user_id: str,
     ) -> None:
+        # Only onto an option that still exists: a post delete drops its
+        # poll (migration 0085 trigger), and a vote racing it must land
+        # nowhere rather than fail the FK.
         await self._db.enqueue(
-            "INSERT INTO space_poll_votes(option_id, voter_user_id) VALUES(?, ?)",
-            (option_id, voter_user_id),
+            "INSERT INTO space_poll_votes(option_id, voter_user_id)"
+            " SELECT ?, ? WHERE EXISTS"
+            " (SELECT 1 FROM space_poll_options WHERE id=?)",
+            (option_id, voter_user_id, option_id),
         )
 
     async def get_post_author(self, post_id: str) -> str | None:
