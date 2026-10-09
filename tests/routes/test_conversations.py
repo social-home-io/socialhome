@@ -732,7 +732,30 @@ async def test_mark_read_without_receipt_clears_own_unread_only(client):
     assert [s for s in (await r.json())["states"] if s["state"] == "read"] == []
 
 
-@pytest.mark.parametrize("body", [{"receipt": "no"}, ["receipt"]])
+@pytest.mark.parametrize("body", [None, {}, {"receipt": True}])
+async def test_mark_read_takes_a_null_or_empty_body_as_a_receipt(client, body):
+    """Older clients may send ``null`` (or ``{}``): the receipt stays on."""
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    await client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"content": "hello"},
+        headers=_auth(client._bob_token),
+    )
+    resp = await client.post(
+        f"/api/conversations/{conv_id}/read",
+        data="null" if body is None else json.dumps(body),
+        headers={**_auth(client._admin_token), "Content-Type": "application/json"},
+    )
+    assert resp.status == 200, await resp.text()
+    assert (await resp.json())["marked"] == 1
+
+
+@pytest.mark.parametrize("body", [{"receipt": "no"}, {"receipt": None}, ["receipt"]])
 async def test_mark_read_rejects_a_malformed_receipt_flag(client, body):
     r = await client.post(
         "/api/conversations/dm",

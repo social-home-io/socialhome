@@ -293,3 +293,33 @@ async def test_unread_by_space_is_empty_for_unknown_and_inactive_users(stack):
     assert await stack.chat.unread_by_space("nobody") == {}
     await stack.db.enqueue("UPDATE users SET state='inactive' WHERE username='bob'")
     assert await stack.chat.unread_by_space("bob") == {}
+
+
+async def test_unread_by_space_reads_the_roster_in_batches(stack):
+    """The @-mention count resolves names with one users read and one
+    remote-users read per chat — never one lookup per member."""
+    for i in range(6):
+        name = f"extra{i}"
+        await stack.db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (name, f"u-{name}", name.title()),
+        )
+        await stack.db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'member')",
+            (SP, f"u-{name}"),
+        )
+    chat_id = (await stack.chat.summary(SP, "bob")).conversation_id
+    await stack.dm.send_message(chat_id, sender_username="anna", content="@bob hi")
+    await stack.dm.send_message(chat_id, sender_username="extra1", content="@bob yo")
+    counts: dict[str, int] = {}
+    for name in ("get", "get_by_user_id", "get_remote", "get_remote_by_member"):
+        original = getattr(stack.users, name)
+
+        def spy(*a, _o=original, _n=name, **kw):
+            counts[_n] = counts.get(_n, 0) + 1
+            return _o(*a, **kw)
+
+        setattr(stack.users, name, spy)
+    assert (await stack.chat.unread_by_space("bob"))[SP].unread == 2
+    # Only the viewer's own lookup — none per seated member or remote seat.
+    assert counts == {"get": 1}

@@ -277,3 +277,34 @@ async def test_a_seat_without_a_login_is_looked_up_by_user_id(env):
     out = await env.resolver.resolve("g9", "hey @gussy")
     assert [m.user_id for m in out] == ["remote-gus-1"]
     assert (await env.resolver.tokens("g9"))["remote-gus-1"] == "gussy"
+
+
+async def test_a_roster_is_read_in_batches_not_per_seat(env):
+    """Local seats come from one ``list_active`` read and remote seats named
+    by ``user_id`` from one ``list_remote_by_ids`` read — a mention count
+    over many busy chats never costs a lookup per member."""
+    await env.user_svc.provision(username="anna", display_name="Anna")
+    await _system_chat(env, "sys", "anna")
+    for i in range(4):
+        await env.users.upsert_remote(
+            RemoteUser(
+                user_id=f"remote-{i}",
+                instance_id="peer-b",
+                remote_username=f"r{i}",
+                display_name=f"R{i}",
+            )
+        )
+    policy = _Policy(*(_computed(f"remote-{i}") for i in range(4)))
+    resolver = DmMentionResolver(env.convos, env.users, policy)  # type: ignore[arg-type]
+    calls: list[str] = []
+    for name in ("get", "get_remote", "list_active", "list_remote_by_ids"):
+        original = getattr(env.users, name)
+
+        def spy(*a, _o=original, _n=name, **kw):
+            calls.append(_n)
+            return _o(*a, **kw)
+
+        setattr(env.users, name, spy)
+    out = await resolver.resolve("sys", "@anna @r0 @r3")
+    assert len(out) == 3
+    assert sorted(calls) == ["list_active", "list_remote_by_ids"]

@@ -91,22 +91,62 @@ function parseUnreadRow(raw: unknown): SpaceChatUnread | null {
   }
 }
 
+/** The read of the counts in flight, and whether one more is owed. */
+let unreadInflight: Promise<void> | null = null
+let unreadAgain = false
+
 /** Fetch every space's chat unread in one call. A failure keeps what
  *  the list already shows. */
-export async function loadSpaceChatUnread(): Promise<void> {
+export function loadSpaceChatUnread(): Promise<void> {
+  // Coalesced: one request at a time. A call (or a live frame) while one
+  // is in flight asks for exactly one more read after it — that answer
+  // may predate what triggered the call, and the newer read reconciles a
+  // bump the older answer would have overwritten.
+  if (unreadInflight) {
+    unreadAgain = true
+    return unreadInflight
+  }
+  unreadInflight = (async () => {
+    try {
+      do {
+        unreadAgain = false
+        if (!await fetchSpaceChatUnread()) break
+      } while (unreadAgain)
+    } finally {
+      unreadInflight = null
+      unreadAgain = false
+    }
+  })()
+  return unreadInflight
+}
+
+/** One read of ``GET /api/spaces/chat-unread``; ``false`` on a failure
+ *  (the list keeps the last answer). */
+async function fetchSpaceChatUnread(): Promise<boolean> {
   try {
     const body = await api.get('/api/spaces/chat-unread') as { spaces?: unknown } | null
     const raw = body?.spaces
-    if (!raw || typeof raw !== 'object') return
+    if (!raw || typeof raw !== 'object') return true
     const next: Record<string, SpaceChatUnread> = {}
     for (const [id, row] of Object.entries(raw as Record<string, unknown>)) {
       const parsed = parseUnreadRow(row)
       if (parsed) next[id] = parsed
     }
     spaceChatUnread.value = next
+    return true
   } catch {
-    /* keep the last answer */
+    return false
   }
+}
+
+/** A ``dm.message_deleted`` frame: whether the spaces list must re-read
+ *  its counts. The frame carries no sender nor whether the message was
+ *  still unread, so a space chat that shows a count re-reads it (a
+ *  deleted unread message must stop counting); one at 0 can't go lower. */
+export function spaceChatDeleteNeedsReload(data: unknown): boolean {
+  const d = data as { system_scope?: unknown; space_id?: unknown } | null
+  if (d?.system_scope !== 'space' || typeof d.space_id !== 'string') return false
+  return (spaceChatUnread.value[d.space_id]?.unread ?? 0) > 0
 }
 
 /** The unread count the spaces list shows for ``spaceId`` (0 = no dot). */
@@ -170,6 +210,8 @@ export function applySpaceChatUnreadFrame(
     ...spaceChatUnread.value,
     [d.space_id]: { ...row, unread: row.unread + 1 },
   }
+  // A read in flight may answer from before this message: read again.
+  if (unreadInflight) unreadAgain = true
   return 'bumped'
 }
 

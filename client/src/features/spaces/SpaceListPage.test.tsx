@@ -13,15 +13,22 @@ vi.mock('@/api', () => ({
 
 type Handler = (e: { type: string; data: Record<string, unknown> }) => void
 const wsHandlers: Record<string, Handler[]> = {}
-vi.mock('@/ws', () => ({
-  ws: {
-    on: (type: string, h: Handler) => {
-      ;(wsHandlers[type] ??= []).push(h)
-      return () => { wsHandlers[type] = (wsHandlers[type] ?? []).filter(x => x !== h) }
+const conn = vi.hoisted(() => ({ state: null as null | { value: string } }))
+vi.mock('@/ws', async () => {
+  const { signal } = await import('@preact/signals')
+  const state = signal('open')
+  conn.state = state
+  return {
+    connectionState: state,
+    ws: {
+      on: (type: string, h: Handler) => {
+        ;(wsHandlers[type] ??= []).push(h)
+        return () => { wsHandlers[type] = (wsHandlers[type] ?? []).filter(x => x !== h) }
+      },
+      send: vi.fn(),
     },
-    send: vi.fn(),
-  },
-}))
+  }
+})
 function emit(type: string, data: Record<string, unknown>): void {
   for (const h of wsHandlers[type] ?? []) h({ type, data })
 }
@@ -119,6 +126,32 @@ describe('SpaceListPage — chat unread pill', () => {
     wire({ sA: { unread: 1, notif_level: 'all', muted_until: null } })
     emit('dm.message', { system_scope: 'space', space_id: 'sA', message: { sender_user_id: 'u2' } })
     await r.waitFor(() => expect(r.getByText('1 unread in chat')).toBeTruthy())
+    expect(unreadCalls()).toBe(2)
+  })
+})
+
+describe('SpaceListPage — chat unread stays current', () => {
+  it('a deleted message in a counted space chat re-reads the counts', async () => {
+    wire({ sA: { unread: 2, notif_level: 'all', muted_until: null } })
+    const r = await renderPage()
+    await r.findByText('2 unread in chat')
+    wire({ sA: { unread: 1, notif_level: 'all', muted_until: null } })
+    emit('dm.message_deleted', { conversation_id: 'c', system_scope: 'household', message_id: 'm' })
+    expect(unreadCalls()).toBe(1)
+    emit('dm.message_deleted', { conversation_id: 'c', system_scope: 'space', space_id: 'sA', message_id: 'm' })
+    await r.waitFor(() => expect(r.getByText('1 unread in chat')).toBeTruthy())
+    expect(unreadCalls()).toBe(2)
+  })
+
+  it('a WS reconnect re-reads the counts (frames missed while down)', async () => {
+    wire({})
+    const r = await renderPage()
+    await r.findByText('Choir')
+    expect(unreadCalls()).toBe(1)
+    wire({ sB: { unread: 4, notif_level: 'all', muted_until: null } })
+    conn.state!.value = 'reconnecting'
+    conn.state!.value = 'open'
+    await r.waitFor(() => expect(r.getByText('4 unread in chat')).toBeTruthy())
     expect(unreadCalls()).toBe(2)
   })
 })

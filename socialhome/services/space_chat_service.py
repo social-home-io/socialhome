@@ -206,7 +206,8 @@ class SpaceChatService:
         at ``mentions`` only the unread messages that @-mention the viewer.
         The mention count parses message text, so it runs only for a
         ``mentions`` seat that has unread messages at all (each bounded by
-        ``list_unread_contents``' 500-message cap). Seats with nothing
+        ``list_unread_contents``' 500-message cap, its roster read in two
+        batched queries — no per-member lookups). Seats with nothing
         unread are still returned (with ``0``) so the SPA knows their
         level and mute for live updates; a chat never opened yet has no
         seat and is absent.

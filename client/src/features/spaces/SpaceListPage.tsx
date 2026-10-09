@@ -14,11 +14,12 @@ import { RemoteInviteInboxBanner } from '@/components/RemoteInviteInboxBanner'
 import { SideNavIcon } from '@/components/SideNavIcon'
 import { openSpaceJoinByCode } from './SpaceJoinByCodeDialog'
 import { isOne, t } from '@/i18n/i18n'
-import { ws } from '@/ws'
+import { connectionState, ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import {
   applySpaceChatUnreadFrame,
   loadSpaceChatUnread,
+  spaceChatDeleteNeedsReload,
   spaceChatUnreadOf,
 } from '@/store/spaceChat'
 
@@ -153,11 +154,24 @@ export default function SpaceListPage() {
 
   // Live chat activity: bump a space's dot by the same rules as its
   // Chat switch; a chat the list has no row for yet (just created by
-  // its first message) refetches the counts.
-  useEffect(() => ws.on('dm.message', (e) => {
-    const res = applySpaceChatUnreadFrame(e.data, currentUser.value?.user_id)
-    if (res === 'unknown') void loadSpaceChatUnread()
-  }), [])
+  // its first message) re-reads the counts, as does a deleted message in
+  // a chat that shows a count and a WS reconnect (frames missed while
+  // the socket was down). Re-reads are coalesced in the store.
+  useEffect(() => {
+    const offMsg = ws.on('dm.message', (e) => {
+      const res = applySpaceChatUnreadFrame(e.data, currentUser.value?.user_id)
+      if (res === 'unknown') void loadSpaceChatUnread()
+    })
+    const offDel = ws.on('dm.message_deleted', (e) => {
+      if (spaceChatDeleteNeedsReload(e.data)) void loadSpaceChatUnread()
+    })
+    let prevConn = connectionState.value
+    const offConn = connectionState.subscribe((next) => {
+      if (prevConn === 'reconnecting' && next === 'open') void loadSpaceChatUnread()
+      prevConn = next
+    })
+    return () => { offMsg(); offDel(); offConn() }
+  }, [])
 
   if (loading.value) return <SpaceListSkeleton />
 

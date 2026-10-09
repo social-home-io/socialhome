@@ -696,6 +696,9 @@ class ConversationReadView(BaseView):
         svc = self.svc(dm_service_key)
         conv_id = self.match("id")
         data = await self.body() if self.request.can_read_body else {}
+        if data is None:
+            # A JSON ``null`` body (older clients) reads as no body.
+            data = {}
         if not isinstance(data, dict):
             return error_response(422, "UNPROCESSABLE", "Body must be an object.")
         receipt = data.get("receipt", True)

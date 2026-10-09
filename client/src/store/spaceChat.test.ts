@@ -10,6 +10,7 @@ import {
   clearSpaceChatUnread,
   isSpaceChatFrame,
   loadSpaceChatUnread,
+  spaceChatDeleteNeedsReload,
   loadSpaceChat,
   patchSpaceChat,
   resetSpaceChat,
@@ -182,5 +183,68 @@ describe('space chat unread for the spaces list', () => {
     apiGet.mockResolvedValueOnce({ enabled: false })
     await loadSpaceChat('sA')
     expect(spaceChatUnread.value.sA).toBeUndefined()
+  })
+})
+
+describe('space chat unread — coalesced loads and deletes', () => {
+  const ROW = (unread: number) => ({ unread, notif_level: 'all', muted_until: null })
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>((r) => { resolve = r })
+    return { promise, resolve }
+  }
+  const calls = () => apiGet.mock.calls.filter(c => c[0] === '/api/spaces/chat-unread').length
+
+  beforeEach(() => { spaceChatUnread.value = {} })
+
+  it('concurrent loads share one request', async () => {
+    const d = deferred<unknown>()
+    apiGet.mockReturnValueOnce(d.promise)
+    const a = loadSpaceChatUnread()
+    const b = loadSpaceChatUnread()
+    // A second caller joins the request in flight: one GET so far.
+    expect(calls()).toBe(1)
+    apiGet.mockResolvedValueOnce({ spaces: { sA: ROW(1) } })
+    d.resolve({ spaces: { sA: ROW(1) } })
+    await Promise.all([a, b])
+    // …and asked for one fresh read after it, never a third.
+    expect(calls()).toBe(2)
+    expect(spaceChatUnreadOf('sA')).toBe(1)
+  })
+
+  it('a bump during a load is not lost: one more read reconciles', async () => {
+    spaceChatUnread.value = { sA: ROW(0) as never }
+    const first = deferred<unknown>()
+    apiGet.mockReturnValueOnce(first.promise)
+    const p = loadSpaceChatUnread()
+    // A message lands while the (stale) answer is in flight.
+    expect(applySpaceChatUnreadFrame(
+      { system_scope: 'space', space_id: 'sA', message: { sender_user_id: 'u2' } }, 'u1',
+    )).toBe('bumped')
+    expect(spaceChatUnreadOf('sA')).toBe(1)
+    apiGet.mockResolvedValueOnce({ spaces: { sA: ROW(1) } })
+    first.resolve({ spaces: { sA: ROW(0) } })
+    await p
+    expect(calls()).toBe(2)
+    expect(spaceChatUnreadOf('sA')).toBe(1)
+  })
+
+  it('a failed load ends the loop', async () => {
+    apiGet.mockRejectedValueOnce(new Error('offline'))
+    await loadSpaceChatUnread()
+    expect(calls()).toBe(1)
+    // The next load starts afresh.
+    apiGet.mockResolvedValueOnce({ spaces: { sA: ROW(2) } })
+    await loadSpaceChatUnread()
+    expect(spaceChatUnreadOf('sA')).toBe(2)
+  })
+
+  it('a deleted message refetches only a space chat that shows a count', () => {
+    spaceChatUnread.value = { sA: ROW(2) as never, sB: ROW(0) as never }
+    expect(spaceChatDeleteNeedsReload({ system_scope: 'space', space_id: 'sA' })).toBe(true)
+    expect(spaceChatDeleteNeedsReload({ system_scope: 'space', space_id: 'sB' })).toBe(false)
+    expect(spaceChatDeleteNeedsReload({ system_scope: 'space', space_id: 'sX' })).toBe(false)
+    expect(spaceChatDeleteNeedsReload({ system_scope: 'household' })).toBe(false)
+    expect(spaceChatDeleteNeedsReload(null)).toBe(false)
   })
 })
