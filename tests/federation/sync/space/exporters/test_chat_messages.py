@@ -59,7 +59,7 @@ class _Convos:
         self.asked: list[tuple] = []
 
     async def list_messages_sync_page(
-        self, conversation_id, *, deleted, cutoff, cursor, limit
+        self, conversation_id, *, deleted, cutoff, cursor, limit, since=None
     ):
         assert conversation_id == "chat-1"
         self.asked.append((deleted, cutoff, cursor, limit))
@@ -222,7 +222,7 @@ class _PagedConvos(_Convos):
         ]
 
     async def list_messages_sync_page(
-        self, conversation_id, *, deleted, cutoff, cursor, limit
+        self, conversation_id, *, deleted, cutoff, cursor, limit, since=None
     ):
         self.asked.append((deleted, cutoff, cursor, limit))
         start = cursor or 0
@@ -251,3 +251,17 @@ async def test_a_space_with_retention_streams_its_window():
     for c in cutoffs:
         age = expected - datetime.fromisoformat(c)
         assert 6.99 < age.total_seconds() / 86400 < 7.01
+
+
+async def test_the_chat_is_part_of_a_session_only_while_it_is_on():
+    """``is_active`` drops the chat from a session's plan (and so from its
+    incremental-sync shape) while the space's chat is off: turning it back
+    on forces one full stream, so what was said meanwhile reaches the
+    household."""
+    exporter = ChatMessagesExporter(_Convos(), _Spaces(_SPACE))  # type: ignore[arg-type]
+    assert await exporter.is_active("sp-1") is True
+    off = dataclasses.replace(_SPACE, features=SpaceFeatures(chat=False))
+    dissolved = dataclasses.replace(_SPACE, dissolved=True)
+    for space in (off, dissolved, None):
+        exporter = ChatMessagesExporter(_Convos(), _Spaces(space))  # type: ignore[arg-type]
+        assert await exporter.is_active("sp-1") is False

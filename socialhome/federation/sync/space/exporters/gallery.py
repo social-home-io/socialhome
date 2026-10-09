@@ -32,13 +32,23 @@ class GalleryExporter(PagedExporterMixin):
     def __init__(self, gallery_repo: "AbstractGalleryRepo") -> None:
         self._repo = gallery_repo
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         # The system album rides along so the receiver creates it
         # pre-populated; without it, mirrored items from forthcoming posts
         # would have nowhere to live until the first local feed event.
         async def albums(cursor: int | None) -> tuple[list["GalleryAlbum"], int | None]:
             return await self._repo.list_albums_sync_page(
-                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE
+                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE, since=since
             )
 
         async for album_page in iter_pages(albums):
@@ -46,7 +56,7 @@ class GalleryExporter(PagedExporterMixin):
 
         async def items(cursor: int | None) -> tuple[list["GalleryItem"], int | None]:
             return await self._repo.list_items_sync_page(
-                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE
+                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE, since=since
             )
 
         async for item_page in iter_pages(items):

@@ -84,6 +84,18 @@ class SyncWindows:
     async def for_space(self, space_id: str) -> SyncWindow:
         return window_for_space(await self._spaces.get(space_id))
 
+    async def retention_key(self, space_id: str) -> str:
+        """The space's retention as a stable string — ``"<days>:<exempt
+        types>"``, ``""`` when it keeps forever. Part of an incremental
+        session's shape (:mod:`.watermark`): a space that starts keeping
+        more history must re-stream rows a watermark would skip."""
+        window = await self.for_space(space_id)
+        if window.cutoff is None:
+            return ""
+        space = await self._spaces.get(space_id)
+        days = space.retention_days if space is not None else 0
+        return f"{days}:{','.join(window.exempt_types)}"
+
 
 async def iter_pages(
     fetch: Callable[[int | None], Awaitable[tuple[list[T], int | None]]],

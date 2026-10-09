@@ -34,7 +34,7 @@ from .....domain.tombstone import SpaceRowTombstone
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, iter_pages
 
-#: A repo's ``list_*_tombstones_page(space_id, *, cursor, limit)``.
+#: A repo's ``list_*_tombstones_page(space_id, *, cursor, limit, since)``.
 TombstonePageFetch = Callable[
     ..., Awaitable[tuple[list[SpaceRowTombstone], int | None]]
 ]
@@ -56,11 +56,23 @@ class RowTombstonesExporter(PagedExporterMixin):
     def __init__(self, fetch: TombstonePageFetch) -> None:
         self._fetch = fetch
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         async def page(
             cursor: int | None,
         ) -> tuple[list[SpaceRowTombstone], int | None]:
-            return await self._fetch(space_id, cursor=cursor, limit=SYNC_PAGE_SIZE)
+            return await self._fetch(
+                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE, since=since
+            )
 
         async for rows in iter_pages(page):
             yield [self.record(t) for t in rows]

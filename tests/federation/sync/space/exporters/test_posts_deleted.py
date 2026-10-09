@@ -31,7 +31,7 @@ class _Posts:
         ]
         self.asked: list[tuple] = []
 
-    async def list_post_tombstones_page(self, space_id, *, cursor, limit):
+    async def list_post_tombstones_page(self, space_id, *, cursor, limit, since=None):
         self.asked.append((space_id, cursor, limit))
         start = cursor or 0
         page = self.rows[start : start + limit]

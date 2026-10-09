@@ -191,11 +191,45 @@ class BatchedExporter(ResourceExporter, Protocol):
         ...
 
 
+@runtime_checkable
+class IncrementalExporter(ResourceExporter, Protocol):
+    """A :class:`ResourceExporter` whose rows carry a change stamp
+    (``sync_seq``, migration 0086): it can stream only the rows changed
+    since a §25.6 incremental session's watermark."""
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Yield, page by page, the records whose rows were stamped above
+        ``since`` — same window, same order, same record shape as the full
+        stream."""
+        ...
+
+
+@runtime_checkable
+class ConditionalExporter(ResourceExporter, Protocol):
+    """A :class:`ResourceExporter` that streams only while a space feature
+    is on (the space chat). A session drops it from its plan while it is
+    off, so it is not part of the session's shape then — switching it on
+    makes the next incremental session a full stream."""
+
+    async def is_active(self, space_id: str) -> bool: ...
+
+
 async def record_batches(
-    exporter: ResourceExporter, space_id: str
+    exporter: ResourceExporter, space_id: str, *, since: int | None = None
 ) -> AsyncIterator[list[dict[str, Any]]]:
     """The exporter's records as non-empty pages — its ``iter_batches``
-    when it pages, else its whole ``list_records`` as one page."""
+    when it pages, else its whole ``list_records`` as one page.
+
+    ``since`` (a §25.6 incremental session's watermark): an
+    :class:`IncrementalExporter` streams only the rows changed after it;
+    every other exporter — a resource kept full — streams everything."""
+    if since is not None and isinstance(exporter, IncrementalExporter):
+        async for batch in exporter.iter_changed(space_id, since):
+            if batch:
+                yield batch
+        return
     if isinstance(exporter, BatchedExporter):
         async for batch in exporter.iter_batches(space_id):
             if batch:
@@ -242,14 +276,16 @@ class ChunkBuilder:
         space_id: str,
         sync_id: str,
         sig_suite: str,
+        since: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield encrypted + signed chunk envelopes for ``exporter``.
 
         Each yielded dict can be serialised with :func:`serialise_chunk`
-        and sent via ``SyncRtcSession.send_chunk``.
+        and sent via ``SyncRtcSession.send_chunk``. ``since``: an
+        incremental session's watermark (see :func:`record_batches`).
         """
         cursor = 0
-        async for batch in record_batches(exporter, space_id):
+        async for batch in record_batches(exporter, space_id, since=since):
             async for envelope in self._chunks_of(
                 exporter.resource,
                 batch,
@@ -310,11 +346,15 @@ class ChunkBuilder:
         space_id: str,
         sync_id: str,
         sig_suite: str,
+        chunk_count: int | None = None,
     ) -> dict[str, Any]:
         """Build the final ``__complete__`` envelope for the session.
 
         Not encrypted (no payload), but signed so the receiver can
-        trust the session-end signal.
+        trust the session-end signal. ``chunk_count`` — how many chunks
+        the stream sent before it: the requester reports the stream clean
+        only when that many arrived and applied (routing metadata, like
+        ``seq_start`` / ``seq_end``; an older receiver ignores it).
         """
         envelope: dict[str, Any] = {
             "sync_id": sync_id,
@@ -322,6 +362,8 @@ class ChunkBuilder:
             "space_id": space_id,
             "is_last": True,
         }
+        if chunk_count is not None:
+            envelope["chunk_count"] = int(chunk_count)
         bytes_to_sign = _orjson.dumps(envelope)
         envelope["signatures"] = self._encoder.sign_envelope_all(
             bytes_to_sign,

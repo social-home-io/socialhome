@@ -39,9 +39,19 @@ class CommentsDeletedExporter(PagedExporterMixin):
     def __init__(self, space_post_repo: "AbstractSpacePostRepo") -> None:
         self._repo = space_post_repo
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         async for comments in iter_comment_pages(
-            self._repo, space_id, KEEP_FOREVER, deleted=True
+            self._repo, space_id, KEEP_FOREVER, deleted=True, since=since
         ):
             yield [comment_tombstone_record(c) for c in comments]
 

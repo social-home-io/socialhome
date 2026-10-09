@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
 from typing import Any
@@ -26,6 +27,7 @@ from socialhome.federation.sync.space import provider as provider_mod
 from socialhome.federation.sync.space.provider import (
     SpaceSyncService,
 )
+from socialhome.federation.sync.space.window import KEEP_FOREVER
 
 
 class _FakeExporter:
@@ -1153,3 +1155,240 @@ async def test_chat_never_streams_without_a_gate_or_federation(encoder):
     session2 = _FakeSession()
     await svc.stream_initial(session2)
     assert _resources(session2) == []
+
+
+# ─── §25.6 incremental sessions: change stamps + per-household watermark ──
+
+
+class _IncExporter(_FakeExporter):
+    """A covered resource: streams ``changed`` when asked since a stamp."""
+
+    def __init__(self, resource: str, records: list[dict], changed: list[dict]):
+        super().__init__(resource, records)
+        self._changed = changed
+        self.asked_since: list[int] = []
+
+    async def iter_changed(self, space_id: str, since: int):
+        self.asked_since.append(since)
+        yield list(self._changed)
+
+
+class _Marks:
+    """A :class:`SyncWatermarks` stand-in recording what the provider asks."""
+
+    def __init__(self, *, snapshot: int = 40, since: int | None = 7) -> None:
+        self._snapshot = snapshot
+        self._since = since
+        self.planned: list[dict] = []
+        self.confirmed: list[dict] = []
+
+    async def snapshot(self) -> int:
+        return self._snapshot
+
+    async def since_for(self, **kw) -> int | None:
+        self.planned.append(kw)
+        return self._since
+
+    async def confirm(self, **kw) -> None:
+        self.confirmed.append(kw)
+
+
+def _inc_provider(encoder, marks, *, windows=None):
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    posts = _IncExporter(
+        "posts",
+        [{"id": "p-1"}, {"id": "p-2"}, {"id": "p-3"}],
+        [{"id": "p-2"}],
+    )
+    exporters = {
+        "members": _FakeExporter("members", [{"user_id": "u-1", "role": "member"}]),
+        "posts": posts,
+    }
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters=exporters,
+        sig_suite="ed25519",
+        windows=windows,
+        watermarks=marks,
+    )
+    return svc, posts
+
+
+def _records(session) -> dict[str, list[dict]]:
+
+    out: dict[str, list[dict]] = {}
+    for raw in session.rtc.sent:
+        env = orjson.loads(raw)
+        if env["resource"] == SENTINEL_RESOURCE:
+            continue
+        plain = base64.urlsafe_b64decode(env["encrypted_payload"])
+        out.setdefault(env["resource"], []).extend(orjson.loads(plain)["records"])
+    return out
+
+
+async def test_an_incremental_session_streams_only_changed_rows_of_covered_resources(
+    encoder,
+):
+    marks = _Marks(snapshot=40, since=7)
+    svc, posts = _inc_provider(encoder, marks)
+    session = _FakeSession(sync_mode="incremental")
+    await svc.stream_initial(session)
+    streamed = _records(session)
+    # Covered: only what changed. Kept full (members): everything.
+    assert streamed["posts"] == [{"id": "p-2"}]
+    assert streamed["members"] == [{"user_id": "u-1", "role": "member"}]
+    assert posts.asked_since == [7]
+    plan = marks.planned[0]
+    assert plan["space_id"] == "sp-1" and plan["instance_id"] == "peer-r"
+    assert plan["sync_mode"] == "incremental"
+    assert plan["shape"].endswith("|members,posts")
+    assert (session.snapshot_seq, session.since_seq) == (40, 7)
+    assert session.stream_clean is True
+    # The signed sentinel names how many chunks came before it, so the
+    # requester can tell a chunk lost on the way.
+    sentinel = orjson.loads(session.rtc.sent[-1])
+    assert sentinel["resource"] == SENTINEL_RESOURCE
+    assert sentinel["chunk_count"] == len(session.rtc.sent) - 1
+
+
+async def test_no_watermark_streams_everything(encoder):
+    marks = _Marks(snapshot=40, since=None)
+    svc, posts = _inc_provider(encoder, marks)
+    session = _FakeSession(sync_mode="incremental")
+    await svc.stream_initial(session)
+    assert [r["id"] for r in _records(session)["posts"]] == ["p-1", "p-2", "p-3"]
+    assert posts.asked_since == []
+
+
+async def test_confirm_advances_to_the_snapshot_only_after_a_clean_stream(encoder):
+    marks = _Marks(snapshot=40, since=7)
+    svc, _ = _inc_provider(encoder, marks)
+    session = _FakeSession(sync_mode="incremental")
+    # Not streamed yet: nothing to confirm.
+    await svc.confirm_complete(session)
+    assert marks.confirmed == []
+    await svc.stream_initial(session)
+    await svc.confirm_complete(session)
+    assert marks.confirmed == [
+        {
+            "space_id": "sp-1",
+            "instance_id": "peer-r",
+            "seq": 40,
+            "shape": session.shape,
+            "full": False,
+        }
+    ]
+
+
+async def test_a_full_stream_confirms_as_full(encoder):
+    marks = _Marks(snapshot=12, since=None)
+    svc, _ = _inc_provider(encoder, marks)
+    session = _FakeSession(sync_mode="initial")
+    await svc.stream_initial(session)
+    await svc.confirm_complete(session)
+    assert marks.confirmed[0]["full"] is True and marks.confirmed[0]["seq"] == 12
+
+
+async def test_a_stream_with_a_failed_chunk_never_advances_the_watermark(encoder):
+
+    marks = _Marks(snapshot=40, since=None)
+    svc, _ = _inc_provider(encoder, marks)
+    federation = AsyncMock()
+    federation.space_member_version = AsyncMock(return_value=55)
+    ok = SimpleNamespace(ok=True, error=None, retry_after_s=None)
+    bad = SimpleNamespace(ok=False, error="routed_send_failed", retry_after_s=None)
+    # One failed chunk (under the abandon budget), then success: the stream
+    # completes and the sentinel ships, but a row may be missing.
+    federation.send_with_mesh_fallback = AsyncMock(side_effect=[bad, ok, ok, ok, ok])
+    svc.attach_federation(federation)
+    session = _FakeSession(sync_mode="incremental")
+    session.rtc = None
+    session.transport_mode = "https"
+    await svc.stream_initial(session)
+    assert session.stream_clean is False
+    await svc.confirm_complete(session)
+    assert marks.confirmed == []
+
+
+async def test_the_snapshot_is_read_before_any_row(encoder):
+    order: list[str] = []
+
+    class _OrderedMarks(_Marks):
+        async def snapshot(self) -> int:
+            order.append("snapshot")
+            return 40
+
+    class _OrderedExporter(_FakeExporter):
+        async def list_records(self, space_id):
+            order.append(f"read:{self.resource}")
+            return await super().list_records(space_id)
+
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={"members": _OrderedExporter("members", [{"user_id": "u"}])},
+        watermarks=_OrderedMarks(),
+    )
+    await svc.stream_initial(_FakeSession(sync_mode="incremental"))
+    assert order == ["snapshot", "read:members"]
+
+
+async def test_the_shape_follows_peer_version_retention_and_resources(encoder):
+
+    class _Windows:
+        async def retention_key(self, space_id: str) -> str:
+            return "30:event"
+
+        async def for_space(self, space_id: str):
+
+            return KEEP_FOREVER
+
+    marks = _Marks()
+    svc, _ = _inc_provider(encoder, marks, windows=_Windows())
+    federation = AsyncMock()
+    federation.space_member_version = AsyncMock(return_value=55)
+    federation.peer_supports = AsyncMock(return_value=True)
+    svc.attach_federation(federation)
+    session = _FakeSession(sync_mode="incremental")
+    await svc.stream_initial(session)
+    assert session.shape.split("|")[1:] == ["p55", "r30:event", "members,posts"]
+
+
+async def test_without_watermarks_every_session_streams_in_full(provider):
+    session = _FakeSession(sync_mode="incremental")
+    await provider.stream_initial(session)
+    assert getattr(session, "since_seq", None) is None
+    await provider.confirm_complete(session)  # a no-op, never raises
+
+
+class _Toggle(_FakeExporter):
+    """A resource that streams only while a space feature is on."""
+
+    def __init__(self, resource: str, records: list[dict]) -> None:
+        super().__init__(resource, records)
+        self.on = False
+
+    async def is_active(self, space_id: str) -> bool:
+        return self.on
+
+
+async def test_a_resource_switched_on_changes_the_shape_so_it_streams_in_full(
+    encoder,
+):
+    """The space chat turned off and on again: while off it is not part of
+    the session shape, so turning it on makes the next periodic session a
+    full stream — the chat said meanwhile reaches the household."""
+    marks = _Marks()
+    svc, _ = _inc_provider(encoder, marks)
+    toggle = _Toggle("timetables", [{"id": "t-1"}])
+    svc._exporters["timetables"] = toggle
+    off = _FakeSession(sync_mode="incremental")
+    await svc.stream_initial(off)
+    assert "timetables" not in _records(off)
+    assert not off.shape.endswith("timetables")
+    toggle.on = True
+    on = _FakeSession(sync_mode="incremental")
+    await svc.stream_initial(on)
+    assert on.shape.endswith("|members,posts,timetables")
+    assert on.shape != off.shape
+    assert _records(on)["timetables"] == [{"id": "t-1"}]

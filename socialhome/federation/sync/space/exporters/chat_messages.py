@@ -37,6 +37,7 @@ from ..window import SYNC_PAGE_SIZE, iter_pages, window_for_space
 
 if TYPE_CHECKING:
     from .....domain.conversation import ConversationMessage
+    from .....domain.space import Space
     from .....repositories.conversation_repo import AbstractConversationRepo
     from .....repositories.space_repo import AbstractSpaceRepo
 
@@ -47,6 +48,7 @@ def _iter_chat_pages(
     cutoff: str | None,
     *,
     deleted: bool,
+    since: int | None = None,
 ) -> AsyncIterator[list["ConversationMessage"]]:
     async def fetch(
         cursor: int | None,
@@ -57,9 +59,14 @@ def _iter_chat_pages(
             cutoff=cutoff,
             cursor=cursor,
             limit=SYNC_PAGE_SIZE,
+            since=since,
         )
 
     return iter_pages(fetch)
+
+
+def _chat_on(space: "Space | None") -> bool:
+    return space is not None and not space.dissolved and space.features.chat
 
 
 class ChatMessagesExporter(PagedExporterMixin):
@@ -75,16 +82,33 @@ class ChatMessagesExporter(PagedExporterMixin):
         self._convos = conversation_repo
         self._spaces = space_repo
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    async def is_active(self, space_id: str) -> bool:
+        """Whether the space's chat is on (and the space live). A session
+        plans the resource only while it is — so it is part of an
+        incremental session's shape only then, and turning the chat back on
+        forces one full stream of it (:mod:`..watermark`)."""
+        return _chat_on(await self._spaces.get(space_id))
+
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         space = await self._spaces.get(space_id)
-        if space is None or space.dissolved or not space.features.chat:
+        if space is None or not _chat_on(space):
             return
         chat = await self._convos.get_space_chat(space_id)
         if chat is None:
             return
         cutoff = window_for_space(space).cutoff
         async for page in _iter_chat_pages(
-            self._convos, chat.id, cutoff, deleted=False
+            self._convos, chat.id, cutoff, deleted=False, since=since
         ):
             yield [
                 {
@@ -119,7 +143,17 @@ class ChatMessagesDeletedExporter(PagedExporterMixin):
         self._convos = conversation_repo
         self._spaces = space_repo
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         space = await self._spaces.get(space_id)
         if space is None or space.dissolved:
             return
@@ -127,7 +161,9 @@ class ChatMessagesDeletedExporter(PagedExporterMixin):
         if chat is None:
             return
         cutoff = window_for_space(space).cutoff
-        async for page in _iter_chat_pages(self._convos, chat.id, cutoff, deleted=True):
+        async for page in _iter_chat_pages(
+            self._convos, chat.id, cutoff, deleted=True, since=since
+        ):
             yield [
                 {"id": m.id, "message_id": m.id, "author_user_id": m.sender_user_id}
                 for m in page

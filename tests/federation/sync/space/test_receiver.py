@@ -28,6 +28,7 @@ from socialhome.federation.sync.space.receiver import (
     _sticky_from_record,
 )
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
 
 
 class _FakeCrypto:
@@ -900,3 +901,120 @@ def test_sticky_from_record_invisible_content_is_dropped():
         _sticky_from_record({"id": "st-1", "author": "u", "content": "​\x00"}, "sp-1")
         is None
     )
+
+
+# ── §25.6 incremental: the sentinel reports whether every chunk applied ──
+
+
+async def _members_chunk(kp, sync_id: str, *, user: str = "u-1") -> bytes:
+    plaintext = orjson.dumps(
+        {"records": [{"user_id": user, "role": "member", "joined_at": "2026"}]}
+    )
+    _, ciphertext = await _FakeCrypto().encrypt_chunk(
+        space_id="sp-1", sync_id=sync_id, plaintext=plaintext
+    )
+    envelope = {
+        "sync_id": sync_id,
+        "resource": "members",
+        "space_id": "sp-1",
+        "epoch": 0,
+        "seq_start": 0,
+        "seq_end": 1,
+        "is_last": False,
+        "encrypted_payload": ciphertext,
+    }
+    return serialise_chunk(await _sign_as_peer(kp, envelope))
+
+
+async def _sentinel_frame(kp, sync_id: str, chunk_count: int | None) -> bytes:
+    sentinel = {
+        "sync_id": sync_id,
+        "resource": SENTINEL_RESOURCE,
+        "space_id": "sp-1",
+        "is_last": True,
+    }
+    if chunk_count is not None:
+        sentinel["chunk_count"] = chunk_count
+    return serialise_chunk(await _sign_as_peer(kp, sentinel))
+
+
+async def _completion(bus, r, kp, sync_id, chunk_count) -> SpaceSyncComplete:
+    captured: list[SpaceSyncComplete] = []
+    bus.subscribe(SpaceSyncComplete, captured.append)
+    await r.on_chunk(
+        await _sentinel_frame(kp, sync_id, chunk_count), from_instance="peer-a"
+    )
+    assert len(captured) == 1
+    return captured[0]
+
+
+async def test_a_stream_whose_every_chunk_applied_completes_clean(
+    bus, receiver, peer_setup
+):
+    r, _, _ = receiver
+    _, kp = peer_setup
+    await r.on_chunk(await _members_chunk(kp, "s-ok"), from_instance="peer-a")
+    await r.on_chunk(
+        await _members_chunk(kp, "s-ok", user="u-2"), from_instance="peer-a"
+    )
+    assert (await _completion(bus, r, kp, "s-ok", 2)).clean is True
+
+
+async def test_a_chunk_that_never_arrived_makes_the_stream_unclean(
+    bus, receiver, peer_setup
+):
+    """A chunk dropped on the way (a relay that could not open it) never
+    reaches the receiver — the provider's signed count says so."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+    await r.on_chunk(await _members_chunk(kp, "s-gap"), from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-gap", 2)).clean is False
+
+
+async def test_a_chunk_that_failed_to_apply_makes_the_stream_unclean(
+    bus, receiver, peer_setup
+):
+    r, space_repo, _ = receiver
+    _, kp = peer_setup
+    space_repo.save_member = AsyncMock(side_effect=RuntimeError("FK failed"))
+    await r.on_chunk(await _members_chunk(kp, "s-bad"), from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-bad", 1)).clean is False
+
+
+async def test_a_tampered_chunk_makes_the_stream_unclean(bus, receiver, peer_setup):
+    r, _, _ = receiver
+    _, kp = peer_setup
+    frame = orjson.loads(await _members_chunk(kp, "s-tamper"))
+    frame["seq_end"] = 99
+    await r.on_chunk(orjson.dumps(frame), from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-tamper", 1)).clean is False
+
+
+async def test_a_chunk_still_waiting_for_its_key_makes_the_stream_unclean(
+    bus, peer_setup
+):
+    peer, kp = peer_setup
+    r = SpaceSyncReceiver(
+        bus=bus,
+        encoder=FederationEncoder(generate_identity_keypair().private_key),
+        crypto=_MissingKeyCrypto(),
+        federation_repo=_FakeFedRepo(peer),
+        space_repo=_FakeSpaceRepo(),
+        space_post_repo=_FakeSpacePostRepo(),
+        space_task_repo=_Stub(),
+        page_repo=_Stub(),
+        sticky_repo=_Stub(),
+        space_calendar_repo=_Stub(),
+        gallery_repo=_Stub(),
+        pending_decrypts=PendingDecryptsCache(bus=bus),
+    )
+    await r.on_chunk(await _members_chunk(kp, "s-wait"), from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-wait", 1)).clean is False
+
+
+async def test_a_sentinel_without_a_count_is_never_clean(bus, receiver, peer_setup):
+    """An older provider sends no count — it keeps no watermark anyway."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+    await r.on_chunk(await _members_chunk(kp, "s-old"), from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-old", None)).clean is False

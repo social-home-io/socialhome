@@ -860,3 +860,48 @@ async def test_list_post_tombstones_page_names_a_moderator_removal(env):
         if t.id == "mod"
     ]
     assert again.moderated_by == "u-mod"
+
+
+# ─── §25.6 incremental reads (migration 0086 ``sync_seq``) ─────────────
+
+
+async def _counter(db) -> int:
+    row = await db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    return int(row["seq"])
+
+
+async def test_sync_pages_since_a_stamp_return_only_rows_changed_after_it(env):
+    for pid in ("p-a", "p-b", "p-c"):
+        await env.repo.save(env.space_id, _post(pid))
+    await env.repo.add_comment(_comment("k-a", "p-a"), space_id=env.space_id)
+    await env.repo.add_comment(_comment("k-b", "p-b"), space_id=env.space_id)
+    mark = await _counter(env.db)
+    # After the mark: an edit, a reaction, a delete, a comment edit, a
+    # comment delete.
+    await env.repo.edit("p-a", "edited", space_id=env.space_id)
+    await env.db.enqueue(
+        "UPDATE space_posts SET reactions='{\"x\":[\"u\"]}' WHERE id='p-b'"
+    )
+    await env.repo.soft_delete("p-c", space_id=env.space_id)
+    await env.repo.edit_comment("k-a", "changed", space_id=env.space_id)
+    await env.repo.soft_delete_comment("k-b", space_id=env.space_id)
+
+    live, _ = await env.repo.list_sync_page(env.space_id, since=mark)
+    assert {p.id for p in live} == {"p-a", "p-b"}
+    gone, _ = await env.repo.list_post_tombstones_page(env.space_id, since=mark)
+    assert [t.id for t in gone] == ["p-c"]
+    comments, _ = await env.repo.list_comments_sync_page(env.space_id, since=mark)
+    assert [c.id for c in comments] == ["k-a"]
+    gone_c, _ = await env.repo.list_comments_sync_page(
+        env.space_id, deleted=True, since=mark
+    )
+    assert [c.id for c in gone_c] == ["k-b"]
+    # Nothing changed since the latest stamp; ``since=None`` is everything.
+    now = await _counter(env.db)
+    assert await env.repo.list_sync_page(env.space_id, since=now) == ([], None)
+    assert await env.repo.list_comments_sync_page(env.space_id, since=now) == (
+        [],
+        None,
+    )
+    full, _ = await env.repo.list_sync_page(env.space_id)
+    assert {p.id for p in full} == {"p-a", "p-b"}

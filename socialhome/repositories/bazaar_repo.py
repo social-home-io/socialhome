@@ -31,6 +31,7 @@ from ..domain.post import (
 )
 from .base import (
     bool_col,
+    changed_since_sql,
     dump_json,
     load_json,
     retention_window_sql,
@@ -89,6 +90,7 @@ class AbstractBazaarRepo(Protocol):
         exempt_types: tuple[str, ...] = (),
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[BazaarListing], int | None]:
         """One page of the space's listings for a §25.6 sync, newest first,
         whatever their status — only those whose wrapper post is live and
@@ -359,19 +361,31 @@ class SqliteBazaarRepo:
         exempt_types: tuple[str, ...] = (),
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[BazaarListing], int | None]:
         window, window_params = retention_window_sql(
             "p.created_at", cutoff, type_col="p.type", exempt_types=exempt_types
         )
+        # A listing change touches its wrapper post (migration 0086), so
+        # the post's stamp covers both.
+        changed, changed_params = changed_since_sql("p.sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT l.rowid AS sync_rowid, l.* FROM bazaar_listings l"
                 " JOIN space_posts p ON p.id = l.post_id AND p.space_id = l.space_id"
                 " WHERE l.space_id=? AND p.deleted=0"
                 + window
+                + changed
                 + " AND (? IS NULL OR l.rowid < ?)"
                 " ORDER BY l.rowid DESC LIMIT ?",
-                (space_id, *window_params, cursor, cursor, int(limit)),
+                (
+                    space_id,
+                    *window_params,
+                    *changed_params,
+                    cursor,
+                    cursor,
+                    int(limit),
+                ),
             )
         )
         listings = [lst for lst in (_row_to_listing(d) for d in rows) if lst]

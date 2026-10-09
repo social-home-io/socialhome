@@ -17,7 +17,7 @@ from ..db import AsyncDatabase
 from ..domain.sticky import DEFAULT_STICKY_COLOR, Sticky, normalize_sticky_color
 from ..domain.tombstone import SpaceRowTombstone
 from ..federation.owner_bound_id import SPACE_STICKY_KIND, mint_owner_bound_id
-from .base import row_to_dict, rows_to_dicts, sync_page_cursor
+from .base import changed_since_sql, row_to_dict, rows_to_dicts, sync_page_cursor
 
 
 # Domain dataclass + field rules live in ``socialhome/domain/sticky.py``;
@@ -102,6 +102,7 @@ class AbstractStickyRepo(Protocol):
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[builtins.list[SpaceRowTombstone], int | None]:
         """One page of the space's sticky tombstones for the §25.6
         ``stickies_deleted`` resource, keyset on the row id."""
@@ -403,14 +404,17 @@ class SqliteStickyRepo:
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[builtins.list[SpaceRowTombstone], int | None]:
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, id, author, created_at, deleted_at,"
                 " deleted_by FROM stickies"
-                " WHERE space_id=? AND deleted_at IS NOT NULL AND rowid > ?"
-                " ORDER BY rowid LIMIT ?",
-                (space_id, cursor or 0, int(limit)),
+                " WHERE space_id=? AND deleted_at IS NOT NULL"
+                + changed
+                + " AND rowid > ? ORDER BY rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
             )
         )
         return [

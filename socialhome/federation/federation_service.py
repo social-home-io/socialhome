@@ -1116,19 +1116,29 @@ class FederationService:
         Deliberately a separate method: :meth:`peer_supports` keeps meaning
         "a paired household's advertised version" for every other gate.
         """
-        if not instance_id or min_version <= 0:
+        if min_version <= 0:
             return False
+        return await self.space_member_version(instance_id) >= min_version
+
+    async def space_member_version(self, instance_id: str) -> int:
+        """The protocol version of a space member household, which may be
+        mesh-only: its ``remote_instances`` row's, else the version claim it
+        made over the mesh, else ``0`` (unknown — fail closed). The judge
+        behind :meth:`space_member_supports`; a §25.6 session shape records
+        it so a household that upgrades gets one full stream."""
+        if not instance_id:
+            return 0
         try:
             peer = await self._federation_repo.get_instance(instance_id)
         except Exception:  # pragma: no cover — defensive
-            return False
+            return 0
         if peer is not None:
-            return peer.proto_version >= min_version
+            return int(peer.proto_version)
         try:
             claim = await self._federation_repo.get_space_member_version(instance_id)
         except Exception:  # pragma: no cover — defensive
-            return False
-        return claim is not None and claim[0] >= min_version
+            return 0
+        return int(claim[0]) if claim is not None else 0
 
     async def mesh_member_identity_pk(self, instance_id: str) -> bytes | None:
         """The identity key a mesh-only member household claimed, or
@@ -3296,13 +3306,23 @@ class FederationService:
 
     async def _handle_space_sync_complete(self, event: FederationEvent) -> None:
         """The requester got our whole stream (its sentinel landed): free
-        the session — only for the household the stream went to."""
+        the session — only for the household the stream went to.
+
+        A completion marked ``clean: true`` — the requester applied every
+        chunk the sentinel counted — also advances that household's §25.6
+        incremental watermark to the session's snapshot
+        (:meth:`SpaceSyncService.confirm_complete`, a no-op unless every
+        chunk shipped), so the next periodic session streams only what
+        changed since. ``clean`` false or missing: the watermark stays and
+        the next session re-streams what the household did not store."""
         if self._sync_manager is None:
             return
         sync_id = str(event.payload.get("sync_id") or "")
         session = self._sync_manager.get_session(sync_id)
         if session is None or session.requester_instance_id != event.from_instance:
             return
+        if self._space_sync_service is not None and event.payload.get("clean") is True:
+            await self._space_sync_service.confirm_complete(session)
         self._sync_manager.close_session(sync_id)
 
     async def _on_space_sync_landed(self, event: SpaceSyncComplete) -> None:
@@ -3333,7 +3353,13 @@ class FederationService:
             await self.send_with_mesh_fallback(
                 to_instance_id=event.from_instance,
                 event_type=FederationEventType.SPACE_SYNC_COMPLETE,
-                payload={"sync_id": event.sync_id, "space_id": event.space_id},
+                payload={
+                    "sync_id": event.sync_id,
+                    "space_id": event.space_id,
+                    # Whether every chunk applied here — only then may the
+                    # provider advance our incremental-sync watermark.
+                    "clean": bool(event.clean),
+                },
                 space_id=event.space_id,
             )
         except Exception as exc:  # pragma: no cover — defensive

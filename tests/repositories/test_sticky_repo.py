@@ -387,3 +387,16 @@ async def test_a_stub_tombstone_is_insert_only(two_spaces):
     # An id held already (live, or in another space) is never touched.
     assert not await env.repo.tombstone("st-b", space_id="space-a", author="u-a")
     assert (await _snapshot(env, "st-b"))["deleted_at"] is None
+
+
+async def test_tombstones_page_since_a_stamp(two_spaces):
+    env = two_spaces
+    first = await env.repo.add(author="u-a", content="one", space_id="space-a")
+    second = await env.repo.add(author="u-a", content="two", space_id="space-a")
+    await env.repo.delete(first.id, space_id="space-a", deleted_by="u-a")
+    row = await env.db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    assert await env.repo.list_tombstones_page("space-a", since=mark) == ([], None)
+    await env.repo.delete(second.id, space_id="space-a", deleted_by="u-a")
+    page, _ = await env.repo.list_tombstones_page("space-a", since=mark)
+    assert [t.id for t in page] == [second.id]

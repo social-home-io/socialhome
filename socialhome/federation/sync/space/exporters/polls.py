@@ -34,9 +34,23 @@ class PollsExporter(PagedExporterMixin):
         self._post_repo = space_post_repo
         self._windows = windows
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """The changed posts' records — a poll / schedule change (or a
+        vote) touches its post (migration 0086)."""
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         window = await self._windows.for_space(space_id)
-        async for posts in iter_post_pages(self._post_repo, space_id, window):
+        async for posts in iter_post_pages(
+            self._post_repo, space_id, window, since=since
+        ):
             yield await self._records(posts)
 
     async def _records(self, posts) -> list[dict[str, Any]]:

@@ -106,6 +106,20 @@ def retention_window_sql(
     )
 
 
+def changed_since_sql(stamp_col: str, since: int | None) -> tuple[str, tuple[Any, ...]]:
+    """``(" AND …", params)`` keeping the rows changed after ``since``.
+
+    For the §25.6 incremental session: ``stamp_col`` is a ``sync_seq``
+    change stamp (migration 0086, set by triggers); a row stamped above
+    ``since`` changed after the requester's watermark. ``since=None`` (a
+    full stream) adds nothing. A row never stamped (NULL — unchanged since
+    the upgrade) is not "changed". Column names are code, never input.
+    """
+    if since is None:
+        return "", ()
+    return f" AND {stamp_col} > ?", (int(since),)
+
+
 def sync_page_cursor(rows: list[dict[str, Any]], limit: int) -> int | None:
     """The keyset cursor after one §25.6 sync page.
 

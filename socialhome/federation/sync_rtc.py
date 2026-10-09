@@ -431,6 +431,19 @@ class SyncSessionRecord:
     #: TTL and must not be torn down (and restarted from scratch) while it
     #: is still making progress. Starts at ``created_at``.
     last_activity: float = field(default=0.0)
+    #: §25.6 incremental sync (provider side, migration 0086). The
+    #: ``sync_seq_counter`` value read before the stream read any row
+    #: (``None``: no watermarks wired) …
+    snapshot_seq: int | None = None
+    #: … the watermark this session streams covered rows above (``None``:
+    #: a full stream) …
+    since_seq: int | None = None
+    #: … the shape it was planned under …
+    shape: str = ""
+    #: … and whether every chunk and the sentinel shipped. Only a clean
+    #: stream the requester confirms (``SPACE_SYNC_COMPLETE``) advances the
+    #: requester's watermark — to ``snapshot_seq``, never further.
+    stream_clean: bool = False
 
     def __post_init__(self) -> None:
         if not self.last_activity:

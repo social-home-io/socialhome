@@ -686,3 +686,20 @@ async def test_list_sync_page_follows_the_wrapper_posts_window(env):
     assert {lst.post_id for lst in exempt} == {"bz-new-1", "bz-new-2", "bz-old"}
     other, _ = await env.bazaar_repo.list_sync_page("space-elsewhere")
     assert other == []
+
+
+async def test_list_sync_page_since_a_stamp_follows_the_listing_and_its_post(env):
+    """§25.6 incremental: a listing streams again when it or its wrapper
+    post changed after the mark (a listing change touches the post)."""
+    for pid in ("bz-a", "bz-b", "bz-c"):
+        await _seed_listing(env, pid)
+    row = await env.db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    assert await env.bazaar_repo.list_sync_page(_DEFAULT_SPACE_ID, since=mark) == (
+        [],
+        None,
+    )
+    await env.db.enqueue("UPDATE bazaar_listings SET title='T' WHERE post_id='bz-a'")
+    await env.db.enqueue("UPDATE space_posts SET content='c' WHERE id='bz-b'")
+    changed, _ = await env.bazaar_repo.list_sync_page(_DEFAULT_SPACE_ID, since=mark)
+    assert {lst.post_id for lst in changed} == {"bz-a", "bz-b"}

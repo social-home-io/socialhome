@@ -164,6 +164,7 @@ from .repositories.profile_picture_repo import SqliteProfilePictureRepo
 from .repositories.space_bot_repo import SqliteSpaceBotRepo
 from .repositories.space_cover_repo import SqliteSpaceCoverRepo
 from .repositories.space_icon_repo import SqliteSpaceIconRepo
+from .repositories.space_sync_watermark_repo import SqliteSpaceSyncWatermarkRepo
 from .repositories.space_zone_repo import SqliteSpaceZoneRepo
 from .repositories.moment_repo import SqliteMomentRepo
 from .repositories.highlight_repo import SqliteHighlightRepo
@@ -335,6 +336,7 @@ from .domain.space import ContentAction
 from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
+from .federation.sync.space.watermark import SyncWatermarks
 from .services.legacy_album_deletes import LegacyAlbumDeletes
 from .services.gallery_service import GalleryService
 from .services.media_transcode_service import MediaTranscodeService
@@ -1124,6 +1126,7 @@ def _build_repos(db: AsyncDatabase):
         alias=SqliteAliasRepo(db),
         pairing_relay=SqlitePairingRelayRepo(db),
         space_zone=SqliteSpaceZoneRepo(db),
+        space_sync_watermark=SqliteSpaceSyncWatermarkRepo(db),
         password_reset=SqlitePasswordResetRepo(db),
         auth_audit_log=SqliteAuthAuditLogRepo(db),
         peer_user_visibility=SqlitePeerUserVisibilityRepo(db),
@@ -1180,6 +1183,7 @@ def _wire_federation_stack(
     report_repo,
     pairing_relay_repo,
     space_zone_repo,
+    space_sync_watermark_repo,
     presence_repo,
     ws_manager,
     peer_user_visibility_repo,
@@ -1559,6 +1563,9 @@ def _wire_federation_stack(
         gallery_repo=gallery_repo,
         bazaar_repo=bazaar_repo,
         windows=sync_windows,
+        # §25.6 incremental sessions: a periodic sync streams only the rows
+        # changed since the household's last confirmed stream (0086).
+        watermarks=SyncWatermarks(space_sync_watermark_repo),
     )
     space_sync_receiver = SpaceSyncReceiver(
         bus=bus,
@@ -3476,6 +3483,7 @@ def create_app(config: Config | None = None) -> web.Application:
             report_repo=report_repo,
             pairing_relay_repo=repos.pairing_relay,
             space_zone_repo=repos.space_zone,
+            space_sync_watermark_repo=repos.space_sync_watermark,
             presence_repo=repos.presence,
             ws_manager=ws_manager,
             peer_user_visibility_repo=repos.peer_user_visibility,

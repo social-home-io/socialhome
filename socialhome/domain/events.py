@@ -1210,6 +1210,11 @@ class SpaceSyncComplete(DomainEvent):
     space_id: str
     from_instance: str
     sync_id: str = ""
+    #: Every chunk the provider counted arrived and applied here
+    #: (:class:`~socialhome.federation.sync.space.receiver.StreamHealth`) —
+    #: sent back as ``SPACE_SYNC_COMPLETE {clean}`` so only a clean stream
+    #: advances the provider's incremental-sync watermark.
+    clean: bool = False
     occurred_at: datetime = field(default_factory=_now)
 
 

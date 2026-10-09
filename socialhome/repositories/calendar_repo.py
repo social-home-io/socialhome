@@ -31,6 +31,7 @@ from ..domain.tombstone import SpaceRowTombstone
 from ..utils.rrule import expand_rrule
 from .base import (
     bool_col,
+    changed_since_sql,
     dump_json,
     load_json,
     row_to_dict,
@@ -607,7 +608,13 @@ class AbstractSpaceCalendarRepo(Protocol):
         *,
         start: datetime,
         end: datetime,
-    ) -> list[CalendarEvent]: ...
+        since: int | None = None,
+    ) -> list[CalendarEvent]:
+        """The space's live events overlapping ``[start, end)`` (recurring
+        ones expanded). ``since``: only those whose change stamp is above it
+        (the §25.6 incremental session; migration 0086)."""
+        ...
+
     async def list_events_since(
         self,
         space_id: str,
@@ -634,6 +641,7 @@ class AbstractSpaceCalendarRepo(Protocol):
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[SpaceRowTombstone], int | None]:
         """One page of the space's event tombstones for the §25.6
         ``calendar_deleted`` resource, keyset on the row id."""
@@ -819,18 +827,17 @@ class SqliteSpaceCalendarRepo:
         *,
         start: datetime,
         end: datetime,
+        since: int | None = None,
     ) -> list[CalendarEvent]:
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = await self._db.fetchall(
-            """
-            SELECT * FROM space_calendar_events
-             WHERE space_id=? AND deleted_at IS NULL
-               AND (
-                    (rrule IS NULL AND start_dt < ? AND end_dt > ?)
-                 OR (rrule IS NOT NULL AND start_dt < ?)
-               )
-             ORDER BY start_dt
-            """,
-            (space_id, _iso(end), _iso(start), _iso(end)),
+            "SELECT * FROM space_calendar_events"
+            " WHERE space_id=? AND deleted_at IS NULL"
+            " AND ((rrule IS NULL AND start_dt < ? AND end_dt > ?)"
+            " OR (rrule IS NOT NULL AND start_dt < ?))"
+            + changed
+            + " ORDER BY start_dt",
+            (space_id, _iso(end), _iso(start), _iso(end), *changed_params),
         )
         events = [_row_to_space_event(d) for d in rows_to_dicts(rows)]
         return _expand_window(events, start=start, end=end)
@@ -931,14 +938,17 @@ class SqliteSpaceCalendarRepo:
         *,
         cursor: int | None = None,
         limit: int = 200,
+        since: int | None = None,
     ) -> tuple[list[SpaceRowTombstone], int | None]:
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = rows_to_dicts(
             await self._db.fetchall(
                 "SELECT rowid AS sync_rowid, id, created_by, created_at,"
                 " deleted_at, deleted_by FROM space_calendar_events"
-                " WHERE space_id=? AND deleted_at IS NOT NULL AND rowid > ?"
-                " ORDER BY rowid LIMIT ?",
-                (space_id, cursor or 0, int(limit)),
+                " WHERE space_id=? AND deleted_at IS NOT NULL"
+                + changed
+                + " AND rowid > ? ORDER BY rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
             )
         )
         return [

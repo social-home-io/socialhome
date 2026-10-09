@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import logging
 import pathlib
+from collections import OrderedDict
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Protocol, TYPE_CHECKING
@@ -131,6 +132,61 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+#: Streams whose health is tracked at once (bounded: a stream whose
+#: sentinel never comes is evicted oldest-first).
+MAX_TRACKED_STREAMS: int = 256
+
+
+class StreamHealth:
+    """Whether every chunk of a §25.6 stream was applied here.
+
+    The requester tells the provider with ``SPACE_SYNC_COMPLETE {clean}``;
+    only a clean stream advances the provider's incremental-sync watermark.
+    A stream is clean when its sentinel names how many chunks the provider
+    sent (``chunk_count``), exactly that many arrived with a valid
+    signature, none failed to decrypt / parse / persist, and none is still
+    waiting for its epoch key. Anything else — a chunk lost on the way, a
+    persist that raised, a tampered chunk, an older provider that sends no
+    count — is unclean, so the next periodic session re-streams it rather
+    than the provider skipping rows this household never stored.
+    """
+
+    __slots__ = ("_streams",)
+
+    def __init__(self) -> None:
+        #: sync_id -> [received, failed, pending]
+        self._streams: OrderedDict[str, list[int]] = OrderedDict()
+
+    def _entry(self, sync_id: str) -> list[int]:
+        entry = self._streams.get(sync_id)
+        if entry is None:
+            entry = self._streams[sync_id] = [0, 0, 0]
+            while len(self._streams) > MAX_TRACKED_STREAMS:
+                self._streams.popitem(last=False)
+        return entry
+
+    def received(self, sync_id: str) -> None:
+        self._entry(sync_id)[0] += 1
+
+    def failed(self, sync_id: str) -> None:
+        self._entry(sync_id)[1] = 1
+
+    def stashed(self, sync_id: str) -> None:
+        self._entry(sync_id)[2] += 1
+
+    def resolved(self, sync_id: str) -> None:
+        entry = self._streams.get(sync_id)
+        if entry is not None and entry[2] > 0:
+            entry[2] -= 1
+
+    def finish(self, sync_id: str, chunk_count: object) -> bool:
+        """End the stream; ``True`` iff it is clean."""
+        received, failed, pending = self._streams.pop(sync_id, [0, 0, 0])
+        if not isinstance(chunk_count, int) or isinstance(chunk_count, bool):
+            return False
+        return not failed and not pending and received == chunk_count
+
+
 class ChatSyncSink(Protocol):
     """Where streamed space-chat messages (v_55) go — the space-chat inbound
     handlers, which apply each record with the live create rule."""
@@ -180,6 +236,7 @@ class SpaceSyncReceiver:
         "_timetable_repo",
         "_page_conflicts",
         "_chat_sink",
+        "_health",
     )
 
     def __init__(
@@ -214,6 +271,7 @@ class SpaceSyncReceiver:
         #: handlers, which run each through the live create rule. ``None``
         #: drops the resource (see :meth:`attach_chat_sink`).
         self._chat_sink: "ChatSyncSink | None" = None
+        self._health = StreamHealth()
         #: v_48 — a ``pages`` record for a page held here (only the host's
         #: chunks get that far) is another version of it: fast-forward,
         #: stale, merge or conflict. ``None``: upserted (last write wins).
@@ -261,8 +319,12 @@ class SpaceSyncReceiver:
         *,
         from_instance: str,
         expected_space_id: str | None = None,
+        redelivery: bool = False,
     ) -> None:
         """Handle one chunk (DataChannel frame or routed federation event).
+
+        ``redelivery`` — a chunk replayed once its epoch key arrived; it was
+        already counted when it first landed (:class:`StreamHealth`).
 
         All failure modes log + return. Note the sender is NOT necessarily
         a paired peer: a mesh-joined member receives its catch-up stream
@@ -291,6 +353,7 @@ class SpaceSyncReceiver:
             log.debug("sync chunk missing required outer fields")
             return
         if expected_space_id is not None and space_id != expected_space_id:
+            self._health.failed(sync_id)
             log.warning(
                 "sync chunk from %s claims space %s but session %s is for %s "
                 "— dropping",
@@ -343,6 +406,7 @@ class SpaceSyncReceiver:
                 or space is None
                 or space.owner_instance_id != from_instance
             ):
+                self._health.failed(sync_id)
                 log.debug(
                     "sync chunk from unknown instance %s for space %s — "
                     "no paired-peer row and no matching host key; dropping",
@@ -353,6 +417,7 @@ class SpaceSyncReceiver:
             try:
                 ed_public_key = bytes.fromhex(host_pk_hex)
             except ValueError:
+                self._health.failed(sync_id)
                 log.warning(
                     "sync chunk: stored host_identity_pk for space %s is not "
                     "valid hex — dropping",
@@ -371,6 +436,7 @@ class SpaceSyncReceiver:
             pq_public_key=pq_pk,
         )
         if not ok:
+            self._health.failed(sync_id)
             log.warning(
                 "sync chunk signature mismatch (sync_id=%s resource=%s)",
                 sync_id,
@@ -385,9 +451,13 @@ class SpaceSyncReceiver:
                     space_id=space_id,
                     from_instance=from_instance,
                     sync_id=sync_id,
+                    clean=self._health.finish(sync_id, envelope.get("chunk_count")),
                 )
             )
             return
+
+        if not redelivery:
+            self._health.received(sync_id)
 
         if resource not in ALLOWED_RESOURCES:
             log.debug("unknown resource %r in sync chunk", resource)
@@ -426,14 +496,20 @@ class SpaceSyncReceiver:
                 )
 
                 async def _redeliver() -> None:
-                    await self.on_chunk(
-                        raw,
-                        from_instance=from_instance,
-                        expected_space_id=space_id,
-                    )
+                    try:
+                        await self.on_chunk(
+                            raw,
+                            from_instance=from_instance,
+                            expected_space_id=space_id,
+                            redelivery=True,
+                        )
+                    finally:
+                        self._health.resolved(sync_id)
 
+                self._health.stashed(sync_id)
                 self._pending_decrypts.stash(space_id, epoch, _redeliver)
                 return
+            self._health.failed(sync_id)
             log.warning(
                 "sync chunk decrypt failed (sync_id=%s resource=%s): %s",
                 sync_id,
@@ -445,12 +521,14 @@ class SpaceSyncReceiver:
         try:
             records = _orjson.loads(plaintext).get("records") or []
         except Exception as exc:
+            self._health.failed(sync_id)
             log.warning("sync chunk plaintext parse failed: %s", exc)
             return
 
         try:
             await self._dispatch(resource, space_id, records, provider=from_instance)
-        except Exception:  # pragma: no cover
+        except Exception:
+            self._health.failed(sync_id)
             log.exception(
                 "sync chunk persist failed (resource=%s space=%s)",
                 resource,

@@ -38,7 +38,19 @@ class BazaarExporter(PagedExporterMixin):
         self._repo = bazaar_repo
         self._windows = windows
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """The listings whose wrapper post changed — a listing change
+        touches the post (migration 0086)."""
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         window = await self._windows.for_space(space_id)
 
         async def fetch(cursor: int | None) -> tuple[list["BazaarListing"], int | None]:
@@ -48,6 +60,7 @@ class BazaarExporter(PagedExporterMixin):
                 exempt_types=window.exempt_types,
                 cursor=cursor,
                 limit=SYNC_PAGE_SIZE,
+                since=since,
             )
 
         async for listings in iter_pages(fetch):

@@ -10,6 +10,8 @@ Defines:
 * :class:`SpaceConfigEventType`, :class:`SpaceConfigEvent` — signed,
   monotonically-ordered space config events (§4.3).
 * :class:`Space`, :class:`SpaceMember`, :class:`SpacePublicProfile`.
+* :class:`SpaceSyncWatermark` — a provider's §25.6 incremental-sync
+  watermark for one (space, member household).
 * :class:`SpacePermissionError`, :class:`PublicSpaceLimitError`,
   :class:`SpaceConfigGapError` — domain exceptions.
 """
@@ -1720,3 +1722,21 @@ class SpacePublicProfile:
     location: tuple[float, float] | None  # (lat, lon), 4dp-truncated
     radius_km: float | None
     join_mode: JoinMode
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceSyncWatermark:
+    """What a member household confirmed of this household's §25.6 streams
+    for one space (``space_instances.synced_*``, migration 0086).
+
+    ``seq`` — the ``sync_seq_counter`` snapshot the last confirmed stream
+    was taken at: every covered row stamped at or below it reached the
+    household. ``shape`` — the session shape it was taken under
+    (:func:`~socialhome.federation.sync.space.watermark.session_shape`); a
+    session of another shape streams in full. ``full_at`` — when the last
+    confirmed FULL stream completed (ISO 8601 UTC), ``None`` if unknown.
+    """
+
+    seq: int
+    shape: str
+    full_at: str | None = None

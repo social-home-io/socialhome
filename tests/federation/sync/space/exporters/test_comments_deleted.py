@@ -45,7 +45,7 @@ class _Comments:
         self.asked: list[tuple] = []
 
     async def list_comments_sync_page(
-        self, space_id, *, deleted, cutoff, exempt_types, cursor, limit
+        self, space_id, *, deleted, cutoff, exempt_types, cursor, limit, since=None
     ):
         self.asked.append((deleted, cutoff, exempt_types, cursor, limit))
         comment = Comment(

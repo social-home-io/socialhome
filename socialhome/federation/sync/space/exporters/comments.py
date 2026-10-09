@@ -27,9 +27,11 @@ def iter_comment_pages(
     window: SyncWindow,
     *,
     deleted: bool = False,
+    since: int | None = None,
 ) -> AsyncIterator[list["Comment"]]:
     """The space's comments in ``window`` — live ones on live posts, or
-    (``deleted``) the tombstones on any post — page by page."""
+    (``deleted``) the tombstones on any post — page by page; ``since``:
+    only those changed after that stamp."""
 
     async def fetch(cursor: int | None) -> tuple[list["Comment"], int | None]:
         return await repo.list_comments_sync_page(
@@ -39,6 +41,7 @@ def iter_comment_pages(
             exempt_types=window.exempt_types,
             cursor=cursor,
             limit=SYNC_PAGE_SIZE,
+            since=since,
         )
 
     return iter_pages(fetch)
@@ -55,9 +58,21 @@ class CommentsExporter(PagedExporterMixin):
         self._repo = space_post_repo
         self._windows = windows
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         window = await self._windows.for_space(space_id)
-        async for comments in iter_comment_pages(self._repo, space_id, window):
+        async for comments in iter_comment_pages(
+            self._repo, space_id, window, since=since
+        ):
             yield [_comment_to_dict(c) for c in comments]
 
 
