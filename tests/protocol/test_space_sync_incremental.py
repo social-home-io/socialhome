@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import base64
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
@@ -55,9 +56,14 @@ from socialhome.config import Config
 from socialhome.domain.events import SpaceSyncComplete
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.page import Page
+from socialhome.domain.task import Task, TaskList, TaskStatus
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
+    SPACE_PAGE_KIND,
     SPACE_POST_KIND,
+    SPACE_TASK_KIND,
+    SPACE_TASK_LIST_KIND,
     mint_owner_bound_id,
 )
 from socialhome.federation.sync.space.exporter import (
@@ -682,3 +688,110 @@ async def test_an_unclean_stream_records_no_applied_seq(houses):
     await _posts(h).edit(pids[9], "dropped", space_id=SPACE)
     await _h_to_c(h, c, drop={"posts"})
     assert await _applied_seq(c, HOST) == before
+
+
+# ── The productivity resources follow the changes too (migration 0088) ───
+
+
+def _bound(kind: str) -> str:
+    return mint_owner_bound_id(kind, space_id=SPACE, owner_user_id=AUTHOR)
+
+
+def _tasks(app):
+    return app[space_sync_service_key]._exporters["tasks"]._repo
+
+
+def _pages(app):
+    return app[space_sync_service_key]._exporters["pages"]._repo
+
+
+async def _task_row(app, tid: str) -> dict | None:
+    row = await app[db_key].fetchone(
+        "SELECT title, archived_at, deleted_at FROM space_tasks WHERE id=?", (tid,)
+    )
+    return dict(row) if row is not None else None
+
+
+async def _page_row(app, pid: str) -> dict | None:
+    row = await app[db_key].fetchone(
+        "SELECT content, deleted_at FROM space_pages WHERE id=?", (pid,)
+    )
+    return dict(row) if row is not None else None
+
+
+async def test_tasks_and_pages_stream_only_what_changed_and_converge(houses):
+    h, c = houses
+    tasks, pages = _tasks(h), _pages(h)
+    lid = _bound(SPACE_TASK_LIST_KIND)
+    assert await tasks.save_list(
+        TaskList(id=lid, name="Chores", created_by=AUTHOR), space_id=SPACE
+    )
+    tids = [_bound(SPACE_TASK_KIND) for _ in range(3)]
+    for i, tid in enumerate(tids):
+        assert await tasks.save(
+            Task(
+                id=tid,
+                list_id=lid,
+                title=f"task {i}",
+                status=TaskStatus.TODO,
+                position=i,
+                created_by=AUTHOR,
+                created_at=_NOW,
+                updated_at=_NOW,
+            ),
+            space_id=SPACE,
+        )
+    pgids = [_bound(SPACE_PAGE_KIND) for _ in range(3)]
+    for i, pgid in enumerate(pgids):
+        assert await pages.save(
+            Page(
+                id=pgid,
+                title=f"page {i}",
+                content=f"body {i}",
+                created_by=AUTHOR,
+                created_at=_NOW.isoformat(),
+                updated_at=_NOW.isoformat(),
+                space_id=SPACE,
+                seq=1,
+            ),
+            space_id=SPACE,
+        )
+    first = await _h_to_c(h, c)
+    assert _ids(first, "tasks") == set(tids)
+    assert _ids(first, "pages") == set(pgids)
+    for pgid in pgids:
+        assert (await _page_row(c, pgid))["content"].startswith("body")
+
+    # Quiet: none of them streams again.
+    quiet = await _h_to_c(h, c)
+    for resource in ("task_lists", "tasks", "tasks_archived", "pages"):
+        assert not quiet.get(resource), resource
+
+    # On H: an edited task, an archived task, an edited page, a deleted page.
+    edited = (await tasks.get(tids[0]))[1]
+    assert await tasks.save(replace(edited, title="edited on H"), space_id=SPACE)
+    archived = (await tasks.get(tids[1]))[1]
+    assert await tasks.save(replace(archived, archived_at=_NOW), space_id=SPACE)
+    page = await pages.get_space_page(pgids[0], space_id=SPACE)
+    assert await pages.save(replace(page, content="edited on H", seq=2), space_id=SPACE)
+    assert await pages.delete(pgids[1], space_id=SPACE, deleted_by=AUTHOR)
+
+    changed = await _h_to_c(h, c)
+    assert _ids(changed, "tasks") == {tids[0]}
+    assert _ids(changed, "tasks_archived") == {tids[1]}
+    assert _ids(changed, "pages") == {pgids[0]}
+    assert _ids(changed, "pages_deleted") == {pgids[1]}
+    assert not changed.get("task_lists") and not changed.get("tasks_deleted")
+    # C converged.
+    assert (await _task_row(c, tids[0]))["title"] == "edited on H"
+    assert (await _task_row(c, tids[1]))["archived_at"] is not None
+    assert (await _task_row(c, tids[2]))["title"] == "task 2"
+    assert (await _page_row(c, pgids[0]))["content"] == "edited on H"
+    assert (await _page_row(c, pgids[1]))["deleted_at"] is not None
+    assert (await _page_row(c, pgids[2]))["content"] == "body 2"
+
+    # Quiet again — and no echo back from C.
+    assert not any(_content(await _h_to_c(h, c)).values())
+    await _c_to_h(h, c)  # C's first stream to H: full (no watermark)
+    for _ in range(2):
+        assert not any(_content(await _c_to_h(h, c)).values())

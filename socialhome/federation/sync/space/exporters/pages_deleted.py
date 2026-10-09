@@ -31,14 +31,26 @@ class PagesDeletedExporter(PagedExporterMixin):
     def __init__(self, page_repo: "AbstractPageRepo") -> None:
         self._repo = page_repo
 
-    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+    def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        return self._pages(space_id, None)
+
+    def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """The tombstones written after ``since`` (§25.6 incremental,
+        migration 0088) — same keyset, filtered by the stamp."""
+        return self._pages(space_id, since)
+
+    async def _pages(
+        self, space_id: str, since: int | None
+    ) -> AsyncIterator[list[dict[str, Any]]]:
         # Every tombstone, newest delete first, page by page: pages are not
         # governed by the space's retention, so no window applies and no
         # fixed count cuts the stream (a household that missed more
         # deletes than any cap would keep the rest forever).
         async def fetch(before: tuple[str, str] | None) -> list:
             return await self._repo.list_page_tombstones(
-                space_id, limit=SYNC_PAGE_SIZE, before=before
+                space_id, limit=SYNC_PAGE_SIZE, before=before, since_seq=since
             )
 
         async for page in iter_tombstone_pages(fetch, lambda t: (t.deleted_at, t.id)):

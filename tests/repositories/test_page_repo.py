@@ -821,3 +821,46 @@ async def test_a_confirmed_tombstone_never_revives(scoped):
     assert not await repo.revive("pg-b", space_id="space-b", seq=99)
     await repo.tombstone("pg-s", space_id="space-a", created_by="u")
     assert not await repo.revive("pg-s", space_id="space-a", seq=99)
+
+
+# ── §25.6 incremental reads (migration 0088 change stamps) ────────────────
+
+
+async def _mark(db) -> int:
+    row = await db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    return int(row["seq"])
+
+
+async def test_space_pages_changed_since_a_stamp(scoped):
+    env = scoped
+    repo = env.page_repo
+    mark = await _mark(env.db)
+    assert await repo.list(space_id="space-a", since_seq=mark) == []
+    # An open conflict side is part of the page's record: it touches it.
+    await repo.insert_snapshot(
+        page_id="pg-a",
+        space_id="space-a",
+        body="theirs",
+        author_user_id="uid-owner",
+        side="theirs",
+        conflict=True,
+        title="t",
+    )
+    assert [p.id for p in await repo.list(space_id="space-a", since_seq=mark)] == [
+        "pg-a"
+    ]
+    assert await repo.list(space_id="space-b", since_seq=mark) == []
+    assert len(await repo.list(space_id="space-a", since_seq=None)) == 1
+
+
+async def test_space_page_tombstones_changed_since_a_stamp(scoped):
+    env = scoped
+    repo = env.page_repo
+    mark = await _mark(env.db)
+    assert await repo.list_page_tombstones("space-a", since_seq=mark) == []
+    await repo.delete("pg-a", space_id="space-a")
+    assert [
+        t.id for t in await repo.list_page_tombstones("space-a", since_seq=mark)
+    ] == ["pg-a"]
+    later = await _mark(env.db)
+    assert await repo.list_page_tombstones("space-a", since_seq=later) == []

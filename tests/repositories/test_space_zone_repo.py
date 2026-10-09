@@ -120,3 +120,14 @@ async def test_zone_tombstones_page_since_a_stamp(repo):
     await repo.delete("z-2", space_id="sp-a")
     page, _ = await repo.list_tombstones_page("sp-a", since=mark)
     assert [t.id for t in page] == ["z-2"]
+
+
+async def test_zones_changed_since_a_stamp(repo):
+    for zid in ("z-1", "z-2"):
+        await repo.upsert(_zone(zid, "sp-a", name=zid), space_id="sp-a")
+    row = await repo._db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    assert await repo.list_for_space("sp-a", since_seq=mark) == []
+    await repo.upsert(_zone("z-2", "sp-a", name="moved"), space_id="sp-a")
+    assert [z.id for z in await repo.list_for_space("sp-a", since_seq=mark)] == ["z-2"]
+    assert {"z-1", "z-2"} <= {z.id for z in await repo.list_for_space("sp-a")}

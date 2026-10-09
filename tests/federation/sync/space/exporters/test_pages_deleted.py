@@ -17,7 +17,7 @@ class _Repo:
         self.asked: list[tuple] = []
 
     async def list_page_tombstones(
-        self, space_id, *, since=None, limit=500, before=None
+        self, space_id, *, since=None, limit=500, before=None, since_seq=None
     ):
         self.asked.append((space_id, since, limit, before))
         return [
@@ -74,7 +74,7 @@ class _ManyRepo:
         self.asked: list = []
 
     async def list_page_tombstones(
-        self, space_id, *, since=None, limit=500, before=None
+        self, space_id, *, since=None, limit=500, before=None, since_seq=None
     ):
         self.asked.append(before)
         rows = [t for t in self.rows if before is None or (t.deleted_at, t.id) < before]

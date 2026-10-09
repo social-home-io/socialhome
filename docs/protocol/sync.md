@@ -213,7 +213,8 @@ re-apply of a streamed row — the receiver upserting what it already
 holds — stamps nothing. Without that, two households would bounce every
 changed row back and forth every tick. Columns that are local
 bookkeeping are left out of the comparison: `updated_at` (an edit always
-changes a content column too), `calendar.notified_at` (local reminder),
+changes a content column too — on every stamped table, tasks, pages and
+timetables included), `calendar.notified_at` (local reminder),
 `conversation_messages.media_sync_status` (local download state).
 
 Covered — streamed row by row when changed:
@@ -225,21 +226,33 @@ Covered — streamed row by row when changed:
 | `chat_messages`, `chat_messages_deleted` | `conversation_messages` | |
 | `gallery`, `gallery_albums_deleted`, `gallery_items_deleted` | `gallery_albums`, `gallery_items` | the 0085 album trigger that tombstones an album's items |
 | `calendar`, `calendar_deleted` | `space_calendar_events` | the 0085 trigger dropping a tombstoned event's RSVPs needs nothing: RSVPs are not part of the record, the tombstone carries the delete |
-| `stickies_deleted` | `stickies` | |
-| `space_zones_deleted` | `space_zones` | |
+| `stickies`, `stickies_deleted` | `stickies` | |
+| `space_zones`, `space_zones_deleted` | `space_zones` | |
+| `task_lists`, `task_lists_deleted` | `space_task_lists` (0088) | |
+| `tasks`, `tasks_archived`, `tasks_deleted` | `space_tasks` (0088) | an edit, a status / position change, a move to another list, archive and unarchive (`archived_at`), a delete; the 0069 / 0071 list-tombstone trigger tombstones — and so stamps — the list's tasks |
+| `pages`, `pages_deleted` | `space_pages` (0088) | a change to the page's draft base (`side='base'`) or open conflict sides (`conflict=1`) — rows of `space_page_snapshots`, part of the page's record — **touches** the page (insert, update, delete; household snapshots touch nothing). `page_edit_history` is in no record and stamps nothing |
+| `timetables` | `space_timetables` (0088) | a delete stamps too, but `timetables` streams live rows only (deletes ride the live `SPACE_TIMETABLE_DELETED` outbox, as before) |
 
-Kept **full on every session** (streamed whole, as before): the roster
-(`bans`, `members`, `member_pictures` — one row per seat, and what every
-other resource is admitted against), the live `stickies` and
-`space_zones` (the current board / map, bounded by what is on it, not
-by history), `timetables`, and the productivity resources `task_lists`,
-`task_lists_deleted`, `tasks`, `tasks_archived`, `tasks_deleted`,
-`pages`, `pages_deleted` — their exporters read whole lists (pages with
-draft bases and conflict sides across three tables, tasks via
-`list_by_space`, tombstones on a `(deleted_at, id)` keyset), they are not
-governed by retention, and at household scale they are small next to the
-posts / chat / gallery history. Moving them over is a follow-up of the
-same shape (stamp the table, add `since` to its read).
+The tombstone resources keep their existing keyset (`(deleted_at, id)`
+for tasks / lists / pages, the row id for the 0085 types) and are filtered
+by the stamp on top; no new paging. The receiver applies every one of
+these by id and never reads "absent from the stream" as a delete, so a
+stream of only the changed rows is safe — a delete always arrives as its
+tombstone.
+
+Kept **full on every session** (streamed whole, as before): the
+**roster** — `bans`, `members`, `member_pictures`. One row per seat, and
+what every other resource is admitted against: a receiver checks each
+content record's author against the roster it holds, so the roster must be
+complete on every stream, not just its changes. Nothing else is kept full.
+
+(History: 0086 covered posts, comments, chat, gallery, calendar and the
+0085 tombstones; 0088 added task lists, tasks, pages, timetables and moved
+the live stickies / zones over — they already carried a stamp, and with
+their tombstones streaming nothing depends on seeing the whole board.
+`SYNC_SHAPE_VERSION` went to 2 with it, so every watermark from before —
+taken while those rows could change without a stamp — falls back to one
+full stream.)
 
 **Per-household watermark — on the provider.** `space_instances` (the
 provider's row for each (space, member household), which a BEGIN already
@@ -374,10 +387,12 @@ back to a full stream without a watermark, with a changed shape or an
 older requester, and re-streams a chunk that failed to apply or never
 arrived; a requester rolled back to an older database re-streams the gap
 on its next periodic session, an inflated `have_seq` is clamped to the
-watermark, and a BEGIN without a valid one streams in full.
-`tests/db/test_migration_0086_space_sync_change_stamps.py`
-fails if a covered table gains a column its update trigger does not
-compare, and `tests/federation/sync/space/test_watermark.py` pins every
+watermark, and a BEGIN without a valid one streams in full; an edited
+task, an archived task, an edited page and a deleted page each stream on
+the next periodic session and converge while the untouched ones do not.
+`tests/db/test_migration_0088_space_sync_productivity_stamps.py` (run
+against the head schema, covering every 0086 and 0088 table) fails if a
+covered table gains a column its update trigger does not compare, and `tests/federation/sync/space/test_watermark.py` pins every
 covered exporter's record keys to `SYNC_SHAPE_VERSION` — a record-shape
 change that does not bump it fails.
 

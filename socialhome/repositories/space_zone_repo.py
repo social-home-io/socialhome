@@ -22,7 +22,13 @@ from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
 
 @runtime_checkable
 class AbstractSpaceZoneRepo(Protocol):
-    async def list_for_space(self, space_id: str) -> list[SpaceZone]: ...
+    async def list_for_space(
+        self, space_id: str, *, since_seq: int | None = None
+    ) -> list[SpaceZone]:
+        """The space's live zones; ``since_seq`` (§25.6 incremental): those
+        stamped above it (migration 0086)."""
+        ...
+
     async def get(self, zone_id: str) -> SpaceZone | None: ...
     async def get_by_name(self, space_id: str, name: str) -> SpaceZone | None: ...
     async def count_for_space(self, space_id: str) -> int: ...
@@ -69,11 +75,15 @@ class SqliteSpaceZoneRepo:
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
 
-    async def list_for_space(self, space_id: str) -> list[SpaceZone]:
+    async def list_for_space(
+        self, space_id: str, *, since_seq: int | None = None
+    ) -> list[SpaceZone]:
+        changed, changed_params = changed_since_sql("sync_seq", since_seq)
         rows = await self._db.fetchall(
             "SELECT * FROM space_zones WHERE space_id=? AND deleted_at IS NULL"
-            " ORDER BY name",
-            (space_id,),
+            + changed
+            + " ORDER BY name",
+            (space_id, *changed_params),
         )
         return [_row_to_zone(dict(r)) for r in rows]  # type: ignore[misc]
 

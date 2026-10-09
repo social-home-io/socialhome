@@ -738,3 +738,53 @@ async def test_list_task_tombstones_newest_first_and_since(two_spaces):
     assert await env.space_repo.list_task_tombstones("sp-2") == []
     # Tombstones never replay as live tasks.
     assert await env.space_repo.list_since("sp-1", "2000-01-01T00:00:00+00:00") == []
+
+
+# ── §25.6 incremental reads (migration 0088 change stamps) ────────────────
+
+
+async def _mark(db) -> int:
+    row = await db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    return int(row["seq"])
+
+
+async def test_space_lists_and_tasks_changed_since_a_stamp(env):
+    repo = env.space_repo
+    for lid in ("cl-1", "cl-2"):
+        await repo.save_list(_list_(lid), space_id="sp-1")
+    for tid in ("ct-1", "ct-2", "ct-3"):
+        await repo.save(_task(tid, list_id="cl-1"), space_id="sp-1")
+    mark = await _mark(env.db)
+    assert await repo.list_lists("sp-1", since_seq=mark) == []
+    assert await repo.list_by_space("sp-1", since_seq=mark) == []
+    await repo.save_list(_list_("cl-2", name="Renamed"), space_id="sp-1")
+    await repo.save(_task("ct-2", list_id="cl-1", title="Edited"), space_id="sp-1")
+    assert [lst.id for lst in await repo.list_lists("sp-1", since_seq=mark)] == ["cl-2"]
+    assert [t.id for t in await repo.list_by_space("sp-1", since_seq=mark)] == ["ct-2"]
+    # ``None`` keeps the full read.
+    assert len(await repo.list_by_space("sp-1", since_seq=None)) == 3
+
+
+async def test_space_tombstones_changed_since_a_stamp(env):
+    repo = env.space_repo
+    for lid in ("dl-1", "dl-2"):
+        await repo.save_list(_list_(lid), space_id="sp-1")
+    for tid in ("dt-1", "dt-2"):
+        await repo.save(_task(tid, list_id="dl-1"), space_id="sp-1")
+    await repo.delete("dt-1", space_id="sp-1")
+    await repo.delete_list("dl-2", space_id="sp-1")
+    mark = await _mark(env.db)
+    assert await repo.list_task_tombstones("sp-1", since_seq=mark) == []
+    assert await repo.list_list_tombstones("sp-1", since_seq=mark) == []
+    await repo.delete("dt-2", space_id="sp-1")
+    await repo.delete_list("dl-1", space_id="sp-1")
+    assert [t.id for t in await repo.list_list_tombstones("sp-1", since_seq=mark)] == [
+        "dl-1"
+    ]
+    # dt-2's list is deleted too, so the list's tombstone carries it (the
+    # existing rule) — a stamp does not bring it back as its own record.
+    assert await repo.list_task_tombstones("sp-1", since_seq=mark) == []
+    assert {t.id for t in await repo.list_list_tombstones("sp-1")} == {
+        "dl-1",
+        "dl-2",
+    }

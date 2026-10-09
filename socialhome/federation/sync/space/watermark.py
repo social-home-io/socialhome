@@ -57,10 +57,17 @@ log = logging.getLogger(__name__)
 #: whatever its watermark says.
 FULL_RESYNC_INTERVAL_S: float = 24 * 3600.0
 
-#: Bumped whenever an exporter's record gains or changes a field: rows
-#: stamped before the change would otherwise never re-stream in the new
-#: shape. Part of every session shape.
-SYNC_SHAPE_VERSION: int = 1
+#: Bumped whenever an exporter's record gains or changes a field — or a
+#: resource starts streaming incrementally: rows stamped (or changed
+#: unstamped) before the change would otherwise never re-stream. Part of
+#: every session shape, so a bump invalidates every watermark once.
+#:
+#: * 1 — migration 0086: posts, comments, chat, gallery, calendar and the
+#:   0085 tombstones.
+#: * 2 — migration 0088: task lists, tasks (active, archived), pages,
+#:   timetables, their tombstones, and the live stickies / zones. A row of
+#:   these changed between a v1 watermark and the upgrade carries no stamp.
+SYNC_SHAPE_VERSION: int = 2
 
 
 def session_shape(

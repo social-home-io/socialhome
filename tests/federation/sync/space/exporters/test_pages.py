@@ -31,7 +31,7 @@ class _Repo:
             base_seq=3,
         )
 
-    async def list(self, *, space_id):
+    async def list(self, *, space_id, since_seq=None):
         return [self.page]
 
     async def list_conflict_sides(self, page_id, *, space_id):

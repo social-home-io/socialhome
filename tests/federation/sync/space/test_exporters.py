@@ -7,6 +7,7 @@ so the receiver has JSON-serialisable input.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
@@ -37,9 +38,26 @@ from socialhome.federation.sync.space.exporters import (
     PostsDeletedExporter,
     PostsExporter,
     SchedulesExporter,
+    BansExporter,
+    MembersExporter,
+    PagesDeletedExporter,
+    PagesExporter,
     StickiesDeletedExporter,
     StickiesExporter,
+    TaskListsDeletedExporter,
+    TaskListsExporter,
+    TasksArchivedExporter,
+    TasksDeletedExporter,
+    TasksExporter,
+    TimetablesExporter,
+    ZonesExporter,
 )
+from socialhome.domain.task import TaskList
+from socialhome.domain.timetable import Timetable
+from socialhome.repositories.page_repo import SqlitePageRepo
+from socialhome.repositories.space_zone_repo import SqliteSpaceZoneRepo
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
+from socialhome.repositories.timetable_repo import SqliteSpaceTimetableRepo
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -255,7 +273,7 @@ async def test_tasks_exporter_normalises_status_and_assignees():
     )
 
     class _Repo:
-        async def list_by_space(self, space_id):
+        async def list_by_space(self, space_id, *, since_seq=None):
             return [task]
 
     recs = await TasksExporter(_Repo()).list_records("sp-1")
@@ -289,7 +307,7 @@ async def test_tasks_exporters_carry_priority_labels_and_archived_at():
     )
 
     class _Repo:
-        async def list_by_space(self, space_id):
+        async def list_by_space(self, space_id, *, since_seq=None):
             return [task]
 
     recs = await TasksArchivedExporter(_Repo()).list_records("sp-1")
@@ -342,7 +360,7 @@ async def test_tasks_archived_filters_to_archived_at():
     )
 
     class _Repo:
-        async def list_by_space(self, space_id):
+        async def list_by_space(self, space_id, *, since_seq=None):
             return [active, done_not_archived, archived]
 
     archived_recs = await TasksArchivedExporter(_Repo()).list_records("sp-1")
@@ -366,7 +384,7 @@ async def test_pages_exporter():
     )
 
     class _Repo:
-        async def list(self, *, space_id):
+        async def list(self, *, space_id, since_seq=None):
             return [page]
 
         async def list_conflict_sides(self, page_id, *, space_id):
@@ -393,7 +411,7 @@ async def test_stickies_exporter():
     )
 
     class _Repo:
-        async def list(self, *, space_id):
+        async def list(self, *, space_id, since_seq=None):
             return [sticky]
 
     recs = await StickiesExporter(_Repo()).list_records("sp-1")
@@ -525,7 +543,7 @@ async def test_zones_exporter_serialises_catalogue():
     )
 
     class _Repo:
-        async def list_for_space(self, space_id):
+        async def list_for_space(self, space_id, *, since_seq=None):
             return [z]
 
     recs = await ZonesExporter(_Repo()).list_records("sp-1")
@@ -801,12 +819,9 @@ async def test_covered_exporters_stream_only_rows_changed_since_a_stamp(db):
     assert [r["id"] for r in await changed(StickiesDeletedExporter(stickies))] == [
         sticky.id
     ]
-    # A resource kept full streams whole even with ``since``.
-    full_stickies = StickiesExporter(stickies)
-    assert not isinstance(full_stickies, IncrementalExporter)
-    assert await collect_batches(
-        record_batches(full_stickies, "sp", since=mark)
-    ) == await full_stickies.list_records("sp")
+    # The live stickies are covered too (migration 0088 follow-up): the
+    # deleted one left the board, nothing else changed.
+    assert await changed(StickiesExporter(stickies)) == []
     # ``since=None`` is the full stream.
     full = await collect_batches(
         record_batches(PostsExporter(posts, windows), "sp", since=None)
@@ -843,3 +858,104 @@ async def test_chat_exporters_stream_only_changed_messages(db):
     live = await collect_batches(record_batches(messages, "sp", since=mark))
     gone = await collect_batches(record_batches(deletions, "sp", since=mark))
     assert live == [] and [r["id"] for r in gone] == ["m1"]
+
+
+# ── §25.6 incremental: the productivity resources (migration 0088) ───────
+
+
+async def test_productivity_exporters_stream_only_rows_changed_since_a_stamp(db):
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp','S','host','anna','ab')"
+    )
+    tasks = SqliteSpaceTaskRepo(db)
+    pages = SqlitePageRepo(db)
+    timetables = SqliteSpaceTimetableRepo(db)
+    stickies = SqliteStickyRepo(db)
+    zones = SqliteSpaceZoneRepo(db)
+    now = datetime.now(timezone.utc)
+    for lid in ("l-quiet", "l-rename", "l-gone"):
+        await tasks.save_list(TaskList(id=lid, name=lid, created_by="u"), space_id="sp")
+    for tid in ("t-quiet", "t-edit", "t-archive", "t-gone"):
+        await tasks.save(
+            Task(
+                id=tid,
+                list_id="l-quiet",
+                title=tid,
+                status=TaskStatus.TODO,
+                position=0,
+                created_by="u",
+                created_at=now,
+                updated_at=now,
+            ),
+            space_id="sp",
+        )
+    for pid in ("pg-quiet", "pg-edit", "pg-gone"):
+        await pages.save(
+            Page(
+                id=pid,
+                title=pid,
+                content="body",
+                created_by="u",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                space_id="sp",
+            ),
+            space_id="sp",
+        )
+    for ttid in ("tt-quiet", "tt-edit"):
+        await timetables.insert(
+            Timetable(
+                id=ttid, name=ttid, created_by="u", created_at=now, updated_at=now
+            ),
+            space_id="sp",
+        )
+    quiet_sticky = await stickies.add(author="u", content="q", space_id="sp")
+    moved = await stickies.add(author="u", content="m", space_id="sp")
+    mark = await _seq(db)
+
+    await tasks.save_list(
+        TaskList(id="l-rename", name="new", created_by="u"), space_id="sp"
+    )
+    await tasks.delete_list("l-gone", space_id="sp")
+    edited = (await tasks.get("t-edit"))[1]
+    await tasks.save(replace(edited, title="edited"), space_id="sp")
+    archived = (await tasks.get("t-archive"))[1]
+    await tasks.save(replace(archived, archived_at=now), space_id="sp")
+    await tasks.delete("t-gone", space_id="sp")
+    page = await pages.get_space_page("pg-edit", space_id="sp")
+    await pages.save(replace(page, content="edited"), space_id="sp")
+    await pages.delete("pg-gone", space_id="sp")
+    tt = (await timetables.get("tt-edit"))[1]
+    assert await timetables.save(
+        replace(tt, name="edited", version=2), space_id="sp", expected_version=1
+    )
+    await stickies.update_position(moved.id, 5.0, 6.0, space_id="sp")
+
+    async def changed(exporter, key: str = "id") -> list[str]:
+        assert isinstance(exporter, IncrementalExporter), exporter
+        recs = await collect_batches(record_batches(exporter, "sp", since=mark))
+        return sorted(r[key] for r in recs)
+
+    assert await changed(TaskListsExporter(tasks)) == ["l-rename"]
+    assert await changed(TaskListsDeletedExporter(tasks)) == ["l-gone"]
+    assert await changed(TasksExporter(tasks)) == ["t-edit"]
+    assert await changed(TasksArchivedExporter(tasks)) == ["t-archive"]
+    assert await changed(TasksDeletedExporter(tasks)) == ["t-gone"]
+    assert await changed(PagesExporter(pages)) == ["pg-edit"]
+    assert await changed(PagesDeletedExporter(pages)) == ["pg-gone"]
+    assert await changed(TimetablesExporter(timetables)) == ["tt-edit"]
+    assert await changed(StickiesExporter(stickies)) == [moved.id]
+    assert await changed(ZonesExporter(zones)) == []
+    # The full stream still carries the untouched rows.
+    full = await TasksExporter(tasks).list_records("sp")
+    assert {"t-quiet", "t-edit"} <= {r["id"] for r in full}
+    assert quiet_sticky.id in {
+        r["id"] for r in await StickiesExporter(stickies).list_records("sp")
+    }
+
+
+def test_the_roster_stays_full():
+    """Admission depends on the whole roster: never incremental."""
+    for exporter in (MembersExporter(None), BansExporter(None)):
+        assert not isinstance(exporter, IncrementalExporter)

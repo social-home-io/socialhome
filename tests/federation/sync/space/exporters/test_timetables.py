@@ -37,7 +37,7 @@ async def test_timetables_exporter_streams_live_wire_dicts():
     tt = Timetable(id="tt-1", name="5b", created_by="u-a", created_at=at, updated_at=at)
 
     class _Repo:
-        async def list_by_space(self, space_id):
+        async def list_by_space(self, space_id, *, since_seq=None):
             assert space_id == "sp-1"
             return [tt]
 

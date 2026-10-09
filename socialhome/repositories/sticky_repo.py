@@ -52,7 +52,14 @@ class AbstractStickyRepo(Protocol):
     async def get_scoped(
         self, sticky_id: str, *, space_id: str | None
     ) -> Sticky | None: ...
-    async def list(self, *, space_id: str | None = None) -> builtins.list[Sticky]: ...
+    async def list(
+        self, *, space_id: str | None = None, since_seq: int | None = None
+    ) -> builtins.list[Sticky]:
+        """Household stickies (``space_id`` ``None``) or a space's live ones;
+        ``since_seq`` (§25.6 incremental, space only): those stamped above
+        it (migration 0086)."""
+        ...
+
     async def list_since(
         self,
         space_id: str,
@@ -206,16 +213,19 @@ class SqliteStickyRepo:
         self,
         *,
         space_id: str | None = None,
+        since_seq: int | None = None,
     ) -> builtins.list[Sticky]:
         if space_id is None:
             rows = await self._db.fetchall(
                 "SELECT * FROM stickies WHERE space_id IS NULL ORDER BY created_at",
             )
         else:
+            changed, changed_params = changed_since_sql("sync_seq", since_seq)
             rows = await self._db.fetchall(
                 "SELECT * FROM stickies WHERE space_id=? AND deleted_at IS NULL"
-                " ORDER BY created_at",
-                (space_id,),
+                + changed
+                + " ORDER BY created_at",
+                (space_id, *changed_params),
             )
         return [s for s in (_row_to_sticky(d) for d in rows_to_dicts(rows)) if s]
 

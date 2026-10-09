@@ -34,7 +34,7 @@ from typing import Protocol, runtime_checkable
 from ..db import AsyncDatabase
 from ..domain.page_version import DraftBase, PageConflictSide, version_hash
 from ..federation.owner_bound_id import SPACE_PAGE_KIND, mint_owner_bound_id
-from .base import row_to_dict, rows_to_dicts
+from .base import changed_since_sql, row_to_dict, rows_to_dicts
 
 
 #: How long an edit lock stays valid before anyone else can claim it
@@ -87,6 +87,7 @@ class AbstractPageRepo(Protocol):
         self,
         *,
         space_id: str | None = None,
+        since_seq: int | None = None,
     ) -> builtins.list[Page]: ...
     async def list_since(
         self,
@@ -121,6 +122,7 @@ class AbstractPageRepo(Protocol):
         since: str | None = None,
         limit: int = 500,
         before: tuple[str, str] | None = None,
+        since_seq: int | None = None,
     ) -> builtins.list[PageTombstone]: ...
     async def raise_seq(self, page_id: str, *, space_id: str, seq: int) -> bool: ...
 
@@ -320,16 +322,23 @@ class SqlitePageRepo:
         self,
         *,
         space_id: str | None = None,
+        since_seq: int | None = None,
     ) -> builtins.list[Page]:
+        """Household pages (``space_id`` ``None``) or a space's live pages.
+        ``since_seq`` (§25.6 incremental, migration 0088 — space pages
+        only): those stamped above it; a change to a page's draft base or
+        conflict sides (``space_page_snapshots``) stamps the page too."""
         if space_id is None:
             rows = await self._db.fetchall(
                 "SELECT *, NULL AS space_id FROM pages ORDER BY updated_at DESC",
             )
         else:
+            changed, changed_params = changed_since_sql("sync_seq", since_seq)
             rows = await self._db.fetchall(
                 "SELECT * FROM space_pages WHERE space_id=? AND deleted_at IS NULL"
-                " ORDER BY updated_at DESC",
-                (space_id,),
+                + changed
+                + " ORDER BY updated_at DESC",
+                (space_id, *changed_params),
             )
         return [p for p in (_row_to_page(d) for d in rows_to_dicts(rows)) if p]
 
@@ -482,17 +491,21 @@ class SqlitePageRepo:
         since: str | None = None,
         limit: int = 500,
         before: tuple[str, str] | None = None,
+        since_seq: int | None = None,
     ) -> builtins.list[PageTombstone]:
         """The space's deleted pages, newest delete first (so a ``limit``
         keeps the deletes a peer is likeliest to have missed) — all of
         them, or those deleted at or after ``since`` (``deleted_at`` is
         naive UTC, ``since`` ISO 8601, so both go through ``datetime()``;
-        second precision, hence ``>=``)."""
+        second precision, hence ``>=``). ``since_seq`` (§25.6 incremental,
+        migration 0088): only rows stamped above it; the keyset is
+        unchanged."""
+        changed, changed_params = changed_since_sql("sync_seq", since_seq)
         sql = (
             "SELECT id, created_by, deleted_at, deleted_by FROM space_pages"
-            " WHERE space_id=? AND deleted_at IS NOT NULL"
+            " WHERE space_id=? AND deleted_at IS NOT NULL" + changed
         )
-        params: tuple = (space_id,)
+        params: tuple = (space_id, *changed_params)
         if since is not None:
             sql += " AND datetime(deleted_at) >= datetime(?)"
             params += (since,)
