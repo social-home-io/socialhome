@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.space import SpaceSyncWatermark
+from ..domain.space import SpaceSyncWatermark, parse_have_seq
 
 
 @runtime_checkable
@@ -109,6 +109,10 @@ class SqliteSpaceSyncWatermarkRepo:
         return int(row["applied_seq"])
 
     async def record_applied(self, space_id: str, instance_id: str, seq: int) -> None:
+        # Refused here, never in the writer: an out-of-range int raises
+        # ``OverflowError`` inside the coalesced batch and fails all of it.
+        if parse_have_seq(seq) is None:
+            raise ValueError(f"applied seq out of range: {seq!r}")
         await self._db.enqueue(
             "UPDATE space_instances SET applied_seq=?"
             " WHERE space_id=? AND instance_id=?",

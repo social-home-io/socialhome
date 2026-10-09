@@ -322,13 +322,27 @@ watermark still claims them. So the requester keeps its own record:
    rolled back — its watermark rolls back with its counter) is **clamped**:
    it can never make the provider skip a row its own watermark says the
    household did not confirm. A BEGIN **without** a valid `have_seq`
-   (absent, negative, not an integer) streams the whole window.
+   (absent, negative, not an integer, or above `2^63 - 1` — no SQLite
+   `INTEGER` holds it) streams the whole window. The same range check
+   guards the sentinel's `snapshot_seq` before the requester stores it: an
+   out-of-range value stores nothing, and never reaches the database
+   writer (where binding it would raise and fail the whole write batch).
+5. The requester keeps the mode and echo with the request it recorded for
+   the BEGIN, so when the direct path times out (15 s ICE) the relay
+   re-BEGIN (`trigger_relay_sync`, `prefer_direct: false`) asks for the
+   same incremental stream with the same `have_seq` — a periodic sync
+   behind a NAT stays incremental instead of becoming a full stream.
 
 Both fields are additive and no protocol bump is needed: an older provider
 ignores `have_seq` and keeps streaming from its own watermark (the #866
 behaviour, healed by its daily full pass); an older requester sends no
-`have_seq` and gets the whole window — it never confirmed `clean` either,
-so it never had an incremental stream to lose. Rule chosen over "trust the
+`have_seq` and gets the whole window. That costs nothing only because no
+released requester ever confirmed `clean`: #863–#866 (the `clean` /
+`chunk_count` fields and the watermark) are unreleased as of the latest
+tag (2026.10.8.1), so **`have_seq` must ship in the same release as
+#866**. Shipped separately, a requester that confirms `clean` but sends
+no `have_seq` would get a full stream on every periodic session — still
+correct (fail-safe toward more data), just costlier. Rule chosen over "trust the
 watermark when `have_seq` is missing": once a requester can echo, a BEGIN
 without the echo is exactly the case where the provider cannot tell what
 the household holds, and fail-safe toward more data is the section's rule.

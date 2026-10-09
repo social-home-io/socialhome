@@ -40,6 +40,7 @@ from socialhome.domain.federation import (
     PairingStatus,
 )
 from socialhome.federation.federation_service import FederationService
+from socialhome.federation.sync_manager import PendingSyncRequest
 from socialhome.federation.sync_rtc import SyncSessionRecord
 from socialhome.services.gfs_connection_service import GfsConnectionService
 
@@ -221,9 +222,11 @@ async def test_legacy_offer_with_signaling_node_is_answered_over_federation(
     """An older provider may still ship ``signaling_node``. The requester
     answers the provider over federation and never dials the URL."""
     svc._sync_manager.pending_sync_request = MagicMock(
-        return_value=SimpleNamespace(
+        return_value=PendingSyncRequest(
+            sync_id="s1",
             provider_instance_id="peer-1",
             space_id="sp",
+            created_at=0.0,
         ),
     )
     svc._sync_manager.apply_offer = AsyncMock(return_value="sdp-answer")

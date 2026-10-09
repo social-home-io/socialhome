@@ -673,7 +673,7 @@ async def test_an_inflated_have_seq_is_clamped_to_the_watermark(houses):
     assert await _applied_seq(c, HOST) < 10**12
 
 
-@pytest.mark.parametrize("wire", [None, -1, "7", True, 1.5])
+@pytest.mark.parametrize("wire", [None, -1, "7", True, 1.5, 2**63])
 async def test_a_begin_without_a_valid_have_seq_streams_the_whole_window(houses, wire):
     h, c = houses
     pids, _comment = await _baseline(h, c)

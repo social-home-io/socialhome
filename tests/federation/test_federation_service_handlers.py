@@ -441,7 +441,8 @@ async def test_handle_space_sync_begin_accepted_no_prefer_direct(svc):
 
 
 @pytest.mark.parametrize(
-    ("wire", "parsed"), [(12, 12), (None, None), ("12", None), (-3, None)]
+    ("wire", "parsed"),
+    [(12, 12), (None, None), ("12", None), (-3, None), (2**63, None)],
 )
 async def test_handle_space_sync_begin_parses_the_have_seq_echo(svc, wire, parsed):
     """The BEGIN's ``have_seq`` (migration 0087) reaches the session parsed:
@@ -799,6 +800,8 @@ def _solicited(svc, *, provider="peer-1", space_id="sp"):
             sync_id="s1",
             space_id=space_id,
             provider_instance_id=provider,
+            sync_mode="incremental",
+            have_seq=41,
         ),
     )
 
@@ -829,6 +832,10 @@ async def test_handle_space_sync_offer_apply_offer_called(svc):
         # only cover the apply_offer branch here.
         pass
     svc._sync_manager.apply_offer.assert_awaited_once()
+    # The session carries what our BEGIN asked for, so a relay retry after
+    # an ICE timeout asks for the same (incremental) stream.
+    kwargs = svc._sync_manager.apply_offer.await_args.kwargs
+    assert (kwargs["sync_mode"], kwargs["have_seq"]) == ("incremental", 41)
 
 
 # ─── Part A: requester-side direct-ready / direct-failed watcher ──

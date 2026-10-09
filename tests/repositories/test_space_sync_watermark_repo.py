@@ -112,3 +112,21 @@ async def test_the_applied_seq_goes_with_the_seat(env):
         "INSERT INTO space_instances(space_id, instance_id) VALUES('sp','peer')"
     )
     assert await repo.applied_seq("sp", "peer") is None
+
+
+@pytest.mark.parametrize("seq", [2**63, -1])
+async def test_record_applied_refuses_a_value_sqlite_cannot_hold(env, seq):
+    """Refused before it reaches the writer: an out-of-range int raises
+    ``OverflowError`` inside the coalesced batch and fails every write in it."""
+    db, repo = env
+    await repo.record_applied("sp", "peer", 5)
+    with pytest.raises(ValueError):
+        await repo.record_applied("sp", "peer", seq)
+    await db.enqueue(
+        "INSERT INTO space_instances(space_id, instance_id) VALUES('sp','other')"
+    )
+    assert await repo.applied_seq("sp", "peer") == 5
+    assert "other" in {
+        r["instance_id"]
+        for r in await db.fetchall("SELECT instance_id FROM space_instances")
+    }

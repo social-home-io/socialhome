@@ -817,9 +817,22 @@ def test_validate_zone_radius_refuses(value):
 
 @pytest.mark.parametrize(
     ("wire", "parsed"),
-    [(0, 0), (9, 9), (None, None), (-1, None), (True, None), ("9", None), (9.0, None)],
+    [
+        (0, 0),
+        (9, 9),
+        (2**63 - 1, 2**63 - 1),
+        (2**63, None),
+        (10**30, None),
+        (None, None),
+        (-1, None),
+        (True, None),
+        ("9", None),
+        (9.0, None),
+    ],
 )
 def test_parse_have_seq_keeps_only_a_non_negative_int(wire, parsed):
+    """…that fits SQLite's signed 64-bit INTEGER: a larger value would raise
+    ``OverflowError`` in the database writer and fail its whole batch."""
     """§25.6 (migration 0087): anything but a non-negative int is an absent
     echo — the provider then streams in full."""
     assert parse_have_seq(wire) == parsed

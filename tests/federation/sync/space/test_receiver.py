@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import AsyncMock
 from types import SimpleNamespace
@@ -28,6 +29,9 @@ from socialhome.federation.sync.space.receiver import (
     _sticky_from_record,
 )
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.space_sync_watermark_repo import (
+    SqliteSpaceSyncWatermarkRepo,
+)
 from socialhome.services.pending_decrypts_cache import PendingDecryptsCache
 
 
@@ -1093,3 +1097,38 @@ async def test_a_failed_echo_write_still_completes_the_stream(bus, peer_setup):
     bus.subscribe(SpaceSyncComplete, captured.append)
     await r.on_chunk(await _sentinel_frame(kp, "s-fail", 0, 7), from_instance="peer-a")
     assert [e.clean for e in captured] == [True]
+
+
+async def test_an_out_of_range_snapshot_stores_nothing_and_breaks_no_batch(
+    bus, peer_setup, db
+):
+    """A peer's signed sentinel naming ``snapshot_seq >= 2**63`` (no SQLite
+    INTEGER holds it) is no echo: nothing is written, and a write coalesced
+    into the same batch still lands."""
+    peer, kp = peer_setup
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-1','S','peer-a','anna','ab')"
+    )
+    await db.enqueue(
+        "INSERT INTO space_instances(space_id, instance_id) VALUES('sp-1','peer-a')"
+    )
+    repo = SqliteSpaceSyncWatermarkRepo(db)
+    await repo.record_applied("sp-1", "peer-a", 7)
+    r = _echo_receiver(bus, peer, repo)
+    captured: list[SpaceSyncComplete] = []
+    bus.subscribe(SpaceSyncComplete, captured.append)
+    await asyncio.gather(
+        r.on_chunk(
+            await _sentinel_frame(kp, "s-big", 0, 2**63), from_instance="peer-a"
+        ),
+        db.enqueue(
+            "INSERT INTO space_instances(space_id, instance_id) VALUES('sp-1','b')"
+        ),
+    )
+    assert [e.clean for e in captured] == [True]
+    assert await repo.applied_seq("sp-1", "peer-a") == 7
+    assert (
+        await db.fetchone("SELECT 1 FROM space_instances WHERE instance_id='b'")
+        is not None
+    )

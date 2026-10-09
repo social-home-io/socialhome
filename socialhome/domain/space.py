@@ -1742,11 +1742,22 @@ class SpaceSyncWatermark:
     full_at: str | None = None
 
 
+#: The largest value a SQLite ``INTEGER`` holds (signed 64-bit). A larger
+#: Python int raises ``OverflowError`` when bound — inside the database
+#: writer, failing every write coalesced into the same batch.
+MAX_SYNC_SEQ: int = 2**63 - 1
+
+
 def parse_have_seq(value: object) -> int | None:
-    """A ``SPACE_SYNC_BEGIN``'s ``have_seq`` (§25.6, migration 0087) — the
-    requester's echo of the provider snapshot of the last stream it applied
-    cleanly — as a non-negative ``int``, else ``None`` (absent or malformed:
-    the session then streams in full). ``bool`` is not an int here."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    """A sync sequence from the wire — a ``SPACE_SYNC_BEGIN``'s ``have_seq``
+    or a sentinel's ``snapshot_seq`` (§25.6, migration 0087) — as an ``int``
+    in ``0..MAX_SYNC_SEQ``, else ``None`` (absent, malformed or out of
+    range: nothing is stored, the session streams in full). ``bool`` is not
+    an int here."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= MAX_SYNC_SEQ
+    ):
         return None
     return value

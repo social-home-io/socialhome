@@ -99,6 +99,11 @@ class PendingSyncRequest:
     space_id: str
     provider_instance_id: str
     created_at: float
+    #: What the BEGIN asked for (§25.6) — the session the OFFER mints
+    #: carries it, so a relay re-BEGIN after an ICE timeout asks for the
+    #: same stream instead of a full one.
+    sync_mode: str = "initial"
+    have_seq: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -197,6 +202,8 @@ class SyncSessionManager:
         sync_id: str,
         space_id: str,
         provider_instance_id: str,
+        sync_mode: str = "initial",
+        have_seq: int | None = None,
     ) -> None:
         """Remember a ``SPACE_SYNC_BEGIN`` we are about to send.
 
@@ -212,6 +219,8 @@ class SyncSessionManager:
             space_id=space_id,
             provider_instance_id=provider_instance_id,
             created_at=time.time(),
+            sync_mode=sync_mode,
+            have_seq=have_seq,
         )
 
     def pending_sync_request(self, sync_id: str) -> PendingSyncRequest | None:
@@ -526,8 +535,13 @@ class SyncSessionManager:
         provider_instance_id: str = "",
         sync_mode: str = "initial",
         ice_servers: list[dict] | None = None,
+        have_seq: int | None = None,
     ) -> str:
         """Requester-side handling of ``SPACE_SYNC_OFFER``.
+
+        ``sync_mode`` / ``have_seq`` — what our BEGIN asked for (the
+        pending request); kept on the session so :meth:`trigger_relay_sync`
+        re-asks for the same stream.
 
         Creates a *requester*-role session if one does not yet exist
         (the requester didn't allocate one in begin_session), generates
@@ -562,6 +576,7 @@ class SyncSessionManager:
                 sync_mode=sync_mode,
                 rtc=rtc,
                 created_at=time.time(),
+                have_seq=have_seq,
             )
             self._sessions[sync_id] = record
 
@@ -639,17 +654,21 @@ class SyncSessionManager:
 
         new_sync_id = secrets.token_urlsafe(16)
         self.close_session(sync_id)
+        payload: dict = {
+            "space_id": record.space_id,
+            "sync_id": new_sync_id,
+            "sync_mode": record.sync_mode,
+            "prefer_direct": False,
+            "tier1_only": record.sync_mode == "initial",
+        }
+        # §25.6: the same incremental stream the direct BEGIN asked for.
+        if record.have_seq is not None:
+            payload["have_seq"] = record.have_seq
         return SyncDecision(
             accepted=True,
             reason="relay_fallback",
             next_event=FederationEventType.SPACE_SYNC_BEGIN,
-            next_payload={
-                "space_id": record.space_id,
-                "sync_id": new_sync_id,
-                "sync_mode": record.sync_mode,
-                "prefer_direct": False,
-                "tier1_only": record.sync_mode == "initial",
-            },
+            next_payload=payload,
         )
 
     # ─── S-17: instance_sync_status guard ─────────────────────────────────

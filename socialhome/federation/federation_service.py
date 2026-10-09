@@ -619,6 +619,8 @@ class FederationService:
         sync_id: str,
         space_id: str,
         provider_instance_id: str,
+        sync_mode: str = "initial",
+        have_seq: int | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -633,6 +635,8 @@ class FederationService:
             sync_id=sync_id,
             space_id=space_id,
             provider_instance_id=provider_instance_id,
+            sync_mode=sync_mode,
+            have_seq=have_seq,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -3593,6 +3597,10 @@ class FederationService:
             provider_instance_id=event.from_instance,
             space_id=space_id,
             ice_servers=payload.get("ice_servers"),
+            # What our BEGIN asked for — a relay retry re-sends it, so a
+            # periodic sync behind a NAT stays incremental.
+            sync_mode=pending.sync_mode,
+            have_seq=pending.have_seq,
         )
         await self.send_event(
             to_instance_id=event.from_instance,

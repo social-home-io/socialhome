@@ -785,6 +785,64 @@ async def test_apply_offer_records_the_provider_on_a_fresh_session():
     assert mgr.get_session("s1").provider_instance_id == "host"
 
 
+async def test_a_periodic_sync_keeps_its_mode_and_echo_through_the_relay_retry():
+    """The requester notes what its BEGIN asked for; the OFFER's session
+    carries it, and the relay re-BEGIN after an ICE timeout asks for the
+    same incremental stream (with the same ``have_seq``) instead of
+    turning every periodic sync behind a NAT into a full one."""
+    mgr = _mgr()
+    mgr.record_sync_request(
+        sync_id="s1",
+        space_id="sp",
+        provider_instance_id="host",
+        sync_mode="incremental",
+        have_seq=41,
+    )
+    pending = mgr.pending_sync_request("s1")
+    assert (pending.sync_mode, pending.have_seq) == ("incremental", 41)
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode=pending.sync_mode,
+            have_seq=pending.have_seq,
+        )
+    record = mgr.get_session("s1")
+    assert (record.sync_mode, record.have_seq) == ("incremental", 41)
+    decision = await mgr.trigger_relay_sync("s1")
+    assert decision.next_payload["sync_mode"] == "incremental"
+    assert decision.next_payload["have_seq"] == 41
+    assert decision.next_payload["prefer_direct"] is False
+
+
+async def test_a_relay_retry_without_an_echo_sends_none():
+    mgr = _mgr()
+    mgr.record_sync_request(sync_id="s1", space_id="sp", provider_instance_id="host")
+    pending = mgr.pending_sync_request("s1")
+    assert (pending.sync_mode, pending.have_seq) == ("initial", None)
+    with patch(
+        "socialhome.federation.sync_manager.SyncRtcSession",
+        MagicMock(return_value=MagicMock(create_answer=AsyncMock(return_value="a"))),
+    ):
+        await mgr.apply_offer(
+            sync_id="s1",
+            sdp_offer="o",
+            requester_instance_id="us",
+            provider_instance_id="host",
+            space_id="sp",
+            sync_mode="incremental",
+        )
+    decision = await mgr.trigger_relay_sync("s1")
+    assert decision.next_payload["sync_mode"] == "incremental"
+    assert "have_seq" not in decision.next_payload
+
+
 async def test_a_capacity_refusal_does_not_spend_the_hourly_budget():
     """A BEGIN refused for ``too_many_sessions`` was never served: it must
     not eat the requester's 5 / h for that space, or a household that

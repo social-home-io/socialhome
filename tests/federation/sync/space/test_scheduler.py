@@ -44,14 +44,24 @@ class _FakeFederation:
         #: ``no_route`` a freshly-booted household gets.
         self.catchup_ships: bool = True
         #: (sync_id, space_id, provider) recorded before each BEGIN.
-        self.requests: list[tuple[str, str, str]] = []
+        self.requests: list[tuple] = []
         #: The ``extra_payload`` (v_46 authority echo) of each catch-up.
         self.mesh_extras: list[dict | None] = []
 
-    def record_sync_request(self, *, sync_id, space_id, provider_instance_id):
+    def record_sync_request(
+        self,
+        *,
+        sync_id,
+        space_id,
+        provider_instance_id,
+        sync_mode="initial",
+        have_seq=None,
+    ):
         """A requester notes the sync_id it is about to ask for, so the
         provider's SPACE_SYNC_OFFER can be recognised as an answer."""
-        self.requests.append((sync_id, space_id, provider_instance_id))
+        self.requests.append(
+            (sync_id, space_id, provider_instance_id, sync_mode, have_seq)
+        )
 
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
@@ -288,6 +298,13 @@ async def test_a_periodic_begin_echoes_the_last_cleanly_applied_snapshot(
         await asyncio.sleep(0.05)
     finally:
         await queue.stop()
+    # What each BEGIN asked for is noted with the request (the relay retry
+    # re-sends it).
+    assert {(r[2], r[3], r[4]) for r in sched._federation.requests} == {
+        ("peer-a", "incremental", 41),
+        ("peer-b", "incremental", None),
+        ("peer-a", "initial", None),
+    }
     sent = [(m["to"], m["payload"]) for m in sched._federation.sent]
     by_mode = {(to, p["sync_mode"]): p for to, p in sent}
     assert by_mode[("peer-a", "incremental")]["have_seq"] == 41

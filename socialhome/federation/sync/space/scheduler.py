@@ -394,24 +394,29 @@ class SpaceSyncScheduler:
             ):
                 prefer_direct = False
             sync_id = uuid.uuid4().hex
+            fields = await self.begin_fields(
+                space_id=space_id,
+                peer_instance_id=peer_instance_id,
+                sync_mode=sync_mode,
+            )
             # Record what we are asking for, so the provider's
             # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An
-            # offer for a sync_id nobody here issued is refused.
+            # offer for a sync_id nobody here issued is refused. The mode
+            # and echo ride along so a relay retry after an ICE timeout
+            # asks for the same stream.
             self._federation.record_sync_request(
                 sync_id=sync_id,
                 space_id=space_id,
                 provider_instance_id=peer_instance_id,
+                sync_mode=sync_mode,
+                have_seq=fields.get("have_seq"),
             )
             payload: dict = {
                 "sync_id": sync_id,
                 "space_id": space_id,
                 "sync_mode": sync_mode,
                 "prefer_direct": prefer_direct,
-                **await self.begin_fields(
-                    space_id=space_id,
-                    peer_instance_id=peer_instance_id,
-                    sync_mode=sync_mode,
-                ),
+                **fields,
             }
             echo = await self._echo_for(space_id, peer_instance_id)
             if echo is not None:
