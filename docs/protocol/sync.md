@@ -248,9 +248,10 @@ session start the provider reads the counter (the **snapshot**) and
 decides:
 
 - the session is `"incremental"`, the household has a watermark, its
-  `synced_shape` equals this session's shape and its last full stream is
-  under `FULL_RESYNC_INTERVAL_S` (24 h) old → stream rows with
-  `sync_seq > synced_seq` (the window still applies on top);
+  `synced_shape` equals this session's shape, its last full stream is
+  under `FULL_RESYNC_INTERVAL_S` (24 h) old and its BEGIN carries a valid
+  `have_seq` (below) → stream rows with
+  `sync_seq > min(synced_seq, have_seq)` (the window still applies on top);
 - otherwise → the whole window (a full stream).
 
 The watermark advances to the **snapshot** — never further — and only
@@ -281,6 +282,44 @@ failure: it would be refused again. Both fields are additive and plain
 routing metadata (a count and a boolean, no content): an older receiver
 ignores `chunk_count`, an older provider ignores `clean`. No protocol bump.
 
+**`have_seq` — the requester's echo, in the requester's database
+(migration 0087).** The provider's watermark says what the household
+*confirmed*, not what it still *holds*: a household restored from an older
+file snapshot under the same identity (a Home Assistant backup) no longer
+has the rows it applied after that snapshot, while every provider's
+watermark still claims them. So the requester keeps its own record:
+
+1. The signed sentinel also carries `snapshot_seq` — the provider's
+   counter snapshot the stream covers (routing metadata, a counter value
+   like `chunk_count`; an older receiver ignores it).
+2. When the stream is clean (the same verdict it sends as
+   `SPACE_SYNC_COMPLETE {clean: true}`), the requester stores that
+   snapshot on **its own** `space_instances` row for the (space, provider
+   household): `applied_seq`. It is written after every row of the
+   stream, in the same database — so a restore rolls it back together with
+   the rows it describes. A sentinel without a valid `snapshot_seq` (an
+   older provider) stores nothing.
+3. A periodic BEGIN echoes it: `SPACE_SYNC_BEGIN {…, sync_mode:
+   "incremental", have_seq}` (absent when nothing is stored — the first
+   periodic session after a join, an upgrade or a dropped seat).
+4. The provider streams since `min(synced_seq, have_seq)`. A rolled-back
+   requester's lower `have_seq` re-streams the gap on its next periodic
+   session — no "Sync now", no waiting for the daily full pass. A
+   `have_seq` above the watermark (forged, or the provider's own database
+   rolled back — its watermark rolls back with its counter) is **clamped**:
+   it can never make the provider skip a row its own watermark says the
+   household did not confirm. A BEGIN **without** a valid `have_seq`
+   (absent, negative, not an integer) streams the whole window.
+
+Both fields are additive and no protocol bump is needed: an older provider
+ignores `have_seq` and keeps streaming from its own watermark (the #866
+behaviour, healed by its daily full pass); an older requester sends no
+`have_seq` and gets the whole window — it never confirmed `clean` either,
+so it never had an incremental stream to lose. Rule chosen over "trust the
+watermark when `have_seq` is missing": once a requester can echo, a BEGIN
+without the echo is exactly the case where the provider cannot tell what
+the household holds, and fail-safe toward more data is the section's rule.
+
 **A resource that is off is not in the plan.** The space chat
 (`chat_messages`) streams only while the space's chat is on; while it is
 off the provider leaves it out of the session's plan
@@ -300,14 +339,15 @@ Fail-safe toward more data, never less:
   gate, a resource added by an upgrade). A household that upgrades, gains
   a writer seat, or a space that keeps more history, so gets the rows it
   could not take before;
+- **no `have_seq`** in the BEGIN → full (see above);
 - **daily anti-entropy** — a full stream at least every 24 h per
   household, so anything a stamp could not express converges within a
   day: a chunk the receiver refused or could not decrypt yet, a row
   refused for a parent it lacked at the time, an archive lifted on the
-  receiver, a requester whose database was rolled back to an older file
-  snapshot under the same identity (the provider's watermark then claims
-  rows the requester lost; a restore from the app's backup re-pairs under
-  a new identity, which has no watermark, so it syncs in full anyway).
+  receiver. (A requester whose database was rolled back to an older file
+  snapshot under the same identity no longer waits for it: its `have_seq`
+  rolled back too. A restore from the app's backup re-pairs under a new
+  identity, which has no watermark, so it syncs in full anyway.)
 
 **Edits outside the window.** The retention window applies to
 `created_at`, as on a full stream: an edit to a row older than the window
@@ -315,13 +355,16 @@ is not streamed by any session (the receiver's own copy ages out the same
 way). Tombstones are not windowed (except the chat's), so a delete of any
 age streams once, when it happens.
 
-**No protocol bump.** Nothing on the wire changes: the requester still
-sends `sync_mode: "incremental"` and `SPACE_SYNC_COMPLETE`, the chunks are
-the same records, a receiver applies them by primary key as always. The
-watermark never travels (it would reveal only how much changed, but it
-has no reason to leave the provider). An older requester that does not
-send `SPACE_SYNC_COMPLETE` never gets a watermark and keeps receiving full
-streams; an older provider keeps streaming full.
+**No protocol bump.** The chunks are the same records, a receiver applies
+them by primary key as always; the only wire additions are routing
+metadata — `chunk_count` / `snapshot_seq` on the signed sentinel, `clean`
+on `SPACE_SYNC_COMPLETE`, `have_seq` on the BEGIN — each ignored by an
+older peer. The provider's watermark never travels; the provider's
+snapshot goes only to the requester it streamed to and comes back only
+from it (a counter value: it reveals how much changed, nothing of what).
+An older requester that does not send `SPACE_SYNC_COMPLETE` / `have_seq`
+keeps receiving full streams; an older provider keeps streaming from its
+own watermark.
 
 Tripwire: `tests/protocol/test_space_sync_incremental.py` (§27.9) — two
 households: after a full sync a periodic session streams only the changed
@@ -329,7 +372,10 @@ rows, converges edits / reactions / moderation / deletes / poll votes,
 streams nothing for a quiet space in either direction (no echo), and falls
 back to a full stream without a watermark, with a changed shape or an
 older requester, and re-streams a chunk that failed to apply or never
-arrived. `tests/db/test_migration_0086_space_sync_change_stamps.py`
+arrived; a requester rolled back to an older database re-streams the gap
+on its next periodic session, an inflated `have_seq` is clamped to the
+watermark, and a BEGIN without a valid one streams in full.
+`tests/db/test_migration_0086_space_sync_change_stamps.py`
 fails if a covered table gains a column its update trigger does not
 compare, and `tests/federation/sync/space/test_watermark.py` pins every
 covered exporter's record keys to `SYNC_SHAPE_VERSION` — a record-shape

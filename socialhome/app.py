@@ -1591,6 +1591,8 @@ def _wire_federation_stack(
         legacy_album_deletes=legacy_album_deletes,
         timetable_repo=space_timetable_repo,
         page_conflicts=page_conflict_service,
+        # §25.6 echo (0087): a clean stream records the provider's snapshot.
+        applied_seqs=space_sync_watermark_repo,
     )
     federation_service.attach_space_sync(
         service=space_sync_service,
@@ -1613,6 +1615,8 @@ def _wire_federation_stack(
         queue=reconnect_queue,
         sync_manager=sync_manager,
         own_instance_id=identity.instance_id,
+        # §25.6 echo (0087): a periodic BEGIN carries it as ``have_seq``.
+        applied_seqs=space_sync_watermark_repo,
     )
     space_sync_scheduler.wire()
     app[K.space_sync_scheduler_key] = space_sync_scheduler

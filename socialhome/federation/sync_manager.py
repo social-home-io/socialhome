@@ -381,8 +381,13 @@ class SyncSessionManager:
         provider_instance_id: str,
         sync_mode: str = "initial",
         ice_servers: list[dict] | None = None,
+        have_seq: int | None = None,
     ) -> SyncDecision:
         """Admit a new sync session.
+
+        ``have_seq`` — the requester's echo from its BEGIN (§25.6,
+        migration 0087), already parsed; kept on the session for the
+        provider's watermark decision.
 
         Runs the S-6 rate limit (5/h + 3 concurrent) and the S-8 cap.
         On rejection returns a :class:`SyncDecision` with
@@ -468,6 +473,7 @@ class SyncSessionManager:
             sync_mode=sync_mode,
             rtc=rtc,
             created_at=time.time(),
+            have_seq=have_seq,
         )
         self._sessions[sync_id] = record
         return SyncDecision(accepted=True)

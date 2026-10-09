@@ -347,6 +347,7 @@ class ChunkBuilder:
         sync_id: str,
         sig_suite: str,
         chunk_count: int | None = None,
+        snapshot_seq: int | None = None,
     ) -> dict[str, Any]:
         """Build the final ``__complete__`` envelope for the session.
 
@@ -355,6 +356,11 @@ class ChunkBuilder:
         the stream sent before it: the requester reports the stream clean
         only when that many arrived and applied (routing metadata, like
         ``seq_start`` / ``seq_end``; an older receiver ignores it).
+        ``snapshot_seq`` — the provider's counter snapshot the stream
+        covers (migration 0086): a requester that applied the stream
+        cleanly stores it and echoes it as ``have_seq`` in its next
+        periodic BEGIN (migration 0087). Routing metadata too — a counter
+        value, no content; an older receiver ignores it.
         """
         envelope: dict[str, Any] = {
             "sync_id": sync_id,
@@ -364,6 +370,8 @@ class ChunkBuilder:
         }
         if chunk_count is not None:
             envelope["chunk_count"] = int(chunk_count)
+        if snapshot_seq is not None:
+            envelope["snapshot_seq"] = int(snapshot_seq)
         bytes_to_sign = _orjson.dumps(envelope)
         envelope["signatures"] = self._encoder.sign_envelope_all(
             bytes_to_sign,

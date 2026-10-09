@@ -7,6 +7,7 @@ import pytest
 from socialhome.domain.space import (
     ACCESS_FEATURES,
     owner_seat_from_roster,
+    parse_have_seq,
     CONTENT_AUTHORITY_ROLES,
     MIRRORABLE_REMOTE_ROLES,
     SETTINGS_AUTHORITY_ROLES,
@@ -812,3 +813,13 @@ def test_validate_zone_radius_accepts(value, expected):
 def test_validate_zone_radius_refuses(value):
     with pytest.raises(ValueError):
         validate_zone_radius(value)
+
+
+@pytest.mark.parametrize(
+    ("wire", "parsed"),
+    [(0, 0), (9, 9), (None, None), (-1, None), (True, None), ("9", None), (9.0, None)],
+)
+def test_parse_have_seq_keeps_only_a_non_negative_int(wire, parsed):
+    """§25.6 (migration 0087): anything but a non-negative int is an absent
+    echo — the provider then streams in full."""
+    assert parse_have_seq(wire) == parsed

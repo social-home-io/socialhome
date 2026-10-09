@@ -33,6 +33,7 @@ from socialhome.federation.sync.space.watermark import (
     FULL_RESYNC_INTERVAL_S,
     SYNC_SHAPE_VERSION,
     SyncWatermarks,
+    parse_have_seq,
     session_shape,
 )
 from socialhome.federation.sync.space.window import SyncWindows
@@ -99,7 +100,11 @@ async def test_snapshot_reads_the_counter():
 
 async def test_an_incremental_session_with_a_fresh_matching_watermark_streams_since_it():
     since = await _marks(_Repo(wm=_wm())).since_for(
-        space_id="sp", instance_id="h", shape="S", sync_mode="incremental"
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=100,
     )
     assert since == 7
 
@@ -107,7 +112,7 @@ async def test_an_incremental_session_with_a_fresh_matching_watermark_streams_si
 @pytest.mark.parametrize("mode", ["initial", "full"])
 async def test_every_other_session_streams_in_full(mode):
     since = await _marks(_Repo(wm=_wm())).since_for(
-        space_id="sp", instance_id="h", shape="S", sync_mode=mode
+        space_id="sp", instance_id="h", shape="S", sync_mode=mode, have_seq=100
     )
     assert since is None
 
@@ -124,7 +129,11 @@ async def test_every_other_session_streams_in_full(mode):
 )
 async def test_fails_safe_toward_a_full_stream(wm):
     since = await _marks(_Repo(wm=wm)).since_for(
-        space_id="sp", instance_id="h", shape="S", sync_mode="incremental"
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=100,
     )
     assert since is None
 
@@ -132,9 +141,61 @@ async def test_fails_safe_toward_a_full_stream(wm):
 async def test_a_naive_full_at_reads_as_utc():
     wm = SpaceSyncWatermark(seq=3, shape="S", full_at="2026-10-09 11:00:00")
     since = await _marks(_Repo(wm=wm)).since_for(
-        space_id="sp", instance_id="h", shape="S", sync_mode="incremental"
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=100,
     )
     assert since == 3
+
+
+# ── The requester's echo (have_seq, migration 0087) ───────────────────────
+
+
+async def _since(have_seq, wm=None):
+    return await _marks(_Repo(wm=wm or _wm(seq=7))).since_for(
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=have_seq,
+    )
+
+
+async def test_a_lower_have_seq_wins_a_rolled_back_requester_re_streams_the_gap():
+    assert await _since(3) == 3
+
+
+async def test_a_have_seq_above_the_watermark_is_clamped_never_trusted_upward():
+    assert await _since(10**12) == 7
+    assert await _since(7) == 7
+
+
+async def test_a_begin_without_have_seq_streams_in_full():
+    assert await _since(None) is None
+
+
+async def test_have_seq_never_rescues_an_untrusted_watermark():
+    assert await _since(3, wm=_wm(shape="OLD")) is None
+
+
+@pytest.mark.parametrize(
+    ("wire", "parsed"),
+    [
+        (0, 0),
+        (12, 12),
+        (None, None),
+        (-1, None),
+        (True, None),
+        (False, None),
+        ("12", None),
+        (1.0, None),
+        ([], None),
+    ],
+)
+def test_parse_have_seq_accepts_only_a_non_negative_int(wire, parsed):
+    assert parse_have_seq(wire) == parsed
 
 
 async def test_confirm_records_a_full_stream_with_its_time():

@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from socialhome.domain.federation import (
     FederationEventType,
     InstanceSource,
@@ -242,6 +244,23 @@ async def test_begin_session_blocks_at_concurrent_cap_s6():
     )
     assert blocked.accepted is False
     assert blocked.reason == "too_many_sessions"
+
+
+@pytest.mark.parametrize("have_seq", [None, 0, 17])
+async def test_begin_session_records_the_requesters_have_seq(have_seq):
+    """§25.6 (migration 0087): the requester's echo rides the session to
+    the provider's watermark decision."""
+    mgr = SyncSessionManager(_FakeFedRepo())
+    d = await mgr.begin_session(
+        sync_id="s-have",
+        space_id="sp-1",
+        requester_instance_id="alice",
+        provider_instance_id="me",
+        sync_mode="incremental",
+        have_seq=have_seq,
+    )
+    assert d.accepted is True
+    assert mgr.get_session("s-have").have_seq == have_seq
 
 
 async def test_begin_session_threads_ice_servers_with_turn():

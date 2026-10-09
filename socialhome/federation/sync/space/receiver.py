@@ -50,6 +50,7 @@ from ....domain.space import (
     ContentAction,
     SpaceMember,
     SpaceZone,
+    parse_have_seq,
     validate_zone_color,
     validate_zone_coord,
     validate_zone_name,
@@ -119,6 +120,9 @@ if TYPE_CHECKING:
     )
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
+    from ....repositories.space_sync_watermark_repo import (
+        AbstractSpaceSyncWatermarkRepo,
+    )
     from ....repositories.bazaar_repo import AbstractBazaarRepo
     from ....repositories.space_zone_repo import AbstractSpaceZoneRepo
     from ....repositories.sticky_repo import AbstractStickyRepo
@@ -237,6 +241,7 @@ class SpaceSyncReceiver:
         "_page_conflicts",
         "_chat_sink",
         "_health",
+        "_applied_seqs",
     )
 
     def __init__(
@@ -264,8 +269,14 @@ class SpaceSyncReceiver:
         legacy_album_deletes: "LegacyAlbumDeletes | None" = None,
         timetable_repo: "AbstractSpaceTimetableRepo | None" = None,
         page_conflicts: "PageConflictService | None" = None,
+        applied_seqs: "AbstractSpaceSyncWatermarkRepo | None" = None,
     ) -> None:
         self._bus = bus
+        #: §25.6 echo (migration 0087): where a clean stream's provider
+        #: snapshot is recorded, per (space, provider household) — sent back
+        #: as ``have_seq`` in the next periodic BEGIN. ``None``: never
+        #: recorded, so every periodic session streams in full.
+        self._applied_seqs = applied_seqs
         self._timetable_repo = timetable_repo
         #: v_55 — where ``chat_messages`` records go: the space-chat inbound
         #: handlers, which run each through the live create rule. ``None``
@@ -312,6 +323,28 @@ class SpaceSyncReceiver:
     def attach_chat_sink(self, sink: "ChatSyncSink") -> None:
         """Wire where streamed space-chat messages (v_55) are applied."""
         self._chat_sink = sink
+
+    async def _record_applied(
+        self, space_id: str, provider: str, snapshot_seq: object
+    ) -> None:
+        """Remember the provider's signed snapshot of a stream that applied
+        cleanly here (§25.6 echo, migration 0087). Written after every row of
+        the stream, in this database — so a restore from an older file
+        snapshot rolls it back with the rows, and the next periodic BEGIN
+        asks for the gap. A sentinel without a valid snapshot (an older
+        provider) records nothing. Fail-soft: an unrecorded echo only means
+        the next session streams more."""
+        seq = parse_have_seq(snapshot_seq)
+        if self._applied_seqs is None or seq is None:
+            return
+        try:
+            await self._applied_seqs.record_applied(space_id, provider, seq)
+        except Exception:
+            log.exception(
+                "sync: recording the applied snapshot of %s for space %s failed",
+                provider,
+                space_id,
+            )
 
     async def on_chunk(
         self,
@@ -446,12 +479,17 @@ class SpaceSyncReceiver:
 
         # Sentinel path — publish end-of-stream + return.
         if resource == SENTINEL_RESOURCE:
+            clean = self._health.finish(sync_id, envelope.get("chunk_count"))
+            if clean:
+                await self._record_applied(
+                    space_id, from_instance, envelope.get("snapshot_seq")
+                )
             await self._bus.publish(
                 SpaceSyncComplete(
                     space_id=space_id,
                     from_instance=from_instance,
                     sync_id=sync_id,
-                    clean=self._health.finish(sync_id, envelope.get("chunk_count")),
+                    clean=clean,
                 )
             )
             return

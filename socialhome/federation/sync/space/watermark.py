@@ -15,7 +15,16 @@ session whenever the watermark cannot be trusted:
   of resources this household gets;
 * the last full stream is older than :data:`FULL_RESYNC_INTERVAL_S` — the
   daily anti-entropy pass that converges whatever a stamp cannot express (a
-  chunk the receiver refused, a requester restored from an older snapshot).
+  chunk the receiver refused, a parent it lacked at the time);
+* the requester's BEGIN carries no valid ``have_seq``.
+
+``have_seq`` (migration 0087) is the requester's echo: our snapshot of the
+last stream it applied cleanly, stored in ITS database. The session streams
+since ``min(watermark, have_seq)`` — so a requester restored from an older
+file snapshot under the same identity (whose echo rolled back with its
+rows) re-streams the gap on its next periodic session, while a ``have_seq``
+above the watermark (forged, or ours rolled back) is clamped: it can never
+make us skip a row our own watermark says it did not confirm.
 
 Fail-safe toward more data, never less. See ``docs/protocol/sync.md``.
 """
@@ -27,10 +36,20 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ....domain.space import parse_have_seq
+
 if TYPE_CHECKING:
     from ....repositories.space_sync_watermark_repo import (
         AbstractSpaceSyncWatermarkRepo,
     )
+
+__all__ = [
+    "FULL_RESYNC_INTERVAL_S",
+    "SYNC_SHAPE_VERSION",
+    "SyncWatermarks",
+    "parse_have_seq",
+    "session_shape",
+]
 
 log = logging.getLogger(__name__)
 
@@ -87,10 +106,13 @@ class SyncWatermarks:
         instance_id: str,
         shape: str,
         sync_mode: str,
+        have_seq: int | None,
     ) -> int | None:
         """The stamp above which this session streams covered rows, or
-        ``None`` for a full stream."""
-        if sync_mode != "incremental":
+        ``None`` for a full stream. ``have_seq``: the requester's echo
+        (:func:`parse_have_seq`) — ``None`` streams in full, a lower one wins,
+        a higher one is clamped to the watermark."""
+        if sync_mode != "incremental" or have_seq is None:
             return None
         mark = await self._repo.get(space_id, instance_id)
         if mark is None or mark.shape != shape or not mark.full_at:
@@ -101,7 +123,7 @@ class SyncWatermarks:
         age = (self._clock() - full_at).total_seconds()
         if age > FULL_RESYNC_INTERVAL_S:
             return None
-        return mark.seq
+        return min(mark.seq, have_seq)
 
     async def confirm(
         self,

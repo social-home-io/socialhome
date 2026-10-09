@@ -24,7 +24,12 @@ content key is not what this tests) so the chunks can be counted.
 * an unconfirmed stream advances nothing, and a ``SPACE_SYNC_COMPLETE``
   from any household but the requester is no confirmation;
 * no watermark (a dropped seat), an older / upgraded requester, "Sync now"
-  and a failed chunk each fall back to the whole window.
+  and a failed chunk each fall back to the whole window;
+* the requester echoes the snapshot of the last stream it applied cleanly
+  (``have_seq`` in the BEGIN, stored in its own database): a requester
+  rolled back to an older file snapshot re-streams the gap on the next
+  periodic session, an inflated ``have_seq`` is clamped to the provider's
+  watermark, and a BEGIN without one streams the whole window.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from socialhome.app_keys import (
     event_bus_key,
     federation_service_key,
     space_sync_receiver_key,
+    space_sync_scheduler_key,
     space_sync_service_key,
 )
 from socialhome.config import Config
@@ -58,6 +64,7 @@ from socialhome.federation.sync.space.exporter import (
     SENTINEL_RESOURCE,
     ChunkBuilder,
 )
+from socialhome.federation.sync.space.watermark import parse_have_seq
 from socialhome.federation.sync_rtc import SyncSessionRecord
 
 pytestmark = pytest.mark.security
@@ -230,15 +237,25 @@ async def _stream(
     during=None,
     confirm_from: str | None = None,
     drop: set[str] = frozenset(),  # type: ignore[assignment]
+    have_seq: object = "from-requester",
 ) -> dict[str, list[dict]]:
     """One real provider session from ``provider_app`` to ``to_app``: every
     frame goes through ``to_app``'s receiver (signature, decode, persist) in
     wire order, the sentinel publishes ``SpaceSyncComplete`` with whether
     the stream applied cleanly, and — when ``complete`` — the requester's
     ``SPACE_SYNC_COMPLETE {clean}`` is delivered to the provider's federation
-    handler. Returns the records per resource."""
+    handler. Returns the records per resource.
+
+    ``have_seq`` — what the requester's BEGIN echoes: by default what its
+    scheduler sends (the snapshot of the last stream it applied cleanly),
+    else the given wire value (``None``: the field is absent)."""
     sync_id = uuid.uuid4().hex
     wire = _Wire(during)
+    if have_seq == "from-requester":
+        fields = await to_app[space_sync_scheduler_key].begin_fields(
+            space_id=SPACE, peer_instance_id=provider, sync_mode=mode
+        )
+        have_seq = fields.get("have_seq")
     session = SyncSessionRecord(
         sync_id=sync_id,
         space_id=SPACE,
@@ -246,6 +263,8 @@ async def _stream(
         provider_instance_id=provider,
         sync_mode=mode,
         rtc=None,
+        # What the provider's BEGIN handler makes of the wire value.
+        have_seq=parse_have_seq(have_seq),
     )
     session.rtc = wire  # type: ignore[assignment]
     fed = provider_app[federation_service_key]
@@ -564,3 +583,102 @@ async def test_a_stale_full_stream_forces_the_daily_full_pass(houses):
     )
     assert _ids(await _h_to_c(h, c), "posts") == set(pids)
     assert not any(_content(await _h_to_c(h, c)).values())
+
+
+# ── The requester's echo: a rolled-back requester does not miss rows ─────
+
+
+async def _applied_seq(app, provider: str) -> int | None:
+    row = await app[db_key].fetchone(
+        "SELECT applied_seq FROM space_instances WHERE space_id=? AND instance_id=?",
+        (SPACE, provider),
+    )
+    return None if row is None else row["applied_seq"]
+
+
+async def _watermark(app, requester: str) -> int | None:
+    row = await app[db_key].fetchone(
+        "SELECT synced_seq FROM space_instances WHERE space_id=? AND instance_id=?",
+        (SPACE, requester),
+    )
+    return None if row is None else row["synced_seq"]
+
+
+async def test_a_requester_rolled_back_to_an_older_snapshot_heals_next_session(
+    houses,
+):
+    """C is restored from an older file snapshot under the same identity
+    (e.g. a Home Assistant backup): the posts it applied after the backup
+    are gone, and so is the ``applied_seq`` that recorded them — it rolled
+    back with C's own database. H's watermark still claims C holds them, but
+    the next periodic session streams since ``min(watermark, have_seq)``, so
+    the gap re-streams without "Sync now" and without the daily full pass."""
+    h, c = houses
+    pids, _comment = await _baseline(h, c)
+    before_backup = await _applied_seq(c, HOST)
+    assert before_backup is not None
+    assert before_backup == await _watermark(h, MEMBER)
+
+    # After the "backup": two new posts and an edit reach C cleanly.
+    late = [_pid(AUTHOR) for _ in range(2)]
+    for i, pid in enumerate(late):
+        await _write_post(h, pid, AUTHOR, f"late {i}")
+    await _posts(h).edit(pids[3], "edited after the backup", space_id=SPACE)
+    applied = await _h_to_c(h, c)
+    assert _ids(applied, "posts") == {*late, pids[3]}
+    assert await _applied_seq(c, HOST) == await _watermark(h, MEMBER)
+    assert await _applied_seq(c, HOST) > before_backup
+
+    # The restore: C's database is back at the backup — the late rows, the
+    # edit and the applied stamp are gone; H's watermark is untouched.
+    cdb = c[db_key]
+    for pid in late:
+        await cdb.enqueue("DELETE FROM space_posts WHERE id=?", (pid,))
+    await cdb.enqueue("UPDATE space_posts SET content='post 3' WHERE id=?", (pids[3],))
+    await cdb.enqueue(
+        "UPDATE space_instances SET applied_seq=? WHERE space_id=? AND instance_id=?",
+        (before_backup, SPACE, HOST),
+    )
+
+    # H is quiet — its watermark alone would stream nothing — yet the gap
+    # re-streams on the very next periodic session.
+    healed = await _h_to_c(h, c)
+    assert _ids(healed, "posts") == {*late, pids[3]}
+    for i, pid in enumerate(late):
+        assert (await _post_row(c, pid))["content"] == f"late {i}"
+    assert (await _post_row(c, pids[3]))["content"] == "edited after the backup"
+    # Converged: quiet again, and the echo caught up with the watermark.
+    assert not any(_content(await _h_to_c(h, c)).values())
+    assert await _applied_seq(c, HOST) == await _watermark(h, MEMBER)
+
+
+async def test_an_inflated_have_seq_is_clamped_to_the_watermark(houses):
+    """A ``have_seq`` above what the provider confirmed (forged, or from a
+    provider that was itself rolled back) never lets the provider skip rows
+    its own watermark says the household has not confirmed."""
+    h, c = houses
+    pids, _comment = await _baseline(h, c)
+    await _posts(h).edit(pids[5], "after the watermark", space_id=SPACE)
+    forged = await _h_to_c(h, c, have_seq=10**12)
+    assert _ids(forged, "posts") == {pids[5]}
+    assert (await _post_row(c, pids[5]))["content"] == "after the watermark"
+    # C records the provider's signed snapshot, never the forged value.
+    assert await _applied_seq(c, HOST) == await _watermark(h, MEMBER)
+    assert await _applied_seq(c, HOST) < 10**12
+
+
+@pytest.mark.parametrize("wire", [None, -1, "7", True, 1.5])
+async def test_a_begin_without_a_valid_have_seq_streams_the_whole_window(houses, wire):
+    h, c = houses
+    pids, _comment = await _baseline(h, c)
+    assert _ids(await _h_to_c(h, c, have_seq=wire), "posts") == set(pids)
+
+
+async def test_an_unclean_stream_records_no_applied_seq(houses):
+    """Only a stream the requester reports clean moves its echo."""
+    h, c = houses
+    pids, _comment = await _baseline(h, c)
+    before = await _applied_seq(c, HOST)
+    await _posts(h).edit(pids[9], "dropped", space_id=SPACE)
+    await _h_to_c(h, c, drop={"posts"})
+    assert await _applied_seq(c, HOST) == before

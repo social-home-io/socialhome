@@ -59,6 +59,7 @@ from ..domain.events import (
     SpaceSyncDeferred,
 )
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.space import parse_have_seq
 from ..domain.media_validator import validate_inbound_media_meta
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
@@ -3400,6 +3401,9 @@ class FederationService:
             provider_instance_id=self._own_instance_id,
             sync_mode=str(payload.get("sync_mode", "initial")),
             ice_servers=self._ice_servers,
+            # §25.6 (migration 0087): the requester's echo of the last
+            # stream it applied cleanly. Absent / malformed → a full stream.
+            have_seq=parse_have_seq(payload.get("have_seq")),
         )
         if not decision.accepted and decision.next_event is not None:
             if (

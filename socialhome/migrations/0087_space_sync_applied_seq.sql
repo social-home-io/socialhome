@@ -1,0 +1,56 @@
+-- 0087 — §25.6 incremental sync: the requester's echo of what it applied.
+--
+-- ``space_instances.applied_seq INTEGER`` (NULL default) — on the
+-- REQUESTER's row for a (space, provider household): the provider's counter
+-- snapshot (``snapshot_seq``, carried in the provider's signed end-of-stream
+-- sentinel) of the last stream from that household this household applied
+-- cleanly — the one it confirmed with ``SPACE_SYNC_COMPLETE {clean: true}``.
+-- A periodic ``SPACE_SYNC_BEGIN`` echoes it as ``have_seq``; the provider
+-- streams the rows stamped above ``min(its watermark, have_seq)``.
+--
+-- Why: the provider's watermark (0086, ``synced_seq`` on the provider's
+-- row) says what the household confirmed — but a household restored from
+-- an older file snapshot under the SAME identity (a Home Assistant backup)
+-- no longer holds the rows applied after that snapshot. Its provider would
+-- skip them until the daily full pass. ``applied_seq`` lives in the
+-- requester's own database, so it rolls back WITH the rows it describes:
+-- the next periodic session re-streams the gap.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this data. ``space_instances``
+--       is written by ``space_repo.add_space_instance`` (an ``ON CONFLICT DO
+--       UPDATE`` upsert that sets only ``last_seen_at`` — the new column
+--       survives it), ``remove_space_instance`` (a DELETE: the echo goes
+--       with the provider household's last seat, so a rejoin syncs in
+--       full), ``federation_repo`` (0078 version / identity claims — UPDATEs
+--       of other columns) and ``space_sync_watermark_repo`` (0086, the
+--       provider-side ``synced_*`` columns). The requester already holds a
+--       row for every household it sends a periodic BEGIN to: the
+--       scheduler's tick walks ``list_member_instances`` — this table. The
+--       §25.6 receiver learns the snapshot from the sentinel; nothing else
+--       reads or writes the echo. The backup export does not copy
+--       ``space_instances`` (a restore from the app's backup re-pairs under
+--       a new identity and syncs in full anyway).
+--   (2) Non-migration alternatives considered and rejected:
+--       * Keep it in memory — lost on every restart, so every boot would
+--         full-sync every space from every provider; and memory does not
+--         roll back with a restored database, which is the whole point.
+--       * Reuse the 0086 ``synced_seq`` column of the same row — it is the
+--         watermark of the OTHER direction (what that household confirmed
+--         of OUR stream, in OUR counter space); both directions run on the
+--         same row because every household is both provider and requester.
+--       * Derive it from the rows held (e.g. the highest stamp received) —
+--         the stamps a receiver holds are its OWN counter's (an applied row
+--         is re-stamped locally), never the provider's.
+--       * Trust the provider's watermark alone (status quo) — heals only at
+--         the daily full pass or on "Sync now".
+--       * A new ``space_sync_applied`` table — ``space_instances`` already is
+--         the (space, household) row, its lifetime (dropped with the last
+--         seat) is the echo's, and it lives in the database that rolls back.
+--   (3) Smallest possible change: one NULL-default column (metadata-only in
+--       SQLite — no table rewrite, no backfill). NULL = never applied a
+--       clean stream from that household → the BEGIN carries no
+--       ``have_seq`` → the provider streams in full once.
+
+ALTER TABLE space_instances ADD COLUMN applied_seq INTEGER;

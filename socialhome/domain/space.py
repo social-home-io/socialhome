@@ -1740,3 +1740,13 @@ class SpaceSyncWatermark:
     seq: int
     shape: str
     full_at: str | None = None
+
+
+def parse_have_seq(value: object) -> int | None:
+    """A ``SPACE_SYNC_BEGIN``'s ``have_seq`` (§25.6, migration 0087) — the
+    requester's echo of the provider snapshot of the last stream it applied
+    cleanly — as a non-negative ``int``, else ``None`` (absent or malformed:
+    the session then streams in full). ``bool`` is not an int here."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value

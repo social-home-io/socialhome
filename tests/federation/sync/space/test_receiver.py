@@ -926,7 +926,9 @@ async def _members_chunk(kp, sync_id: str, *, user: str = "u-1") -> bytes:
     return serialise_chunk(await _sign_as_peer(kp, envelope))
 
 
-async def _sentinel_frame(kp, sync_id: str, chunk_count: int | None) -> bytes:
+async def _sentinel_frame(
+    kp, sync_id: str, chunk_count: int | None, snapshot_seq: object = None
+) -> bytes:
     sentinel = {
         "sync_id": sync_id,
         "resource": SENTINEL_RESOURCE,
@@ -935,6 +937,8 @@ async def _sentinel_frame(kp, sync_id: str, chunk_count: int | None) -> bytes:
     }
     if chunk_count is not None:
         sentinel["chunk_count"] = chunk_count
+    if snapshot_seq is not None:
+        sentinel["snapshot_seq"] = snapshot_seq
     return serialise_chunk(await _sign_as_peer(kp, sentinel))
 
 
@@ -1018,3 +1022,74 @@ async def test_a_sentinel_without_a_count_is_never_clean(bus, receiver, peer_set
     _, kp = peer_setup
     await r.on_chunk(await _members_chunk(kp, "s-old"), from_instance="peer-a")
     assert (await _completion(bus, r, kp, "s-old", None)).clean is False
+
+
+# ── §25.6 echo (migration 0087): a clean stream records its snapshot ─────
+
+
+class _AppliedSeqs:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.recorded: list[tuple[str, str, int]] = []
+        self._fail = fail
+
+    async def record_applied(self, space_id: str, instance_id: str, seq: int):
+        if self._fail:
+            raise RuntimeError("database is locked")
+        self.recorded.append((space_id, instance_id, seq))
+
+
+def _echo_receiver(bus, peer, applied) -> SpaceSyncReceiver:
+    return SpaceSyncReceiver(
+        bus=bus,
+        encoder=FederationEncoder(generate_identity_keypair().private_key),
+        crypto=_FakeCrypto(),
+        federation_repo=_FakeFedRepo(peer),
+        space_repo=_FakeSpaceRepo(),
+        space_post_repo=_FakeSpacePostRepo(),
+        space_task_repo=_Stub(),
+        page_repo=_Stub(),
+        sticky_repo=_Stub(),
+        space_calendar_repo=_Stub(),
+        gallery_repo=_Stub(),
+        applied_seqs=applied,
+    )
+
+
+async def test_a_clean_stream_records_the_providers_snapshot(bus, peer_setup):
+    peer, kp = peer_setup
+    applied = _AppliedSeqs()
+    r = _echo_receiver(bus, peer, applied)
+    await r.on_chunk(await _members_chunk(kp, "s-echo"), from_instance="peer-a")
+    await r.on_chunk(await _sentinel_frame(kp, "s-echo", 1, 41), from_instance="peer-a")
+    assert applied.recorded == [("sp-1", "peer-a", 41)]
+
+
+@pytest.mark.parametrize("snapshot", [None, -1, "41", True])
+async def test_no_valid_snapshot_records_nothing(bus, peer_setup, snapshot):
+    peer, kp = peer_setup
+    applied = _AppliedSeqs()
+    r = _echo_receiver(bus, peer, applied)
+    await r.on_chunk(
+        await _sentinel_frame(kp, "s-none", 0, snapshot), from_instance="peer-a"
+    )
+    assert applied.recorded == []
+
+
+async def test_an_unclean_stream_records_nothing(bus, peer_setup):
+    peer, kp = peer_setup
+    applied = _AppliedSeqs()
+    r = _echo_receiver(bus, peer, applied)
+    await r.on_chunk(await _members_chunk(kp, "s-gap2"), from_instance="peer-a")
+    await r.on_chunk(await _sentinel_frame(kp, "s-gap2", 2, 41), from_instance="peer-a")
+    assert applied.recorded == []
+
+
+async def test_a_failed_echo_write_still_completes_the_stream(bus, peer_setup):
+    """Bookkeeping is fail-soft: the requester still confirms (the next
+    BEGIN then carries the older echo — more data, never less)."""
+    peer, kp = peer_setup
+    r = _echo_receiver(bus, peer, _AppliedSeqs(fail=True))
+    captured: list[SpaceSyncComplete] = []
+    bus.subscribe(SpaceSyncComplete, captured.append)
+    await r.on_chunk(await _sentinel_frame(kp, "s-fail", 0, 7), from_instance="peer-a")
+    assert [e.clean for e in captured] == [True]

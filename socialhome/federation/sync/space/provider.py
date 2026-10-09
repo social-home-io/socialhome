@@ -282,6 +282,7 @@ class SpaceSyncService:
                 sync_id=sync_id,
                 sig_suite=self._sig_suite,
                 chunk_count=chunk_count,
+                snapshot_seq=session.snapshot_seq,
             )
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.
@@ -360,6 +361,9 @@ class SpaceSyncService:
             instance_id=session.requester_instance_id,
             shape=session.shape,
             sync_mode=session.sync_mode,
+            # The requester's echo (migration 0087): ``None`` streams in
+            # full, a lower one re-streams what a rolled-back requester lost.
+            have_seq=getattr(session, "have_seq", None),
         )
         log.info(
             "sync %s: %s stream of space %s to %s (snapshot %d%s)",
