@@ -17,7 +17,7 @@ class _Repo:
         self.asked: list[tuple] = []
 
     async def list_task_tombstones(
-        self, space_id, *, since=None, limit=500, before=None
+        self, space_id, *, since=None, limit=500, before=None, since_seq=None
     ):
         self.asked.append((space_id, since, limit, before))
         return [

@@ -440,6 +440,11 @@ class SyncSessionRecord:
     since_seq: int | None = None
     #: … the shape it was planned under …
     shape: str = ""
+    #: … the requester's echo from its BEGIN (``have_seq``, migration 0087,
+    #: parsed by :func:`~.sync.space.watermark.parse_have_seq`): our snapshot
+    #: of the last stream it applied cleanly. ``None`` (absent / malformed):
+    #: a full stream. The session streams since ``min(watermark, have_seq)``.
+    have_seq: int | None = None
     #: … and whether every chunk and the sentinel shipped. Only a clean
     #: stream the requester confirms (``SPACE_SYNC_COMPLETE``) advances the
     #: requester's watermark — to ``snapshot_seq``, never further.

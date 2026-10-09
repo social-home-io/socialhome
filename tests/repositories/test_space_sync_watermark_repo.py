@@ -76,3 +76,57 @@ async def test_the_watermark_goes_with_the_seat(env):
         "INSERT INTO space_instances(space_id, instance_id) VALUES('sp','peer')"
     )
     assert await repo.get("sp", "peer") is None
+
+
+# ── The requester's echo (migration 0087) ─────────────────────────────────
+
+
+async def test_no_applied_seq_until_a_clean_stream_is_recorded(env):
+    _db, repo = env
+    assert await repo.applied_seq("sp", "peer") is None
+    assert await repo.applied_seq("sp", "stranger") is None
+
+
+async def test_record_applied_keeps_the_latest_and_leaves_the_watermark(env):
+    _db, repo = env
+    await repo.confirm("sp", "peer", seq=5, shape="s", full_at="t")
+    await repo.record_applied("sp", "peer", 11)
+    await repo.record_applied("sp", "peer", 12)
+    assert await repo.applied_seq("sp", "peer") == 12
+    assert (await repo.get("sp", "peer")).seq == 5
+
+
+async def test_record_applied_for_a_household_without_a_seat_is_a_noop(env):
+    _db, repo = env
+    await repo.record_applied("sp", "stranger", 3)
+    assert await repo.applied_seq("sp", "stranger") is None
+
+
+async def test_the_applied_seq_goes_with_the_seat(env):
+    db, repo = env
+    await repo.record_applied("sp", "peer", 4)
+    await db.enqueue(
+        "DELETE FROM space_instances WHERE space_id='sp' AND instance_id='peer'"
+    )
+    await db.enqueue(
+        "INSERT INTO space_instances(space_id, instance_id) VALUES('sp','peer')"
+    )
+    assert await repo.applied_seq("sp", "peer") is None
+
+
+@pytest.mark.parametrize("seq", [2**63, -1])
+async def test_record_applied_refuses_a_value_sqlite_cannot_hold(env, seq):
+    """Refused before it reaches the writer: an out-of-range int raises
+    ``OverflowError`` inside the coalesced batch and fails every write in it."""
+    db, repo = env
+    await repo.record_applied("sp", "peer", 5)
+    with pytest.raises(ValueError):
+        await repo.record_applied("sp", "peer", seq)
+    await db.enqueue(
+        "INSERT INTO space_instances(space_id, instance_id) VALUES('sp','other')"
+    )
+    assert await repo.applied_seq("sp", "peer") == 5
+    assert "other" in {
+        r["instance_id"]
+        for r in await db.fetchall("SELECT instance_id FROM space_instances")
+    }

@@ -400,3 +400,20 @@ async def test_tombstones_page_since_a_stamp(two_spaces):
     await env.repo.delete(second.id, space_id="space-a", deleted_by="u-a")
     page, _ = await env.repo.list_tombstones_page("space-a", since=mark)
     assert [t.id for t in page] == [second.id]
+
+
+async def test_space_stickies_changed_since_a_stamp(env):
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-s','S','inst','alice','ab')"
+    )
+    a = await env.repo.add(author="u", content="a", space_id="sp-s")
+    b = await env.repo.add(author="u", content="b", space_id="sp-s")
+    row = await env.db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    assert await env.repo.list(space_id="sp-s", since_seq=mark) == []
+    await env.repo.update_content(b.id, "b2", space_id="sp-s")
+    assert [s.id for s in await env.repo.list(space_id="sp-s", since_seq=mark)] == [
+        b.id
+    ]
+    assert {s.id for s in await env.repo.list(space_id="sp-s")} == {a.id, b.id}

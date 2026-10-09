@@ -946,7 +946,8 @@ async def test_0063_timetable_tables_and_feature_columns(tmp_path):
         sp = {
             r["name"] for r in await db.fetchall("PRAGMA table_info(space_timetables)")
         }
-        assert sp == common | {"space_id", "deleted_at"}
+        # ``sync_seq``: the §25.6 change stamp of migration 0088.
+        assert sp == common | {"space_id", "deleted_at", "sync_seq"}
 
         idx = await db.fetchall("PRAGMA index_list(space_timetables)")
         assert "idx_space_timetables_space" in {r["name"] for r in idx}

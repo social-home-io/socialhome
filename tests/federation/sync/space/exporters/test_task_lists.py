@@ -11,7 +11,7 @@ class _Repo:
     def __init__(self) -> None:
         self.asked: list[str] = []
 
-    async def list_lists(self, space_id):
+    async def list_lists(self, space_id, *, since_seq=None):
         self.asked.append(space_id)
         return [TaskList(id="l1", name="Chores", created_by="u1")]
 

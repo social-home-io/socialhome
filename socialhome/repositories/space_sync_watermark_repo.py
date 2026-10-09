@@ -7,6 +7,10 @@
   the provider's watermark for a (space, member household): what that
   household confirmed of our last stream. Lives on the seat row, so it goes
   when the household's last seat does (a rejoin syncs in full).
+* ``space_instances.applied_seq`` (migration 0087) — the REQUESTER's echo
+  for a (space, provider household): that provider's snapshot of the last
+  stream applied cleanly here. Sent as ``have_seq`` in a periodic BEGIN; it
+  lives in this database, so it rolls back with the rows it describes.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.space import SpaceSyncWatermark
+from ..domain.space import SpaceSyncWatermark, parse_have_seq
 
 
 @runtime_checkable
@@ -40,6 +44,16 @@ class AbstractSpaceSyncWatermarkRepo(Protocol):
         """Record a confirmed stream. ``full_at`` ``None`` keeps the time of
         the last full stream (an incremental one). A household without a
         seat in the space gets nothing."""
+        ...
+
+    async def applied_seq(self, space_id: str, instance_id: str) -> int | None:
+        """The provider ``instance_id``'s snapshot of the last stream applied
+        cleanly here for the space; ``None`` when none is recorded."""
+        ...
+
+    async def record_applied(self, space_id: str, instance_id: str, seq: int) -> None:
+        """Record that a stream from ``instance_id`` up to its snapshot
+        ``seq`` applied cleanly here. No seat row for that household: no-op."""
         ...
 
 
@@ -83,4 +97,24 @@ class SqliteSpaceSyncWatermarkRepo:
             " synced_full_at=COALESCE(?, synced_full_at)"
             " WHERE space_id=? AND instance_id=?",
             (int(seq), shape, full_at, space_id, instance_id),
+        )
+
+    async def applied_seq(self, space_id: str, instance_id: str) -> int | None:
+        row = await self._db.fetchone(
+            "SELECT applied_seq FROM space_instances WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+        if row is None or row["applied_seq"] is None:
+            return None
+        return int(row["applied_seq"])
+
+    async def record_applied(self, space_id: str, instance_id: str, seq: int) -> None:
+        # Refused here, never in the writer: an out-of-range int raises
+        # ``OverflowError`` inside the coalesced batch and fails all of it.
+        if parse_have_seq(seq) is None:
+            raise ValueError(f"applied seq out of range: {seq!r}")
+        await self._db.enqueue(
+            "UPDATE space_instances SET applied_seq=?"
+            " WHERE space_id=? AND instance_id=?",
+            (int(seq), space_id, instance_id),
         )

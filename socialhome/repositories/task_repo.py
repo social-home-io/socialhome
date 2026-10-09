@@ -30,7 +30,7 @@ from ..domain.task import (
     TaskStatus,
     normalize_labels,
 )
-from .base import dump_json, load_json, row_to_dict, rows_to_dicts
+from .base import changed_since_sql, dump_json, load_json, row_to_dict, rows_to_dicts
 
 
 # ─── Shared helpers ───────────────────────────────────────────────────────
@@ -463,7 +463,13 @@ class SqliteTaskRepo:
 class AbstractSpaceTaskRepo(Protocol):
     async def save_list(self, list_: TaskList, *, space_id: str) -> bool: ...
     async def get_list(self, list_id: str) -> tuple[str, TaskList] | None: ...
-    async def list_lists(self, space_id: str) -> list[TaskList]: ...
+    async def list_lists(
+        self, space_id: str, *, since_seq: int | None = None
+    ) -> list[TaskList]:
+        """The space's live lists; ``since_seq`` (a §25.6 incremental
+        session, migration 0088): only those stamped above it."""
+        ...
+
     async def open_counts(self, space_id: str) -> dict[str, int]: ...
     async def list_lists_since(
         self, space_id: str, since: str, *, limit: int = 500
@@ -482,6 +488,7 @@ class AbstractSpaceTaskRepo(Protocol):
         since: str | None = None,
         limit: int = 500,
         before: tuple[str, str] | None = None,
+        since_seq: int | None = None,
     ) -> list[TaskListTombstone]: ...
 
     async def save(self, task: Task, *, space_id: str) -> bool: ...
@@ -494,7 +501,13 @@ class AbstractSpaceTaskRepo(Protocol):
         space_id: str,
         include_done: bool = True,
     ) -> list[Task]: ...
-    async def list_by_space(self, space_id: str) -> list[Task]: ...
+    async def list_by_space(
+        self, space_id: str, *, since_seq: int | None = None
+    ) -> list[Task]:
+        """The space's live tasks (archived included); ``since_seq``: only
+        those stamped above it (migration 0088)."""
+        ...
+
     async def list_since(
         self,
         space_id: str,
@@ -522,6 +535,7 @@ class AbstractSpaceTaskRepo(Protocol):
         since: str | None = None,
         limit: int = 500,
         before: tuple[str, str] | None = None,
+        since_seq: int | None = None,
     ) -> list[TaskTombstone]: ...
 
 
@@ -572,11 +586,15 @@ class SqliteSpaceTaskRepo:
             return None
         return d["space_id"], _row_to_list(d)
 
-    async def list_lists(self, space_id: str) -> list[TaskList]:
+    async def list_lists(
+        self, space_id: str, *, since_seq: int | None = None
+    ) -> list[TaskList]:
+        changed, changed_params = changed_since_sql("sync_seq", since_seq)
         rows = await self._db.fetchall(
             "SELECT * FROM space_task_lists WHERE space_id=? AND deleted_at IS NULL"
-            " ORDER BY created_at",
-            (space_id,),
+            + changed
+            + " ORDER BY created_at",
+            (space_id, *changed_params),
         )
         return [_row_to_list(d) for d in rows_to_dicts(rows)]
 
@@ -673,16 +691,20 @@ class SqliteSpaceTaskRepo:
         since: str | None = None,
         limit: int = 500,
         before: tuple[str, str] | None = None,
+        since_seq: int | None = None,
     ) -> list[TaskListTombstone]:
         """The space's deleted lists, newest delete first (so a ``limit``
         keeps the deletes a peer is likeliest to have missed) — all of
         them, or those deleted at or after ``since`` (same ``>=`` compare
-        as :meth:`list_lists_since`)."""
+        as :meth:`list_lists_since`). ``since_seq`` (§25.6 incremental,
+        migration 0088): only rows stamped above it — the keyset is
+        unchanged, the stamp only filters."""
+        changed, changed_params = changed_since_sql("sync_seq", since_seq)
         sql = (
             "SELECT id, created_by, deleted_at, deleted_by FROM space_task_lists"
-            " WHERE space_id=? AND deleted_at IS NOT NULL"
+            " WHERE space_id=? AND deleted_at IS NOT NULL" + changed
         )
-        params: tuple = (space_id,)
+        params: tuple = (space_id, *changed_params)
         if since is not None:
             sql += " AND datetime(deleted_at) >= datetime(?)"
             params += (since,)
@@ -816,11 +838,15 @@ class SqliteSpaceTaskRepo:
             )
         return [_row_to_task(d) for d in rows_to_dicts(rows)]
 
-    async def list_by_space(self, space_id: str) -> list[Task]:
+    async def list_by_space(
+        self, space_id: str, *, since_seq: int | None = None
+    ) -> list[Task]:
+        changed, changed_params = changed_since_sql("sync_seq", since_seq)
         rows = await self._db.fetchall(
             "SELECT * FROM space_tasks WHERE space_id=? AND deleted_at IS NULL"
-            " ORDER BY position, created_at",
-            (space_id,),
+            + changed
+            + " ORDER BY position, created_at",
+            (space_id, *changed_params),
         )
         return [_row_to_task(d) for d in rows_to_dicts(rows)]
 
@@ -911,6 +937,7 @@ class SqliteSpaceTaskRepo:
         since: str | None = None,
         limit: int = 500,
         before: tuple[str, str] | None = None,
+        since_seq: int | None = None,
     ) -> list[TaskTombstone]:
         """The space's deleted tasks, newest delete first (so a ``limit``
         keeps the deletes a peer is likeliest to have missed) — all of
@@ -921,14 +948,17 @@ class SqliteSpaceTaskRepo:
         Tasks of a deleted list are left out: the migration-0071 trigger
         tombstoned them with the list, and the list's own tombstone
         (``task_lists_deleted`` / the replayed list delete) does the same
-        on the receiver — shipping them again would only be noise."""
+        on the receiver — shipping them again would only be noise.
+        ``since_seq`` (§25.6 incremental, migration 0088): only rows
+        stamped above it; the keyset is unchanged."""
+        changed, changed_params = changed_since_sql("sync_seq", since_seq)
         sql = (
             "SELECT id, list_id, created_by, deleted_at, deleted_by"
             " FROM space_tasks WHERE space_id=? AND deleted_at IS NOT NULL"
             " AND list_id NOT IN (SELECT id FROM space_task_lists"
-            "  WHERE space_id=? AND deleted_at IS NOT NULL)"
+            "  WHERE space_id=? AND deleted_at IS NOT NULL)" + changed
         )
-        params: tuple = (space_id, space_id)
+        params: tuple = (space_id, space_id, *changed_params)
         if since is not None:
             sql += " AND datetime(deleted_at) >= datetime(?)"
             params += (since,)

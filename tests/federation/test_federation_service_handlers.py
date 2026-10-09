@@ -440,6 +440,28 @@ async def test_handle_space_sync_begin_accepted_no_prefer_direct(svc):
     svc._space_sync_service.stream_initial.assert_awaited_once_with(record)
 
 
+@pytest.mark.parametrize(
+    ("wire", "parsed"),
+    [(12, 12), (None, None), ("12", None), (-3, None), (2**63, None)],
+)
+async def test_handle_space_sync_begin_parses_the_have_seq_echo(svc, wire, parsed):
+    """The BEGIN's ``have_seq`` (migration 0087) reaches the session parsed:
+    only a non-negative int survives; anything else streams in full."""
+    svc._sync_manager = MagicMock()
+    svc._sync_manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(accepted=False, next_event=None)
+    )
+    payload = {"sync_id": "s", "space_id": "sp", "sync_mode": "incremental"}
+    if wire is not None:
+        payload["have_seq"] = wire
+    await svc._handle_space_sync_begin(
+        _event("SPACE_SYNC_BEGIN", payload, space_id="sp")
+    )
+    kwargs = svc._sync_manager.begin_session.await_args.kwargs
+    assert kwargs["have_seq"] == parsed
+    assert kwargs["sync_mode"] == "incremental"
+
+
 async def test_handle_space_sync_begin_offer_has_no_signaling_node(svc):
     """The OFFER carries only the SDP + ICE servers — the GFS is never asked
     for a signaling node, so it learns nothing about the sync."""
@@ -778,6 +800,8 @@ def _solicited(svc, *, provider="peer-1", space_id="sp"):
             sync_id="s1",
             space_id=space_id,
             provider_instance_id=provider,
+            sync_mode="incremental",
+            have_seq=41,
         ),
     )
 
@@ -808,6 +832,10 @@ async def test_handle_space_sync_offer_apply_offer_called(svc):
         # only cover the apply_offer branch here.
         pass
     svc._sync_manager.apply_offer.assert_awaited_once()
+    # The session carries what our BEGIN asked for, so a relay retry after
+    # an ICE timeout asks for the same (incremental) stream.
+    kwargs = svc._sync_manager.apply_offer.await_args.kwargs
+    assert (kwargs["sync_mode"], kwargs["have_seq"]) == ("incremental", 41)
 
 
 # ─── Part A: requester-side direct-ready / direct-failed watcher ──

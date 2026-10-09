@@ -509,3 +509,19 @@ class TestTombstone:
     async def test_missing_space_refused(self, env):
         assert await env.space_repo.tombstone("x", space_id="sp-nope", at=T0) is False
         assert await env.space_repo.is_tombstoned("x") is False
+
+
+# ── §25.6 incremental reads (migration 0088 change stamps) ────────────────
+
+
+async def test_space_timetables_changed_since_a_stamp(env):
+    repo = env.space_repo
+    for tid in ("tt-a", "tt-b"):
+        assert await repo.insert(_tt(tid, name=tid), space_id="sp-1")
+    row = await env.db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
+    mark = int(row["seq"])
+    assert await repo.list_by_space("sp-1", since_seq=mark) == []
+    edited = _tt("tt-b", name="renamed", version=2)
+    assert await repo.save(edited, space_id="sp-1", expected_version=1)
+    assert [t.id for t in await repo.list_by_space("sp-1", since_seq=mark)] == ["tt-b"]
+    assert len(await repo.list_by_space("sp-1")) == 2

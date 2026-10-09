@@ -59,6 +59,7 @@ from ..domain.events import (
     SpaceSyncDeferred,
 )
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.space import parse_have_seq
 from ..domain.media_validator import validate_inbound_media_meta
 from ..webrtc_ice import warn_if_no_turn, warn_if_turn_unusable
 from ..domain.federation import (
@@ -618,6 +619,8 @@ class FederationService:
         sync_id: str,
         space_id: str,
         provider_instance_id: str,
+        sync_mode: str = "initial",
+        have_seq: int | None = None,
     ) -> None:
         """Note a ``SPACE_SYNC_BEGIN`` we are sending (§25.6).
 
@@ -632,6 +635,8 @@ class FederationService:
             sync_id=sync_id,
             space_id=space_id,
             provider_instance_id=provider_instance_id,
+            sync_mode=sync_mode,
+            have_seq=have_seq,
         )
 
     def attach_sync_manager(self, sync_manager) -> None:
@@ -3400,6 +3405,9 @@ class FederationService:
             provider_instance_id=self._own_instance_id,
             sync_mode=str(payload.get("sync_mode", "initial")),
             ice_servers=self._ice_servers,
+            # §25.6 (migration 0087): the requester's echo of the last
+            # stream it applied cleanly. Absent / malformed → a full stream.
+            have_seq=parse_have_seq(payload.get("have_seq")),
         )
         if not decision.accepted and decision.next_event is not None:
             if (
@@ -3589,6 +3597,10 @@ class FederationService:
             provider_instance_id=event.from_instance,
             space_id=space_id,
             ice_servers=payload.get("ice_servers"),
+            # What our BEGIN asked for — a relay retry re-sends it, so a
+            # periodic sync behind a NAT stays incremental.
+            sync_mode=pending.sync_mode,
+            have_seq=pending.have_seq,
         )
         await self.send_event(
             to_instance_id=event.from_instance,

@@ -1423,15 +1423,22 @@ space's retention window for live posts and chat (everything without
 retention; gallery items and every tombstone resource always in full),
 read page by page in bounded memory — never a fixed count. The 30-minute
 periodic re-sync is `incremental`: no media re-ship, and — for the
-history-growing resources (posts and their polls / schedules / listings,
-comments, chat, gallery, calendar and the 0085 tombstones) — only the rows
-changed since the stream the household last confirmed. Each covered row
+content resources (posts and their polls / schedules / listings,
+comments, chat, gallery, calendar, stickies, zones, task lists, tasks,
+pages, timetables and every tombstone resource) — only the rows changed
+since the stream the household last confirmed; only the roster (bans,
+members, member pictures), which every record is admitted against, is
+streamed whole every time. Each covered row
 carries a trigger-maintained change stamp from one monotonic per-household
-counter (migration 0086), and the provider keeps, on the household's
-`space_instances` row, the counter snapshot of its last confirmed stream;
-no watermark, a changed session shape (record shape, the household's
-version, retention, its resource set) or a last full stream older than a
-day falls back to the whole window. A session is reaped only when idle,
+counter (migrations 0086, 0088), and the provider keeps, on the household's
+`space_instances` row, the counter snapshot of its last confirmed stream.
+The requester echoes, from its own `space_instances` row (migration 0087),
+the snapshot of the last stream it applied cleanly (`have_seq`), and the
+provider streams since the lower of the two — so a household restored from
+an older file snapshot re-streams the gap on its next periodic session;
+no watermark, no echo, a changed session shape (record shape, the
+household's version, retention, its resource set) or a last full stream
+older than a day falls back to the whole window. A session is reaped only when idle,
 never mid-stream; see
 [`protocol/sync.md`](./protocol/sync.md#what-a-sync-streams) and
 [incremental sessions](./protocol/sync.md#incremental-sessions-change-stamps--per-household-watermark).

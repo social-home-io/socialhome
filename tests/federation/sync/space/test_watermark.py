@@ -26,13 +26,30 @@ from socialhome.federation.sync.space.exporters import (
     PostsDeletedExporter,
     PostsExporter,
     SchedulesExporter,
+    PagesDeletedExporter,
+    PagesExporter,
     StickiesDeletedExporter,
+    StickiesExporter,
+    TaskListsDeletedExporter,
+    TaskListsExporter,
+    TasksArchivedExporter,
+    TasksDeletedExporter,
+    TasksExporter,
+    TimetablesExporter,
     ZonesDeletedExporter,
+    ZonesExporter,
 )
+from socialhome.domain.page import Page
+from socialhome.domain.task import Task, TaskList, TaskStatus
+from socialhome.domain.timetable import Timetable
+from socialhome.repositories.page_repo import SqlitePageRepo
+from socialhome.repositories.task_repo import SqliteSpaceTaskRepo
+from socialhome.repositories.timetable_repo import SqliteSpaceTimetableRepo
 from socialhome.federation.sync.space.watermark import (
     FULL_RESYNC_INTERVAL_S,
     SYNC_SHAPE_VERSION,
     SyncWatermarks,
+    parse_have_seq,
     session_shape,
 )
 from socialhome.federation.sync.space.window import SyncWindows
@@ -99,7 +116,11 @@ async def test_snapshot_reads_the_counter():
 
 async def test_an_incremental_session_with_a_fresh_matching_watermark_streams_since_it():
     since = await _marks(_Repo(wm=_wm())).since_for(
-        space_id="sp", instance_id="h", shape="S", sync_mode="incremental"
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=100,
     )
     assert since == 7
 
@@ -107,7 +128,7 @@ async def test_an_incremental_session_with_a_fresh_matching_watermark_streams_si
 @pytest.mark.parametrize("mode", ["initial", "full"])
 async def test_every_other_session_streams_in_full(mode):
     since = await _marks(_Repo(wm=_wm())).since_for(
-        space_id="sp", instance_id="h", shape="S", sync_mode=mode
+        space_id="sp", instance_id="h", shape="S", sync_mode=mode, have_seq=100
     )
     assert since is None
 
@@ -124,7 +145,11 @@ async def test_every_other_session_streams_in_full(mode):
 )
 async def test_fails_safe_toward_a_full_stream(wm):
     since = await _marks(_Repo(wm=wm)).since_for(
-        space_id="sp", instance_id="h", shape="S", sync_mode="incremental"
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=100,
     )
     assert since is None
 
@@ -132,9 +157,61 @@ async def test_fails_safe_toward_a_full_stream(wm):
 async def test_a_naive_full_at_reads_as_utc():
     wm = SpaceSyncWatermark(seq=3, shape="S", full_at="2026-10-09 11:00:00")
     since = await _marks(_Repo(wm=wm)).since_for(
-        space_id="sp", instance_id="h", shape="S", sync_mode="incremental"
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=100,
     )
     assert since == 3
+
+
+# ── The requester's echo (have_seq, migration 0087) ───────────────────────
+
+
+async def _since(have_seq, wm=None):
+    return await _marks(_Repo(wm=wm or _wm(seq=7))).since_for(
+        space_id="sp",
+        instance_id="h",
+        shape="S",
+        sync_mode="incremental",
+        have_seq=have_seq,
+    )
+
+
+async def test_a_lower_have_seq_wins_a_rolled_back_requester_re_streams_the_gap():
+    assert await _since(3) == 3
+
+
+async def test_a_have_seq_above_the_watermark_is_clamped_never_trusted_upward():
+    assert await _since(10**12) == 7
+    assert await _since(7) == 7
+
+
+async def test_a_begin_without_have_seq_streams_in_full():
+    assert await _since(None) is None
+
+
+async def test_have_seq_never_rescues_an_untrusted_watermark():
+    assert await _since(3, wm=_wm(shape="OLD")) is None
+
+
+@pytest.mark.parametrize(
+    ("wire", "parsed"),
+    [
+        (0, 0),
+        (12, 12),
+        (None, None),
+        (-1, None),
+        (True, None),
+        (False, None),
+        ("12", None),
+        (1.0, None),
+        ([], None),
+    ],
+)
+def test_parse_have_seq_accepts_only_a_non_negative_int(wire, parsed):
+    assert parse_have_seq(wire) == parsed
 
 
 async def test_confirm_records_a_full_stream_with_its_time():
@@ -236,6 +313,51 @@ async def _covered_record_keys(db) -> dict[str, list[str]]:
     )
     sticky = await stickies.add(author="u", content="n", space_id="sp")
     await stickies.delete(sticky.id, space_id="sp", deleted_by="u")
+    await stickies.add(author="u", content="live", space_id="sp")
+    await db.enqueue(
+        "INSERT INTO space_zones(id, space_id, name, latitude, longitude, radius_m,"
+        " created_by) VALUES('z-live','sp','Live',1,2,100,'u')"
+    )
+    tasks = SqliteSpaceTaskRepo(db)
+    for lid in ("l-live", "l-gone"):
+        await tasks.save_list(TaskList(id=lid, name=lid, created_by="u"), space_id="sp")
+    await tasks.delete_list("l-gone", space_id="sp", deleted_by="u")
+    for tid, archived in (("t-live", None), ("t-arch", now), ("t-gone", None)):
+        await tasks.save(
+            Task(
+                id=tid,
+                list_id="l-live",
+                title=tid,
+                status=TaskStatus.TODO,
+                position=0,
+                created_by="u",
+                created_at=now,
+                updated_at=now,
+                archived_at=archived,
+            ),
+            space_id="sp",
+        )
+    await tasks.delete("t-gone", space_id="sp", deleted_by="u")
+    pages = SqlitePageRepo(db)
+    for pid in ("pg-live", "pg-gone"):
+        await pages.save(
+            Page(
+                id=pid,
+                title=pid,
+                content="c",
+                created_by="u",
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+                space_id="sp",
+            ),
+            space_id="sp",
+        )
+    await pages.delete("pg-gone", space_id="sp", deleted_by="u")
+    timetables = SqliteSpaceTimetableRepo(db)
+    await timetables.insert(
+        Timetable(id="tt", name="T", created_by="u", created_at=now, updated_at=now),
+        space_id="sp",
+    )
     await db.enqueue(
         "INSERT INTO space_zones(id, space_id, name, latitude, longitude, radius_m,"
         " created_by, deleted_at, deleted_by) VALUES('z','sp','Z',1,2,100,'u','2026','u')"
@@ -267,7 +389,17 @@ async def _covered_record_keys(db) -> dict[str, list[str]]:
         CalendarExporter(cal),
         CalendarDeletedExporter(cal),
         StickiesDeletedExporter(stickies),
+        StickiesExporter(stickies),
         ZonesDeletedExporter(zones),
+        ZonesExporter(zones),
+        TaskListsExporter(tasks),
+        TaskListsDeletedExporter(tasks),
+        TasksExporter(tasks),
+        TasksArchivedExporter(tasks),
+        TasksDeletedExporter(tasks),
+        PagesExporter(pages),
+        PagesDeletedExporter(pages),
+        TimetablesExporter(timetables),
         ChatMessagesExporter(convos, spaces),
         ChatMessagesDeletedExporter(convos, spaces),
     ]
@@ -423,12 +555,118 @@ RECORD_KEYS_AT_SHAPE: dict[str, list[str]] = {
     "schedules": ["deadline", "post_id", "slots", "title"],
     "space_zones_deleted": ["actor_user_id", "created_at", "created_by", "id"],
     "stickies_deleted": ["actor_user_id", "author", "created_at", "id"],
+    "pages": [
+        "conflict",
+        "content",
+        "cover_image_url",
+        "created_at",
+        "created_by",
+        "delete_approved_at",
+        "delete_approved_by",
+        "delete_requested_at",
+        "delete_requested_by",
+        "id",
+        "last_edited_at",
+        "last_editor_user_id",
+        "lock_expires_at",
+        "locked_at",
+        "locked_by",
+        "seq",
+        "space_id",
+        "title",
+        "updated_at",
+        "version_hash",
+    ],
+    "pages_deleted": ["actor_user_id", "created_by", "id", "page_id", "space_id"],
+    "space_zones": [
+        "color",
+        "created_at",
+        "created_by",
+        "id",
+        "latitude",
+        "longitude",
+        "name",
+        "radius_m",
+        "space_id",
+        "updated_at",
+    ],
+    "stickies": [
+        "author",
+        "color",
+        "content",
+        "created_at",
+        "id",
+        "position_x",
+        "position_y",
+        "space_id",
+        "updated_at",
+    ],
+    "task_lists": ["created_by", "id", "name", "space_id"],
+    "task_lists_deleted": ["actor_user_id", "created_by", "id", "space_id"],
+    "tasks": [
+        "archived_at",
+        "assignees",
+        "created_at",
+        "created_by",
+        "description",
+        "due_date",
+        "id",
+        "labels",
+        "list_id",
+        "position",
+        "priority",
+        "recurrence",
+        "recurrence_parent_id",
+        "space_id",
+        "status",
+        "title",
+        "updated_at",
+    ],
+    "tasks_archived": [
+        "archived_at",
+        "assignees",
+        "created_at",
+        "created_by",
+        "description",
+        "due_date",
+        "id",
+        "labels",
+        "list_id",
+        "position",
+        "priority",
+        "recurrence",
+        "recurrence_parent_id",
+        "space_id",
+        "status",
+        "title",
+        "updated_at",
+    ],
+    "tasks_deleted": ["actor_user_id", "created_by", "id", "list_id", "space_id"],
+    "timetables": [
+        "assignees",
+        "color",
+        "created_at",
+        "created_by",
+        "days",
+        "defaults",
+        "entries",
+        "id",
+        "name",
+        "overrides",
+        "schema",
+        "tz",
+        "updated_at",
+        "updated_by",
+        "validity",
+        "version",
+        "week_start",
+    ],
 }
 
 
 async def test_record_shapes_are_pinned_to_the_shape_version(db):
     keys = await _covered_record_keys(db)
-    assert SYNC_SHAPE_VERSION == 1 and keys == RECORD_KEYS_AT_SHAPE, (
+    assert SYNC_SHAPE_VERSION == 2 and keys == RECORD_KEYS_AT_SHAPE, (
         "A covered §25.6 exporter's record shape changed. Bump "
         "SYNC_SHAPE_VERSION (federation/sync/space/watermark.py) so every "
         "household gets one full stream in the new shape, then update "

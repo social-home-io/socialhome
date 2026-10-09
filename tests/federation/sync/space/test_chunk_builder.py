@@ -150,6 +150,35 @@ async def test_build_sentinel_is_signed_not_encrypted(builder):
     assert "ed25519" in sentinel["signatures"]
 
 
+async def test_the_sentinel_signs_its_count_and_snapshot():
+    kp = generate_identity_keypair()
+    encoder = FederationEncoder(kp.private_key)
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    sentinel = await builder.build_sentinel(
+        space_id="sp-1",
+        sync_id="sync-x",
+        sig_suite="ed25519",
+        chunk_count=3,
+        snapshot_seq=41,
+    )
+    assert (sentinel["chunk_count"], sentinel["snapshot_seq"]) == (3, 41)
+    body = {k: v for k, v in sentinel.items() if k != "signatures"}
+    assert encoder.verify_signatures_all(
+        orjson.dumps(body),
+        suite="ed25519",
+        signatures=sentinel["signatures"],
+        ed_public_key=kp.public_key,
+        pq_public_key=None,
+    )
+
+
+async def test_a_sentinel_without_watermarks_carries_no_snapshot(builder):
+    sentinel = await builder.build_sentinel(
+        space_id="sp-1", sync_id="sync-x", sig_suite="ed25519"
+    )
+    assert "snapshot_seq" not in sentinel and "chunk_count" not in sentinel
+
+
 async def test_build_chunks_rejects_unknown_resource(builder):
     exporter = _FakeExporter(resource="not_a_real_resource", records=[{"x": 1}])
     with pytest.raises(ValueError, match="not in ALLOWED_RESOURCES"):

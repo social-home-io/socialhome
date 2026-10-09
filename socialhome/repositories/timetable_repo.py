@@ -36,7 +36,7 @@ from ..domain.timetable import (
     validity_from_dict,
     validity_to_dict,
 )
-from .base import dump_json, load_json, row_to_dict, rows_to_dicts
+from .base import changed_since_sql, dump_json, load_json, row_to_dict, rows_to_dicts
 
 log = logging.getLogger(__name__)
 
@@ -268,7 +268,13 @@ def _space_insert_params(tt: Timetable, space_id: str) -> tuple[Any, ...]:
 class AbstractSpaceTimetableRepo(Protocol):
     async def get(self, timetable_id: str) -> tuple[str, Timetable] | None: ...
     async def is_tombstoned(self, timetable_id: str) -> bool: ...
-    async def list_by_space(self, space_id: str) -> list[Timetable]: ...
+    async def list_by_space(
+        self, space_id: str, *, since_seq: int | None = None
+    ) -> list[Timetable]:
+        """The space's live timetables; ``since_seq`` (§25.6 incremental,
+        migration 0088): only those stamped above it."""
+        ...
+
     async def list_by_ids(
         self,
         ids: Sequence[str],
@@ -327,12 +333,16 @@ class SqliteSpaceTimetableRepo:
         )
         return row is not None
 
-    async def list_by_space(self, space_id: str) -> list[Timetable]:
+    async def list_by_space(
+        self, space_id: str, *, since_seq: int | None = None
+    ) -> list[Timetable]:
+        changed, changed_params = changed_since_sql("sync_seq", since_seq)
         rows = await self._db.fetchall(
             "SELECT * FROM space_timetables"
             " WHERE space_id=? AND deleted_at IS NULL"
-            " ORDER BY name COLLATE NOCASE, created_at, id",
-            (space_id,),
+            + changed
+            + " ORDER BY name COLLATE NOCASE, created_at, id",
+            (space_id, *changed_params),
         )
         return [_row_to_timetable(d) for d in rows_to_dicts(rows)]
 

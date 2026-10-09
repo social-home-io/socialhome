@@ -61,11 +61,13 @@ class _FakeSession:
         space_id="sp-1",
         requester="peer-r",
         sync_mode="initial",
+        have_seq=None,
     ):
         self.sync_id = sync_id
         self.space_id = space_id
         self.requester_instance_id = requester
         self.sync_mode = sync_mode
+        self.have_seq = have_seq
         self.rtc = _FakeRtc()
         self.touches = 0
 
@@ -1231,7 +1233,7 @@ async def test_an_incremental_session_streams_only_changed_rows_of_covered_resou
 ):
     marks = _Marks(snapshot=40, since=7)
     svc, posts = _inc_provider(encoder, marks)
-    session = _FakeSession(sync_mode="incremental")
+    session = _FakeSession(sync_mode="incremental", have_seq=33)
     await svc.stream_initial(session)
     streamed = _records(session)
     # Covered: only what changed. Kept full (members): everything.
@@ -1241,6 +1243,8 @@ async def test_an_incremental_session_streams_only_changed_rows_of_covered_resou
     plan = marks.planned[0]
     assert plan["space_id"] == "sp-1" and plan["instance_id"] == "peer-r"
     assert plan["sync_mode"] == "incremental"
+    # The requester's echo reaches the watermark decision.
+    assert plan["have_seq"] == 33
     assert plan["shape"].endswith("|members,posts")
     assert (session.snapshot_seq, session.since_seq) == (40, 7)
     assert session.stream_clean is True
@@ -1249,6 +1253,9 @@ async def test_an_incremental_session_streams_only_changed_rows_of_covered_resou
     sentinel = orjson.loads(session.rtc.sent[-1])
     assert sentinel["resource"] == SENTINEL_RESOURCE
     assert sentinel["chunk_count"] == len(session.rtc.sent) - 1
+    # … and the snapshot it streamed up to: the requester's echo
+    # (``have_seq``) once it applied the stream cleanly.
+    assert sentinel["snapshot_seq"] == 40
 
 
 async def test_no_watermark_streams_everything(encoder):

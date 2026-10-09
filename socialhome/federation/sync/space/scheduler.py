@@ -57,6 +57,9 @@ if TYPE_CHECKING:
     from ....infrastructure.reconnect_queue import ReconnectSyncQueue
     from ....repositories.federation_repo import AbstractFederationRepo
     from ....repositories.space_repo import AbstractSpaceRepo
+    from ....repositories.space_sync_watermark_repo import (
+        AbstractSpaceSyncWatermarkRepo,
+    )
     from ...federation_service import FederationService
     from ...sync_manager import SyncSessionManager
 
@@ -135,6 +138,7 @@ class SpaceSyncScheduler:
         "_deferred_tasks",
         "_mesh_announce",
         "_mesh_announced",
+        "_applied_seqs",
     )
 
     def __init__(
@@ -148,8 +152,14 @@ class SpaceSyncScheduler:
         sync_manager: "SyncSessionManager",
         own_instance_id: str,
         interval_seconds: float = PERIODIC_INTERVAL_SECONDS,
+        applied_seqs: "AbstractSpaceSyncWatermarkRepo | None" = None,
     ) -> None:
         self._bus = bus
+        #: §25.6 echo (migration 0087): the provider snapshot of the last
+        #: stream we applied cleanly, per (space, provider) — a periodic
+        #: BEGIN carries it as ``have_seq``. ``None``: never sent, so every
+        #: periodic session streams in full.
+        self._applied_seqs = applied_seqs
         self._federation = federation
         self._federation_repo = federation_repo
         self._space_repo = space_repo
@@ -212,6 +222,32 @@ class SpaceSyncScheduler:
         self._bus.subscribe(SpaceSyncComplete, self._on_space_sync_complete)
         self._bus.subscribe(SpaceAuthorityEchoDue, self._on_authority_echo_due)
         self._bus.subscribe(SpaceSyncDeferred, self._on_sync_deferred)
+
+    async def begin_fields(
+        self, *, space_id: str, peer_instance_id: str, sync_mode: str
+    ) -> dict[str, int]:
+        """The §25.6 incremental fields of a BEGIN to ``peer_instance_id``.
+
+        A periodic (``"incremental"``) session echoes ``have_seq`` — the
+        provider's snapshot of the last stream from it we applied cleanly
+        (migration 0087). It lives in our database, so after a restore from
+        an older file snapshot it is the older value, and the provider
+        re-streams what we lost instead of trusting its own watermark.
+        Nothing recorded (or the read failed): no field — the provider then
+        streams in full. Other modes stream in full anyway.
+        """
+        if sync_mode != "incremental" or self._applied_seqs is None:
+            return {}
+        try:
+            seq = await self._applied_seqs.applied_seq(space_id, peer_instance_id)
+        except Exception:
+            log.exception(
+                "space sync: reading the applied snapshot of %s for %s failed",
+                peer_instance_id,
+                space_id,
+            )
+            return {}
+        return {} if seq is None else {"have_seq": int(seq)}
 
     async def _echo_for(self, space_id: str, to_instance_id: str) -> dict | None:
         if self._authority_echo is None:
@@ -358,19 +394,29 @@ class SpaceSyncScheduler:
             ):
                 prefer_direct = False
             sync_id = uuid.uuid4().hex
+            fields = await self.begin_fields(
+                space_id=space_id,
+                peer_instance_id=peer_instance_id,
+                sync_mode=sync_mode,
+            )
             # Record what we are asking for, so the provider's
             # ``SPACE_SYNC_OFFER`` can be recognised as an ANSWER. An
-            # offer for a sync_id nobody here issued is refused.
+            # offer for a sync_id nobody here issued is refused. The mode
+            # and echo ride along so a relay retry after an ICE timeout
+            # asks for the same stream.
             self._federation.record_sync_request(
                 sync_id=sync_id,
                 space_id=space_id,
                 provider_instance_id=peer_instance_id,
+                sync_mode=sync_mode,
+                have_seq=fields.get("have_seq"),
             )
             payload: dict = {
                 "sync_id": sync_id,
                 "space_id": space_id,
                 "sync_mode": sync_mode,
                 "prefer_direct": prefer_direct,
+                **fields,
             }
             echo = await self._echo_for(space_id, peer_instance_id)
             if echo is not None:

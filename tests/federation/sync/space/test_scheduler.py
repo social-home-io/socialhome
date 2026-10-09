@@ -44,14 +44,24 @@ class _FakeFederation:
         #: ``no_route`` a freshly-booted household gets.
         self.catchup_ships: bool = True
         #: (sync_id, space_id, provider) recorded before each BEGIN.
-        self.requests: list[tuple[str, str, str]] = []
+        self.requests: list[tuple] = []
         #: The ``extra_payload`` (v_46 authority echo) of each catch-up.
         self.mesh_extras: list[dict | None] = []
 
-    def record_sync_request(self, *, sync_id, space_id, provider_instance_id):
+    def record_sync_request(
+        self,
+        *,
+        sync_id,
+        space_id,
+        provider_instance_id,
+        sync_mode="initial",
+        have_seq=None,
+    ):
         """A requester notes the sync_id it is about to ask for, so the
         provider's SPACE_SYNC_OFFER can be recognised as an answer."""
-        self.requests.append((sync_id, space_id, provider_instance_id))
+        self.requests.append(
+            (sync_id, space_id, provider_instance_id, sync_mode, have_seq)
+        )
 
     async def is_confirmed_peer(self, instance_id: str) -> bool:
         return instance_id in self.confirmed
@@ -240,6 +250,81 @@ async def test_enqueue_sync_for_space_sends_begin(bus, queue, sync_manager):
     assert fed.sent[0]["payload"]["space_id"] == "sp-1"
     assert fed.sent[0]["payload"]["sync_mode"] == "initial"
     assert fed.sent[0]["payload"]["prefer_direct"] is True
+
+
+class _Applied:
+    """``AbstractSpaceSyncWatermarkRepo.applied_seq`` stand-in."""
+
+    def __init__(self, seqs: dict[tuple[str, str], int], *, fail: bool = False):
+        self._seqs = seqs
+        self._fail = fail
+
+    async def applied_seq(self, space_id: str, instance_id: str) -> int | None:
+        if self._fail:
+            raise RuntimeError("database is locked")
+        return self._seqs.get((space_id, instance_id))
+
+
+def _echo_scheduler(bus, queue, sync_manager, applied) -> SpaceSyncScheduler:
+    return SpaceSyncScheduler(
+        bus=bus,
+        federation=_FakeFederation(),
+        federation_repo=_FakeFedRepo([]),
+        space_repo=_FakeSpaceRepo(spaces_by_type={}, members_by_space={}),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+        applied_seqs=applied,
+    )
+
+
+async def test_a_periodic_begin_echoes_the_last_cleanly_applied_snapshot(
+    bus, queue, sync_manager
+):
+    """§25.6 (migration 0087): the provider streams since
+    ``min(watermark, have_seq)``, so a rolled-back requester heals."""
+    sched = _echo_scheduler(
+        bus, queue, sync_manager, _Applied({("sp-1", "peer-a"): 41})
+    )
+    await queue.start()
+    try:
+        await sched.enqueue_sync_for_space(
+            space_id="sp-1", peer_instance_id="peer-a", sync_mode="incremental"
+        )
+        await sched.enqueue_sync_for_space(
+            space_id="sp-1", peer_instance_id="peer-b", sync_mode="incremental"
+        )
+        await sched.enqueue_sync_for_space(space_id="sp-1", peer_instance_id="peer-a")
+        await asyncio.sleep(0.05)
+    finally:
+        await queue.stop()
+    # What each BEGIN asked for is noted with the request (the relay retry
+    # re-sends it).
+    assert {(r[2], r[3], r[4]) for r in sched._federation.requests} == {
+        ("peer-a", "incremental", 41),
+        ("peer-b", "incremental", None),
+        ("peer-a", "initial", None),
+    }
+    sent = [(m["to"], m["payload"]) for m in sched._federation.sent]
+    by_mode = {(to, p["sync_mode"]): p for to, p in sent}
+    assert by_mode[("peer-a", "incremental")]["have_seq"] == 41
+    # Nothing applied from peer-b yet: no echo, so it streams in full.
+    assert "have_seq" not in by_mode[("peer-b", "incremental")]
+    # A full session asks for everything anyway.
+    assert "have_seq" not in by_mode[("peer-a", "initial")]
+
+
+async def test_begin_fields_without_a_store_or_on_failure_carry_no_echo(
+    bus, queue, sync_manager
+):
+    for applied in (None, _Applied({}, fail=True)):
+        sched = _echo_scheduler(bus, queue, sync_manager, applied)
+        assert (
+            await sched.begin_fields(
+                space_id="sp-1", peer_instance_id="peer-a", sync_mode="incremental"
+            )
+            == {}
+        )
 
 
 async def test_a_link_joined_provider_is_asked_for_relay_mode(bus, queue, sync_manager):
