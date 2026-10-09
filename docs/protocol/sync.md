@@ -257,10 +257,36 @@ The watermark advances to the **snapshot** — never further — and only
 when the stream is confirmed: every chunk shipped (`ok`), the sentinel
 shipped, and the requester's `SPACE_SYNC_COMPLETE` arrived from the
 household the stream went to (the existing end-of-stream event; a
-forged one from anyone else is ignored as before). A row changed while
-the stream runs gets a stamp above the snapshot, so it streams next time
-whether or not the keyset paging happened to catch it this time. A full
-stream also stamps `synced_full_at`.
+forged one from anyone else is ignored as before) **with `clean: true`**.
+A row changed while the stream runs gets a stamp above the snapshot, so it
+streams next time whether or not the keyset paging happened to catch it
+this time. A full stream also stamps `synced_full_at`.
+
+**`clean` — the requester applied everything.** Shipping is not storing:
+a chunk can be lost on the way (a relay that could not open it never hands
+it to the receiver), fail its signature, fail to decrypt or parse, raise
+while persisting (a missing parent, a lock), or still wait for its epoch
+key when the stream ends. The signed sentinel carries `chunk_count` —
+how many chunks the provider put on the wire before it — and the receiver
+(`SpaceSyncReceiver`, `StreamHealth`) counts the chunks that arrived with
+a valid signature and notes any that failed. The stream is clean only when
+the counts match, nothing failed and nothing is still stashed;
+`SpaceSyncComplete.clean` carries the verdict and the requester sends it
+as `SPACE_SYNC_COMPLETE {sync_id, space_id, clean}`. The provider confirms
+only `clean: true`; `false` or a missing field (an older requester) leaves
+the watermark where it was, so the next periodic session — 30 minutes,
+not the daily full pass — re-streams what the household did not store. A
+record the receiver *refuses* by rule (the live admission check) is not a
+failure: it would be refused again. Both fields are additive and plain
+routing metadata (a count and a boolean, no content): an older receiver
+ignores `chunk_count`, an older provider ignores `clean`. No protocol bump.
+
+**A resource that is off is not in the plan.** The space chat
+(`chat_messages`) streams only while the space's chat is on; while it is
+off the provider leaves it out of the session's plan
+(`ConditionalExporter.is_active`), so it is not part of the shape — turning
+the chat back on changes the shape and the next periodic session streams in
+full, carrying what was said meanwhile.
 
 Fail-safe toward more data, never less:
 
@@ -302,9 +328,12 @@ households: after a full sync a periodic session streams only the changed
 rows, converges edits / reactions / moderation / deletes / poll votes,
 streams nothing for a quiet space in either direction (no echo), and falls
 back to a full stream without a watermark, with a changed shape or an
-older requester. `tests/db/test_migration_0086_space_sync_change_stamps.py`
+older requester, and re-streams a chunk that failed to apply or never
+arrived. `tests/db/test_migration_0086_space_sync_change_stamps.py`
 fails if a covered table gains a column its update trigger does not
-compare.
+compare, and `tests/federation/sync/space/test_watermark.py` pins every
+covered exporter's record keys to `SYNC_SHAPE_VERSION` — a record-shape
+change that does not bump it fails.
 
 ### Post and comment tombstones
 
@@ -462,7 +491,7 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
   it was the one that sent DIRECT_FAILED (e.g. rate-limited).
 
 **Freeing the session.** When the end-of-stream sentinel lands, the
-requester sends `SPACE_SYNC_COMPLETE {sync_id, space_id}` to the provider
+requester sends `SPACE_SYNC_COMPLETE {sync_id, space_id, clean}` to the provider
 (`send_with_mesh_fallback`) and closes its own session. The provider then
 frees its slot, but only when the sender is the household the stream went
 to. Before this, nothing sent that event. The provider held every finished

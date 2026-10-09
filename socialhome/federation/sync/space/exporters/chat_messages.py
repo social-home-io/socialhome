@@ -37,6 +37,7 @@ from ..window import SYNC_PAGE_SIZE, iter_pages, window_for_space
 
 if TYPE_CHECKING:
     from .....domain.conversation import ConversationMessage
+    from .....domain.space import Space
     from .....repositories.conversation_repo import AbstractConversationRepo
     from .....repositories.space_repo import AbstractSpaceRepo
 
@@ -64,6 +65,10 @@ def _iter_chat_pages(
     return iter_pages(fetch)
 
 
+def _chat_on(space: "Space | None") -> bool:
+    return space is not None and not space.dissolved and space.features.chat
+
+
 class ChatMessagesExporter(PagedExporterMixin):
     resource = "chat_messages"
 
@@ -77,6 +82,13 @@ class ChatMessagesExporter(PagedExporterMixin):
         self._convos = conversation_repo
         self._spaces = space_repo
 
+    async def is_active(self, space_id: str) -> bool:
+        """Whether the space's chat is on (and the space live). A session
+        plans the resource only while it is — so it is part of an
+        incremental session's shape only then, and turning the chat back on
+        forces one full stream of it (:mod:`..watermark`)."""
+        return _chat_on(await self._spaces.get(space_id))
+
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
         return self._pages(space_id, None)
 
@@ -89,7 +101,7 @@ class ChatMessagesExporter(PagedExporterMixin):
         self, space_id: str, since: int | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
         space = await self._spaces.get(space_id)
-        if space is None or space.dissolved or not space.features.chat:
+        if space is None or not _chat_on(space):
             return
         chat = await self._convos.get_space_chat(space_id)
         if chat is None:

@@ -3308,17 +3308,20 @@ class FederationService:
         """The requester got our whole stream (its sentinel landed): free
         the session — only for the household the stream went to.
 
-        The same confirmation advances that household's §25.6 incremental
-        watermark to the session's snapshot (:meth:`SpaceSyncService
-        .confirm_complete` — a no-op unless every chunk shipped), so the
-        next periodic session streams only what changed since."""
+        A completion marked ``clean: true`` — the requester applied every
+        chunk the sentinel counted — also advances that household's §25.6
+        incremental watermark to the session's snapshot
+        (:meth:`SpaceSyncService.confirm_complete`, a no-op unless every
+        chunk shipped), so the next periodic session streams only what
+        changed since. ``clean`` false or missing: the watermark stays and
+        the next session re-streams what the household did not store."""
         if self._sync_manager is None:
             return
         sync_id = str(event.payload.get("sync_id") or "")
         session = self._sync_manager.get_session(sync_id)
         if session is None or session.requester_instance_id != event.from_instance:
             return
-        if self._space_sync_service is not None:
+        if self._space_sync_service is not None and event.payload.get("clean") is True:
             await self._space_sync_service.confirm_complete(session)
         self._sync_manager.close_session(sync_id)
 
@@ -3350,7 +3353,13 @@ class FederationService:
             await self.send_with_mesh_fallback(
                 to_instance_id=event.from_instance,
                 event_type=FederationEventType.SPACE_SYNC_COMPLETE,
-                payload={"sync_id": event.sync_id, "space_id": event.space_id},
+                payload={
+                    "sync_id": event.sync_id,
+                    "space_id": event.space_id,
+                    # Whether every chunk applied here — only then may the
+                    # provider advance our incremental-sync watermark.
+                    "clean": bool(event.clean),
+                },
                 space_id=event.space_id,
             )
         except Exception as exc:  # pragma: no cover — defensive

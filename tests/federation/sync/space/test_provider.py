@@ -1244,6 +1244,11 @@ async def test_an_incremental_session_streams_only_changed_rows_of_covered_resou
     assert plan["shape"].endswith("|members,posts")
     assert (session.snapshot_seq, session.since_seq) == (40, 7)
     assert session.stream_clean is True
+    # The signed sentinel names how many chunks came before it, so the
+    # requester can tell a chunk lost on the way.
+    sentinel = orjson.loads(session.rtc.sent[-1])
+    assert sentinel["resource"] == SENTINEL_RESOURCE
+    assert sentinel["chunk_count"] == len(session.rtc.sent) - 1
 
 
 async def test_no_watermark_streams_everything(encoder):
@@ -1354,3 +1359,36 @@ async def test_without_watermarks_every_session_streams_in_full(provider):
     await provider.stream_initial(session)
     assert getattr(session, "since_seq", None) is None
     await provider.confirm_complete(session)  # a no-op, never raises
+
+
+class _Toggle(_FakeExporter):
+    """A resource that streams only while a space feature is on."""
+
+    def __init__(self, resource: str, records: list[dict]) -> None:
+        super().__init__(resource, records)
+        self.on = False
+
+    async def is_active(self, space_id: str) -> bool:
+        return self.on
+
+
+async def test_a_resource_switched_on_changes_the_shape_so_it_streams_in_full(
+    encoder,
+):
+    """The space chat turned off and on again: while off it is not part of
+    the session shape, so turning it on makes the next periodic session a
+    full stream — the chat said meanwhile reaches the household."""
+    marks = _Marks()
+    svc, _ = _inc_provider(encoder, marks)
+    toggle = _Toggle("timetables", [{"id": "t-1"}])
+    svc._exporters["timetables"] = toggle
+    off = _FakeSession(sync_mode="incremental")
+    await svc.stream_initial(off)
+    assert "timetables" not in _records(off)
+    assert not off.shape.endswith("timetables")
+    toggle.on = True
+    on = _FakeSession(sync_mode="incremental")
+    await svc.stream_initial(on)
+    assert on.shape.endswith("|members,posts,timetables")
+    assert on.shape != off.shape
+    assert _records(on)["timetables"] == [{"id": "t-1"}]

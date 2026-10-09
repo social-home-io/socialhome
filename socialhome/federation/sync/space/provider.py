@@ -28,7 +28,12 @@ from ....domain.federation import (
     FederationEventType,
 )
 from ....domain.federation_capabilities import FederationCapability
-from .exporter import ChunkBuilder, RESOURCE_ORDER, serialise_chunk
+from .exporter import (
+    ChunkBuilder,
+    ConditionalExporter,
+    RESOURCE_ORDER,
+    serialise_chunk,
+)
 from .exporters.members import PreModeratorMembersExporter
 from .exporters.posts import iter_post_pages
 from .watermark import session_shape
@@ -232,6 +237,9 @@ class SpaceSyncService:
         # :meth:`_send_chunk`.
         waits: dict[str, int] = {}
         session.stream_clean = False
+        # Chunks put on the wire — the sentinel carries the count, so the
+        # requester can tell one that never arrived (StreamHealth).
+        chunk_count = 0
         try:
             plan = await self._plan(session)
             for exporter in plan:
@@ -243,6 +251,7 @@ class SpaceSyncService:
                     since=session.since_seq,
                 ):
                     sent = await self._send_chunk(session, envelope, waits)
+                    chunk_count += 1
                     if sent:
                         # Progress: the stale reaper measures idleness, so
                         # a long stream survives while chunks flow.
@@ -272,6 +281,7 @@ class SpaceSyncService:
                 space_id=space_id,
                 sync_id=sync_id,
                 sig_suite=self._sig_suite,
+                chunk_count=chunk_count,
             )
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.
@@ -323,6 +333,11 @@ class SpaceSyncService:
             exporter = await self._exporter_for(resource, session)
             if exporter is None:
                 log.debug("no exporter for resource %s — skipping", resource)
+                continue
+            if isinstance(exporter, ConditionalExporter) and not (
+                await exporter.is_active(session.space_id)
+            ):
+                log.debug("resource %s is off in this space — skipping", resource)
                 continue
             exporters.append(exporter)
         session.snapshot_seq = None

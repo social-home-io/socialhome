@@ -18,6 +18,9 @@ content key is not what this tests) so the chunks can be counted.
   comment delete, a new post — and C converges;
 * a quiet space streams nothing in either direction (no echo);
 * a row changed WHILE a stream runs is not lost: it streams next time;
+* a chunk that failed to apply, or never arrived, makes the requester
+  report the stream unclean (``SPACE_SYNC_COMPLETE {clean: false}``), so the
+  next periodic session re-streams it;
 * an unconfirmed stream advances nothing, and a ``SPACE_SYNC_COMPLETE``
   from any household but the requester is no confirmation;
 * no watermark (a dropped seat), an older / upgraded requester, "Sync now"
@@ -37,11 +40,13 @@ import pytest
 from socialhome.app import create_app
 from socialhome.app_keys import (
     db_key,
+    event_bus_key,
     federation_service_key,
     space_sync_receiver_key,
     space_sync_service_key,
 )
 from socialhome.config import Config
+from socialhome.domain.events import SpaceSyncComplete
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.federation.owner_bound_id import (
@@ -135,6 +140,9 @@ class _PlainCrypto:
     async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
         return 0, base64.urlsafe_b64encode(plaintext).decode("ascii")
 
+    async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
+        return base64.urlsafe_b64decode(ciphertext)
+
 
 class _Wire:
     """A DataChannel stand-in: collects the frames, runs ``during`` once
@@ -166,6 +174,20 @@ async def houses(aiohttp_client, tmp_path):
         svc = app[space_sync_service_key]
         svc._builder = ChunkBuilder(
             encoder=svc._builder._encoder, crypto=_PlainCrypto()
+        )
+        app[space_sync_receiver_key]._crypto = _PlainCrypto()
+        # The completion is delivered by ``_stream``; no wire to send it on.
+        fed = app[federation_service_key]
+        app[event_bus_key].unsubscribe(SpaceSyncComplete, fed._on_space_sync_landed)
+    # Each household pins the other's real identity key, so the chunks'
+    # signatures verify on the receiver exactly as on the wire.
+    for app, peer, other in ((h, MEMBER, c), (c, HOST, h)):
+        row = await other[db_key].fetchone(
+            "SELECT identity_public_key FROM instance_identity"
+        )
+        await app[db_key].enqueue(
+            "UPDATE remote_instances SET remote_identity_pk=? WHERE id=?",
+            (row["identity_public_key"], peer),
         )
     return h, c
 
@@ -207,11 +229,14 @@ async def _stream(
     complete: bool = True,
     during=None,
     confirm_from: str | None = None,
+    drop: set[str] = frozenset(),  # type: ignore[assignment]
 ) -> dict[str, list[dict]]:
-    """One real provider session from ``provider_app`` to ``to_app``: the
-    chunks are applied by ``to_app``'s receiver in wire order and — when
-    ``complete`` — the requester's ``SPACE_SYNC_COMPLETE`` is delivered to
-    the provider's federation handler. Returns the records per resource."""
+    """One real provider session from ``provider_app`` to ``to_app``: every
+    frame goes through ``to_app``'s receiver (signature, decode, persist) in
+    wire order, the sentinel publishes ``SpaceSyncComplete`` with whether
+    the stream applied cleanly, and — when ``complete`` — the requester's
+    ``SPACE_SYNC_COMPLETE {clean}`` is delivered to the provider's federation
+    handler. Returns the records per resource."""
     sync_id = uuid.uuid4().hex
     wire = _Wire(during)
     session = SyncSessionRecord(
@@ -229,12 +254,27 @@ async def _stream(
     assert wire.frames and wire.frames[-1]["resource"] == SENTINEL_RESOURCE
     streamed: dict[str, list[dict]] = {}
     receiver = to_app[space_sync_receiver_key]
-    for frame in wire.frames[:-1]:
-        records = orjson.loads(base64.urlsafe_b64decode(frame["encrypted_payload"]))[
-            "records"
-        ]
-        streamed.setdefault(frame["resource"], []).extend(records)
-        await receiver._dispatch(frame["resource"], SPACE, records, provider=provider)
+    landed: list[SpaceSyncComplete] = []
+
+    async def _landed(event: SpaceSyncComplete) -> None:
+        landed.append(event)
+
+    to_app[event_bus_key].subscribe(SpaceSyncComplete, _landed)
+    try:
+        for frame in wire.frames:
+            if frame["resource"] in drop:
+                continue  # lost on the way: the receiver never sees it
+            if frame["resource"] != SENTINEL_RESOURCE:
+                records = orjson.loads(
+                    base64.urlsafe_b64decode(frame["encrypted_payload"])
+                )["records"]
+                streamed.setdefault(frame["resource"], []).extend(records)
+            await receiver.on_chunk(
+                orjson.dumps(frame), from_instance=provider, expected_space_id=SPACE
+            )
+    finally:
+        to_app[event_bus_key].unsubscribe(SpaceSyncComplete, _landed)
+    [done] = landed
     if complete:
         await fed._handle_space_sync_complete(
             FederationEvent(
@@ -243,7 +283,7 @@ async def _stream(
                 from_instance=confirm_from or requester,
                 to_instance=provider,
                 timestamp=_NOW.isoformat(),
-                payload={"sync_id": sync_id, "space_id": SPACE},
+                payload={"sync_id": sync_id, "space_id": SPACE, "clean": done.clean},
                 space_id=SPACE,
             )
         )
@@ -403,6 +443,59 @@ async def test_an_unconfirmed_stream_advances_nothing(houses):
     assert _ids(lost, "posts") == {pids[7]}
     again = await _h_to_c(h, c)
     assert _ids(again, "posts") == {pids[7]}
+
+
+class _FailOnce:
+    """C's post repo, whose ``save`` of one post raises once (a persist that
+    fails — an FK, a lock): the chunk carrying it does not apply."""
+
+    def __init__(self, inner, post_id: str) -> None:
+        self._inner = inner
+        self._post_id = post_id
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def save(self, space_id, post):
+        if post.id == self._post_id:
+            self._post_id = ""
+            raise RuntimeError("FOREIGN KEY constraint failed")
+        return await self._inner.save(space_id, post)
+
+
+async def test_a_chunk_that_failed_to_apply_streams_again_next_time(houses):
+    """The requester reports the stream unclean, so the provider keeps its
+    watermark and the next periodic session re-streams the row — within 30
+    minutes, not at the next daily full pass."""
+    h, c = houses
+    pids, _comment = await _baseline(h, c)
+    await _posts(h).edit(pids[9], "lost once", space_id=SPACE)
+    receiver = c[space_sync_receiver_key]
+    real = receiver._space_post_repo
+    receiver._space_post_repo = _FailOnce(real, pids[9])
+    try:
+        first = await _h_to_c(h, c)
+    finally:
+        receiver._space_post_repo = real
+    assert _ids(first, "posts") == {pids[9]}
+    assert (await _post_row(c, pids[9]))["content"] != "lost once"
+    again = await _h_to_c(h, c)
+    assert _ids(again, "posts") == {pids[9]}
+    assert (await _post_row(c, pids[9]))["content"] == "lost once"
+    assert not any(_content(await _h_to_c(h, c)).values())
+
+
+async def test_a_chunk_lost_on_the_way_streams_again_next_time(houses):
+    """A chunk that never reaches the receiver (a relay that could not open
+    it) — the sentinel's signed count tells the requester."""
+    h, c = houses
+    pids, _comment = await _baseline(h, c)
+    await _posts(h).edit(pids[9], "dropped", space_id=SPACE)
+    first = await _h_to_c(h, c, drop={"posts"})
+    assert pids[9] not in _ids(first, "posts")
+    again = await _h_to_c(h, c)
+    assert _ids(again, "posts") == {pids[9]}
+    assert (await _post_row(c, pids[9]))["content"] == "dropped"
 
 
 async def test_only_the_requester_can_confirm_its_stream(houses):

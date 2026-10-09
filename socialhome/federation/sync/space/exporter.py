@@ -206,6 +206,16 @@ class IncrementalExporter(ResourceExporter, Protocol):
         ...
 
 
+@runtime_checkable
+class ConditionalExporter(ResourceExporter, Protocol):
+    """A :class:`ResourceExporter` that streams only while a space feature
+    is on (the space chat). A session drops it from its plan while it is
+    off, so it is not part of the session's shape then — switching it on
+    makes the next incremental session a full stream."""
+
+    async def is_active(self, space_id: str) -> bool: ...
+
+
 async def record_batches(
     exporter: ResourceExporter, space_id: str, *, since: int | None = None
 ) -> AsyncIterator[list[dict[str, Any]]]:
@@ -336,11 +346,15 @@ class ChunkBuilder:
         space_id: str,
         sync_id: str,
         sig_suite: str,
+        chunk_count: int | None = None,
     ) -> dict[str, Any]:
         """Build the final ``__complete__`` envelope for the session.
 
         Not encrypted (no payload), but signed so the receiver can
-        trust the session-end signal.
+        trust the session-end signal. ``chunk_count`` — how many chunks
+        the stream sent before it: the requester reports the stream clean
+        only when that many arrived and applied (routing metadata, like
+        ``seq_start`` / ``seq_end``; an older receiver ignores it).
         """
         envelope: dict[str, Any] = {
             "sync_id": sync_id,
@@ -348,6 +362,8 @@ class ChunkBuilder:
             "space_id": space_id,
             "is_last": True,
         }
+        if chunk_count is not None:
+            envelope["chunk_count"] = int(chunk_count)
         bytes_to_sign = _orjson.dumps(envelope)
         envelope["signatures"] = self._encoder.sign_envelope_all(
             bytes_to_sign,
