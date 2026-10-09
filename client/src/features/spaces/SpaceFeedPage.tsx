@@ -625,7 +625,7 @@ export default function SpaceFeedPage() {
       )}
       {chatOpen && (
         <SpaceChatView spaceId={spaceId} spaceName={s?.name ?? t('spaces.space_title')}
-                       canModerate={canModerate} />
+                       canModerate={canModerate} archived={s?.archived === true} />
       )}
 
       {activeTab.value === 'feed' && !chatOpen && (

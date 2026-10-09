@@ -7,7 +7,9 @@
  * summary's metadata (a system chat 404s on ``GET /api/conversations/{id}``):
  * text only (no attachments, no calls, no group info / header). Delete
  * is offered on the viewer's own messages and — ``canModerate``, the
- * space's owner / admins / moderators — on anyone's.
+ * space's owner / admins / moderators — on anyone's. In an archived space
+ * the thread is read-only (no composer, reply, edit or reactions; delete
+ * stays), as the server refuses those writes there.
  */
 import { useEffect, useMemo, useRef } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
@@ -19,6 +21,7 @@ import { DmThreadSkeleton } from '@/components/Skeleton'
 import { ConversationView, type ConversationMeta } from '@/features/dms/ConversationView'
 import { MuteButton } from '@/features/dms/ConversationMute'
 import {
+  clearSpaceChatUnread,
   isSpaceChatFrame,
   loadSpaceChat,
   patchSpaceChat,
@@ -32,9 +35,12 @@ interface Props {
   spaceName: string
   /** Owner / admin / moderator — may delete other people's messages. */
   canModerate: boolean
+  /** The space is archived: the chat reads (and takes deletes) but no
+   *  longer takes posts, edits or reactions — the server's rule. */
+  archived?: boolean
 }
 
-export function SpaceChatView({ spaceId, spaceName, canModerate }: Props) {
+export function SpaceChatView({ spaceId, spaceName, canModerate, archived = false }: Props) {
   const chat = spaceChatOf(spaceId)
   const convId = chat?.enabled ? chat.conversation_id : null
   const level = chat?.notif_level ?? 'mentions'
@@ -92,6 +98,8 @@ export function SpaceChatView({ spaceId, spaceName, canModerate }: Props) {
         allowAttachments={false}
         allowDelete
         canModerate={canModerate}
+        readOnly={archived}
+        readOnlyNote={t('space.chat.read_only_archived')}
         meta={meta}
       />
     </>
@@ -114,7 +122,8 @@ export function SpaceChatView({ spaceId, spaceName, canModerate }: Props) {
  *   follows too — so the badge never shows chatter the viewer asked not
  *   to hear about.
  * - Viewing the chat reads it (ConversationView posts the watermark), so
- *   the badge clears while it's open.
+ *   the badge — and the spaces list's dot for this space — clears while
+ *   it's open.
  */
 export function useSpaceChatSummary(spaceId: string, eligible: boolean, chatOpen: boolean): void {
   const openRef = useRef(chatOpen)
@@ -161,4 +170,8 @@ export function useSpaceChatSummary(spaceId: string, eligible: boolean, chatOpen
   useEffect(() => {
     if (chatOpen && unread > 0) patchSpaceChat({ unread: 0 })
   }, [chatOpen, unread])
+  // The spaces list's dot for this space goes once its chat is viewed.
+  useEffect(() => {
+    if (chatOpen) clearSpaceChatUnread(spaceId)
+  }, [chatOpen, spaceId, unread])
 }

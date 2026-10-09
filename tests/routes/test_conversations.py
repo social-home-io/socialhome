@@ -699,6 +699,55 @@ async def test_mark_read_returns_marked_count(client):
     assert body["marked"] == 2
 
 
+async def test_mark_read_without_receipt_clears_own_unread_only(client):
+    """Read receipts off: ``{"receipt": false}`` still advances the
+    reader's watermark (no unread pill after a reload) but leaves the
+    sender without a read tick."""
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    await client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"content": "hello"},
+        headers=_auth(client._bob_token),
+    )
+    resp = await client.post(
+        f"/api/conversations/{conv_id}/read",
+        json={"receipt": False},
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 200
+    assert (await resp.json())["marked"] == 0
+    r = await client.get(
+        f"/api/conversations/{conv_id}/unread", headers=_auth(client._admin_token)
+    )
+    assert (await r.json())["unread"] == 0
+    r = await client.get(
+        f"/api/conversations/{conv_id}/delivery-states",
+        headers=_auth(client._bob_token),
+    )
+    assert [s for s in (await r.json())["states"] if s["state"] == "read"] == []
+
+
+@pytest.mark.parametrize("body", [{"receipt": "no"}, ["receipt"]])
+async def test_mark_read_rejects_a_malformed_receipt_flag(client, body):
+    r = await client.post(
+        "/api/conversations/dm",
+        json={"username": "bob"},
+        headers=_auth(client._admin_token),
+    )
+    conv_id = (await r.json())["id"]
+    resp = await client.post(
+        f"/api/conversations/{conv_id}/read",
+        json=body,
+        headers=_auth(client._admin_token),
+    )
+    assert resp.status == 422
+
+
 async def test_mark_delivered_upserts_state(client):
     r = await client.post(
         "/api/conversations/dm",

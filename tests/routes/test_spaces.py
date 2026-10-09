@@ -3586,3 +3586,133 @@ async def test_space_chat_roster_is_refused_to_followers_and_non_members(client)
     assert r.status == 403
     r = await client.get(path, headers=_auth(client._admin_token))
     assert r.status == 200
+
+
+# ── Space chat unread for the spaces list (GET /api/spaces/chat-unread) ──
+
+
+async def _chat_unread(client, token: str) -> dict:
+    r = await client.get("/api/spaces/chat-unread", headers=_auth(token))
+    assert r.status == 200, await r.text()
+    return (await r.json())["spaces"]
+
+
+async def _say(client, cid: str, token: str, content: str) -> str:
+    r = await client.post(
+        f"/api/conversations/{cid}/messages",
+        json={"content": content},
+        headers=_auth(token),
+    )
+    assert r.status == 201, await r.text()
+    return (await r.json())["id"]
+
+
+async def test_space_chat_unread_requires_auth(client):
+    r = await client.get("/api/spaces/chat-unread")
+    assert r.status == 401
+
+
+async def test_space_chat_unread_counts_per_space_by_level_and_mute(client):
+    choir = await _chat_space(client, "Choir")
+    band = await _chat_space(client, "Band")
+    for sid in (choir, band):
+        await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    # A chat nobody opened yet has no seat: absent, not "0".
+    assert await _chat_unread(client, client._bob_token) == {}
+    choir_cid = (await _space_chat(client, choir, client._bob_token))[1][
+        "conversation_id"
+    ]
+    band_cid = (await _space_chat(client, band, client._bob_token))[1][
+        "conversation_id"
+    ]
+    await _say(client, choir_cid, client._admin_token, "rehearsal moved")
+    await _say(client, choir_cid, client._admin_token, "@bob can you open up?")
+    await _say(client, band_cid, client._admin_token, "gig on friday")
+    got = await _chat_unread(client, client._bob_token)
+    # Space chats start at "Only @mentions": only the mention counts.
+    assert got == {
+        choir: {"unread": 1, "notif_level": "mentions", "muted_until": None},
+        band: {"unread": 0, "notif_level": "mentions", "muted_until": None},
+    }
+    # The sender's own messages never count for her.
+    assert (await _chat_unread(client, client._admin_token))[choir]["unread"] == 0
+    r = await client.put(
+        f"/api/conversations/{band_cid}/notif-prefs",
+        json={"level": "all"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    assert (await _chat_unread(client, client._bob_token))[band]["unread"] == 1
+    # Muted: the dot goes, the mute is reported.
+    r = await client.put(
+        f"/api/conversations/{choir_cid}/mute",
+        json={"duration": "forever"},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200, await r.text()
+    choir_row = (await _chat_unread(client, client._bob_token))[choir]
+    assert choir_row["unread"] == 0 and choir_row["muted_until"]
+    # Reading the chat clears it — receipts on or off.
+    r = await client.post(
+        f"/api/conversations/{band_cid}/read",
+        json={"receipt": False},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    assert (await _chat_unread(client, client._bob_token))[band]["unread"] == 0
+
+
+async def test_space_chat_unread_leaves_out_chat_off_and_followers(client):
+    sid = await _chat_space(client)
+    await _seat_local_member(client, sid, client._bob_token, client._bob_uid)
+    cid = (await _space_chat(client, sid, client._bob_token))[1]["conversation_id"]
+    await _say(client, cid, client._admin_token, "@bob hi")
+    assert (await _chat_unread(client, client._bob_token))[sid]["unread"] == 1
+    r = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"features": {"chat": False}},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200, await r.text()
+    assert await _chat_unread(client, client._bob_token) == {}
+
+    broadcast = await _create_subscribable_space(client, "Broadcast")
+    r = await client.post(
+        f"/api/spaces/{broadcast}/subscribe", headers=_auth(client._bob_token)
+    )
+    assert r.status in (200, 201), await r.text()
+    await _space_chat(client, broadcast, client._admin_token)
+    assert broadcast not in await _chat_unread(client, client._bob_token)
+
+
+async def test_archived_space_chat_reads_and_deletes_but_refuses_writes(client):
+    """The SPA's read-only chat mirrors this: an archived space's chat
+    still reads, marks read and deletes, but refuses posts, edits and
+    reactions."""
+    sid = await _chat_space(client)
+    cid = (await _space_chat(client, sid, client._admin_token))[1]["conversation_id"]
+    mid = await _say(client, cid, client._admin_token, "before")
+    admin = _auth(client._admin_token)
+    r = await client.post(f"/api/spaces/{sid}/archive", headers=admin)
+    assert r.status == 200, await r.text()
+    r = await client.post(
+        f"/api/conversations/{cid}/messages", json={"content": "x"}, headers=admin
+    )
+    assert r.status == 403
+    r = await client.patch(
+        f"/api/conversations/{cid}/messages/{mid}",
+        json={"content": "edited"},
+        headers=admin,
+    )
+    assert r.status == 403
+    r = await client.put(
+        f"/api/conversations/{cid}/messages/{mid}/reactions/%F0%9F%91%8D",
+        headers=admin,
+    )
+    assert r.status == 403
+    r = await client.get(f"/api/conversations/{cid}/messages", headers=admin)
+    assert r.status == 200
+    r = await client.post(f"/api/conversations/{cid}/read", headers=admin)
+    assert r.status == 200
+    r = await client.delete(f"/api/conversations/{cid}/messages/{mid}", headers=admin)
+    assert r.status == 200

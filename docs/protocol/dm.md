@@ -326,7 +326,10 @@ Read receipts are end-to-end, not routing-layer. The browser sends a
 `POST /api/conversations/{id}/read` on "mark all read" which
 bulk-upserts `read` state for every visible message from other
 participants. A `POST /api/conversations/{id}/messages/{mid}/delivered`
-covers the single-message ack path.
+covers the single-message ack path. A reader who turned read receipts
+off still posts `read` — with body `{"receipt": false}` — so their own
+watermark (unread counts) advances, but no `read` state is written and
+the others see no tick; the browser skips the `delivered` ack then too.
 
 ```mermaid
 sequenceDiagram

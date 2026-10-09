@@ -28,6 +28,7 @@ from ..domain.conversation import (
     GroupRosterChange,
     MessageReaction,
     RemoteConversationMember,
+    SpaceChatSeatUnread,
     SystemChatScope,
     TOMBSTONE_MESSAGE_TYPE,
 )
@@ -201,6 +202,9 @@ class AbstractConversationRepo(Protocol):
         types: frozenset[str],
         limit: int = 500,
     ) -> list[str]: ...
+    async def list_space_chat_unread(
+        self, username: str, *, writer_roles: frozenset[str]
+    ) -> list[SpaceChatSeatUnread]: ...
 
     # Reactions -----------------------------------------------------------
     async def add_reaction(
@@ -1349,6 +1353,64 @@ class SqliteConversationRepo:
             ),
         )
         return [str(r["content"] or "") for r in rows]
+
+    async def list_space_chat_unread(
+        self, username: str, *, writer_roles: frozenset[str]
+    ) -> list[SpaceChatSeatUnread]:
+        """``username``'s live seats in space chats, each with its raw unread
+        count (the :meth:`count_unread` rules), in ONE query.
+
+        Only seats the chat's access would still honour come back: the
+        space known and not dissolved, its ``feature_chat`` on, the user
+        holding a ``space_members`` seat whose role is in ``writer_roles``
+        (never a follower) and not banned. A chat not created yet (or a
+        seat not reconciled yet) simply has no row.
+        """
+        if not writer_roles:
+            return []
+        marks = ",".join("?" for _ in writer_roles)
+        rows = await self._db.fetchall(
+            f"""
+            SELECT c.space_id, c.id AS conversation_id, cm.notif_level,
+                   cm.muted_until,
+                   (SELECT COUNT(*) FROM conversation_messages m
+                     WHERE m.conversation_id = c.id
+                       AND m.sender_user_id != u.user_id
+                       AND m.sender_user_id NOT IN (
+                           {guardian_block_counterparts_sql("u.user_id")}
+                       )
+                       AND m.deleted = 0
+                       AND m.created_at > COALESCE(cm.last_read_at, '1970-01-01')
+                   ) AS unread
+              FROM conversation_members cm
+              JOIN users u ON u.username = cm.username
+              JOIN conversations c
+                ON c.id = cm.conversation_id AND c.system_scope = ?
+              JOIN spaces s
+                ON s.id = c.space_id AND s.dissolved = 0 AND s.feature_chat = 1
+              JOIN space_members sm
+                ON sm.space_id = s.id AND sm.user_id = u.user_id
+               AND sm.role IN ({marks})
+             WHERE cm.username = ?
+               AND cm.deleted_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM space_bans b
+                    WHERE b.space_id = s.id AND b.user_id = u.user_id
+               )
+             ORDER BY c.space_id
+            """,
+            (SystemChatScope.SPACE.value, *sorted(writer_roles), username),
+        )
+        return [
+            SpaceChatSeatUnread(
+                space_id=str(r["space_id"]),
+                conversation_id=str(r["conversation_id"]),
+                notif_level=str(r["notif_level"] or "all"),
+                muted_until=r["muted_until"],
+                unread=int(r["unread"] or 0),
+            )
+            for r in rows_to_dicts(rows)
+        ]
 
     # ── Reactions ──────────────────────────────────────────────────────
 

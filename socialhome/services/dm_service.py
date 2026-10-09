@@ -1235,13 +1235,17 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         conversation_id: str,
         *,
         username: str,
+        receipt: bool = True,
     ) -> int:
         """Mark every message in the conversation read for ``username``.
 
-        Updates the watermark (`set_last_read`) for unread counts AND
-        bulk-upserts ``conversation_delivery_state`` rows so other
-        participants see read-receipt ticks. Returns the number of
-        messages that flipped to ``read``.
+        Always advances the reader's own watermark (`set_last_read`), which
+        drives their unread counts. With ``receipt`` (the default) it also
+        bulk-upserts ``conversation_delivery_state`` rows so the other
+        participants see read-receipt ticks, and returns the number of
+        messages that flipped to ``read``. ``receipt=False`` — the reader
+        turned read receipts off — leaves those rows (what OTHERS see)
+        untouched and returns ``0``.
         """
         await self._require_membership(conversation_id, username)
         # Pass Python-format ISO timestamp so it compares correctly with
@@ -1250,6 +1254,8 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         # mismatches against Python isoformat() values.
         now = datetime.now(timezone.utc).isoformat()
         await self._convos.set_last_read(conversation_id, username, at=now)
+        if not receipt:
+            return 0
         user = await self._require_user(username)
         return await self._convos.mark_conversation_read(
             conversation_id=conversation_id,

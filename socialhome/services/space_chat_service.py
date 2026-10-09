@@ -31,10 +31,12 @@ This service owns the chat's lifecycle on this household:
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..domain.conversation import (
     Conversation,
+    SpaceChatSeatUnread,
     SystemChatScope,
     SystemChatSummary,
     mute_active,
@@ -46,7 +48,7 @@ from ..domain.events import (
     SpaceMemberJoined,
     SpaceMemberLeft,
 )
-from ..domain.space import SpaceRole
+from ..domain.space import WRITER_ROLES, SpaceRole
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -192,6 +194,47 @@ class SpaceChatService:
             muted_until=muted_until,
             last_read_at=seat.last_read_at,
         )
+
+    async def unread_by_space(self, username: str) -> dict[str, SpaceChatSeatUnread]:
+        """``username``'s space chats that have something to show, keyed by
+        space — the spaces list's per-space unread dot.
+
+        One repo query reads every live seat with its raw unread count
+        (writer role, not banned, chat on, space not dissolved — the
+        :class:`SpaceChatAccess` read rules). Each count is then narrowed
+        to what the seat hears, the summary's rule: ``0`` while muted, and
+        at ``mentions`` only the unread messages that @-mention the viewer.
+        The mention count parses message text, so it runs only for a
+        ``mentions`` seat that has unread messages at all (each bounded by
+        ``list_unread_contents``' 500-message cap). Seats with nothing
+        unread are still returned (with ``0``) so the SPA knows their
+        level and mute for live updates; a chat never opened yet has no
+        seat and is absent.
+        """
+        user = await self._users.get(username)
+        if user is None or not user.is_active():
+            return {}
+        rows = await self._convos.list_space_chat_unread(
+            username, writer_roles=frozenset(r.value for r in WRITER_ROLES)
+        )
+        now = datetime.now(timezone.utc)
+        resolver = DmMentionResolver(self._convos, self._users, self._policy)
+        out: dict[str, SpaceChatSeatUnread] = {}
+        for row in rows:
+            muted = mute_active(row.muted_until, now=now)
+            unread = row.unread
+            if muted:
+                unread = 0
+            elif unread and row.notif_level == "mentions":
+                unread = await resolver.unread_for(
+                    row.conversation_id, username, user.user_id, row.notif_level
+                )
+            out[row.space_id] = replace(
+                row,
+                unread=unread,
+                muted_until=row.muted_until if muted else None,
+            )
+        return out
 
     async def _on_space_event(
         self,

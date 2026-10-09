@@ -573,3 +573,26 @@ describe('ConversationView — host-given meta (system chats)', () => {
     expect(apiGet.mock.calls.map(c => c[0])).not.toContain('/api/conversations/sys-h')
   })
 })
+
+describe('markThreadRead — read receipts', () => {
+  it('always posts the watermark; receipts off asks for no receipt', async () => {
+    const { markThreadRead } = await import('./ConversationView')
+    const { readReceiptsEnabled } = await import('@/components/ReadReceipts')
+    readReceiptsEnabled.value = true
+    markThreadRead('conv-a')
+    expect(apiPost).toHaveBeenLastCalledWith('/api/conversations/conv-a/read')
+    readReceiptsEnabled.value = false
+    try {
+      markThreadRead('conv-a')
+      expect(apiPost).toHaveBeenLastCalledWith(
+        '/api/conversations/conv-a/read', { receipt: false },
+      )
+      // A failed post stays silent.
+      apiPost.mockRejectedValueOnce(new Error('offline'))
+      markThreadRead('conv-a')
+      await new Promise(res => setTimeout(res, 0))
+    } finally {
+      readReceiptsEnabled.value = true
+    }
+  })
+})

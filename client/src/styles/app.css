@@ -5621,6 +5621,16 @@ body.sh-dm-thread-open .sh-messages {
 /* Composer reply chip — pinned just above the input, mirrors the same
  * cream + terracotta accent shape the quoted card uses. Has its own
  * dismiss "×" button so the user doesn't have to hunt the reply target. */
+/* In place of the composer when the thread only reads (an archived
+   space's chat). */
+.sh-composer-readonly {
+  margin: 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-top: 1px solid var(--sh-border);
+  background: var(--sh-bg-secondary, var(--sh-bg));
+  font-size: var(--sh-font-size-sm);
+  text-align: center;
+}
 .sh-composer-reply {
   display: flex;
   align-items: center;
@@ -17022,6 +17032,33 @@ a.sh-link-preview-link:focus-visible {
 .sh-space-card__chips {
   display: flex; flex-wrap: wrap; gap: var(--sh-space-xs);
   margin-top: 4px;
+}
+/* Name + the chat-unread pill on one line; a long name wraps (never
+   pushes the pill off the card). */
+.sh-space-card__title {
+  display: flex; align-items: center; gap: var(--sh-space-xs);
+  min-width: 0;
+}
+.sh-space-card__title > strong {
+  min-width: 0; overflow-wrap: anywhere;
+}
+.sh-space-card__chat-unread {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.sh-space-card__chat-unread .sh-sidenav-icon {
+  width: 12px; height: 12px; flex: 0 0 12px;
+}
+.sh-space-card__chat-unread .sh-sidenav-icon svg {
+  width: 12px; height: 12px;
 }
 
 /* Subscriber read-only banner on SpaceFeedPage. Replaces the post

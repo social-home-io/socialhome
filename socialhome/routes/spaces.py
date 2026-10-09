@@ -2930,6 +2930,36 @@ class SpaceChatView(BaseView):
         return self._json(asdict(summary))
 
 
+class SpaceChatUnreadView(BaseView):
+    """``GET /api/spaces/chat-unread`` — the caller's space-chat unread
+    counts for the spaces list, in one call.
+
+    ``{"spaces": {space_id: {unread, notif_level, muted_until}}}`` — one
+    entry per space chat the caller holds a live seat in (a writer role,
+    not banned, chat on, space not dissolved). ``unread`` follows the Chat
+    switch's honest rules: ``0`` while muted, only unread @-mentions at
+    ``mentions``. A follower, a space with chat off and a chat never opened
+    are absent. ``notif_level`` / ``muted_until`` let the SPA apply the
+    same rules to live ``dm.message`` frames.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        rows = await self.svc(space_chat_service_key).unread_by_space(ctx.username)
+        return self._json(
+            {
+                "spaces": {
+                    space_id: {
+                        "unread": row.unread,
+                        "notif_level": row.notif_level,
+                        "muted_until": row.muted_until,
+                    }
+                    for space_id, row in rows.items()
+                }
+            }
+        )
+
+
 class SpaceNotifPrefsView(BaseView):
     """``GET /api/spaces/{id}/notif-prefs`` — caller's per-space prefs.
 

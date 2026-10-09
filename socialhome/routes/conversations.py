@@ -682,17 +682,26 @@ class ConversationMembersView(BaseView):
 class ConversationReadView(BaseView):
     """POST /api/conversations/{id}/read — mark conversation as read.
 
-    Updates the caller's watermark AND bulk-upserts
-    ``conversation_delivery_state`` rows so other participants see the
-    read-receipt tick. Returns ``{marked}`` — count of messages whose
-    state flipped to ``read``.
+    Always advances the caller's own read watermark (their unread counts
+    and the "New messages" divider). Optional body ``{"receipt": false}``
+    — the caller turned read receipts off — skips the
+    ``conversation_delivery_state`` upsert, so the other participants see
+    no read tick; otherwise (no body, or ``receipt`` true) they do.
+    Returns ``{marked}`` — count of messages whose state flipped to
+    ``read`` (``0`` without a receipt).
     """
 
     async def post(self) -> web.Response:
         ctx = self.user
         svc = self.svc(dm_service_key)
         conv_id = self.match("id")
-        marked = await svc.mark_read(conv_id, username=ctx.username)
+        data = await self.body() if self.request.can_read_body else {}
+        if not isinstance(data, dict):
+            return error_response(422, "UNPROCESSABLE", "Body must be an object.")
+        receipt = data.get("receipt", True)
+        if not isinstance(receipt, bool):
+            return error_response(422, "UNPROCESSABLE", "receipt must be a boolean.")
+        marked = await svc.mark_read(conv_id, username=ctx.username, receipt=receipt)
         # Clear bell badges for this conversation in lockstep with the
         # read-receipt update — opening a thread is the natural "I've
         # seen these" signal, no separate UI gesture needed.

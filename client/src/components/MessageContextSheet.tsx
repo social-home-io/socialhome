@@ -21,9 +21,11 @@ export interface ContextSheetAction {
 const QUICK_EMOJI = ['👍', '❤️', '😂', '😮', '😢', '🙏']
 
 interface Props {
-  onReact: (emoji: string) => void
+  /** A quick reaction tapped. Absent → no reaction row (a read-only
+   *  thread, e.g. an archived space's chat). */
+  onReact?: (emoji: string) => void
   /** "+" tapped — open the full emoji picker. */
-  onPickMore: () => void
+  onPickMore?: () => void
   actions: ContextSheetAction[]
   onClose: () => void
 }
@@ -48,6 +50,7 @@ export function MessageContextSheet(props: Props) {
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
+        {props.onReact && (
         <div class="sh-context-sheet__quick" role="group" aria-label={t('dms.context.quick_reactions')}>
           {QUICK_EMOJI.map(em => (
             <button
@@ -55,7 +58,7 @@ export function MessageContextSheet(props: Props) {
               type="button"
               class="sh-context-sheet__emoji"
               aria-label={t('dms.context.react_with', { emoji: em })}
-              onClick={() => { props.onReact(em); props.onClose() }}
+              onClick={() => { props.onReact?.(em); props.onClose() }}
             >
               {em}
             </button>
@@ -64,11 +67,12 @@ export function MessageContextSheet(props: Props) {
             type="button"
             class="sh-context-sheet__emoji sh-context-sheet__more"
             aria-label={t('dms.context.more_emoji')}
-            onClick={() => { props.onPickMore(); props.onClose() }}
+            onClick={() => { props.onPickMore?.(); props.onClose() }}
           >
             +
           </button>
         </div>
+        )}
         <ul class="sh-context-sheet__actions">
           {props.actions.map(a => (
             <li key={a.label}>

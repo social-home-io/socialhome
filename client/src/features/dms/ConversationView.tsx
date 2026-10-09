@@ -348,6 +348,19 @@ function metaToThreadInfo(meta: ConversationMeta): ThreadInfo {
   }
 }
 
+/** Advance the viewer's own read watermark for ``convId`` — always, so
+ *  the unread pill / divider never comes back after a reload. Only the
+ *  read *receipt* others see depends on the viewer's preference: with
+ *  receipts off the server is told ``{receipt: false}`` and writes no
+ *  read tick. Fire-and-forget. */
+export function markThreadRead(convId: string): void {
+  const path = `/api/conversations/${convId}/read`
+  const req = readReceiptsEnabled.value
+    ? api.post(path)
+    : api.post(path, { receipt: false })
+  void Promise.resolve(req).catch(() => {})
+}
+
 /** Own, sent, not deleted, and text the sender wrote: a text message or a
  *  media caption. Voice notes (machine transcript) and location pins are
  *  not edited from the thread. */
@@ -676,6 +689,14 @@ export interface ConversationViewProps {
   /** With ``allowDelete``: the viewer may delete anyone's message — a
    *  space chat's owner / admins / moderators. */
   canModerate?: boolean
+  /** The thread only reads (an archived space's chat): no composer —
+   *  ``readOnlyNote`` shows in its place —, no reply, edit or
+   *  reactions. Reading, marking read, copying and (with
+   *  ``allowDelete``) deleting stay, mirroring what the server
+   *  still takes. */
+  readOnly?: boolean
+  /** The note shown instead of the composer while ``readOnly``. */
+  readOnlyNote?: string
 }
 
 /** One conversation's thread — header, message list, composer — usable
@@ -693,6 +714,8 @@ export function ConversationView({
   meta,
   allowDelete = false,
   canModerate = false,
+  readOnly = false,
+  readOnlyNote,
 }: ConversationViewProps) {
   const convId = conversationId
   const location = useLocation()
@@ -950,9 +973,7 @@ export function ConversationView({
     if (!entryLandedAtLiveEdge.current) return
     if (newSinceScrollUp.value !== 0) newSinceScrollUp.value = 0
     if (unreadAnchor.value) unreadAnchor.value = null
-    if (readReceiptsEnabled.value) {
-      api.post(`/api/conversations/${convId}/read`).catch(() => {})
-    }
+    markThreadRead(convId)
   // eslint-disable-next-line react-hooks/exhaustive-deps -- store signals are fixed per ``convId``; ``anchor`` is tracked by its id
   }, [convId, isLoading, anchor?.message_id])
 
@@ -1078,9 +1099,7 @@ export function ConversationView({
           // ``handleScroll`` branch); marking on entry would advance the
           // watermark before the user has seen anything and the next
           // entry wouldn't render the divider.
-          if (!unreadAnchor.value && readReceiptsEnabled.value) {
-            api.post(`/api/conversations/${convId}/read`).catch(() => {})
-          }
+          if (!unreadAnchor.value) markThreadRead(convId)
         },
         // Second argument, NOT a trailing ``.catch`` — this branch must
         // see *only* a rejected fetch. A trailing catch would also
@@ -1196,9 +1215,7 @@ export function ConversationView({
       // it to true before the optimistic append. The
       // sticky-bottom transition branch in ``handleScroll`` covers
       // the "user scrolls down to catch up" path.
-      if (readReceiptsEnabled.value && stickToBottom.current) {
-        api.post(`/api/conversations/${convId}/read`).catch(() => {})
-      }
+      if (stickToBottom.current) markThreadRead(convId)
     })
     // Live-patch the thread-member roster on session-presence frames so
     // the header status line stays current.
@@ -2092,12 +2109,12 @@ export function ConversationView({
         cleanup()
         return
       }
-      setOffset(Math.max(0, Math.min(80, dx)))
+      setOffset(readOnly ? 0 : Math.max(0, Math.min(80, dx)))
     }
     const onUp = (ev: PointerEvent) => {
       window.clearTimeout(longPressTimer)
       const dx = ev.clientX - startX
-      if (!didLongPress && !bailed && dx >= 60) {
+      if (!readOnly && !didLongPress && !bailed && dx >= 60) {
         replyTo.value = m
       }
       el.style.removeProperty('--sh-swipe')
@@ -2208,9 +2225,7 @@ export function ConversationView({
       const hadPending =
         unreadAnchor.value !== null || newSinceScrollUp.value > 0
       newSinceScrollUp.value = 0
-      if (readReceiptsEnabled.value && hadPending) {
-        api.post(`/api/conversations/${convId}/read`).catch(() => {})
-      }
+      if (hadPending) markThreadRead(convId)
       // Clear the divider once the user has caught up.
       if (unreadAnchor.value) unreadAnchor.value = null
     }
@@ -2392,9 +2407,7 @@ export function ConversationView({
               el.scrollTo({ top: 0, behavior: 'smooth' })
               newSinceScrollUp.value = 0
               if (unreadAnchor.value) unreadAnchor.value = null
-              if (readReceiptsEnabled.value) {
-                api.post(`/api/conversations/${convId}/read`).catch(() => {})
-              }
+              markThreadRead(convId)
             }}
             aria-label={t(
               isOne(newSinceScrollUp.value) ? 'dms.jump_latest_one' : 'dms.jump_latest',
@@ -2724,6 +2737,7 @@ export function ConversationView({
                             + (info.mine ? ' sh-reaction-chip--mine' : '')
                           }
                           aria-pressed={info.mine}
+                          disabled={readOnly}
                           aria-label={
                             info.mine
                               ? t('dms.reaction_remove_aria', { emoji, n: String(info.count) })
@@ -2744,6 +2758,7 @@ export function ConversationView({
               )}
               {!m.deleted && (
                 <Fragment>
+                  {!readOnly && (
                   <button
                     type="button"
                     class="sh-message-react-btn"
@@ -2753,7 +2768,8 @@ export function ConversationView({
                   >
                     😊
                   </button>
-                  {canEditMessage(m, myUserId) && (
+                  )}
+                  {!readOnly && canEditMessage(m, myUserId) && (
                     <button
                       type="button"
                       class="sh-message-react-btn sh-message-edit-btn"
@@ -2777,6 +2793,7 @@ export function ConversationView({
                       🗑
                     </button>
                   )}
+                  {!readOnly && (
                   <button
                     type="button"
                     class="sh-message-reply-btn"
@@ -2786,6 +2803,7 @@ export function ConversationView({
                   >
                     ↩
                   </button>
+                  )}
                 </Fragment>
               )}
             </div>
@@ -2804,6 +2822,10 @@ export function ConversationView({
           <div class="sh-dm-load-older" aria-live="polite">{t('dms.loading_older')}</div>
         )}
       </div>
+      {readOnly ? (
+        <p class="sh-composer-readonly sh-muted" role="note">{readOnlyNote}</p>
+      ) : (
+      <Fragment>
       {replyTo.value && (
         <div class="sh-composer-reply" role="status" aria-live="polite">
           <div class="sh-composer-reply-body">
@@ -2972,6 +2994,8 @@ export function ConversationView({
           />
         )}
       </form>
+      </Fragment>
+      )}
       {/* Module-singleton popover for the ``:foo`` autocomplete the
        *  textarea triggers via ``checkForEmojiTrigger``. Mounting it
        *  inside the thread (rather than at app root) is fine — the
@@ -3016,11 +3040,13 @@ export function ConversationView({
         // must never reach ``window.open`` — the action is hidden instead.
         const openUrl = safeHref(target.media_url)
         const actions = [
-          {
-            label: t('dms.reply.action'),
-            glyph: '↩',
-            onClick: () => { replyTo.value = target },
-          },
+          ...(readOnly
+            ? []
+            : [{
+                label: t('dms.reply.action'),
+                glyph: '↩',
+                onClick: () => { replyTo.value = target },
+              }]),
           ...(target.content
             ? [{
                 label: t('dms.copy_text'),
@@ -3028,7 +3054,7 @@ export function ConversationView({
                 onClick: () => { void copyMessageText(target) },
               }]
             : []),
-          ...(canEditMessage(target, myUserId)
+          ...(!readOnly && canEditMessage(target, myUserId)
             ? [{
                 label: t('common.edit'),
                 glyph: '✎',
@@ -3056,8 +3082,8 @@ export function ConversationView({
         return (
           <MessageContextSheet
             actions={actions}
-            onReact={(emoji) => { void toggleReaction(target, emoji) }}
-            onPickMore={() => { reactionPickerFor.value = target }}
+            onReact={readOnly ? undefined : (emoji) => { void toggleReaction(target, emoji) }}
+            onPickMore={readOnly ? undefined : () => { reactionPickerFor.value = target }}
             onClose={() => { contextSheetFor.value = null }}
           />
         )

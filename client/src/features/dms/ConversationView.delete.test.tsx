@@ -178,3 +178,29 @@ describe('canDeleteMessage / asDeleted', () => {
     expect(asDeleted(m)).toMatchObject({ deleted: true, content: '', media_url: null, reactions: [] })
   })
 })
+
+describe('ConversationView — read-only (an archived space chat)', () => {
+  it('no composer, reply, edit or reactions; the note and delete stay', async () => {
+    const r = await renderView({
+      allowDelete: true, readOnly: true, readOnlyNote: 'This space is archived.',
+    })
+    expect(r.container.querySelector('form.sh-composer')).toBeNull()
+    expect(r.getByRole('note').textContent).toBe('This space is archived.')
+    expect(r.queryByRole('button', { name: "Add reaction to Bob's message" })).toBeNull()
+    expect(r.queryByRole('button', { name: 'Reply to Bob' })).toBeNull()
+    expect(r.queryByRole('button', { name: 'Edit your message' })).toBeNull()
+    // Existing reactions still show, but can't be toggled.
+    const chip = bubble(r.container, 'm-bob').querySelector<HTMLButtonElement>('.sh-reaction-chip')!
+    expect(chip.disabled).toBe(true)
+    expect(r.getByRole('button', { name: 'Delete your message' })).toBeTruthy()
+  })
+
+  it('a writable thread keeps them all', async () => {
+    const r = await renderView({ allowDelete: true })
+    expect(r.container.querySelector('form.sh-composer')).not.toBeNull()
+    expect(r.queryByRole('note')).toBeNull()
+    expect(r.getByRole('button', { name: "Add reaction to Bob's message" })).toBeTruthy()
+    expect(r.getByRole('button', { name: 'Reply to Bob' })).toBeTruthy()
+    expect(r.getByRole('button', { name: 'Edit your message' })).toBeTruthy()
+  })
+})
