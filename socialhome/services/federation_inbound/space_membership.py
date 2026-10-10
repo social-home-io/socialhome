@@ -255,7 +255,15 @@ class SpaceMembershipInboundHandlers:
 
     async def _joined_after(self, space_id: str, removed_at: object) -> bool:
         """Whether a local member of *space_id* joined after *removed_at*
-        (the host's tombstone time, UTC)."""
+        (the host's tombstone time, UTC).
+
+        The two times come from different clocks (the owner's tombstone,
+        our ``joined_at``), so skew can tip a near-simultaneous pair either
+        way. That is benign — neither direction grants access: a removal
+        wrongly taken as older only leaves our copy unarchived, while the
+        owner still holds no live seat for us (it streams us nothing and
+        refuses our writes); a re-join wrongly taken as older archives a
+        copy that a fresh invitation re-seats."""
         removed = _utc(removed_at)
         if removed is None:
             return False

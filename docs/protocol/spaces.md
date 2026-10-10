@@ -705,7 +705,10 @@ dropping it:
   or left), none live. Terminal — except that the reply carries the newest
   tombstone's `removed_at` (migration 0093), and a household whose own
   current join is newer (a delegated admin re-invited it; the host has not
-  heard the re-join yet) keeps its copy.
+  heard the re-join yet) keeps its copy. The two times come from different
+  clocks; skew only decides whether the copy is archived — the host still
+  holds no live seat for the household, streams it nothing and refuses its
+  writes.
 - `reason="not_seated"` (migration 0093) — the host has no record of the
   requester at all, or its join is still in flight (a live seat whose
   `space_instances` row has not landed yet, or a merely accepted

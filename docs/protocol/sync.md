@@ -747,6 +747,20 @@ discovery.md); otherwise the host drops silently. Each stream's sentinel also
 carries the owner statement for spaces with delegated admins (no config edit).
 Older receivers drop an unknown reason.
 
+A delegated admin's sentinel also carries its `inviter_proof` (migration
+0093): its signature, with the space's authority seed, over `{space_id,
+owner_instance_id, inviter_instance_id, authority_key_epoch, authority_pk}`
+for the key it holds now. A household that admin invited
+(`spaces.invited_by_instance`) whose inviting-admin trust paused at a key
+rotation resumes it only on such a proof — naming the sender, for the pinned
+key and epoch (`apply_inviter_reproof`); an admin the rotation revoked cannot
+make one. A proof that names another household, an older key, or a key
+we do not pin is ignored. The stream whose sentinel resumed the trust was
+applied under the member rules (the trust came back only at its end), so,
+like a held-back stream, it is not reported clean and its snapshot is not
+recorded — the next session re-streams under the restored trust. Owners and
+pre-0093 senders send no `inviter_proof`; receivers ignore its absence.
+
 The HTTPS chunk handler (`_handle_space_sync_chunk`) validates that the
 envelope's `from_instance` matches the session's recorded provider and
 then forwards the inner payload to `SpaceSyncReceiver.on_chunk` — the

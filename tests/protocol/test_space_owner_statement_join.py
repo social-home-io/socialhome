@@ -22,7 +22,7 @@ import orjson
 from datetime import datetime, timezone
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1032,14 +1032,37 @@ async def test_a_removed_without_a_time_still_archives(joiner, db):
     assert (await joiner.spaces.get(SPACE)).archived is True
 
 
-async def test_an_expired_pending_invitation_protects_nothing(joiner, db):
-    """A stub seated by an invitation that expired unanswered is dead: a
-    proven owner's invite may replace it."""
+async def test_a_pending_invitation_past_its_ttl_still_protects_the_stub(joiner, db):
+    """The invitee-side row's short ttl does not end it: it stays listed and
+    acceptable, so it still protects its stub — status decides, never
+    ``expires_at`` (else the user's real invitation would be displaced)."""
     mal_kp = generate_space_keypair()
     await _mal_preseats(joiner, mal_kp)
     await db.enqueue(
         "UPDATE space_invitations SET expires_at='2020-01-01T00:00:00+00:00'"
         " WHERE invite_token='t-mal'"
+    )
+    assert await joiner.spaces.has_pending_remote_invitation(SPACE) is True
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(
+        _invite(
+            R,
+            _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
+            token="t-r",
+        )
+    )
+    assert (await _seated(joiner))[0] != R
+    row = await db.fetchone(
+        "SELECT status FROM space_invitations WHERE invite_token='t-mal'"
+    )
+    assert row["status"] == "pending"
+
+
+async def test_an_expired_by_status_invitation_protects_nothing(joiner, db):
+    mal_kp = generate_space_keypair()
+    await _mal_preseats(joiner, mal_kp)
+    await db.enqueue(
+        "UPDATE space_invitations SET status='expired' WHERE invite_token='t-mal'"
     )
     assert await joiner.spaces.has_pending_remote_invitation(SPACE) is False
     real_kp = generate_space_keypair()
@@ -1051,3 +1074,41 @@ async def test_an_expired_pending_invitation_protects_nothing(joiner, db):
         )
     )
     assert (await _seated(joiner))[0] == R
+
+
+async def test_the_stream_that_carried_a_reproof_is_not_recorded_clean(joiner):
+    """Its chunks were applied under the member rules (the re-proof lands
+    only at the sentinel), so the stream must not count as a clean full
+    apply — the next session re-streams under the restored trust."""
+    kp = generate_space_keypair()
+    await _admin_seated_at_epoch_0(joiner, kp)
+    new_kp = generate_space_keypair()
+    assert await joiner.spaces.adopt_authority_key(SPACE, new_kp.public_key.hex(), 1)
+    admin_seed = b"\x63" * 32
+    receiver = _paired_receiver(joiner, {ADMIN: admin_seed})
+    reproof = sign_inviter_proof(
+        space_id=SPACE,
+        owner_instance_id=R,
+        inviter_instance_id=ADMIN,
+        space_seed=new_kp.private_key,
+        authority_key_epoch=1,
+    )
+    with patch.object(SpaceSyncReceiver, "_record_applied", AsyncMock()) as recorded:
+        await _sentinel(
+            receiver,
+            sender=ADMIN,
+            seed=admin_seed,
+            inviter_proof=reproof,
+            chunk_count=0,
+        )
+        assert await joiner.spaces.get_invited_by_epoch(SPACE) == 1
+        recorded.assert_not_awaited()
+        # The next stream, under the restored trust, records as usual.
+        await _sentinel(
+            receiver,
+            sender=ADMIN,
+            seed=admin_seed,
+            inviter_proof=reproof,
+            chunk_count=0,
+        )
+        recorded.assert_awaited_once()

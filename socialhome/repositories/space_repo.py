@@ -1118,13 +1118,15 @@ class SqliteSpaceRepo:
 
     async def has_pending_remote_invitation(self, space_id: str) -> bool:
         """Whether a cross-household invitation into *space_id* still waits
-        for an answer here AND has not expired (it seated the stub; it is not
-        displaced). An expired pending invitation is dead — it can no longer
-        be accepted — so it protects nothing."""
+        for an answer here (it seated the stub; it is not displaced).
+
+        Decided by ``status`` alone, never by ``expires_at``: an invitee-side
+        row keeps a short ttl yet stays listed and acceptable, so a pending
+        row past its ``expires_at`` still protects the stub. Only a row whose
+        status left ``pending`` (declined, accepted, expired) is dead."""
         row = await self._db.fetchone(
             "SELECT 1 FROM space_invitations WHERE space_id=?"
-            " AND status='pending' AND remote_instance_id IS NOT NULL"
-            " AND datetime(expires_at) > datetime('now') LIMIT 1",
+            " AND status='pending' AND remote_instance_id IS NOT NULL LIMIT 1",
             (space_id,),
         )
         return row is not None

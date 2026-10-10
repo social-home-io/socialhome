@@ -108,7 +108,10 @@ async def test_a_demoted_or_removed_admin_seat_ends_the_trust(env):
 
 async def test_no_marker_no_trust(env, db):
     spaces, seats = env
-    await db.enqueue("UPDATE spaces SET invited_by_instance=NULL WHERE id='sp-1'")
+    await db.enqueue(
+        "UPDATE spaces SET invited_by_instance=NULL, invited_by_epoch=NULL"
+        " WHERE id='sp-1'"
+    )
     assert await _check(env, ADMIN) == (False, False)
 
 

@@ -8542,7 +8542,7 @@ async def admit_join_stub(
       issuer that merely names itself); the existing stub is NOT backed by
       a current owner statement of its own; and nobody here ever accepted an
       invitation into it (no local member, no accepted invitation) — dust
-      left by an invitation that expired or was declined. The
+      left by an invitation whose status turned expired or declined. The
       earlier stub is then dropped with everything that came with it (its
       inviter's seats, households, pinned key, pending invitations). Space
       ids are random, not key-derived, so two households can both claim

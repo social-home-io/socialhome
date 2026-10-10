@@ -760,7 +760,10 @@ class SpaceSyncReceiver:
             await self._keep_owner_statement(space_id, envelope.get("owner_statement"))
             # …and our inviting admin's fresh seed proof for the key we pin
             # resumes its trust after a rotation (never the pin move alone).
-            await apply_inviter_reproof(
+            # This stream's chunks were applied under the member rules (the
+            # trust resumed only now), so like a held-back stream it is not
+            # clean: the next session re-streams under the restored trust.
+            reproved = await apply_inviter_reproof(
                 self._space_repo,
                 space_id,
                 provider=from_instance,
@@ -774,10 +777,13 @@ class SpaceSyncReceiver:
             archive_changed = self._health.archive_changed(
                 sync_id, archived=bool(space_now is not None and space_now.archived)
             )
-            clean = self._streaks.clean(
-                self._health.finish(sync_id, envelope.get("chunk_count")),
-                space_id,
-                from_instance,
+            clean = (
+                self._streaks.clean(
+                    self._health.finish(sync_id, envelope.get("chunk_count")),
+                    space_id,
+                    from_instance,
+                )
+                and not reproved
             )
             if clean and not archive_changed:
                 await self._record_applied(

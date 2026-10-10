@@ -203,6 +203,7 @@ class SqliteSpaceRemoteMemberRepo:
                 role=excluded.role,
                 authority_epoch=excluded.authority_epoch,
                 tombstoned=0,
+                removed_at=NULL,
                 member_version=space_remote_members.member_version
                     + (CASE WHEN space_remote_members.tombstoned THEN 1 ELSE 0 END)
             """,
@@ -338,15 +339,22 @@ class SqliteSpaceRemoteMemberRepo:
                 """
                 INSERT INTO space_remote_members(
                     space_id, instance_id, user_id, user_pk, display_name,
-                    role, member_version, tombstoned, authority_epoch
+                    role, member_version, tombstoned, authority_epoch, removed_at
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?,
-                         (SELECT authority_key_epoch FROM spaces WHERE id=?))
+                         (SELECT authority_key_epoch FROM spaces WHERE id=?),
+                         CASE WHEN ? = 1 THEN datetime('now') END)
                 ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
                     user_pk=excluded.user_pk,
                     display_name=excluded.display_name,
                     role=excluded.role,
                     member_version=excluded.member_version,
                     tombstoned=excluded.tombstoned,
+                    removed_at=CASE
+                        WHEN excluded.tombstoned = 0 THEN NULL
+                        WHEN space_remote_members.tombstoned = 1
+                        AND space_remote_members.removed_at IS NOT NULL
+                        THEN space_remote_members.removed_at
+                        ELSE datetime('now') END,
                     authority_epoch=excluded.authority_epoch
                 """,
                 (
@@ -359,6 +367,7 @@ class SqliteSpaceRemoteMemberRepo:
                     member_version,
                     1 if tombstoned else 0,
                     space_id,
+                    1 if tombstoned else 0,
                 ),
             )
             return True
@@ -366,9 +375,10 @@ class SqliteSpaceRemoteMemberRepo:
             """
             INSERT INTO space_remote_members(
                 space_id, instance_id, user_id, user_pk, display_name,
-                role, member_version, tombstoned, authority_epoch
+                role, member_version, tombstoned, authority_epoch, removed_at
             )
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   CASE WHEN ? = 1 THEN datetime('now') END
             WHERE (SELECT authority_key_epoch FROM spaces WHERE id=?) = ?
             ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
                 user_pk=excluded.user_pk,
@@ -376,6 +386,12 @@ class SqliteSpaceRemoteMemberRepo:
                 role=excluded.role,
                 member_version=excluded.member_version,
                 tombstoned=excluded.tombstoned,
+                removed_at=CASE
+                    WHEN excluded.tombstoned = 0 THEN NULL
+                    WHEN space_remote_members.tombstoned = 1
+                    AND space_remote_members.removed_at IS NOT NULL
+                    THEN space_remote_members.removed_at
+                    ELSE datetime('now') END,
                 authority_epoch=excluded.authority_epoch
             """,
             (
@@ -388,6 +404,7 @@ class SqliteSpaceRemoteMemberRepo:
                 member_version,
                 1 if tombstoned else 0,
                 verified_epoch,
+                1 if tombstoned else 0,
                 space_id,
                 verified_epoch,
             ),
@@ -420,14 +437,21 @@ class SqliteSpaceRemoteMemberRepo:
             """
             INSERT INTO space_remote_members(
                 space_id, instance_id, user_id, user_pk, display_name,
-                role, member_version, tombstoned, authority_epoch
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, (SELECT authority_key_epoch FROM spaces WHERE id=?))
+                role, member_version, tombstoned, authority_epoch, removed_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, (SELECT authority_key_epoch FROM spaces WHERE id=?),
+                     CASE WHEN ? = 1 THEN datetime('now') END)
             ON CONFLICT(space_id, instance_id, user_id) DO UPDATE SET
                 user_pk=excluded.user_pk,
                 display_name=excluded.display_name,
                 role=excluded.role,
                 member_version=excluded.member_version,
                 tombstoned=excluded.tombstoned,
+                removed_at=CASE
+                    WHEN excluded.tombstoned = 0 THEN NULL
+                    WHEN space_remote_members.tombstoned = 1
+                    AND space_remote_members.removed_at IS NOT NULL
+                    THEN space_remote_members.removed_at
+                    ELSE datetime('now') END,
                 authority_epoch=excluded.authority_epoch
             """,
             (
@@ -440,6 +464,7 @@ class SqliteSpaceRemoteMemberRepo:
                 member_version,
                 1 if tombstoned else 0,
                 space_id,
+                1 if tombstoned else 0,
             ),
         )
 

@@ -85,10 +85,35 @@ def test_invited_by_instance_is_a_null_default_column(conn) -> None:
 
 
 def test_invited_by_epoch_and_removed_at_columns(conn) -> None:
-    conn.execute("UPDATE spaces SET invited_by_epoch=3 WHERE id='old'")
+    conn.execute(
+        "UPDATE spaces SET invited_by_instance='admin-hh', invited_by_epoch=3"
+        " WHERE id='old'"
+    )
     assert (
         conn.execute("SELECT invited_by_epoch FROM spaces WHERE id='old'").fetchone()[0]
         == 3
     )
     cols = {r[1] for r in conn.execute("PRAGMA table_info(space_remote_members)")}
     assert "removed_at" in cols
+
+
+def test_an_epoch_without_an_inviter_is_rejected(conn) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE spaces SET invited_by_epoch=0 WHERE id='old'")
+
+
+def test_clearing_the_inviter_must_clear_its_epoch(conn) -> None:
+    conn.execute(
+        "UPDATE spaces SET invited_by_instance='admin-hh', invited_by_epoch=0"
+        " WHERE id='old'"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE spaces SET invited_by_instance=NULL WHERE id='old'")
+    conn.execute(
+        "UPDATE spaces SET invited_by_instance=NULL, invited_by_epoch=NULL"
+        " WHERE id='old'"
+    )
+
+
+def test_an_inviter_with_no_epoch_yet_is_accepted(conn) -> None:
+    conn.execute("UPDATE spaces SET invited_by_instance='admin-hh' WHERE id='old'")

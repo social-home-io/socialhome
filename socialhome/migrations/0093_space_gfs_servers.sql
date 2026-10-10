@@ -120,8 +120,30 @@ ALTER TABLE spaces ADD COLUMN invited_by_instance TEXT;
 -- holds only while the pinned epoch equals it: after a rotation it resumes
 -- only on a fresh proof for the new epoch (an honest admin's §25.6 sentinel
 -- carries one), which an admin revoked by that rotation cannot make. A moved
--- pin alone never resumes it. NULL when ``invited_by_instance`` is NULL.
-ALTER TABLE spaces ADD COLUMN invited_by_epoch INTEGER;
+-- pin alone never resumes it. NULL when ``invited_by_instance`` is NULL —
+-- the CHECK holds that direction (an epoch with no inviter is meaningless);
+-- ``set_invited_by`` writes both together and NULLs the epoch with the
+-- inviter, and ``set_invited_by_epoch`` writes only while an inviter is set.
+--
+-- Audit for this column:
+--   (1) Paths that touch the data: ``set_invited_by`` (the join paths, and
+--       the ``not_seated`` answer clearing the inviter), ``set_invited_by_epoch``
+--       (``apply_inviter_reproof`` at a §25.6 sentinel), and
+--       ``host_equivalence.is_trusted_inviter``, the only reader.
+--   (2) Rejected: binding the trust to the pinned authority KEY instead
+--       (``spaces.identity_public_key`` at seat time, or an inviter-proof
+--       blob re-verified on every check) — the pin moves on a relayed cert
+--       any sender may forward, so a key/epoch compare against the pin
+--       alone cannot tell "the inviter proved this key" from "the pin moved
+--       under it", and keeping the whole proof blob only to re-derive this
+--       integer adds a JSON column for nothing; reusing ``authority_epoch``
+--       on the inviter's seat row (``space_remote_members``) — that column
+--       is the epoch a roster EVENT was verified under, rewritten by every
+--       gossip upsert, not what the inviter proved.
+--   (3) One NULL-default INTEGER column, no backfill (NULL = no trust,
+--       today's behaviour for every existing stub).
+ALTER TABLE spaces ADD COLUMN invited_by_epoch INTEGER
+    CHECK (invited_by_epoch IS NULL OR invited_by_instance IS NOT NULL);
 
 -- ``space_remote_members.removed_at`` (same migration): when a seat was
 -- tombstoned (UTC, ``datetime('now')``). The owner's terminal ``removed``

@@ -2257,10 +2257,12 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   every snapshot and config it sends; members keep the latest verified one
   (`spaces.owner_statement`) and relay it.
 - **A pending invitation is never displaced.** A stub seated by an
-  invitation still waiting for an answer (and not expired) stays, whoever
+  invitation still waiting for an answer (status `pending`) stays, whoever
   claims otherwise and whatever the statements' ages (first seated wins, as
-  before); only its own owner's newer statement updates it. An expired
-  pending invitation is dead and protects nothing.
+  before); only its own owner's newer statement updates it. The invitation's
+  status decides, not its `expires_at` — an invitee-side invitation past its
+  ttl is still listed and acceptable, so it still protects the stub. Only a
+  declined or expired-by-status invitation is dead.
 - **A proven owner beats unproven dust.** Otherwise, a stub held under
   another owner is replaced only when the newcomer's owner is PROVEN
   (its signed statement verified), the existing stub is NOT backed by a
