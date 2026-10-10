@@ -12,7 +12,7 @@ import orjson
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
-from socialhome.domain.events import SpaceSyncComplete
+from socialhome.domain.events import SpaceContentKeyImported, SpaceSyncComplete
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.federation import (
     InstanceSource,
@@ -25,6 +25,7 @@ from socialhome.federation.sync.space.exporter import (
     serialise_chunk,
 )
 from socialhome.federation.sync.space.receiver import (
+    HeldBack,
     SpaceSyncReceiver,
     _sticky_from_record,
 )
@@ -134,6 +135,12 @@ class _Stub:
     async def create_item_in_space(self, item, *, space_id, bump_count=True):
         self.saved.append(("item", item))
         return True
+
+    async def get_album(self, album_id):
+        return None
+
+    async def recount_items(self, album_id):
+        return 0
 
     async def is_album_deleted(self, album_id, *, space_id):
         return False
@@ -638,19 +645,25 @@ async def test_persist_album_failure_is_logged_not_swallowed(receiver, caplog):
     r, space_repo, _ = receiver
     r._gallery_repo.create_album = AsyncMock(side_effect=RuntimeError("boom"))
 
+    held_back = HeldBack()
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         await r._persist_album(
             {"id": "al-1", "space_id": "sp-1", "name": "Holiday", "is_system": 0},
             "sp-1",
+            from_host=True,
+            held_back=held_back,
         )
 
     assert "gallery album al-1" in caplog.text
+    # Nor does it count as stored: the stream is reported unclean.
+    assert held_back.count == 1
 
 
 async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, caplog):
     """Same for items — a missing parent album must not be silent."""
     r, _space_repo, _ = receiver
     r._gallery_repo.create_item_in_space = AsyncMock(side_effect=RuntimeError("boom"))
+    held_back = HeldBack()
 
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         await r._persist_gallery_item(
@@ -665,9 +678,11 @@ async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, ca
                 "height": 10,
             },
             "sp-1",
+            held_back,
         )
 
     assert "gallery item it-1" in caplog.text
+    assert held_back.count == 1
 
 
 async def test_on_chunk_refuses_a_chunk_for_another_space(receiver, peer_setup):
@@ -1018,6 +1033,87 @@ async def test_a_chunk_still_waiting_for_its_key_makes_the_stream_unclean(
     )
     await r.on_chunk(await _members_chunk(kp, "s-wait"), from_instance="peer-a")
     assert (await _completion(bus, r, kp, "s-wait", 1)).clean is False
+
+
+async def test_a_sentinel_overtaking_a_chunks_persist_is_not_clean(
+    bus, receiver, peer_setup
+):
+    """A chunk counts once its records are stored, not when it arrives:
+    relayed chunks are separate inbound events, so the sentinel can be
+    handled while an earlier chunk is still persisting — and that persist
+    may yet fail. The verdict must not run ahead of the database."""
+    r, space_repo, _ = receiver
+    _, kp = peer_setup
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    stored = space_repo.save_member
+
+    async def _slow_save(member):
+        entered.set()
+        await gate.wait()
+        raise RuntimeError("database is locked")
+
+    space_repo.save_member = _slow_save
+    persisting = asyncio.create_task(
+        r.on_chunk(await _members_chunk(kp, "s-race"), from_instance="peer-a")
+    )
+    await entered.wait()
+    done = await _completion(bus, r, kp, "s-race", 1)
+    gate.set()
+    await persisting
+    space_repo.save_member = stored
+    assert done.clean is False
+
+
+async def test_a_chunk_counts_only_once_stored(bus, receiver, peer_setup):
+    """The same race with a persist that succeeds: still not clean — the
+    sentinel saw the chunk unstored, so the next session re-streams it."""
+    r, space_repo, _ = receiver
+    _, kp = peer_setup
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    stored = space_repo.save_member
+
+    async def _slow_save(member):
+        entered.set()
+        await gate.wait()
+        return await stored(member)
+
+    space_repo.save_member = _slow_save
+    persisting = asyncio.create_task(
+        r.on_chunk(await _members_chunk(kp, "s-slow"), from_instance="peer-a")
+    )
+    await entered.wait()
+    done = await _completion(bus, r, kp, "s-slow", 1)
+    gate.set()
+    await persisting
+    assert done.clean is False
+    # The late chunk leaves nothing behind for a stream already finished.
+    assert "s-slow" not in r._health._streams
+
+
+async def test_a_redelivered_chunk_counts_once_it_applies(bus, peer_setup):
+    """A chunk stashed for its epoch key counts when the replay stores it."""
+    peer, kp = peer_setup
+    crypto = _MissingKeyCrypto()
+    cache = PendingDecryptsCache(bus=bus)
+    r = SpaceSyncReceiver(
+        bus=bus,
+        encoder=FederationEncoder(generate_identity_keypair().private_key),
+        crypto=crypto,
+        federation_repo=_FakeFedRepo(peer),
+        space_repo=_FakeSpaceRepo(),
+        space_post_repo=_FakeSpacePostRepo(),
+        space_task_repo=_Stub(),
+        page_repo=_Stub(),
+        sticky_repo=_Stub(),
+        space_calendar_repo=_Stub(),
+        gallery_repo=_Stub(),
+        pending_decrypts=cache,
+    )
+    await r.on_chunk(await _members_chunk(kp, "s-key"), from_instance="peer-a")
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=0))
+    assert (await _completion(bus, r, kp, "s-key", 1)).clean is True
 
 
 async def test_a_sentinel_without_a_count_is_never_clean(bus, receiver, peer_setup):

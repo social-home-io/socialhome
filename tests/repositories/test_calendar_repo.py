@@ -1408,18 +1408,56 @@ async def test_space_calendar_reads_since_a_stamp(two_space_calendars):
     repo = env.space_cal_repo
     row = await env.db.fetchone("SELECT seq FROM sync_seq_counter WHERE id=1")
     mark = int(row["seq"])
-    lo = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    hi = datetime(2030, 1, 1, tzinfo=timezone.utc)
-    assert await repo.list_events_in_range("cs-a", start=lo, end=hi, since=mark) == []
+    assert await repo.list_events_sync_page("cs-a", since=mark) == ([], None)
     await env.db.enqueue(
         "UPDATE space_calendar_events SET summary='moved' WHERE id='cev-a'"
     )
-    changed = await repo.list_events_in_range("cs-a", start=lo, end=hi, since=mark)
+    changed, _ = await repo.list_events_sync_page("cs-a", since=mark)
     assert [e.id for e in changed] == ["cev-a"]
     assert await repo.list_event_tombstones_page("cs-b", since=mark) == ([], None)
     await repo.delete_event("cev-b", space_id="cs-b", deleted_by="uid-alice")
     page, _ = await repo.list_event_tombstones_page("cs-b", since=mark)
     assert [t.id for t in page] == ["cev-b"]
-    # Without ``since`` every live event in range, as before.
-    every = await repo.list_events_in_range("cs-a", start=lo, end=hi)
+    # Without ``since`` every live event of the space.
+    every, _ = await repo.list_events_sync_page("cs-a")
     assert [e.id for e in every] == ["cev-a"]
+    assert await repo.list_events_sync_page("cs-b") == ([], None)
+
+
+async def test_space_calendar_sync_page_is_every_stored_event_unexpanded(
+    two_space_calendars,
+):
+    """§25.6: the rows as stored — a series once, with its rule, whatever
+    its age; keyset-paged on the row id."""
+    env = two_space_calendars
+    repo = env.space_cal_repo
+    ancient = datetime(1990, 3, 1, tzinfo=timezone.utc)
+    assert await repo.save_event(
+        CalendarEvent(
+            id="cev-series",
+            calendar_id="cs-a",
+            summary="weekly",
+            start=ancient,
+            end=ancient,
+            created_by="uid-alice",
+            rrule="FREQ=WEEKLY",
+        ),
+        space_id="cs-a",
+    )
+    far = datetime(2090, 1, 1, tzinfo=timezone.utc)
+    assert await repo.save_event(
+        CalendarEvent(
+            id="cev-far",
+            calendar_id="cs-a",
+            summary="far",
+            start=far,
+            end=far,
+            created_by="uid-alice",
+        ),
+        space_id="cs-a",
+    )
+    first, nxt = await repo.list_events_sync_page("cs-a", limit=2)
+    assert [e.id for e in first] == ["cev-a", "cev-series"] and nxt is not None
+    assert first[1].rrule == "FREQ=WEEKLY" and first[1].start == ancient
+    rest, end = await repo.list_events_sync_page("cs-a", cursor=nxt, limit=2)
+    assert [e.id for e in rest] == ["cev-far"] and end is None

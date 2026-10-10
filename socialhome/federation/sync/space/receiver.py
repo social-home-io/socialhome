@@ -28,7 +28,7 @@ from typing import Any, Protocol, TYPE_CHECKING
 
 import orjson as _orjson
 
-from ....domain.calendar import CalendarEvent
+from ....domain.calendar import OCCURRENCE_ID_SEPARATOR, CalendarEvent
 from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.page import Page
@@ -76,6 +76,7 @@ from ....domain.timetable import (
     validate,
 )
 from ....infrastructure.event_bus import EventBus
+from ....utils.timezones import coerce_tz
 from ....media.cleanup import unlink_unreferenced
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -94,7 +95,11 @@ from ...owner_bound_id import (
     is_owner_bound,
     owner_bound_id_refused,
 )
-from ....services.inbound_media_store import local_media_ref, local_media_refs
+from ....services.inbound_media_store import (
+    local_media_ref,
+    local_media_refs,
+    verbatim_local_media_ref,
+)
 from ....services.link_preview_service import wire_link_preview
 from ....services.page_conflict_service import PageMode, canonical_from_wire
 from ...space_scope import archive_refusal
@@ -141,27 +146,65 @@ log = logging.getLogger(__name__)
 MAX_TRACKED_STREAMS: int = 256
 
 
+class HeldBack:
+    """Records of one sync chunk refused only **for now** — they would land
+    on a later stream, so the chunk does not count as applied and the
+    stream is reported unclean (:class:`StreamHealth`); the provider keeps
+    its watermark and the next periodic session streams them again,
+    instead of the daily full pass.
+
+    Only a refusal that a later stream can turn into a write counts: a
+    record naming a user this space has no record of at all yet (the
+    roster gossip seating them trails the stream — the same race the live
+    path holds a write for), a tombstone / item whose parent is not held
+    here at all yet, or a persist that failed where the caller logs rather
+    than raises (the gallery album / item writes). A refusal by rule (held already, deleted here, a user
+    known but not seated on the provider, another space's id) would be
+    refused again and is not counted — it must not keep every stream
+    unclean."""
+
+    __slots__ = ("count",)
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def add(self, n: int = 1) -> None:
+        self.count += n
+
+
 class StreamHealth:
     """Whether every chunk of a §25.6 stream was applied here.
 
     The requester tells the provider with ``SPACE_SYNC_COMPLETE {clean}``;
     only a clean stream advances the provider's incremental-sync watermark.
     A stream is clean when its sentinel names how many chunks the provider
-    sent (``chunk_count``), exactly that many arrived with a valid
-    signature, none failed to decrypt / parse / persist, and none is still
-    waiting for its epoch key. Anything else — a chunk lost on the way, a
-    persist that raised, a tampered chunk, an older provider that sends no
-    count — is unclean, so the next periodic session re-streams it rather
-    than the provider skipping rows this household never stored.
+    sent (``chunk_count``), exactly that many were **stored** here — counted
+    once a chunk's records are persisted, never on arrival —, none failed
+    to decrypt / parse / persist or held a record back for a retry, and
+    none is still waiting for its epoch key. Anything else — a chunk lost on
+    the way, a persist that raised or is still running, a tampered chunk, a
+    record refused only for now, an older provider that sends no count — is
+    unclean, so the next periodic session re-streams it rather than the
+    provider skipping rows this household never stored.
+
+    Counting on arrival made the verdict depend on chunks being persisted
+    one after another: relayed chunks are separate inbound events, so the
+    sentinel can be handled while an earlier chunk still persists — and
+    that persist may yet fail.
     """
 
-    __slots__ = ("_streams",)
+    __slots__ = ("_streams", "_finished")
 
     def __init__(self) -> None:
-        #: sync_id -> [received, failed, pending]
+        #: sync_id -> [applied, failed, pending]
         self._streams: OrderedDict[str, list[int]] = OrderedDict()
+        #: Streams whose verdict was given: a chunk finishing after its
+        #: sentinel changes nothing, and must not open a new entry.
+        self._finished: OrderedDict[str, None] = OrderedDict()
 
-    def _entry(self, sync_id: str) -> list[int]:
+    def _entry(self, sync_id: str) -> list[int] | None:
+        if sync_id in self._finished:
+            return None
         entry = self._streams.get(sync_id)
         if entry is None:
             entry = self._streams[sync_id] = [0, 0, 0]
@@ -169,14 +212,21 @@ class StreamHealth:
                 self._streams.popitem(last=False)
         return entry
 
-    def received(self, sync_id: str) -> None:
-        self._entry(sync_id)[0] += 1
+    def applied(self, sync_id: str) -> None:
+        """A chunk's records are stored (or refused for good)."""
+        entry = self._entry(sync_id)
+        if entry is not None:
+            entry[0] += 1
 
     def failed(self, sync_id: str) -> None:
-        self._entry(sync_id)[1] = 1
+        entry = self._entry(sync_id)
+        if entry is not None:
+            entry[1] = 1
 
     def stashed(self, sync_id: str) -> None:
-        self._entry(sync_id)[2] += 1
+        entry = self._entry(sync_id)
+        if entry is not None:
+            entry[2] += 1
 
     def resolved(self, sync_id: str) -> None:
         entry = self._streams.get(sync_id)
@@ -185,10 +235,13 @@ class StreamHealth:
 
     def finish(self, sync_id: str, chunk_count: object) -> bool:
         """End the stream; ``True`` iff it is clean."""
-        received, failed, pending = self._streams.pop(sync_id, [0, 0, 0])
+        applied, failed, pending = self._streams.pop(sync_id, [0, 0, 0])
+        self._finished[sync_id] = None
+        while len(self._finished) > MAX_TRACKED_STREAMS:
+            self._finished.popitem(last=False)
         if not isinstance(chunk_count, int) or isinstance(chunk_count, bool):
             return False
-        return not failed and not pending and received == chunk_count
+        return not failed and not pending and applied == chunk_count
 
 
 class ChatSyncSink(Protocol):
@@ -197,7 +250,10 @@ class ChatSyncSink(Protocol):
 
     async def apply_sync_records(
         self, space_id: str, records: list[dict[str, Any]], *, provider: str
-    ) -> None: ...
+    ) -> int:
+        """Apply the records; return how many were held for a seat that
+        has not reached this household yet (:class:`HeldBack`)."""
+        ...
 
     async def apply_sync_tombstones(
         self, space_id: str, records: list[dict[str, Any]], *, provider: str
@@ -352,12 +408,12 @@ class SpaceSyncReceiver:
         *,
         from_instance: str,
         expected_space_id: str | None = None,
-        redelivery: bool = False,
     ) -> None:
         """Handle one chunk (DataChannel frame or routed federation event).
 
-        ``redelivery`` — a chunk replayed once its epoch key arrived; it was
-        already counted when it first landed (:class:`StreamHealth`).
+        A chunk counts towards its stream's verdict (:class:`StreamHealth`)
+        only once its records are stored — a chunk stashed for its epoch key
+        counts when the replay stores it.
 
         All failure modes log + return. Note the sender is NOT necessarily
         a paired peer: a mesh-joined member receives its catch-up stream
@@ -494,10 +550,9 @@ class SpaceSyncReceiver:
             )
             return
 
-        if not redelivery:
-            self._health.received(sync_id)
-
         if resource not in ALLOWED_RESOURCES:
+            # A newer provider's resource: dropped by rule, never retried.
+            self._health.applied(sync_id)
             log.debug("unknown resource %r in sync chunk", resource)
             return
 
@@ -539,7 +594,6 @@ class SpaceSyncReceiver:
                             raw,
                             from_instance=from_instance,
                             expected_space_id=space_id,
-                            redelivery=True,
                         )
                     finally:
                         self._health.resolved(sync_id)
@@ -564,7 +618,9 @@ class SpaceSyncReceiver:
             return
 
         try:
-            await self._dispatch(resource, space_id, records, provider=from_instance)
+            settled = await self._dispatch(
+                resource, space_id, records, provider=from_instance
+            )
         except Exception:
             self._health.failed(sync_id)
             log.exception(
@@ -572,6 +628,22 @@ class SpaceSyncReceiver:
                 resource,
                 space_id,
             )
+            return
+        if settled:
+            self._health.applied(sync_id)
+            return
+        # A record refused only for now (its author's seat or its parent has
+        # not reached us yet): the stream is unclean, so the provider keeps
+        # its watermark and the next periodic session streams it again.
+        self._health.failed(sync_id)
+        log.info(
+            "sync %s: %s chunk for space %s from %s held records back for a "
+            "retry — reporting the stream unclean",
+            sync_id,
+            resource,
+            space_id,
+            from_instance,
+        )
 
     async def _dispatch(
         self,
@@ -580,7 +652,10 @@ class SpaceSyncReceiver:
         records: list[dict[str, Any]],
         *,
         provider: str,
-    ) -> None:
+    ) -> bool:
+        """Admit and persist one chunk's records. ``False`` when a record
+        was held back for a retry (refused only for now — see
+        :class:`HeldBack`), so the stream must not count as clean."""
         if not isinstance(records, list):
             records = []
         shaped = [r for r in records if isinstance(r, dict)]
@@ -596,12 +671,30 @@ class SpaceSyncReceiver:
             # Read before the admission drops a member's records for held
             # pages: the host's seq floor learns from them (never content).
             await self._page_seq_hints(shaped, space_id, provider=provider)
-        records = await self._admit(resource, space_id, shaped, provider=provider)
+        held_back = HeldBack()
+        records = await self._admit(
+            resource, space_id, shaped, provider=provider, held_back=held_back
+        )
         # v_36: whoever streams it — the host included — a record may not
         # claim an owner-bound id for anybody but the user it commits to.
         records = [r for r in records if not _claims_bound_id(resource, space_id, r)]
-        if not records:
-            return
+        if records:
+            await self._persist(
+                resource, space_id, records, provider=provider, held_back=held_back
+            )
+        return not held_back.count
+
+    async def _persist(
+        self,
+        resource: str,
+        space_id: str,
+        records: list[dict[str, Any]],
+        *,
+        provider: str,
+        held_back: "HeldBack",
+    ) -> None:
+        """Persist admitted records of ``resource``. A record that cannot
+        land only for now is counted in ``held_back``."""
         if resource == "members":
             for r in records:
                 await self._space_repo.save_member(
@@ -837,7 +930,7 @@ class SpaceSyncReceiver:
             )
         elif resource == "calendar":
             for r in records:
-                event = _calendar_from_record(r)
+                event = _calendar_from_record(r, provider=provider)
                 if event is None:
                     continue
                 if await self._space_calendar_repo.is_event_deleted(
@@ -852,15 +945,29 @@ class SpaceSyncReceiver:
         elif resource == "gallery_albums_deleted":
             await self._persist_album_tombstones(records, space_id, provider=provider)
         elif resource == "gallery_items_deleted":
-            await self._persist_item_tombstones(records, space_id, provider=provider)
+            await self._persist_item_tombstones(
+                records, space_id, provider=provider, held_back=held_back
+            )
         elif resource == "gallery":
             # Albums first, then items — preserve the exporter's order.
+            from_host = await self._is_host(space_id, provider)
+            recount: set[str] = set()
             for r in records:
                 kind = r.get("kind")
                 if kind == "album":
-                    await self._persist_album(r, space_id)
+                    if await self._persist_album(
+                        r, space_id, from_host=from_host, held_back=held_back
+                    ):
+                        recount.add(str(r["id"]))
                 elif kind == "item":
-                    await self._persist_gallery_item(r, space_id)
+                    if await self._persist_gallery_item(r, space_id, held_back):
+                        recount.add(str(r.get("album_id") or ""))
+            # The album's count is what this household holds — the provider's
+            # figure counts the provider's rows, and a sync item lands without
+            # a bump — so it is recounted, whatever order the album record,
+            # its items and their tombstones were applied in.
+            for album_id in sorted(recount):
+                await self._gallery_repo.recount_items(album_id)
         elif resource == "polls":
             # v1: polls ride along with posts (Post.poll field). The
             # standalone polls stream is informational — nothing to
@@ -985,8 +1092,11 @@ class SpaceSyncReceiver:
                     len(records),
                 )
                 return
-            await self._chat_sink.apply_sync_records(
-                space_id, records, provider=provider
+            held_back.add(
+                await self._chat_sink.apply_sync_records(
+                    space_id, records, provider=provider
+                )
+                or 0
             )
 
     async def _persist_timetables(
@@ -1665,6 +1775,7 @@ class SpaceSyncReceiver:
         space_id: str,
         *,
         provider: str,
+        held_back: HeldBack,
     ) -> None:
         """Apply streamed gallery-item deletes (``gallery_items_deleted``,
         migration 0085).
@@ -1677,7 +1788,10 @@ class SpaceSyncReceiver:
         never held here gets a stub tombstone when the id is owner-bound to
         its ``uploaded_by`` in THIS space and its album is held live here in
         this space (``album_id`` is a FK); under an album tombstoned here it
-        needs nothing — the album's tombstone covers it.
+        needs nothing — the album's tombstone covers it. An album not held
+        here at all yet (the chunks applied out of order — ``gallery`` after
+        this one) holds the stub back for the next stream
+        (:class:`HeldBack`) instead of dropping the delete.
         """
         from_host = await self._is_host(space_id, provider)
         cross_space: list[str] = []
@@ -1721,7 +1835,7 @@ class SpaceSyncReceiver:
             if not _bound_here(GALLERY_ITEM_KIND, item_id, space_id, uploader):
                 unbound += 1
                 continue
-            if not await self._gallery_repo.tombstone_item(
+            if await self._gallery_repo.tombstone_item(
                 item_id,
                 space_id=space_id,
                 album_id=album_id,
@@ -1729,7 +1843,11 @@ class SpaceSyncReceiver:
                 created_at=str(r.get("created_at") or ""),
                 deleted_by=deleted_by,
             ):
-                unbound += 1  # its album is not held live in this space
+                continue
+            if await self._gallery_repo.get_album(album_id) is None:
+                held_back.add()  # its album has not reached us yet
+            else:
+                unbound += 1  # its album is another space's
         _log_tombstone_refusals(
             "gallery item", provider, space_id, cross_space, unbound
         )
@@ -1911,6 +2029,7 @@ class SpaceSyncReceiver:
         records: list[dict[str, Any]],
         *,
         provider: str,
+        held_back: "HeldBack",
     ) -> list[dict[str, Any]]:
         """The records of this chunk the ``provider`` may write here.
 
@@ -1975,7 +2094,7 @@ class SpaceSyncReceiver:
         admitted: list[dict[str, Any]] = []
         refused = 0
         for r in records:
-            if await self._admit_record(resource, space_id, r, event):
+            if await self._admit_record(resource, space_id, r, event, held_back):
                 admitted.append(r)
             else:
                 refused += 1
@@ -1997,12 +2116,13 @@ class SpaceSyncReceiver:
         space_id: str,
         r: dict[str, Any],
         event: FederationEvent,
+        held_back: "HeldBack",
     ) -> bool:
         """The live-event rules for one record: its authorship, then — for
         the access-levelled features — the space's level for its creator
         (§4.3, v_42; e.g. a member household cannot stream a page into an
         ``ADMIN_ONLY`` wiki that it could not have sent live)."""
-        if not await self._authored_record(resource, space_id, r, event):
+        if not await self._authored_record(resource, space_id, r, event, held_back):
             return False
         access = _ACCESS_FEATURE_OF.get(resource)
         if access is None:
@@ -2025,6 +2145,7 @@ class SpaceSyncReceiver:
         space_id: str,
         r: dict[str, Any],
         event: FederationEvent,
+        held_back: "HeldBack",
     ) -> bool:
         auth = self._authorship
         assert auth is not None
@@ -2039,8 +2160,8 @@ class SpaceSyncReceiver:
             case "posts":
                 if not rid or await self._space_post_repo.get(rid) is not None:
                     return False
-                return await auth.may_author(
-                    event, space_id, str(r.get("author") or "")
+                return await self._may_author(
+                    held_back, event, space_id, str(r.get("author") or "")
                 )
             case "posts_deleted":
                 # The live SPACE_POST_DELETED rule
@@ -2105,7 +2226,8 @@ class SpaceSyncReceiver:
             case "comments":
                 if not rid or await self._space_post_repo.get_comment(rid) is not None:
                     return False
-                return await auth.may_author(
+                return await self._may_author(
+                    held_back,
                     event,
                     space_id,
                     str(r.get("author") or ""),
@@ -2122,8 +2244,8 @@ class SpaceSyncReceiver:
                     return False
                 if await self._space_task_repo.is_list_deleted(rid, space_id=space_id):
                     return False  # deleted here; the tombstone wins
-                return await auth.may_author(
-                    event, space_id, str(r.get("created_by") or "")
+                return await self._may_author(
+                    held_back, event, space_id, str(r.get("created_by") or "")
                 )
             case "task_lists_deleted":
                 # The live SPACE_TASK_LIST_DELETED rule
@@ -2151,8 +2273,8 @@ class SpaceSyncReceiver:
                     return False
                 if await self._space_task_repo.is_task_deleted(rid, space_id=space_id):
                     return False  # deleted here; the tombstone wins
-                return await auth.may_author(
-                    event, space_id, str(r.get("created_by") or "")
+                return await self._may_author(
+                    held_back, event, space_id, str(r.get("created_by") or "")
                 )
             case "pages_deleted":
                 # The live SPACE_PAGE_DELETED rule: a writer household
@@ -2174,7 +2296,7 @@ class SpaceSyncReceiver:
                     return False  # deleted here; the tombstone wins
                 creator = str(r.get("created_by") or "")
                 if creator:
-                    return await auth.may_author(event, space_id, creator)
+                    return await self._may_author(held_back, event, space_id, creator)
                 return await auth.writes_here(event, space_id)
             case "stickies_deleted":
                 # The live SPACE_STICKY_DELETED rule
@@ -2191,8 +2313,11 @@ class SpaceSyncReceiver:
                     return False
                 if await self._sticky_repo.is_deleted(rid, space_id=space_id):
                     return False  # deleted here; the tombstone wins
-                return await auth.may_author(
-                    event, space_id, str(r.get("author") or r.get("created_by") or "")
+                return await self._may_author(
+                    held_back,
+                    event,
+                    space_id,
+                    str(r.get("author") or r.get("created_by") or ""),
                 )
             case "calendar_deleted":
                 # The live SPACE_CALENDAR_EVENT_DELETED rule (feature
@@ -2219,8 +2344,8 @@ class SpaceSyncReceiver:
                     rid, space_id=space_id
                 ):
                     return False  # deleted here; the tombstone wins
-                return await auth.may_author(
-                    event, space_id, str(r.get("created_by") or "")
+                return await self._may_author(
+                    held_back, event, space_id, str(r.get("created_by") or "")
                 )
             case "gallery_albums_deleted":
                 # The live SPACE_GALLERY_ALBUM_DELETED rule
@@ -2253,12 +2378,17 @@ class SpaceSyncReceiver:
                     if r.get("is_system"):
                         return False
                     owner = str(r.get("owner_user_id") or r.get("owner_id") or "")
-                    return await auth.acts_for(event, space_id, owner)
+                    if await auth.acts_for(event, space_id, owner):
+                        return True
+                    if await auth.trails_seat(space_id, owner):
+                        held_back.add()
+                    return False
                 if not rid or await self._gallery_repo.get_item(rid) is not None:
                     return False
                 if await self._gallery_repo.is_item_deleted(rid, space_id=space_id):
                     return False  # deleted here; the tombstone wins
-                return await auth.may_author(
+                return await self._may_author(
+                    held_back,
                     event,
                     space_id,
                     str(r.get("uploaded_by") or r.get("uploader") or ""),
@@ -2304,8 +2434,8 @@ class SpaceSyncReceiver:
                     return False
                 if await self._timetable_repo.get(rid) is not None:
                     return True
-                return await auth.may_author(
-                    event, space_id, str(r.get("created_by") or "")
+                return await self._may_author(
+                    held_back, event, space_id, str(r.get("created_by") or "")
                 )
             case "chat_messages" | "chat_messages_deleted":
                 # Judged record by record by the chat sink with the live
@@ -2323,7 +2453,28 @@ class SpaceSyncReceiver:
                 seller = str(r.get("seller_user_id") or "")
                 if got is None or got[1].author != seller:
                     return False
-                return await auth.may_author(event, space_id, seller)
+                return await self._may_author(held_back, event, space_id, seller)
+        return False
+
+    async def _may_author(
+        self,
+        held_back: "HeldBack",
+        event: FederationEvent,
+        space_id: str,
+        user_id: str,
+        **kwargs: Any,
+    ) -> bool:
+        """:meth:`SpaceAuthorship.may_author` for a record a member household
+        adds — and, when it is refused because this space has no record of
+        ``user_id`` at all yet (the roster gossip seating them trails the
+        stream), the record is held back: the stream must not count as
+        clean, or the provider's watermark would skip it until the daily
+        full pass."""
+        assert self._authorship is not None
+        if await self._authorship.may_author(event, space_id, user_id, **kwargs):
+            return True
+        if await self._authorship.trails_seat(space_id, user_id):
+            held_back.add()
         return False
 
     async def _writer_delete_admits(
@@ -2377,14 +2528,27 @@ class SpaceSyncReceiver:
             self._legacy_album_deletes.is_deleted(space_id, album_id)
         )
 
-    async def _persist_album(self, record: dict[str, Any], space_id: str) -> None:
+    async def _persist_album(
+        self,
+        record: dict[str, Any],
+        space_id: str,
+        *,
+        from_host: bool,
+        held_back: HeldBack,
+    ) -> bool:
+        """Create a streamed album — or, held here already in this space for
+        the same owner, take the **host's** edits of it (name, description,
+        cover; the host's copy is the one the space converges on, as for
+        every host record). ``True`` when the album is held here in this
+        space afterwards, so its item count is recounted. A member
+        household's record only ever adds an album (:meth:`_admit`)."""
         if self._legacy_album_deleted(
             space_id, str(record["id"])
         ) or await self._gallery_repo.is_album_deleted(
             str(record["id"]), space_id=space_id
         ):
             log.debug("sync: gallery album %s was deleted here — skipped", record["id"])
-            return
+            return False
         # The album lands in the space this sync stream was gated for —
         # never the record's own ``space_id`` (another space, or NULL =
         # the household gallery), which is just untrusted payload.
@@ -2406,7 +2570,30 @@ class SpaceSyncReceiver:
                 album.owner_user_id,
                 space_id,
             )
-            return
+            return False
+        held = await self._gallery_repo.get_album(album.id)
+        if held is not None:
+            if held.space_id != space_id or held.owner_user_id != album.owner_user_id:
+                log.warning(
+                    "sync: gallery album %s is held for another space or owner "
+                    "— refusing the write for %s",
+                    album.id,
+                    space_id,
+                )
+                return False
+            if from_host and not held.is_system:
+                # An idempotent re-apply changes no synced column, so it
+                # stamps nothing (migration 0086) — no echo.
+                await self._gallery_repo.update_album_in_space(
+                    album.id,
+                    {
+                        "name": album.name,
+                        "description": album.description,
+                        "cover_item_id": album.cover_item_id,
+                    },
+                    space_id=space_id,
+                )
+            return True
         try:
             await self._gallery_repo.create_album(album)
         except Exception:
@@ -2424,22 +2611,28 @@ class SpaceSyncReceiver:
                 album.space_id,
                 exc_info=True,
             )
+            held_back.add()  # a failed persist: the stream is not clean
+            return False
+        return True
 
     async def _persist_gallery_item(
         self,
         record: dict[str, Any],
         space_id: str,
-    ) -> None:
+        held_back: HeldBack,
+    ) -> bool:
+        """Store a streamed item. ``True`` when it landed in an album of this
+        space (its count is then recounted)."""
         album_id = str(record.get("album_id") or "")
         if self._legacy_album_deleted(
             space_id, album_id
         ) or await self._gallery_repo.is_album_deleted(album_id, space_id=space_id):
-            return  # its album was deleted here; so was the item
+            return False  # its album was deleted here; so was the item
         if await self._gallery_repo.is_item_deleted(
             str(record["id"]), space_id=space_id
         ):
             log.debug("sync: gallery item %s was deleted here — skipped", record["id"])
-            return
+            return False
         item = GalleryItem(
             id=str(record["id"]),
             album_id=album_id,
@@ -2457,28 +2650,36 @@ class SpaceSyncReceiver:
             created_at=record.get("created_at"),
         )
         try:
-            # ``bump_count=False``: the album record already carried its
-            # ``item_count``. The album must belong to this sync's space.
-            if not await self._gallery_repo.create_item_in_space(
+            # ``bump_count=False``: the caller recounts the album once the
+            # chunk is in. The album must belong to this sync's space.
+            if await self._gallery_repo.create_item_in_space(
                 item, space_id=space_id, bump_count=False
             ):
-                log.warning(
-                    "sync: gallery item %s names album %s outside space %s "
-                    "— refusing the write",
-                    item.id,
-                    item.album_id,
-                    space_id,
-                )
+                return True
+            if await self._gallery_repo.get_album(album_id) is None:
+                # Its album is not here yet (a chunk applied out of order):
+                # a later stream lands it — not a refusal.
+                held_back.add()
+                return False
+            log.warning(
+                "sync: gallery item %s names album %s outside space %s "
+                "— refusing the write",
+                item.id,
+                item.album_id,
+                space_id,
+            )
         except Exception:
             # Same reasoning as ``_persist_album``: redelivery is handled in
             # SQL, so a failure here is real (a missing parent album, a bad
-            # record) and must not be silent.
+            # record) and must not be silent — nor count as stored.
             log.warning(
                 "sync: persisting gallery item %s (album=%s) failed",
                 item.id,
                 item.album_id,
                 exc_info=True,
             )
+            held_back.add()
+        return False
 
 
 #: ``resource → (id kind, owner fields in precedence order)`` for the sync
@@ -2788,9 +2989,22 @@ def _zone_from_record(
     )
 
 
-def _calendar_from_record(r: dict[str, Any]) -> CalendarEvent | None:
+def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent | None:
+    """A ``calendar`` record as the event row it streams — read like the
+    live ``SPACE_CALENDAR_EVENT_*`` payload, rule and all: a record that
+    dropped ``rrule`` / ``cover_url`` / ``location`` / ``announce_in_feed``
+    upserted a member's copy of a series into a one-off event and wiped the
+    rest, on every stream.
+
+    An id of the form ``<event id>@<start>`` is not a row: it is an
+    occurrence an older provider expanded a series into (one record per
+    occurrence, ten years either side of its clock). The series streams as
+    its own row; storing its occurrences would duplicate it as one-off
+    events, so they are skipped."""
+    rid = str(r.get("id") or "")
     if (
-        not r.get("id")
+        not rid
+        or OCCURRENCE_ID_SEPARATOR in rid
         or not r.get("calendar_id")
         or not r.get("summary")
         or not r.get("created_by")
@@ -2798,8 +3012,10 @@ def _calendar_from_record(r: dict[str, Any]) -> CalendarEvent | None:
         return None
     start = _parse_iso(r.get("start"))
     end = _parse_iso(r.get("end"))
+    rrule = r.get("rrule")
+    location = r.get("location")
     return CalendarEvent(
-        id=str(r["id"]),
+        id=rid,
         calendar_id=str(r["calendar_id"]),
         summary=str(r["summary"]),
         start=start,
@@ -2809,9 +3025,17 @@ def _calendar_from_record(r: dict[str, Any]) -> CalendarEvent | None:
         all_day=bool(r.get("all_day", False)),
         attendees=tuple(str(a) for a in (r.get("attendees") or ())),
         mirrored_from=r.get("mirrored_from"),
-        # IANA wall-clock anchor — additive field; older peers omit it,
-        # in which case the dataclass default ``"UTC"`` kicks in.
-        tz=str(r.get("tz") or "UTC"),
+        rrule=rrule if isinstance(rrule, str) and rrule else None,
+        # Rendered as ``<img src>`` for every member: only a local media
+        # reference — a third-party URL would leak their IPs.
+        cover_url=verbatim_local_media_ref(r.get("cover_url")),
+        location=location if isinstance(location, str) and location else None,
+        # IANA wall-clock anchor — validated as on the live event; an older
+        # peer omits it and gets ``"UTC"``.
+        tz=coerce_tz(r.get("tz"), context=f"space sync calendar from {provider}"),
+        # §23.15 opt-in feed mirror; absent on an older provider → True, the
+        # live event's default.
+        announce_in_feed=bool(r.get("announce_in_feed", True)),
     )
 
 

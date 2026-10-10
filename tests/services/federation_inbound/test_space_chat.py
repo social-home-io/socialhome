@@ -14,6 +14,7 @@ from socialhome.domain.events import (
     DmMessageUpdated,
 )
 from socialhome.domain.federation import FederationEventType
+from socialhome.federation.pending_seat_buffer import PendingSeatBuffer
 
 from ..space_chat_stack import HOUSE_B, HOUSE_F, SP, build_stack, chat_id
 
@@ -185,6 +186,28 @@ async def test_the_host_relays_a_remote_writers_message_by_sync(stack):
         provider="house-host",
     )
     assert len(await _rows(stack)) == 1
+
+
+async def test_a_synced_message_held_for_its_authors_seat_is_reported(stack):
+    """§25.6: a message naming a user this space has no record of yet waits
+    for their seat — and ``apply_sync_records`` says so, so the stream it
+    came in is not counted clean (the hold is in memory and expires). A
+    refusal by rule is not reported."""
+    await stack.db.enqueue("UPDATE spaces SET owner_instance_id='house-host'")
+    stack.inbound._authorship._pending = PendingSeatBuffer()
+    held = await stack.inbound.apply_sync_records(
+        SP,
+        [{"message_id": chat_id("u-new"), "author_user_id": "u-new", "content": "x"}],
+        provider="house-host",
+    )
+    assert held == 1
+    assert await _rows(stack) == []
+    refused = await stack.inbound.apply_sync_records(
+        SP,
+        [{"message_id": chat_id("u-rf"), "author_user_id": "u-rf", "content": "x"}],
+        provider="house-host",
+    )
+    assert refused == 0
 
 
 # ── Update / delete / reaction ────────────────────────────────────────────

@@ -14,6 +14,12 @@ from datetime import date, datetime, timedelta
 from ..utils.timezones import is_valid_tz, local_date
 from .errors import CodedError
 
+#: Joins a recurring event's id and an occurrence's start in the id of a
+#: virtual occurrence (``<event id>@<start iso>``) — what reading a range
+#: expands a series into. Never a stored row's id: the §25.6 sync streams
+#: and stores the series row, and refuses an occurrence id.
+OCCURRENCE_ID_SEPARATOR: str = "@"
+
 
 @dataclass(slots=True, frozen=True)
 class Calendar:

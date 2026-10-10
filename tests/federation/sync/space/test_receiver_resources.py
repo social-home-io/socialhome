@@ -67,6 +67,8 @@ class _FakeRepos:
         self.stickies = []
         self.calendar = []
         self.gallery_albums = []
+        self.album_edits = []
+        self.recounted = []
         self.gallery_items = []
         self.zones = []
         self.bazaar_listings = []
@@ -206,6 +208,17 @@ class _GalleryRepoStub:
 
     async def create_album(self, album):
         self._c.gallery_albums.append(album)
+
+    async def get_album(self, album_id):
+        return next((a for a in self._c.gallery_albums if a.id == album_id), None)
+
+    async def update_album_in_space(self, album_id, patch, *, space_id):
+        self._c.album_edits.append((album_id, patch))
+        return True
+
+    async def recount_items(self, album_id):
+        self._c.recounted.append(album_id)
+        return sum(1 for i in self._c.gallery_items if i.album_id == album_id)
 
     async def create_item_in_space(self, item, *, space_id, bump_count=True):
         self._c.gallery_items.append(item)
@@ -1792,6 +1805,9 @@ class _ChatSink:
 
     async def apply_sync_records(self, space_id, records, *, provider):
         self.calls.append((space_id, list(records), provider))
+        return self.held
+
+    held = 0
 
 
 def _chat_record(owner: str = "u-a", space_id: str = "sp-1") -> dict:
@@ -1820,6 +1836,21 @@ async def test_a_chat_record_claiming_another_authors_id_never_reaches_the_sink(
     good = _chat_record("u-b")
     await _send(r, kp, "chat_messages", [squatted, good])
     assert sink.calls == [("sp-1", [good], "peer-a")]
+
+
+async def test_a_chat_record_held_for_its_seat_keeps_the_chunk_unsettled(setup):
+    """The chat sink held a message for a seat that has not reached us: the
+    chunk is not settled, so the stream it came in is reported unclean."""
+    r, _collector, _kp = setup
+    sink = _ChatSink()
+    r.attach_chat_sink(sink)
+    assert await r._dispatch(
+        "chat_messages", "sp-1", [_chat_record()], provider="peer-a"
+    )
+    sink.held = 1
+    assert not await r._dispatch(
+        "chat_messages", "sp-1", [_chat_record()], provider="peer-a"
+    )
 
 
 async def test_chat_records_are_dropped_without_a_sink(setup):

@@ -930,6 +930,20 @@ class SpaceAuthorship:
             getattr(level, "value", level),
         )
 
+    async def trails_seat(self, space_id: str, user_id: str) -> bool:
+        """Has this space no record of ``user_id`` at all — no seat on any
+        household, live or removed, and not one of OUR users? Then a write
+        naming them may simply have overtaken the roster gossip seating
+        them: a race a later delivery wins, not a refusal by rule. (A user
+        seated on another household, or a removed one, is known — those
+        are refusals.)"""
+        return (
+            bool(user_id)
+            and user_id != SYSTEM_AUTHOR
+            and not await self._known_in_space(space_id, user_id)
+            and not await self._is_local_user(user_id)
+        )
+
     async def hold_or_refuse(
         self,
         event: "FederationEvent",
@@ -949,10 +963,7 @@ class SpaceAuthorship:
         """
         if (
             self._pending is not None
-            and user_id
-            and user_id != SYSTEM_AUTHOR
-            and not await self._known_in_space(space_id, user_id)
-            and not await self._is_local_user(user_id)
+            and await self.trails_seat(space_id, user_id)
             and self._pending.hold(event, space_id=space_id, user_id=user_id)
         ):
             log.info(
