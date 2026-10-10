@@ -23,12 +23,13 @@ import logging
 import pathlib
 from collections import OrderedDict
 from dataclasses import replace
+from enum import StrEnum
 from datetime import datetime, timezone
 from typing import Any, Protocol, TYPE_CHECKING
 
 import orjson as _orjson
 
-from ....domain.calendar import CalendarEvent, is_occurrence_id
+from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
 from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.page import Page
@@ -172,20 +173,62 @@ class HeldBack:
         self.count += n
 
 
+#: Consecutive streams from one provider for one space that may be unclean
+#: ONLY because records were held back (:class:`HeldBack`). The next one is
+#: reported clean: a record that never lands (a parent this household will
+#: never hold, an author it will never learn) must not keep every periodic
+#: session unclean — the provider would never confirm, and past the daily
+#: full-pass interval every 30-minute session would be a full stream.
+HELD_BACK_LIMIT: int = 3
+
+
+class StreamVerdict(StrEnum):
+    """How a §25.6 stream ended here."""
+
+    CLEAN = "clean"
+    #: Every chunk arrived and was stored, but records were held back for
+    #: a retry (:class:`HeldBack`) — unclean, bounded by
+    #: :data:`HELD_BACK_LIMIT`.
+    HELD_BACK = "held_back"
+    UNCLEAN = "unclean"
+
+
+class _Stream:
+    """One stream's tally (module-local)."""
+
+    __slots__ = ("plain", "indices", "failed", "held", "pending", "archived")
+
+    def __init__(self) -> None:
+        #: Chunks stored that carry no index (an older provider).
+        self.plain = 0
+        #: Distinct ``chunk_index`` values of the chunks stored (v_56): a
+        #: chunk delivered twice counts once, so a duplicate cannot stand
+        #: in for a chunk that was lost.
+        self.indices: set[int] = set()
+        self.failed = False
+        self.held = False
+        self.pending = 0
+        #: The space's archive flag when the stream's first chunk landed —
+        #: ``None`` until then (see :meth:`StreamHealth.archive_changed`).
+        self.archived: bool | None = None
+
+
 class StreamHealth:
     """Whether every chunk of a §25.6 stream was applied here.
 
     The requester tells the provider with ``SPACE_SYNC_COMPLETE {clean}``;
     only a clean stream advances the provider's incremental-sync watermark.
     A stream is clean when its sentinel names how many chunks the provider
-    sent (``chunk_count``), exactly that many were **stored** here — counted
-    once a chunk's records are persisted, never on arrival —, none failed
-    to decrypt / parse / persist or held a record back for a retry, and
-    none is still waiting for its epoch key. Anything else — a chunk lost on
-    the way, a persist that raised or is still running, a tampered chunk, a
-    record refused only for now, an older provider that sends no count — is
-    unclean, so the next periodic session re-streams it rather than the
-    provider skipping rows this household never stored.
+    sent (``chunk_count``), exactly that many distinct chunks were
+    **stored** here — counted once a chunk's records are persisted, never on
+    arrival, and by their signed ``chunk_index`` (v_56) so a duplicate
+    cannot mask a lost chunk —, none failed to decrypt / parse / persist or
+    held a record back for a retry, and none is still waiting for its epoch
+    key. Anything else — a chunk lost on the way, a persist that raised or
+    is still running, a tampered chunk, a record refused only for now, an
+    older provider that sends no count — is unclean, so the next periodic
+    session re-streams it rather than the provider skipping rows this
+    household never stored.
 
     Counting on arrival made the verdict depend on chunks being persisted
     one after another: relayed chunks are separate inbound events, so the
@@ -196,52 +239,126 @@ class StreamHealth:
     __slots__ = ("_streams", "_finished")
 
     def __init__(self) -> None:
-        #: sync_id -> [applied, failed, pending]
-        self._streams: OrderedDict[str, list[int]] = OrderedDict()
+        self._streams: OrderedDict[str, _Stream] = OrderedDict()
         #: Streams whose verdict was given: a chunk finishing after its
         #: sentinel changes nothing, and must not open a new entry.
         self._finished: OrderedDict[str, None] = OrderedDict()
 
-    def _entry(self, sync_id: str) -> list[int] | None:
+    def _entry(self, sync_id: str) -> _Stream | None:
         if sync_id in self._finished:
             return None
         entry = self._streams.get(sync_id)
         if entry is None:
-            entry = self._streams[sync_id] = [0, 0, 0]
+            entry = self._streams[sync_id] = _Stream()
             while len(self._streams) > MAX_TRACKED_STREAMS:
                 self._streams.popitem(last=False)
         return entry
 
-    def applied(self, sync_id: str) -> None:
+    def begun(self, sync_id: str) -> bool:
+        """Has the stream been seen (or finished) already?"""
+        return sync_id in self._streams or sync_id in self._finished
+
+    def begin(self, sync_id: str, *, archived: bool) -> None:
+        """Note the space's archive flag as the stream's first chunk lands."""
+        entry = self._entry(sync_id)
+        if entry is not None and entry.archived is None:
+            entry.archived = archived
+
+    def archive_changed(self, sync_id: str, *, archived: bool) -> bool:
+        """Did the space's archive flag change while the stream ran? Read
+        at the sentinel, before :meth:`finish`. A stream that saw no chunk
+        recorded nothing it could have refused."""
+        entry = self._streams.get(sync_id)
+        return (
+            entry is not None
+            and entry.archived is not None
+            and entry.archived != archived
+        )
+
+    def applied(self, sync_id: str, index: object = None) -> None:
         """A chunk's records are stored (or refused for good)."""
         entry = self._entry(sync_id)
+        if entry is None:
+            return
+        if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
+            entry.indices.add(index)
+        else:
+            entry.plain += 1
+
+    def held(self, sync_id: str, index: object = None) -> None:
+        """A chunk stored all but records held back for a retry."""
+        self.applied(sync_id, index)
+        entry = self._entry(sync_id)
         if entry is not None:
-            entry[0] += 1
+            entry.held = True
 
     def failed(self, sync_id: str) -> None:
         entry = self._entry(sync_id)
         if entry is not None:
-            entry[1] = 1
+            entry.failed = True
 
     def stashed(self, sync_id: str) -> None:
         entry = self._entry(sync_id)
         if entry is not None:
-            entry[2] += 1
+            entry.pending += 1
 
     def resolved(self, sync_id: str) -> None:
         entry = self._streams.get(sync_id)
-        if entry is not None and entry[2] > 0:
-            entry[2] -= 1
+        if entry is not None and entry.pending > 0:
+            entry.pending -= 1
 
-    def finish(self, sync_id: str, chunk_count: object) -> bool:
-        """End the stream; ``True`` iff it is clean."""
-        applied, failed, pending = self._streams.pop(sync_id, [0, 0, 0])
+    def finish(self, sync_id: str, chunk_count: object) -> StreamVerdict:
+        """End the stream and give its verdict."""
+        entry = self._streams.pop(sync_id, None) or _Stream()
         self._finished[sync_id] = None
         while len(self._finished) > MAX_TRACKED_STREAMS:
             self._finished.popitem(last=False)
         if not isinstance(chunk_count, int) or isinstance(chunk_count, bool):
+            return StreamVerdict.UNCLEAN
+        stored = entry.plain + len(entry.indices)
+        if entry.failed or entry.pending or stored != chunk_count:
+            return StreamVerdict.UNCLEAN
+        return StreamVerdict.HELD_BACK if entry.held else StreamVerdict.CLEAN
+
+
+class HeldBackStreaks:
+    """Consecutive held-back-only verdicts per (space, provider), bounded by
+    :data:`HELD_BACK_LIMIT` (see there). In memory: a restart starts the
+    count over — at worst :data:`HELD_BACK_LIMIT` more unclean sessions."""
+
+    __slots__ = ("_streaks", "_warned")
+
+    def __init__(self) -> None:
+        self._streaks: OrderedDict[tuple[str, str], int] = OrderedDict()
+        self._warned: OrderedDict[tuple[str, str], None] = OrderedDict()
+
+    def clean(self, verdict: StreamVerdict, space_id: str, provider: str) -> bool:
+        """Whether to report the stream clean."""
+        key = (space_id, provider)
+        if verdict is StreamVerdict.CLEAN:
+            self._streaks.pop(key, None)
+            return True
+        if verdict is StreamVerdict.UNCLEAN:
             return False
-        return not failed and not pending and applied == chunk_count
+        streak = self._streaks.pop(key, 0) + 1
+        if streak < HELD_BACK_LIMIT:
+            self._streaks[key] = streak
+            while len(self._streaks) > MAX_TRACKED_STREAMS:
+                self._streaks.popitem(last=False)
+            return False
+        if key not in self._warned:
+            self._warned[key] = None
+            while len(self._warned) > MAX_TRACKED_STREAMS:
+                self._warned.popitem(last=False)
+            log.warning(
+                "sync: %d streams in a row from %s for space %s held records "
+                "back that never landed — taking them as refused and "
+                "reporting this stream clean",
+                streak,
+                provider,
+                space_id,
+            )
+        return True
 
 
 class ChatSyncSink(Protocol):
@@ -297,6 +414,8 @@ class SpaceSyncReceiver:
         "_page_conflicts",
         "_chat_sink",
         "_health",
+        "_streaks",
+        "_foreign_system_albums",
         "_applied_seqs",
     )
 
@@ -339,6 +458,10 @@ class SpaceSyncReceiver:
         #: drops the resource (see :meth:`attach_chat_sink`).
         self._chat_sink: "ChatSyncSink | None" = None
         self._health = StreamHealth()
+        self._streaks = HeldBackStreaks()
+        #: Ids of other households' system albums seen in a stream — never
+        #: stored here (see :meth:`_persist_album`); bounded.
+        self._foreign_system_albums: OrderedDict[str, None] = OrderedDict()
         #: v_48 — a ``pages`` record for a page held here (only the host's
         #: chunks get that far) is another version of it: fast-forward,
         #: stale, merge or conflict. ``None``: upserted (last write wins).
@@ -535,8 +658,20 @@ class SpaceSyncReceiver:
 
         # Sentinel path — publish end-of-stream + return.
         if resource == SENTINEL_RESOURCE:
-            clean = self._health.finish(sync_id, envelope.get("chunk_count"))
-            if clean:
+            space_now = await self._space_repo.get(space_id)
+            # An archive lifted (or set) while the stream ran: the lift
+            # dropped our echo (migration 0090) so the next session is full
+            # and delivers what the archive refused — recording this
+            # stream's snapshot now would put the echo straight back.
+            archive_changed = self._health.archive_changed(
+                sync_id, archived=bool(space_now is not None and space_now.archived)
+            )
+            clean = self._streaks.clean(
+                self._health.finish(sync_id, envelope.get("chunk_count")),
+                space_id,
+                from_instance,
+            )
+            if clean and not archive_changed:
                 await self._record_applied(
                     space_id, from_instance, envelope.get("snapshot_seq")
                 )
@@ -549,6 +684,13 @@ class SpaceSyncReceiver:
                 )
             )
             return
+
+        if not self._health.begun(sync_id):
+            space_then = await self._space_repo.get(space_id)
+            self._health.begin(
+                sync_id,
+                archived=bool(space_then is not None and space_then.archived),
+            )
 
         if resource not in ALLOWED_RESOURCES:
             # A newer provider's resource: dropped by rule, never retried.
@@ -611,7 +753,11 @@ class SpaceSyncReceiver:
             return
 
         try:
-            records = _orjson.loads(plaintext).get("records") or []
+            body = _orjson.loads(plaintext)
+            records = body.get("records") or []
+            # v_56: the chunk's position in the stream, inside the signed and
+            # encrypted payload; an older provider sends none.
+            index = body.get("chunk_index")
         except Exception as exc:
             self._health.failed(sync_id)
             log.warning("sync chunk plaintext parse failed: %s", exc)
@@ -630,12 +776,13 @@ class SpaceSyncReceiver:
             )
             return
         if settled:
-            self._health.applied(sync_id)
+            self._health.applied(sync_id, index)
             return
         # A record refused only for now (its author's seat or its parent has
         # not reached us yet): the stream is unclean, so the provider keeps
-        # its watermark and the next periodic session streams it again.
-        self._health.failed(sync_id)
+        # its watermark and the next periodic session streams it again
+        # (bounded — :data:`HELD_BACK_LIMIT`).
+        self._health.held(sync_id, index)
         log.info(
             "sync %s: %s chunk for space %s from %s held records back for a "
             "retry — reporting the stream unclean",
@@ -1844,7 +1991,10 @@ class SpaceSyncReceiver:
                 deleted_by=deleted_by,
             ):
                 continue
-            if await self._gallery_repo.get_album(album_id) is None:
+            if (
+                await self._gallery_repo.get_album(album_id) is None
+                and album_id not in self._foreign_system_albums
+            ):
                 held_back.add()  # its album has not reached us yet
             else:
                 unbound += 1  # its album is another space's
@@ -2377,6 +2527,12 @@ class SpaceSyncReceiver:
                 if r.get("kind") == "album":
                     if r.get("is_system"):
                         return False
+                    if not rid or await self._gallery_repo.get_album(rid) is not None:
+                        return False  # a member household only adds albums
+                    if await self._gallery_repo.is_album_deleted(
+                        rid, space_id=space_id
+                    ):
+                        return False  # deleted here; the tombstone wins
                     owner = str(r.get("owner_user_id") or r.get("owner_id") or "")
                     if await auth.acts_for(event, space_id, owner):
                         return True
@@ -2549,6 +2705,18 @@ class SpaceSyncReceiver:
         ):
             log.debug("sync: gallery album %s was deleted here — skipped", record["id"])
             return False
+        if record.get("is_system"):
+            ours = await self._gallery_repo.get_system_album(space_id)
+            if ours is not None and ours.id != str(record["id"]):
+                # Every household mints its own system ("Posts") album, so a
+                # provider's is never stored here once we hold ours (the
+                # partial unique index). Remember its id: an item or
+                # tombstone naming it can never land — a refusal by rule,
+                # never a hold.
+                self._foreign_system_albums[str(record["id"])] = None
+                while len(self._foreign_system_albums) > MAX_TRACKED_STREAMS:
+                    self._foreign_system_albums.popitem(last=False)
+                return False
         # The album lands in the space this sync stream was gated for —
         # never the record's own ``space_id`` (another space, or NULL =
         # the household gallery), which is just untrusted payload.
@@ -2656,7 +2824,10 @@ class SpaceSyncReceiver:
                 item, space_id=space_id, bump_count=False
             ):
                 return True
-            if await self._gallery_repo.get_album(album_id) is None:
+            if (
+                await self._gallery_repo.get_album(album_id) is None
+                and album_id not in self._foreign_system_albums
+            ):
                 # Its album is not here yet (a chunk applied out of order):
                 # a later stream lands it — not a refusal.
                 held_back.add()
@@ -3026,6 +3197,7 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
         attendees=tuple(str(a) for a in (r.get("attendees") or ())),
         mirrored_from=r.get("mirrored_from"),
         rrule=rrule if isinstance(rrule, str) and rrule else None,
+        capacity=coerce_capacity(r.get("capacity")),
         # Rendered as ``<img src>`` for every member: only a local media
         # reference — a third-party URL would leak their IPs.
         cover_url=verbatim_local_media_ref(r.get("cover_url")),

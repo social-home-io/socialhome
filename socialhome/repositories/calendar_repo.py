@@ -616,9 +616,11 @@ class AbstractSpaceCalendarRepo(Protocol):
         *,
         start: datetime,
         end: datetime,
+        since: int | None = None,
     ) -> list[CalendarEvent]:
         """The space's live events overlapping ``[start, end)`` (recurring
-        ones expanded)."""
+        ones expanded). ``since``: only those whose change stamp is above it
+        (the record set a §25.6 requester below v_56 is streamed)."""
         ...
 
     async def list_events_sync_page(
@@ -849,14 +851,17 @@ class SqliteSpaceCalendarRepo:
         *,
         start: datetime,
         end: datetime,
+        since: int | None = None,
     ) -> list[CalendarEvent]:
+        changed, changed_params = changed_since_sql("sync_seq", since)
         rows = await self._db.fetchall(
             "SELECT * FROM space_calendar_events"
             " WHERE space_id=? AND deleted_at IS NULL"
             " AND ((rrule IS NULL AND start_dt < ? AND end_dt > ?)"
             " OR (rrule IS NOT NULL AND start_dt < ?))"
-            " ORDER BY start_dt",
-            (space_id, _iso(end), _iso(start), _iso(end)),
+            + changed
+            + " ORDER BY start_dt",
+            (space_id, _iso(end), _iso(start), _iso(end), *changed_params),
         )
         events = [_row_to_space_event(d) for d in rows_to_dicts(rows)]
         return _expand_window(events, start=start, end=end)

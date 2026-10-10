@@ -2334,6 +2334,7 @@
   "capability.shared_gfs_relay": "Llegar a un hogar emparejado a través de un GFS compartido",
   "capability.gfs_fallback_later": "Activar más tarde el GFS como alternativa",
   "capability.space_chat": "Chat en los espacios",
+  "capability.synced_recurring_events": "Eventos periódicos al ponerse al día en espacios",
   "settings.tab.security": "Seguridad",
   "settings.could_not_save": "No se pudo guardar: {error}",
   "settings.profile.save_failed": "Error al guardar: {error}",

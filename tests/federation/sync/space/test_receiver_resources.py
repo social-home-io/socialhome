@@ -209,6 +209,9 @@ class _GalleryRepoStub:
     async def create_album(self, album):
         self._c.gallery_albums.append(album)
 
+    async def get_system_album(self, space_id):
+        return None
+
     async def get_album(self, album_id):
         return next((a for a in self._c.gallery_albums if a.id == album_id), None)
 

@@ -394,12 +394,23 @@ class SqliteGalleryRepo:
                 if held is not None and held[0] != album_id:
                     safe.pop("cover_item_id")
             if safe:
-                set_clause = ", ".join(f"{k}=?" for k in safe)
+                # Only what changes — a re-applied edit (the §25.6 sync
+                # re-applies the host's album every stream) writes nothing.
+                current = conn.execute(
+                    f"SELECT {', '.join(safe)} FROM gallery_albums WHERE id=?",
+                    (album_id,),
+                ).fetchone()
+                changed = {
+                    k: v for i, (k, v) in enumerate(safe.items()) if current[i] != v
+                }
+                if not changed:
+                    return True
+                set_clause = ", ".join(f"{k}=?" for k in changed)
                 conn.execute(
                     f"UPDATE gallery_albums SET {set_clause}, updated_at=?"
                     " WHERE id=? AND space_id=?",
                     (
-                        *safe.values(),
+                        *changed.values(),
                         datetime.now(timezone.utc).isoformat(),
                         album_id,
                         space_id,
@@ -541,6 +552,7 @@ class SqliteGalleryRepo:
                 "SELECT i.rowid AS sync_rowid, i.* FROM gallery_items i"
                 " JOIN gallery_albums a ON a.id = i.album_id"
                 " WHERE a.space_id=? AND i.source_post_id IS NULL"
+                " AND a.is_system = 0"
                 " AND i.deleted_at IS NULL AND a.deleted_at IS NULL"
                 + changed
                 + " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",
@@ -963,6 +975,7 @@ class SqliteGalleryRepo:
                 " i.created_at, i.deleted_at, i.deleted_by FROM gallery_items i"
                 " JOIN gallery_albums a ON a.id = i.album_id"
                 " WHERE a.space_id=? AND a.deleted_at IS NULL"
+                " AND a.is_system = 0"
                 " AND i.deleted_at IS NOT NULL"
                 + changed
                 + " AND i.rowid > ? ORDER BY i.rowid LIMIT ?",

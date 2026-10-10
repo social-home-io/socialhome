@@ -21,6 +21,14 @@ from .errors import CodedError
 OCCURRENCE_ID_SEPARATOR: str = "@"
 
 
+def coerce_capacity(value: object) -> int | None:
+    """A peer-supplied per-occurrence ``capacity``: a non-negative integer,
+    else ``None`` (no cap)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def is_occurrence_id(event_id: str, start_iso: str) -> bool:
     """Is ``event_id`` a virtual occurrence's id — ``<series id>@<start>``
     where ``<start>`` is the occurrence's own start (``start_iso``)? The

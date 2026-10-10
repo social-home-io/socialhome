@@ -34,6 +34,7 @@ from .exporter import (
     RESOURCE_ORDER,
     serialise_chunk,
 )
+from .exporters.calendar import CalendarExporter
 from .exporters.members import PreModeratorMembersExporter
 from .exporters.posts import iter_post_pages
 from .watermark import session_shape
@@ -186,6 +187,12 @@ class SpaceSyncService:
         one we cannot ask gets no exporter at all.
         """
         exporter = self._exporters.get(resource)
+        if exporter is not None and resource == "calendar":
+            if isinstance(exporter, CalendarExporter) and not (
+                await self._series_rows(session)
+            ):
+                return exporter.expanded()
+            return exporter
         if exporter is not None and resource in (
             "chat_messages",
             "chat_messages_deleted",
@@ -212,6 +219,17 @@ class SpaceSyncService:
             )
         )
         return exporter if supports else PreModeratorMembersExporter(exporter)
+
+    async def _series_rows(self, session: "SyncSessionRecord") -> bool:
+        """v_56: does the requester take calendar series rows and numbered
+        chunks? One we cannot ask (no federation) gets the older shape —
+        never a series row an older receiver would flatten."""
+        return self._federation is not None and bool(
+            await self._federation.space_member_supports(
+                session.requester_instance_id,
+                min_version=FederationCapability.MIN_FOR_SYNC_SERIES_ROWS,
+            )
+        )
 
     def attach_federation(self, federation_service) -> None:
         """Wire the federation service so HTTPS-mode sessions can
@@ -242,6 +260,9 @@ class SpaceSyncService:
         chunk_count = 0
         try:
             plan = await self._plan(session)
+            # v_56: number the chunks (inside the encrypted payload) so the
+            # requester counts distinct ones; an older one counts as before.
+            indexed = await self._series_rows(session)
             for exporter in plan:
                 async for envelope in self._builder.build_chunks(
                     exporter=exporter,
@@ -249,6 +270,7 @@ class SpaceSyncService:
                     sync_id=sync_id,
                     sig_suite=self._sig_suite,
                     since=session.since_seq,
+                    index_from=chunk_count if indexed else None,
                 ):
                     sent = await self._send_chunk(session, envelope, waits)
                     chunk_count += 1

@@ -108,7 +108,7 @@ def _config(tmp_path, name: str) -> Config:
     )
 
 
-async def _seat(db, instance: str, user: str, *, version: int = 55) -> None:
+async def _seat(db, instance: str, user: str, *, version: int = 56) -> None:
     await db.enqueue(
         "INSERT INTO space_instances(space_id, instance_id) VALUES(?,?)",
         (SPACE, instance),
@@ -567,7 +567,7 @@ async def test_an_upgraded_requester_gets_one_full_stream(houses):
     h, c = houses
     pids, _comment = await _baseline(h, c)
     await h[db_key].enqueue(
-        "UPDATE remote_instances SET proto_version=56 WHERE id=?", (MEMBER,)
+        "UPDATE remote_instances SET proto_version=57 WHERE id=?", (MEMBER,)
     )
     assert _ids(await _h_to_c(h, c), "posts") == set(pids)
     assert not any(_content(await _h_to_c(h, c)).values())
@@ -833,7 +833,8 @@ async def _save_event(app, *, start: datetime, rrule: str | None = None, **kw):
 
 async def _event_rows(app) -> dict[str, dict]:
     rows = await app[db_key].fetchall(
-        "SELECT id, summary, rrule, location, start_dt FROM space_calendar_events"
+        "SELECT id, summary, rrule, location, capacity, start_dt"
+        " FROM space_calendar_events"
         " WHERE space_id=? AND deleted_at IS NULL",
         (SPACE,),
     )
@@ -851,6 +852,7 @@ async def test_a_recurring_event_streams_as_one_row_with_its_rule(houses):
         rrule="FREQ=WEEKLY;COUNT=5",
         location="Hall",
         summary="choir",
+        capacity=20,
     )
     first = await _h_to_c(h, c)
     assert _ids(first, "calendar") == {eid}
@@ -858,6 +860,7 @@ async def test_a_recurring_event_streams_as_one_row_with_its_rule(houses):
     assert set(held) == {eid}
     assert held[eid]["rrule"] == "FREQ=WEEKLY;COUNT=5"
     assert held[eid]["location"] == "Hall"
+    assert held[eid]["capacity"] == 20
 
 
 async def test_events_of_any_age_stream_and_so_do_their_edits(houses):
@@ -1078,3 +1081,131 @@ async def test_records_refused_while_archived_stream_again_after_unarchive(house
     after = await _c_to_h(h, c)
     assert pid in _ids(after, "posts")
     assert (await _post_row(h, pid))["content"] == "written while H was archived"
+
+
+async def test_an_older_requester_gets_the_expanded_calendar_and_no_index(houses):
+    """v_56 gate: a requester below it drops ``rrule`` from a record and its
+    upsert would flatten a series into a one-off event, so it is streamed
+    the old record set (occurrences, ±10 years) and unnumbered chunks; at
+    v_56 it gets the series row and every chunk carries its index."""
+    h, c = houses
+    eid = await _save_event(
+        h, start=_NOW - timedelta(days=3), rrule="FREQ=DAILY;COUNT=3"
+    )
+    await h[db_key].enqueue(
+        "UPDATE remote_instances SET proto_version=55 WHERE id=?", (MEMBER,)
+    )
+    wire_frames: list[dict] = []
+    old = await _h_to_c(h, c, reorder=lambda f: wire_frames.extend(f) or f)
+    ids = _ids(old, "calendar")
+    assert (
+        eid in ids
+        and len(ids) == 3
+        and all(i == eid or i.startswith(f"{eid}@") for i in ids)
+    )
+    # The old record set never lands as rows of their own here (migration
+    # 0089's guard / the receiver's skip), whatever an older provider sends.
+    assert set(await _event_rows(c)) == {eid}
+    assert all(
+        _index(f) is None for f in wire_frames if f["resource"] != SENTINEL_RESOURCE
+    )
+
+    await h[db_key].enqueue(
+        "UPDATE remote_instances SET proto_version=56 WHERE id=?", (MEMBER,)
+    )
+    new_frames: list[dict] = []
+    new = await _h_to_c(h, c, reorder=lambda f: new_frames.extend(f) or f)
+    assert _ids(new, "calendar") == {eid}
+    content = [f for f in new_frames if f["resource"] != SENTINEL_RESOURCE]
+    assert [_index(f) for f in content] == list(range(len(content)))
+
+
+def _index(frame: dict):
+    return orjson.loads(base64.urlsafe_b64decode(frame["encrypted_payload"])).get(
+        "chunk_index"
+    )
+
+
+# ── Held back only for a retry that can come — never for good ─────────────
+
+
+async def test_the_hosts_system_album_items_are_refused_not_held(houses):
+    """Every household mints its own system ("Posts") album, so the host's
+    is never stored here and an item naming it can never land: a refusal by
+    rule (what the live path does with an item of an album not held), not a
+    hold that would keep every stream unclean. The provider no longer
+    streams them (they are post mirrors each household rebuilds); this is
+    what an older provider's stream gets."""
+    h, c = houses
+    gallery_c = _gallery(c)
+    await gallery_c.create_album(
+        GalleryAlbum(
+            id="sys-c", space_id=SPACE, owner_user_id=None, name="Posts", is_system=True
+        )
+    )
+    host_album = {
+        "kind": "album",
+        "id": "sys-h",
+        "space_id": SPACE,
+        "owner_user_id": None,
+        "name": "Posts",
+        "is_system": True,
+        "item_count": 1,
+    }
+    item = {
+        "kind": "item",
+        "id": _bound(GALLERY_ITEM_KIND),
+        "album_id": "sys-h",
+        "uploaded_by": AUTHOR,
+        "item_type": "photo",
+        "url": "api/media/x.webp",
+        "thumbnail_url": "api/media/tx.webp",
+        "width": 1,
+        "height": 1,
+    }
+    receiver = c[space_sync_receiver_key]
+    assert await receiver._dispatch("gallery", SPACE, [host_album], provider=HOST)
+    assert await receiver._dispatch("gallery", SPACE, [item], provider=HOST)
+    tomb = {"id": _bound(GALLERY_ITEM_KIND), "album_id": "sys-h", "uploaded_by": AUTHOR}
+    assert await receiver._dispatch(
+        "gallery_items_deleted", SPACE, [tomb], provider=HOST
+    )
+    assert await gallery_c.get_item(item["id"]) is None
+
+    # The provider streams neither the system album's items nor their
+    # tombstones.
+    gallery_h = _gallery(h)
+    await gallery_h.create_album(
+        GalleryAlbum(
+            id="sys-h", space_id=SPACE, owner_user_id=None, name="Posts", is_system=True
+        )
+    )
+    mirror = replace(_photo("sys-h", 3), id=_bound(GALLERY_ITEM_KIND))
+    assert await gallery_h.create_item_in_space(mirror, space_id=SPACE)
+    streamed = await _h_to_c(h, c)
+    assert mirror.id not in _ids(streamed, "gallery")
+    assert await gallery_h.delete_item_in_space(mirror.id, space_id=SPACE)
+    assert mirror.id not in _ids(await _h_to_c(h, c), "gallery_items_deleted")
+
+
+async def test_a_held_album_by_an_unknown_owner_is_refused_not_held(houses):
+    """A member household streaming an album this household already holds
+    is refused by rule (it only ever adds) — before the owner check, so an
+    owner this space no longer knows (they left) cannot hold the stream."""
+    h, c = houses
+    aid = mint_owner_bound_id(
+        GALLERY_ALBUM_KIND, space_id=SPACE, owner_user_id="u-gone"
+    )
+    assert await _gallery(h).create_album_in_space(
+        GalleryAlbum(id=aid, space_id=SPACE, owner_user_id="u-gone", name="Old"),
+        space_id=SPACE,
+    )
+    record = {
+        "kind": "album",
+        "id": aid,
+        "space_id": SPACE,
+        "owner_user_id": "u-gone",
+        "name": "Old",
+    }
+    receiver = h[space_sync_receiver_key]
+    assert await receiver._dispatch("gallery", SPACE, [record], provider=MEMBER)

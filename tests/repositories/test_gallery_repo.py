@@ -497,6 +497,26 @@ async def test_update_album_in_space_is_scoped(two_spaces):
     assert (got.name, got.description) == ("Renamed", "new")
 
 
+async def test_an_album_edit_that_changes_nothing_writes_nothing(two_spaces):
+    """A re-applied edit (the §25.6 sync re-applies the host's album on every
+    stream) leaves ``updated_at`` alone; a real change bumps it."""
+    db, repo = two_spaces
+    await db.enqueue(
+        "UPDATE gallery_albums SET updated_at='2000-01-01' WHERE id='alb-1'"
+    )
+    album = await repo.get_album("alb-1")
+    assert await repo.update_album_in_space(
+        "alb-1",
+        {"name": album.name, "description": album.description, "cover_item_id": None},
+        space_id="sp-1",
+    )
+    row = await db.fetchone("SELECT updated_at FROM gallery_albums WHERE id='alb-1'")
+    assert row["updated_at"] == "2000-01-01"
+    assert await repo.update_album_in_space("alb-1", {"name": "New"}, space_id="sp-1")
+    row = await db.fetchone("SELECT updated_at FROM gallery_albums WHERE id='alb-1'")
+    assert row["updated_at"] != "2000-01-01"
+
+
 async def test_update_album_in_space_cover_must_be_an_item_of_that_album(
     two_spaces,
 ):

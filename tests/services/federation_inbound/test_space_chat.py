@@ -208,6 +208,32 @@ async def test_a_synced_message_held_for_its_authors_seat_is_reported(stack):
         provider="house-host",
     )
     assert refused == 0
+    # The sync hold never takes a slot of the live seat buffer: it is the
+    # next stream that brings the message again, not a replay.
+    assert len(stack.inbound._authorship._pending) == 0
+
+
+async def test_a_synced_message_held_already_is_never_held(stack):
+    """ "Already held" is decided before the author check: a message this
+    household holds, by an author it no longer knows, is a no-op — not a
+    hold that would come back on every stream."""
+    await stack.db.enqueue("UPDATE spaces SET owner_instance_id='house-host'")
+    await stack.db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?, 'house-host', 'u-left', 'member')",
+        (SP,),
+    )
+    mid = chat_id("u-left")
+    record = {"message_id": mid, "author_user_id": "u-left", "content": "x"}
+    assert (
+        await stack.inbound.apply_sync_records(SP, [record], provider="house-host") == 0
+    )
+    assert [r[0] for r in await _rows(stack)] == [mid]
+    await stack.db.enqueue("DELETE FROM space_remote_members WHERE user_id='u-left'")
+    stack.inbound._authorship._pending = PendingSeatBuffer()
+    assert (
+        await stack.inbound.apply_sync_records(SP, [record], provider="house-host") == 0
+    )
 
 
 # ── Update / delete / reaction ────────────────────────────────────────────

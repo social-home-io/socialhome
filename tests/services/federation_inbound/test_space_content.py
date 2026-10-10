@@ -1576,6 +1576,60 @@ async def test_calendar_saved_happy_path(repos, handlers):
     assert ev.id == "e-1"
 
 
+@pytest.mark.parametrize(
+    ("wire", "stored"), [(12, 12), (0, 0), (None, None), (-1, None), ("9", None)]
+)
+async def test_calendar_saved_keeps_the_capacity(repos, handlers, wire, stored):
+    """The per-occurrence cap travels with the event; a member household
+    reads it on RSVPs. Anything but a non-negative integer is no cap."""
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-cap",
+                "calendar_id": "cal-1",
+                "summary": "Workshop",
+                "created_by": "u-1",
+                "start": "2026-04-18T10:00:00+00:00",
+                "end": "2026-04-18T11:00:00+00:00",
+                "capacity": wire,
+            },
+            space_id="sp-1",
+        )
+    )
+    _sp, ev = repos["calendar"].saved[0]
+    assert ev.capacity == stored
+
+
+async def test_calendar_saved_without_a_capacity_keeps_the_held_one(repos, handlers):
+    """An older sender — or a moderation release, which carries no cap —
+    leaves the held cap alone instead of clearing it."""
+    base = {
+        "id": "e-keep",
+        "calendar_id": "cal-1",
+        "summary": "Workshop",
+        "created_by": "u-1",
+        "start": "2026-04-18T10:00:00+00:00",
+        "end": "2026-04-18T11:00:00+00:00",
+    }
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {**base, "capacity": 8},
+            space_id="sp-1",
+        )
+    )
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+            {**base, "summary": "Workshop II"},
+            space_id="sp-1",
+        )
+    )
+    _sp, ev = repos["calendar"].saved[-1]
+    assert (ev.summary, ev.capacity) == ("Workshop II", 8)
+
+
 async def test_calendar_saved_missing_end_drops(repos, handlers):
     await handlers._on_calendar_saved(
         _event(

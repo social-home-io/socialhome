@@ -1553,6 +1553,7 @@ async def test_create_event_publishes_federation_event(space_cal_env):
         created_by="uid-alice",
         cover_url="api/media/cover.webp",
         location="Pier 39",
+        capacity=12,
     )
     created_calls = [
         c for c in fed.calls if c[1].value == "space_calendar_event_created"
@@ -1569,6 +1570,8 @@ async def test_create_event_publishes_federation_event(space_cal_env):
     assert payload["created_by"] == "uid-alice"
     assert payload["cover_url"] == "api/media/cover.webp"
     assert payload["location"] == "Pier 39"
+    # The per-occurrence cap reaches members too: they enforce it on RSVPs.
+    assert payload["capacity"] == 12
     # See the RSVP test above: the payload carries the space so a
     # mesh-relayed envelope stays attributable.
     assert payload["space_id"] == "sp-cal"

@@ -88,6 +88,9 @@ class _Stub:
         self.saved.append(member)
         return member
 
+    async def get(self, space_id):
+        return None
+
     async def ban_member(
         self, *, space_id, user_id, banned_by, identity_pk=None, reason=None
     ):

@@ -32,6 +32,7 @@ from ..domain.calendar import (
 )
 from ..domain.child_protection import ProtectedCapability
 from ..domain.space import (
+    MODERATION_BLOCK_KEY,
     HostTooOldError,
     AccessDecision,
     ContentAction,
@@ -2473,11 +2474,19 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             # space's ``calendar`` access level. Older peers ignore it.
             "actor_user_id": actor_user_id,
         }
+        payload = with_release(payload)
+        if MODERATION_BLOCK_KEY not in payload:
+            # The per-occurrence cap (Phase C) — members enforce it on RSVPs.
+            # Additive: an older receiver ignores it, and a receiver keeps
+            # its held value when it is absent. Not on a moderation release:
+            # an older author household's fail-closed release check refuses
+            # a payload key it does not classify.
+            payload["capacity"] = event.capacity
         await self._federation.broadcast_to_space_members(
             space_id,
             evt_type,
             # A write released from the moderation queue names it (v_43).
-            with_release(payload),
+            payload,
         )
 
     async def _publish_federation_event_deleted(

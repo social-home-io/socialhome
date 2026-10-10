@@ -149,7 +149,11 @@ what the space's retention keeps (`federation/sync/space/window.py`):
 - **always in full**, whatever the retention:
   - **gallery** items — nothing prunes them (the retention sweep touches
     posts and chat only), so a window would hide from a joiner photos the
-    host still shows;
+    host still shows. The system ("Posts") album's items and their
+    tombstones never stream: they mirror posts, every household rebuilds
+    its own from the posts, and each household's system album has its own
+    id (a receiver refuses an item naming another household's system album
+    by rule — an older provider's stream);
   - **calendar** events — every live event **as its stored row**, whatever
     its date: a recurring event once, carrying its `rrule` (the receiver
     expands its occurrences on read, as the host does), never one record
@@ -162,7 +166,11 @@ what the space's retention keeps (`federation/sync/space/window.py`):
     record whose suffix is its own start, from an older provider: it is a
     view of a series, never a row — and migration 0089 removed the ones
     already stored, with their RSVPs and reminders, and refuses the shape
-    at insert.)
+    at insert.) **v_56-gated**: a requester below v_56 reads no `rrule`
+    from a record and its upsert would turn each series it holds into a
+    one-off event, so it is still streamed the old record set
+    (`ExpandedCalendarExporter`: occurrences, ±10 years). Its version is
+    part of the session shape, so an upgrade brings one full stream;
   - the **post and comment tombstones** — only the host runs the post
     sweep, which soft-deletes expired posts without telling anyone; a
     member household never sweeps, so these tombstones are how a
@@ -315,7 +323,13 @@ A chunk counts once its records are **stored**, never on arrival: relayed
 chunks are separate inbound events, so the sentinel can be handled while
 an earlier chunk is still persisting — a verdict taken then reports that
 chunk missing (unclean), never applied. A chunk that finishes after its
-sentinel changes nothing (the verdict was given).
+sentinel changes nothing (the verdict was given). From a v_56 provider to
+a v_56 requester each chunk carries `chunk_index` — its position in the
+stream, inside the encrypted (so signed) payload — and the requester
+counts **distinct** indices against `chunk_count`: a chunk delivered twice
+(a relay retry) cannot stand in for one that was lost. An older provider
+sends no index and its chunks are counted as before; an older requester
+is sent none.
 
 A record the receiver *refuses* by rule (held already, deleted here, an
 author known but not seated on the provider, another space's id) is not a
@@ -327,12 +341,30 @@ stream, the race the live path holds a write for (a member household's
 streamed chat message the live rule held for its author's seat (an
 in-memory hold that expires); a gallery item or item stub whose album is
 not held here yet; or a persist that failed. Such a chunk does not count
-as applied, the stream is unclean, and the next periodic session streams
+as clean, the stream is unclean, and the next periodic session streams
 the record again — by then the seat (or album) is in. Counting it clean
-let the watermark skip it until the daily full pass. Both fields are
-additive and plain routing metadata (a count and a boolean, no content):
-an older receiver ignores `chunk_count`, an older provider ignores
-`clean`. No protocol bump.
+let the watermark skip it until the daily full pass. "Held already" is
+always decided first (a row this household holds, by an author it no
+longer knows, is a refusal, not a hold), and a held chat message is left
+for the next stream — it takes no slot of the live seat buffer.
+
+**Bounded.** A record that can never land (a parent this household will
+never hold, an author it will never learn) must not keep every session
+unclean — the provider would never confirm, and past the daily interval
+every 30-minute session would be a full stream. So the requester counts,
+per (space, provider), consecutive streams that were unclean **only**
+because of held-back records (`HeldBackStreaks`, in memory); the
+`HELD_BACK_LIMIT`-th (3) is reported clean, with one WARNING, and the
+count starts over — a lost, failed or still-stashed chunk is never
+forgiven. Both fields are additive and plain routing metadata (a count
+and a boolean, no content): an older receiver ignores `chunk_count`, an
+older provider ignores `clean`.
+
+**An archive changed mid-stream records no echo.** The requester notes
+the space's archive flag when a stream's first chunk lands; if it differs
+at the sentinel (an unarchive raced the stream), the stream's snapshot is
+not stored as `applied_seq` — the unarchive cleared it so the next session
+is full, and writing it back would undo that.
 
 **A held album follows the host.** A `gallery` album record from the
 host for an album held here (same space, same owner) applies the host's
@@ -426,15 +458,17 @@ Fail-safe toward more data, never less:
   trigger (migration 0090) clears the space's `applied_seq`, so the next
   periodic BEGIN carries no `have_seq` and streams the whole window;
 - **daily anti-entropy** — a full stream at least every 24 h per
-  household, a backstop for anything a stamp could not express. No known
-  case waits for it: a chunk that did not arrive, decrypt or store, one
-  still waiting for its key, and a record refused only for now (see
-  `clean` above) re-stream on the next periodic session, and an archive
-  lifted here forces a full one. (A requester whose database was rolled
-  back to an older file snapshot under the same identity does not wait
-  for it either: its `have_seq` rolled back too. A restore from the app's
-  backup re-pairs under a new identity, which has no watermark, so it
-  syncs in full anyway.)
+  household, a backstop for anything a stamp could not express. A chunk
+  that did not arrive, decrypt or store, one still waiting for its key,
+  and a record refused only for now (see `clean` above) re-stream on the
+  next periodic session, and an archive lifted here forces a full one.
+  What does wait for it: a record still held back after
+  `HELD_BACK_LIMIT` streams in a row (taken as refused then), whose
+  parent or author turns up later — the daily full stream offers it
+  again. (A requester whose database was rolled back to an older file
+  snapshot under the same identity does not wait for it: its `have_seq`
+  rolled back too. A restore from the app's backup re-pairs under a new
+  identity, which has no watermark, so it syncs in full anyway.)
 
 **Edits outside the window.** The retention window applies to
 `created_at`, as on a full stream: an edit to a row older than the window
@@ -442,11 +476,14 @@ is not streamed by any session (the receiver's own copy ages out the same
 way). Tombstones are not windowed (except the chat's), so a delete of any
 age streams once, when it happens.
 
-**No protocol bump.** The chunks are the same records, a receiver applies
-them by primary key as always; the only wire additions are routing
-metadata — `chunk_count` / `snapshot_seq` on the signed sentinel, `clean`
-on `SPACE_SYNC_COMPLETE`, `have_seq` on the BEGIN — each ignored by an
-older peer. The provider's watermark never travels; the provider's
+**Versioning.** The incremental session itself needs no bump: the
+chunks are the same records, a receiver applies them by primary key as
+always; the wire additions are routing metadata — `chunk_count` /
+`snapshot_seq` on the signed sentinel, `clean` on `SPACE_SYNC_COMPLETE`,
+`have_seq` on the BEGIN — each ignored by an older peer. The calendar
+series rows and `chunk_index` are gated on v_56
+(`FederationCapability.MIN_FOR_SYNC_SERIES_ROWS`, see
+[`capabilities.md`](./capabilities.md)). The provider's watermark never travels; the provider's
 snapshot goes only to the requester it streamed to and comes back only
 from it (a counter value: it reveals how much changed, nothing of what).
 An older requester that does not send `SPACE_SYNC_COMPLETE` / `have_seq`

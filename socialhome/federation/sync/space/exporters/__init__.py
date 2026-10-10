@@ -12,7 +12,7 @@ resource id to :data:`RESOURCE_ORDER` in the exporter framework.
 
 from .bans import BansExporter
 from .bazaar import BazaarExporter
-from .calendar import CalendarExporter
+from .calendar import CalendarExporter, ExpandedCalendarExporter
 from .calendar_deleted import CalendarDeletedExporter
 from .chat_messages import ChatMessagesDeletedExporter, ChatMessagesExporter
 from .comments import CommentsExporter
@@ -46,6 +46,7 @@ __all__ = [
     "BazaarExporter",
     "CalendarDeletedExporter",
     "CalendarExporter",
+    "ExpandedCalendarExporter",
     "ChatMessagesDeletedExporter",
     "ChatMessagesExporter",
     "CommentsDeletedExporter",

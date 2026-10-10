@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
 from ..exporter import PagedExporterMixin
@@ -31,6 +32,10 @@ class CalendarExporter(PagedExporterMixin):
 
     def __init__(self, space_calendar_repo: "AbstractSpaceCalendarRepo") -> None:
         self._repo = space_calendar_repo
+
+    def expanded(self) -> "ExpandedCalendarExporter":
+        """The record set for a requester below v_56 (see there)."""
+        return ExpandedCalendarExporter(self._repo)
 
     def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
         return self._pages(space_id, None)
@@ -53,6 +58,48 @@ class CalendarExporter(PagedExporterMixin):
 
         async for events in iter_pages(page):
             yield [_event_to_dict(e) for e in events]
+
+
+#: The window an older requester's record set is expanded in (the shape
+#: before v_56): ~10 years either side of the provider's clock.
+_EXPANDED_WINDOW = timedelta(days=3652)
+
+
+class ExpandedCalendarExporter:
+    """The ``calendar`` record set a requester below v_56 understands: every
+    series expanded into its occurrences (``<id>@<start>`` records) in a
+    ±10-year window around the provider's clock — the pre-v_56 shape.
+
+    An older receiver reads no ``rrule`` from a record and upserts the row
+    without one, so streaming it the series row would turn every recurring
+    event it holds into a one-off event; the expanded set at least shows the
+    occurrences. Same resource, so a requester that upgrades gets one full
+    stream in the new shape (its version is part of the session shape)."""
+
+    resource = "calendar"
+
+    __slots__ = ("_repo",)
+
+    def __init__(self, space_calendar_repo: "AbstractSpaceCalendarRepo") -> None:
+        self._repo = space_calendar_repo
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return await self._records(space_id, None)
+
+    async def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        yield await self._records(space_id, since)
+
+    async def _records(self, space_id: str, since: int | None) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        events = await self._repo.list_events_in_range(
+            space_id,
+            start=now - _EXPANDED_WINDOW,
+            end=now + _EXPANDED_WINDOW,
+            since=since,
+        )
+        return [_event_to_dict(e) for e in events]
 
 
 def _event_to_dict(event: "CalendarEvent") -> dict[str, Any]:

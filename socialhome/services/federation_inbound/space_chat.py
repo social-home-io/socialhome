@@ -290,9 +290,10 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         """A new message. ``from_sync`` (the §25.6 catch-up): stored
         quietly — no bell, no mention, no WS frame per historical message —
         and a chat it creates seats its readers at *now*, so nobody inherits
-        the backlog as unread. ``True`` when the message was held for its
-        author's seat (a race, not a refusal) rather than stored or
-        refused."""
+        the backlog as unread. ``True`` when the message waits for its
+        author's seat (a race, not a refusal) rather than stored or refused —
+        held in the live seat buffer, or, from a sync, left for the next
+        stream."""
         p = event.payload if isinstance(event.payload, dict) else {}
         message_id = _str(p, "message_id")
         author = _str(p, "author_user_id")
@@ -314,7 +315,31 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             # author's, another space's, a legacy uuid — is refused.
             _refuse(event, "chat message", message_id, f"id not bound to {author!r}")
             return False
+        if await self._convos.get_message(message_id) is not None:
+            # Held already — or deleted before it arrived here (a
+            # tombstone): either way a create never brings it back. Decided
+            # before the author check, so a held message by an author this
+            # space no longer knows is a no-op, never a hold.
+            log_not_applied(
+                event, what="chat message", row_id=message_id, reason="already held"
+            )
+            return False
         if not await authorship.may_author_writer(event, space_id, author):
+            if from_sync:
+                # §25.6: an author whose seat has not reached us yet is a
+                # race the NEXT stream wins — reported to the receiver, not
+                # parked in the live seat buffer (whose slots are for live
+                # writes, and whose replay would run without ``from_sync``).
+                if await authorship.trails_seat(space_id, author):
+                    return True
+                authorship.log_refusal(
+                    event,
+                    space_id=space_id,
+                    what="chat message",
+                    row_id=message_id,
+                    user_id=author,
+                )
+                return False
             return await authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
@@ -322,13 +347,6 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
                 row_id=message_id,
                 user_id=author,
             )
-        if await self._convos.get_message(message_id) is not None:
-            # Held already — or deleted before it arrived here (a
-            # tombstone): either way a create never brings it back.
-            log_not_applied(
-                event, what="chat message", row_id=message_id, reason="already held"
-            )
-            return False
         created_at = parse_iso8601_lenient(p.get("created_at"))
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
