@@ -20,8 +20,17 @@ class GfsSpaceSeat:
     gfs_connection_id: str | None = None
     gfs_public_key: str | None = None
     gfs_inbox_url: str | None = None
-    #: When the seat was first seen matching no paired connection (UTC,
-    #: SQLite ``datetime('now')`` form), ``None`` while one matches. After
-    #: :data:`~socialhome.services.gfs_space_mirror_service.ORPHAN_SEAT_DAYS`
-    #: the row is dropped — the server was unpaired and never re-paired.
-    unmatched_since: str | None = None
+    #: The server was unpaired: the row is kept (a re-pair re-takes or
+    #: releases it) and its unsubscribe was sent in the background.
+    detached: bool = False
+    #: When it was detached (UTC ``YYYY-MM-DD HH:MM:SS``), ``None`` until
+    #: the clock looked sane.
+    detached_at: str | None = None
+    #: The server confirmed the unsubscribe; until then a detached row is
+    #: an unsubscribe-only tombstone.
+    released: bool = False
+    #: First sweep that found a released, detached row past its age —
+    #: a second sweep a day later drops it.
+    expiry_seen_at: str | None = None
+    #: The "server address changed — re-follow" warning was logged.
+    address_warned: bool = False

@@ -27,10 +27,19 @@ class AbstractGfsSpaceSeatRepo(Protocol):
     async def list_for_space(self, space_id: str) -> list[GfsSpaceSeat]: ...
     async def list_for_gfs(self, gfs_instance_id: str) -> list[GfsSpaceSeat]: ...
     async def list_all(self) -> list[GfsSpaceSeat]: ...
-    async def set_unmatched(
-        self, space_id: str, gfs_instance_id: str, *, unmatched: bool
+    async def mark_detached(
+        self, space_id: str, gfs_instance_id: str, *, at: str | None
     ) -> None: ...
-    async def purge_unmatched(self, *, older_than_days: int) -> int: ...
+    async def mark_released(self, space_id: str, gfs_instance_id: str) -> None: ...
+    async def set_detached_at(
+        self, space_id: str, gfs_instance_id: str, at: str
+    ) -> None: ...
+    async def set_expiry_seen(
+        self, space_id: str, gfs_instance_id: str, at: str | None
+    ) -> None: ...
+    async def mark_address_warned(
+        self, space_id: str, gfs_instance_id: str
+    ) -> None: ...
 
 
 class SqliteGfsSpaceSeatRepo:
@@ -53,7 +62,8 @@ class SqliteGfsSpaceSeatRepo:
             " gfs_connection_id=excluded.gfs_connection_id,"
             " gfs_public_key=excluded.gfs_public_key,"
             " gfs_inbox_url=excluded.gfs_inbox_url,"
-            " unmatched_since=NULL",
+            " detached=0, detached_at=NULL, released=0, expiry_seen_at=NULL,"
+            " address_warned=0",
             (
                 seat.space_id,
                 seat.gfs_instance_id,
@@ -99,24 +109,48 @@ class SqliteGfsSpaceSeatRepo:
         )
         return [_seat(r) for r in rows]
 
-    async def set_unmatched(
-        self, space_id: str, gfs_instance_id: str, *, unmatched: bool
+    async def mark_detached(
+        self, space_id: str, gfs_instance_id: str, *, at: str | None
     ) -> None:
-        """Start (keeping an earlier start) or clear the "matches no
-        paired connection" clock of one seat."""
+        """The server was unpaired: keep the row, unreleased, stamped
+        *at* (``None`` while the clock can't be trusted)."""
         await self._db.enqueue(
-            "UPDATE gfs_space_seats SET unmatched_since="
-            + ("COALESCE(unmatched_since, datetime('now'))" if unmatched else "NULL")
-            + " WHERE space_id=? AND gfs_instance_id=?",
+            "UPDATE gfs_space_seats SET detached=1, released=0,"
+            " detached_at=COALESCE(detached_at, ?), expiry_seen_at=NULL"
+            " WHERE space_id=? AND gfs_instance_id=?",
+            (at, space_id, gfs_instance_id),
+        )
+
+    async def mark_released(self, space_id: str, gfs_instance_id: str) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_space_seats SET released=1"
+            " WHERE space_id=? AND gfs_instance_id=? AND detached=1",
             (space_id, gfs_instance_id),
         )
 
-    async def purge_unmatched(self, *, older_than_days: int) -> int:
-        """Drop seats that have matched no connection for that long."""
-        return await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_seats WHERE unmatched_since IS NOT NULL"
-            " AND unmatched_since < datetime('now', ?)",
-            (f"-{int(older_than_days)} days",),
+    async def set_detached_at(
+        self, space_id: str, gfs_instance_id: str, at: str
+    ) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_space_seats SET detached_at=?, expiry_seen_at=NULL"
+            " WHERE space_id=? AND gfs_instance_id=?",
+            (at, space_id, gfs_instance_id),
+        )
+
+    async def set_expiry_seen(
+        self, space_id: str, gfs_instance_id: str, at: str | None
+    ) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_space_seats SET expiry_seen_at=?"
+            " WHERE space_id=? AND gfs_instance_id=?",
+            (at, space_id, gfs_instance_id),
+        )
+
+    async def mark_address_warned(self, space_id: str, gfs_instance_id: str) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_space_seats SET address_warned=1"
+            " WHERE space_id=? AND gfs_instance_id=?",
+            (space_id, gfs_instance_id),
         )
 
 
@@ -127,5 +161,9 @@ def _seat(row: Any) -> GfsSpaceSeat:
         gfs_connection_id=row["gfs_connection_id"],
         gfs_public_key=row["gfs_public_key"],
         gfs_inbox_url=row["gfs_inbox_url"],
-        unmatched_since=row["unmatched_since"],
+        detached=bool(row["detached"]),
+        detached_at=row["detached_at"],
+        released=bool(row["released"]),
+        expiry_seen_at=row["expiry_seen_at"],
+        address_warned=bool(row["address_warned"]),
     )

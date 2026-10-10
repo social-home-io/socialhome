@@ -462,7 +462,9 @@ cannot widen access through a missing field or Python truthiness.
   config change or key import invalidates a download in flight), and a
   directory over 500 000 ids or 64 MiB is refused (logged) — never
   truncated, and never answered with per-space probes. The body is parsed
-  in a worker thread and only the ids and their publish mode are kept. A
+  in a worker thread — `json.loads` holds the GIL, so a huge directory
+  slows the event loop rather than freezing it; the byte cap is what bounds
+  the cost — and only the ids, their publish mode and owner are kept. A
   cached copy lacking the id is re-read once it is 5 s old, so a space
   published a moment ago is followable at once. An unreadable directory
   proves no listing: that server gets no detail GET.
@@ -537,7 +539,11 @@ cannot widen access through a missing field or Python truthiness.
   listed it — mirror provenance, a recorded GFS seat, a `public_space_cache`
   row (the directory poll is that table's only writer, but it imports a
   bounded slice per tick, so a missing row proves nothing), or a paired
-  server's whole directory listing it now. A public/global
+  server's whole directory listing it — read from the cache only, since
+  this runs on the unsubscribe request, and never for an owner the admin
+  blocked from discovery (the poll's own filter). The mirror teardown and
+  a subscribe of the same space take one per-space lock, so the teardown
+  re-reads the members after any subscribe in progress. A public/global
   stub learned from a direct peer matches the first four and must not be
   touched — the signed, identity-bound unsubscribe would disclose to every
   GFS operator a relationship with a space they never knew about, and the
@@ -568,27 +574,40 @@ cannot widen access through a missing field or Python truthiness.
   - each GFS-WS **reconnect** re-takes that server's recorded seats still
     wanted and releases those nobody wants any more (re-checked right before
     each release);
-  - an explicit **unpair** is local only: it sends nothing and keeps the
-    server's seats, so a re-pair of the same server (same id, key and
-    address) re-takes them on its first reconnect. A local sweep (startup
-    and every reconnect, no request) clocks seats that match no paired
-    connection and drops them after 90 days — the server was never
-    re-paired. A server whose id and key come back at a DIFFERENT address
-    (a domain change, http → https) is not re-bound: that could be an
-    impostor, and only the planned proof of possession can tell. Each such
+  - an explicit **unpair** keeps the server's seats, marked *detached*,
+    and sends their unsubscribes in the background (never inside the unpair
+    request) — the GFS does not keep an identity-bound seat of a household
+    that left it. A confirmed unsubscribe marks the row *released*; a
+    failed one leaves an unsubscribe-only tombstone that any later matching
+    connection retries. A re-pair of the same server (same id, key and
+    address) re-takes the detached seats a local user still wants, releases
+    the rest, and carries the v_44 pin anchor over through the same rows;
+  - a local sweep (startup and every reconnect, no request) drops a
+    detached row only once it is released and 90 days old, confirmed by a
+    second sweep at least a day after the first that saw it expired;
+    nothing is stamped or aged while the wall clock reads before 2026 (a
+    device without a real-time clock), and a stamp in the future (the
+    clock went back) is reset. An unreleased row is never dropped;
+  - a server whose id and key come back at a DIFFERENT address (a domain
+    change, http → https) is not re-bound: that could be an impostor, and
+    only the proof of possession planned in a follow-up can tell. Each such
     seat is logged once at WARNING ("needs re-follow: server address
-    changed"); the user re-follows. Addresses compare as scheme + host
-    (+ non-default port), so case, a trailing slash or an explicit `:443`
-    don't count as a move;
+    changed", remembered on the row); the user re-follows, and an
+    unfollow while it is unreleased keeps the row as an unsubscribe-only
+    tombstone for that follow-up to release. Addresses compare as scheme +
+    host (+ non-default port), so case, a trailing slash or an explicit
+    `:443` don't count as a move;
   - a seat taken by a first subscribe in the last 2 min is spared by every
     teardown (its member row is written after the subscribe succeeds), and
     the mirror purge waits too; once the window has passed, a tracked
     re-check releases the seat and purges the stub if nobody wants them (a
-    subscribe undone within the window);
+    subscribe undone within the window); shutdown cancels a waiting
+    re-check but lets a teardown already running finish (bounded);
   - a pre-v44 mirror with no recorded seat on ANY server falls back to the
-    servers whose **whole** directory lists the space (its first successful
-    re-subscribe records the seat), and contacts none when the directory
-    can't be read;
+    servers whose **whole** directory lists the space under an owner the
+    admin did not block (its first successful re-subscribe records the
+    seat), and contacts none when the directory can't be read; on unfollow
+    that directory lookup runs in the background, never on the request;
   - **reactive teardown**: a relay frame (one its consumer accepted) from a
     server holding a recorded seat of ours that no local user wants triggers
     an unsubscribe there, in the background, at most once per 10 min per

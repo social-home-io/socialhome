@@ -277,6 +277,7 @@ class GfsConnectionService:
         "_publish_retry",
         "_publish_client",
         "_on_repinned",
+        "_on_disconnect",
     )
 
     def __init__(
@@ -361,6 +362,14 @@ class GfsConnectionService:
         #: v_49 — called after a publish that carried the owner's authority
         #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
         self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
+        self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
+
+    def attach_on_disconnect(
+        self, hook: Callable[[GfsConnection], Awaitable[object]]
+    ) -> None:
+        """Wire the seat keeper's unpair handling (local bookkeeping; any
+        request it needs runs in the background, never in the route)."""
+        self._on_disconnect = hook
 
     def attach_on_repinned(self, hook: Callable[[str, str], Awaitable[object]]) -> None:
         """Wire the v_49 epoch re-announce run after a re-pinning publish."""
@@ -1183,10 +1192,19 @@ class GfsConnectionService:
         await self._repo.update_display_name(gfs_id, new_name)
 
     async def disconnect(self, gfs_id: str) -> None:
-        """Remove a GFS connection and all its publications."""
+        """Remove a GFS connection and all its publications.
+
+        Sends nothing inline: the ``on_disconnect`` hook (the seat keeper)
+        only records local state and schedules its unsubscribes in the
+        background."""
         conn = await self._repo.get(gfs_id)
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+        if self._on_disconnect is not None:
+            try:
+                await self._on_disconnect(conn)
+            except Exception:
+                log.exception("gfs: on-disconnect hook failed for %s", gfs_id)
         await self._repo.delete(gfs_id)
 
     async def list_connections(self) -> list[GfsConnection]:
@@ -1750,14 +1768,18 @@ class GfsConnectionService:
         :meth:`unpublish_space`, removing an already-absent subscription is
         idempotent. Returns the GFS-reported status.
         """
+        conn = await self._repo.get(gfs_id)
+        if conn is None:
+            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+        return await self.unsubscribe_via(conn, space_id)
+
+    async def unsubscribe_via(self, conn: GfsConnection, space_id: str) -> str:
+        """:meth:`unsubscribe_from_gfs_space` over a connection snapshot —
+        for the unsubscribes an unpair sends after its row is gone."""
         if not self._own_instance_id or not self._own_signing_key:
             raise GfsConnectionError(
                 "cannot unsubscribe from a GFS space without a wired signing identity",
             )
-        conn = await self._repo.get(gfs_id)
-        if conn is None:
-            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
-
         ts = datetime.now(timezone.utc).isoformat()
         canonical = json.dumps(
             {

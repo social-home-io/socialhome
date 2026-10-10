@@ -75,13 +75,15 @@ class GfsDirectoryCache:
     does not linger.
     """
 
-    __slots__ = ("_client", "_entries", "_inflight", "_generation")
+    __slots__ = ("_client", "_entries", "_owners", "_inflight", "_generation")
 
     def __init__(self, client: Callable[[], aiohttp.ClientSession | None]) -> None:
         # A getter, not a session: the cookie-less publish session is
         # attached after construction (``app._on_startup``).
         self._client = client
         self._entries: dict[str, tuple[dict[str, str] | None, float]] = {}
+        # conn id → {space id: listed owning instance} of the same download.
+        self._owners: dict[str, dict[str, str]] = {}
         self._inflight: dict[str, asyncio.Task[dict[str, str] | None]] = {}
         # Bumped by :meth:`forget`: a download started before it never
         # stores its (possibly stale) result.
@@ -96,6 +98,7 @@ class GfsDirectoryCache:
         and the next caller starts a fresh one."""
         self._generation += 1
         self._entries.clear()
+        self._owners.clear()
         self._inflight.clear()
 
     async def directory(self, conn: GfsConnection) -> dict[str, str] | None:
@@ -121,6 +124,24 @@ class GfsDirectoryCache:
             return False
         listed = await self._fetch(conn)
         return listed is not None and space_id in listed
+
+    def peek_owner(self, conn: GfsConnection, space_id: str) -> str | None:
+        """Cache only, never a request: the owning instance *conn*'s fresh
+        cached directory lists for *space_id* (``""`` when it names none),
+        or ``None`` when no fresh copy lists it — for request paths that
+        must not wait on a download."""
+        cached = self._entries.get(conn.id)
+        if cached is None or not self._fresh(cached) or cached[0] is None:
+            return None
+        if space_id not in cached[0]:
+            return None
+        return self._owners.get(conn.id, {}).get(space_id, "")
+
+    async def owner(self, conn: GfsConnection, space_id: str) -> str | None:
+        """:meth:`peek_owner`, downloading the directory when needed."""
+        if not await self.lists(conn, space_id):
+            return None
+        return self._owners.get(conn.id, {}).get(space_id, "")
 
     async def mode(self, conn: GfsConnection, space_id: str) -> str | None:
         """The listed member publish mode, or ``None`` when not listed."""
@@ -164,19 +185,26 @@ class GfsDirectoryCache:
     async def _read_and_store(
         self, conn: GfsConnection, generation: int
     ) -> dict[str, str] | None:
-        listed = await self._read(conn)
+        read = await self._read(conn)
+        listed, owners = read if read is not None else (None, {})
         if generation == self._generation:
-            self._store(conn.id, listed)
+            self._store(conn.id, listed, owners)
         return listed
 
-    def _store(self, conn_id: str, listed: dict[str, str] | None) -> None:
+    def _store(
+        self, conn_id: str, listed: dict[str, str] | None, owners: dict[str, str]
+    ) -> None:
         now = _now()
         for cid, (_listed, at) in list(self._entries.items()):
             if now - at >= LISTING_TTL_S:
                 del self._entries[cid]
+                self._owners.pop(cid, None)
         self._entries[conn_id] = (listed, now)
+        self._owners[conn_id] = owners
 
-    async def _read(self, conn: GfsConnection) -> dict[str, str] | None:
+    async def _read(
+        self, conn: GfsConnection
+    ) -> tuple[dict[str, str], dict[str, str]] | None:
         client = self._client()
         if client is None:
             return None
@@ -196,12 +224,17 @@ class GfsDirectoryCache:
             return None
         if raw is None:
             return None
-        # Up to 64 MiB of JSON: parse off the event loop.
+        # Up to 64 MiB of JSON: parse in a worker thread. ``json.loads``
+        # holds the GIL, so this slows the loop rather than freezing it —
+        # the byte cap is what bounds the cost.
         return await asyncio.to_thread(_parse_directory, raw, url)
 
 
-def _parse_directory(raw: bytes, url: str) -> dict[str, str] | None:
-    """``{space id: publish mode}`` of a directory body, or ``None`` when
+def _parse_directory(
+    raw: bytes, url: str
+) -> tuple[dict[str, str], dict[str, str]] | None:
+    """``({space id: publish mode}, {space id: owning instance})`` of a
+    directory body, or ``None`` when
     it is unparsable, has no ``spaces`` list, or lists more than
     :data:`MAX_DIRECTORY_IDS` (refused, never truncated)."""
     try:
@@ -224,12 +257,22 @@ def _parse_directory(raw: bytes, url: str) -> dict[str, str] | None:
         return None
     # ``member_publish_mode`` (v_50) is absent on an older server, which
     # reads as ``trusted``.
-    return {
+    entries = [
+        sp
+        for sp in spaces
+        if isinstance(sp, dict) and isinstance(sp.get("space_id"), str)
+    ]
+    modes = {
         sp["space_id"]: (
             GFS_PUBLISH_MODE_STRICT
             if sp.get("member_publish_mode") == GFS_PUBLISH_MODE_STRICT
             else _TRUSTED
         )
-        for sp in spaces
-        if isinstance(sp, dict) and isinstance(sp.get("space_id"), str)
+        for sp in entries
     }
+    owners = {
+        sp["space_id"]: sp["owning_instance"]
+        for sp in entries
+        if isinstance(sp.get("owning_instance"), str)
+    }
+    return modes, owners

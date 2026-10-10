@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import io
@@ -6131,6 +6132,37 @@ async def test_the_mirrors_post_grace_recheck_runs_the_same_teardown(stack):
 
     assert mirror.unsubscribes == ["remote-sp"]
     assert await stack.space_repo.get("remote-sp") is None
+
+
+async def test_the_mirror_teardown_waits_for_a_subscribe_in_progress(stack):
+    """L2: the teardown takes the space's subscribe lock and re-reads the
+    members inside it — a subscribe that was in progress is seen, nothing
+    is purged out from under it."""
+    fan = await stack.provision_user("fan")
+    other = await stack.provision_user("other")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+
+    lock = stack.space_svc._mirror_lock("remote-sp")
+    await lock.acquire()  # a subscribe of `other` is in progress
+    leave = asyncio.create_task(
+        stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    )
+    await asyncio.sleep(0.3)  # ample time to finish, were it not waiting
+    assert not leave.done()
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id="remote-sp",
+            user_id=other.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-10-10T00:00:00+00:00",
+        )
+    )
+    lock.release()
+    await leave
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get("remote-sp") is not None
 
 
 async def test_unsubscribe_keeps_mirror_while_another_member_remains(stack):

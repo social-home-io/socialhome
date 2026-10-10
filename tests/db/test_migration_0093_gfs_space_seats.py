@@ -108,10 +108,15 @@ def test_one_row_per_space_and_server(conn):
     assert row["seated_at"]
 
 
-def test_the_unmatched_clock_column_defaults_to_null(conn):
+def test_the_detach_columns_default_to_a_live_seat(conn):
     _apply_through(conn, _VERSION)
     conn.execute(
         "INSERT INTO gfs_space_seats(space_id, gfs_instance_id) VALUES('sp-y','g')"
     )
-    row = conn.execute("SELECT unmatched_since FROM gfs_space_seats").fetchone()
-    assert row["unmatched_since"] is None
+    row = conn.execute(
+        "SELECT detached, detached_at, released, expiry_seen_at, address_warned"
+        " FROM gfs_space_seats"
+    ).fetchone()
+    assert tuple(row) == (0, None, 0, None, 0)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE gfs_space_seats SET detached=2")

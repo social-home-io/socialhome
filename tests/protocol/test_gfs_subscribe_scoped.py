@@ -235,6 +235,7 @@ async def test_unsubscribe_never_reaches_a_gfs_that_did_not_seat_it(household):
     mirror, session, iid, _conns, _spaces = household
     await mirror.unsubscribe("sp-mirrored")
     await mirror.unsubscribe("sp-legacy")
+    await mirror.wait_idle()  # a legacy mirror's lookup runs in the background
     assert _leaks_to_other(session, iid) == []
     unsubscribed = [
         body["space_id"]

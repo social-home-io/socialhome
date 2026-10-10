@@ -2488,6 +2488,9 @@ def create_app(config: Config | None = None) -> web.Application:
     space_service.attach_gfs_space_mirror(gfs_space_mirror)
     # A space's seats go when its last local member leaves (or is banned).
     gfs_space_mirror.wire(bus)
+    # An unpair keeps the seats (detached) and unsubscribes in the
+    # background — never inside the unpair request.
+    gfs_connection_service.attach_on_disconnect(gfs_space_mirror.on_disconnect)
 
     # ── Public space discovery (GFS poll) ────────────────────────────────
     public_space_discovery = PublicSpaceDiscoveryService(

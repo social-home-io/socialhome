@@ -26,14 +26,21 @@
 -- matching all three) apply that check. They are needed once the old
 -- ``gfs_connections`` row is deleted, which every disconnect does.
 --
--- An unpair sends nothing and keeps the seats: a re-pair of the same server
--- re-takes them on reconnect. ``unmatched_since`` (nullable) starts when a
--- local sweep (startup + every reconnect, no request) finds a seat matching
--- no paired connection, resets when one matches again; after 90 days the
--- row is dropped — the server was never re-paired. A server whose id and
--- key return at another address is NOT re-bound (only a proof of
--- possession, planned, could tell a move from an impostor): its seats are
--- logged once as needing a re-follow and age out the same way.
+-- An unpair keeps the rows and marks them ``detached`` (``detached_at``:
+-- when, UTC, stamped only while the clock looks sane), then sends the
+-- server's unsubscribes in the background — never inside the unpair
+-- request; a confirmed one sets ``released``. A re-pair with the same id,
+-- key and address re-takes the detached seats a local user still wants
+-- and releases the rest; the v_44 pin anchor follows through the same
+-- rows. A local sweep (startup + every reconnect, no request) drops a
+-- detached row only once it is ``released`` and 90 days old, confirmed on
+-- a second sweep at least a day later (``expiry_seen_at``) so one clock
+-- jump never drops it; an unreleased row is an unsubscribe-only tombstone
+-- kept until a matching connection takes the unsubscribe. A server whose
+-- id and key return at another address is NOT re-bound (only a proof of
+-- possession, planned in a follow-up, can tell a move from an impostor):
+-- such seats keep their rows as tombstones and are logged once
+-- (``address_warned``) as needing a re-follow.
 --
 -- Backfill: a v_44+ mirror recorded the seating connection in
 -- ``spaces.mirror_gfs_id``; where that connection still exists and a local
@@ -85,7 +92,11 @@ CREATE TABLE IF NOT EXISTS gfs_space_seats (
     gfs_connection_id TEXT,
     gfs_public_key    TEXT,
     gfs_inbox_url     TEXT,
-    unmatched_since   TEXT,
+    detached          INTEGER NOT NULL DEFAULT 0 CHECK (detached IN (0, 1)),
+    detached_at       TEXT,
+    released          INTEGER NOT NULL DEFAULT 0 CHECK (released IN (0, 1)),
+    expiry_seen_at    TEXT,
+    address_warned    INTEGER NOT NULL DEFAULT 0 CHECK (address_warned IN (0, 1)),
     PRIMARY KEY (space_id, gfs_instance_id)
 );
 
