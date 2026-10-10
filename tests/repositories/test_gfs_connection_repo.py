@@ -110,6 +110,30 @@ async def test_update_display_name_changes_the_row(repo):
     assert got.display_name == "Renamed GFS"
 
 
+async def test_update_gfs_instance_id_rebinds_the_row(repo):
+    await repo.save(_conn("gfs-1"))
+    assert await repo.update_gfs_instance_id("gfs-1", "gfs-shared") is True
+    got = await repo.get("gfs-1")
+    assert got is not None
+    assert got.gfs_instance_id == "gfs-shared"
+
+
+async def test_update_gfs_instance_id_refuses_an_id_another_connection_holds(repo):
+    """``gfs_instance_id`` is UNIQUE: the same server paired twice keeps both
+    rows untouched instead of failing the write."""
+    await repo.save(_conn("gfs-1"))
+    await repo.save(_conn("gfs-2"))
+    assert await repo.update_gfs_instance_id("gfs-1", "inst-gfs-2") is False
+    assert (await repo.get("gfs-1")).gfs_instance_id == "inst-gfs-1"
+    assert (await repo.get("gfs-2")).gfs_instance_id == "inst-gfs-2"
+
+
+async def test_update_gfs_instance_id_to_its_own_id_is_a_noop(repo):
+    await repo.save(_conn("gfs-1"))
+    assert await repo.update_gfs_instance_id("gfs-1", "inst-gfs-1") is True
+    assert (await repo.get("gfs-1")).gfs_instance_id == "inst-gfs-1"
+
+
 async def test_list_all_returns_every_status_ordered_by_paired_at_desc(repo):
     await repo.save(
         _conn_with("g-active", status="active", paired_at="2026-06-01 00:00:00")

@@ -179,6 +179,12 @@ CLUSTER_MAX_NODES: int = 32
 #: Operator-approved rows are never dropped.
 CLUSTER_STALE_SIBLING_S: int = 10 * HEARTBEAT_INTERVAL_S
 
+#: How long a sibling's reported ``instance_id`` mismatch stays in force
+#: without being re-reported. A live sibling re-reports on every heartbeat;
+#: one that went away (or was fixed and restarted under another node id)
+#: stops failing ``/healthz`` after this — the stale-sibling horizon.
+CLUSTER_IDENTITY_MISMATCH_TTL_S: int = CLUSTER_STALE_SIBLING_S
+
 #: Replay-cache capacity across all nodes: ``None`` — the per-node share
 #: (:data:`CLUSTER_REPLAY_MAX_PER_NODE`, ~110 KB) is the binding bound. Only
 #: frames that verified under a member's key are recorded, so the nodes with
@@ -503,6 +509,8 @@ class ClusterService:
         "_admin_repo",
         "_fed_repo",
         "_node_id",
+        "_instance_id",
+        "_identity_mismatches",
         "_self_url",
         "_peers",
         "_signing_key",
@@ -541,6 +549,7 @@ class ClusterService:
         admin_repo: "AbstractGfsAdminRepo | None" = None,
         fed_repo: "AbstractGfsFederationRepo | None" = None,
         node_id: str = "",
+        instance_id: str = "",
         self_url: str = "",
         peers: tuple[str, ...] = (),
         signing_key: bytes = b"",
@@ -554,6 +563,14 @@ class ClusterService:
         self._admin_repo = admin_repo
         self._fed_repo = fed_repo
         self._node_id = node_id
+        #: This GFS's PUBLIC id (``[server] instance_id``). Every node holding
+        #: our identity key must serve the same one — households pin it — so
+        #: it rides HELLO + heartbeat and a sibling reporting another one is
+        #: an operator error (:meth:`_note_sibling_identity`).
+        self._instance_id = instance_id
+        #: Sibling node id → (the instance_id it reported, monotonic time of
+        #: the report). Only siblings under our OWN key that sent the field.
+        self._identity_mismatches: dict[str, tuple[str, float]] = {}
         self._self_url = self_url
         #: Node ids we already WARNed about for announcing OUR url (a
         #: duplicated ``advertise_url``) — once per node, not per heartbeat.
@@ -754,8 +771,8 @@ class ClusterService:
 
         Exposed so the public ``GET /gfs/info`` endpoint can publish the
         key HFS clients pin during pairing. The matching private key is
-        derived from the GFS ``instance_id`` and never leaves the
-        process.
+        the persisted identity seed (shared by every node of a shared-seed
+        cluster) and never leaves the process.
         """
         return self._own_pk_hex
 
@@ -941,6 +958,10 @@ class ClusterService:
             # Our own identity key — what an operator approves for this node on
             # every other node (``POST /admin/api/cluster/peers``).
             "public_key": self._own_pk_hex,
+            # Our public id, and every sibling under our key that serves
+            # another one (``/healthz`` fails while this is non-empty).
+            "instance_id": self._instance_id,
+            "instance_id_mismatches": self.identity_mismatches(),
             "status": self_status,
             "nodes": nodes,
         }
@@ -1287,6 +1308,7 @@ class ClusterService:
         from_node_id: str,
         url: str,
         public_key_hex: str,
+        instance_id: object = None,
     ) -> None:
         """Record a member's HELLO (online, ``last_seen`` now).
 
@@ -1315,6 +1337,7 @@ class ClusterService:
         # (the URL may not match ``base_url`` exactly).
         if from_node_id == self._node_id:
             return
+        self._note_sibling_identity(from_node_id, public_key_hex, instance_id)
         # "Known" means we have heard from it before. An admin-added row has
         # never been seen (``last_seen`` is None) — answer its first HELLO so
         # the two sides converge whichever the operator added first.
@@ -1475,6 +1498,16 @@ class ClusterService:
         rows = await self._repo.list_nodes()
         for r in rows:
             if r.node_id == from_node_id:
+                if is_member(r, self._own_pk_hex):
+                    # The key this heartbeat verified under
+                    # (:func:`authorize_frame`): its approved key, else ours.
+                    self._note_sibling_identity(
+                        from_node_id,
+                        r.approved_key or self._own_pk_hex,
+                        payload.get("instance_id")
+                        if isinstance(payload, dict)
+                        else None,
+                    )
                 # UPDATE only: an admin removal since the read stays removed.
                 # A shared-seed sibling's URL follows its heartbeat as it does
                 # its HELLO; a heartbeat always names its recipient, so a
@@ -1770,7 +1803,75 @@ class ClusterService:
             "node_id": self._node_id,
             "url": self._self_url,
             "public_key": self._own_pk_hex,
+            # Our public id, for the sibling identity guard. Additive: older
+            # nodes ignore it.
+            "instance_id": self._instance_id,
         }
+
+    # ─── Public-identity guard ───────────────────────────────────────
+
+    def _note_sibling_identity(
+        self, node_id: str, verified_key: str, reported: object
+    ) -> None:
+        """Compare a sibling's reported ``instance_id`` with ours.
+
+        Only a node whose frame verified under our OWN identity key is
+        compared: it IS this GFS to every household (same key, same
+        ``base_url`` behind the load balancer), so it must answer under the
+        same public id — otherwise a household pins whichever id the node
+        it reached served, and every request the balancer sends to another
+        node is refused as addressed elsewhere. A peer under its own
+        (approved) key is another server and may have another id.
+
+        A missing / empty field is UNKNOWN, never a mismatch: an older node
+        does not send it (a rolling upgrade must not trip the guard).
+        """
+        own = self._own_pk_hex.lower()
+        if not own or not self._instance_id or verified_key.lower() != own:
+            return
+        if not isinstance(reported, str) or not reported:
+            return
+        if reported == self._instance_id:
+            if self._identity_mismatches.pop(node_id, None) is not None:
+                log.info(
+                    "cluster: sibling %s now serves our instance_id %s",
+                    ascii(node_id),
+                    ascii(self._instance_id),
+                )
+            return
+        previous = self._identity_mismatches.get(node_id)
+        self._identity_mismatches[node_id] = (reported, self._clock())
+        if previous is None or previous[0] != reported:
+            log.error(
+                "cluster: sibling %s shares our identity key but serves "
+                "instance_id %s, we serve %s. Households pin the id they "
+                "were served and sign it into every request, so requests "
+                "routed to the other node are refused. Set the SAME [server] "
+                "instance_id on every node (keep old ids in "
+                "instance_id_aliases while households migrate); /healthz "
+                "fails until it matches.",
+                ascii(node_id),
+                ascii(reported),
+                ascii(self._instance_id),
+            )
+
+    def identity_mismatches(self) -> list[dict]:
+        """Siblings under our key that recently reported another
+        ``instance_id``: ``[{node_id, instance_id}]``, sorted by node id."""
+        now = self._clock()
+        for node_id, (_reported, at) in list(self._identity_mismatches.items()):
+            if now - at > CLUSTER_IDENTITY_MISMATCH_TTL_S:
+                del self._identity_mismatches[node_id]
+        return [
+            {"node_id": node_id, "instance_id": reported}
+            for node_id, (reported, _at) in sorted(self._identity_mismatches.items())
+        ]
+
+    @property
+    def identity_consistent(self) -> bool:
+        """``False`` while a sibling under our key serves another
+        ``instance_id`` — ``GET /healthz`` fails then."""
+        return not self.identity_mismatches()
 
     async def _announce_to_peers(self) -> None:
         """HELLO every configured peer URL (fail-soft per peer).
@@ -1861,6 +1962,8 @@ class ClusterService:
                             # sibling's row for us follows it. Older peers
                             # ignore the key.
                             "url": self._self_url,
+                            # Our public id, for the sibling identity guard.
+                            "instance_id": self._instance_id,
                         },
                         to=r.node_id,
                         session=None,

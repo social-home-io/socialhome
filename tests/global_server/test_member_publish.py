@@ -146,13 +146,16 @@ def _body(
 
 
 @pytest.fixture
-async def gfs(tmp_dir):
+async def gfs(tmp_dir, request):
+    # ``indirect`` params override config fields (e.g. instance_id_aliases).
+    overrides = getattr(request, "param", None) or {}
     cfg = GfsConfig(
         host="127.0.0.1",
         port=0,
         base_url="http://gfs.test",
         data_dir=str(tmp_dir),
-        instance_id="gfs-node-a",
+        instance_id=overrides.get("instance_id", "gfs-node-a"),
+        instance_id_aliases=overrides.get("instance_id_aliases", ()),
         cluster_enabled=False,
         cluster_node_id="gfs-node-a",
         cluster_peers=(),
@@ -653,6 +656,77 @@ async def test_a_request_signed_for_another_gfs_is_refused(gfs):
         json=_body(gfs.publisher, gfs_instance_id="gfs-node-b"),
     )
     await _assert_refused(resp)
+
+
+# ── instance_id_aliases: a migration bridge, accepted as addressee only ──
+
+#: The server moved to a shared public id; its old id is an alias.
+_ALIASED = {"instance_id": "gfs-shared", "instance_id_aliases": (GFS_ID,)}
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_a_publish_addressed_to_an_alias_is_accepted_and_logged(gfs, caplog):
+    with caplog.at_level(logging.INFO, logger="socialhome.global_server.addressee"):
+        resp = await gfs.post(
+            "/gfs/member-publish", json=_body(gfs.publisher, gfs_instance_id=GFS_ID)
+        )
+    assert resp.status == 200
+    assert any("alias 'gfs-node-a'" in r.getMessage() for r in caplog.records)
+    # The new public id is accepted too.
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json=_body(gfs.publisher, gfs_instance_id="gfs-shared", payload="x2"),
+    )
+    assert resp.status == 200
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_an_id_that_is_neither_the_id_nor_an_alias_is_still_refused(gfs):
+    await _assert_refused(
+        await gfs.post(
+            "/gfs/member-publish",
+            json=_body(gfs.publisher, gfs_instance_id="gfs-node-b"),
+        )
+    )
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_an_owner_epoch_notice_addressed_to_an_alias_is_accepted(gfs):
+    resp = await gfs.post(
+        f"/gfs/spaces/{SPACE_ID}/epoch",
+        json=_owner_notice(gfs, 3, gfs_instance_id=GFS_ID),
+    )
+    assert resp.status == 200
+    assert (await _state(gfs)).confirmed == 3
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_an_anonymous_publish_addressed_to_an_alias_passes_the_addressee_check(
+    gfs,
+):
+    """Strict mode checks the addressee first: an alias gets past it to the
+    writer-key check (no key pinned here → the later refusal), while an
+    unknown id is refused at the addressee check itself."""
+    svc = gfs.app_[gfs_member_publish_key]
+    assert svc.addressed_here(GFS_ID)
+    assert svc.addressed_here("gfs-shared")
+    assert not svc.addressed_here("gfs-node-b")
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_info_serves_and_signs_only_the_instance_id_never_an_alias(gfs):
+    resp = await gfs.get("/gfs/info")
+    info = await resp.json()
+    assert info["gfs_instance_id"] == "gfs-shared"
+    assert GFS_ID not in json.dumps(info)
+    assert verify_capabilities(
+        info["public_key"],
+        "gfs-shared",
+        info["capabilities"],
+        info["capabilities_sig"],
+        info["capabilities_sig_suite"],
+    )
 
 
 # ── Round 2: epoch lockout (I1) ───────────────────────────────────────────

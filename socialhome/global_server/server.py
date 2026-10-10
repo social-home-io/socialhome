@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from ..db import AsyncDatabase
 from ..hardening import install_security_headers
 from . import app_keys as K
+from .addressee import GfsAddressee
 from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
 from .channels import GfsChannelService, build_channel_rate_limit
@@ -233,6 +234,8 @@ class GfsApp:
         *,
         db_path_override: str | Path | None = None,
     ) -> None:
+        # A cluster node without an explicit node_id refuses to start.
+        config.check_cluster_identity()
         self.config = config
         # The data dir is wherever the SQLite DB lives — the identity seed is
         # stored beside it, so a test/override db path keeps both together.
@@ -340,7 +343,13 @@ class GfsApp:
             repos.cluster,
             admin_repo=repos.admin,
             fed_repo=repos.federation,
+            # Unique per node. Cluster mode never reaches the fallback: a
+            # cluster node without an explicit node_id refused to start
+            # (``check_cluster_identity``) — the fallback is only the name a
+            # single node gives itself. ``instance_id`` is the public id
+            # every node shares, carried for the sibling identity guard.
             node_id=config.cluster_node_id or config.instance_id,
+            instance_id=config.instance_id,
             self_url=config.cluster_self_url,
             peers=config.cluster_peers,
             signing_key=signing_key,
@@ -375,13 +384,17 @@ class GfsApp:
         cluster.attach_drain(envelope_relay.drain)
         # Trusted-mode member publish (v_49): writer-cert-authorized items
         # fanned out through the same push-or-queue path as envelopes.
+        # What households pin from ``/gfs/info`` and sign into each request
+        # as the addressee — plus the transitional aliases (accepted, never
+        # served). One instance, so alias use is counted in one place.
+        addressee = GfsAddressee(config.instance_id, config.instance_id_aliases)
         member_publish = GfsMemberPublishService(
             federation=federation,
             fed_repo=repos.federation,
             epoch_repo=repos.space_epochs,
             relay=envelope_relay,
-            # What households pin from ``/gfs/info`` and sign into each request.
             gfs_instance_id=config.instance_id,
+            addressee=addressee,
         )
         # Opaque channels for private spaces (v_51): same fan-out workers and
         # offline queue as member publish, keyed by a random channel id.
@@ -390,6 +403,7 @@ class GfsApp:
             channel_repo=repos.channels,
             member_publish=member_publish,
             gfs_instance_id=config.instance_id,
+            addressee=addressee,
         )
         # Periodic retention sweep — purges expired admin sessions, expired
         # highlight publications, aged pair tokens, and envelopes whose TTL

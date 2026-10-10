@@ -367,8 +367,14 @@ class GfsChannelService:
         return out
 
     async def _capable_in(self, gfs_ids: tuple[str, ...]) -> list[GfsConnection]:
+        """The capable connections a grant's *gfs_ids* name — matched on the
+        server's current id or one it was pinned under before a rebind in
+        this process (a grant issued before the rebind names the old id
+        until the owner re-issues it)."""
         wanted = set(gfs_ids)
-        return [c for c in await self._capable() if c.gfs_instance_id in wanted]
+        return [
+            c for c in await self._capable() if self._gfs.known_instance_ids(c) & wanted
+        ]
 
     async def _live_seat(self, space_id: str, instance_id: str) -> bool:
         return bool(
@@ -786,6 +792,32 @@ class GfsChannelService:
             except Exception:
                 log.exception("gfs.channel: heal failed for a private space")
         return done
+
+    async def on_gfs_rebound(self, gfs_id: str) -> None:
+        """A connection adopted its server's new public id (the GFS
+        connection service's rebind hook). In the background, the owner
+        re-registers each private space's channel there under the new id,
+        re-announces, and re-issues every member's grant — grants name
+        servers by id, so ones naming the old id would stop matching once
+        the members rebind too."""
+        self._spawn(self._after_rebind(gfs_id), "rebind")
+
+    async def _after_rebind(self, gfs_id: str) -> None:
+        conn = await self._conn_repo.get(gfs_id)
+        if conn is None or conn.status != "active":
+            return
+        for space in await self._spaces.list_all():
+            if (
+                space.space_type is not SpaceType.PRIVATE
+                or space.owner_instance_id != self._own_instance_id
+            ):
+                continue
+            try:
+                if await self.reconcile(space.id) in ("created", "kept"):
+                    await self.announce_epoch(space.id, only=gfs_id)
+                    await self.distribute(space.id)
+            except Exception:
+                log.exception("gfs.channel: re-issue after a rebind failed")
 
     # ── Epoch notices (any seed holder) ──────────────────────────────────
 
@@ -1356,7 +1388,7 @@ class GfsChannelService:
         )
         accepted: list[GfsConnection] = []
         for conn in targets:
-            if conn.gfs_instance_id not in grant.gfs_ids:
+            if not self._gfs.known_instance_ids(conn) & set(grant.gfs_ids):
                 continue
             if await self._first_attempt(conn, item):
                 accepted.append(conn)

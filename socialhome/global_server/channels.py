@@ -86,6 +86,7 @@ from ..gfs_channel import (
     verify_register,
     verify_unregister,
 )
+from .addressee import GfsAddressee
 from .domain import CHANNEL_EPOCH_GRACE_S, GfsChannel
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import MAX_SUBSCRIPTIONS_PER_INSTANCE, SeenPayloadCache
@@ -168,7 +169,7 @@ class GfsChannelService:
         "_channel_limiter",
         "_clock",
         "_federation",
-        "_gfs_instance_id",
+        "_addressee",
         "_limiter",
         "_max_channels",
         "_member_publish",
@@ -184,6 +185,7 @@ class GfsChannelService:
         channel_repo: "AbstractGfsChannelRepo",
         member_publish: "GfsMemberPublishService",
         gfs_instance_id: str,
+        addressee: GfsAddressee | None = None,
         clock: Callable[[], float] = time.time,
         register_limiter: SlidingWindowCounter | None = None,
         max_channels: int = MAX_CHANNELS,
@@ -191,7 +193,9 @@ class GfsChannelService:
         self._federation = federation
         self._channels = channel_repo
         self._member_publish = member_publish
-        self._gfs_instance_id = gfs_instance_id
+        #: This server's public id + its transitional aliases (see
+        #: :mod:`.addressee`).
+        self._addressee = addressee or GfsAddressee(gfs_instance_id)
         self._clock = clock
         self._max_channels = max_channels
         self._register_limiter = register_limiter or SlidingWindowCounter(
@@ -216,7 +220,7 @@ class GfsChannelService:
         return int(self._clock())
 
     def _addressed(self, gfs_instance_id: str) -> None:
-        if gfs_instance_id != self._gfs_instance_id:
+        if not self._addressee.accepts(gfs_instance_id):
             raise PermissionError("request is addressed to another server")
 
     def _fresh(self, ts: str) -> int:

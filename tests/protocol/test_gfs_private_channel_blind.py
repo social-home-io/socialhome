@@ -100,6 +100,9 @@ class _Gfs:
     async def private_channels_supported(self, conn):
         return True
 
+    def known_instance_ids(self, conn):
+        return frozenset({conn.gfs_instance_id})
+
     async def member_publish_trusted_supported(self, conn):
         return True
 

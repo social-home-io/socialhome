@@ -7,6 +7,7 @@ import json
 import re
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.crypto import (
     b64url_decode,
@@ -18,6 +19,7 @@ from socialhome.capabilities_sig import (
     verify_capabilities,
 )
 from socialhome.global_server.cluster import (
+    CLUSTER_IDENTITY_MISMATCH_TTL_S,
     CLUSTER_RATE_LIMIT_PER_MIN,
     CLUSTER_SIG_SUITE_ED25519,
     ClusterReplayCache,
@@ -38,6 +40,8 @@ from socialhome.global_server.cluster import (
     parse_cluster_sig_suite,
 )
 from socialhome.global_server import cluster as cluster_mod
+from socialhome.global_server.app_keys import gfs_cluster_key
+from socialhome.global_server.server import create_gfs_app
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClusterNode
 from socialhome.global_server.repositories import SqliteClusterRepo
@@ -1685,3 +1689,219 @@ async def test_a_hint_after_the_drain_finished_drains_again(gfs_db):
     assert await svc.apply_drain_hint([_HOME_A]) == 1
     await svc.stop()
     assert calls == [_HOME_A, _HOME_A]
+
+
+# ─── Public-identity guard: every node under our key serves one instance_id ──
+
+
+@pytest.fixture
+def identity_clock() -> list[float]:
+    return [1000.0]
+
+
+@pytest.fixture
+async def identity_cluster(gfs_db, hello_replies, identity_clock):
+    """node-a, serving the public id ``gfs-shared``, on a steerable clock."""
+    clock = identity_clock
+    return ClusterService(
+        SqliteClusterRepo(gfs_db),
+        node_id="node-a",
+        instance_id="gfs-shared",
+        self_url="https://a.gfs.test",
+        own_public_key_hex=_OWN,
+        enabled=True,
+        clock=lambda: clock[0],
+    )
+
+
+def test_hello_and_heartbeat_payloads_carry_our_instance_id():
+    svc = ClusterService(None, node_id="node-a", instance_id="gfs-shared")  # type: ignore[arg-type]
+    assert svc._hello_payload()["instance_id"] == "gfs-shared"
+
+
+async def test_heartbeat_frame_carries_our_instance_id(gfs_db, monkeypatch):
+    repo = SqliteClusterRepo(gfs_db)
+    svc = ClusterService(
+        repo,
+        node_id="node-a",
+        instance_id="gfs-shared",
+        self_url="https://a.gfs.test",
+        own_public_key_hex=_OWN,
+        enabled=True,
+    )
+    await repo.insert_node(
+        ClusterNode(node_id="node-c", url="https://c.gfs.test", public_key=_OWN)
+    )
+    sent: list[tuple[str, dict]] = []
+
+    async def fake_post(self, url, msg_type, payload, *, to="", session=None):
+        sent.append((msg_type, payload))
+
+    async def fake_ping(self, url):
+        return True
+
+    monkeypatch.setattr(ClusterService, "_post_to_peer", fake_post)
+    monkeypatch.setattr(ClusterService, "_ping_peer", fake_ping)
+    await svc._heartbeat_tick()
+    (beat,) = [p for t, p in sent if t == NODE_HEARTBEAT]
+    assert beat["instance_id"] == "gfs-shared"
+
+
+@pytest.mark.security
+async def test_a_sibling_under_our_key_with_another_instance_id_is_flagged(
+    identity_cluster, caplog
+):
+    with caplog.at_level("ERROR"):
+        await identity_cluster.handle_hello(
+            from_node_id="node-c",
+            url="https://c.gfs.test",
+            public_key_hex=_OWN,
+            instance_id="gfs-2",
+        )
+    assert not identity_cluster.identity_consistent
+    assert identity_cluster.identity_mismatches() == [
+        {"node_id": "node-c", "instance_id": "gfs-2"}
+    ]
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1 and "instance_id" in errors[0].getMessage()
+    view = await identity_cluster.admin_cluster()
+    assert view["instance_id"] == "gfs-shared"
+    assert view["instance_id_mismatches"] == [
+        {"node_id": "node-c", "instance_id": "gfs-2"}
+    ]
+    # Re-reported on every heartbeat: logged once, not per heartbeat.
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        await identity_cluster.handle_heartbeat("node-c", {"instance_id": "gfs-2"})
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+async def test_a_heartbeat_reporting_another_instance_id_is_flagged(identity_cluster):
+    await identity_cluster.handle_hello(
+        from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_OWN
+    )
+    assert identity_cluster.identity_consistent
+    await identity_cluster.handle_heartbeat("node-c", {"instance_id": "gfs-3"})
+    assert not identity_cluster.identity_consistent
+
+
+@pytest.mark.parametrize("reported", [None, "", 42])
+async def test_a_sibling_that_does_not_report_an_instance_id_is_not_a_mismatch(
+    identity_cluster, reported
+):
+    """An older node sends no ``instance_id``: a rolling upgrade, where the
+    old allocs run beside new ones, must never fail the health check."""
+    await identity_cluster.handle_hello(
+        from_node_id="node-c",
+        url="https://c.gfs.test",
+        public_key_hex=_OWN,
+        instance_id=reported,
+    )
+    await identity_cluster.handle_heartbeat("node-c", {"active_sync_sessions": 0})
+    await identity_cluster.handle_heartbeat("node-c", None)
+    assert identity_cluster.identity_consistent
+
+
+async def test_a_matching_report_clears_the_mismatch(identity_cluster):
+    await identity_cluster.handle_hello(
+        from_node_id="node-c",
+        url="https://c.gfs.test",
+        public_key_hex=_OWN,
+        instance_id="gfs-2",
+    )
+    await identity_cluster.handle_heartbeat("node-c", {"instance_id": "gfs-shared"})
+    assert identity_cluster.identity_consistent
+
+
+async def test_a_mismatch_nobody_re_reports_expires(identity_cluster, identity_clock):
+    await identity_cluster.handle_hello(
+        from_node_id="node-c",
+        url="https://c.gfs.test",
+        public_key_hex=_OWN,
+        instance_id="gfs-2",
+    )
+    identity_clock[0] += CLUSTER_IDENTITY_MISMATCH_TTL_S + 1
+    assert identity_cluster.identity_consistent
+
+
+@pytest.mark.security
+async def test_a_peer_under_its_own_approved_key_may_have_another_instance_id(
+    identity_cluster,
+):
+    """A distinct-key peer is another server to households, not this one."""
+    await identity_cluster.add_peer("node-b", "https://b.gfs.test", _PIN)
+    await identity_cluster.handle_hello(
+        from_node_id="node-b",
+        url="https://b.gfs.test",
+        public_key_hex=_PIN,
+        instance_id="gfs-elsewhere",
+    )
+    await identity_cluster.handle_heartbeat("node-b", {"instance_id": "gfs-elsewhere"})
+    assert identity_cluster.identity_consistent
+
+
+async def _healthz_app(tmp_dir, **kw):
+    cfg = GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url="http://gfs.test",
+        data_dir=str(tmp_dir),
+        instance_id="gfs-shared",
+        cluster_enabled=False,
+        cluster_node_id="node-a",
+        **kw,
+    )
+    return create_gfs_app(cfg)
+
+
+async def test_healthz_fails_while_a_sibling_serves_another_instance_id(
+    tmp_dir, hello_replies
+):
+    app = await _healthz_app(tmp_dir)
+    async with TestClient(TestServer(app)) as tc:
+        resp = await tc.get("/healthz")
+        assert (resp.status, await resp.json()) == (200, {"status": "ok"})
+        svc = app[gfs_cluster_key]
+        own = svc.own_public_key_hex
+        await svc.handle_hello(
+            from_node_id="node-c",
+            url="https://c.gfs.test",
+            public_key_hex=own,
+            instance_id="gfs-2",
+        )
+        resp = await tc.get("/healthz")
+        assert resp.status == 503
+        assert await resp.json() == {
+            "status": "unhealthy",
+            "reason": "cluster_instance_id_mismatch",
+        }
+        # Fixed (same id reported) → healthy again.
+        await svc.handle_heartbeat("node-c", {"instance_id": "gfs-shared"})
+        assert (await tc.get("/healthz")).status == 200
+
+
+async def test_healthz_stays_ok_when_a_sibling_sends_no_instance_id(
+    tmp_dir, hello_replies
+):
+    app = await _healthz_app(tmp_dir)
+    async with TestClient(TestServer(app)) as tc:
+        svc = app[gfs_cluster_key]
+        await svc.handle_hello(
+            from_node_id="node-c",
+            url="https://c.gfs.test",
+            public_key_hex=svc.own_public_key_hex,
+        )
+        await svc.handle_heartbeat("node-c", {"active_sync_sessions": 1})
+        assert (await tc.get("/healthz")).status == 200
+
+
+def test_a_cluster_node_without_a_node_id_refuses_to_start(tmp_dir):
+    cfg = GfsConfig(
+        base_url="http://gfs.test",
+        data_dir=str(tmp_dir),
+        instance_id="gfs-shared",
+        cluster_enabled=True,
+        cluster_node_id="",
+    )
+    with pytest.raises(ValueError, match="node_id"):
+        create_gfs_app(cfg)

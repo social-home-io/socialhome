@@ -345,6 +345,58 @@ The Social Home ↔ GFS link is split by direction:
   socket drains its queue right away instead of on the next reconnect.
   Drains are serialised per household, so a hello drain and a hint drain
   never deliver a row twice.
+- **One public identity per GFS, however many nodes.** `[server] instance_id`
+  is the GFS's PUBLIC identity: `/gfs/info` serves it, the capability block
+  is signed over it, and households pin it at pairing and sign it as the
+  addressee into every member publish, epoch notice and channel request. The
+  nodes of a cluster share one identity key and one `base_url` behind a load
+  balancer, so a household's `/gfs/info` and its next request usually reach
+  DIFFERENT nodes — `instance_id` MUST be identical on every node. Nodes are
+  told apart by `[cluster] node_id`, which MUST be unique and explicit (a
+  cluster node without one refuses to start). Guards and the migration path:
+  - **Sibling check.** `NODE_HELLO` / `NODE_HEARTBEAT` carry the sender's
+    `instance_id` (additive). A sibling whose frame verified under this
+    node's own key and reports another one is logged at ERROR, listed in
+    `GET /admin/api/cluster` (`instance_id_mismatches`) and fails `GET
+    /healthz` (503), so the load balancer stops routing to the disagreeing
+    node and a rollout that introduced it fails its health check. A missing
+    field is unknown, never a mismatch — old nodes in a rolling upgrade
+    don't trip it.
+  - **Aliases (server side).** `[server] instance_id_aliases`
+    (`GFS_INSTANCE_ID_ALIASES`) lists former ids still accepted as the
+    addressee of a signed request — never served, never signed. Each use is
+    logged at INFO (at most once per alias per 10 minutes, with a count) so
+    the operator can drop them once households have moved.
+  - **Rebind (household side).** The pinned KEY is the trust anchor, the id a
+    label: when `/gfs/info` serves a different `gfs_instance_id` together
+    with the pinned `public_key`, and the capability block verifies under
+    (pinned key, served id), the household adopts the served id (INFO log)
+    on its next reconnect. A different key is refused with a WARNING (a new
+    key means re-pairing); an id another connection already holds (the same
+    server paired twice) leaves both connections untouched, with a WARNING.
+    The owner of a private space then re-registers its channel and
+    re-issues grants naming the new id; until they arrive, a grant naming
+    the id this connection held before the rebind still matches it (in
+    memory, for the life of the process).
+
+```mermaid
+sequenceDiagram
+    participant H as Household (pinned key K, id gfs-1)
+    participant LB as Load balancer
+    participant N0 as Node gfs-0 (key K)
+    participant N1 as Node gfs-1 (key K)
+    Note over N0,N1: instance_id = "gfs-shared" on both,<br/>instance_id_aliases = ["gfs-0", "gfs-1"]
+    N0->>N1: NODE_HELLO {node_id, url, public_key, instance_id}
+    Note over N1: same key, same instance_id → healthy
+    H->>LB: POST /gfs/member-publish {gfs_instance_id: "gfs-1", …}
+    LB->>N0: (round robin)
+    Note over N0: "gfs-1" is an alias → accepted, INFO
+    H->>LB: GET /gfs/info (WS reconnect)
+    LB->>N1: (round robin)
+    N1-->>H: {gfs_instance_id: "gfs-shared", public_key: K, capabilities_sig}
+    Note over H: key == pinned K and block verifies<br/>under (K, "gfs-shared") → rebind
+    H->>LB: POST /gfs/member-publish {gfs_instance_id: "gfs-shared", …}
+```
 
 ### Connecting a household: QR code or open sign-up
 
@@ -1121,7 +1173,9 @@ POST /gfs/member-publish
 - `signature` is the household identity signature over canonical JSON of
   the other fields plus `action: "gfs-member-publish:v1"`.
   `gfs_instance_id` is the server id pinned from `/gfs/info`; the server
-  refuses any other, so a request can't be replayed to another GFS.
+  refuses any other (bar its own transitional `instance_id_aliases`, see
+  "One public identity per GFS"), so a request can't be replayed to another
+  GFS.
 - The GFS checks, in order: the household signature against its registered
   key (±300 s, instance active, addressed to this server); a
   per-(household, space) and a per-space rate limit; the

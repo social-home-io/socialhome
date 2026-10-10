@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -19,6 +20,9 @@ class AbstractGfsConnectionRepo(Protocol):
     async def list_all(self) -> list[GfsConnection]: ...
     async def update_status(self, gfs_id: str, status: str) -> None: ...
     async def update_display_name(self, gfs_id: str, display_name: str) -> None: ...
+    async def update_gfs_instance_id(
+        self, gfs_id: str, gfs_instance_id: str
+    ) -> bool: ...
     async def delete(self, gfs_id: str) -> None: ...
     async def publish_space(
         self, space_id: str, gfs_id: str, status: str = "active"
@@ -100,6 +104,29 @@ class SqliteGfsConnectionRepo:
             "UPDATE gfs_connections SET display_name=? WHERE id=?",
             (display_name, gfs_id),
         )
+
+    async def update_gfs_instance_id(self, gfs_id: str, gfs_instance_id: str) -> bool:
+        """Rebind connection *gfs_id* to the server's new public id.
+
+        ``gfs_instance_id`` is UNIQUE. Returns ``False`` — and writes
+        nothing — when ANOTHER connection already holds *gfs_instance_id*
+        (the same server paired twice); ``True`` otherwise.
+        """
+        row = await self._db.fetchone(
+            "SELECT id FROM gfs_connections WHERE gfs_instance_id=? AND id<>?",
+            (gfs_instance_id, gfs_id),
+        )
+        if row is not None:
+            return False
+        try:
+            await self._db.enqueue(
+                "UPDATE gfs_connections SET gfs_instance_id=? WHERE id=?",
+                (gfs_instance_id, gfs_id),
+            )
+        except sqlite3.IntegrityError:
+            # Another connection took the id between the read and the write.
+            return False
+        return True
 
     async def delete(self, gfs_id: str) -> None:
         await self._db.enqueue(

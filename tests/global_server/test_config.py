@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.db.database import DEFAULT_WRITE_BATCH_WINDOW_MS
 from socialhome.global_server.config import (
+    EXAMPLE_TOML,
     GfsConfig,
     set_password_in_toml,
     write_example_config,
@@ -450,3 +451,73 @@ def test_env_cluster_advertise_url_empty_is_unset(tmp_dir, monkeypatch, blank):
     monkeypatch.setenv("GFS_CLUSTER_ADVERTISE_URL", blank)
     cfg = GfsConfig.from_toml(p)._with_env_overrides()
     assert cfg.cluster_self_url == "http://10.0.0.5:1"
+
+
+# ── Public identity: instance_id aliases + cluster node_id ──────────────
+
+
+def _server_toml(tmp_dir, server_body: str, cluster_body: str = ""):
+    p = tmp_dir / "global_server.toml"
+    p.write_text(
+        f"""
+[server]
+base_url = "https://gfs.example.com"
+{server_body}
+
+[cluster]
+{cluster_body}
+"""
+    )
+    return p
+
+
+def test_instance_id_aliases_default_to_none():
+    assert GfsConfig().instance_id_aliases == ()
+
+
+def test_instance_id_aliases_load_from_toml(tmp_dir):
+    p = _server_toml(
+        tmp_dir,
+        'instance_id = "gfs-shared"\n'
+        'instance_id_aliases = ["gfs-0", " gfs-1 ", "", "gfs-shared", "gfs-0"]',
+    )
+    cfg = GfsConfig.from_toml(p)
+    assert cfg.instance_id == "gfs-shared"
+    # Trimmed, de-duplicated, empty entries and the id itself dropped.
+    assert cfg.instance_id_aliases == ("gfs-0", "gfs-1")
+
+
+def test_instance_id_aliases_env_overrides_the_file(tmp_dir, monkeypatch):
+    p = _server_toml(tmp_dir, 'instance_id_aliases = ["gfs-0"]')
+    monkeypatch.setenv("GFS_INSTANCE_ID_ALIASES", "gfs-2, gfs-3,")
+    cfg = GfsConfig.load(p)
+    assert cfg.instance_id_aliases == ("gfs-2", "gfs-3")
+
+
+def test_instance_id_aliases_env_empty_clears(tmp_dir, monkeypatch):
+    p = _server_toml(tmp_dir, 'instance_id_aliases = ["gfs-0"]')
+    monkeypatch.setenv("GFS_INSTANCE_ID_ALIASES", "")
+    assert GfsConfig.load(p).instance_id_aliases == ()
+
+
+def test_an_alias_equal_to_an_env_instance_id_is_dropped(tmp_dir, monkeypatch):
+    p = _server_toml(tmp_dir, 'instance_id_aliases = ["gfs-0", "gfs-new"]')
+    monkeypatch.setenv("GFS_INSTANCE_ID", "gfs-new")
+    assert GfsConfig.load(p).instance_id_aliases == ("gfs-0",)
+
+
+def test_cluster_mode_requires_an_explicit_node_id():
+    """No fallback to instance_id: that id is shared by every node."""
+    with pytest.raises(ValueError, match="node_id"):
+        GfsConfig(cluster_enabled=True, cluster_node_id="").check_cluster_identity()
+    with pytest.raises(ValueError, match="node_id"):
+        GfsConfig(cluster_enabled=True, cluster_node_id="  ").check_cluster_identity()
+    # Set, or cluster mode off: fine.
+    GfsConfig(cluster_enabled=True, cluster_node_id="gfs-0").check_cluster_identity()
+    GfsConfig(cluster_enabled=False).check_cluster_identity()
+
+
+def test_example_toml_documents_the_shared_public_identity():
+    assert "instance_id_aliases" in EXAMPLE_TOML
+    assert "MUST be identical on every node" in EXAMPLE_TOML
+    assert "GFS_INSTANCE_ID_ALIASES" in EXAMPLE_TOML

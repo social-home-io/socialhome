@@ -622,9 +622,23 @@ class SpaceUnpublishView(GfsBaseView):
 
 
 class HealthzView(GfsBaseView):
-    """``GET /healthz`` — liveness probe."""
+    """``GET /healthz`` — the load balancer's and Nomad's health probe.
+
+    ``200 {"status": "ok"}`` normally. ``503`` while a cluster sibling under
+    this node's identity key serves another ``[server] instance_id``
+    (:meth:`ClusterService.identity_consistent`): the load balancer then
+    stops sending households to a node whose public id disagrees with its
+    siblings', and a rollout that introduced the mismatch fails its health
+    check. Names no node — the admin cluster view does.
+    """
 
     async def get(self) -> web.Response:
+        cluster = self.svc(K.gfs_cluster_key)
+        if not cluster.identity_consistent:
+            return web.json_response(
+                {"status": "unhealthy", "reason": "cluster_instance_id_mismatch"},
+                status=503,
+            )
         return web.json_response({"status": "ok"})
 
 

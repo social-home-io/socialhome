@@ -279,6 +279,9 @@ class GfsConnectionService:
         "_publish_client",
         "_on_repinned",
         "_on_disconnect",
+        "_on_rebound",
+        "_rebind_warned",
+        "_previous_ids",
     )
 
     def __init__(
@@ -364,6 +367,18 @@ class GfsConnectionService:
         #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
         self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
         self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
+        #: Called with the connection id after it adopted the server's new
+        #: public id (:meth:`_rebind_to_served_id`) — the private-channel
+        #: owner re-registers and re-issues grants naming the new id.
+        self._on_rebound: Callable[[str], Awaitable[object]] | None = None
+        #: ``(connection id, served id)`` pairs already WARNed about — one
+        #: line per refused rebind per process, not one per reconnect.
+        self._rebind_warned: set[tuple[str, str]] = set()
+        #: Connection id → the ids it was pinned under before a rebind in
+        #: THIS process. RAM-only: it bridges grants issued before the
+        #: rebind until their owner re-issues them (see
+        #: :meth:`known_instance_ids`).
+        self._previous_ids: dict[str, set[str]] = {}
 
     def attach_on_disconnect(
         self, hook: Callable[[GfsConnection], Awaitable[object]]
@@ -371,6 +386,16 @@ class GfsConnectionService:
         """Wire the seat keeper's unpair handling (local bookkeeping; any
         request it needs runs in the background, never in the route)."""
         self._on_disconnect = hook
+
+    def attach_on_rebound(self, hook: Callable[[str], Awaitable[object]]) -> None:
+        """Wire the hook run after a connection adopted a new public id."""
+        self._on_rebound = hook
+
+    def known_instance_ids(self, conn: GfsConnection) -> frozenset[str]:
+        """*conn*'s pinned public id plus the ids it was pinned under before
+        a rebind in this process — what a grant issued before the rebind
+        may still name for this server."""
+        return frozenset({conn.gfs_instance_id, *self._previous_ids.get(conn.id, ())})
 
     def attach_on_repinned(self, hook: Callable[[str, str], Awaitable[object]]) -> None:
         """Wire the v_49 epoch re-announce run after a re-pinning publish."""
@@ -882,8 +907,121 @@ class GfsConnectionService:
             self._info_failed_at[conn.id] = time.monotonic()
             return None
         self._info_failed_at.pop(conn.id, None)
+        await self._rebind_to_served_id(conn, info)
         self._record_capabilities(conn, info)
         return info
+
+    async def _rebind_to_served_id(self, conn: GfsConnection, info: dict) -> None:
+        """Adopt the public id ``/gfs/info`` serves when it is proven by the
+        PINNED key.
+
+        The key is the trust anchor, the id only a label: an operator may
+        change ``[server] instance_id`` (a cluster whose nodes each served
+        their own id moving to one shared id), and a household pinned
+        whichever one the node it reached at pairing served. A new id is
+        adopted only when the served ``public_key`` IS the pinned key and
+        the capability block verifies under (pinned key, new id) — nobody
+        without the pinned private key can move it. A different key is
+        refused with a WARNING (a new key means re-pairing). The id is
+        UNIQUE: when another connection already holds it (the same server
+        paired twice), both rows stay untouched. Never raises.
+        """
+        served = info.get("gfs_instance_id")
+        if not isinstance(served, str) or not served:
+            return
+        if served == conn.gfs_instance_id:
+            return
+        served_key = info.get("public_key")
+        if (
+            not isinstance(served_key, str)
+            or served_key.lower() != conn.public_key.lower()
+        ):
+            self._warn_rebind(
+                conn,
+                served,
+                f"now serves the id {served!r} under a key other than the pinned "
+                "key — not adopting it. If the server really changed its key, "
+                "remove the connection and pair again",
+            )
+            return
+        if not self._block_signed_for(conn, served, info):
+            # The pinned key, but no block it signed over the new id: the
+            # capability check warns about the block itself.
+            return
+        try:
+            fresh = await self._repo.get(conn.id)
+            if fresh is None or fresh.gfs_instance_id == served:
+                return
+            if not await self._repo.update_gfs_instance_id(conn.id, served):
+                self._warn_rebind(
+                    conn,
+                    served,
+                    f"now serves the id {served!r}, which another connection "
+                    "already holds — the same server paired twice. Keeping both "
+                    "connections as they are; remove one of them",
+                )
+                return
+        except Exception:
+            log.exception("GFS %s: rebind to the served id failed", conn.id)
+            return
+        log.info(
+            "GFS %r (%s) now serves the id %r instead of %r under the pinned key "
+            "— adopted",
+            conn.display_name,
+            conn.inbox_url,
+            served,
+            fresh.gfs_instance_id,
+        )
+        self._previous_ids.setdefault(conn.id, set()).add(fresh.gfs_instance_id)
+        if self._on_rebound is not None:
+            try:
+                await self._on_rebound(conn.id)
+            except Exception:
+                log.exception("GFS %s: rebind hook failed", conn.id)
+
+    @staticmethod
+    def _block_signed_for(
+        conn: GfsConnection, gfs_instance_id: str, info: dict
+    ) -> bool:
+        """Whether *info*'s capability block verifies under *conn*'s PINNED
+        key for *gfs_instance_id*. Never raises."""
+        caps = info.get("capabilities")
+        sig = info.get("capabilities_sig")
+        suite = info.get("capabilities_sig_suite")
+        if not isinstance(caps, dict) or not isinstance(sig, str) or not sig:
+            return False
+        if not isinstance(suite, str):
+            return False
+        try:
+            return bool(
+                verify_capabilities(conn.public_key, gfs_instance_id, caps, sig, suite)
+            )
+        except UnsupportedCapsSigSuite:
+            return False
+
+    def _warn_rebind(self, conn: GfsConnection, served: str, detail: str) -> None:
+        if (conn.id, served) in self._rebind_warned:
+            return
+        self._rebind_warned.add((conn.id, served))
+        log.warning("GFS %r (%s) %s.", conn.display_name, conn.inbox_url, detail)
+
+    @staticmethod
+    def _signed_id(conn: GfsConnection, info: dict) -> str:
+        """The id *info*'s capability block is verified for: the served one
+        when ``/gfs/info`` serves the PINNED key (it may have moved to a new
+        id, see :meth:`_rebind_to_served_id`), else the pinned one. Always
+        verified under the pinned key, so only that key's holder can make a
+        block pass either way."""
+        served = info.get("gfs_instance_id")
+        served_key = info.get("public_key")
+        if (
+            isinstance(served, str)
+            and served
+            and isinstance(served_key, str)
+            and served_key.lower() == conn.public_key.lower()
+        ):
+            return served
+        return conn.gfs_instance_id
 
     def _record_capabilities(self, conn: GfsConnection, info: dict) -> None:
         """Update the capability cache for *conn* from a ``/gfs/info`` body.
@@ -973,7 +1111,7 @@ class GfsConnectionService:
             return None
         try:
             ok = verify_capabilities(
-                conn.public_key, conn.gfs_instance_id, caps, sig, suite
+                conn.public_key, self._signed_id(conn, info), caps, sig, suite
             )
         except UnsupportedCapsSigSuite:
             self._warn_capabilities(

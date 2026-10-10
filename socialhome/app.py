@@ -3401,6 +3401,9 @@ def create_app(config: Config | None = None) -> web.Application:
         writer_certs.attach_channels(gfs_channels)
         gfs_channels.attach_space_service(real_space_service)
         gfs_channels.wire(bus)
+        # A connection adopted its server's new public id: re-register the
+        # owner's channels there and re-issue grants naming the new id.
+        gfs_connection_service.attach_on_rebound(gfs_channels.on_gfs_rebound)
         space_public_outbound = SpacePublicOutbound(
             bus=bus,
             space_repo=space_repo,

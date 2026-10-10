@@ -191,13 +191,16 @@ def _anon_body(ch: _Channel, epoch: int, *, writer_seed: bytes | None = None) ->
 
 
 @pytest.fixture
-async def gfs(tmp_dir):
+async def gfs(tmp_dir, request):
+    # ``indirect`` params override config fields (e.g. instance_id_aliases).
+    overrides = getattr(request, "param", None) or {}
     cfg = GfsConfig(
         host="127.0.0.1",
         port=0,
         base_url="http://gfs.test",
         data_dir=str(tmp_dir),
-        instance_id=GFS_ID,
+        instance_id=overrides.get("instance_id", GFS_ID),
+        instance_id_aliases=overrides.get("instance_id_aliases", ()),
         cluster_enabled=False,
         cluster_node_id=GFS_ID,
         cluster_peers=(),
@@ -517,6 +520,35 @@ async def test_unsubscribe_drops_the_seat(gfs) -> None:
     assert resp.status == 200
     repo = gfs.app_[gfs_channel_repo_key]
     assert not await repo.has_subscription(gfs.ch.id, gfs.member.instance_id)
+
+
+# ── instance_id_aliases: the old public id still addresses this server ──
+
+
+@pytest.mark.parametrize(
+    "gfs",
+    [{"instance_id": "gfs-shared", "instance_id_aliases": (GFS_ID,)}],
+    indirect=True,
+)
+async def test_every_channel_request_addressed_to_an_alias_is_accepted(gfs) -> None:
+    """Every body here is signed for ``GFS_ID`` — now an alias of the
+    server's new shared id: register, notice, subscribe and publish all pass,
+    while a request for an unrelated id is still refused."""
+    await _ready(gfs)
+    await _seat(gfs, gfs.other)
+    resp = await gfs.post(
+        "/gfs/channels/publish", json=_publish_body(gfs.ch, gfs.member, 3)
+    )
+    assert resp.status == 200, await resp.text()
+    assert len(await _queued(gfs, gfs.other)) == 1
+    await _refused(
+        await gfs.post(
+            "/gfs/channels/register", json=gfs.ch.register(gfs_instance_id="other")
+        )
+    )
+    info = await (await gfs.get("/gfs/info")).json()
+    assert info["gfs_instance_id"] == "gfs-shared"
+    assert GFS_ID not in json.dumps(info)
 
 
 # ── Trusted publish ──────────────────────────────────────────────────────
