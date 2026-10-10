@@ -197,7 +197,11 @@ async def test_unknown_proof_suite_is_refused(gfs, repo, session, aiohttp_server
         # balancer): retryable, not "unproven".
         (404, {"error": "not_found"}, "unreachable"),
         (405, {"error": "method"}, "unreachable"),
-        (403, {"error": "nope"}, "unproven"),
+        # A WAF's 403, a 400, a redirect: unexpected, retryable — only a 200
+        # whose signature does not verify is an identity verdict.
+        (403, {"error": "nope"}, "unreachable"),
+        (400, {"error": "bad"}, "unreachable"),
+        (302, {"error": "elsewhere"}, "unreachable"),
         (200, ["not", "an", "object"], "unproven"),
         (200, {"proof_sig": 42, "proof_sig_suite": "ed25519"}, "unproven"),
         (200, {"proof_sig": "abc"}, "unproven"),
@@ -371,7 +375,7 @@ async def test_pairing_succeeds_on_any_node_pair_of_a_cluster(
         # And the reconnect gate passes whichever node answers.
         for _ in range(3):
             svc._proven_at.clear()
-            assert await svc.possession_gate(conn.id) is True
+            assert await svc.possession_gate(conn.id) == "pass"
     finally:
         for tc in nodes:
             await tc.close()
@@ -438,8 +442,8 @@ async def test_gate_passes_and_reuses_a_fresh_proof(gfs, repo, session):
     session.post = counting_post  # type: ignore[method-assign]
     try:
         await svc.refresh_connection_metadata(conn.id)
-        assert await svc.possession_gate(conn.id) is True
-        assert await svc.possession_gate(conn.id) is True
+        assert await svc.possession_gate(conn.id) == "pass"
+        assert await svc.possession_gate(conn.id) == "pass"
     finally:
         session.post = real_post  # type: ignore[method-assign]
     # The pairing proof is still fresh: no further challenge.
@@ -458,7 +462,7 @@ async def test_gate_refuses_a_ratcheted_connection_that_fails(
     )
     svc._proven_at.clear()
     with caplog.at_level(logging.WARNING):
-        assert await svc.possession_gate(conn.id) is False
+        assert await svc.possession_gate(conn.id) == "refuse"
     assert svc.possession_proven(conn) is False
     assert any("possession" in r.getMessage() for r in caplog.records)
 
@@ -467,9 +471,10 @@ async def test_ratchet_survives_restart_and_refuses_a_downgrade(
     repo, session, aiohttp_server, caplog
 ):
     """Proven once, the connection requires the proof — also in a NEW
-    process (fresh service, same DB) — and a server that then serves a
-    descriptor without the capability and no proof (a replayed pre-proof
-    block) is refused."""
+    process (fresh service, same DB). A server that then serves a descriptor
+    without the capability and no answer to the challenge (a rollback, or a
+    replayed pre-proof block) holds the reconcile back for a retry; a
+    signature that does not verify refuses it."""
     kp = generate_identity_keypair()
     state = {"caps": {PROOF_CAPABILITY: True}, "proof": True}
     url_box: dict[str, str] = {}
@@ -495,7 +500,7 @@ async def test_ratchet_survives_restart_and_refuses_a_downgrade(
     restarted = GfsConnectionService(repo, http_client=session)
     await restarted.refresh_connection_metadata(conn.id)
     with caplog.at_level(logging.WARNING):
-        assert await restarted.possession_gate(conn.id) is False
+        assert await restarted.possession_gate(conn.id) == "retry"
     assert any(PROOF_CAPABILITY in r.getMessage() for r in caplog.records)
     # The ratchet never clears on its own.
     assert (await repo.get(conn.id)).proof_required_at is not None
@@ -515,7 +520,7 @@ async def test_gate_sets_the_ratchet_when_an_upgraded_gfs_first_proves(
     )
     svc = GfsConnectionService(repo, http_client=session)
     await svc.refresh_connection_metadata(conn.id)
-    assert await svc.possession_gate(conn.id) is True
+    assert await svc.possession_gate(conn.id) == "pass"
     assert (await repo.get(conn.id)).proof_required_at is not None
 
 
@@ -535,7 +540,7 @@ async def test_gate_passes_an_older_gfs_without_a_ratchet(
     conn = await _saved_conn(repo, _url(server), public_key=kp.public_key.hex())
     svc = GfsConnectionService(repo, http_client=session)
     await svc.refresh_connection_metadata(conn.id)
-    assert await svc.possession_gate(conn.id) is True
+    assert await svc.possession_gate(conn.id) == "pass"
     assert svc.possession_proven(conn) is False
 
 
@@ -557,13 +562,102 @@ async def test_gate_without_ratchet_tolerates_a_transient_failure(
     conn = await _saved_conn(repo, _url(server), public_key=kp.public_key.hex())
     svc = GfsConnectionService(repo, http_client=session)
     await svc.refresh_connection_metadata(conn.id)
-    assert await svc.possession_gate(conn.id) is True
+    assert await svc.possession_gate(conn.id) == "pass"
     assert (await repo.get(conn.id)).proof_required_at is None
 
 
-async def test_gate_for_unknown_connection_is_true(repo, session):
+async def test_gate_for_unknown_connection_passes(repo, session):
     svc = GfsConnectionService(repo, http_client=session)
-    assert await svc.possession_gate("nope") is True
+    assert await svc.possession_gate("nope") == "pass"
+
+
+@pytest.mark.parametrize(
+    "status", [404, 405, 503, 429, 403, 400, 302], ids=lambda s: f"http{s}"
+)
+async def test_ratcheted_connection_with_a_retryable_answer_retries(
+    repo, session, aiohttp_server, status
+):
+    """A rolling deploy's 404, a balancer's 503, a 429, a WAF's 403: no
+    verdict about the key — the reconcile is held for a retry, never dropped."""
+    kp = generate_identity_keypair()
+
+    async def handler(request: web.Request) -> web.Response:
+        if request.path == "/gfs/info":
+            return web.json_response(
+                _signed_info(kp, "gfs-real", {PROOF_CAPABILITY: True})
+            )
+        return web.json_response({"error": "x"}, status=status)
+
+    server = await _stub(aiohttp_server, handler)
+    conn = await _saved_conn(
+        repo,
+        _url(server),
+        public_key=kp.public_key.hex(),
+        proof_required_at="2026-01-01T00:00:00+00:00",
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    await svc.refresh_connection_metadata(conn.id)
+    assert await svc.possession_gate(conn.id) == "retry"
+
+
+async def test_unratcheted_connection_with_a_failed_proof_passes_unratcheted(
+    gfs, repo, session, caplog
+):
+    """A self-hosted GFS paired at a LAN IP / alias that differs from its
+    base_url: once it upgrades, its proofs fail at the stored address. Never
+    proven there, so nothing to enforce: the reconcile runs, with a WARNING,
+    and no ratchet is set."""
+    info = await (await gfs.get("/gfs/info")).json()
+    conn = await _saved_conn(
+        repo,
+        f"http://localhost:{gfs.port}",
+        gfs_instance_id=info["gfs_instance_id"],
+        public_key=info["public_key"],
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    await svc.refresh_connection_metadata(conn.id)
+    with caplog.at_level(logging.WARNING, logger=svc_mod.__name__):
+        assert await svc.possession_gate(conn.id) == "pass"
+    assert (await repo.get(conn.id)).proof_required_at is None
+    assert svc.possession_proven(conn) is False
+    assert "FAILED proof of possession" in caplog.text
+
+
+async def test_sibling_under_a_ratcheted_key_is_held_to_the_proof(gfs, repo, session):
+    """An un-ratcheted connection that pins a key another connection has the
+    ratchet for is held to the proof too."""
+    info = await (await gfs.get("/gfs/info")).json()
+    await _saved_conn(
+        repo,
+        "https://elsewhere.example",
+        id="c-proven",
+        gfs_instance_id="gfs-old-id",
+        public_key=info["public_key"],
+        proof_required_at="2026-01-01T00:00:00+00:00",
+    )
+    sibling = await _saved_conn(
+        repo,
+        f"http://localhost:{gfs.port}",  # proof fails at this alias
+        id="c-sibling",
+        gfs_instance_id=info["gfs_instance_id"],
+        public_key=info["public_key"],
+    )
+    svc = GfsConnectionService(repo, http_client=session)
+    await svc.refresh_connection_metadata(sibling.id)
+    assert await svc.possession_gate(sibling.id) == "refuse"
+
+
+async def test_a_candidate_check_never_touches_the_connections_own_entry(
+    gfs, repo, session
+):
+    """``verify_gfs_possession`` with a candidate copy (another URL) is
+    cached per (connection, URL): the real connection's answer stands."""
+    svc = GfsConnectionService(repo, http_client=session)
+    conn = await svc.pair({"gfs_url": _url(gfs), "token": await _token(gfs)}, **OWN)
+    candidate = replace(conn, inbox_url=f"http://localhost:{gfs.port}")
+    assert await svc.verify_gfs_possession(candidate) is False
+    assert svc.possession_proven(conn) is True
+    assert svc.possession_proven(candidate) is False
 
 
 async def test_failed_proof_warning_names_what_the_server_reported(

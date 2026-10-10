@@ -553,16 +553,31 @@ What the household checks and sends:
 - **The ratchet: once proven, always required.** The first successful proof
   stamps `gfs_connections.proof_required_at` (migration 0094; also exposed on
   `GET /api/gfs/connections`). From then on, on every GFS-WebSocket
-  (re)connect, the identity-bound reconcile — pin heal, seat re-subscribe,
-  member epoch notices, the name push, the content-key reconcile — runs only
-  after a fresh proof at that address (one proof is reused for 5 minutes).
-  A failed or retryable proof skips it with a WARNING until a later connect
-  proves the key again; a server that no longer advertises the capability (a
-  rollback, a replayed pre-proof descriptor) is warned about and challenged
-  anyway — only a fresh proof lets the reconcile run. Pairing another
-  connection under a key this household holds a proven connection for
-  requires the proof too. A connection paired before its GFS learnt the
-  proof gets the ratchet on its first successful proof at a reconnect.
+  (re)connect, the BULK reconcile the household sends on its own — pin heal,
+  seat re-subscribe (and seat rebind), member epoch notices, the name push,
+  the content-key reconcile — runs only after a fresh proof at that address
+  (one proof is reused for 5 minutes). What this does not cover: the
+  socket's signed hello is already out by then, and user-driven traffic (a
+  publish, a follow, a report) is not gated. Outcomes:
+  - **verified failure** (a 200 whose signature does not verify for the
+    pinned key at this address, a malformed proof, an unknown suite) → the
+    reconcile is skipped with a WARNING until a later connect proves the key
+    again;
+  - **retryable** (no answer, 5xx, 404 / 405 from a node without the route,
+    429, any other unexpected status such as a redirect, a WAF's 403 or a
+    400) → the reconcile is held, not dropped: gate + reconcile are retried
+    after 15 s, 1 min and 5 min, then on every hourly `/gfs/info` pass while
+    it is still pending;
+  - a server that no longer advertises the capability (a rollback, a
+    replayed pre-proof descriptor) is warned about and challenged anyway.
+  Pairing another connection under a key this household holds a proven
+  connection for requires the proof too, and an un-ratcheted connection
+  pinning such a key is held to it on reconnect. A connection paired before
+  its GFS learnt the proof gets the ratchet on its first successful proof at
+  a reconnect; until then a failed proof only logs a WARNING and the
+  reconcile runs (the ratchet protects only connections that once proved —
+  a self-hosted GFS paired at a LAN address or alias other than its
+  `base_url` keeps working, unproven).
 - **Older GFS: paired, unproven, not enforced.** A GFS whose signed block
   does not offer `proof_of_possession` (and whose key has no ratchet here)
   pairs and reconnects as before, logged at INFO; `possession_proven` reads
@@ -570,6 +585,15 @@ What the household checks and sends:
   signed before the GFS learnt the proof, for a key this household never saw
   proven, still pairs as such an "older GFS" — the proof cannot help before
   it has been seen once.
+- **Rollout.** Upgrade every node of a GFS before relying on the proof:
+  while a load-balanced cluster is mixed, `/gfs/info` may advertise the
+  capability on one node and `/gfs/proof` may 404 on the next. Households
+  read that as retryable — pairing answers `502 GFS_UNREACHABLE` (try
+  again), a ratcheted reconnect holds its reconcile for the retry above —
+  never as an impostor. Every node must share the seed and serve the same
+  `base_url`, and that `base_url` must be the address households pair with;
+  a household paired at another address (a LAN IP, an alias) never gets the
+  ratchet there.
 - **A follow seat moves only with a proof.** A seat whose server comes back
   under the same id and pinned key at a NEW address is re-bound to it (and
   the v_44 pin anchor follows) only when the server there passes a fresh

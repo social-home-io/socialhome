@@ -799,8 +799,10 @@ proof can never collide with a cluster frame (canonical JSON) or a capability
 block signed by the same key. The household demands the proof at pairing
 (before registering — an impostor learns neither the token nor the
 household's identity). The first success sets a persisted ratchet
-(`gfs_connections.proof_required_at`): from then on the reconnect reconcile
-runs only after a fresh proof. Not enforced: an impostor replaying a block
+(`gfs_connections.proof_required_at`): from then on the reconnect bulk
+reconcile runs only after a fresh proof (a verified failure skips it, a
+retryable answer retries it; the signed WebSocket hello and user-driven
+traffic are not gated). Not enforced: an impostor replaying a block
 signed before the GFS learnt the proof, for a key the household never saw
 proven, looks like an older GFS and pairs unproven.
 

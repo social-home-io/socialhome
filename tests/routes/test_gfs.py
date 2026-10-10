@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import aiohttp
@@ -19,6 +20,7 @@ from socialhome.config import Config
 from socialhome.crypto import derive_user_id, generate_identity_keypair
 from socialhome.domain.federation import GfsConnection
 from socialhome.gfs_proof import PROOF_CAPABILITY
+from socialhome.infrastructure import gfs_reconcile_retry as reconcile_retry_mod
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
 from .conftest import _auth
@@ -478,7 +480,7 @@ async def test_list_and_detail_report_possession_from_the_cache(client):
     await _seed_gfs(client, "gfs-1")
     await _seed_gfs(client, "gfs-2")
     svc = client.app[gfs_connection_service_key]
-    svc._possession["gfs-1"] = True
+    svc._possession[("gfs-1", "https://gfs.example.com")] = True
     r = await client.get("/api/gfs/connections", headers=_auth(client._tok))
     body = {c["id"]: c for c in await r.json()}
     assert body["gfs-1"]["possession_proven"] is True
@@ -718,22 +720,12 @@ async def test_unpublish_gfs_not_found(client):
 # ─── Reconnect reconcile behind the proof-of-possession gate ─────────
 
 
-@pytest.mark.parametrize("trusted", [True, False])
-async def test_reconnect_reconcile_runs_only_past_the_possession_gate(
-    client, monkeypatch, trusted
-):
-    """Once a connection's server proved its key (the ratchet), the
-    identity-bound reconnect reconcile (pin heal, seat re-subscribe, …) runs
-    only after a fresh proof — an impostor at the address learns nothing."""
-    svc = client.app[gfs_connection_service_key]
-    supervisor = client.app[gfs_ws_supervisor_key]
-    healed: list[str] = []
-
+def _patch_gate(monkeypatch, svc, answers: list[str], healed: list[str]) -> None:
     async def _refresh(self, gfs_id):
         return None
 
     async def _gate(self, gfs_id):
-        return trusted
+        return answers.pop(0) if answers else "retry"
 
     async def _heal(self, gfs_id):
         healed.append(gfs_id)
@@ -743,5 +735,41 @@ async def test_reconnect_reconcile_runs_only_past_the_possession_gate(
     monkeypatch.setattr(cls, "refresh_connection_metadata", _refresh)
     monkeypatch.setattr(cls, "possession_gate", _gate)
     monkeypatch.setattr(cls, "heal_space_pins", _heal)
-    await supervisor._on_connected("gfs-1")
-    assert healed == (["gfs-1"] if trusted else [])
+
+
+@pytest.mark.parametrize(("gate", "runs"), [("pass", True), ("refuse", False)])
+async def test_reconnect_reconcile_runs_only_past_the_possession_gate(
+    client, monkeypatch, gate, runs
+):
+    """Once a connection's server proved its key (the ratchet), the bulk
+    reconnect reconcile (pin heal, seat re-subscribe, …) runs only after a
+    fresh proof; a verified failure skips it."""
+    monkeypatch.setattr(reconcile_retry_mod, "RETRY_DELAYS_S", (0.01,))
+    healed: list[str] = []
+    _patch_gate(monkeypatch, client.app[gfs_connection_service_key], [gate], healed)
+    await client.app[gfs_ws_supervisor_key]._on_connected("gfs-1")
+    await asyncio.sleep(0.05)
+    assert healed == (["gfs-1"] if runs else [])
+
+
+async def test_a_retryable_gate_answer_runs_the_reconcile_after_a_retry(
+    client, monkeypatch
+):
+    """A ratcheted connection whose proof got a retryable answer (a rolling
+    deploy's 404, a 503, a 429) does not lose its reconcile for the life of
+    the socket: the bounded retry runs gate + reconcile again."""
+    monkeypatch.setattr(reconcile_retry_mod, "RETRY_DELAYS_S", (0.01, 0.01, 0.01))
+    healed: list[str] = []
+    _patch_gate(
+        monkeypatch,
+        client.app[gfs_connection_service_key],
+        ["retry", "retry", "pass"],
+        healed,
+    )
+    await client.app[gfs_ws_supervisor_key]._on_connected("gfs-1")
+    assert healed == []
+    for _ in range(100):
+        if healed:
+            break
+        await asyncio.sleep(0.01)
+    assert healed == ["gfs-1"]

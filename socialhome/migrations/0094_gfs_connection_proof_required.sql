@@ -1,18 +1,19 @@
 -- 0094 — ``gfs_connections.proof_required_at``: the proof-of-possession
 -- ratchet. NOTE: numbered 0094 deliberately — 0093 is taken by another
 -- branch in flight (space GFS servers); renumber at merge if the order moves.
+-- Requires 0093 to be merged first: migrations apply only versions above the
+-- current maximum, so landing 0094 before 0093 would skip 0093 forever.
 --
 -- A household pins a GFS's id + key from the unauthenticated ``/gfs/info``.
 -- A GFS that advertises ``proof_of_possession`` signs a fresh nonce bound to
 -- its base_url (``POST /gfs/proof``, ``socialhome/gfs_proof.py``). The first
 -- time a connection's server proves it, the household stamps this column
 -- (UTC, tz-aware ISO 8601 like ``paired_at``). From then on that connection
--- REQUIRES the proof: a later ``/gfs/info`` without the capability (a
--- rollback, or an impostor replaying a block signed before the GFS learnt the
--- proof) or a failed proof makes the household refuse the reconnect
--- reconcile (no identity-bound subscribe / pin heal / epoch notice to that
--- address) and refuse pairing another connection under the same key without
--- a proof. NULL = never proven (an older GFS, or not yet checked).
+-- REQUIRES the proof: a verified failure makes the household skip the
+-- reconnect bulk reconcile (identity-bound subscribe / pin heal / epoch
+-- notice to that address); a retryable answer holds it for a bounded retry;
+-- and pairing another connection under the same key needs a proof. NULL =
+-- never proven (an older GFS, or not yet checked).
 --
 -- CLAUDE.md "audit before a migration":
 --   (1) Audited every code path touching ``gfs_connections``:
