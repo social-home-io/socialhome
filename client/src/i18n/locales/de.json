@@ -2956,6 +2956,7 @@
   "error.gfs_signup_closed": "Dieser GFS nimmt gerade keine Anmeldungen an. Frag seinen Betreiber nach einem Kopplungscode.",
   "error.gfs_busy": "Der GFS ist gerade ausgelastet. Versuch es in einer Minute nochmal.",
   "error.gfs_identity_mismatch": "Das sieht nicht nach dem Social-Home-GFS aus. Prüf die Adresse.",
+  "error.gfs_proof_failed": "Der Server unter dieser Adresse konnte nicht nachweisen, dass er der GFS ist, der er vorgibt zu sein. Prüf die Adresse.",
   "error.gfs_pairing_failed": "Der GFS hat diesen Haushalt nicht angenommen.",
   "error.gfs_already_connected": "Du bist mit diesem GFS bereits verbunden.",
   "error.storage_full": "Auf deinem Social Home ist kein Speicherplatz mehr frei. Mach Platz frei oder frag deinen Admin.",

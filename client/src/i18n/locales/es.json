@@ -2983,6 +2983,7 @@
   "error.gfs_signup_closed": "Este GFS no acepta registros ahora mismo. Pide un código de emparejamiento a su operador.",
   "error.gfs_busy": "El GFS está ocupado. Inténtalo de nuevo en un minuto.",
   "error.gfs_identity_mismatch": "Esto no parece el GFS de Social Home. Revisa la dirección.",
+  "error.gfs_proof_failed": "El servidor de esta dirección no pudo demostrar que es el GFS que dice ser. Revisa la dirección.",
   "error.gfs_pairing_failed": "El GFS no aceptó este hogar.",
   "error.gfs_already_connected": "Ya estás conectado a este GFS.",
   "error.storage_full": "Tu Social Home se ha quedado sin espacio. Libera espacio o pregunta a tu admin.",

@@ -20,7 +20,11 @@ _DEFAULT_HEALTH: dict = {"connected": False, "last_error": None}
 
 
 def _conn_dict(
-    conn, health: dict | None = None, *, envelope_relay: bool = False
+    conn,
+    health: dict | None = None,
+    *,
+    envelope_relay: bool = False,
+    possession_proven: bool | None = None,
 ) -> dict:
     """Public-shape view of a :class:`GfsConnection`.
 
@@ -32,6 +36,10 @@ def _conn_dict(
     ``envelope_relay`` says whether the server has proved (signed) that it
     relays household envelopes — what a ``url_gfs`` / ``gfs`` pairing
     code needs; the SPA offers those reach options only when one does.
+    ``possession_proven`` says whether the server at ``inbox_url`` proved it
+    holds the pinned key (``POST /gfs/proof``) at pairing or its latest
+    connect: ``true``, ``false`` (an older GFS without the proof, or a failed
+    one) or ``null`` (not checked since this household started).
     """
     d = asdict(conn)
     # Remove sensitive key material from the API response.
@@ -40,6 +48,7 @@ def _conn_dict(
     d["connected"] = bool(h.get("connected", False))
     d["last_error"] = h.get("last_error")
     d["envelope_relay"] = envelope_relay
+    d["possession_proven"] = possession_proven
     return d
 
 
@@ -84,6 +93,12 @@ _CONNECT_ERRORS: dict[str, tuple[int, str, str]] = {
         422,
         "GFS_PAIRING_FAILED",
         "The GFS didn't accept this household.",
+    ),
+    "unproven": (
+        422,
+        "GFS_PROOF_FAILED",
+        "The server at this address couldn't prove it is the GFS it claims to "
+        "be. Check the address.",
     ),
 }
 
@@ -134,8 +149,10 @@ class GfsConnectionCollectionView(BaseView):
     (``status`` ``active`` or ``pending``), or the same codes the open
     sign-up step answers for the same causes: ``ALREADY_CONNECTED`` (409),
     ``GFS_UNREACHABLE`` (502 — no answer, or a 5xx), ``GFS_IDENTITY_MISMATCH``
-    (422 — the address answers, but not as a GFS) or ``GFS_PAIRING_FAILED``
-    (422 — a missing field, an unusable URL, or the GFS refused the token).
+    (422 — the address answers, but not as a GFS), ``GFS_PROOF_FAILED`` (422
+    — the GFS offers proof of possession and failed it at this address) or
+    ``GFS_PAIRING_FAILED`` (422 — a missing field, an unusable URL, or the GFS
+    refused the token).
     Details are the household's own sentences, never the GFS's words.
     """
 
@@ -156,6 +173,7 @@ class GfsConnectionCollectionView(BaseView):
                     # Cache only — a list read never probes a GFS. Same
                     # eligibility as the pairing reach: active + signed.
                     envelope_relay=c.status == "active" and svc.envelope_relay_known(c),
+                    possession_proven=svc.possession_proven(c),
                 )
                 for c in connections
             ]
@@ -178,7 +196,10 @@ class GfsConnectionCollectionView(BaseView):
             # Only a malformed call gets here (missing payload / identity
             # fields) — the household's own words, nothing from a GFS.
             return error_response(422, "GFS_PAIRING_FAILED", str(exc))
-        return web.json_response(_conn_dict(conn), status=201)
+        return web.json_response(
+            _conn_dict(conn, possession_proven=svc.possession_proven(conn)),
+            status=201,
+        )
 
 
 class GfsDefaultConnectionView(BaseView):
@@ -200,7 +221,8 @@ class GfsDefaultConnectionView(BaseView):
     ``ALREADY_CONNECTED`` (409), ``GFS_SIGNUP_CLOSED`` (409),
     ``GFS_UNREACHABLE`` (502), ``GFS_BUSY``
     (503), ``GFS_IDENTITY_MISMATCH`` (422 — ``/gfs/info`` doesn't match the
-    pinned ``[gfs] default_instance_id`` / ``default_public_key``) or
+    pinned ``[gfs] default_instance_id`` / ``default_public_key``),
+    ``GFS_PROOF_FAILED`` (422 — failed proof of possession) or
     ``GFS_PAIRING_FAILED`` (422).
     """
 
@@ -258,7 +280,10 @@ class GfsDefaultConnectionView(BaseView):
             )
         except GfsSignupError as exc:
             return _connect_error(exc)
-        return web.json_response(_conn_dict(conn), status=201)
+        return web.json_response(
+            _conn_dict(conn, possession_proven=svc.possession_proven(conn)),
+            status=201,
+        )
 
 
 class GfsConnectionDetailView(BaseView):
@@ -279,7 +304,10 @@ class GfsConnectionDetailView(BaseView):
         health = (
             supervisor.connection_health(gfs_id) if supervisor is not None else None
         )
-        return web.json_response(_conn_dict(conn, health))
+        svc = self.svc(K.gfs_connection_service_key)
+        return web.json_response(
+            _conn_dict(conn, health, possession_proven=svc.possession_proven(conn))
+        )
 
     async def delete(self) -> web.Response:
         ctx = self.user

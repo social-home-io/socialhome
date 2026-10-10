@@ -494,6 +494,11 @@ sequenceDiagram
     SPA->>H: POST /api/gfs/connections/default (admin said yes)
     H->>G: GET /gfs/info
     Note over H: verify signed capabilities against the key<br/>in this response (TOFU) — require open_signup
+    opt signed block offers proof_of_possession
+        H->>G: POST /gfs/proof {nonce} (fresh, 32 random bytes)
+        G-->>H: {proof_sig, proof_sig_suite} over {base_url, id, nonce}
+        Note over H: verify against the key from /gfs/info<br/>and the URL H used — else 422 GFS_PROOF_FAILED
+    end
     H->>G: POST /gfs/signup-token (no body)
     G-->>H: {token, expires_in}
     H->>G: POST /gfs/register {token, instance_id, public_key,<br/>display_name, keywrap_*}
@@ -522,6 +527,37 @@ What the household checks and sends:
   LAN). A bare, unsigned or wrongly-signed `open_signup` counts as "closed",
   and the household never asks for a token. The pinned key is the verified
   one: there is no second descriptor fetch to swap.
+- **Proof of possession before anything is sent.** `/gfs/info` is static —
+  its signed block proves what the key once signed, not that the server
+  answering holds it, so a host could replay a real GFS's descriptor from
+  another address and be pinned as that GFS. When the signed block offers
+  `proof_of_possession`, the household (QR and open sign-up alike) first sends
+  `POST /gfs/proof {nonce}` — a fresh random 32-byte challenge, nothing about
+  the household — and verifies the returned signature against the key it is
+  about to pin, the `gfs_instance_id` from the descriptor, and **the URL it
+  used**. The GFS signs its OWN configured `base_url`, never one the requester
+  names, so an impostor relaying the challenge to the real server still fails
+  at its own address. A failure is `422 GFS_PROOF_FAILED` (no answer / 5xx is
+  `502 GFS_UNREACHABLE`), raised before `/gfs/register`: no token is spent and
+  no identity is sent. Signature shape and suite: [crypto](../crypto.md).
+  Consequence for operators: the address a household pairs with must be the
+  GFS's `base_url` (the QR code already carries exactly that; an open-sign-up
+  `[gfs] default_url` must match it up to case, default port and trailing
+  slash).
+- **Older GFS: paired, recorded unproven.** A GFS whose signed block does not
+  offer `proof_of_possession` pairs as before, logged at INFO; the household
+  records the connection as unproven (`possession_proven: false` on
+  `GET /api/gfs/connections`). The record is RAM-only like the capability
+  cache — it describes the live server at an address — and is re-proven on
+  every GFS-WebSocket (re)connect: a failed proof, or a server that proved
+  possession earlier in this process and no longer offers it (a replayed old
+  block, a rollback, another server at that address), is a WARNING and marks
+  the connection unproven. `GfsConnectionService.verify_gfs_possession(conn)`
+  runs the same challenge on demand — the check for re-binding to a GFS that
+  moved to a new URL with the same id and key (pass the connection with the
+  candidate `inbox_url`). A replayed pre-proof block still makes an impostor
+  look like an older GFS at pairing; such a connection is never *proven*, so
+  every check that requires the proof fails.
 - **Nothing new reaches the GFS.** The token request has no body. The
   registration body is built by the same code as QR pairing: instance id,
   public key, display name, and the key-wrap public key + its
@@ -535,8 +571,8 @@ What the household checks and sends:
   refused map to fixed household-side sentences; the GFS's own error text
   never reaches the screen.
 
-The household↔GFS leg has no `proto_version`: `open_signup` is a signed
-capability, not an `OURS` bump.
+The household↔GFS leg has no `proto_version`: `open_signup` and
+`proof_of_possession` are signed capabilities, not an `OURS` bump.
 
 ### Subscriber-side on-ramp (local space mirror)
 

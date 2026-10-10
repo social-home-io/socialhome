@@ -2956,6 +2956,7 @@
   "error.gfs_signup_closed": "Deze GFS neemt nu geen aanmeldingen aan. Vraag de beheerder om een koppelcode.",
   "error.gfs_busy": "De GFS is druk. Probeer het over een minuut opnieuw.",
   "error.gfs_identity_mismatch": "Dit lijkt niet de GFS van Social Home. Controleer het adres.",
+  "error.gfs_proof_failed": "De server op dit adres kon niet bewijzen dat hij de GFS is die hij zegt te zijn. Controleer het adres.",
   "error.gfs_pairing_failed": "De GFS heeft dit huishouden niet geaccepteerd.",
   "error.gfs_already_connected": "Je bent al met deze GFS verbonden.",
   "error.storage_full": "Je Social Home heeft geen opslagruimte meer. Maak ruimte vrij of vraag je beheerder.",

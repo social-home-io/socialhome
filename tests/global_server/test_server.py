@@ -292,6 +292,10 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         # Takes the optional, signed ``gfs_key`` (its own key) on household
         # requests. No ``replaces``: this server has no instance_id_aliases.
         "addressee_key": True,
+        # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
+        # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
+        # address), so the GFS honestly does not offer it.
+        "proof_of_possession": False,
     }
     assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
     assert verify_capabilities(

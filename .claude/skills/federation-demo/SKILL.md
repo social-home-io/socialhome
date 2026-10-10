@@ -1020,13 +1020,16 @@ a public link is not a special kind of client):
    token; rendered as ``data-pair-token`` on the ``<code>`` element
    so it's scrape-friendly).
 2. POST it to the SH side's ``/api/gfs/connections``. The SH then
-   ``GET {gfs_url}/gfs/info`` to pull the GFS's Ed25519 ``public_key``
+   ``GET {gfs_url}/gfs/info`` to pull the GFS's Ed25519 ``public_key``,
+   ``POST /gfs/proof {nonce}`` to make the GFS prove it holds that key at
+   this URL (its signed block offers ``proof_of_possession``; the demo
+   GFS's ``base_url`` is the loopback URL the households use),
    and ``POST /gfs/register`` with the SH's ``{instance_id,
    public_key, token}`` body (no household address — the GFS keeps
    none; an ``inbox_url`` from an older household build is ignored).
 3. Assert all three households now show the GFS connection as
    ``status="active"`` (auto-accept is on by default for fresh
-   deployments).
+   deployments) and ``possession_proven=true``.
 
 ### ``gfs-traffic`` — global-space publish round-trip
 

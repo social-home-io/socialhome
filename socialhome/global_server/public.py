@@ -30,6 +30,7 @@ from aiohttp import web
 
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
 from ..domain.space import SPACE_CATEGORIES
+from ..gfs_proof import PROOF_ROUTE
 from ..rate_limiter import client_bucket
 from . import app_keys as K
 from .config import DEFAULT_TRUSTED_PROXIES
@@ -87,6 +88,14 @@ SIGNUP_MAX_PER_MINUTE_GLOBAL: int = 30
 #: per pairing; this sheds token-guessing and replay floods before the token
 #: lookup touches the database.
 REGISTER_MAX_PER_MINUTE: int = 10
+
+#: Per-IP/minute cap on ``POST /gfs/proof`` (proof of possession). A household
+#: asks once at pairing and once per GFS-WebSocket (re)connect; a reconnect
+#: storm from one address stays well under this. Signing is cheap (one
+#: Ed25519 signature), so this is flood hygiene for an unauthenticated
+#: endpoint, not a cost brake — and deliberately NOT a server-wide cap, which
+#: would let one flooder stop every household from proving the server.
+PROOF_MAX_PER_MINUTE: int = 20
 
 #: Hard cap on how many client IPs a rate-limit window tracks at once. The key
 #: is attacker-influenced (one bucket per source address, and a botnet or an
@@ -461,6 +470,16 @@ def build_register_rate_limit(resolver: ClientIpResolver):
         resolver,
         REGISTER_MAX_PER_MINUTE,
         lambda path: path == "/gfs/register",
+    )
+
+
+def build_proof_rate_limit(resolver: ClientIpResolver):
+    """Per-IP rate limiter for ``POST /gfs/proof``
+    (:data:`PROOF_MAX_PER_MINUTE`)."""
+    return build_window_limiter(
+        resolver,
+        PROOF_MAX_PER_MINUTE,
+        lambda path: path == PROOF_ROUTE,
     )
 
 

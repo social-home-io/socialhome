@@ -773,10 +773,40 @@ that key signs. The household additionally **ratchets** a verified `true`
 There is no identified fallback: a GFS without a verified `true` receives no
 publish.
 
+**GFS proof of possession** (`gfs_proof.py`) — the capability block is a
+*static* statement: it proves what the GFS key once signed, not that the
+server answering `/gfs/info` holds that key, so anyone can replay a real
+GFS's descriptor from another address. A GFS that advertises
+`proof_of_possession` in its signed block answers `POST /gfs/proof {nonce}`
+(a fresh random 32-byte household challenge, b64url) with `proof_sig` (b64url
+Ed25519 with the same identity key) and `proof_sig_suite`
+(`PROOF_SIG_SUITE_ED25519 = "ed25519"`, validated against
+`SUPPORTED_PROOF_SIG_SUITES`; unknown → `UnsupportedProofSigSuite`, never a
+default). Signing bytes are `b"gfs-proof:v1:"` + canonical JSON of
+`{base_url, gfs_instance_id, nonce, suite}`: the nonce makes every proof
+single-use (no timestamp — freshness comes from the nonce, and a clock check
+would only let a skewed GFS clock break pairing), the suite inside the bytes
+stops a signature being re-labelled under another suite, and `base_url` is the
+GFS's OWN configured `[server] base_url` (normalized: lower-cased scheme and
+host, default port and trailing slash dropped). Binding the server's own URL
+rather than one the requester names is what stops a **relaying impostor**: a
+host at another address that forwards the challenge to the real GFS gets back
+a genuine signature over the real GFS's URL, which fails when the household
+verifies with the address it actually used. The prefix is not JSON, so a
+proof can never collide with a cluster frame (canonical JSON) or a capability
+block signed by the same key. The household demands the proof at pairing
+(before registering — an impostor learns neither the token nor the
+household's identity) and on every GFS-WebSocket (re)connect; an older GFS
+without the capability pairs as before, recorded unproven. Residual
+downgrade: an impostor can replay an OLD signed block from before the GFS
+learnt the proof and so look like an older GFS — that pairing is recorded
+unproven, never proven, and every check that requires a proof still fails.
+
 The suite-tag retrofit promised in earlier revisions of this doc is
 shipped — every cryptographic wire format in the federation surface
 carries a ``*_suite`` identifier (signatures, mesh KEM, key-wrap KEM,
-content-key delivery, GFS capability block, writer certificates). A future ChaCha20-Poly1305 or
+content-key delivery, GFS capability block, GFS proof of possession,
+writer certificates). A future ChaCha20-Poly1305 or
 PQ-protected variant
 is therefore a wire-additive change. (An earlier *sealed-sender*
 primitive carried its own ``aead_suite``; it was never wired into any

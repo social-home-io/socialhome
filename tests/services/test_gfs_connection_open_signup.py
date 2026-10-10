@@ -17,6 +17,8 @@ runs in production.
 
 from __future__ import annotations
 
+import socket
+
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -80,17 +82,26 @@ async def repo(tmp_dir):
     await db.shutdown()
 
 
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 async def _gfs(tmp_dir, *, open_signup: bool):
+    # Served at exactly its configured base_url: the household demands proof
+    # of possession, which the GFS binds to that URL.
+    port = _free_port()
     cfg = GfsConfig(
         host="127.0.0.1",
-        port=0,
-        base_url="http://gfs.test",
+        port=port,
+        base_url=f"http://127.0.0.1:{port}",
         data_dir=str(tmp_dir / "gfs"),
         instance_id="gfs-project",
         open_signup=open_signup,
     )
     (tmp_dir / "gfs").mkdir(exist_ok=True)
-    return TestClient(TestServer(create_gfs_app(cfg)))
+    return TestClient(TestServer(create_gfs_app(cfg), host="127.0.0.1", port=port))
 
 
 def _url(tc: TestClient) -> str:
@@ -112,19 +123,24 @@ async def test_open_signup_pairs_with_the_real_gfs(tmp_dir, repo):
         assert conn.gfs_instance_id == "gfs-project"
         assert (await repo.get(conn.id)) is not None
 
-        # ONE descriptor fetch, one token, one registration — the key that was
-        # verified is the key that was pinned.
+        # ONE descriptor fetch, one token, one proof of possession, one
+        # registration — the key that was verified (and proven) is the key
+        # that was pinned.
         paths = [(m, u.removeprefix(_url(tc))) for m, u, _ in rec.calls]
         assert paths == [
             ("GET", "/gfs/info"),
             ("POST", "/gfs/signup-token"),
+            ("POST", "/gfs/proof"),
             ("POST", "/gfs/register"),
         ]
-        # The token request carries nothing about this household.
+        # The token request carries nothing about this household; the proof
+        # challenge only a random nonce.
         assert rec.calls[1][2] is None
+        assert set(rec.calls[2][2]) == {"nonce"}  # type: ignore[arg-type]
+        assert svc.possession_proven(conn) is True
         # Registration sends what QR pairing sends, and nothing new.
-        assert set(rec.calls[2][2]) == QR_REGISTER_FIELDS  # type: ignore[arg-type]
-        assert "inbox_url" not in rec.calls[2][2]  # type: ignore[operator]
+        assert set(rec.calls[3][2]) == QR_REGISTER_FIELDS  # type: ignore[arg-type]
+        assert "inbox_url" not in rec.calls[3][2]  # type: ignore[operator]
 
         registered = await tc.server.app[gfs_fed_repo_key].get_instance("alpha.home")
         assert registered is not None
