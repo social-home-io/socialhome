@@ -15,6 +15,7 @@ from socialhome.domain.calendar import (
     CalendarRSVP,
     RSVPStatus,
     all_day_covers,
+    is_occurrence_id,
 )
 
 
@@ -225,3 +226,12 @@ def test_all_day_without_a_zone_uses_the_fallback():
 def test_all_day_degenerate_end_is_the_start_day():
     ev = _all_day("2026-09-30T00:00:00+00:00", "2026-09-30T00:00:00+00:00")
     assert all_day_covers(ev, date(2026, 9, 30), "UTC") is True
+
+
+def test_is_occurrence_id_matches_only_the_expanded_shape():
+    start = "2026-10-14T09:20:24+00:00"
+    assert is_occurrence_id(f"abc@{start}", start)
+    assert not is_occurrence_id("meeting@calendar.example.org", start)
+    assert not is_occurrence_id(f"abc@{start}", "2026-10-15T09:20:24+00:00")
+    assert not is_occurrence_id(f"@{start}", start)
+    assert not is_occurrence_id("abc@", "")

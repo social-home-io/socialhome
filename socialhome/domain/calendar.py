@@ -21,6 +21,16 @@ from .errors import CodedError
 OCCURRENCE_ID_SEPARATOR: str = "@"
 
 
+def is_occurrence_id(event_id: str, start_iso: str) -> bool:
+    """Is ``event_id`` a virtual occurrence's id — ``<series id>@<start>``
+    where ``<start>`` is the occurrence's own start (``start_iso``)? The
+    exact shape the expansion mints, so an id that merely contains ``@``
+    (an ICS-style ``uid@host`` a legacy peer might use) is not one. The
+    database refuses the same shape (migration 0090)."""
+    suffix = f"{OCCURRENCE_ID_SEPARATOR}{start_iso}"
+    return bool(start_iso) and len(event_id) > len(suffix) and event_id.endswith(suffix)
+
+
 @dataclass(slots=True, frozen=True)
 class Calendar:
     id: str

@@ -159,7 +159,10 @@ what the space's retention keeps (`federation/sync/space/window.py`):
     every occurrence as a one-off event and the series row lost its rule,
     and events drifted across the window's edge so a full and an
     incremental session disagreed. A receiver skips an `<id>@<start>`
-    record from an older provider: it is a view of a series, never a row.)
+    record whose suffix is its own start, from an older provider: it is a
+    view of a series, never a row — and migration 0090 removed the ones
+    already stored, with their RSVPs and reminders, and refuses the shape
+    at insert.)
   - the **post and comment tombstones** — only the host runs the post
     sweep, which soft-deletes expired posts without telling anyone; a
     member household never sweeps, so these tombstones are how a
@@ -414,17 +417,24 @@ Fail-safe toward more data, never less:
   a writer seat, or a space that keeps more history, so gets the rows it
   could not take before;
 - **no `have_seq`** in the BEGIN → full (see above);
+- **archive lifted here** → full. While a space is archived on the
+  requester its member households' records are refused by rule (the
+  snapshot is read-only) and the stream stays clean — refusing them on
+  every stream must not make every session full for the whole archive.
+  When the archive is lifted (any path: a local unarchive, the host's
+  config, a refreshed snapshot) the `spaces_unarchive_drops_applied_seq`
+  trigger (migration 0091) clears the space's `applied_seq`, so the next
+  periodic BEGIN carries no `have_seq` and streams the whole window;
 - **daily anti-entropy** — a full stream at least every 24 h per
-  household, so anything a stamp could not express converges within a
-  day: today, a member household's records refused while the space was
-  archived here, once the archive is lifted. Everything else re-streams
-  on the next periodic session: a chunk that did not arrive, decrypt or
-  store, one still waiting for its key, and a record refused only for now
-  (see `clean` above). (A requester whose database was rolled back to an
-  older file snapshot under the same identity no longer waits for it: its
-  `have_seq` rolled back too. A restore from the app's backup re-pairs
-  under a new identity, which has no watermark, so it syncs in full
-  anyway.)
+  household, a backstop for anything a stamp could not express. No known
+  case waits for it: a chunk that did not arrive, decrypt or store, one
+  still waiting for its key, and a record refused only for now (see
+  `clean` above) re-stream on the next periodic session, and an archive
+  lifted here forces a full one. (A requester whose database was rolled
+  back to an older file snapshot under the same identity does not wait
+  for it either: its `have_seq` rolled back too. A restore from the app's
+  backup re-pairs under a new identity, which has no watermark, so it
+  syncs in full anyway.)
 
 **Edits outside the window.** The retention window applies to
 `created_at`, as on a full stream: an edit to a row older than the window

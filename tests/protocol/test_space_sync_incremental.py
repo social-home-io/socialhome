@@ -904,6 +904,11 @@ async def test_a_virtual_occurrence_from_an_older_provider_is_not_stored(houses)
     receiver = c[space_sync_receiver_key]
     assert await receiver._dispatch("calendar", SPACE, [occurrence], provider=HOST)
     assert await _event_rows(c) == {}
+    # An id that merely contains ``@`` (a legacy peer's ``uid@host``) is a
+    # row like any other.
+    legacy = {**occurrence, "id": "meeting-42@calendar.example.org"}
+    assert await receiver._dispatch("calendar", SPACE, [legacy], provider=HOST)
+    assert set(await _event_rows(c)) == {"meeting-42@calendar.example.org"}
 
 
 # ── Gallery: album state, and a tombstone that overtakes its album ────────
@@ -1047,3 +1052,29 @@ async def test_a_record_refused_by_rule_does_not_hold_the_stream(houses):
     assert _ids(first, "posts") == {pid}
     assert await _post_row(h, pid) is None
     assert not any(_content(await _c_to_h(h, c)).values())
+
+
+# ── A member household's records refused while the space was archived ─────
+
+
+async def test_records_refused_while_archived_stream_again_after_unarchive(houses):
+    """While the space is archived on H (a read-only snapshot), a member
+    household's records are refused by rule — the stream stays clean, so its
+    watermark advances past them. Lifting the archive drops H's stored echo
+    for the space (migration trigger), so C's next periodic stream to H is
+    full and delivers them — not the next daily full pass."""
+    h, c = houses
+    await _c_to_h(h, c)  # C's first stream to H (full): sets C's watermark
+    pid = _pid(CORA)
+    await _write_post(c, pid, CORA, "written while H was archived")
+    h_spaces = h[space_sync_receiver_key]._space_repo
+    await h_spaces.set_archived(SPACE, True)
+    refused = await _c_to_h(h, c)
+    assert _ids(refused, "posts") == {pid}
+    assert await _post_row(h, pid) is None
+    assert not any(_content(await _c_to_h(h, c)).values())  # clean: skipped
+
+    await h_spaces.set_archived(SPACE, False)
+    after = await _c_to_h(h, c)
+    assert pid in _ids(after, "posts")
+    assert (await _post_row(h, pid))["content"] == "written while H was archived"

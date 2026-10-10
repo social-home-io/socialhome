@@ -28,7 +28,7 @@ from typing import Any, Protocol, TYPE_CHECKING
 
 import orjson as _orjson
 
-from ....domain.calendar import OCCURRENCE_ID_SEPARATOR, CalendarEvent
+from ....domain.calendar import CalendarEvent, is_occurrence_id
 from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.page import Page
@@ -2996,15 +2996,15 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
     upserted a member's copy of a series into a one-off event and wiped the
     rest, on every stream.
 
-    An id of the form ``<event id>@<start>`` is not a row: it is an
-    occurrence an older provider expanded a series into (one record per
+    An id of the form ``<event id>@<its own start>`` is not a row: it is
+    an occurrence an older provider expanded a series into (one record per
     occurrence, ten years either side of its clock). The series streams as
     its own row; storing its occurrences would duplicate it as one-off
     events, so they are skipped."""
     rid = str(r.get("id") or "")
     if (
         not rid
-        or OCCURRENCE_ID_SEPARATOR in rid
+        or is_occurrence_id(rid, str(r.get("start") or ""))
         or not r.get("calendar_id")
         or not r.get("summary")
         or not r.get("created_by")
