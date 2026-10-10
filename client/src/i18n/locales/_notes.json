@@ -476,7 +476,6 @@
   "space.gfs_listing.remove": "Button on a GFS row: stop listing the space there.",
   "space.gfs_listing.remove_aria": "Screen-reader name of the Remove button; {name} is the GFS name.",
   "space.gfs_listing.removed": "Toast after removing; {name} is the GFS name.",
-  "space.gfs_listing.remove_failed": "Error toast; {name} is the GFS name.",
   "space.gfs_listing.remove_last_title": "Confirm dialog title before removing the only GFS listing.",
   "space.gfs_listing.remove_last_body": "Confirm dialog body before removing the only GFS listing.",
   "space.gfs_listing.add_label": "Label of a select of GFSs to add.",

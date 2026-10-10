@@ -120,64 +120,91 @@ describe('SpaceGfsListing — the owner edits the list', () => {
     expect(row.querySelector('.sh-federation-public-url')).toBeNull()
   })
 
-  it('Add PUTs the current set plus the picked GFS, then reloads', async () => {
+  it('Add POSTs the one picked GFS (an atomic add, never a full replace), then reloads', async () => {
     apiMock.get.mockResolvedValueOnce(ownerView()).mockResolvedValueOnce(ownerView({
       available: [
         { ...TOWN, listed: true, listing_status: 'active' },
         { ...CLUB, listed: true, listing_status: 'active' },
       ],
     }))
-    apiMock.put.mockResolvedValue({ listed: ['g-town', 'g-club'], failed: [] })
+    apiMock.post.mockResolvedValue({
+      space_id: 's-1', gfs_connection_id: 'g-club', published_at: '', status: 'active',
+    })
     const { getByText, findByTestId } = renderOwner()
     await flush()
     fireEvent.click(getByText('space.gfs_listing.add'))
-    await waitFor(() => expect(apiMock.put).toHaveBeenCalledWith(
-      '/api/spaces/s-1/gfs-servers', { gfs_ids: ['g-town', 'g-club'] },
-    ))
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledWith('/api/spaces/s-1/publish/g-club'))
+    // Never a PUT of [...listed, new]: that would drop listings this view
+    // doesn't show (held connections) and undo another tab's change.
+    expect(apiMock.put).not.toHaveBeenCalled()
     expect(showToast).toHaveBeenCalledWith('space.gfs_listing.added:{"name":"Club GFS"}', 'success')
     // Every connection lists it now: the picker gives way to a note.
     expect(await findByTestId('gfs-all-listed')).toBeTruthy()
   })
 
-  it('names a GFS the add could not reach instead of claiming success', async () => {
+  it('a refused add shows the server sentence, never a success', async () => {
     apiMock.get.mockResolvedValue(ownerView())
-    apiMock.put.mockResolvedValue({
-      listed: ['g-town'], failed: [{ gfs_id: 'g-club', reason: 'publish_failed' }],
-    })
+    apiMock.post.mockRejectedValue(new Error('The GFS could not be reached.'))
+    const { getByText } = renderOwner()
+    await flush()
+    fireEvent.click(getByText('space.gfs_listing.add'))
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      'The GFS could not be reached.', 'error',
+    ))
+    expect(showToast).not.toHaveBeenCalledWith(expect.stringContaining('added'), 'success')
+  })
+
+  it('a refused add with no message names the GFS', async () => {
+    apiMock.get.mockResolvedValue(ownerView())
+    apiMock.post.mockRejectedValue(new Error(''))
     const { getByText } = renderOwner()
     await flush()
     fireEvent.click(getByText('space.gfs_listing.add'))
     await waitFor(() => expect(showToast).toHaveBeenCalledWith(
       'space.gfs_listing.add_failed:{"name":"Club GFS"}', 'error',
     ))
-    expect(showToast).not.toHaveBeenCalledWith(expect.stringContaining('added'), 'success')
   })
 
-  it('maps a refused PUT through the api error message', async () => {
-    apiMock.get.mockResolvedValue(ownerView())
-    apiMock.put.mockRejectedValue(new Error('A space can be listed on at most 8 GFSs.'))
-    const { getByText } = renderOwner()
-    await flush()
-    fireEvent.click(getByText('space.gfs_listing.add'))
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
-      'A space can be listed on at most 8 GFSs.', 'error',
-    ))
-  })
-
-  it('Remove withdraws one listing straight away while others remain', async () => {
+  it('Remove withdraws one listing straight away, then focuses the Add picker', async () => {
     const two = ownerView({
       available: [
         { ...TOWN, listed: true, listing_status: 'active' },
         { ...CLUB, listed: true, listing_status: 'active' },
       ],
     })
-    apiMock.get.mockResolvedValue(two)
+    apiMock.get.mockResolvedValueOnce(two).mockResolvedValue(ownerView())
     apiMock.delete.mockResolvedValue(undefined)
     const { getByTestId } = renderOwner()
     await flush()
     fireEvent.click(getByTestId('gfs-row-g-club').querySelector('button[aria-label]')!)
     await waitFor(() => expect(apiMock.delete).toHaveBeenCalledWith('/api/spaces/s-1/publish/g-club'))
     expect(showToast).toHaveBeenCalledWith('space.gfs_listing.removed:{"name":"Club GFS"}', 'success')
+    // The clicked button is gone with its row; focus lands on the picker.
+    await waitFor(() => expect(document.activeElement).toBe(getByTestId('gfs-add-select')))
+  })
+
+  it('stays busy until the fresh list is in — a second click sends no second DELETE', async () => {
+    const two = ownerView({
+      available: [
+        { ...TOWN, listed: true, listing_status: 'active' },
+        { ...CLUB, listed: true, listing_status: 'active' },
+      ],
+    })
+    let release: (v: SpaceGfsServersView) => void = () => {}
+    apiMock.get.mockResolvedValueOnce(two)
+      .mockImplementationOnce(() => new Promise(r => { release = r }))
+    apiMock.delete.mockResolvedValue(undefined)
+    const { getByTestId } = renderOwner()
+    await flush()
+    const btn = getByTestId('gfs-row-g-club').querySelector('button[aria-label]') as HTMLButtonElement
+    fireEvent.click(btn)
+    await waitFor(() => expect(apiMock.delete).toHaveBeenCalledTimes(1))
+    // The reload is still in flight: the row's button is disabled/spinning.
+    fireEvent.click(btn)
+    fireEvent.click(getByTestId('gfs-row-g-town').querySelector('button[aria-label]')!)
+    expect(apiMock.delete).toHaveBeenCalledTimes(1)
+    release(ownerView())
+    await flush()
   })
 
   it('removing the last GFS asks first, and Cancel keeps it', async () => {

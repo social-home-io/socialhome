@@ -23290,6 +23290,11 @@ button.sh-page-editor-status {
   overflow-wrap: anywhere;
 }
 .sh-gfs-checklist .sh-form-error { margin-bottom: 0; }
+/* Sits right under the Global card it belongs to. */
+.sh-form-fieldset.sh-gfs-checklist { margin-top: 0; }
+.sh-gfs-checklist__intro { margin-top: 0; font-size: var(--sh-font-size-sm); }
+/* The member view sits above the settings tabs. */
+.sh-gfs-listing-section--member { margin-bottom: var(--sh-space-md); }
 .sh-gfs-listing { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
 .sh-gfs-listing__list { list-style: none; margin: 0; padding: 0; }
 .sh-gfs-listing__info {

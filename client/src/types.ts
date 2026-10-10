@@ -398,12 +398,6 @@ export interface SpaceGfsServersView {
   }[]
 }
 
-/** ``PUT /api/spaces/{id}/gfs-servers`` → what the change did. */
-export interface GfsSelectionOutcome {
-  listed: string[]
-  failed: { gfs_id: string; reason: 'publish_failed' | 'unpublish_failed' }[]
-}
-
 /** A space feature's access level (``SpaceFeatureAccess`` server-side). */
 export type SpaceAccessLevel = 'open' | 'moderated' | 'admin_only'
 
