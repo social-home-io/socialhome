@@ -125,6 +125,22 @@ def owner_statement_via(federation: object, space: "Space") -> dict | None:
     return stored if isinstance(stored, dict) else None
 
 
+def owner_statement_for_delegated(
+    federation: object, space: "Space", *, owned_only: bool = False
+) -> dict | None:
+    """:func:`owner_statement_via`, but only for a space with delegated
+    admins — the only case a statement is needed (a household seated through
+    an inviting admin). ``owned_only``: only when this household OWNS the
+    space (what a never-seated household's sync BEGIN is answered with)."""
+    if not space.features.delegated_admin_authority:
+        return None
+    if owned_only and space.owner_instance_id != getattr(
+        federation, "own_instance_id", None
+    ):
+        return None
+    return owner_statement_via(federation, space)
+
+
 def owner_authority_cert_via(federation: object, space: "Space") -> dict | None:
     """:func:`owner_authority_cert` with the identity read off a
     :class:`FederationService` (``None`` when federation is not wired)."""

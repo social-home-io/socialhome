@@ -448,8 +448,8 @@ authority_pk, authority_key_epoch, issued_at, owner_statement_sig_suite}`
 `derive_instance_id(owner_pk) == owner_instance_id` and against the
 authority key AND epoch the snapshot pins; `issued_at` (unix ms) more than a
 day ahead is refused and never signed, and a statement older than 30 days is
-refused (`MAX_STATEMENT_AGE_MS`; the owner re-signs every 7 days and on every
-rotation). The suite tag `owner_statement_sig_suite`
+refused (`MAX_STATEMENT_AGE_MS`; the owner signs a fresh one into every
+config, invite, rotation bundle and §25.6 sync sentinel it sends). The suite tag `owner_statement_sig_suite`
 (`SUPPORTED_OWNER_STATEMENT_SUITES`, `UnsupportedOwnerStatementSuite`) is
 rejected when unknown. The inviter proof is an ordinary space-authority
 signature (`authority_sig_suite`, event type `space_inviter_proof`) over

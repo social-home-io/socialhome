@@ -825,9 +825,6 @@ class SpaceInviteTokenRedeemCoordinator:
                     meta=meta,
                 )
                 await self._spaces.save(stub)
-                await seat_join_owner_state(
-                    self._spaces, space_id, join, issuer_instance_id
-                )
                 # The owner's signed GFS list (migration 0093), relayed by
                 # the issuer; taken only under the owner's signature.
                 await apply_gfs_servers_from_metadata(
@@ -848,6 +845,11 @@ class SpaceInviteTokenRedeemCoordinator:
                             meta.get("authority_cert"),
                             own_instance_id=self._federation.own_instance_id,
                         )
+                # Pin first, then record the inviting admin + the owner's
+                # statement for that key and epoch.
+                await seat_join_owner_state(
+                    self._spaces, space_id, join, issuer_instance_id
+                )
                 # §D1b cover bytes (#116) — persist host's WebP
                 # when shipped inline so the stub renders properly.
                 await apply_space_cover_from_metadata(

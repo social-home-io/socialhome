@@ -108,6 +108,7 @@ from ....services.inbound_media_store import (
 )
 from ....services.link_preview_service import wire_link_preview
 from ....services.page_conflict_service import PageMode, canonical_from_wire
+from ....services.space_service import apply_owner_statement_from_metadata
 from ...space_scope import archive_refusal
 from .exporter import (
     ALLOWED_RESOURCES,
@@ -750,6 +751,10 @@ class SpaceSyncReceiver:
 
         # Sentinel path — publish end-of-stream + return.
         if resource == SENTINEL_RESOURCE:
+            # Migration 0093: the owner's statement rides the sentinel —
+            # kept when it is the owner's, for the key and epoch we pin,
+            # and newer than ours. No config edit, no sequence bump.
+            await self._keep_owner_statement(space_id, envelope.get("owner_statement"))
             space_now = await self._space_repo.get(space_id)
             # An archive lifted (or set) while the stream ran: the lift
             # dropped our echo (migration 0090) so the next session is full
@@ -956,6 +961,26 @@ class SpaceSyncReceiver:
                 resource, space_id, records, provider=provider, held_back=held_back
             )
         return held_back
+
+    async def _keep_owner_statement(self, space_id: str, statement: object) -> None:
+        if not isinstance(statement, dict):
+            return
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return
+        try:
+            await apply_owner_statement_from_metadata(
+                self._space_repo,
+                space_id,
+                meta={
+                    "owner_statement": statement,
+                    "identity_public_key": space.identity_public_key,
+                },
+                owner_instance_id=space.owner_instance_id,
+                authority_key_epoch=space.authority_key_epoch,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception("sync: keeping the owner statement for %s failed", space_id)
 
     async def _spare_owner_people(
         self,

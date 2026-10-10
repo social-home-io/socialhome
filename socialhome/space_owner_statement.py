@@ -67,13 +67,10 @@ MAX_STATEMENT_FUTURE_SKEW_MS: int = 24 * 60 * 60 * 1000
 #: How old a statement may be and still be taken. A statement names the
 #: authority key of its moment; an admin revoked by a rotation still holds
 #: the OLD key and the owner's old statement for it, so an old statement
-#: must expire. The owner re-signs on every rotation and every
-#: :data:`STATEMENT_REFRESH_MS` (well inside this window) and members relay
-#: the newest.
+#: must expire. The owner signs a fresh one into every config, invite and
+#: §25.6 stream it sends (the stream's sentinel carries it, no config edit)
+#: and into the rotation bundle; members relay the newest.
 MAX_STATEMENT_AGE_MS: int = 30 * 24 * 60 * 60 * 1000
-
-#: How often the owner household re-broadcasts a fresh statement.
-STATEMENT_REFRESH_MS: int = 7 * 24 * 60 * 60 * 1000
 
 MAX_STATEMENT_INT: int = 2**63 - 1
 
@@ -339,7 +336,6 @@ def verify_inviter_proof(
 __all__ = [
     "INVITER_PROOF_EVENT",
     "MAX_STATEMENT_AGE_MS",
-    "STATEMENT_REFRESH_MS",
     "MAX_STATEMENT_FUTURE_SKEW_MS",
     "OWNER_STATEMENT_FIELDS",
     "OWNER_STATEMENT_SUITE_ED25519",

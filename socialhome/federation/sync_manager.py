@@ -768,9 +768,11 @@ def make_sync_reject_reason(space_repo, seat_repo):
     """The S-1 classifier for a ``SPACE_SYNC_BEGIN`` from a non-member:
 
     * ``"dissolved"`` — the space row is gone (a dissolve purged it);
-    * ``"removed"`` — the requester was a member here once: a seat row
-      (tombstones included: kicked, banned or left) or an accepted
-      invitation of that household;
+    * ``"removed"`` — the requester held a seat here and lost it: only
+      tombstoned seat rows (kicked, banned or left), none live. A live seat
+      without the household row is a join in flight (the accept writes the
+      seat before ``space_instances``), and an accepted invitation alone
+      proves nothing yet — neither may be told ``removed``;
     * ``"not_seated"`` — no record at all: it may be joining through a
       delegated admin before our roster learned of it (or after a restore
       from a backup older than its join). Not terminal — the requester keeps
@@ -783,7 +785,7 @@ def make_sync_reject_reason(space_repo, seat_repo):
         seats = await seat_repo.list_for_instance(
             space_id, requester, include_tombstoned=True
         )
-        if seats or await space_repo.instance_accepted_invitation(space_id, requester):
+        if seats and all(seat.tombstoned for seat in seats):
             return "removed"
         return SYNC_REJECT_NOT_SEATED
 

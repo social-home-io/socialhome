@@ -2256,8 +2256,12 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   instance id is refused outright. The owner signs a fresh statement into
   every snapshot and config it sends; members keep the latest verified one
   (`spaces.owner_statement`) and relay it.
-- **A proven owner beats an unproven, unaccepted pre-seat.** A stub held
-  under another owner is replaced only when the newcomer's owner is PROVEN
+- **A pending invitation is never displaced.** A stub seated by an
+  invitation still waiting for an answer stays, whoever claims otherwise and
+  whatever the statements' ages (first seated wins, as before); only its own
+  owner's newer statement updates it.
+- **A proven owner beats unproven dust.** Otherwise, a stub held under
+  another owner is replaced only when the newcomer's owner is PROVEN
   (its signed statement verified), the existing stub is NOT backed by a
   current statement of its own, and nobody here ever accepted an invitation
   into it (no local member, no accepted invitation). The earlier inviter's
@@ -2267,18 +2271,21 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   re-invite into it.
 - **Statements expire and follow the key.** A statement is taken only while
   younger than 30 days and only for the key AND epoch the snapshot pins; the
-  inviter proof binds the epoch too. The owner re-signs on every rotation
-  and every 7 days (`OwnerStatementRefreshService`, a sequence-raised config
-  broadcast), and members relay the newest. A trusted inviter stays trusted
+  inviter proof binds the epoch too. The owner signs a fresh statement into
+  every config, invite, rotation bundle and §25.6 stream sentinel it sends
+  (the sentinel carries it with no config edit — no sequence or HLC bump),
+  and members keep and relay the newest. A trusted inviter stays trusted
   only while the statement held here is current for the pinned key and
-  epoch; a moved pin (a rotation re-pin) clears `invited_by_instance`. So an
+  epoch; after an honest rotation that pauses until the owner's statement for
+  the new key arrives (the mark itself is kept). So an
   admin revoked by a rotation — still holding the old seed and the owner's
   old statement — loses a household it seated on the old key once the
   statement ages out, or sooner: the owner answers a catch-up from a
   household it never seated with a non-terminal `SPACE_SYNC_REJECTED`
   (`reason: "not_seated"`) carrying its CURRENT statement, and when that
   names another key / epoch than the inviter pinned, the owner wins
-  (re-pin to the newer epoch, inviter trust cleared). A household with any
+  (re-pin to the newer epoch, inviter mark cleared; the owner's cert for the
+  new key arrives with its next config). A household with any
   record of membership on the owner (a seat row or tombstone, an accepted
   invitation) still gets the terminal `removed`. The inviter's identity key is recorded as the
   host key only when the inviter is the owner. An inviting admin's key is kept on its own

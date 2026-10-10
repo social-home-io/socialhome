@@ -553,6 +553,9 @@ class PrivateSpaceInviteHandler:
                 meta=meta,
             )
             await self._space_repo.save(stub)
+            # Pin the epoch the owner's cert names FIRST, then record the
+            # inviting admin + the owner's statement for that key and epoch.
+            await self._apply_meta_cert(space_id, meta)
             await seat_join_owner_state(
                 self._space_repo, space_id, join, event.from_instance
             )
@@ -574,7 +577,6 @@ class PrivateSpaceInviteHandler:
                 claimed_pk_hex=p.get("host_identity_pk"),
                 owner_instance_id=owner_instance,
             )
-            await self._apply_meta_cert(space_id, meta)
             # §D1b cover bytes (#116) — when shipped inline, persist
             # so the stub renders the real cover rather than the
             # gradient placeholder.

@@ -121,7 +121,17 @@ class SpaceSyncService:
         "_chat_gate",
         "_windows",
         "_watermarks",
+        "_owner_statement_for",
     )
+
+    async def _sentinel_statement(self, space_id: str) -> dict | None:
+        if self._owner_statement_for is None:
+            return None
+        try:
+            return await self._owner_statement_for(space_id)
+        except Exception:
+            log.exception("sync: owner statement for %s failed", space_id)
+            return None
 
     def __init__(
         self,
@@ -135,8 +145,12 @@ class SpaceSyncService:
         bazaar_repo=None,
         windows: SyncWindows | None = None,
         watermarks: "SyncWatermarks | None" = None,
+        owner_statement_for: "Callable[[str], Awaitable[dict | None]] | None" = None,
     ) -> None:
         self._builder = builder
+        #: Migration 0093 — the owner statement each stream's sentinel
+        #: carries (``None``: none).
+        self._owner_statement_for = owner_statement_for
         #: §25.6 incremental sessions (migration 0086): the per-household
         #: watermark a periodic session streams covered rows above. ``None``
         #: (not wired): every session streams in full, as before.
@@ -308,6 +322,7 @@ class SpaceSyncService:
                     else chunk_count
                 ),
                 snapshot_seq=session.snapshot_seq,
+                owner_statement=await self._sentinel_statement(space_id),
             )
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.

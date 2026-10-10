@@ -361,8 +361,15 @@ class ChunkBuilder:
         sig_suite: str,
         chunk_count: int | None = None,
         snapshot_seq: int | None = None,
+        owner_statement: dict | None = None,
     ) -> dict[str, Any]:
         """Build the final ``__complete__`` envelope for the session.
+
+        ``owner_statement`` (migration 0093) — the space owner's signed
+        ownership statement (fresh from the owner, relayed by a member):
+        public, self-authenticating, no content. It keeps members' copies
+        current without any config edit (no sequence / HLC bump); an older
+        receiver ignores it.
 
         Not encrypted (no payload), but signed so the receiver can
         trust the session-end signal. ``chunk_count`` — how many chunks
@@ -385,6 +392,8 @@ class ChunkBuilder:
             envelope["chunk_count"] = int(chunk_count)
         if snapshot_seq is not None:
             envelope["snapshot_seq"] = int(snapshot_seq)
+        if owner_statement is not None:
+            envelope["owner_statement"] = owner_statement
         bytes_to_sign = _orjson.dumps(envelope)
         envelope["signatures"] = self._encoder.sign_envelope_all(
             bytes_to_sign,

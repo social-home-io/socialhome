@@ -17,13 +17,16 @@ to become host-equivalent there once R invites us for real.
 from __future__ import annotations
 
 import json
+
+import orjson
 from datetime import datetime, timezone
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from socialhome.authority_cert import sign_authority_cert
 from socialhome.crypto import (
     derive_instance_id,
     ed25519_public_key,
@@ -41,6 +44,12 @@ from socialhome.domain.space import (
 )
 from socialhome.federation.host_equivalence import acts_as_host
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
+from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.sync.space.exporter import (
+    SENTINEL_RESOURCE,
+    serialise_chunk,
+)
+from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.federation.sync_manager import (
     SYNC_REJECT_NOT_SEATED,
     SyncSessionManager,
@@ -53,7 +62,10 @@ from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
-from socialhome.services.space_authority_pin import owner_statement_via
+from socialhome.services.space_authority_pin import (
+    owner_statement_for_delegated,
+    owner_statement_via,
+)
 from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
 from socialhome.services.space_service import (
     build_space_snapshot_for_federation,
@@ -225,12 +237,36 @@ async def test_impossible_owner_claims_fall_back(joiner, claimed):
     assert (await _seated(joiner))[:2] == (MAL, None)
 
 
-async def test_the_real_owners_invite_replaces_an_unaccepted_preseat(joiner):
-    """R wins, MAL loses everything it brought: owner, key, inviter mark,
-    its seats and household rows, its pending invitation."""
+async def test_a_pending_preseat_is_never_displaced(joiner):
+    """First seated wins while its invitation is pending (as before 0093) —
+    even against the proven owner, whatever the statements' ages."""
+    mal_kp = generate_space_keypair()
+    await _mal_preseats(joiner, mal_kp)
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(
+        _invite(
+            R,
+            _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
+            token="t-r",
+        )
+    )
+    assert await _seated(joiner) == (MAL, None, mal_kp.public_key.hex())
+    assert (await joiner.spaces.get_invitation_by_token("t-mal"))["status"] == (
+        "pending"
+    )
+    assert await joiner.spaces.get_invitation_by_token("t-r") is None
+
+
+async def test_the_real_owners_invite_replaces_a_dead_unproven_preseat(joiner):
+    """Once MAL's invitation is no longer pending (declined / expired) and
+    nobody accepted it, R's proven invite replaces the dust: MAL loses
+    everything it brought — owner, key, its seats and household rows."""
     mal_kp = generate_space_keypair()
     await _mal_preseats(joiner, mal_kp)
     assert await joiner.seats.get(SPACE, MAL, "u-mal") is not None
+    await joiner.spaces.update_invitation_status(
+        (await joiner.spaces.get_invitation_by_token("t-mal"))["id"], "declined"
+    )
 
     real_kp = generate_space_keypair()
     await joiner.handler._on_invite(
@@ -249,7 +285,7 @@ async def test_the_real_owners_invite_replaces_an_unaccepted_preseat(joiner):
     assert await joiner.seats.get(SPACE, MAL, "u-mal") is None
     assert MAL not in await joiner.spaces.list_member_instances(SPACE)
     assert (await joiner.spaces.get_invitation_by_token("t-mal"))["status"] == (
-        "expired"
+        "declined"
     )
     assert (await joiner.spaces.get_invitation_by_token("t-r"))["status"] == ("pending")
     space = await joiner.spaces.get(SPACE)
@@ -638,7 +674,10 @@ async def test_the_owner_answers_a_never_seated_household_with_its_statement(db)
     assert decision.next_payload["owner_statement"] == statement
 
 
-async def test_a_household_that_accepted_an_invitation_is_removed_not_unknown(db):
+async def test_a_join_in_flight_is_never_told_removed(db):
+    """An accepted invitation, or a live seat whose household row has not
+    landed yet (the accept writes the seat first), is a join in flight —
+    ``not_seated``, never the terminal ``removed``."""
     spaces = SqliteSpaceRepo(db)
     seats = SqliteSpaceRemoteMemberRepo(db)
     await db.enqueue(
@@ -657,7 +696,16 @@ async def test_a_household_that_accepted_an_invitation_is_removed_not_unknown(db
     row = await spaces.get_invitation_by_token("t-acc")
     await spaces.update_invitation_status(row["id"], "accepted")
     classify = make_sync_reject_reason(spaces, seats)
-    assert await classify(SPACE, JOINER) == "removed"
+    assert await classify(SPACE, JOINER) == SYNC_REJECT_NOT_SEATED
+    await seats.add(
+        space_id=SPACE,
+        instance_id=JOINER,
+        user_id="u-joe",
+        user_pk=None,
+        display_name="Joe",
+        role=SpaceRole.MEMBER.value,
+    )
+    assert await classify(SPACE, JOINER) == SYNC_REJECT_NOT_SEATED
 
 
 async def test_a_held_statement_for_the_pinned_key_is_only_replaced_by_a_newer(
@@ -688,3 +736,150 @@ async def test_a_held_statement_for_the_pinned_key_is_only_replaced_by_a_newer(
     other["authority_pk"] = "cd" * 32
     await joiner.spaces.set_owner_statement(SPACE, json.dumps(other))
     assert await store_owner_statement(joiner.spaces, SPACE, canonical) is True
+
+
+# ── Round 4: rotated keys keep an honest admin trusted ────────────────────
+
+
+def _cert(kp, epoch: int) -> dict:
+    return sign_authority_cert(
+        space_id=SPACE,
+        owner_instance_id=R,
+        owner_seed=R_SEED,
+        owner_pk_hex=ed25519_public_key(R_SEED).hex(),
+        authority_pk_hex=kp.public_key.hex(),
+        key_epoch=epoch,
+    )
+
+
+async def test_an_admin_invite_into_a_rotated_space_is_trusted(joiner):
+    """Epoch >= 1: the relayed cert is applied BEFORE the inviter is
+    recorded, and statement + proof name that epoch."""
+    kp = generate_space_keypair()
+    await joiner.handler._on_invite(
+        _invite(
+            ADMIN,
+            _meta(
+                kp.public_key.hex(),
+                R,
+                authority_cert=_cert(kp, 3),
+                authority_key_epoch=3,
+                owner_statement=sign_owner_statement(
+                    space_id=SPACE,
+                    owner_seed=R_SEED,
+                    authority_pk_hex=kp.public_key.hex(),
+                    authority_key_epoch=3,
+                ),
+                inviter_proof=sign_inviter_proof(
+                    space_id=SPACE,
+                    owner_instance_id=R,
+                    inviter_instance_id=ADMIN,
+                    space_seed=kp.private_key,
+                    authority_key_epoch=3,
+                ),
+                roster=[{"user_id": "u-admin", "instance_id": ADMIN, "role": "admin"}],
+            ),
+            token="t-ep",
+        )
+    )
+    space = await joiner.spaces.get(SPACE)
+    assert (space.owner_instance_id, space.authority_key_epoch) == (R, 3)
+    assert await joiner.spaces.get_invited_by(SPACE) == ADMIN
+    assert await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
+
+
+async def test_an_honest_rotation_suspends_then_restores_the_trust(joiner):
+    """The pin moves (0 → 1): the held statement is for the old key, so the
+    inviter is not trusted — until the owner's statement for the NEW key
+    arrives (on a sync stream's sentinel here), with its admin seat live."""
+    kp = generate_space_keypair()
+    await joiner.handler._on_invite(
+        _invite(
+            ADMIN,
+            _meta(
+                kp.public_key.hex(),
+                R,
+                owner_statement=_statement(kp),
+                inviter_proof=_proof(kp, inviter=ADMIN),
+                roster=[{"user_id": "u-admin", "instance_id": ADMIN, "role": "admin"}],
+            ),
+            token="t-1",
+        )
+    )
+    new_kp = generate_space_keypair()
+    assert await joiner.spaces.adopt_authority_key(SPACE, new_kp.public_key.hex(), 1)
+    space = await joiner.spaces.get(SPACE)
+    assert await joiner.spaces.get_invited_by(SPACE) == ADMIN
+    assert not await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
+
+    fresh = sign_owner_statement(
+        space_id=SPACE,
+        owner_seed=R_SEED,
+        authority_pk_hex=new_kp.public_key.hex(),
+        authority_key_epoch=1,
+    )
+    sentinel = {
+        "sync_id": "s-r",
+        "resource": SENTINEL_RESOURCE,
+        "space_id": SPACE,
+        "is_last": True,
+        "owner_statement": fresh,
+    }
+    sentinel["signatures"] = FederationEncoder(R_SEED).sign_envelope_all(
+        orjson.dumps(sentinel), suite="ed25519"
+    )
+    paired_r = SimpleNamespace(
+        get_instance=AsyncMock(
+            return_value=SimpleNamespace(
+                sig_suite="ed25519",
+                remote_identity_pk=ed25519_public_key(R_SEED).hex(),
+                remote_pq_identity_pk=None,
+            )
+        )
+    )
+    receiver = SpaceSyncReceiver(
+        bus=EventBus(),
+        encoder=FederationEncoder(b"\x09" * 32),
+        crypto=MagicMock(),
+        federation_repo=paired_r,  # type: ignore[arg-type]
+        space_repo=joiner.spaces,
+        space_post_repo=MagicMock(),
+        space_task_repo=MagicMock(),
+        page_repo=MagicMock(),
+        sticky_repo=MagicMock(),
+        space_calendar_repo=MagicMock(),
+        gallery_repo=MagicMock(),
+    )
+    await receiver.on_chunk(serialise_chunk(sentinel), from_instance=R)
+    space = await joiner.spaces.get(SPACE)
+    assert await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
+
+
+async def test_not_seated_answers_only_for_owned_delegated_spaces() -> None:
+    seed = b"\x66" * 32
+    own = derive_instance_id(ed25519_public_key(seed))
+    fed = SimpleNamespace(own_instance_id=own, own_identity_seed=seed)
+    base = Space(
+        id=SPACE,
+        name="S",
+        owner_instance_id=own,
+        owner_username="o",
+        identity_public_key="aa" * 32,
+        config_sequence=1,
+        features=SpaceFeatures(delegated_admin_authority=True),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    assert owner_statement_for_delegated(fed, base, owned_only=True) is not None
+    assert (
+        owner_statement_for_delegated(
+            fed, replace(base, features=SpaceFeatures()), owned_only=True
+        )
+        is None
+    )
+    assert (
+        owner_statement_for_delegated(
+            fed, replace(base, owner_instance_id="someone"), owned_only=True
+        )
+        is None
+    )

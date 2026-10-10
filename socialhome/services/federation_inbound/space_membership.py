@@ -288,6 +288,10 @@ class SpaceMembershipInboundHandlers:
             space.authority_key_epoch,
         )
         await self._space_repo.set_invited_by(space_id, None)
+        # The answer carries the owner's statement, not its authority cert:
+        # the statement alone is owner-identity-signed for the new key and
+        # epoch, so the pin moves on it; the cert (and the rest of the
+        # owner's config) arrives with the owner's next config / snapshot.
         if verified.authority_key_epoch > space.authority_key_epoch and (
             await self._space_repo.adopt_authority_key(
                 space_id, verified.authority_pk_hex, verified.authority_key_epoch

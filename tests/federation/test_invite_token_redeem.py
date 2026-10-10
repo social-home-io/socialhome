@@ -249,6 +249,12 @@ class _FakeSpaceRepo:
     async def expire_remote_invitations_except(self, space_id, keep_instance_id):
         pass
 
+    async def has_pending_remote_invitation(self, space_id):
+        return False
+
+    async def any_invitation_accepted(self, space_id):
+        return False
+
     async def purge(self, space_id):
         self.spaces.pop(space_id, None)
         self.space_rows_for_get.pop(space_id, None)

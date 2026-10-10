@@ -700,8 +700,17 @@ dropping it:
 - `reason="dissolved"` — the `spaces` row is gone on the host (a dissolve
   purged it; a never-existed space collapses into this case too, so a
   dissolved space is indistinguishable from one that never existed).
-- `reason="removed"` — the space still exists on the host but the requester
-  is no longer in `space_instances`.
+- `reason="removed"` — the space still exists on the host and the requester
+  held a seat there that is gone: only tombstoned seat rows (kicked, banned
+  or left), none live. Terminal.
+- `reason="not_seated"` (migration 0093) — the host has no record of the
+  requester at all, or its join is still in flight (a live seat whose
+  `space_instances` row has not landed yet, or a merely accepted
+  invitation). NOT terminal: the requester keeps its copy. For a space the
+  host owns with delegated admins, the reply carries the owner's current
+  signed `owner_statement` (see "The invitee's view of the inviting admin");
+  otherwise the host drops the request silently, as before. Older receivers
+  drop the unknown reason.
 
 The `dissolved`/`removed` split is an existence signal: a peer that asks
 about an *existing* space it isn't a member of learns the space exists
@@ -718,7 +727,8 @@ space's `owner_instance_id` (a non-owner can't terminate your copy), checks the
 reason is a known terminal value, and — if the copy isn't already terminally
 archived — calls `set_archived(space_id, True, reason=reason)` and publishes
 `RemoteSpaceDissolved`. The notification copy is reason-aware (`removed` →
-"you're no longer a member"). An *admin*-archived copy (`archived_reason`
+"you're no longer a member"). A `not_seated` reply never archives; the
+handler only applies the owner statement it carries. An *admin*-archived copy (`archived_reason`
 NULL) is still upgradable to a terminal reason here.
 
 Guards: the request is rate-limited (S-6, 5/h per peer+space) **before** the
@@ -1964,9 +1974,15 @@ owner's latest statement). It then records that admin household in
 without both proofs the stub names the inviter itself and nothing below
 applies. Both bind the authority key epoch, and the statement must be younger
 than 30 days; the trust holds only while the statement held here is current
-for the pinned key and epoch (the owner re-signs every 7 days and on every
-rotation), and a re-pin clears it (see discovery.md, "Statements expire and
-follow the key").
+for the pinned key and epoch. The owner signs a fresh statement into every
+config, invite, rotation bundle and §25.6 sync sentinel it sends; after an
+honest rotation the trust is suspended until the owner's statement for the
+NEW key arrives, then resumes (see discovery.md, "Statements expire and follow
+the key"). **If the owner stays unreachable for more than 30 days**, the
+statement held here ages out: the inviting admin stops being host-equivalent
+here, and admins can no longer invite NEW households through it (their
+relayed statement is too old, so a joiner seats the stub under the admin
+itself).
 While the space's `delegated_admin_authority` is ON and that household still
 holds a live `admin` seat, the invitee treats it as **host-equivalent for
 content and admin actions** — the owner is often offline, and the admin may
@@ -1993,9 +2009,9 @@ or delegation-off reaches this household. Even while trusted it never
 changes, bans or unbans a user of the OWNER household (the owner seat or any
 seat the owner's household holds). The §25.6 mesh catch-up asks both the
 owner and the trusted inviter (the owner may not know this household yet),
-and an owner answers a household it never seated with no terminal
-`SPACE_SYNC_REJECTED` (only a tombstoned seat earns `removed`), so a joining
-household never archives the space it is joining. Nothing changes for the
+and an owner answers a household it never seated with the non-terminal
+`SPACE_SYNC_REJECTED` reason `not_seated` (only tombstoned seats earn
+`removed`), so a joining household never archives the space it is joining. Nothing changes for the
 owner.
 
 #### Config edits offline-of-owner (`SPACE_CONFIG_CHANGED`, v_24+)

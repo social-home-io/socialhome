@@ -1043,9 +1043,6 @@ class SpaceConfigEventType(StrEnum):
     #: The owner's GFS list (``Space.gfs_servers``) changed — federates as a
     #: ``SPACE_CONFIG_CHANGED`` snapshot like any other config edit.
     GFS_SERVERS_CHANGED = "gfs_servers_changed"
-    #: The owner household re-signed its ownership statement (migration
-    #: 0093) — federates as a config snapshot that carries it.
-    OWNER_STATEMENT_REFRESHED = "owner_statement_refreshed"
 
 
 def role_change_event_type(

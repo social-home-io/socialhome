@@ -261,3 +261,31 @@ async def test_record_batches_wraps_a_plain_exporter_as_one_page():
         [{"id": "a"}, {"id": "b"}]
     ]
     assert [b async for b in record_batches(_FakeExporter("bans", []), "sp-1")] == []
+
+
+async def test_the_sentinel_carries_and_signs_the_owner_statement():
+    """Migration 0093: the owner statement rides the sentinel (no config
+    edit), inside the provider's signature; absent when none is given."""
+    kp = generate_identity_keypair()
+    encoder = FederationEncoder(kp.private_key)
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    statement = {"owner_statement_sig": "x", "issued_at": 1}
+    sentinel = await builder.build_sentinel(
+        space_id="sp-1",
+        sync_id="sync-x",
+        sig_suite="ed25519",
+        owner_statement=statement,
+    )
+    assert sentinel["owner_statement"] == statement
+    body = {k: v for k, v in sentinel.items() if k != "signatures"}
+    assert encoder.verify_signatures_all(
+        orjson.dumps(body),
+        suite="ed25519",
+        signatures=sentinel["signatures"],
+        ed_public_key=kp.public_key,
+        pq_public_key=None,
+    )
+    plain = await builder.build_sentinel(
+        space_id="sp-1", sync_id="sync-x", sig_suite="ed25519"
+    )
+    assert "owner_statement" not in plain

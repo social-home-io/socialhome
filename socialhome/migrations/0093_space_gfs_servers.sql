@@ -123,9 +123,10 @@ ALTER TABLE spaces ADD COLUMN invited_by_instance TEXT;
 -- the inviting household ONLY with a valid statement from that owner binding
 -- the pinned authority key, plus the inviter's seed-holder proof; otherwise
 -- it seats under the inviter as before 0093 (no ``invited_by_instance``).
--- On an OWNED space it is the statement the owner last broadcast (re-signed
--- every 7 days and after a rotation); NULL on stubs that never got one. A
--- statement counts for 30 days and only for the pinned key and epoch. Audit: the v_44 authority cert is the nearest existing shape, but it
+-- NULL on owned spaces (the owner signs a fresh one into every config,
+-- invite, rotation bundle and §25.6 sync sentinel it sends) and on stubs that
+-- never got one. A statement counts for 30 days and only for the pinned key
+-- and epoch. Audit: the v_44 authority cert is the nearest existing shape, but it
 -- exists only from key epoch 1 (epoch 0 is TOFU, never certified, and the GFS
 -- verifies certs with that rule), so it cannot name the owner of a space
 -- that never rotated; nothing else on the row is signed by the owner. One

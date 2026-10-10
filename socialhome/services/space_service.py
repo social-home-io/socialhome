@@ -8486,11 +8486,14 @@ async def admit_join_stub(
     * A row under the SAME owner: refreshed only by that owner or by our
       trusted inviting admin (:mod:`socialhome.federation.host_equivalence`)
       — a delegated admin re-inviting another of our users.
-    * A row under ANOTHER owner is replaced only when ALL hold: the
+    * A row under ANOTHER owner is never displaced while it holds a
+      pending invitation (first seated wins, as before 0093 — whatever the
+      statements' ages). Otherwise it is replaced only when ALL hold: the
       newcomer's owner is PROVEN (its signed statement verified — never an
       issuer that merely names itself); the existing stub is NOT backed by
       a current owner statement of its own; and nobody here ever accepted an
-      invitation into it (no local member, no accepted invitation). The
+      invitation into it (no local member, no accepted invitation) — dust
+      left by an invitation that expired or was declined. The
       earlier stub is then dropped with everything that came with it (its
       inviter's seats, households, pinned key, pending invitations). Space
       ids are random, not key-derived, so two households can both claim
@@ -8518,6 +8521,16 @@ async def admit_join_stub(
             "our trusted inviting admin",
             space_id,
             issuer_instance_id,
+        )
+        return None
+    if await space_repo.has_pending_remote_invitation(space_id):
+        log.warning(
+            "space %s: join snapshot from %s names owner %s, but a pending "
+            "invitation here already seated it under %s — first one stays",
+            space_id,
+            issuer_instance_id,
+            jo.owner_instance_id,
+            existing.owner_instance_id,
         )
         return None
     if jo.statement_json is None:

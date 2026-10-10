@@ -1984,9 +1984,11 @@ async def test_invited_by_round_trips_and_save_never_touches_it(env):
     assert await env.repo.get_invited_by("nope") is None
 
 
-async def test_a_moved_pin_ends_the_inviting_admins_mark(env):
-    """Migration 0093: the inviting admin proved the seed of the OLD key."""
+async def test_a_moved_pin_keeps_the_inviting_admins_mark(env):
+    """Migration 0093: an honest rotation must not end the trust for good —
+    the mark stays; trust is suspended by the owner-statement check until
+    the owner's statement for the NEW key arrives."""
     await env.repo.save(_space("sp-r"))
     await env.repo.set_invited_by("sp-r", "admin-hh")
     assert await env.repo.adopt_authority_key("sp-r", "cd" * 32, 1)
-    assert await env.repo.get_invited_by("sp-r") is None
+    assert await env.repo.get_invited_by("sp-r") == "admin-hh"
