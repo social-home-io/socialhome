@@ -10628,6 +10628,38 @@ async def test_an_upgrade_to_v57_delivers_the_writer_key_in_a_trusted_space(stac
     assert "writer_key" in kw["payload"]
 
 
+async def test_turning_followers_on_pins_and_hands_out_the_writer_key(stack):
+    """v_57: a trusted global space that just became publicly readable gets
+    a writer key at once — the owner's epoch notice pins it at its GFSs and
+    the member households' roster snapshots carry it (no rotation needed)."""
+    space, fed, remote, _pks = await _cert_space(stack, version=57)
+    await stack.db.enqueue(
+        "UPDATE spaces SET space_type='global', allow_subscribers=0 WHERE id=?",
+        (space.id,),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    member_gfs = SimpleNamespace(
+        announce_epoch=AsyncMock(return_value=1),
+        channel_space=AsyncMock(return_value=False),
+    )
+    stack.space_svc.attach_member_gfs(member_gfs)
+    fed.send_with_mesh_fallback.reset_mock()
+    current = (await stack.space_repo.get(space.id)).features
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="hosty",
+        features=dataclasses.replace(current, allow_subscribers=True),
+    )
+    member_gfs.announce_epoch.assert_awaited_with(space.id)
+    sent = [
+        c.kwargs
+        for c in fed.send_with_mesh_fallback.await_args_list
+        if c.kwargs.get("to_instance_id") == "peer-a"
+    ]
+    assert any("writer_key" in kw["payload"] for kw in sent)
+
+
 async def test_a_trusted_space_sends_no_writer_key_below_v57(stack):
     space, fed, remote, _pks = await _cert_space(stack, version=56)
     await stack.db.enqueue(

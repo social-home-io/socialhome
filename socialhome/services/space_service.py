@@ -241,7 +241,7 @@ from .space_authority_pin import (
 from .space_member_guard import SpaceMemberGuardMixin
 from .space_mentions import SpaceMentionResolver
 from .space_post_moderation import SpacePostAttachments, post_to_queue_payload
-from .space_writer_cert_service import scope_weakened
+from .space_writer_cert_service import scope_weakened, writer_key_min_version
 from ..domain.writer_cert import WriterEntitlement
 
 
@@ -2637,6 +2637,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and space.owner_instance_id == self._own_instance_id
         ):
             await self._after_gfs_publish_mode_change(updated)
+        elif (
+            space.owner_instance_id == self._own_instance_id
+            and writer_key_min_version(updated) is not None
+            and writer_key_min_version(updated) != writer_key_min_version(space)
+        ):
+            await self._after_writer_key_scope_change(updated)
         if private_gfs_changed and space.owner_instance_id == self._own_instance_id:
             await self._after_private_gfs_change(updated)
         # Delegated-admin authority just flipped OFF on the space we host:
@@ -2648,6 +2654,29 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         ):
             await self._bus.publish(SpaceAdminAuthorityRevoked(space_id=space_id))
         return updated
+
+    async def _after_writer_key_scope_change(self, space: Space) -> None:
+        """v_57 — a config change gave the space we host a writer group key it
+        did not have (followers turned on, or the space entered a public
+        tier): pin the current epoch's key at every GFS listing it (the
+        owner's epoch notice) and hand it to the member households (their
+        roster snapshot carries it) — without waiting for the next rotation,
+        or members' anonymous publishes are refused until then."""
+        if self._member_gfs is not None:
+            try:
+                await self._member_gfs.announce_epoch(space.id)
+            except Exception:
+                log.exception("writer key: GFS notice failed for %s", space.id)
+        own = self._own_instance_id
+        for inst in await self._spaces.list_member_instances(space.id):
+            if inst == own:
+                continue
+            try:
+                await self.send_roster_snapshot(space.id, to_instance_id=inst)
+            except Exception:
+                log.exception(
+                    "writer key: roster snapshot to %s failed for %s", inst, space.id
+                )
 
     async def _after_gfs_publish_mode_change(self, space: Space) -> None:
         """v_50 — the owner switched ``gfs_publish_mode`` on the space we host.
