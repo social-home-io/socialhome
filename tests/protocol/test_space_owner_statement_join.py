@@ -22,7 +22,7 @@ import orjson
 from datetime import datetime, timezone
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -63,6 +63,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.space_authority_pin import (
+    apply_authority_cert,
     owner_statement_for_delegated,
     owner_statement_via,
 )
@@ -406,7 +407,8 @@ async def test_the_owner_does_not_terminate_a_household_it_never_seated(db):
         role=SpaceRole.MEMBER.value,
     )
     await seats.remove(SPACE, JOINER, "u-joe")
-    assert await classify(SPACE, JOINER) == "removed"
+    reason, extra = await classify(SPACE, JOINER)
+    assert reason == "removed" and extra["removed_at"]
 
 
 async def test_an_honest_admins_real_snapshot_carries_what_the_joiner_needs(
@@ -788,60 +790,25 @@ async def test_an_admin_invite_into_a_rotated_space_is_trusted(joiner):
     assert await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
 
 
-async def test_an_honest_rotation_suspends_then_restores_the_trust(joiner):
-    """The pin moves (0 → 1): the held statement is for the old key, so the
-    inviter is not trusted — until the owner's statement for the NEW key
-    arrives (on a sync stream's sentinel here), with its admin seat live."""
-    kp = generate_space_keypair()
-    await joiner.handler._on_invite(
-        _invite(
-            ADMIN,
-            _meta(
-                kp.public_key.hex(),
-                R,
-                owner_statement=_statement(kp),
-                inviter_proof=_proof(kp, inviter=ADMIN),
-                roster=[{"user_id": "u-admin", "instance_id": ADMIN, "role": "admin"}],
-            ),
-            token="t-1",
-        )
-    )
-    new_kp = generate_space_keypair()
-    assert await joiner.spaces.adopt_authority_key(SPACE, new_kp.public_key.hex(), 1)
-    space = await joiner.spaces.get(SPACE)
-    assert await joiner.spaces.get_invited_by(SPACE) == ADMIN
-    assert not await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
+def _paired_receiver(joiner, seeds: dict[str, bytes]) -> SpaceSyncReceiver:
+    """A §25.6 receiver for which every household in *seeds* is a paired
+    peer (its identity key known)."""
 
-    fresh = sign_owner_statement(
-        space_id=SPACE,
-        owner_seed=R_SEED,
-        authority_pk_hex=new_kp.public_key.hex(),
-        authority_key_epoch=1,
-    )
-    sentinel = {
-        "sync_id": "s-r",
-        "resource": SENTINEL_RESOURCE,
-        "space_id": SPACE,
-        "is_last": True,
-        "owner_statement": fresh,
-    }
-    sentinel["signatures"] = FederationEncoder(R_SEED).sign_envelope_all(
-        orjson.dumps(sentinel), suite="ed25519"
-    )
-    paired_r = SimpleNamespace(
-        get_instance=AsyncMock(
-            return_value=SimpleNamespace(
-                sig_suite="ed25519",
-                remote_identity_pk=ed25519_public_key(R_SEED).hex(),
-                remote_pq_identity_pk=None,
-            )
+    async def _get_instance(instance_id):
+        seed = seeds.get(instance_id)
+        if seed is None:
+            return None
+        return SimpleNamespace(
+            sig_suite="ed25519",
+            remote_identity_pk=ed25519_public_key(seed).hex(),
+            remote_pq_identity_pk=None,
         )
-    )
-    receiver = SpaceSyncReceiver(
+
+    return SpaceSyncReceiver(
         bus=EventBus(),
         encoder=FederationEncoder(b"\x09" * 32),
         crypto=MagicMock(),
-        federation_repo=paired_r,  # type: ignore[arg-type]
+        federation_repo=SimpleNamespace(get_instance=_get_instance),  # type: ignore[arg-type]
         space_repo=joiner.spaces,
         space_post_repo=MagicMock(),
         space_task_repo=MagicMock(),
@@ -850,9 +817,129 @@ async def test_an_honest_rotation_suspends_then_restores_the_trust(joiner):
         space_calendar_repo=MagicMock(),
         gallery_repo=MagicMock(),
     )
-    await receiver.on_chunk(serialise_chunk(sentinel), from_instance=R)
+
+
+async def _sentinel(receiver, *, sender: str, seed: bytes, **extra) -> None:
+    envelope = {
+        "sync_id": f"s-{sender[:4]}",
+        "resource": SENTINEL_RESOURCE,
+        "space_id": SPACE,
+        "is_last": True,
+        **extra,
+    }
+    envelope["signatures"] = FederationEncoder(seed).sign_envelope_all(
+        orjson.dumps(envelope), suite="ed25519"
+    )
+    await receiver.on_chunk(serialise_chunk(envelope), from_instance=sender)
+
+
+async def _admin_seated_at_epoch_0(joiner, kp, *, inviter=ADMIN) -> None:
+    await joiner.handler._on_invite(
+        _invite(
+            inviter,
+            _meta(
+                kp.public_key.hex(),
+                R,
+                owner_statement=_statement(kp),
+                inviter_proof=_proof(kp, inviter=inviter),
+                roster=[{"user_id": "u-inv", "instance_id": inviter, "role": "admin"}],
+            ),
+            token="t-1",
+        )
+    )
+
+
+async def test_an_honest_rotation_suspends_then_restores_the_trust(joiner):
+    """The pin moves (0 → 1): the trust pauses. Neither the pin move nor the
+    owner's fresh statement resumes it on their own — only the inviting
+    admin's re-proof with the NEW seed (its sync sentinel carries one)."""
+    kp = generate_space_keypair()
+    await _admin_seated_at_epoch_0(joiner, kp)
+    new_kp = generate_space_keypair()
+    assert await joiner.spaces.adopt_authority_key(SPACE, new_kp.public_key.hex(), 1)
     space = await joiner.spaces.get(SPACE)
+    assert not await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
+
+    admin_seed = b"\x63" * 32  # ADMIN's identity seed (see ADMIN above)
+    receiver = _paired_receiver(joiner, {R: R_SEED, ADMIN: admin_seed})
+    fresh = sign_owner_statement(
+        space_id=SPACE,
+        owner_seed=R_SEED,
+        authority_pk_hex=new_kp.public_key.hex(),
+        authority_key_epoch=1,
+    )
+    await _sentinel(receiver, sender=R, seed=R_SEED, owner_statement=fresh)
+    space = await joiner.spaces.get(SPACE)
+    assert not await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
+
+    reproof = sign_inviter_proof(
+        space_id=SPACE,
+        owner_instance_id=R,
+        inviter_instance_id=ADMIN,
+        space_seed=new_kp.private_key,
+        authority_key_epoch=1,
+    )
+    await _sentinel(receiver, sender=ADMIN, seed=admin_seed, inviter_proof=reproof)
+    space = await joiner.spaces.get(SPACE)
+    assert await joiner.spaces.get_invited_by_epoch(SPACE) == 1
     assert await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
+
+
+async def test_a_demoted_inviter_never_regains_trust(joiner):
+    """The review's probe: X invited us at epoch 0, then R demoted X and
+    rotated. X relays R's epoch-1 cert itself (the pin moves), streams us
+    R's fresh epoch-1 statement (it holds it as a member), keeps its own
+    roster saying "admin" — and still is not trusted: it cannot re-prove
+    without the new seed, and a proof with the OLD seed, or one replayed
+    from another household, does not count."""
+    x_seed = b"\x65" * 32
+    old_kp = generate_space_keypair()
+    await _admin_seated_at_epoch_0(joiner, old_kp, inviter=X)
+    new_kp = generate_space_keypair()
+    # X relays R's genuine cert for the new key (any sender may).
+    space = await joiner.spaces.get(SPACE)
+    await apply_authority_cert(
+        joiner.spaces, space, _cert(new_kp, 1), own_instance_id=JOINER
+    )
+    space = await joiner.spaces.get(SPACE)
+    assert (space.identity_public_key, space.authority_key_epoch) == (
+        new_kp.public_key.hex(),
+        1,
+    )
+    receiver = _paired_receiver(joiner, {X: x_seed, ADMIN: b"\x63" * 32})
+    fresh = sign_owner_statement(
+        space_id=SPACE,
+        owner_seed=R_SEED,
+        authority_pk_hex=new_kp.public_key.hex(),
+        authority_key_epoch=1,
+    )
+    old_seed_proof = sign_inviter_proof(
+        space_id=SPACE,
+        owner_instance_id=R,
+        inviter_instance_id=X,
+        space_seed=old_kp.private_key,
+        authority_key_epoch=1,
+    )
+    await _sentinel(
+        receiver,
+        sender=X,
+        seed=x_seed,
+        owner_statement=fresh,
+        inviter_proof=old_seed_proof,
+    )
+    # A real admin's valid proof, replayed by X, names the other admin.
+    admins_proof = sign_inviter_proof(
+        space_id=SPACE,
+        owner_instance_id=R,
+        inviter_instance_id=ADMIN,
+        space_seed=new_kp.private_key,
+        authority_key_epoch=1,
+    )
+    await _sentinel(receiver, sender=X, seed=x_seed, inviter_proof=admins_proof)
+    space = await joiner.spaces.get(SPACE)
+    assert await joiner.spaces.get_invited_by(SPACE) == X
+    assert await joiner.spaces.get_invited_by_epoch(SPACE) == 0
+    assert not await acts_as_host(joiner.spaces, joiner.seats, space, X)
 
 
 async def test_not_seated_answers_only_for_owned_delegated_spaces() -> None:
@@ -883,3 +970,84 @@ async def test_not_seated_answers_only_for_owned_delegated_spaces() -> None:
         )
         is None
     )
+
+
+# ── Round 5: a re-invited household is not archived by an older removal ───
+
+
+def _rejected(reason: str, **extra) -> FederationEvent:
+    return FederationEvent(
+        msg_id="m-rej-5",
+        event_type=FederationEventType.SPACE_SYNC_REJECTED,
+        from_instance=R,
+        to_instance=JOINER,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        payload={"sync_id": "s-5", "space_id": SPACE, "reason": reason, **extra},
+        space_id=SPACE,
+    )
+
+
+@pytest.mark.parametrize("joined_after", [True, False])
+async def test_removed_older_than_our_current_join_does_not_archive(
+    joiner, db, joined_after
+):
+    """We left (the owner holds our tombstone), a delegated admin re-invited
+    us, and our catch-up BEGIN reached the owner before the re-join gossip:
+    the owner says ``removed`` — but our current join is newer, so we keep
+    the copy. A removal newer than our join still archives."""
+    kp = generate_space_keypair()
+    await joiner.handler._on_invite(
+        _invite(R, _meta(kp.public_key.hex(), R), token="t-r")
+    )
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('joe','u-joe','Joe')"
+    )
+    await joiner.spaces.save_member(
+        SpaceMember(
+            space_id=SPACE,
+            user_id="u-joe",
+            role="member",
+            joined_at="2026-10-10T12:00:00+00:00",
+        )
+    )
+    removed_at = "2026-10-10 11:00:00" if joined_after else "2026-10-10 13:00:00"
+    handlers = SpaceMembershipInboundHandlers(
+        bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
+    )
+    await handlers._on_sync_rejected(_rejected("removed", removed_at=removed_at))
+    space = await joiner.spaces.get(SPACE)
+    assert space.archived is (not joined_after)
+
+
+async def test_a_removed_without_a_time_still_archives(joiner, db):
+    """Pre-0093 tombstones carry no time: ``removed`` is honoured as before."""
+    kp = generate_space_keypair()
+    await joiner.handler._on_invite(
+        _invite(R, _meta(kp.public_key.hex(), R), token="t-r")
+    )
+    handlers = SpaceMembershipInboundHandlers(
+        bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
+    )
+    await handlers._on_sync_rejected(_rejected("removed"))
+    assert (await joiner.spaces.get(SPACE)).archived is True
+
+
+async def test_an_expired_pending_invitation_protects_nothing(joiner, db):
+    """A stub seated by an invitation that expired unanswered is dead: a
+    proven owner's invite may replace it."""
+    mal_kp = generate_space_keypair()
+    await _mal_preseats(joiner, mal_kp)
+    await db.enqueue(
+        "UPDATE space_invitations SET expires_at='2020-01-01T00:00:00+00:00'"
+        " WHERE invite_token='t-mal'"
+    )
+    assert await joiner.spaces.has_pending_remote_invitation(SPACE) is False
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(
+        _invite(
+            R,
+            _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
+            token="t-r",
+        )
+    )
+    assert (await _seated(joiner))[0] == R

@@ -1535,11 +1535,14 @@ class JoinOwner:
     owner's signed statement and the inviter's seed-holder proof both
     verified (it then becomes ``spaces.invited_by_instance``).
     ``statement_json`` — the owner's verified statement to keep and relay.
+    ``proven_epoch`` — the authority-key epoch the inviter proved it holds
+    the seed of (``spaces.invited_by_epoch``).
     """
 
     owner_instance_id: str
     trusted_inviter: str | None = None
     statement_json: str | None = None
+    proven_epoch: int | None = None
 
 
 @dataclass(slots=True, frozen=True)

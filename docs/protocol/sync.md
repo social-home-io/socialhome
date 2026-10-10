@@ -734,7 +734,9 @@ drop, so no sync helper uses one for a possibly-unpaired counterpart.
 **Rejecting a non-member BEGIN** (S-1, `make_sync_reject_reason`).
 `SPACE_SYNC_REJECTED` carries a `reason`: `dissolved` (the space row is gone)
 and `removed` (the requester held a seat that is gone — only tombstoned seat
-rows, none live) are terminal and archive the requester's copy; `not_seated`
+rows, none live; carries the newest tombstone's `removed_at`, and a requester
+whose own current join is newer keeps its copy) are terminal and archive the
+requester's copy; `not_seated`
 (migration 0093 — no record at all, e.g. a household a delegated admin invited
 before the host's roster learned of it, a restore from an older backup, or a
 join still in flight: a live seat whose household row has not landed, or a

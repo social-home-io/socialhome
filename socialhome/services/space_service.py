@@ -7773,19 +7773,9 @@ async def build_space_snapshot_for_federation(
     meta = space_metadata_for_federation(
         space, authority_cert=authority_cert, owner_statement=owner_statement
     )
-    if own_instance_id and space.owner_instance_id != own_instance_id:
-        seed = await space_repo.get_space_seed(space.id)
-        if (
-            seed is not None
-            and ed25519_public_key(seed).hex() == space.identity_public_key.lower()
-        ):
-            meta["inviter_proof"] = sign_inviter_proof(
-                space_id=space.id,
-                owner_instance_id=space.owner_instance_id,
-                inviter_instance_id=own_instance_id,
-                space_seed=seed,
-                authority_key_epoch=space.authority_key_epoch,
-            )
+    proof = await own_inviter_proof(space_repo, space, own_instance_id)
+    if proof is not None:
+        meta["inviter_proof"] = proof
     local_members = await space_repo.list_members(space.id)
     local_users = await user_repo.list_by_ids({m.user_id for m in local_members})
     name_by_id = {u.user_id: u.display_name for u in local_users}
@@ -7882,6 +7872,64 @@ async def build_space_snapshot_for_federation(
                 "key_base64": base64.b64encode(raw_key).decode("ascii"),
             }
     return meta
+
+
+async def own_inviter_proof(
+    space_repo, space: Space, own_instance_id: str | None
+) -> dict | None:
+    """This household's inviter proof for *space* (migration 0093): its id
+    signed with the space authority seed of the key it pins, at that epoch —
+    ``None`` unless we are a NON-owner household holding exactly that seed
+    (a delegated admin). Shipped in our invite snapshots and in our §25.6
+    sentinels, so households we invited re-confirm us after a rotation."""
+    if not own_instance_id or space.owner_instance_id == own_instance_id:
+        return None
+    seed = await space_repo.get_space_seed(space.id)
+    if (
+        seed is None
+        or ed25519_public_key(seed).hex() != space.identity_public_key.lower()
+    ):
+        return None
+    return sign_inviter_proof(
+        space_id=space.id,
+        owner_instance_id=space.owner_instance_id,
+        inviter_instance_id=own_instance_id,
+        space_seed=seed,
+        authority_key_epoch=space.authority_key_epoch,
+    )
+
+
+async def apply_inviter_reproof(
+    space_repo, space_id: str, *, provider: str, proof: object
+) -> bool:
+    """A §25.6 sentinel from OUR inviting admin carried a fresh inviter proof
+    for the key and epoch we pin now: the trust resumes at that epoch
+    (migration 0093). From anyone else, or for another key / epoch, it is
+    ignored. ``True`` when the proven epoch moved."""
+    if proof is None:
+        return False
+    if await space_repo.get_invited_by(space_id) != provider:
+        return False
+    space = await space_repo.get(space_id)
+    if space is None or not verify_inviter_proof(
+        proof,
+        space_id=space_id,
+        owner_instance_id=space.owner_instance_id,
+        inviter_instance_id=provider,
+        authority_pk_hex=space.identity_public_key,
+        authority_key_epoch=space.authority_key_epoch,
+    ):
+        return False
+    if await space_repo.get_invited_by_epoch(space_id) == space.authority_key_epoch:
+        return False
+    await space_repo.set_invited_by_epoch(space_id, space.authority_key_epoch)
+    log.info(
+        "space %s: inviting admin %s re-proved the seed for key epoch %d",
+        space_id,
+        provider,
+        space.authority_key_epoch,
+    )
+    return True
 
 
 def space_metadata_for_federation(
@@ -8463,6 +8511,7 @@ def resolve_join_owner(
         owner_instance_id=claimed,
         trusted_inviter=issuer_instance_id,
         statement_json=statement_json,
+        proven_epoch=meta_pinned_epoch(meta),
     )
 
 
@@ -8590,7 +8639,9 @@ async def seat_join_owner_state(
     """After the stub was saved: record the trusted inviting admin and keep
     the owner's verified statement (both migration 0093)."""
     if jo.trusted_inviter:
-        await space_repo.set_invited_by(space_id, jo.trusted_inviter)
+        await space_repo.set_invited_by(
+            space_id, jo.trusted_inviter, jo.proven_epoch or 0
+        )
     if jo.statement_json:
         await store_owner_statement(space_repo, space_id, jo.statement_json)
 

@@ -82,3 +82,13 @@ def test_invited_by_instance_is_a_null_default_column(conn) -> None:
         "SELECT invited_by_instance FROM spaces WHERE id='old'"
     ).fetchone()
     assert row[0] == "admin-hh"
+
+
+def test_invited_by_epoch_and_removed_at_columns(conn) -> None:
+    conn.execute("UPDATE spaces SET invited_by_epoch=3 WHERE id='old'")
+    assert (
+        conn.execute("SELECT invited_by_epoch FROM spaces WHERE id='old'").fetchone()[0]
+        == 3
+    )
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(space_remote_members)")}
+    assert "removed_at" in cols

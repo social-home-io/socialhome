@@ -50,6 +50,9 @@ class SpaceRemoteMember:
     #: written (migration 0066, v_44). The rotation baseline reset only
     #: overrides seats written under an OLDER key.
     authority_epoch: int = 0
+    #: When the seat was tombstoned here (UTC ``datetime('now')``, migration
+    #: 0093); ``None`` on live seats and on pre-0093 tombstones.
+    removed_at: str | None = None
 
 
 @runtime_checkable
@@ -225,6 +228,7 @@ class SqliteSpaceRemoteMemberRepo:
             """
             UPDATE space_remote_members
             SET tombstoned=1, member_version=member_version + 1,
+                removed_at=datetime('now'),
                 authority_epoch=(SELECT authority_key_epoch FROM spaces WHERE id=?)
             WHERE space_id=? AND instance_id=? AND user_id=?
             """,
@@ -554,4 +558,5 @@ def _row(row: dict) -> SpaceRemoteMember:
         member_version=int(row.get("member_version") or 0),
         tombstoned=bool(row.get("tombstoned")),
         authority_epoch=int(row.get("authority_epoch") or 0),
+        removed_at=row.get("removed_at"),
     )

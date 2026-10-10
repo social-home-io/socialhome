@@ -2257,9 +2257,10 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   every snapshot and config it sends; members keep the latest verified one
   (`spaces.owner_statement`) and relay it.
 - **A pending invitation is never displaced.** A stub seated by an
-  invitation still waiting for an answer stays, whoever claims otherwise and
-  whatever the statements' ages (first seated wins, as before); only its own
-  owner's newer statement updates it.
+  invitation still waiting for an answer (and not expired) stays, whoever
+  claims otherwise and whatever the statements' ages (first seated wins, as
+  before); only its own owner's newer statement updates it. An expired
+  pending invitation is dead and protects nothing.
 - **A proven owner beats unproven dust.** Otherwise, a stub held under
   another owner is replaced only when the newcomer's owner is PROVEN
   (its signed statement verified), the existing stub is NOT backed by a
@@ -2276,8 +2277,10 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   (the sentinel carries it with no config edit — no sequence or HLC bump),
   and members keep and relay the newest. A trusted inviter stays trusted
   only while the statement held here is current for the pinned key and
-  epoch; after an honest rotation that pauses until the owner's statement for
-  the new key arrives (the mark itself is kept). So an
+  epoch, and only for the epoch the inviter PROVED: after a rotation it
+  resumes only on the inviter's fresh proof with the new seed (its §25.6
+  sentinel carries one); a moved pin, a fresh statement or the inviter's own
+  roster never resume it. So an
   admin revoked by a rotation — still holding the old seed and the owner's
   old statement — loses a household it seated on the old key once the
   statement ages out, or sooner: the owner answers a catch-up from a

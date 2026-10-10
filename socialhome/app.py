@@ -179,6 +179,7 @@ from .repositories.space_remote_location_repo import (
 from .repositories.space_remote_member_repo import SqliteSpaceRemoteMemberRepo
 from .repositories.space_proposal_repo import SqliteSpaceProposalRepo
 from .services.space_authority_pin import owner_statement_for_delegated
+from .services.space_service import own_inviter_proof
 from .services.space_approval_service import SpaceApprovalService
 from .repositories.report_repo import SqliteReportRepo
 from .repositories.search_repo import SqliteSearchRepo
@@ -1295,6 +1296,16 @@ def _wire_federation_stack(
             return None
         return owner_statement_for_delegated(federation_service, space, owned_only=True)
 
+    async def _sync_inviter_proof_for(space_id: str) -> dict | None:
+        # Migration 0093: as a delegated admin, re-prove the seed of the key
+        # we pin to the households we invited (they check who sends it).
+        space = await space_repo.get(space_id)
+        if space is None or not space.features.delegated_admin_authority:
+            return None
+        return await own_inviter_proof(
+            space_repo, space, federation_service.own_instance_id
+        )
+
     async def _sync_owner_statement_for(space_id: str) -> dict | None:
         space = await space_repo.get(space_id)
         if space is None:
@@ -1604,6 +1615,7 @@ def _wire_federation_stack(
         # statement (fresh on the owner, relayed by a member) for spaces
         # with delegated admins — no config edit, no sequence bump.
         owner_statement_for=_sync_owner_statement_for,
+        inviter_proof_for=_sync_inviter_proof_for,
     )
     space_sync_receiver = SpaceSyncReceiver(
         bus=bus,

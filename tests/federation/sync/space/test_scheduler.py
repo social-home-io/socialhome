@@ -1146,7 +1146,7 @@ async def test_mesh_catchup_also_asks_the_trusted_inviting_admin(db, delegation)
         display_name="A",
         role=SpaceRole.ADMIN.value,
     )
-    await spaces.set_invited_by("sp-inv", "admin-hh")
+    await spaces.set_invited_by("sp-inv", "admin-hh", 0)
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     await spaces.set_owner_statement(
         "sp-inv",

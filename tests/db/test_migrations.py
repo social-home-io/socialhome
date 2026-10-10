@@ -897,6 +897,8 @@ async def test_0054_rebuild_preserves_rows_index_and_fk(tmp_path):
             "tombstoned": 1,
             # 0066 (v_44) — a later additive column; a migrated row reads 0.
             "authority_epoch": 0,
+            # 0093 — when the seat was tombstoned; NULL on a pre-0093 one.
+            "removed_at": None,
         }
         idx = await db.fetchall("PRAGMA index_list(space_remote_members)")
         assert "idx_space_remote_members_instance_user" in {r["name"] for r in idx}, (

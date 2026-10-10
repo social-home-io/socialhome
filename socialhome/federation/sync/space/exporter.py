@@ -362,6 +362,7 @@ class ChunkBuilder:
         chunk_count: int | None = None,
         snapshot_seq: int | None = None,
         owner_statement: dict | None = None,
+        inviter_proof: dict | None = None,
     ) -> dict[str, Any]:
         """Build the final ``__complete__`` envelope for the session.
 
@@ -394,6 +395,11 @@ class ChunkBuilder:
             envelope["snapshot_seq"] = int(snapshot_seq)
         if owner_statement is not None:
             envelope["owner_statement"] = owner_statement
+        if inviter_proof is not None:
+            # The provider's own inviter proof for the key it pins (a
+            # delegated admin): households it invited re-confirm it after a
+            # rotation (migration 0093). Public; an older receiver ignores it.
+            envelope["inviter_proof"] = inviter_proof
         bytes_to_sign = _orjson.dumps(envelope)
         envelope["signatures"] = self._encoder.sign_envelope_all(
             bytes_to_sign,

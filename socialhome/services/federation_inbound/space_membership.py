@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ...domain.events import (
@@ -227,6 +228,18 @@ class SpaceMembershipInboundHandlers:
         space = await self._space_repo.get(space_id)
         if space is None:
             return  # nothing local to archive
+        if reason == "removed" and await self._joined_after(
+            space_id, event.payload.get("removed_at")
+        ):
+            # Migration 0093: we joined again AFTER the seat the host dropped
+            # (a delegated admin re-invited us; the host has not learned the
+            # re-join yet). Not terminal for us.
+            log.info(
+                "SPACE_SYNC_REJECTED removed for %s predates our current join — "
+                "keeping our copy",
+                space_id,
+            )
+            return
         if space.owner_instance_id != event.from_instance:
             log.warning(
                 "SPACE_SYNC_REJECTED for %s from non-owner %s (owner=%s) — dropping",
@@ -239,6 +252,17 @@ class SpaceMembershipInboundHandlers:
             return  # already terminally archived — idempotent
         await self._space_repo.set_archived(space_id, True, reason=reason)
         await self._bus.publish(RemoteSpaceDissolved(space_id=space_id))
+
+    async def _joined_after(self, space_id: str, removed_at: object) -> bool:
+        """Whether a local member of *space_id* joined after *removed_at*
+        (the host's tombstone time, UTC)."""
+        removed = _utc(removed_at)
+        if removed is None:
+            return False
+        joined = [
+            _utc(m.joined_at) for m in await self._space_repo.list_members(space_id)
+        ]
+        return any(j is not None and j > removed for j in joined)
 
     async def _apply_owner_statement_answer(
         self, event: "FederationEvent", space_id: str
@@ -555,3 +579,15 @@ class SpaceMembershipInboundHandlers:
             )
         except Exception as exc:  # pragma: no cover
             log.warning("SPACE_CONFIG_CATCH_UP push failed: %s", exc)
+
+
+def _utc(value: object) -> datetime | None:
+    """An ISO-8601 / SQLite ``datetime('now')`` string as an aware UTC
+    datetime (naive values are UTC); ``None`` when unreadable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

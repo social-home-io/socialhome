@@ -58,7 +58,7 @@ async def env(db):
             display_name=uid,
             role=SpaceRole.ADMIN.value,
         )
-    await spaces.set_invited_by("sp-1", ADMIN)
+    await spaces.set_invited_by("sp-1", ADMIN, 0)
     await spaces.set_owner_statement("sp-1", _current_statement())
     return spaces, seats
 
@@ -170,3 +170,14 @@ async def test_the_trust_needs_a_current_owner_statement(env, statement):
     await spaces.set_owner_statement("sp-1", value)
     assert await _check(env, ADMIN) == (False, False)
     assert await _check(env, OWNER) == (True, False)
+
+
+async def test_the_trust_is_bound_to_the_proven_epoch(env):
+    """A moved pin alone never resumes the trust: only a re-proof for the
+    new epoch does (``set_invited_by_epoch``)."""
+    spaces, _ = env
+    await spaces.adopt_authority_key("sp-1", "aa" * 32, 1)
+    await spaces.set_owner_statement("sp-1", _current_statement(epoch=1))
+    assert await _check(env, ADMIN) == (False, False)
+    await spaces.set_invited_by_epoch("sp-1", 1)
+    assert await _check(env, ADMIN) == (True, True)

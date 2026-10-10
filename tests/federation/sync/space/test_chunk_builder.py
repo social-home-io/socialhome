@@ -289,3 +289,15 @@ async def test_the_sentinel_carries_and_signs_the_owner_statement():
         space_id="sp-1", sync_id="sync-x", sig_suite="ed25519"
     )
     assert "owner_statement" not in plain
+
+
+async def test_the_sentinel_carries_the_providers_inviter_proof():
+    kp = generate_identity_keypair()
+    builder = ChunkBuilder(
+        encoder=FederationEncoder(kp.private_key), crypto=_FakeCrypto()
+    )
+    proof = {"authority_sig": "x"}
+    sentinel = await builder.build_sentinel(
+        space_id="sp-1", sync_id="sync-x", sig_suite="ed25519", inviter_proof=proof
+    )
+    assert sentinel["inviter_proof"] == proof

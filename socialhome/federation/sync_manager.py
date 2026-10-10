@@ -466,10 +466,14 @@ class SyncSessionManager:
                     reason = "dissolved"
                 if reason is None:
                     return SyncDecision(accepted=False, reason="not_a_member")
+                extra: dict = {}
+                if isinstance(reason, tuple):
+                    reason, extra = reason
                 payload: dict = {
                     "sync_id": sync_id,
                     "space_id": space_id,
                     "reason": reason,
+                    **extra,
                 }
                 if reason == SYNC_REJECT_NOT_SEATED:
                     # A household this host never seated (one a delegated
@@ -779,13 +783,21 @@ def make_sync_reject_reason(space_repo, seat_repo):
       its copy and gets the owner's statement
       (:meth:`SyncSessionManager.begin_session`)."""
 
-    async def _reject_reason(space_id: str, requester: str) -> str | None:
+    async def _reject_reason(
+        space_id: str, requester: str
+    ) -> str | tuple[str, dict] | None:
         if await space_repo.get(space_id) is None:
             return "dissolved"
         seats = await seat_repo.list_for_instance(
             space_id, requester, include_tombstoned=True
         )
         if seats and all(seat.tombstoned for seat in seats):
+            # When the newest seat was dropped (migration 0093): a household
+            # a delegated admin re-invited since — whose BEGIN beat the
+            # re-join gossip here — joined after it and keeps its copy.
+            removed = [s.removed_at for s in seats if s.removed_at]
+            if removed:
+                return ("removed", {"removed_at": max(removed)})
             return "removed"
         return SYNC_REJECT_NOT_SEATED
 

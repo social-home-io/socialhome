@@ -108,7 +108,10 @@ from ....services.inbound_media_store import (
 )
 from ....services.link_preview_service import wire_link_preview
 from ....services.page_conflict_service import PageMode, canonical_from_wire
-from ....services.space_service import apply_owner_statement_from_metadata
+from ....services.space_service import (
+    apply_inviter_reproof,
+    apply_owner_statement_from_metadata,
+)
 from ...space_scope import archive_refusal
 from .exporter import (
     ALLOWED_RESOURCES,
@@ -755,6 +758,14 @@ class SpaceSyncReceiver:
             # kept when it is the owner's, for the key and epoch we pin,
             # and newer than ours. No config edit, no sequence bump.
             await self._keep_owner_statement(space_id, envelope.get("owner_statement"))
+            # …and our inviting admin's fresh seed proof for the key we pin
+            # resumes its trust after a rotation (never the pin move alone).
+            await apply_inviter_reproof(
+                self._space_repo,
+                space_id,
+                provider=from_instance,
+                proof=envelope.get("inviter_proof"),
+            )
             space_now = await self._space_repo.get(space_id)
             # An archive lifted (or set) while the stream ran: the lift
             # dropped our echo (migration 0090) so the next session is full

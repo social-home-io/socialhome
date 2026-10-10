@@ -1992,3 +1992,16 @@ async def test_a_moved_pin_keeps_the_inviting_admins_mark(env):
     await env.repo.set_invited_by("sp-r", "admin-hh")
     assert await env.repo.adopt_authority_key("sp-r", "cd" * 32, 1)
     assert await env.repo.get_invited_by("sp-r") == "admin-hh"
+
+
+async def test_invited_by_carries_its_proven_epoch(env):
+    await env.repo.save(_space("sp-e"))
+    await env.repo.set_invited_by("sp-e", "admin-hh", 2)
+    assert await env.repo.get_invited_by_epoch("sp-e") == 2
+    await env.repo.set_invited_by_epoch("sp-e", 3)
+    assert await env.repo.get_invited_by_epoch("sp-e") == 3
+    await env.repo.set_invited_by("sp-e", None)
+    assert await env.repo.get_invited_by_epoch("sp-e") is None
+    # No inviter → a re-proof has nothing to move.
+    await env.repo.set_invited_by_epoch("sp-e", 4)
+    assert await env.repo.get_invited_by_epoch("sp-e") is None

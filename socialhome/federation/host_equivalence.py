@@ -17,7 +17,10 @@ The trust is narrow:
   (:func:`socialhome.services.space_service.resolve_join_owner`);
 * only while the space's ``delegated_admin_authority`` is ON (the owner's
   own opt-in to admins acting for it) — turning it off ends the trust;
-* only while that household still holds a live ``admin`` seat here.
+* only while that household still holds a live ``admin`` seat here;
+* only for the authority-key epoch the inviter PROVED it holds the seed of
+  (``spaces.invited_by_epoch``): after a rotation, only a fresh inviter
+  proof for the new epoch resumes it.
 
 It covers CONTENT and admin actions — the full §25.6 stream (roster and bans
 included), role changes, live bans / unbans, remote-member removals,
@@ -91,6 +94,12 @@ async def is_trusted_inviter(
     if not getattr(features, "delegated_admin_authority", False):
         return False
     if await space_repo.get_invited_by(space.id) != sender:
+        return False
+    if await space_repo.get_invited_by_epoch(space.id) != space.authority_key_epoch:
+        # The inviter proved the seed of ANOTHER key epoch. After a rotation
+        # the trust resumes only on a fresh proof for the new epoch (an
+        # honest admin's §25.6 sentinel carries one) — never because the
+        # pin moved: an admin the rotation revoked lacks the new seed.
         return False
     if not owner_statement_current(space):
         # The owner's word for the key we pin has lapsed (or the pin moved):

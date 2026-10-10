@@ -121,7 +121,11 @@ class AbstractSpaceRepo(Protocol):
     async def get_owner_user_id(self, space_id: str) -> str | None: ...
     async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
-    async def set_invited_by(self, space_id: str, instance_id: str | None) -> None: ...
+    async def set_invited_by(
+        self, space_id: str, instance_id: str | None, epoch: int | None = None
+    ) -> None: ...
+    async def set_invited_by_epoch(self, space_id: str, epoch: int) -> None: ...
+    async def get_invited_by_epoch(self, space_id: str) -> int | None: ...
     async def any_invitation_accepted(self, space_id: str) -> bool: ...
     async def has_pending_remote_invitation(self, space_id: str) -> bool: ...
     async def set_owner_statement(
@@ -1059,15 +1063,34 @@ class SqliteSpaceRepo:
             (pk_hex, space_id),
         )
 
-    async def set_invited_by(self, space_id: str, instance_id: str | None) -> None:
+    async def set_invited_by(
+        self, space_id: str, instance_id: str | None, epoch: int | None = None
+    ) -> None:
         """Record the delegated admin household that issued THIS household's
-        invite into a space it does not own (migration 0093,
-        :mod:`socialhome.federation.host_equivalence`). Never written by
-        ``save``."""
+        invite into a space it does not own, with the authority-key epoch it
+        PROVED (migration 0093, :mod:`socialhome.federation.host_equivalence`).
+        Never written by ``save``."""
         await self._db.enqueue(
-            "UPDATE spaces SET invited_by_instance=? WHERE id=?",
-            (instance_id, space_id),
+            "UPDATE spaces SET invited_by_instance=?, invited_by_epoch=? WHERE id=?",
+            (instance_id, epoch if instance_id else None, space_id),
         )
+
+    async def set_invited_by_epoch(self, space_id: str, epoch: int) -> None:
+        """The inviting admin proved the seed of the key at *epoch* again (a
+        re-proof after a rotation). The caller verified the proof."""
+        await self._db.enqueue(
+            "UPDATE spaces SET invited_by_epoch=?"
+            " WHERE id=? AND invited_by_instance IS NOT NULL",
+            (epoch, space_id),
+        )
+
+    async def get_invited_by_epoch(self, space_id: str) -> int | None:
+        row = await self._db.fetchone(
+            "SELECT invited_by_epoch FROM spaces WHERE id=?", (space_id,)
+        )
+        if row is None or row["invited_by_epoch"] is None:
+            return None
+        return int(row["invited_by_epoch"])
 
     async def set_owner_statement(
         self, space_id: str, statement_json: str | None
@@ -1095,10 +1118,13 @@ class SqliteSpaceRepo:
 
     async def has_pending_remote_invitation(self, space_id: str) -> bool:
         """Whether a cross-household invitation into *space_id* still waits
-        for an answer here (it seated the stub; it is not displaced)."""
+        for an answer here AND has not expired (it seated the stub; it is not
+        displaced). An expired pending invitation is dead — it can no longer
+        be accepted — so it protects nothing."""
         row = await self._db.fetchone(
             "SELECT 1 FROM space_invitations WHERE space_id=?"
-            " AND status='pending' AND remote_instance_id IS NOT NULL LIMIT 1",
+            " AND status='pending' AND remote_instance_id IS NOT NULL"
+            " AND datetime(expires_at) > datetime('now') LIMIT 1",
             (space_id,),
         )
         return row is not None

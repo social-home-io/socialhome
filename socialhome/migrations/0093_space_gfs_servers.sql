@@ -115,6 +115,25 @@ ALTER TABLE spaces ADD COLUMN gfs_servers TEXT
 
 ALTER TABLE spaces ADD COLUMN invited_by_instance TEXT;
 
+-- ``spaces.invited_by_epoch`` (same change): the authority-key epoch the
+-- inviting admin PROVED it holds the seed of (its inviter proof). The trust
+-- holds only while the pinned epoch equals it: after a rotation it resumes
+-- only on a fresh proof for the new epoch (an honest admin's §25.6 sentinel
+-- carries one), which an admin revoked by that rotation cannot make. A moved
+-- pin alone never resumes it. NULL when ``invited_by_instance`` is NULL.
+ALTER TABLE spaces ADD COLUMN invited_by_epoch INTEGER;
+
+-- ``space_remote_members.removed_at`` (same migration): when a seat was
+-- tombstoned (UTC, ``datetime('now')``). The owner's terminal ``removed``
+-- sync reject carries the newest one, so a household re-invited by a
+-- delegated admin after leaving — whose BEGIN reached the owner before the
+-- re-join gossip — ignores a ``removed`` older than its own current join
+-- instead of archiving. Audit: the tombstone row (0031) already exists for
+-- exactly this lifetime; only its time was missing — no new table. NULL on
+-- live seats and on tombstones written before 0093 (then ``removed`` is
+-- honoured as before).
+ALTER TABLE space_remote_members ADD COLUMN removed_at TEXT;
+
 -- ``spaces.owner_statement`` (same migration): the owner household's signed
 -- ownership statement for this space (``socialhome/space_owner_statement.py``)
 -- as last verified here, a JSON object — kept so this household can relay it

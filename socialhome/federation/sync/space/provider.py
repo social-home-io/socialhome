@@ -122,7 +122,17 @@ class SpaceSyncService:
         "_windows",
         "_watermarks",
         "_owner_statement_for",
+        "_inviter_proof_for",
     )
+
+    async def _sentinel_proof(self, space_id: str) -> dict | None:
+        if self._inviter_proof_for is None:
+            return None
+        try:
+            return await self._inviter_proof_for(space_id)
+        except Exception:
+            log.exception("sync: inviter proof for %s failed", space_id)
+            return None
 
     async def _sentinel_statement(self, space_id: str) -> dict | None:
         if self._owner_statement_for is None:
@@ -146,11 +156,15 @@ class SpaceSyncService:
         windows: SyncWindows | None = None,
         watermarks: "SyncWatermarks | None" = None,
         owner_statement_for: "Callable[[str], Awaitable[dict | None]] | None" = None,
+        inviter_proof_for: "Callable[[str], Awaitable[dict | None]] | None" = None,
     ) -> None:
         self._builder = builder
         #: Migration 0093 — the owner statement each stream's sentinel
         #: carries (``None``: none).
         self._owner_statement_for = owner_statement_for
+        #: Migration 0093 — our own inviter proof (a delegated admin) each
+        #: sentinel carries (``None``: none).
+        self._inviter_proof_for = inviter_proof_for
         #: §25.6 incremental sessions (migration 0086): the per-household
         #: watermark a periodic session streams covered rows above. ``None``
         #: (not wired): every session streams in full, as before.
@@ -323,6 +337,7 @@ class SpaceSyncService:
                 ),
                 snapshot_seq=session.snapshot_seq,
                 owner_statement=await self._sentinel_statement(space_id),
+                inviter_proof=await self._sentinel_proof(space_id),
             )
             # Marked before the sentinel ships: the requester's
             # ``SPACE_SYNC_COMPLETE`` may land before ``_send`` returns.

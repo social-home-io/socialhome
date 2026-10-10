@@ -944,3 +944,30 @@ async def test_begin_session_not_seated_answers_with_the_owner_statement(stateme
             "reason": SYNC_REJECT_NOT_SEATED,
             "owner_statement": statement,
         }
+
+
+async def test_begin_session_removed_carries_the_tombstone_time():
+    """Migration 0093: a classifier may add fields to the reject — the time
+    of the newest tombstone rides with ``removed``."""
+
+    async def check_member(space_id, instance_id):
+        return False
+
+    async def reject_reason(space_id, requester_instance_id):
+        return ("removed", {"removed_at": "2026-10-10 11:00:00"})
+
+    mgr = SyncSessionManager(
+        _FakeFedRepo(), check_member=check_member, reject_reason=reject_reason
+    )
+    d = await mgr.begin_session(
+        sync_id="sid-r",
+        space_id="sp-r",
+        requester_instance_id="ex",
+        provider_instance_id="me",
+    )
+    assert d.next_payload == {
+        "sync_id": "sid-r",
+        "space_id": "sp-r",
+        "reason": "removed",
+        "removed_at": "2026-10-10 11:00:00",
+    }

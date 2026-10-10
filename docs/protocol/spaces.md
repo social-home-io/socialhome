@@ -702,7 +702,10 @@ dropping it:
   dissolved space is indistinguishable from one that never existed).
 - `reason="removed"` — the space still exists on the host and the requester
   held a seat there that is gone: only tombstoned seat rows (kicked, banned
-  or left), none live. Terminal.
+  or left), none live. Terminal — except that the reply carries the newest
+  tombstone's `removed_at` (migration 0093), and a household whose own
+  current join is newer (a delegated admin re-invited it; the host has not
+  heard the re-join yet) keeps its copy.
 - `reason="not_seated"` (migration 0093) — the host has no record of the
   requester at all, or its join is still in flight (a live seat whose
   `space_instances` row has not landed yet, or a merely accepted
@@ -1975,10 +1978,14 @@ without both proofs the stub names the inviter itself and nothing below
 applies. Both bind the authority key epoch, and the statement must be younger
 than 30 days; the trust holds only while the statement held here is current
 for the pinned key and epoch. The owner signs a fresh statement into every
-config, invite, rotation bundle and §25.6 sync sentinel it sends; after an
-honest rotation the trust is suspended until the owner's statement for the
-NEW key arrives, then resumes (see discovery.md, "Statements expire and follow
-the key"). **If the owner stays unreachable for more than 30 days**, the
+config, invite, rotation bundle and §25.6 sync sentinel it sends. The trust
+is also bound to the key epoch the admin PROVED (`spaces.invited_by_epoch`):
+after a rotation it resumes only when the admin re-proves with the NEW seed —
+an honest delegated admin's §25.6 sentinel carries its fresh inviter proof
+(`own_inviter_proof`), checked against the sender. A moved pin, the owner's
+fresh statement or the admin's own roster never resume it on their own, so an
+admin revoked by the rotation (no new seed) stays out (see discovery.md,
+"Statements expire and follow the key"). **If the owner stays unreachable for more than 30 days**, the
 statement held here ages out: the inviting admin stops being host-equivalent
 here, and admins can no longer invite NEW households through it (their
 relayed statement is too old, so a joiner seats the stub under the admin
