@@ -1,7 +1,9 @@
 """§27.9 release blocker: a household's signed, identity-bound
 ``/gfs/subscribe`` (subscribe or unsubscribe) never reaches a GFS that did
 not seat the subscription — that request alone would tell the operator this
-household follows the space.
+household follows the space. Likewise the mirror's per-space detail fetch
+(``GET /gfs/spaces/{id}``) only goes to a GFS whose whole directory lists the
+space: probing the others would disclose the interest (and our address).
 
 Real ``GfsConnectionService`` (real signing, real request bodies) over a
 recording HTTP session, real SQLite repos. Both assertions fail against the
@@ -67,8 +69,9 @@ class _Resp:
 
 
 class _Session:
-    """Records every request. The listing GFS's directory lists only the
-    legacy space; the other GFS lists nothing of ours."""
+    """Records every request. The listing GFS's directory lists the legacy
+    space and ``sp-new`` (with a seatable detail body); the other GFS lists
+    nothing of ours."""
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, dict]] = []
@@ -76,7 +79,21 @@ class _Session:
     def get(self, url, **_kw):
         self.requests.append(("GET", url, {}))
         if url == f"{LISTING_GFS}/gfs/spaces":
-            return _Resp(200, {"spaces": [{"space_id": "sp-legacy"}]})
+            return _Resp(
+                200, {"spaces": [{"space_id": "sp-legacy"}, {"space_id": "sp-new"}]}
+            )
+        if url == f"{LISTING_GFS}/gfs/spaces/sp-new":
+            return _Resp(
+                200,
+                {
+                    "space_id": "sp-new",
+                    "owning_instance": "remote-host",
+                    "name": "New",
+                    "status": "active",
+                    "identity_public_key": "aa" * 32,
+                    "allow_subscribers": True,
+                },
+            )
         if url == f"{OTHER_GFS}/gfs/spaces":
             return _Resp(200, {"spaces": [{"space_id": "sp-unrelated"}]})
         return _Resp(404)
@@ -180,7 +197,7 @@ def _leaks_to_other(session: _Session, iid: str) -> list[tuple[str, str, dict]]:
         if url.startswith(OTHER_GFS)
         and any(
             marker in url or marker in json.dumps(body)
-            for marker in (iid, "sp-mirrored", "sp-legacy")
+            for marker in (iid, "sp-mirrored", "sp-legacy", "sp-new")
         )
     ]
 
@@ -205,3 +222,17 @@ async def test_reconnect_never_subscribes_on_a_gfs_that_did_not_seat_it(househol
     assert not any(m == "POST" for m, _url, _b in session.requests)
     # The seating GFS still gets its seats back.
     assert await mirror.resubscribe_all("listing") == 2
+
+
+async def test_mirror_detail_fetch_never_probes_a_gfs_that_does_not_list_it(
+    household,
+):
+    mirror, session, iid = household
+    # Listed nowhere: only whole-directory reads, no per-space request at all.
+    assert await mirror.ensure_mirror("sp-nowhere") is None
+    assert not any("sp-nowhere" in url for _m, url, _b in session.requests)
+    # Listed on one GFS: the detail comes from there, never from the other.
+    got = await mirror.ensure_mirror("sp-new")
+    assert got is not None and got[1] == "listing"
+    assert _leaks_to_other(session, iid) == []
+    assert ("GET", f"{LISTING_GFS}/gfs/spaces/sp-new", {}) in session.requests

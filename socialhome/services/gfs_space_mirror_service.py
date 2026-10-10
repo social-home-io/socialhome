@@ -117,6 +117,13 @@ _PIN_HEX_LEN = 64
 #: than the 15 s used for the interactive GFS calls.
 _MIRROR_FETCH_TIMEOUT_S = 5.0
 
+#: How long a GFS's whole directory (``GET /gfs/spaces``) is reused before
+#: it is read again. It gates every per-space request (mirror detail fetch,
+#: (un)subscribe of a legacy mirror), and ``ensure_mirror`` is reachable by
+#: any local user with arbitrary ids — without the reuse each such request
+#: would re-download the (up to 32 MB) directory from every paired GFS.
+_DIRECTORY_TTL_S = 30.0
+
 #: Minimum seconds between two lazy pin refreshes of one space (v_44). A
 #: relayed frame that fails the authority check triggers a refresh; a burst
 #: of them (or a hostile relay replaying old-key frames) must not turn into
@@ -171,6 +178,7 @@ class GfsSpaceMirrorService:
         "_http_client",
         "_own_instance_id",
         "_last_pin_refresh",
+        "_directories",
     )
 
     def __init__(
@@ -193,6 +201,9 @@ class GfsSpaceMirrorService:
         self._http_client: aiohttp.ClientSession | None = None
         self._own_instance_id = ""
         self._last_pin_refresh: dict[str, float] = {}
+        # conn id → (listed space ids, monotonic fetch time); one entry per
+        # paired GFS, failures are never cached.
+        self._directories: dict[str, tuple[frozenset[str], float]] = {}
 
     def attach_identity(self, *, own_instance_id: str) -> None:
         """Our instance id — an owner never re-pins its own space (v_44)."""
@@ -209,7 +220,9 @@ class GfsSpaceMirrorService:
 
     async def ensure_mirror(self, space_id: str) -> tuple[Space, str] | None:
         """Mirror *space_id*'s metadata from the first paired GFS that serves
-        it, returning ``(seated_space, gfs_connection_id)``.
+        it, returning ``(seated_space, gfs_connection_id)``. A GFS is asked
+        for the space's detail only when its whole directory lists the id
+        (:meth:`_fetch_directory`) — never a per-space probe of the others.
 
         Returns ``None`` when no active GFS knows the space, when every
         candidate listing fails validation (fail-closed — see the module
@@ -230,6 +243,13 @@ class GfsSpaceMirrorService:
             )
             return None
         for conn in await self._gfs_conn_repo.list_active():
+            # The detail GET names the space: sent to a GFS that doesn't list
+            # it, it would tell that operator (and give it our address) which
+            # space this household is after. Ask only a server whose WHOLE
+            # directory lists the id; an unreadable directory proves nothing.
+            listed_ids = await self._fetch_directory(conn)
+            if listed_ids is None or space_id not in listed_ids:
+                continue
             url = f"{conn.inbox_url.rstrip('/')}/gfs/spaces/{space_id}"
             try:
                 async with client.get(
@@ -626,12 +646,11 @@ class GfsSpaceMirrorService:
         if conn is None:
             return 0
         # Fetched at most once per reconnect, and only for a legacy mirror.
-        directory: dict[str, frozenset[str] | None] = {}
         batch: list[str] = []
         for space_id in await self._spaces.list_subscribed_space_ids():
             if not await self.was_gfs_listed(space_id):
                 continue
-            if await self._seated_on(space_id, conn, directory):
+            if await self._seated_on(space_id, conn):
                 batch.append(space_id)
         batch = list(dict.fromkeys([*batch, *also]))
         secrets.SystemRandom().shuffle(batch)
@@ -675,9 +694,8 @@ class GfsSpaceMirrorService:
         idempotent). A :class:`GfsConnectionError` is logged and swallowed —
         a GFS that is down must never block a local unsubscribe.
         """
-        directory: dict[str, frozenset[str] | None] = {}
         for conn in await self._gfs_conn_repo.list_active():
-            if not await self._seated_on(space_id, conn, directory):
+            if not await self._seated_on(space_id, conn):
                 continue
             try:
                 await self._gfs.unsubscribe_from_gfs_space(space_id, conn.id)
@@ -689,12 +707,7 @@ class GfsSpaceMirrorService:
                     exc,
                 )
 
-    async def _seated_on(
-        self,
-        space_id: str,
-        conn: GfsConnection,
-        directory: dict[str, frozenset[str] | None],
-    ) -> bool:
+    async def _seated_on(self, space_id: str, conn: GfsConnection) -> bool:
         """Whether *conn* is a GFS that may hear about our subscription to
         *space_id*.
 
@@ -707,21 +720,23 @@ class GfsSpaceMirrorService:
         *conn*'s WHOLE public directory (``GET /gfs/spaces`` — never a
         space-specific probe, which would itself disclose the interest): a
         server that lists the space already knows it, and is where the
-        subscribe went. *directory* memoises that fetch per connection for
-        the caller's loop. Fail closed: an unreadable directory proves
-        nothing, so the server is not contacted.
+        subscribe went. Fail closed: an unreadable directory proves nothing,
+        so the server is not contacted.
         """
         mirror_gfs, _ = await self._spaces.get_mirror_provenance(space_id)
         if mirror_gfs is not None:
             return mirror_gfs == conn.id
-        if conn.id not in directory:
-            directory[conn.id] = await self._fetch_directory(conn)
-        listed = directory[conn.id]
+        listed = await self._fetch_directory(conn)
         return listed is not None and space_id in listed
 
     async def _fetch_directory(self, conn: GfsConnection) -> frozenset[str] | None:
         """The space ids in *conn*'s whole directory, or ``None`` when it
-        can't be read (no session, transport error, non-200, bad body)."""
+        can't be read (no session, transport error, non-200, bad body).
+        Reused for :data:`_DIRECTORY_TTL_S`; a failure is not cached."""
+        cached = self._directories.get(conn.id)
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < _DIRECTORY_TTL_S:
+            return cached[0]
         client = self._http_client
         if client is None:
             return None
@@ -748,8 +763,10 @@ class GfsSpaceMirrorService:
         spaces = body.get("spaces") if isinstance(body, dict) else None
         if not isinstance(spaces, list):
             return None
-        return frozenset(
+        listed = frozenset(
             sp["space_id"]
             for sp in spaces
             if isinstance(sp, dict) and isinstance(sp.get("space_id"), str)
         )
+        self._directories[conn.id] = (listed, now)
+        return listed

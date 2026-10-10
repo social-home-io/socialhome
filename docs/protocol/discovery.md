@@ -440,8 +440,9 @@ frames against, and `SpaceService.subscribe_to_space` refuses an unknown
 space id.
 
 `services/gfs_space_mirror_service.py` closes that gap. On a subscribe to an
-id with no local row it walks the active GFS connections, fetches
-`GET {gfs}/gfs/spaces/{space_id}`, and seats a remote **stub** row via the
+id with no local row it walks the active GFS connections and, from the first
+one whose **whole** directory (`GET {gfs}/gfs/spaces`) lists the id, fetches
+`GET {gfs}/gfs/spaces/{space_id}` and seats a remote **stub** row via the
 shared `stub_space_from_metadata` helper (`space_type=global`, with the
 owner's real `join_mode` and `features.allow_subscribers` copied off the
 directory body — a mirror is not locally joinable; joining still goes through
@@ -449,6 +450,13 @@ directory body — a mirror is not locally joinable; joining still goes through
 (`normalize_join_mode`; `is True` for the flag) so an older or hostile GFS
 cannot widen access through a missing field or Python truthiness.
 
+- **No per-space probe of a server that doesn't list the space.** The detail
+  GET names the space, so sending it to every paired GFS would tell each
+  operator (and hand it the household's address) which space this household
+  is after. The directory read is non-specific — the same request the
+  discovery poll makes — and is reused for 30 s, so arbitrary ids typed into
+  the subscribe endpoint don't re-download it from every server. An
+  unreadable directory proves no listing: that server gets no detail GET.
 - **Fail-closed validation.** The listing must be `status: "active"` and must
   carry a well-formed 32-byte-hex `identity_public_key`; anything else is
   skipped rather than mirrored. A stub with an unverifiable pin would accept

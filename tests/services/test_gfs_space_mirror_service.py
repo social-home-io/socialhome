@@ -78,7 +78,13 @@ class _StubResp:
 
 
 class _StubSession:
-    """Per-URL GET responses; anything unmapped 404s."""
+    """Per-URL GET responses; anything unmapped 404s.
+
+    An unmapped whole directory (``{base}/gfs/spaces``) answers with the ids
+    of every detail URL mapped under that base with a non-404 status — a GFS
+    that serves a space's detail lists it. Map the directory explicitly to
+    model a server whose directory says otherwise.
+    """
 
     __slots__ = ("responses", "calls", "raise_for")
 
@@ -96,10 +102,21 @@ class _StubSession:
         self.calls.append(url)
         if self.raise_for is not None and self.raise_for in url:
             raise OSError("boom")
-        entry = self.responses.get(url, (404, {}))
+        entry = self.responses.get(url) or self._derived_directory(url)
         status, body = entry[0], entry[1]
         raw = entry[2] if len(entry) > 2 else None
         return _StubResp(status, body if isinstance(body, dict) else {}, raw=raw)
+
+    def _derived_directory(self, url: str) -> tuple:
+        if not url.endswith("/gfs/spaces"):
+            return (404, {})
+        prefix = f"{url}/"
+        listed = [
+            {"space_id": u[len(prefix) :]}
+            for u, entry in self.responses.items()
+            if u.startswith(prefix) and entry[0] != 404
+        ]
+        return (200, {"spaces": listed})
 
 
 class _StubGfs:
@@ -281,10 +298,42 @@ async def test_ensure_mirror_falls_through_to_second_connection(env):
     got = await _mirror(env, session).ensure_mirror("sp-1")
     assert got is not None
     assert got[1] == "gfs-2"
+    # gfs-1's directory doesn't list sp-1: no per-space probe goes there.
     assert session.calls == [
-        "https://a.test/gfs/spaces/sp-1",
+        "https://a.test/gfs/spaces",
+        "https://b.test/gfs/spaces",
         "https://b.test/gfs/spaces/sp-1",
     ]
+
+
+@pytest.mark.security
+async def test_ensure_mirror_never_probes_a_gfs_whose_directory_omits_it(env):
+    """The per-space detail GET tells the server which space this household
+    cares about — it goes only to a GFS whose WHOLE directory lists it."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    session = _StubSession(
+        {
+            "https://a.test/gfs/spaces": _directory("sp-other"),
+            # Would seat fine — but the directory says it isn't listed here.
+            "https://a.test/gfs/spaces/sp-1": (200, _gfs_space_body()),
+        }
+    )
+    assert await _mirror(env, session).ensure_mirror("sp-1") is None
+    assert session.calls == ["https://a.test/gfs/spaces"]
+    assert await env.spaces.get("sp-1") is None
+
+
+async def test_ensure_mirror_unreadable_directory_sends_no_probe(env):
+    """Fail closed: a directory we can't read proves no listing."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    session = _StubSession(
+        {
+            "https://a.test/gfs/spaces": (500, {}),
+            "https://a.test/gfs/spaces/sp-1": (200, _gfs_space_body()),
+        }
+    )
+    assert await _mirror(env, session).ensure_mirror("sp-1") is None
+    assert session.calls == ["https://a.test/gfs/spaces"]
 
 
 async def test_ensure_mirror_survives_transport_error(env):
@@ -1012,3 +1061,30 @@ def test_refresh_bookkeeping_stays_bounded(env):
     for i in range(mod._PIN_REFRESH_MAX_TRACKED + 10):
         mirror._remember_refresh(f"sp-{i}", 0.0)
     assert len(mirror._last_pin_refresh) <= mod._PIN_REFRESH_MAX_TRACKED
+
+
+# ─── directory reuse (gates every per-space request) ─────────────────────
+
+
+async def test_directory_is_reused_within_the_ttl_and_refetched_after(env, monkeypatch):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    session = _StubSession({"https://a.test/gfs/spaces": _directory("sp-x")})
+    svc = _mirror(env, session)
+    clock = [1000.0]
+    monkeypatch.setattr(mirror_mod.time, "monotonic", lambda: clock[0])
+
+    assert await svc.ensure_mirror("sp-1") is None
+    assert await svc.ensure_mirror("sp-2") is None
+    assert session.calls == ["https://a.test/gfs/spaces"]
+    clock[0] += mirror_mod._DIRECTORY_TTL_S
+    assert await svc.ensure_mirror("sp-1") is None
+    assert session.calls == ["https://a.test/gfs/spaces"] * 2
+
+
+async def test_unreadable_directory_is_not_cached(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    session = _StubSession({"https://a.test/gfs/spaces": (503, {})})
+    svc = _mirror(env, session)
+    assert await svc.ensure_mirror("sp-1") is None
+    assert await svc.ensure_mirror("sp-1") is None
+    assert session.calls == ["https://a.test/gfs/spaces"] * 2
