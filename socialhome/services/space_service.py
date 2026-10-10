@@ -7268,6 +7268,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if await self._spaces.list_members(space_id):
             # Another local user still subscribes — keep the mirror.
             return
+        if await self._gfs_mirror.seat_in_grace(space_id):
+            # A subscribe is in flight: its GFS seat was just taken and its
+            # member row is not written yet. Tearing down now would pull the
+            # seat (and the row) out from under it.
+            log.debug(
+                "space %s: a subscribe is in flight — keeping the mirror", space_id
+            )
+            return
         proven_mirror = space.space_type is SpaceType.GLOBAL and (
             await self._gfs_mirror.was_gfs_listed(space_id)
         )

@@ -2500,6 +2500,9 @@ async def test_subscribe_maps_gfs_outage_to_502(client):
         async def subscribe_to_gfs(self, space_id: str, gfs_id: str) -> None:
             raise GfsConnectionError("global server unreachable")
 
+        async def seat_in_grace(self, space_id):
+            return False
+
         async def unsubscribe(self, space_id: str) -> None:
             return None
 

@@ -66,6 +66,7 @@ from ....domain.events import (
     GalleryItemDeleted,
     PageDeleted,
     PostDeleted,
+    RemoteSpaceMemberBanned,
     SpacePostSynced,
     TaskDeleted,
     TaskListDeleted,
@@ -1004,12 +1005,23 @@ class SpaceSyncReceiver:
                 banned_by = str(r.get("banned_by") or "")
                 if not user_id or not banned_by:
                     continue
+                # ``ban_member`` drops a seated member's row: tell the bus,
+                # exactly like the host's live ban (``_on_banned``), so the
+                # seat's dependents (space chat, GFS subscriber seats)
+                # follow. A ban of someone not seated here is no change.
+                seated = await self._space_repo.get_member(space_id, user_id)
                 await self._space_repo.ban_member(
                     space_id=space_id,
                     user_id=user_id,
                     banned_by=banned_by,
                     reason=r.get("reason"),
                 )
+                if seated is not None:
+                    await self._bus.publish(
+                        RemoteSpaceMemberBanned(
+                            space_id=space_id, user_id=user_id, banned_by=banned_by
+                        )
+                    )
         elif resource == "posts":
             for r in records:
                 post = _post_from_record(r)

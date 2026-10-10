@@ -457,8 +457,11 @@ cannot widen access through a missing field or Python truthiness.
   discovery poll makes — and comes from one cache shared with member publish
   (`services/gfs_directory.py`, over the cookie-less publish session): the
   servers' directories are read concurrently, each kept 10 min (an empty one
-  1 min, an unreadable one 5 s), concurrent misses share one download, and a
-  directory over 50 000 ids is refused (logged) rather than truncated. A
+  1 min, an unreadable one 5 s), concurrent misses share one download (run
+  as its own task, so a cancelled caller never cancels the others), and a
+  directory over 500 000 ids or 256 MiB is refused (logged) — never
+  truncated, and never answered with per-space probes. Only the ids and
+  their publish mode are kept. A
   cached copy lacking the id is re-read once it is 5 s old, so a space
   published a moment ago is followable at once. An unreadable directory
   proves no listing: that server gets no detail GET.
@@ -495,11 +498,12 @@ cannot widen access through a missing field or Python truthiness.
   first (TOFU) pin; the seq bound stops it from rolling the pin back, and no
   other connection server can move it. A disconnect + re-pair of that same
   server mints a new local connection id; on the next reconnect the anchor
-  moves to it only when the new pairing has the same `gfs_instance_id` AND
-  pins the same server public key as the connection the seat was taken over
-  (both kept on the `gfs_space_seats` row, since the old connection row is
-  deleted). A re-pair under a different key inherits nothing — that mirror
-  keeps its old anchor and no longer heals. A household with a real seat, or a
+  moves to it only when the new pairing has the same `gfs_instance_id`,
+  pins the same server public key AND answers at the same URL as the
+  connection the seat was taken over (all kept on the `gfs_space_seats` row,
+  since the old connection row is deleted). A re-pair under a different key
+  or URL inherits nothing — that mirror keeps its old anchor and no longer
+  heals. A household with a real seat, or a
   private stub (a pending invite), never takes a pin from a GFS — it re-pins
   from the owner's own cert, delivered over federation (`spaces.md`). A
   mirror seated before v_44 has no recorded provenance and does not heal
@@ -542,26 +546,40 @@ cannot widen access through a missing field or Python truthiness.
   the reconnect self-heal's, a member's auto-subscribe — therefore records
   the seat in `gfs_space_seats` (0092) under the server's own
   `gfs_instance_id`, which survives a disconnect + re-pair (the local
-  connection id does not). Teardown and re-subscribe reach exactly the
-  recorded servers:
-  - when the **last local user** of a space leaves (follower unsubscribe,
-    member leave or removal — `SpaceMemberLeft`), every recorded seat is
-    released; a server that is not connected right now keeps its row until
-    it reconnects;
+  connection id does not), bound to the server key and URL it was taken
+  over. A connection is a seat's server only when id, key AND (normalized)
+  URL all match: pairing reads id and key off an unauthenticated
+  `/gfs/info`, so an impostor can claim both but cannot answer at the real
+  server's address. (A proof of possession — the server signing a fresh
+  household nonce — would close the remaining gap of an attacker who also
+  controls that address; no GFS endpoint offers one today.) Teardown and
+  re-subscribe reach exactly the matching servers:
+  - when **no local user** is seated in a space any more (follower
+    unsubscribe, member leave or removal, a local / federated / synced ban —
+    `SpaceMemberLeft`, `RemoteSpaceMemberRemoved`, `RemoteSpaceMemberBanned`,
+    the `member_banned` config event) or the space is dissolved, every
+    recorded seat is released — in the background, never inside the leave;
+    a server not connected right now keeps its row until it reconnects;
   - each GFS-WS **reconnect** re-takes that server's recorded seats still
-    wanted and releases those no local user wants any more (a leave missed
-    while it was down);
-  - a pre-v44 mirror (no provenance, no recorded seat) falls back to the
-    servers whose **whole** directory lists the space, and contacts none
-    when it can't be read;
-  - **reactive teardown**: a seat nothing local records — such a mirror
-    whose space was withdrawn from the directory (the GFS keeps its relay and
-    subscribers), a connection re-paired away before 0092 — shows itself when
-    that server relays the space. A relay frame for a space no local user is
-    seated in proves that server seats us, so it — and only it — gets an
-    unsubscribe, at most once per 10 min per (server, space). A seat taken in
-    the last 2 min is spared (the local member row is written after the
-    subscribe succeeds).
+    wanted and releases those nobody wants any more (re-checked right before
+    each release);
+  - an explicit **unpair** sends a best-effort unsubscribe for every seat
+    that server holds and drops those rows either way;
+  - a seat taken by a first subscribe in the last 2 min is spared by every
+    teardown (its member row is written after the subscribe succeeds), and
+    the mirror purge waits too;
+  - a pre-v44 mirror with no recorded seat on ANY server falls back to the
+    servers whose **whole** directory lists the space (its first successful
+    re-subscribe records the seat), and contacts none when the directory
+    can't be read;
+  - **reactive teardown**: a relay frame (one its consumer accepted) from a
+    server holding a recorded seat of ours that no local user wants triggers
+    an unsubscribe there, in the background, at most once per 10 min per
+    (server, space). A frame for a space THIS server holds no recorded seat
+    of ours in does nothing, whatever other servers hold — so made-up frames
+    can't ask "do you follow X". A pre-v44 seat on a server whose directory
+    no longer lists the space (withdrawn before the upgrade) is therefore
+    not knowable and stays until that GFS drops it.
 
 ### `allow_subscribers: false` — listed, never relayed
 

@@ -2486,8 +2486,11 @@ def create_app(config: Config | None = None) -> web.Application:
         directories=gfs_directories,
     )
     space_service.attach_gfs_space_mirror(gfs_space_mirror)
-    # A space's seats go when its last local member leaves.
+    # A space's seats go when its last local member leaves (or is banned).
     gfs_space_mirror.wire(bus)
+    # An explicit unpair drops that server's seats (best-effort unsubscribe
+    # first) — never left behind for a later impostor to have replayed.
+    gfs_connection_service.attach_before_disconnect(gfs_space_mirror.forget_server)
 
     # ── Public space discovery (GFS poll) ────────────────────────────────
     public_space_discovery = PublicSpaceDiscoveryService(
@@ -4457,6 +4460,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_ws_supervisor.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()
+        # Background seat releases ride the HTTP session too.
+        await gfs_space_mirror.stop()
         if gfs_member_publish is not None:
             await gfs_member_publish.stop()
         if gfs_channels is not None:

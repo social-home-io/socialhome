@@ -277,6 +277,7 @@ class GfsConnectionService:
         "_publish_retry",
         "_publish_client",
         "_on_repinned",
+        "_before_disconnect",
     )
 
     def __init__(
@@ -361,6 +362,16 @@ class GfsConnectionService:
         #: v_49 — called after a publish that carried the owner's authority
         #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
         self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
+        self._before_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = (
+            None
+        )
+
+    def attach_before_disconnect(
+        self, hook: Callable[[GfsConnection], Awaitable[object]]
+    ) -> None:
+        """Wire the seat cleanup run on an explicit unpair, while the
+        connection row (needed to reach the server) still exists."""
+        self._before_disconnect = hook
 
     def attach_on_repinned(self, hook: Callable[[str, str], Awaitable[object]]) -> None:
         """Wire the v_49 epoch re-announce run after a re-pinning publish."""
@@ -1187,6 +1198,12 @@ class GfsConnectionService:
         conn = await self._repo.get(gfs_id)
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+        if self._before_disconnect is not None:
+            try:
+                await self._before_disconnect(conn)
+            except Exception:
+                # Best-effort: an unreachable server never blocks the unpair.
+                log.exception("gfs: pre-disconnect cleanup failed for %s", gfs_id)
         await self._repo.delete(gfs_id)
 
     async def list_connections(self) -> list[GfsConnection]:

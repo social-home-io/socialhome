@@ -20,6 +20,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
+from socialhome.domain.gfs_space_seat import GfsSpaceSeat
 from socialhome.domain.public_space import PublicSpaceListing
 from socialhome.domain.space import (
     JoinMode,
@@ -189,10 +190,13 @@ async def household(tmp_dir):
             )
             # What ``take_seat`` recorded when the follower subscribed.
             await seats.record(
-                space_id,
-                f"inst-{seated_by}",
-                gfs_connection_id=seated_by,
-                gfs_public_key="pk",
+                GfsSpaceSeat(
+                    space_id=space_id,
+                    gfs_instance_id=f"inst-{seated_by}",
+                    gfs_connection_id=seated_by,
+                    gfs_public_key="pk",
+                    gfs_inbox_url=LISTING_GFS,
+                )
             )
     session = _Session()
     gfs = GfsConnectionService(conns, http_client=session)

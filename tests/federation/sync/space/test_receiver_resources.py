@@ -14,7 +14,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from socialhome.domain.events import TimetableSaved
+from socialhome.domain.events import RemoteSpaceMemberBanned, TimetableSaved
 from socialhome.domain.task import Task, TaskPriority, TaskStatus
 from socialhome.domain.timetable import Timetable, to_wire_dict
 from socialhome.federation.encoder import FederationEncoder
@@ -282,6 +282,9 @@ class _SpaceRepoStub:
     ):
         self._c.bans.append((space_id, user_id, banned_by, reason))
 
+    async def get_member(self, space_id, user_id):
+        return SimpleNamespace(user_id=user_id) if user_id == "u-seated" else None
+
 
 @pytest.fixture
 def bus():
@@ -371,6 +374,28 @@ async def test_bans(setup):
         ],
     )
     assert c.bans == [("sp-1", "u-x", "admin-a", "spam")]
+
+
+async def test_a_synced_ban_of_a_seated_member_is_published(setup, bus):
+    """Like the live ban: the seat's dependents (space chat, GFS seats)
+    hear of it. A ban of someone not seated here publishes nothing."""
+    r, c, kp = setup
+    got: list = []
+
+    async def _rec(event):
+        got.append((event.space_id, event.user_id, event.banned_by))
+
+    bus.subscribe(RemoteSpaceMemberBanned, _rec)
+    await _send(
+        r,
+        kp,
+        "bans",
+        [
+            {"user_id": "u-seated", "banned_by": "admin-a"},
+            {"user_id": "u-x", "banned_by": "admin-a"},
+        ],
+    )
+    assert got == [("sp-1", "u-seated", "admin-a")]
 
 
 async def test_posts(setup):

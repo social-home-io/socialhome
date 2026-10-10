@@ -195,7 +195,45 @@ async def test_a_failing_shared_fetch_raises_to_every_waiter(clock, monkeypatch)
     s.gate.set()
     results = await asyncio.gather(*tasks, return_exceptions=True)
     assert all(isinstance(r, RuntimeError) for r in results)
+    await asyncio.sleep(0)
     assert cache._inflight == {}
+
+
+async def test_cancelling_the_first_caller_never_cancels_the_others(clock):
+    """L7: the download is its own task; a cancelled caller is the only one
+    that sees ``CancelledError``."""
+    s = _Session(body=_dir("a"))
+    s.gate = asyncio.Event()
+    cache = GfsDirectoryCache(lambda: s)
+    first = asyncio.create_task(cache.lists(_conn(), "a"))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(cache.lists(_conn(), "a"))
+    await asyncio.sleep(0)
+    first.cancel()
+    await asyncio.sleep(0)
+    s.gate.set()
+    assert await second is True
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert len(s.calls) == 1
+    # The result was stored: no second download.
+    assert await cache.lists(_conn(), "a")
+    assert len(s.calls) == 1
+
+
+async def test_a_fetch_every_caller_abandoned_still_completes_quietly(clock):
+    s = _Session(body=_dir("a"))
+    s.gate = asyncio.Event()
+    cache = GfsDirectoryCache(lambda: s)
+    only = asyncio.create_task(cache.directory(_conn()))
+    await asyncio.sleep(0)
+    only.cancel()
+    s.gate.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert cache._inflight == {}
+    assert await cache.directory(_conn()) == {"a": "trusted"}
+    assert len(s.calls) == 1
 
 
 async def test_stale_entries_of_other_connections_are_pruned(clock):

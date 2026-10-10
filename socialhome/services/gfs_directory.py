@@ -16,6 +16,7 @@ directory is downloaded once per TTL rather than once per caller.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from collections.abc import Callable
@@ -24,7 +25,7 @@ import aiohttp
 
 from ..domain.federation import GfsConnection
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODE_STRICT
-from .gfs_http import MAX_GFS_DIRECTORY_BODY_BYTES, read_json_capped
+from .gfs_http import read_json_capped
 
 log = logging.getLogger(__name__)
 
@@ -43,10 +44,16 @@ FAILURE_TTL_S: float = 5.0
 #: ago must not stay unfollowable for a whole TTL.
 MISS_REFRESH_S: float = 5.0
 
-#: Most space ids accepted from one directory. Over it the directory is
-#: refused (fail closed, logged) rather than truncated: a silently cut list
-#: would make every space past the cut unfollowable with no trace.
-MAX_DIRECTORY_IDS: int = 50_000
+#: Most space ids accepted from one directory, and the largest directory
+#: body read. Over either the directory is refused (fail closed, logged) —
+#: never truncated, which would make every space past the cut silently
+#: unfollowable, and never answered by falling back to per-space probes,
+#: which is the leak this cache exists to prevent. Sized with headroom far
+#: past any realistic connection server (member publish read the directory
+#: uncapped before; ~500 bytes per listing puts 500 000 ids near 256 MiB).
+#: Only the ids (and their publish mode) are kept after parsing.
+MAX_DIRECTORY_IDS: int = 500_000
+MAX_DIRECTORY_BODY_BYTES: int = 256 * 1024 * 1024
 
 #: The directory is a bigger body than a single listing; still bounded.
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
@@ -74,7 +81,7 @@ class GfsDirectoryCache:
         # attached after construction (``app._on_startup``).
         self._client = client
         self._entries: dict[str, tuple[dict[str, str] | None, float]] = {}
-        self._inflight: dict[str, asyncio.Future[dict[str, str] | None]] = {}
+        self._inflight: dict[str, asyncio.Task[dict[str, str] | None]] = {}
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -124,25 +131,31 @@ class GfsDirectoryCache:
         return _now() - at < ttl
 
     async def _fetch(self, conn: GfsConnection) -> dict[str, str] | None:
-        pending = self._inflight.get(conn.id)
-        if pending is not None:
-            return await asyncio.shield(pending)
-        fut: asyncio.Future[dict[str, str] | None] = (
-            asyncio.get_running_loop().create_future()
-        )
-        self._inflight[conn.id] = fut
-        try:
-            listed = await self._read(conn)
-            self._store(conn.id, listed)
-            fut.set_result(listed)
-            return listed
-        except BaseException as exc:
-            fut.set_exception(exc)
-            # Retrieved here so an unawaited future never logs the error.
-            fut.exception()
-            raise
-        finally:
-            del self._inflight[conn.id]
+        """One download per connection at a time, run as its own task:
+        every caller — the first one too — awaits it through
+        :func:`asyncio.shield`, so a caller that is cancelled is the only
+        one that sees ``CancelledError``; the others still get the result."""
+        task = self._inflight.get(conn.id)
+        if task is None:
+            task = asyncio.create_task(
+                self._read_and_store(conn), name=f"gfs-directory-{conn.id}"
+            )
+            self._inflight[conn.id] = task
+            task.add_done_callback(functools.partial(self._fetched, conn.id))
+        return await asyncio.shield(task)
+
+    def _fetched(self, conn_id: str, task: asyncio.Task[dict[str, str] | None]) -> None:
+        if self._inflight.get(conn_id) is task:
+            del self._inflight[conn_id]
+        # Retrieved so a fetch every caller abandoned never logs as an
+        # unretrieved task exception.
+        if not task.cancelled():
+            task.exception()
+
+    async def _read_and_store(self, conn: GfsConnection) -> dict[str, str] | None:
+        listed = await self._read(conn)
+        self._store(conn.id, listed)
+        return listed
 
     def _store(self, conn_id: str, listed: dict[str, str] | None) -> None:
         now = _now()
@@ -164,7 +177,7 @@ class GfsDirectoryCache:
                     log.warning("gfs_directory: %s returned HTTP %d", url, resp.status)
                     return None
                 body = await read_json_capped(
-                    resp, url=url, limit=MAX_GFS_DIRECTORY_BODY_BYTES
+                    resp, url=url, limit=MAX_DIRECTORY_BODY_BYTES
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             log.warning("gfs_directory: fetch from %s failed: %s", url, exc)

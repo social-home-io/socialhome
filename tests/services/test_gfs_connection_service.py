@@ -3981,3 +3981,22 @@ async def test_unpublish_from_listed_only_contacts_listing_gfs(env):
     assert len(session.calls) == 1
     assert "gfs.example.com" in session.calls[0][1]
     assert all("other.example.com" not in c[1] for c in session.calls)
+
+
+async def test_disconnect_runs_the_seat_cleanup_first_and_never_fails_on_it(env):
+    """L12: the pre-disconnect hook sees the connection row (it needs it to
+    reach the server); a failing hook never blocks the unpair."""
+    _, conn_repo = env
+    svc = GfsConnectionService(conn_repo, http_client=_StubSession())  # type: ignore[arg-type]
+    await conn_repo.save(_make_conn("gfs-1"))
+    seen: list[str] = []
+
+    async def _hook(conn):
+        seen.append(conn.id)
+        assert await conn_repo.get(conn.id) is not None
+        raise RuntimeError("server down")
+
+    svc.attach_before_disconnect(_hook)
+    await svc.disconnect("gfs-1")
+    assert seen == ["gfs-1"]
+    assert await conn_repo.get("gfs-1") is None

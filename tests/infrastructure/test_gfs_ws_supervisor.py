@@ -564,3 +564,14 @@ async def test_a_failing_observer_never_costs_the_frame(caplog):
     await _relay_for(consume, _boom, "gfs-1")({"space_id": "sp"})
     consume.assert_awaited_once()
     assert "relay observer failed" in caplog.text
+
+
+async def test_a_frame_the_consumer_rejected_never_reaches_the_observer():
+    seen = AsyncMock()
+
+    async def _reject(frame):
+        raise ValueError("bad frame")
+
+    with pytest.raises(ValueError):
+        await _relay_for(_reject, seen, "gfs-1")({"space_id": "sp"})
+    seen.assert_not_awaited()

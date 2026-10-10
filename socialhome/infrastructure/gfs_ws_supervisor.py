@@ -315,21 +315,20 @@ def _relay_for(
     on_seen: Callable[..., Awaitable[None]] | None,
     gfs_id: str,
 ) -> Callable[[dict], Awaitable[None]]:
-    """The client's ``on_relay``: the shared consumer, then — fail-soft,
-    so a bug there never costs the frame — the per-server observer."""
+    """The client's ``on_relay``: the shared consumer, then — only when it
+    returned normally, and fail-soft so a bug there never costs the frame —
+    the per-server observer."""
     if on_seen is None:
         return on_relay
 
     async def _wrapped(frame: dict) -> None:
+        await on_relay(frame)
         try:
-            await on_relay(frame)
-        finally:
-            try:
-                await on_seen(frame, gfs_id=gfs_id)
-            except Exception:
-                log.exception(
-                    "gfs.ws.supervisor: relay observer failed for gfs_id=%s", gfs_id
-                )
+            await on_seen(frame, gfs_id=gfs_id)
+        except Exception:
+            log.exception(
+                "gfs.ws.supervisor: relay observer failed for gfs_id=%s", gfs_id
+            )
 
     return _wrapped
 

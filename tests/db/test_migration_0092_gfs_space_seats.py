@@ -84,10 +84,13 @@ def test_backfills_resolvable_follower_mirrors_only(conn):
     _member(conn, "sp-remote", "far-user", "subscriber", local=False)
     _apply_through(conn, _VERSION)
     rows = conn.execute(
-        "SELECT space_id, gfs_instance_id, gfs_connection_id, gfs_public_key"
+        "SELECT space_id, gfs_instance_id, gfs_connection_id, gfs_public_key,"
+        " gfs_inbox_url"
         " FROM gfs_space_seats ORDER BY space_id"
     ).fetchall()
-    assert [tuple(r) for r in rows] == [("sp-follow", "gfs-a", "conn-1", "pk")]
+    assert [tuple(r) for r in rows] == [
+        ("sp-follow", "gfs-a", "conn-1", "pk", "https://g")
+    ]
 
 
 def test_one_row_per_space_and_server(conn):

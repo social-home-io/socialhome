@@ -15,15 +15,16 @@
 -- ``spaces``) until it is torn down on the server — a cascade would forget
 -- the one fact that lets the household send that unsubscribe.
 --
--- ``gfs_connection_id`` / ``gfs_public_key`` (nullable) remember the local
--- connection the seat was taken over and the server key pinned on it then.
--- They carry the v_44 pin-heal anchor (``spaces.mirror_gfs_id``) across a
--- re-pair: a mirror whose ``mirror_gfs_id`` names this seat's
--- ``gfs_connection_id`` is moved to the re-paired connection ONLY when that
--- connection has the same ``gfs_instance_id`` AND the same pinned public key
--- — a re-pair under a different key inherits nothing (no trust widening).
--- Both are needed once the old ``gfs_connections`` row is deleted, which
--- every disconnect does.
+-- ``gfs_connection_id`` / ``gfs_public_key`` / ``gfs_inbox_url`` (nullable)
+-- bind the seat to the local connection it was taken over, the server key
+-- pinned on it and the server's URL. A connection is this seat's server
+-- only when id, key AND (normalized) URL all match: pairing learns the id
+-- and key from an unauthenticated ``/gfs/info``, so an impostor can serve
+-- both, but not answer at the real server's address. Every seat read
+-- (re-subscribe, teardown, reactive teardown) and the v_44 pin-heal anchor
+-- move (``spaces.mirror_gfs_id`` follows a re-pair only to a connection
+-- matching all three) apply that check. They are needed once the old
+-- ``gfs_connections`` row is deleted, which every disconnect does.
 --
 -- Backfill: a v_44+ mirror recorded the seating connection in
 -- ``spaces.mirror_gfs_id``; where that connection still exists and a local
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS gfs_space_seats (
     seated_at       TEXT NOT NULL DEFAULT (datetime('now')),
     gfs_connection_id TEXT,
     gfs_public_key    TEXT,
+    gfs_inbox_url     TEXT,
     PRIMARY KEY (space_id, gfs_instance_id)
 );
 
@@ -79,9 +81,9 @@ CREATE INDEX IF NOT EXISTS idx_gfs_space_seats_gfs
     ON gfs_space_seats(gfs_instance_id);
 
 INSERT OR IGNORE INTO gfs_space_seats(
-    space_id, gfs_instance_id, gfs_connection_id, gfs_public_key
+    space_id, gfs_instance_id, gfs_connection_id, gfs_public_key, gfs_inbox_url
 )
-SELECT s.id, gc.gfs_instance_id, gc.id, gc.public_key
+SELECT s.id, gc.gfs_instance_id, gc.id, gc.public_key, gc.inbox_url
   FROM spaces s
   JOIN gfs_connections gc ON gc.id = s.mirror_gfs_id
  WHERE EXISTS (

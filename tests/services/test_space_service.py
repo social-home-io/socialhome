@@ -5939,6 +5939,8 @@ class _FakeGfsMirror:
         self.ensure_calls: list[str] = []
         self.subscribes: list[tuple[str, str]] = []
         self.unsubscribes: list[str] = []
+        # ``seat_in_grace``: a subscribe of this space is in flight.
+        self.in_grace = False
 
     async def ensure_mirror(self, space_id):
         from socialhome.services.space_service import stub_space_from_metadata
@@ -5980,6 +5982,9 @@ class _FakeGfsMirror:
 
     async def was_gfs_listed(self, space_id):
         return self._gfs_listed
+
+    async def seat_in_grace(self, space_id):
+        return self.in_grace
 
     async def unsubscribe(self, space_id):
         self.unsubscribes.append(space_id)
@@ -6095,6 +6100,21 @@ async def test_unsubscribe_last_subscriber_purges_the_mirror(stack):
     assert await stack.space_repo.get("remote-sp") is None
     keys = SqliteSpaceKeyRepo(stack.db)
     assert await keys.get_latest("remote-sp") is None
+
+
+async def test_unsubscribe_keeps_mirror_while_a_subscribe_is_in_flight(stack):
+    """L5: another user's subscribe just took the GFS seat and has not
+    written its member row yet — no teardown pulls it out from under it."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    mirror.in_grace = True
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get("remote-sp") is not None
 
 
 async def test_unsubscribe_keeps_mirror_while_another_member_remains(stack):
@@ -6273,7 +6293,10 @@ async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
         )
     )
     down = _DownGfs()
-    from socialhome.repositories.gfs_space_seat_repo import SqliteGfsSpaceSeatRepo
+    from socialhome.repositories.gfs_space_seat_repo import (
+        GfsSpaceSeat,
+        SqliteGfsSpaceSeatRepo,
+    )
 
     seats = SqliteGfsSpaceSeatRepo(stack.db)
     real_mirror = GfsSpaceMirrorService(
@@ -6289,7 +6312,13 @@ async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
     await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
     # What ``take_seat`` records for the GFS subscribe the fake stood in for.
     await seats.record(
-        "remote-sp", "inst-1", gfs_connection_id="gfs-1", gfs_public_key="pk"
+        GfsSpaceSeat(
+            space_id="remote-sp",
+            gfs_instance_id="inst-1",
+            gfs_connection_id="gfs-1",
+            gfs_public_key="pk",
+            gfs_inbox_url="https://gfs.test",
+        )
     )
     stack.space_svc.attach_gfs_space_mirror(real_mirror)
 
