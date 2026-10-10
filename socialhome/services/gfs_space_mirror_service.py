@@ -1106,6 +1106,55 @@ class GfsSpaceMirrorService:
                 _address(rekeyed.inbox_url),
             )
 
+    async def on_gfs_rebound(self, gfs_id: str) -> int:
+        """The connection *gfs_id* adopted its server's new public id (the
+        GFS connection service's rebind hook): carry its seats over now,
+        so follows keep matching. Returns how many moved."""
+        conn = await self._gfs_conn_repo.get(gfs_id)
+        if conn is None:
+            return 0
+        return await self.adopt_renamed_server(conn)
+
+    async def adopt_renamed_server(self, conn: GfsConnection) -> int:
+        """Move every seat bound to *conn*'s pinned key AND address but
+        recorded under another server id onto ``conn.gfs_instance_id``.
+
+        The key is the trust anchor and the address is what an impostor
+        cannot answer at (:func:`_belongs`); the id is only the server's
+        label, which it may change (a cluster moving to one shared id). The
+        connection adopts a new id only under its pinned key, so a seat
+        bound to that key at that address is this server's whatever id it
+        was recorded under. Runs from the rebind hook, and again before every
+        reconnect reconcile, so a crash between the two steps heals. A seat
+        bound to another key or address never moves. Returns how many moved.
+        """
+        moved = 0
+        for seat in await self._seats.list_all():
+            if (
+                seat.gfs_instance_id == conn.gfs_instance_id
+                or seat.gfs_public_key is None
+                or seat.gfs_public_key != conn.public_key
+                or seat.gfs_inbox_url is None
+                or _address(seat.gfs_inbox_url) != _address(conn.inbox_url)
+            ):
+                continue
+            if await self._seats.rename_server(
+                seat.space_id,
+                seat.gfs_instance_id,
+                conn.gfs_instance_id,
+                public_key=seat.gfs_public_key,
+                inbox_url=seat.gfs_inbox_url,
+            ):
+                moved += 1
+                log.info(
+                    "gfs_space_mirror: seat on %s follows GFS %s from id %r to %r",
+                    seat.space_id,
+                    conn.id,
+                    seat.gfs_instance_id,
+                    conn.gfs_instance_id,
+                )
+        return moved
+
     async def _seats_on(self, conn: GfsConnection) -> list[GfsSpaceSeat]:
         """The recorded seats that belong to *conn*: same server id, key and
         URL. A seat recorded under the id but bound to another key / URL is
@@ -1169,6 +1218,7 @@ class GfsSpaceMirrorService:
         # First: carry the pin-heal anchor over a genuine re-pair — before
         # the re-take below rebinds the seats to this connection — and run
         # the local orphan-seat housekeeping.
+        await self.adopt_renamed_server(conn)
         await self.rebind_mirrors(conn)
         await self.sweep_orphan_seats()
         keep: list[str] = []

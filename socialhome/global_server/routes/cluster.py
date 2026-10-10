@@ -272,6 +272,8 @@ class ClusterSyncView(GfsBaseView):
                 from_node_id=from_node,
                 url=str(payload.get("url") or ""),
                 public_key_hex=verdict.verify_key,
+                instance_id=payload.get("instance_id"),
+                instance_id_aliases=payload.get("instance_id_aliases"),
             )
         elif msg_type == NODE_HEARTBEAT:
             await svc.handle_heartbeat(from_node, payload)

@@ -61,6 +61,7 @@ process.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from .writer_cert import MAX_WRITER_CERT_EPOCH, WriterCert
@@ -189,6 +190,7 @@ def owner_epoch_notice_signing_payload(
     ts: str,
     publish_mode: str | None = None,
     writer_key_cert: dict | None = None,
+    gfs_key: str | None = None,
 ) -> dict:
     """What the space OWNER's household signs to confirm a content epoch at
     one connection server (``POST /gfs/spaces/{id}/epoch``). Canonical JSON of
@@ -214,11 +216,35 @@ def owner_epoch_notice_signing_payload(
         payload["publish_mode"] = publish_mode
     if writer_key_cert is not None:
         payload["writer_key_cert"] = writer_key_cert
-    return payload
+    # The addressed server's pinned key, when the household binds it (see
+    # ``_with_gfs_key``).
+    return _with_gfs_key(gfs_key, payload)
 
 
 class InvalidMemberPublish(ValueError):
     """The body or frame is not a well-formed member-publish shape."""
+
+
+_GFS_KEY_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _with_gfs_key(gfs_key: str | None, body: dict) -> dict:
+    """*body* plus ``gfs_key`` (the addressed server's pinned key, hex) when
+    set — inside the signed bytes, binding the request to the server's KEY
+    and not only its id. Omitted when ``None`` (an older household's exact
+    bytes)."""
+    if gfs_key is not None:
+        body["gfs_key"] = gfs_key
+    return body
+
+
+def _gfs_key(raw: dict) -> str | None:
+    value = raw.get("gfs_key")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _GFS_KEY_RE.fullmatch(value):
+        raise InvalidMemberPublish("invalid field: gfs_key")
+    return value
 
 
 def _short_str(raw: dict, field: str, limit: int) -> str:
@@ -271,6 +297,11 @@ class MemberPublishRequest:
     writer_cert: WriterCert
     payload: str
 
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
+
     @property
     def event_type(self) -> str:
         return SPACE_ITEM_EVENT_TYPE
@@ -278,17 +309,20 @@ class MemberPublishRequest:
     def signing_payload(self) -> dict:
         """Every signed field: the request minus ``signature``, plus the
         ``action`` domain separator."""
-        return {
-            "action": MEMBER_PUBLISH_ACTION,
-            "instance_id": self.instance_id,
-            "gfs_instance_id": self.gfs_instance_id,
-            "ts": self.ts,
-            "target": self.target,
-            "event_type": SPACE_ITEM_EVENT_TYPE,
-            "epoch": self.epoch,
-            "writer_cert": self.writer_cert.v1().to_wire(),
-            "payload": self.payload,
-        }
+        return _with_gfs_key(
+            self.gfs_key,
+            {
+                "action": MEMBER_PUBLISH_ACTION,
+                "instance_id": self.instance_id,
+                "gfs_instance_id": self.gfs_instance_id,
+                "ts": self.ts,
+                "target": self.target,
+                "event_type": SPACE_ITEM_EVENT_TYPE,
+                "epoch": self.epoch,
+                "writer_cert": self.writer_cert.v1().to_wire(),
+                "payload": self.payload,
+            },
+        )
 
     def signing_bytes(self) -> bytes:
         """Canonical bytes the household signs — the same encoding the GFS
@@ -319,10 +353,15 @@ class MemberPublishRequest:
         missing, extra or malformed field."""
         if not isinstance(raw, dict):
             raise InvalidMemberPublish("expected a JSON object")
-        if set(raw) != MEMBER_PUBLISH_REQUEST_KEYS:
+        if (
+            not MEMBER_PUBLISH_REQUEST_KEYS
+            <= set(raw)
+            <= MEMBER_PUBLISH_REQUEST_KEYS | {"gfs_key"}
+        ):
             raise InvalidMemberPublish("unexpected or missing fields")
         _event_type(raw)
         return cls(
+            gfs_key=_gfs_key(raw),
             instance_id=_short_str(raw, "instance_id", MAX_WIRE_ID_CHARS),
             gfs_instance_id=_short_str(raw, "gfs_instance_id", MAX_WIRE_ID_CHARS),
             ts=_short_str(raw, "ts", _MAX_SHORT_FIELD_CHARS),
@@ -358,6 +397,11 @@ class MemberPublishAnonRequest:
     writer_sig: str
     writer_sig_suite: str
 
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
+
     @property
     def event_type(self) -> str:
         return SPACE_ITEM_EVENT_TYPE
@@ -365,16 +409,19 @@ class MemberPublishAnonRequest:
     def signing_body(self) -> dict:
         """Every signed field: the request minus ``writer_sig`` (the suite
         tag is inside the signature)."""
-        return {
-            "gfs_instance_id": self.gfs_instance_id,
-            "ts": self.ts,
-            "nonce": self.nonce,
-            "target": self.target,
-            "event_type": SPACE_ITEM_EVENT_TYPE,
-            "epoch": self.epoch,
-            "payload": self.payload,
-            "writer_sig_suite": self.writer_sig_suite,
-        }
+        return _with_gfs_key(
+            self.gfs_key,
+            {
+                "gfs_instance_id": self.gfs_instance_id,
+                "ts": self.ts,
+                "nonce": self.nonce,
+                "target": self.target,
+                "event_type": SPACE_ITEM_EVENT_TYPE,
+                "epoch": self.epoch,
+                "payload": self.payload,
+                "writer_sig_suite": self.writer_sig_suite,
+            },
+        )
 
     def signing_bytes(self) -> bytes:
         """Canonical, domain-separated bytes the writer group key signs."""
@@ -402,10 +449,15 @@ class MemberPublishAnonRequest:
         refused outright."""
         if not isinstance(raw, dict):
             raise InvalidMemberPublish("expected a JSON object")
-        if set(raw) != MEMBER_PUBLISH_ANON_REQUEST_KEYS:
+        if (
+            not MEMBER_PUBLISH_ANON_REQUEST_KEYS
+            <= set(raw)
+            <= MEMBER_PUBLISH_ANON_REQUEST_KEYS | {"gfs_key"}
+        ):
             raise InvalidMemberPublish("unexpected or missing fields")
         _event_type(raw)
         return cls(
+            gfs_key=_gfs_key(raw),
             gfs_instance_id=_short_str(raw, "gfs_instance_id", MAX_WIRE_ID_CHARS),
             ts=_short_str(raw, "ts", _MAX_SHORT_FIELD_CHARS),
             nonce=_nonce(raw),

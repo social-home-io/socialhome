@@ -110,6 +110,7 @@ from ..domain.space_item import (
 )
 from ..domain.writer_cert import WriterCert, scope_permits
 from .gfs_directory import GfsDirectoryCache
+from .gfs_http import refused_gfs_key
 from .gfs_publish_retry import (
     GfsPublish,
     GfsPublishRetryQueue,
@@ -620,6 +621,7 @@ class GfsMemberPublishService:
         req = MemberPublishRequest(
             instance_id=self._own_instance_id,
             gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
             ts=datetime.now(timezone.utc).isoformat(),
             signature="",
             target=space_id,
@@ -670,6 +672,7 @@ class GfsMemberPublishService:
             return PublishOutcome.permanent()
         req = MemberPublishAnonRequest(
             gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
             ts=_anon_ts(),
             nonce=b64url_encode(secrets.token_bytes(16)),
             target=space_id,
@@ -763,6 +766,7 @@ class GfsMemberPublishService:
             payload = owner_epoch_notice_signing_payload(
                 owning_instance=self._own_instance_id,
                 gfs_instance_id=conn.gfs_instance_id,
+                gfs_key=self._gfs.addressee_key_for(conn),
                 space_id=space_id,
                 epoch=int(data["epoch"]),
                 ts=ts,
@@ -785,6 +789,8 @@ class GfsMemberPublishService:
                 body["publish_mode"] = mode
             if wkc is not None:
                 body["writer_key_cert"] = wkc
+            if payload.get("gfs_key") is not None:
+                body["gfs_key"] = payload["gfs_key"]
             return await self._post(self._gfs.client(), url, body, conn)
         # Seed-only form: anonymous — authorized by the authority signature
         # alone, so it rides the cookie-less publish session.
@@ -816,6 +822,15 @@ class GfsMemberPublishService:
                 outcome = classify_publish_status(
                     resp.status, resp.headers.get("Retry-After")
                 )
+                if refused_gfs_key(
+                    body,
+                    resp.status,
+                    resp.reason,
+                    signature_only="owning_instance" in body,
+                ):
+                    # An older node that does not know the field: drop it
+                    # for this connection; ``_send`` tries once without.
+                    self._gfs.forget_addressee_key(conn)
                 if outcome.kind != "delivered":
                     log.warning(
                         "gfs.member_publish: GFS %s answered HTTP %d (%s)",
@@ -833,6 +848,16 @@ class GfsMemberPublishService:
             return PublishOutcome.transient()
 
     async def _send(self, conn: GfsConnection, item: GfsPublish) -> PublishOutcome:
+        """One attempt — and, when it bound ``gfs_key`` and the node
+        refused the field (an older node of a cluster mid-upgrade), one more
+        without it."""
+        bound = self._gfs.addressee_key_for(conn) is not None
+        outcome = await self._attempt(conn, item)
+        if bound and self._gfs.addressee_key_for(conn) is None:
+            outcome = await self._attempt(conn, item)
+        return outcome
+
+    async def _attempt(self, conn: GfsConnection, item: GfsPublish) -> PublishOutcome:
         if item.event_type == _KIND_ANON:
             return await self._post_anon_item(conn, item.space_id, item.payload)
         if item.event_type == _KIND_ITEM:

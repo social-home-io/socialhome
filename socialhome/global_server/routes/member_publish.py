@@ -143,6 +143,7 @@ class SpaceEpochNoticeView(GfsBaseView):
                     signature=str(_field(body, "signature")),
                     publish_mode=body.get("publish_mode"),
                     writer_key_cert=body.get("writer_key_cert"),
+                    gfs_key=body.get("gfs_key"),
                 )
             else:
                 await svc.note_epoch(

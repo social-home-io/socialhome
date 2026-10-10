@@ -40,6 +40,15 @@ class AbstractGfsSpaceSeatRepo(Protocol):
     async def mark_refollow_warned(
         self, space_id: str, gfs_instance_id: str
     ) -> None: ...
+    async def rename_server(
+        self,
+        space_id: str,
+        from_id: str,
+        to_id: str,
+        *,
+        public_key: str,
+        inbox_url: str,
+    ) -> bool: ...
 
 
 class SqliteGfsSpaceSeatRepo:
@@ -152,6 +161,41 @@ class SqliteGfsSpaceSeatRepo:
             " WHERE space_id=? AND gfs_instance_id=?",
             (space_id, gfs_instance_id),
         )
+
+    async def rename_server(
+        self,
+        space_id: str,
+        from_id: str,
+        to_id: str,
+        *,
+        public_key: str,
+        inbox_url: str,
+    ) -> bool:
+        """Move the seat on *space_id* from server id *from_id* to *to_id* —
+        the server adopted a new public id under the key it is pinned by.
+
+        Compare-and-set: only the row still bound to exactly *public_key* and
+        the stored *inbox_url* moves (the caller matched the normalized
+        address and the connection's key). When a seat under *to_id* already
+        exists it is the same server's and is kept; the old row is dropped.
+        Returns whether a row bound that way was found.
+        """
+        params = (space_id, from_id, public_key, inbox_url)
+        where = (
+            " WHERE space_id=? AND gfs_instance_id=?"
+            " AND gfs_public_key=? AND gfs_inbox_url=?"
+        )
+        row = await self._db.fetchone("SELECT 1 FROM gfs_space_seats" + where, params)
+        if row is None:
+            return False
+        if await self.get(space_id, to_id) is not None:
+            await self._db.enqueue("DELETE FROM gfs_space_seats" + where, params)
+        else:
+            await self._db.enqueue(
+                "UPDATE gfs_space_seats SET gfs_instance_id=?" + where,
+                (to_id, *params),
+            )
+        return True
 
 
 def _seat(row: Any) -> GfsSpaceSeat:

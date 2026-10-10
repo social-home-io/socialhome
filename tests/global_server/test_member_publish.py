@@ -130,6 +130,7 @@ def _body(
     ts: str | None = None,
     signer: _Household | None = None,
     gfs_instance_id: str = GFS_ID,
+    gfs_key: str | None = None,
 ) -> dict:
     req = MemberPublishRequest(
         instance_id=publisher.instance_id,
@@ -140,19 +141,23 @@ def _body(
         epoch=epoch,
         writer_cert=cert if cert is not None else _cert(publisher, epoch=epoch),
         payload=payload,
+        gfs_key=gfs_key,
     )
     sig = sign_ed25519((signer or publisher).seed, req.signing_bytes())
     return replace(req, signature=b64url_encode(sig)).to_wire()
 
 
 @pytest.fixture
-async def gfs(tmp_dir):
+async def gfs(tmp_dir, request):
+    # ``indirect`` params override config fields (e.g. instance_id_aliases).
+    overrides = getattr(request, "param", None) or {}
     cfg = GfsConfig(
         host="127.0.0.1",
         port=0,
         base_url="http://gfs.test",
         data_dir=str(tmp_dir),
-        instance_id="gfs-node-a",
+        instance_id=overrides.get("instance_id", "gfs-node-a"),
+        instance_id_aliases=overrides.get("instance_id_aliases", ()),
         cluster_enabled=False,
         cluster_node_id="gfs-node-a",
         cluster_peers=(),
@@ -655,6 +660,80 @@ async def test_a_request_signed_for_another_gfs_is_refused(gfs):
     await _assert_refused(resp)
 
 
+# ── instance_id_aliases: a migration bridge, accepted as addressee only ──
+
+#: The server moved to a shared public id; its old id is an alias.
+_ALIASED = {"instance_id": "gfs-shared", "instance_id_aliases": (GFS_ID,)}
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_a_publish_addressed_to_an_alias_is_accepted_and_logged(gfs, caplog):
+    with caplog.at_level(logging.INFO, logger="socialhome.global_server.addressee"):
+        resp = await gfs.post(
+            "/gfs/member-publish", json=_body(gfs.publisher, gfs_instance_id=GFS_ID)
+        )
+    assert resp.status == 200
+    assert any("alias 'gfs-node-a'" in r.getMessage() for r in caplog.records)
+    # The new public id is accepted too.
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json=_body(gfs.publisher, gfs_instance_id="gfs-shared", payload="x2"),
+    )
+    assert resp.status == 200
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_an_id_that_is_neither_the_id_nor_an_alias_is_still_refused(gfs):
+    await _assert_refused(
+        await gfs.post(
+            "/gfs/member-publish",
+            json=_body(gfs.publisher, gfs_instance_id="gfs-node-b"),
+        )
+    )
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_an_owner_epoch_notice_addressed_to_an_alias_is_accepted(gfs):
+    resp = await gfs.post(
+        f"/gfs/spaces/{SPACE_ID}/epoch",
+        json=_owner_notice(gfs, 3, gfs_instance_id=GFS_ID),
+    )
+    assert resp.status == 200
+    assert (await _state(gfs)).confirmed == 3
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_an_anonymous_publish_addressed_to_an_alias_passes_the_addressee_check(
+    gfs,
+):
+    """Strict mode checks the addressee first: an alias gets past it to the
+    writer-key check (no key pinned here → the later refusal), while an
+    unknown id is refused at the addressee check itself."""
+    addressee = gfs.app_[gfs_member_publish_key]._addressee
+    assert addressee.accepts(GFS_ID)
+    assert addressee.accepts("gfs-shared")
+    assert not addressee.accepts("gfs-node-b")
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_info_serves_the_instance_id_and_signs_the_aliases_as_replaces(gfs):
+    """The served id is always ``instance_id``; an alias appears only inside
+    the SIGNED block, as ``replaces`` — what lets a household pinned to it
+    move (and nothing else does)."""
+    resp = await gfs.get("/gfs/info")
+    info = await resp.json()
+    assert info["gfs_instance_id"] == "gfs-shared"
+    assert info["capabilities"]["replaces"] == [GFS_ID]
+    assert verify_capabilities(
+        info["public_key"],
+        "gfs-shared",
+        info["capabilities"],
+        info["capabilities_sig"],
+        info["capabilities_sig_suite"],
+    )
+
+
 # ── Round 2: epoch lockout (I1) ───────────────────────────────────────────
 
 
@@ -670,6 +749,7 @@ def _owner_notice(
     signer: _Household | None = None,
     owning: _Household | None = None,
     gfs_instance_id: str = GFS_ID,
+    gfs_key: str | None = None,
 ) -> dict:
     owner = owning or gfs.owner
     ts = ts or _now_iso()
@@ -679,18 +759,22 @@ def _owner_notice(
         space_id=SPACE_ID,
         epoch=epoch,
         ts=ts,
+        gfs_key=gfs_key,
     )
     sig = sign_ed25519(
         (signer or owner).seed,
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
     )
-    return {
+    body = {
         "owning_instance": owner.instance_id,
         "gfs_instance_id": gfs_instance_id,
         "epoch": epoch,
         "ts": ts,
         "signature": b64url_encode(sig),
     }
+    if gfs_key is not None:
+        body["gfs_key"] = gfs_key
+    return body
 
 
 async def _confirm(gfs, epoch) -> None:
@@ -1580,3 +1664,71 @@ async def test_the_public_listing_carries_the_publish_mode(gfs):
     assert detail["member_publish_mode"] == "strict"
     # The writer keys never reach the public directory.
     assert "writer_key" not in json.dumps(listing)
+
+
+# ── L2: the signed ``gfs_key`` binds a request to this server's KEY ──────
+
+
+async def _own_key(gfs) -> str:
+    return (await (await gfs.get("/gfs/info")).json())["public_key"]
+
+
+async def test_info_advertises_the_addressee_key_capability(gfs):
+    info = await (await gfs.get("/gfs/info")).json()
+    assert info["capabilities"]["addressee_key"] is True
+
+
+async def test_a_publish_bound_to_this_servers_key_is_accepted(gfs):
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json=_body(gfs.publisher, gfs_key=await _own_key(gfs)),
+    )
+    assert resp.status == 200
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_an_alias_request_bound_to_another_servers_key_is_refused(gfs):
+    """``gfs-node-a`` is an alias here — and may be ANOTHER operator's real
+    id. A request a household bound to that other server's key (captured
+    there, replayed here) is refused, although its id is accepted."""
+    other = "ab" * 32
+    await _assert_refused(
+        await gfs.post(
+            "/gfs/member-publish",
+            json=_body(gfs.publisher, gfs_instance_id=GFS_ID, gfs_key=other),
+        )
+    )
+    resp = await gfs.post(
+        f"/gfs/spaces/{SPACE_ID}/epoch",
+        json=_owner_notice(gfs, 3, gfs_instance_id=GFS_ID, gfs_key=other),
+    )
+    assert resp.status == 403
+
+
+async def test_an_owner_notice_bound_to_this_servers_key_is_accepted(gfs):
+    resp = await gfs.post(
+        f"/gfs/spaces/{SPACE_ID}/epoch",
+        json=_owner_notice(gfs, 3, gfs_key=await _own_key(gfs)),
+    )
+    assert resp.status == 200
+
+
+@pytest.mark.security
+async def test_the_gfs_key_is_inside_the_household_signature(gfs):
+    """Stripping or swapping the bound key breaks the signature."""
+    body = _body(gfs.publisher, gfs_key=await _own_key(gfs))
+    del body["gfs_key"]
+    await _assert_refused(await gfs.post("/gfs/member-publish", json=body))
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_a_connection_left_on_the_old_id_is_still_served_with_the_key(gfs):
+    """A household that paired this server twice keeps its second row on
+    the old id (the UNIQUE new id belongs to the first). Its requests name the
+    old id — an alias — bound to this server's own key: accepted."""
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json=_body(gfs.publisher, gfs_instance_id=GFS_ID, gfs_key=await _own_key(gfs)),
+    )
+    assert resp.status == 200

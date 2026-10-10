@@ -81,7 +81,8 @@ import secrets
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Protocol
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import aiohttp
 
@@ -130,6 +131,7 @@ from ..gfs_channel import (
     sign_unregister,
     verify_grant,
 )
+from .gfs_http import refused_gfs_key
 from .gfs_publish_retry import (
     GfsPublish,
     GfsPublishRetryQueue,
@@ -153,6 +155,8 @@ if TYPE_CHECKING:
     from .space_writer_cert_service import SpaceWriterCertService
 
 log = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class _SyncScheduler(Protocol):
@@ -367,8 +371,23 @@ class GfsChannelService:
         return out
 
     async def _capable_in(self, gfs_ids: tuple[str, ...]) -> list[GfsConnection]:
+        """The capable connections a grant's *gfs_ids* name — matched on the
+        server's current id or one it was pinned under before a rebind in
+        this process (a grant issued before the rebind names the old id
+        until the owner re-issues it)."""
         wanted = set(gfs_ids)
-        return [c for c in await self._capable() if c.gfs_instance_id in wanted]
+        out: list[GfsConnection] = []
+        for c in await self._capable():
+            if not self._gfs.known_instance_ids(c) & wanted:
+                # The grant names an id this connection does not know (yet):
+                # its server may have moved to a new public id we have not
+                # read. Re-read /gfs/info now (debounced) before skipping it.
+                fresh = await self._gfs.refresh_if_stale(c)
+                if fresh is None or not self._gfs.known_instance_ids(fresh) & wanted:
+                    continue
+                c = fresh
+            out.append(c)
+        return out
 
     async def _live_seat(self, space_id: str, instance_id: str) -> bool:
         return bool(
@@ -504,15 +523,20 @@ class GfsChannelService:
         if client is None:
             return done, squatted
         for conn in conns:
-            body = sign_register(
-                channel_seed=channel_seed,
-                channel_id=channel_id,
-                gfs_instance_id=conn.gfs_instance_id,
-                ts=_anon_ts(),
-            ).to_wire()
-            status = await self._post_status(
-                client, f"{conn.inbox_url}{CHANNEL_REGISTER_ROUTE}", body, conn
-            )
+
+            async def _register(conn: GfsConnection = conn) -> int | None:
+                body = sign_register(
+                    channel_seed=channel_seed,
+                    channel_id=channel_id,
+                    gfs_instance_id=conn.gfs_instance_id,
+                    gfs_key=self._gfs.addressee_key_for(conn),
+                    ts=_anon_ts(),
+                ).to_wire()
+                return await self._post_status(
+                    client, f"{conn.inbox_url}{CHANNEL_REGISTER_ROUTE}", body, conn
+                )
+
+            status = await self._keyed(conn, _register)
             if status in (200, 201):
                 done.add(conn.gfs_instance_id)
             elif status == 409:
@@ -532,6 +556,8 @@ class GfsChannelService:
             async with client.post(
                 url, json=body, allow_redirects=False, timeout=_HTTP_TIMEOUT
             ) as resp:
+                if refused_gfs_key(body, resp.status, resp.reason):
+                    self._gfs.forget_addressee_key(conn)
                 if resp.status not in (200, 201):
                     log.warning(
                         "gfs.channel: GFS %s answered HTTP %d on register",
@@ -568,15 +594,23 @@ class GfsChannelService:
         if seed is not None and client is not None:
             channel_seed = derive_channel_seed(seed, space.id, channel_id)
             for conn in await self._capable():
-                body = sign_unregister(
-                    channel_seed=channel_seed,
-                    channel_id=channel_id,
-                    gfs_instance_id=conn.gfs_instance_id,
-                    ts=_anon_ts(),
-                ).to_wire()
-                await self._post(
-                    client, f"{conn.inbox_url}{CHANNEL_UNREGISTER_ROUTE}", body, conn
-                )
+
+                async def _unregister(conn: GfsConnection = conn) -> PublishOutcome:
+                    body = sign_unregister(
+                        channel_seed=channel_seed,
+                        channel_id=channel_id,
+                        gfs_instance_id=conn.gfs_instance_id,
+                        gfs_key=self._gfs.addressee_key_for(conn),
+                        ts=_anon_ts(),
+                    ).to_wire()
+                    return await self._post(
+                        client,
+                        f"{conn.inbox_url}{CHANNEL_UNREGISTER_ROUTE}",
+                        body,
+                        conn,
+                    )
+
+                await self._keyed(conn, _unregister)
         await self._spaces.set_gfs_channel(space.id, None, None)
         log.info(
             "gfs.channel: retired channel %s — private space %s no longer uses "
@@ -787,6 +821,32 @@ class GfsChannelService:
                 log.exception("gfs.channel: heal failed for a private space")
         return done
 
+    async def on_gfs_rebound(self, gfs_id: str) -> None:
+        """A connection adopted its server's new public id (the GFS
+        connection service's rebind hook). In the background, the owner
+        re-registers each private space's channel there under the new id,
+        re-announces, and re-issues every member's grant — grants name
+        servers by id, so ones naming the old id would stop matching once
+        the members rebind too."""
+        self._spawn(self._after_rebind(gfs_id), "rebind")
+
+    async def _after_rebind(self, gfs_id: str) -> None:
+        conn = await self._conn_repo.get(gfs_id)
+        if conn is None or conn.status != "active":
+            return
+        for space in await self._spaces.list_all():
+            if (
+                space.space_type is not SpaceType.PRIVATE
+                or space.owner_instance_id != self._own_instance_id
+            ):
+                continue
+            try:
+                if await self.reconcile(space.id) in ("created", "kept"):
+                    await self.announce_epoch(space.id, only=gfs_id)
+                    await self.distribute(space.id)
+            except Exception:
+                log.exception("gfs.channel: re-issue after a rebind failed")
+
     # ── Epoch notices (any seed holder) ──────────────────────────────────
 
     async def _channel_gfs_ids(self, space: "Space") -> tuple[str, ...]:
@@ -861,6 +921,7 @@ class GfsChannelService:
             channel_seed=channel_seed,
             channel_id=channel_id,
             gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
             # Exact, not jittered: the server orders the mode by it (after
             # the epoch), and only seed holders send notices.
             ts=datetime.now(timezone.utc).isoformat(),
@@ -996,6 +1057,8 @@ class GfsChannelService:
                 outcome = classify_publish_status(
                     resp.status, resp.headers.get("Retry-After")
                 )
+                if refused_gfs_key(body, resp.status, resp.reason):
+                    self._gfs.forget_addressee_key(conn)
                 held: dict | None = None
                 if resp.status == 200:
                     try:
@@ -1263,44 +1326,60 @@ class GfsChannelService:
         for conn in await self._capable_in(grant.gfs_ids):
             if only is not None and conn.id != only:
                 continue
-            req = ChannelSubscribeRequest(
-                instance_id=self._own_instance_id,
-                gfs_instance_id=conn.gfs_instance_id,
-                channel_id=grant.channel_id,
-                ts=datetime.now(timezone.utc).isoformat(),
-                signature="",
-                channel_pass=grant.channel_pass,
-            )
-            sig = sign_ed25519(self._own_seed, canonical(req.signing_payload()))
-            body = replace(req, signature=b64url_encode(sig)).to_wire()
-            outcome = await self._post(
-                self._gfs.client(),
-                f"{conn.inbox_url}{CHANNEL_SUBSCRIBE_ROUTE}",
-                body,
-                conn,
-            )
+            channel_pass = grant.channel_pass
+
+            async def _subscribe(conn: GfsConnection = conn) -> PublishOutcome:
+                req = ChannelSubscribeRequest(
+                    instance_id=self._own_instance_id,
+                    gfs_instance_id=conn.gfs_instance_id,
+                    gfs_key=self._gfs.addressee_key_for(conn),
+                    channel_id=grant.channel_id,
+                    ts=datetime.now(timezone.utc).isoformat(),
+                    signature="",
+                    channel_pass=channel_pass,
+                )
+                sig = sign_ed25519(self._own_seed, canonical(req.signing_payload()))
+                body = replace(req, signature=b64url_encode(sig)).to_wire()
+                return await self._post(
+                    self._gfs.client(),
+                    f"{conn.inbox_url}{CHANNEL_SUBSCRIBE_ROUTE}",
+                    body,
+                    conn,
+                )
+
+            outcome = await self._keyed(conn, _subscribe)
             if outcome.kind == "delivered":
                 done += 1
         return done
 
     async def _unsubscribe_all(self, channel_id: str, gfs_ids: tuple[str, ...]) -> None:
         for conn in await self._capable_in(gfs_ids):
-            req = ChannelUnsubscribeRequest(
-                instance_id=self._own_instance_id,
-                gfs_instance_id=conn.gfs_instance_id,
-                channel_id=channel_id,
-                ts=datetime.now(timezone.utc).isoformat(),
-                signature="",
-            )
-            sig = sign_ed25519(self._own_seed, canonical(req.signing_payload()))
-            await self._post(
-                self._gfs.client(),
-                f"{conn.inbox_url}{CHANNEL_UNSUBSCRIBE_ROUTE}",
-                replace(req, signature=b64url_encode(sig)).to_wire(),
-                conn,
-            )
+
+            async def _unsubscribe(conn: GfsConnection = conn) -> PublishOutcome:
+                req = ChannelUnsubscribeRequest(
+                    instance_id=self._own_instance_id,
+                    gfs_instance_id=conn.gfs_instance_id,
+                    gfs_key=self._gfs.addressee_key_for(conn),
+                    channel_id=channel_id,
+                    ts=datetime.now(timezone.utc).isoformat(),
+                    signature="",
+                )
+                sig = sign_ed25519(self._own_seed, canonical(req.signing_payload()))
+                return await self._post(
+                    self._gfs.client(),
+                    f"{conn.inbox_url}{CHANNEL_UNSUBSCRIBE_ROUTE}",
+                    replace(req, signature=b64url_encode(sig)).to_wire(),
+                    conn,
+                )
+
+            await self._keyed(conn, _unsubscribe)
 
     # ── Publishing an item (called by the member publisher) ──────────────
+
+    async def _names_of(self, gfs_ids: tuple[str, ...]) -> list[str]:
+        """Connection ids of the capable servers *gfs_ids* names
+        (:meth:`_capable_in`, refresh included)."""
+        return [c.id for c in await self._capable_in(gfs_ids)]
 
     async def plan(self, space_id: str) -> list[GfsConnection]:
         """The servers our item in private ``space_id`` goes to, or ``[]``:
@@ -1355,8 +1434,9 @@ class GfsChannelService:
             payload={"epoch": epoch, "payload": ciphertext},
         )
         accepted: list[GfsConnection] = []
+        named = set(await self._names_of(grant.gfs_ids))
         for conn in targets:
-            if conn.gfs_instance_id not in grant.gfs_ids:
+            if conn.id not in named:
                 continue
             if await self._first_attempt(conn, item):
                 accepted.append(conn)
@@ -1379,6 +1459,7 @@ class GfsChannelService:
             req = sign_publish_anon(
                 ChannelPublishAnonRequest(
                     gfs_instance_id=conn.gfs_instance_id,
+                    gfs_key=self._gfs.addressee_key_for(conn),
                     channel_id=grant.channel_id,
                     ts=_anon_ts(),
                     nonce=b64url_encode(secrets.token_bytes(16)),
@@ -1404,6 +1485,7 @@ class GfsChannelService:
         pub = ChannelPublishRequest(
             instance_id=self._own_instance_id,
             gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
             channel_id=grant.channel_id,
             ts=datetime.now(timezone.utc).isoformat(),
             signature="",
@@ -1474,6 +1556,8 @@ class GfsChannelService:
                 outcome = classify_publish_status(
                     resp.status, resp.headers.get("Retry-After")
                 )
+                if refused_gfs_key(body, resp.status, resp.reason):
+                    self._gfs.forget_addressee_key(conn)
                 if outcome.kind != "delivered":
                     log.warning(
                         "gfs.channel: GFS %s answered HTTP %d (%s) on %s",
@@ -1491,7 +1575,22 @@ class GfsChannelService:
             )
             return PublishOutcome.transient()
 
+    async def _keyed(
+        self, conn: GfsConnection, attempt: Callable[[], Awaitable[_T]]
+    ) -> _T:
+        """Run *attempt* — and, when it bound ``gfs_key`` and the node
+        refused the field (an older node of a cluster mid-upgrade; the post
+        helpers then drop the key for *conn*), once more without it."""
+        bound = self._gfs.addressee_key_for(conn) is not None
+        result = await attempt()
+        if bound and self._gfs.addressee_key_for(conn) is None:
+            result = await attempt()
+        return result
+
     async def _send(self, conn: GfsConnection, item: GfsPublish) -> PublishOutcome:
+        return await self._keyed(conn, lambda: self._send_once(conn, item))
+
+    async def _send_once(self, conn: GfsConnection, item: GfsPublish) -> PublishOutcome:
         if item.event_type == _KIND_NOTICE:
             return await self._post_notice(conn, item.space_id, item.payload)
         return await self._post_item(

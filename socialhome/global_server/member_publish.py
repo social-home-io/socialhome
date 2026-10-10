@@ -141,6 +141,7 @@ from ..writer_cert import (
     verify_writer_cert,
 )
 from ..writer_key import InvalidWriterKey, verify_writer_key_cert, verify_writer_sig
+from .addressee import GfsAddressee
 from .domain import MIN_EPOCH_STEP_INTERVAL_S, epoch_ceiling
 from .envelope_relay import ENVELOPE_QUEUE_TTL_SECONDS
 from .federation import SeenPayloadCache
@@ -253,7 +254,7 @@ class GfsMemberPublishService:
         "_epoch_repo",
         "_fed_repo",
         "_federation",
-        "_gfs_instance_id",
+        "_addressee",
         "_limiter",
         "_pending",
         "_queues",
@@ -275,6 +276,7 @@ class GfsMemberPublishService:
         epoch_repo: "AbstractGfsSpaceEpochRepo",
         relay: "GfsEnvelopeRelay",
         gfs_instance_id: str,
+        addressee: GfsAddressee | None = None,
         limiter: SlidingWindowCounter | None = None,
         space_limiter: SlidingWindowCounter | None = None,
         writer_key_limiter: SlidingWindowCounter | None = None,
@@ -285,7 +287,9 @@ class GfsMemberPublishService:
         self._fed_repo = fed_repo
         self._epoch_repo = epoch_repo
         self._relay = relay
-        self._gfs_instance_id = gfs_instance_id
+        #: This server's public id + its transitional aliases (see
+        #: :mod:`.addressee`) — what a household-signed request must name.
+        self._addressee = addressee or GfsAddressee(gfs_instance_id)
         self._limiter = limiter or SlidingWindowCounter(MEMBER_PUBLISH_MAX_PER_MINUTE)
         self._space_limiter = space_limiter or SlidingWindowCounter(
             MEMBER_PUBLISH_MAX_PER_MINUTE_PER_SPACE
@@ -456,7 +460,7 @@ class GfsMemberPublishService:
         )
         if inst.status != "active":
             raise PermissionError("instance is not active")
-        if req.gfs_instance_id != self._gfs_instance_id:
+        if not self._addressee.accepts(req.gfs_instance_id, req.gfs_key):
             # Signed for another connection server: never replayable here.
             raise PermissionError("request is addressed to another server")
         if not self._limiter.allow(f"{inst.instance_id}\x00{req.target}"):
@@ -514,7 +518,7 @@ class GfsMemberPublishService:
         Raises :class:`PermissionError` on any refusal (a replay included),
         :class:`MemberPublishRateLimited` past a per-minute budget and
         :class:`MemberPublishBusy` when the fan-out cannot take it."""
-        if req.gfs_instance_id != self._gfs_instance_id:
+        if not self._addressee.accepts(req.gfs_instance_id, req.gfs_key):
             raise PermissionError("request is addressed to another server")
         self._check_anon_ts(req.ts)
         await self._readable_space(req.target)
@@ -595,6 +599,7 @@ class GfsMemberPublishService:
         signature: str,
         publish_mode: object = None,
         writer_key_cert: object = None,
+        gfs_key: object = None,
     ) -> None:
         """The space OWNER's household-signed epoch notice: confirms
         ``epoch`` (any raise up to :func:`epoch_ceiling`). Signed over
@@ -610,7 +615,9 @@ class GfsMemberPublishService:
         before anything is written. Raises :class:`PermissionError` on any
         refusal."""
         epoch_int = _valid_epoch(epoch)
-        if gfs_instance_id != self._gfs_instance_id:
+        if gfs_key is not None and not isinstance(gfs_key, str):
+            raise PermissionError("malformed gfs_key")
+        if not self._addressee.accepts(gfs_instance_id, gfs_key):
             raise PermissionError("notice is addressed to another server")
         if publish_mode is not None and publish_mode not in GFS_PUBLISH_MODES:
             raise PermissionError("unknown publish mode")
@@ -628,6 +635,7 @@ class GfsMemberPublishService:
                 ts=ts,
                 publish_mode=mode,
                 writer_key_cert=wkc,
+                gfs_key=gfs_key,
             ),
             signature=signature,
         )

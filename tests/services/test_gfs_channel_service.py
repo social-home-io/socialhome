@@ -179,9 +179,23 @@ class _Gfs:
     def __init__(self, session, *, capable: bool = True) -> None:
         self.session = session
         self.capable = capable
+        #: Connection id → ids it was pinned under before a rebind.
+        self.previous: dict[str, set[str]] = {}
 
     async def private_channels_supported(self, conn):
         return self.capable
+
+    def known_instance_ids(self, conn):
+        return frozenset({conn.gfs_instance_id, *self.previous.get(conn.id, ())})
+
+    def addressee_key_for(self, conn):
+        return None
+
+    def forget_addressee_key(self, conn):
+        self.forgotten = [*getattr(self, "forgotten", []), conn.id]
+
+    async def refresh_if_stale(self, conn):
+        return conn
 
     def client(self):
         return self.session
@@ -268,13 +282,16 @@ class _Node:
 
 
 @pytest.fixture
-async def env(tmp_dir):
+async def env(tmp_dir, request):
+    # ``indirect`` params override GFS config fields (instance_id + aliases).
+    overrides = getattr(request, "param", None) or {}
     cfg = GfsConfig(
         host="127.0.0.1",
         port=0,
         base_url="http://gfs.test",
         data_dir=str(tmp_dir),
-        instance_id=GFS_ID,
+        instance_id=overrides.get("instance_id", GFS_ID),
+        instance_id_aliases=overrides.get("instance_id_aliases", ()),
         cluster_enabled=False,
         cluster_node_id=GFS_ID,
         cluster_peers=(),
@@ -688,6 +705,58 @@ async def test_heal_reannounces_and_resubscribes(env):
     assert await env.member.svc.heal("conn-1") == 1
     assert await repo.has_subscription(channel_id, env.member.h.instance_id)
     assert await env.owner.svc.heal("conn-1") == 1
+
+
+# ── Rebind: the server moved to a new public id ─────────────────────────
+
+#: The server's new shared id; every connection pinned the old ``GFS_ID``,
+#: which the server keeps as an alias while households migrate.
+_MOVED = {"instance_id": "gfs-new", "instance_id_aliases": (GFS_ID,)}
+
+
+def _rebind(node: _Node, new_id: str = "gfs-new") -> None:
+    """What the GFS connection service does for *node* on a rebind."""
+    conns = node.svc._conn_repo
+    node.gfs.previous.setdefault(conns.conn.id, set()).add(conns.conn.gfs_instance_id)
+    conns.conn = replace(conns.conn, gfs_instance_id=new_id)
+
+
+@pytest.mark.parametrize("env", [_MOVED], indirect=True)
+async def test_a_grant_naming_the_old_id_still_matches_after_a_rebind(env):
+    await _channel_ready(env)
+    await _hand_grants(env, env.member, env.other)
+    _rebind(env.other)
+    targets = await env.other.svc.plan(SPACE_ID)
+    assert [t.gfs_instance_id for t in targets] == ["gfs-new"]
+    accepted = await env.other.svc.publish_sealed(SPACE_ID, 3, "Y2lwaGVy", targets)
+    assert len(accepted) == 1
+    assert len(await _queued(env, env.member)) == 1
+    # Without the remembered old id (e.g. after a restart) the old grant no
+    # longer names this server.
+    env.other.gfs.previous.clear()
+    assert await env.other.svc.plan(SPACE_ID) == []
+
+
+@pytest.mark.parametrize("env", [_MOVED], indirect=True)
+async def test_the_owner_reissues_grants_naming_the_new_id_after_a_rebind(env):
+    await _channel_ready(env)
+    env.owner.space_service.snapshots.clear()
+    _rebind(env.owner)
+    await env.owner.svc.on_gfs_rebound("conn-1")
+    await env.owner.svc.wait_idle()
+    assert set(env.owner.space_service.snapshots) == {
+        (SPACE_ID, env.member.h.instance_id),
+        (SPACE_ID, env.other.h.instance_id),
+    }
+    grant = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
+    assert grant is not None and "gfs-new" in grant["gfs_ids"]
+
+
+async def test_a_rebind_of_an_unknown_connection_does_nothing(env):
+    env.owner.space_service.snapshots.clear()
+    await env.owner.svc.on_gfs_rebound("nope")
+    await env.owner.svc.wait_idle()
+    assert env.owner.space_service.snapshots == []
 
 
 async def test_a_switch_to_a_new_channel_drops_the_old_seat(env):
@@ -1142,3 +1211,51 @@ async def test_a_member_never_uses_the_channel_while_the_stored_option_is_off(en
     )
     assert outcome.kind == "permanent"
     assert await _queued(env, env.member) == []
+
+
+async def test_a_grant_naming_an_unknown_id_refreshes_before_skipping(env):
+    """L2: the owner's grant names the server's NEW id, this member has not
+    rebound yet — its connection re-reads /gfs/info (debounced) and, once
+    rebound, the server is used instead of skipped."""
+    node = env.other
+    calls: list[str] = []
+    conns = node.svc._conn_repo
+
+    async def refresh(conn):
+        calls.append(conn.id)
+        conns.conn = replace(conns.conn, gfs_instance_id="gfs-new")
+        return conns.conn
+
+    node.gfs.refresh_if_stale = refresh  # type: ignore[method-assign]
+    got = await node.svc._capable_in(("gfs-new",))
+    assert [c.gfs_instance_id for c in got] == ["gfs-new"]
+    assert calls == ["conn-1"]
+
+    async def no_move(conn):
+        calls.append(conn.id)
+        return conn
+
+    node.gfs.refresh_if_stale = no_move  # type: ignore[method-assign]
+    assert await node.svc._capable_in(("gfs-elsewhere",)) == []
+
+
+async def test_a_refused_gfs_key_is_retried_once_without_it(env):
+    """L1: a channel request whose ``gfs_key`` an older node refused (the
+    post helper then forgets the key) runs once more, without it — and only
+    once; a request that bound no key is never repeated."""
+    svc, gfs = env.member.svc, env.member.gfs
+    conn = svc._conn_repo.conn
+    calls: list[str | None] = []
+    key = ["ab" * 32]
+    gfs.addressee_key_for = lambda c: key[0]  # type: ignore[method-assign]
+
+    async def attempt() -> str:
+        calls.append(key[0])
+        key[0] = None  # the node refused it: forgotten for this connection
+        return "done"
+
+    assert await svc._keyed(conn, attempt) == "done"
+    assert calls == ["ab" * 32, None]
+    calls.clear()
+    assert await svc._keyed(conn, attempt) == "done"
+    assert calls == [None]

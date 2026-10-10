@@ -110,6 +110,10 @@ _REMOTE_DETAIL_READ_BYTES = 8192
 #: picked up within seconds.
 GFS_INFO_NEGATIVE_TTL_S: float = 30.0
 
+#: At most one on-demand ``/gfs/info`` refresh per connection this often
+#: (:meth:`GfsConnectionService.refresh_if_stale`).
+GFS_INFO_REFRESH_DEBOUNCE_S: float = 60.0
+
 
 async def _remote_detail(resp, *, context: str) -> str:
     """Read a GFS error body for display, bounded and truncated.
@@ -252,6 +256,14 @@ def _descriptor_offers_open_signup(info: dict) -> bool:
     return bool(ok) and caps.get("open_signup") is True
 
 
+def _replaces_of(caps: dict) -> frozenset[str]:
+    """The former ids a verified capability block says it ``replaces``."""
+    raw = caps.get("replaces")
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(r for r in raw if isinstance(r, str) and r)
+
+
 class GfsConnectionService:
     """Service for managing GFS connections and space publications."""
 
@@ -272,6 +284,8 @@ class GfsConnectionService:
         "_invite_links",
         "_member_publish_strict",
         "_private_channels",
+        "_addressee_key",
+        "_refreshed_at",
         "_member_publish_trusted",
         "_authority_rotation",
         "_rotation_warned",
@@ -279,6 +293,9 @@ class GfsConnectionService:
         "_publish_client",
         "_on_repinned",
         "_on_disconnect",
+        "_on_rebound",
+        "_rebind_warned",
+        "_replaces",
     )
 
     def __init__(
@@ -351,6 +368,14 @@ class GfsConnectionService:
         # server would refuse an owner notice carrying them).
         self._member_publish_strict: dict[str, bool] = {}
         self._private_channels: dict[str, bool] = {}
+        # Same discipline for ``addressee_key``: whether the server takes the
+        # signed ``gfs_key`` field (its own key) on member publish, epoch
+        # notices and channel requests. An older server refuses unknown
+        # fields, so the key is bound only where proven (True only).
+        self._addressee_key: dict[str, bool] = {}
+        # ``time.monotonic()`` of the last on-demand ``/gfs/info`` refresh per
+        # connection (:meth:`refresh_if_stale` — the debounce).
+        self._refreshed_at: dict[str, float] = {}
         # Same again for ``authority_rotation`` (v_44): whether the GFS
         # re-pins a space's authority key from an owner cert. A GFS without
         # it keeps the OLD key — and so keeps honouring a revoked admin's
@@ -364,6 +389,22 @@ class GfsConnectionService:
         #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
         self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
         self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
+        #: Called in order with the connection id after it adopted the
+        #: server's new public id (:meth:`_rebind_to_served_id`): the seat
+        #: keeper moves this household's follow seats to the new id, the
+        #: private-channel owner re-registers and re-issues grants.
+        self._on_rebound: list[Callable[[str], Awaitable[object]]] = []
+        #: ``(connection id, served id)`` pairs already WARNed about — one
+        #: line per refused rebind per process, not one per reconnect.
+        self._rebind_warned: set[tuple[str, str]] = set()
+        #: Connection id → the former ids its server SIGNED that it
+        #: ``replaces`` (the ``replaces`` list of the latest verified
+        #: capability block served under the connection's current id).
+        #: Re-derived on every verified ``/gfs/info`` fetch — startup warm-up,
+        #: each reconnect, the periodic refresh — so it survives a restart.
+        #: What a grant issued before a rebind may still name for this server
+        #: (:meth:`known_instance_ids`).
+        self._replaces: dict[str, frozenset[str]] = {}
 
     def attach_on_disconnect(
         self, hook: Callable[[GfsConnection], Awaitable[object]]
@@ -371,6 +412,17 @@ class GfsConnectionService:
         """Wire the seat keeper's unpair handling (local bookkeeping; any
         request it needs runs in the background, never in the route)."""
         self._on_disconnect = hook
+
+    def attach_on_rebound(self, hook: Callable[[str], Awaitable[object]]) -> None:
+        """Add a hook run after a connection adopted a new public id (hooks
+        run in the order attached; one failing never skips the next)."""
+        self._on_rebound.append(hook)
+
+    def known_instance_ids(self, conn: GfsConnection) -> frozenset[str]:
+        """*conn*'s pinned public id plus the former ids its server signed
+        that it ``replaces`` — what a grant issued before a rebind may still
+        name for this server."""
+        return frozenset({conn.gfs_instance_id, *self._replaces.get(conn.id, ())})
 
     def attach_on_repinned(self, hook: Callable[[str, str], Awaitable[object]]) -> None:
         """Wire the v_49 epoch re-announce run after a re-pinning publish."""
@@ -882,8 +934,171 @@ class GfsConnectionService:
             self._info_failed_at[conn.id] = time.monotonic()
             return None
         self._info_failed_at.pop(conn.id, None)
+        current = await self._rebind_to_served_id(conn, info)
+        self._note_replaces(conn, current, info)
         self._record_capabilities(conn, info)
         return info
+
+    def _note_replaces(self, conn: GfsConnection, current: str, info: dict) -> None:
+        """Remember the ``replaces`` list of a block served under *current*
+        (the connection's id after any rebind) and signed by the pinned
+        key. A block served under another id (a node still on an old id)
+        never touches it."""
+        if info.get("gfs_instance_id") != current:
+            return
+        caps = self._caps_signed_for(conn, current, info)
+        if caps is None:
+            return
+        self._replaces[conn.id] = _replaces_of(caps)
+
+    async def refresh_all_metadata(
+        self, *, should_stop: Callable[[], bool] | None = None
+    ) -> int:
+        """:meth:`refresh_connection_metadata` for every active connection —
+        the periodic, jittered pass (``GfsInfoRefreshScheduler``) that lets a
+        household whose socket stays up for days still converge on its
+        server's new id. Sequential and fail-soft; returns how many were
+        refreshed."""
+        done = 0
+        for conn in await self._repo.list_active():
+            if should_stop is not None and should_stop():
+                break
+            if conn.status != "active" or not conn.inbox_url:
+                continue
+            try:
+                await self.refresh_connection_metadata(conn.id)
+            except Exception:
+                log.exception("GFS %s: periodic /gfs/info refresh failed", conn.id)
+                continue
+            done += 1
+        return done
+
+    async def _rebind_to_served_id(self, conn: GfsConnection, info: dict) -> str:
+        """Adopt the public id ``/gfs/info`` serves when the server SIGNED,
+        under the pinned key, that it replaces the pinned one. Returns the
+        connection's id after this step.
+
+        The key is the trust anchor, the id only a label: an operator may
+        change ``[server] instance_id`` (a cluster whose nodes each served
+        their own id moving to one shared id), keeping the old ids in
+        ``instance_id_aliases``, which the server signs into its capability
+        block as ``replaces``. A new id is adopted only when the served
+        ``public_key`` IS the pinned key, the block verifies under (pinned
+        key, new id) AND that block's ``replaces`` names the pinned id. A
+        node that merely serves ANOTHER id under the same key (today's
+        per-node-id cluster, or an old node mid-rollout) is not a reason to
+        move — no lateral moves, no flipping back. A different key is
+        refused with a WARNING (a new key means re-pairing). The id is
+        UNIQUE: when another connection already holds it (the same server
+        paired twice), both rows stay untouched. Never raises.
+        """
+        served = info.get("gfs_instance_id")
+        if not isinstance(served, str) or not served:
+            return conn.gfs_instance_id
+        if served == conn.gfs_instance_id:
+            return conn.gfs_instance_id
+        served_key = info.get("public_key")
+        if (
+            not isinstance(served_key, str)
+            or served_key.lower() != conn.public_key.lower()
+        ):
+            self._warn_rebind(
+                conn,
+                served,
+                f"now serves the id {served!r} under a key other than the pinned "
+                "key — not adopting it. If the server really changed its key, "
+                "remove the connection and pair again",
+            )
+            return conn.gfs_instance_id
+        caps = self._caps_signed_for(conn, served, info)
+        if caps is None:
+            # The pinned key, but no block it signed over the new id: the
+            # capability check warns about the block itself.
+            return conn.gfs_instance_id
+        try:
+            fresh = await self._repo.get(conn.id)
+            if fresh is None:
+                return conn.gfs_instance_id
+            if fresh.gfs_instance_id == served:
+                return served
+            if fresh.gfs_instance_id not in _replaces_of(caps):
+                log.debug(
+                    "GFS %s serves %r, which does not replace the pinned %r — staying",
+                    conn.id,
+                    served,
+                    fresh.gfs_instance_id,
+                )
+                return fresh.gfs_instance_id
+            if not await self._repo.update_gfs_instance_id(conn.id, served):
+                self._warn_rebind(
+                    conn,
+                    served,
+                    f"now serves the id {served!r}, which another connection "
+                    "already holds — the same server paired twice. Keeping both "
+                    "connections as they are; remove one of them",
+                )
+                return fresh.gfs_instance_id
+        except Exception:
+            log.exception("GFS %s: rebind to the served id failed", conn.id)
+            return conn.gfs_instance_id
+        log.info(
+            "GFS %r (%s) now serves the id %r instead of %r under the pinned key "
+            "— adopted",
+            conn.display_name,
+            conn.inbox_url,
+            served,
+            fresh.gfs_instance_id,
+        )
+        self._replaces[conn.id] = _replaces_of(caps)
+        for hook in self._on_rebound:
+            try:
+                await hook(conn.id)
+            except Exception:
+                log.exception("GFS %s: rebind hook failed", conn.id)
+        return served
+
+    @staticmethod
+    def _caps_signed_for(
+        conn: GfsConnection, gfs_instance_id: str, info: dict
+    ) -> dict | None:
+        """*info*'s capability block when it verifies under *conn*'s PINNED
+        key for *gfs_instance_id*, else ``None``. Never raises."""
+        caps = info.get("capabilities")
+        sig = info.get("capabilities_sig")
+        suite = info.get("capabilities_sig_suite")
+        if not isinstance(caps, dict) or not isinstance(sig, str) or not sig:
+            return None
+        if not isinstance(suite, str):
+            return None
+        try:
+            ok = verify_capabilities(conn.public_key, gfs_instance_id, caps, sig, suite)
+        except UnsupportedCapsSigSuite:
+            return None
+        return caps if ok else None
+
+    def _warn_rebind(self, conn: GfsConnection, served: str, detail: str) -> None:
+        if (conn.id, served) in self._rebind_warned:
+            return
+        self._rebind_warned.add((conn.id, served))
+        log.warning("GFS %r (%s) %s.", conn.display_name, conn.inbox_url, detail)
+
+    @staticmethod
+    def _signed_id(conn: GfsConnection, info: dict) -> str:
+        """The id *info*'s capability block is verified for: the served one
+        when ``/gfs/info`` serves the PINNED key (it may have moved to a new
+        id, see :meth:`_rebind_to_served_id`), else the pinned one. Always
+        verified under the pinned key, so only that key's holder can make a
+        block pass either way."""
+        served = info.get("gfs_instance_id")
+        served_key = info.get("public_key")
+        if (
+            isinstance(served, str)
+            and served
+            and isinstance(served_key, str)
+            and served_key.lower() == conn.public_key.lower()
+        ):
+            return served
+        return conn.gfs_instance_id
 
     def _record_capabilities(self, conn: GfsConnection, info: dict) -> None:
         """Update the capability cache for *conn* from a ``/gfs/info`` body.
@@ -903,6 +1118,51 @@ class GfsConnectionService:
         )
         if caps is not None and caps.get("envelope_relay") is True:
             self._envelope_relay[conn.id] = True
+        if caps is not None and caps.get("addressee_key") is True:
+            self._addressee_key[conn.id] = True
+
+    def addressee_key_for(self, conn: GfsConnection) -> str | None:
+        """The server key to bind into a request to *conn* (``gfs_key``,
+        signed): *conn*'s PINNED key, once its server proved under a valid
+        signature that it takes the field; ``None`` otherwise (the field is
+        omitted, exactly as an older household sends it). RAM cache only,
+        warmed by every ``/gfs/info`` fetch."""
+        if not self._addressee_key.get(conn.id) or not conn.public_key:
+            return None
+        return conn.public_key.lower()
+
+    def forget_addressee_key(self, conn: GfsConnection) -> None:
+        """Stop binding ``gfs_key`` for *conn* until the next verified
+        ``/gfs/info`` fetch says ``addressee_key`` again. Called when a node
+        refused a request carrying it as an unknown field — in a cluster
+        mid-upgrade, the balancer may route to an older node that does not
+        know the field although a newer one advertised it."""
+        if self._addressee_key.pop(conn.id, None):
+            log.info(
+                "GFS %r (%s) refused the gfs_key field (an older node?) — "
+                "sending without it until its /gfs/info says otherwise",
+                conn.display_name,
+                conn.inbox_url,
+            )
+
+    async def refresh_if_stale(
+        self,
+        conn: GfsConnection,
+        *,
+        min_interval_s: float = GFS_INFO_REFRESH_DEBOUNCE_S,
+    ) -> GfsConnection | None:
+        """Re-read *conn*'s ``/gfs/info`` now — at most once per
+        *min_interval_s* per connection — and return the connection as it
+        stands afterwards (``None`` when it is gone). For a caller that
+        found evidence the server moved on (an owner's grant naming an id
+        this connection does not know yet): it may rebind before the caller
+        gives up."""
+        now = time.monotonic()
+        last = self._refreshed_at.get(conn.id)
+        if last is None or now - last >= min_interval_s:
+            self._refreshed_at[conn.id] = now
+            await self.refresh_connection_metadata(conn.id)
+        return await self._repo.get(conn.id)
 
     async def warm_capabilities(
         self,
@@ -973,7 +1233,7 @@ class GfsConnectionService:
             return None
         try:
             ok = verify_capabilities(
-                conn.public_key, conn.gfs_instance_id, caps, sig, suite
+                conn.public_key, self._signed_id(conn, info), caps, sig, suite
             )
         except UnsupportedCapsSigSuite:
             self._warn_capabilities(

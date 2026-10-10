@@ -88,3 +88,42 @@ async def test_detach_release_and_the_sweep_markers(repo):
         False,
     )
     assert [x.space_id for x in await repo.list_all()] == ["sp-1"]
+
+
+# ── Rebind to a server's new public id (same key, same address) ─────────
+
+
+async def test_rename_server_moves_a_seat_bound_to_the_same_key_and_url(repo):
+    await repo.record(_s("sp-1", "gfs-1"))
+    assert await repo.rename_server(
+        "sp-1", "gfs-1", "gfs-shared", public_key="pk-1", inbox_url="https://g.test"
+    )
+    assert await repo.get("sp-1", "gfs-1") is None
+    moved = await repo.get("sp-1", "gfs-shared")
+    assert moved == _s("sp-1", "gfs-shared")
+
+
+@pytest.mark.parametrize(
+    "key, url", [("pk-other", "https://g.test"), ("pk-1", "https://other.test")]
+)
+async def test_rename_server_is_a_compare_and_set_on_key_and_url(repo, key, url):
+    await repo.record(_s("sp-1", "gfs-1"))
+    assert not await repo.rename_server(
+        "sp-1", "gfs-1", "gfs-shared", public_key=key, inbox_url=url
+    )
+    assert await repo.get("sp-1", "gfs-1") == _s("sp-1", "gfs-1")
+    assert await repo.get("sp-1", "gfs-shared") is None
+
+
+async def test_rename_server_onto_an_existing_seat_keeps_that_one(repo):
+    """The seat is already held under the new id: the old row is the same
+    server's duplicate and goes; the newer row is kept as it is."""
+    await repo.record(_s("sp-1", "gfs-1"))
+    await repo.record(_s("sp-1", "gfs-shared", conn="c-2"))
+    assert await repo.rename_server(
+        "sp-1", "gfs-1", "gfs-shared", public_key="pk-1", inbox_url="https://g.test"
+    )
+    assert [s.gfs_instance_id for s in await repo.list_for_space("sp-1")] == [
+        "gfs-shared"
+    ]
+    assert (await repo.get("sp-1", "gfs-shared")).gfs_connection_id == "c-2"

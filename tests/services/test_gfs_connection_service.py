@@ -4007,3 +4007,324 @@ async def test_the_same_server_at_a_differently_spelled_url_is_not_paired_twice(
     with pytest.raises(GfsSignupError) as exc:
         await svc._require_new_gfs_url(spelled)
     assert exc.value.reason == "already_connected"
+
+
+# ─── Rebind: the pinned key is the trust anchor, the id is a label ───────
+
+
+def _pinned_conn(conn_id: str = "g1", *, instance_id: str = "gfs-0") -> GfsConnection:
+    """A connection that pinned ``_GFS_KP`` under an old per-node id."""
+    return GfsConnection(
+        id=conn_id,
+        gfs_instance_id=instance_id,
+        display_name="GFS g1",
+        public_key=_GFS_KP.public_key.hex(),
+        inbox_url="https://gfs.example.com",
+        status="active",
+        paired_at="2025-01-01T00:00:00+00:00",
+    )
+
+
+def _served(
+    instance_id: str = "gfs-shared",
+    *,
+    kp=None,
+    served_key: str | None = None,
+    replaces: tuple[str, ...] | None = ("gfs-0", "gfs-1"),
+) -> dict:
+    """``/gfs/info`` serving *instance_id*, its block signed by *kp*'s key
+    over that id (listing the former ids it *replaces*; ``None`` = an old
+    per-node-id server that lists none), and *served_key* (default: *kp*'s)
+    as ``public_key``."""
+    signer = kp or _GFS_KP
+    caps: dict = {"anonymous_publish": True, "private_channels": True}
+    if replaces is not None:
+        caps["replaces"] = list(replaces)
+    info = _signed_info(gfs_instance_id=instance_id, kp=signer, capabilities=caps)
+    info["gfs_instance_id"] = instance_id
+    info["public_key"] = (
+        served_key if served_key is not None else signer.public_key.hex()
+    )
+    return info
+
+
+def _logs(caplog, level: int) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == level and r.name == "socialhome.services.gfs_connection_service"
+    ]
+
+
+def _rebind_svc(repo, info: dict) -> tuple[GfsConnectionService, list[str]]:
+    session = _AnonSession(info=info)
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
+    rebound: list[str] = []
+
+    async def hook(conn_id: str) -> None:
+        rebound.append(conn_id)
+
+    svc.attach_on_rebound(hook)
+    return svc, rebound
+
+
+async def test_a_new_id_under_the_pinned_key_is_adopted_on_reconnect(env, caplog):
+    _, repo = env
+    await repo.save(_pinned_conn())
+    svc, rebound = _rebind_svc(repo, _served())
+    with caplog.at_level(logging.INFO):
+        await svc.refresh_connection_metadata("g1")
+    got = await repo.get("g1")
+    assert got is not None and got.gfs_instance_id == "gfs-shared"
+    assert rebound == ["g1"]
+    assert any("gfs-0" in m and "gfs-shared" in m for m in _logs(caplog, logging.INFO))
+    # The capability block verified under (pinned key, new id): trusted.
+    assert svc._anon_publish["g1"] is True
+    assert _logs(caplog, logging.WARNING) == []
+    # The ids the server signed that it replaces (grants issued before).
+    assert svc.known_instance_ids(got) == frozenset({"gfs-shared", "gfs-0", "gfs-1"})
+
+
+async def test_a_stale_connection_object_still_verifies_after_the_rebind(env):
+    """A caller holding the row read before the rebind (old id) still gets
+    the capability verified — the block is checked under the pinned key."""
+    _, repo = env
+    stale = _pinned_conn()
+    await repo.save(stale)
+    svc, _rebound = _rebind_svc(repo, _served())
+    assert await svc.private_channels_supported(stale) is True
+    assert (await repo.get("g1")).gfs_instance_id == "gfs-shared"
+
+
+@pytest.mark.security
+async def test_a_new_id_under_another_key_is_refused_with_a_warning(env, caplog):
+    """The served key is not the pinned one: nothing is adopted, nothing
+    from that block is trusted — re-pairing is the only way to a new key."""
+    _, repo = env
+    await repo.save(_pinned_conn())
+    svc, rebound = _rebind_svc(repo, _served(kp=generate_identity_keypair()))
+    with caplog.at_level(logging.WARNING):
+        await svc.refresh_connection_metadata("g1")
+        await svc.refresh_connection_metadata("g1")
+    assert (await repo.get("g1")).gfs_instance_id == "gfs-0"
+    assert rebound == []
+    assert svc._anon_publish.get("g1") is False
+    key_warnings = [
+        m
+        for m in _logs(caplog, logging.WARNING)
+        if "pinned key" in m and "gfs-shared" in m
+    ]
+    # Once per connection, not per reconnect.
+    assert len(key_warnings) == 1
+
+
+@pytest.mark.security
+async def test_the_pinned_key_served_beside_a_block_it_did_not_sign_is_refused(env):
+    """The served ``public_key`` claims the pinned key, but the block over the
+    new id is signed by another key: no rebind."""
+    _, repo = env
+    await repo.save(_pinned_conn())
+    svc, rebound = _rebind_svc(
+        repo,
+        _served(kp=generate_identity_keypair(), served_key=_GFS_KP.public_key.hex()),
+    )
+    await svc.refresh_connection_metadata("g1")
+    assert (await repo.get("g1")).gfs_instance_id == "gfs-0"
+    assert rebound == []
+    assert svc._anon_publish.get("g1") is False
+
+
+async def test_an_unsigned_descriptor_with_a_new_id_is_not_adopted(env):
+    _, repo = env
+    await repo.save(_pinned_conn())
+    svc, rebound = _rebind_svc(
+        repo,
+        {
+            "server_name": "GFS g1",
+            "gfs_instance_id": "gfs-shared",
+            "public_key": _GFS_KP.public_key.hex(),
+        },
+    )
+    await svc.refresh_connection_metadata("g1")
+    assert (await repo.get("g1")).gfs_instance_id == "gfs-0"
+    assert rebound == []
+
+
+async def test_a_rebind_onto_an_id_another_connection_holds_keeps_both(env, caplog):
+    """The same server paired twice (two rows, one key): the UNIQUE id
+    cannot be given to both — both rows stay as they are, with a WARNING."""
+    _, repo = env
+    await repo.save(_pinned_conn("g1", instance_id="gfs-0"))
+    await repo.save(_pinned_conn("g2", instance_id="gfs-shared"))
+    svc, rebound = _rebind_svc(repo, _served())
+    with caplog.at_level(logging.WARNING):
+        await svc.refresh_connection_metadata("g1")
+    assert (await repo.get("g1")).gfs_instance_id == "gfs-0"
+    assert (await repo.get("g2")).gfs_instance_id == "gfs-shared"
+    assert rebound == []
+    assert any("paired twice" in m for m in _logs(caplog, logging.WARNING))
+
+
+async def test_the_same_id_is_no_rebind(env):
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-shared"))
+    svc, rebound = _rebind_svc(repo, _served())
+    await svc.refresh_connection_metadata("g1")
+    assert rebound == []
+    assert svc.known_instance_ids(await repo.get("g1")) == frozenset(
+        {"gfs-shared", "gfs-0", "gfs-1"}
+    )
+
+
+async def test_a_failing_rebind_hook_does_not_fail_the_refresh(env):
+    _, repo = env
+    await repo.save(_pinned_conn())
+    svc, _rebound = _rebind_svc(repo, _served())
+
+    async def hook(conn_id: str) -> None:
+        raise RuntimeError("boom")
+
+    svc.attach_on_rebound(hook)
+    await svc.refresh_connection_metadata("g1")
+    assert (await repo.get("g1")).gfs_instance_id == "gfs-shared"
+
+
+# ── Rebind is gated on the server's signed ``replaces`` (no lateral moves) ──
+
+
+async def test_a_lateral_id_under_the_pinned_key_never_moves_the_pin(env, caplog):
+    """Today's per-node-id cluster: every node signs its OWN id under the
+    shared key, none ``replaces`` the pinned one — a household must not
+    flip between them on each reconnect."""
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-1"))
+    svc, rebound = _rebind_svc(repo, _served("gfs-2", replaces=None))
+    with caplog.at_level(logging.INFO):
+        for node in ("gfs-2", "gfs-3", "gfs-0"):
+            svc._http_client.info = _served(node, replaces=None)  # type: ignore[union-attr]
+            await svc.refresh_connection_metadata("g1")
+    assert (await repo.get("g1")).gfs_instance_id == "gfs-1"
+    assert rebound == []
+    assert _logs(caplog, logging.WARNING) == []
+    # The capability block still verifies (same key): publishing works.
+    assert svc._anon_publish["g1"] is True
+
+
+async def test_a_mixed_cluster_never_flips_and_converges_on_the_shared_id(env):
+    """Rolling deploy: old per-node nodes (gfs-k, no ``replaces``) beside
+    new ones (gfs-shared, replacing gfs-0..3). The household moves exactly
+    once — the first time it reaches a new node — and never back."""
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-1"))
+    shared = _served("gfs-shared", replaces=("gfs-0", "gfs-1", "gfs-2", "gfs-3"))
+    svc, rebound = _rebind_svc(repo, _served("gfs-2", replaces=None))
+    seen: list[str] = []
+    for info in (
+        _served("gfs-2", replaces=None),
+        _served("gfs-3", replaces=None),
+        shared,
+        _served("gfs-0", replaces=None),
+        _served("gfs-2", replaces=None),
+        shared,
+    ):
+        svc._http_client.info = info  # type: ignore[union-attr]
+        await svc.refresh_connection_metadata("g1")
+        seen.append((await repo.get("g1")).gfs_instance_id)
+    assert seen == ["gfs-1", "gfs-1"] + ["gfs-shared"] * 4
+    assert rebound == ["g1"]
+
+
+async def test_grants_match_the_signed_replaces_list_after_a_restart(env):
+    """L1: the former ids come from the server's signed ``replaces`` on each
+    verified fetch — a fresh process (no memory of the rebind) still matches
+    a grant naming the old id."""
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-shared"))
+    svc, _rebound = _rebind_svc(repo, _served())
+    conn = await repo.get("g1")
+    assert svc.known_instance_ids(conn) == frozenset({"gfs-shared"})
+    await svc.refresh_connection_metadata("g1")
+    assert svc.known_instance_ids(conn) == frozenset({"gfs-shared", "gfs-0", "gfs-1"})
+
+
+async def test_a_lateral_nodes_replaces_list_is_ignored(env):
+    """A block served under ANOTHER id than the connection's never feeds
+    its ``replaces`` into grant matching."""
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-shared"))
+    svc, _rebound = _rebind_svc(repo, _served("gfs-other", replaces=("gfs-9",)))
+    await svc.refresh_connection_metadata("g1")
+    assert svc.known_instance_ids(await repo.get("g1")) == frozenset({"gfs-shared"})
+
+
+async def test_refresh_all_metadata_visits_every_active_connection(env):
+    _, repo = env
+    await repo.save(_pinned_conn("g1", instance_id="gfs-0"))
+    await repo.save(
+        GfsConnection(
+            id="g2",
+            gfs_instance_id="other",
+            display_name="x",
+            public_key="ab",
+            inbox_url="https://other.test",
+            status="pending",
+            paired_at="2025-01-01T00:00:00+00:00",
+        )
+    )
+    svc, rebound = _rebind_svc(repo, _served())
+    assert await svc.refresh_all_metadata() == 1
+    assert rebound == ["g1"]
+    assert await svc.refresh_all_metadata(should_stop=lambda: True) == 0
+
+
+async def test_the_addressee_key_is_bound_only_once_the_server_proves_it(env):
+    """L2: ``addressee_key_for`` answers the PINNED key only after a verified
+    block says the server takes ``gfs_key`` — an older server would refuse
+    the unknown field."""
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-shared"))
+    conn = await repo.get("g1")
+    svc, _rebound = _rebind_svc(repo, _served())
+    await svc.refresh_connection_metadata("g1")
+    assert svc.addressee_key_for(conn) is None
+    info = _signed_info(
+        gfs_instance_id="gfs-shared",
+        capabilities={"anonymous_publish": True, "addressee_key": True},
+    )
+    info.update(gfs_instance_id="gfs-shared", public_key=_GFS_KP.public_key.hex())
+    svc._http_client.info = info  # type: ignore[union-attr]
+    await svc.refresh_connection_metadata("g1")
+    assert svc.addressee_key_for(conn) == _GFS_KP.public_key.hex()
+
+
+async def test_forget_addressee_key_until_the_next_verified_fetch(env):
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-shared"))
+    conn = await repo.get("g1")
+    info = _signed_info(
+        gfs_instance_id="gfs-shared",
+        capabilities={"anonymous_publish": True, "addressee_key": True},
+    )
+    info.update(gfs_instance_id="gfs-shared", public_key=_GFS_KP.public_key.hex())
+    svc, _rebound = _rebind_svc(repo, info)
+    await svc.refresh_connection_metadata("g1")
+    assert svc.addressee_key_for(conn) is not None
+    svc.forget_addressee_key(conn)
+    assert svc.addressee_key_for(conn) is None
+    await svc.refresh_connection_metadata("g1")
+    assert svc.addressee_key_for(conn) is not None
+
+
+async def test_refresh_if_stale_is_debounced_per_connection(env):
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-0"))
+    svc, rebound = _rebind_svc(repo, _served())
+    conn = await repo.get("g1")
+    fresh = await svc.refresh_if_stale(conn)
+    assert fresh is not None and fresh.gfs_instance_id == "gfs-shared"
+    assert rebound == ["g1"]
+    gets = len(svc._http_client.gets)  # type: ignore[union-attr]
+    await svc.refresh_if_stale(conn)
+    assert len(svc._http_client.gets) == gets  # type: ignore[union-attr]
+    await svc.refresh_if_stale(conn, min_interval_s=0)
+    assert len(svc._http_client.gets) == gets + 1  # type: ignore[union-attr]

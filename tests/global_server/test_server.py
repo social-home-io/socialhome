@@ -289,6 +289,9 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "private_channels": True,
         # Open sign-up is an operator opt-in, off by default.
         "open_signup": False,
+        # Takes the optional, signed ``gfs_key`` (its own key) on household
+        # requests. No ``replaces``: this server has no instance_id_aliases.
+        "addressee_key": True,
     }
     assert body["capabilities_sig_suite"] == CAPS_SIG_SUITE_ED25519
     assert verify_capabilities(

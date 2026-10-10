@@ -90,6 +90,15 @@ class _Gfs:
     def publish_client(self):
         return self._anon
 
+    def addressee_key_for(self, conn):
+        return None
+
+    def forget_addressee_key(self, conn):
+        self.forgotten = [*getattr(self, "forgotten", []), conn.id]
+
+    async def refresh_if_stale(self, conn):
+        return conn
+
     async def member_publish_trusted_supported(self, conn):
         return True
 

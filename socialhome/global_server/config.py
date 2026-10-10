@@ -91,7 +91,21 @@ class GfsConfig:
     port: int = 8765
     base_url: str = ""  # public URL, e.g. "https://gfs.example.com"
     data_dir: str = DEFAULT_DATA_DIR
+    #: This GFS's PUBLIC identity. ``GET /gfs/info`` serves it and signs it
+    #: into the capability block; households pin it at pairing and sign it
+    #: into every member publish, epoch notice and channel request as the
+    #: addressee. It MUST be identical on every node of a cluster (the nodes
+    #: share one identity key and one ``base_url``, and a load balancer sends
+    #: a household's requests to any of them) — nodes are told apart by
+    #: ``[cluster] node_id``, never by this.
     instance_id: str = "gfs-node-0"
+    #: Former ``instance_id`` values still accepted as the ADDRESSEE of a
+    #: household-signed request — a migration bridge after a change of
+    #: ``instance_id``, while households re-read ``/gfs/info`` and adopt the
+    #: new id. Served only inside the SIGNED capability block, as
+    #: ``replaces`` (what lets a household pinned to one of them move). Drop
+    #: them once the INFO log of alias use goes quiet.
+    instance_id_aliases: tuple[str, ...] = ()
     #: Optional 64-hex-char (32-byte) override for this GFS's Ed25519 identity
     #: seed, for operators who inject secrets from a vault instead of letting
     #: the data dir own the key. Empty (the default) means "use the random seed
@@ -178,6 +192,9 @@ class GfsConfig:
             base_url=str(server.get("base_url") or ""),
             data_dir=str(server.get("data_dir") or DEFAULT_DATA_DIR),
             instance_id=str(server.get("instance_id") or "gfs-node-0"),
+            instance_id_aliases=tuple(
+                str(a) for a in (server.get("instance_id_aliases") or ())
+            ),
             signing_seed_hex=str(server.get("signing_seed_hex") or ""),
             # An explicitly EMPTY list must stay empty (the internet-facing
             # posture) — only a missing key falls back to the default.
@@ -213,7 +230,42 @@ class GfsConfig:
                 f"GFS config at {p} is missing [server] base_url — "
                 "public URLs and pairing QRs cannot be generated without it",
             )
-        return cfg
+        return cfg._with_clean_aliases()
+
+    def _with_clean_aliases(self) -> "GfsConfig":
+        """Trim + de-duplicate ``instance_id_aliases``; drop empty entries and
+        the ``instance_id`` itself (an alias equal to the id is no alias)."""
+        seen: list[str] = []
+        for raw in self.instance_id_aliases:
+            alias = str(raw).strip()
+            if alias and alias != self.instance_id and alias not in seen:
+                seen.append(alias)
+        return replace(self, instance_id_aliases=tuple(seen))
+
+    def check_cluster_identity(self) -> None:
+        """Log an ERROR for a cluster node whose ``[cluster] node_id`` is
+        empty while ``instance_id_aliases`` is set.
+
+        ``node_id`` falls back to ``instance_id`` (kept: refusing to start
+        would break existing deployments). But ``instance_id`` is the public
+        identity every node of a cluster must share, so on a cluster moving
+        to one shared id (aliases set) the fallback gives every node the
+        same ``node_id``. Duplicate ``node_id``s are also detected at
+        runtime (:class:`ClusterService`). Never raises.
+        """
+        if (
+            self.cluster_enabled
+            and not self.cluster_node_id.strip()
+            and self.instance_id_aliases
+        ):
+            log.error(
+                "[cluster] node_id is empty, so it falls back to [server] "
+                "instance_id %r — which every node of the cluster shares "
+                "(instance_id_aliases is set). Nodes with the same node_id "
+                "cannot be told apart: set a unique [cluster] node_id on "
+                "every node.",
+                self.instance_id,
+            )
 
     @property
     def cluster_self_url(self) -> str:
@@ -245,6 +297,14 @@ class GfsConfig:
         # over GFS_DATA_DIR, mirroring the historical fallback order.
         if "GFS_DB_PATH" in env:
             data_dir = str(Path(env["GFS_DB_PATH"]).resolve().parent)
+        aliases = self.instance_id_aliases
+        if "GFS_INSTANCE_ID_ALIASES" in env:
+            # Comma-separated; an empty value clears the list.
+            aliases = tuple(
+                part.strip()
+                for part in env["GFS_INSTANCE_ID_ALIASES"].split(",")
+                if part.strip()
+            )
         trusted_proxies = self.trusted_proxies
         if "GFS_TRUSTED_PROXIES" in env:
             # Comma-separated IPs / CIDRs; an empty value clears the list.
@@ -270,6 +330,7 @@ class GfsConfig:
             base_url=env.get("GFS_BASE_URL", self.base_url),
             data_dir=data_dir,
             instance_id=env.get("GFS_INSTANCE_ID", self.instance_id),
+            instance_id_aliases=aliases,
             signing_seed_hex=env.get("GFS_SIGNING_SEED", self.signing_seed_hex),
             trusted_proxies=trusted_proxies,
             open_signup=(
@@ -282,7 +343,7 @@ class GfsConfig:
                 if "GFS_WRITE_BATCH_WINDOW_MS" in env
                 else self.write_batch_window_ms
             ),
-        )
+        )._with_clean_aliases()
 
     @classmethod
     def from_env_fallback(cls) -> "GfsConfig":
@@ -380,13 +441,27 @@ EXAMPLE_TOML: str = """\
 [server]
 # These apply as written. To retarget a single instance without editing
 # the file, set the matching env var (env > file): GFS_HOST, GFS_PORT,
-# GFS_BASE_URL, GFS_DATA_DIR, GFS_INSTANCE_ID, GFS_SIGNING_SEED,
-# GFS_WRITE_BATCH_WINDOW_MS.
+# GFS_BASE_URL, GFS_DATA_DIR, GFS_INSTANCE_ID, GFS_INSTANCE_ID_ALIASES,
+# GFS_SIGNING_SEED, GFS_WRITE_BATCH_WINDOW_MS.
 host     = "0.0.0.0"
 port     = 8765
 base_url = "https://gfs.example.com"
 data_dir = "/var/lib/sh-gfs"
+# instance_id is this GFS's public identity: /gfs/info serves it, the
+# capability block is signed over it, and households pin it at pairing and
+# sign it into their requests as the addressee. In a cluster it
+# MUST be identical on every node (the nodes share one key and one base_url,
+# and the load balancer sends a household to any of them); nodes are told
+# apart by [cluster] node_id, never by this.
 instance_id = "gfs-node-0"
+# Former instance_id values still accepted as the addressee of a household's
+# request — a migration bridge after changing instance_id, while households
+# re-read /gfs/info and adopt the new id (on their next reconnect or hourly
+# refresh, keyed on the unchanged identity key: /gfs/info signs these as
+# "replaces", and a household moves only off an id listed there).
+# Each use is logged at INFO; drop the aliases once those lines stop.
+# Env override: GFS_INSTANCE_ID_ALIASES="gfs-0,gfs-1" (empty string = []).
+instance_id_aliases = []
 # This server's Ed25519 identity seed, 64 hex chars (32 bytes). Leave empty and
 # the GFS mints a random seed on first boot and persists it as
 # <data_dir>/gfs_identity.seed (0600) — that is the key every paired household
@@ -456,8 +531,17 @@ turn_secret = ""
 # never changes in place — to rotate, remove the peer and add it again.
 # Frames carry a timestamp that must be within 300 s of the receiver's
 # clock: keep every node on NTP, or they stop syncing with each other.
-# node_id must be unique per node (defaults to instance_id) — two nodes
-# with the same id cannot be told apart.
+# node_id MUST be unique per node — set it explicitly. Left empty it falls
+# back to [server] instance_id, which is the public identity and MUST be
+# identical on every node, so every node would get the same node_id (logged
+# at ERROR at startup when instance_id_aliases is set, and at runtime when a
+# node announces our node_id from another address; GET /admin/api/cluster
+# lists it under duplicate_node_id_urls). Nodes sharing the identity seed
+# compare their instance_id on HELLO / heartbeat: a sibling reporting an id
+# linked through either side's instance_id_aliases is a rolling id change
+# (WARNING, instance_id_transitional); any other difference is a
+# misconfiguration (ERROR, instance_id_mismatches) — fix it by giving every
+# node the same instance_id. Neither fails GET /healthz.
 # Set [server] trusted_proxies EXPLICITLY on every cluster node.
 # /cluster/sync budgets failed requests per client address (and failed
 # verifies per node + address), and trusted_proxies decides that address. A

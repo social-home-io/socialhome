@@ -742,7 +742,14 @@ that gossip state over `POST /cluster/sync`. Each node announces
 `[cluster] advertise_url` (falling back to `[server] base_url`) as the
 address its peers reach it at; behind a shared load balancer every node must
 advertise its own address (node IP + port), or frames reach a random node
-and are refused `wrong_recipient`. Membership is operator-approved,
+and are refused `wrong_recipient`. Nodes are told apart by `[cluster]
+node_id` (unique — set it; an empty one falls back to `instance_id` and a
+duplicate is flagged); `[server] instance_id` is the GFS's public identity
+that households pin and sign into requests, so it is the SAME on every node
+(HELLO / heartbeat carry it and the aliases; a same-key sibling reporting an
+unlinked id is flagged in the admin view, never a `/healthz` failure; see
+[`protocol/discovery.md`](protocol/discovery.md) "One public identity per
+GFS"). Membership is operator-approved,
 never trust-on-first-use: a node is a member **if and only if** its frames
 verify under a key the receiving node already holds. That is either the
 GFS's own identity key (`gfs_identity.seed`: an operator who gave a node the

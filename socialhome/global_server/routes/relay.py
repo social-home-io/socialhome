@@ -122,7 +122,7 @@ class GfsInfoView(GfsBaseView):
         # Signed because the household offers that one-click path only when
         # it is proven — a forged flag would only waste one request, but a
         # bare flag is never what a household trusts.
-        capabilities = {
+        capabilities: dict[str, object] = {
             "anonymous_publish": True,
             "envelope_relay": True,
             "invite_links": True,
@@ -131,7 +131,17 @@ class GfsInfoView(GfsBaseView):
             "member_publish_strict": True,
             "private_channels": True,
             "open_signup": bool(cfg.open_signup),
+            # Takes the signed, optional ``gfs_key`` (the addressed server's
+            # key) on member publish, epoch notices and channel requests, and
+            # refuses one that is not its own key.
+            "addressee_key": True,
         }
+        if cfg.instance_id_aliases:
+            # The former ids this server answers to (``instance_id_aliases``),
+            # SIGNED: a household pinned to one of them adopts
+            # ``instance_id`` — and only then (no lateral moves between the
+            # ids of a cluster still on per-node ids).
+            capabilities["replaces"] = sorted(cfg.instance_id_aliases)
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {
             "gfs_instance_id": cfg.instance_id,
@@ -622,7 +632,12 @@ class SpaceUnpublishView(GfsBaseView):
 
 
 class HealthzView(GfsBaseView):
-    """``GET /healthz`` — liveness probe."""
+    """``GET /healthz`` — liveness probe (the load balancer's and Nomad's).
+
+    Deliberately NOT failed by a cluster identity mismatch: that would pull
+    every node of a misconfigured cluster out of the balancer at once. The
+    mismatch is an ERROR log and a flag in ``GET /admin/api/cluster``.
+    """
 
     async def get(self) -> web.Response:
         return web.json_response({"status": "ok"})
