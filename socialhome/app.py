@@ -4120,6 +4120,12 @@ def create_app(config: Config | None = None) -> web.Application:
             # — idempotent (the pin only moves on an owner-certified rotation,
             # v_44) and fail-soft.
             await gfs_connection_service.heal_space_pins(gfs_id)
+            # And withdraw what must no longer be listed there: a space that
+            # left the global tier or was dissolved while this GFS was down.
+            try:
+                await gfs_server_selection.retry_withdrawals(gfs_id)
+            except Exception:  # noqa: BLE001 — best-effort self-heal
+                log.exception("gfs: withdrawal retry failed for %s", gfs_id)
             # Self-heal our SUBSCRIBER seats on the GFS, the mirror image of
             # the pin heal above. ``subscribe_to_space`` POSTs
             # ``/gfs/subscribe`` only on the first-ever mirror, while the GFS

@@ -764,13 +764,33 @@ async def test_space_publications_empty_array(client):
 # ─── DELETE /api/spaces/{id}/publish/{gfs_id} ────────────────────────
 
 
-async def test_unpublish_gfs_not_found(client):
+@pytest.mark.security
+async def test_unpublish_without_a_listing_contacts_no_gfs(client):
+    """A GFS that holds no listing of the space would learn its id from the
+    withdrawal: 404, nothing sent."""
+    await _seed_gfs(client, "gfs-1")
     await _seed_space(client, "sp-1")
+    _stub_session(client, status=204)
+    for gfs_id in ("gfs-1", "nonexistent"):
+        r = await client.delete(
+            f"/api/spaces/sp-1/publish/{gfs_id}",
+            headers=_auth(client._tok),
+        )
+        assert r.status == 404
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
+
+
+async def test_household_admin_withdraws_a_dissolved_spaces_leftover_listing(client):
+    """Keyed on the publication row, not on a live space."""
+    await _seed_gfs(client, "gfs-1")
+    await SqliteGfsConnectionRepo(client._db).publish_space("sp-gone", "gfs-1")
+    _stub_session(client, status=204)
     r = await client.delete(
-        "/api/spaces/sp-1/publish/nonexistent",
-        headers=_auth(client._tok),
+        "/api/spaces/sp-gone/publish/gfs-1", headers=_auth(client._tok)
     )
-    assert r.status == 422
+    assert r.status == 204
+    repo = SqliteGfsConnectionRepo(client._db)
+    assert await repo.list_publications_for_space("sp-gone") == []
 
 
 # ─── Reconnect reconcile behind the proof-of-possession gate ─────────

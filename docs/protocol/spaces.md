@@ -601,7 +601,7 @@ there once that household upgrades.
 - **The owner picks the servers.** A global space is listed on exactly the
   GFSs its owner chose — on create (`POST /api/spaces {gfs_ids}`, at least
   one while any GFS is connected), on the tier proposal that makes it global
-  (`gfs_ids`, honoured only from a proposer on the owner household), or later
+  (`gfs_ids`, honoured only from the space's owner), or later
   through `PUT /api/spaces/{id}/gfs-servers` (owner only, owner household
   only, no quorum — the tier change itself stays quorum-gated). Nothing is
   ever published to "every active GFS".
@@ -617,12 +617,26 @@ there once that household upgrades.
   the space, never to another one.
 - **Members see the list.** The owner's signed GFS list (`gfs_servers`,
   migration 0093) rides `space_meta`; `GET /api/spaces/{id}` exposes it
-  read-only as `gfs_servers: [{display_name, inbox_url, connected}]`.
+  read-only as `gfs_servers: [{display_name, inbox_url, connected}]` to the
+  space's members and the owner household's admins (`null` for anyone
+  else).
 - **Upgrade.** At startup the owner household turns each owned public space
-  that was hand-published to a GFS into a global one (recording the listing
-  it already has; no quorum), and signs a GFS list for each owned global
-  space that has none, keeping its listings
-  (`GfsServerSelectionService.reconcile_on_startup`).
+  that was hand-published to a GFS — an **active** listing and **no** signed
+  GFS list, a combination only a pre-owner-model household has — into a
+  global one (recording the listing it already has; no quorum), and signs a
+  GFS list for each owned global space that has none, keeping its listings
+  (`GfsServerSelectionService.reconcile_on_startup`). It is one-shot by
+  construction: every space that has been global since carries a signed list
+  (an empty one once it leaves the tier), so a quorum-approved move from
+  global back to public is never reverted.
+- **Withdrawal retry.** A withdrawal that could not reach a GFS leaves the
+  local publication row. At every start and on every reconnect to that GFS
+  the owner household withdraws again each row whose space is gone,
+  dissolved, or owned here and no longer global
+  (`GfsServerSelectionService.retry_withdrawals`). Until then such a row gets
+  no relayed content and no epoch notice (both require a global space and an
+  accepted listing), and the reconnect heal never re-publishes it — nor a
+  row for a space hosted elsewhere (only the owner lists a space).
 
 Impl: `services/gfs_server_selection_service.py` (the choice + the signed
 list), `SpaceService.on_tier_change`, `GfsConnectionService._require_publishable`.
@@ -2663,11 +2677,12 @@ same rule, so no single person can unilaterally delete or publish the group.
 
 A `set_public_tier` proposal into `global` may carry `gfs_ids` — the GFSs
 (owner-household connection ids) it is listed on when it executes. They are
-kept only when the proposer is on the owner household; a forwarded proposal
-from a remote admin drops them, and if it passes the space is "global, not
-listed" until the owner picks servers. An owner-household admin who joins an
-open proposal with `gfs_ids` names the servers that proposal executes with.
-Servers disconnected by the time it executes are skipped.
+kept only when the proposer is the space's **owner**; a co-admin's or a
+forwarded remote admin's are dropped, and if such a proposal passes the space
+is "global, not listed" until the owner picks servers. The owner joining an
+open proposal with `gfs_ids` names the servers it executes with; nobody else
+can replace them under votes already cast. Servers disconnected by the time
+it executes are skipped.
 
 `SpaceApprovalService` (host-authoritative) owns the workflow:
 

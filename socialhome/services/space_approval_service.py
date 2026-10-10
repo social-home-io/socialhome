@@ -165,16 +165,19 @@ class SpaceApprovalService(ProtectionGateMixin):
         params = params or {}
         if GFS_IDS_PARAM in params:
             # Servers are chosen only for a move into the global tier, only
-            # by a proposer on the owner household (checked here, before a
-            # proposal opens — a forwarded proposal never carries them).
+            # by the space OWNER on the owner household (checked here, before
+            # a proposal opens — a forwarded proposal never carries them).
             hosted_here = (
                 not space.owner_instance_id
                 or space.owner_instance_id == self._own_instance_id
             )
+            member = await self._spaces.get_member(space_id, actor.user_id)
+            is_owner = member is not None and member.role == SpaceRole.OWNER
             if (
                 action is not ProposalAction.SET_PUBLIC_TIER
                 or not _goes_global(params)
                 or not hosted_here
+                or not is_owner
             ):
                 params = {k: v for k, v in params.items() if k != GFS_IDS_PARAM}
             elif self._space_service is not None:
@@ -444,9 +447,15 @@ class SpaceApprovalService(ProtectionGateMixin):
         proposer_instance: str,
         proposer_user: str,
     ) -> dict:
-        if GFS_IDS_PARAM in params and proposer_instance != self._own_instance_id:
-            # Choosing GFSs is the owner household's call: a remote admin's
-            # proposal to go global passes as "global, not listed".
+        if GFS_IDS_PARAM in params and (
+            proposer_instance,
+            proposer_user,
+        ) != await self._owner_key(space_id):
+            # Choosing GFSs is the space OWNER's call: a remote admin's — or
+            # an owner-household co-admin's — proposal to go global names no
+            # servers (it passes as "global, not listed"), and can't replace
+            # the owner's choice on an open proposal whose votes were cast
+            # for it.
             params = {k: v for k, v in params.items() if k != GFS_IDS_PARAM}
         existing = await self._proposals.find_open(space_id, action)
         # §CP.R: a space a protected account owns never goes public — not by
@@ -467,7 +476,7 @@ class SpaceApprovalService(ProtectionGateMixin):
                 and existing.params.get("space_type") == params.get("space_type")
                 and existing.params.get(GFS_IDS_PARAM) != params[GFS_IDS_PARAM]
             ):
-                # The owner household joins an open proposal to go global
+                # The space owner joins an open proposal to go global
                 # (perhaps a remote admin's, which carries no servers) and
                 # names the servers: its choice is the one that executes.
                 proposal = replace(

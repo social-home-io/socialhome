@@ -2540,6 +2540,8 @@ class GfsConnectionService:
         space exists. Fail-soft per GFS; returns how many accepted the
         publish.
         """
+        if not await self._owns(space_id):
+            return 0
         done = 0
         for conn in await self._repo.list_gfs_for_space(space_id):
             if conn.status != "active":
@@ -2611,7 +2613,9 @@ class GfsConnectionService:
                 space_id,
             )
             return 0
-        conns = await self._repo.list_gfs_for_space(space_id)
+        if not await self._relayable(space_id):
+            return 0
+        conns = await self._repo.list_active_listings_for_space(space_id)
         if not conns:
             return 0
         item = GfsPublish(space_id=space_id, event_type=event_type, payload=payload)
@@ -2720,13 +2724,19 @@ class GfsConnectionService:
         """
         if self._http_client is None or self._publish_client is None:
             return PublishOutcome.permanent()
-        conn = next(
-            (
-                c
-                for c in await self._repo.list_gfs_for_space(item.space_id)
-                if c.id == conn_id
-            ),
-            None,
+        conn = (
+            next(
+                (
+                    c
+                    for c in await self._repo.list_active_listings_for_space(
+                        item.space_id
+                    )
+                    if c.id == conn_id
+                ),
+                None,
+            )
+            if await self._relayable(item.space_id)
+            else None
         )
         if conn is None or conn.status != "active":
             log.info(
@@ -2796,6 +2806,11 @@ class GfsConnectionService:
             return 0
         healed = 0
         for pub in publications:
+            if not await self._owns(pub.space_id):
+                # Only the owner household lists a space (owner model): a
+                # legacy row for a space hosted elsewhere is never refreshed
+                # (a household admin can withdraw it by hand).
+                continue
             if not await self._holds_space_seed(pub.space_id):
                 continue
             try:
@@ -2826,6 +2841,27 @@ class GfsConnectionService:
                     gfs_id,
                 )
         return healed
+
+    async def _owns(self, space_id: str) -> bool:
+        """Whether this household hosts *space_id* (a live local row)."""
+        if self._space_repo is None or not self._own_instance_id:
+            return False
+        space = await self._space_repo.get(space_id)
+        return (
+            space is not None
+            and not space.dissolved
+            and space.owner_instance_id == self._own_instance_id
+        )
+
+    async def _relayable(self, space_id: str) -> bool:
+        """Whether content of *space_id* may go to the GFSs listing it: only a
+        GLOBAL space is on a GFS. A leftover row of a space that left the
+        tier (its withdrawal failed) must not keep the relay going — the
+        withdrawal retry removes the row itself."""
+        if self._space_repo is None:
+            return True
+        space = await self._space_repo.get(space_id)
+        return space is not None and space.space_type is SpaceType.GLOBAL
 
     async def _holds_space_seed(self, space_id: str) -> bool:
         """Whether this household can author a metadata publish for *space_id*.

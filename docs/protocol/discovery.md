@@ -2422,8 +2422,8 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
 
 Only a **global** space is listed, and only on the GFSs its **owner** picks
 (at most 8): at create (`POST /api/spaces {space_type: "global", gfs_ids}`),
-on the approved tier proposal that makes it global (`gfs_ids` from a proposer
-on the owner household), or later with `PUT /api/spaces/{id}/gfs-servers` /
+on the approved tier proposal that makes it global (`gfs_ids` from the
+space's owner), or later with `PUT /api/spaces/{id}/gfs-servers` /
 `POST|DELETE /api/spaces/{id}/publish/{gfs_id}` (owner only;
 `GfsServerSelectionService`). Each chosen GFS gets the owner-signed metadata
 publish; members get the new signed GFS list once, after every publish
@@ -2436,7 +2436,10 @@ that list the space and to no other: when the owner removes a server, when
 the space leaves the global tier, and when it is dissolved. A directory
 setting change (`join_mode`, `allow_subscribers`) re-publishes to the GFSs
 that list the space — never to one that doesn't, so neither a settings edit
-nor a withdrawal is how a GFS first learns a space exists.
+nor a withdrawal is how a GFS first learns a space exists. A withdrawal that
+could not reach its GFS is retried at every start and every reconnect to that
+GFS; until it lands, the leftover listing gets no relayed content and no
+epoch notice, and the reconnect heal never re-publishes it.
 
 ```mermaid
 sequenceDiagram

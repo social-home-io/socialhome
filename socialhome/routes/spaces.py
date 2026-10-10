@@ -20,6 +20,7 @@ from ..app_keys import (
     event_bus_key,
     federation_repo_key,
     gfs_server_selection_service_key,
+    instance_id_key,
     media_signer_key,
     media_transcode_repo_key,
     notification_repo_key,
@@ -255,10 +256,7 @@ class SpaceDetailView(BaseView):
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         space = await svc._require_space(space_id)
-        selection = self.request.app.get(gfs_server_selection_service_key)
-        gfs_servers, gfs_unlisted = (
-            await selection.describe(space) if selection is not None else (None, False)
-        )
+        gfs_servers, gfs_unlisted = await self._gfs_listing(space)
         cover_url = (
             f"/api/spaces/{space.id}/cover?v={space.cover_hash}"
             if space.cover_hash
@@ -324,6 +322,24 @@ class SpaceDetailView(BaseView):
         if signer is not None:
             sign_media_urls_in(payload, signer)
         return web.json_response(payload)
+
+    async def _gfs_listing(self, space) -> tuple[list[dict] | None, bool]:
+        """Where a global space is listed — only for its members (not
+        followers) and, on the owner household, the household admins (who
+        manage its GFS connections). Anyone else gets ``(None, False)``:
+        which servers list a space is the members' business."""
+        selection = self.request.app.get(gfs_server_selection_service_key)
+        if selection is None:
+            return None, False
+        ctx = self.user
+        member = await self.svc(space_repo_key).get_member(space.id, ctx.user_id)
+        is_member = member is not None and member.role != SpaceRole.SUBSCRIBER
+        owner_household_admin = bool(ctx.is_admin) and (
+            space.owner_instance_id == self.request.app.get(instance_id_key)
+        )
+        if not (is_member or owner_household_admin):
+            return None, False
+        return await selection.describe(space)
 
     async def _has_remote_households(self, space_id: str) -> bool:
         moderation = self.request.app.get(space_moderation_service_key)

@@ -170,6 +170,16 @@ class _Conns:
     async def list_gfs_for_space(self, space_id):
         return [c for c in self.conns if c.id in self.own]
 
+    async def list_active_listings_for_space(self, space_id):
+        """Listings in ``inactive`` stand for a pending / banned row."""
+        return [
+            c
+            for c in self.conns
+            if c.id in self.own and c.status == "active" and c.id not in self.inactive
+        ]
+
+    inactive: frozenset[str] = frozenset()
+
     async def get(self, gfs_id):
         return next((c for c in self.conns if c.id == gfs_id), None)
 
@@ -224,7 +234,7 @@ def _space(*, owner: str = "host.home", public=True, readable=True, sid=SPACE_ID
         identity_public_key=SPACE_PK.hex(),
         config_sequence=0,
         features=SpaceFeatures(allow_subscribers=readable),
-        space_type=SpaceType.PUBLIC if public else SpaceType.PRIVATE,
+        space_type=SpaceType.GLOBAL if public else SpaceType.PRIVATE,
         join_mode=JoinMode.OPEN,
     )
 
@@ -1379,3 +1389,31 @@ async def test_an_older_node_refusing_gfs_key_gets_one_retry_without_it(world):
     assert outcome.kind == "delivered"
     assert ["gfs_key" in b for b in old.bodies] == [True, False]
     assert world["gfs"].addressee_key is None
+
+
+@pytest.mark.security
+async def test_a_space_that_left_the_global_tier_gets_no_epoch_notice(world):
+    """Owner model: a public space is never on a GFS. A leftover listing (its
+    withdrawal failed) must not keep receiving epoch notices."""
+    owner_svc = _owner_svc(world)
+    world["crypto"].epoch = 7
+    world["spaces"].spaces[SPACE_ID] = replace(
+        world["spaces"].spaces[SPACE_ID], space_type=SpaceType.PUBLIC
+    )
+    assert await owner_svc.announce_epoch(SPACE_ID) == 0
+
+
+async def test_a_pending_own_listing_is_not_a_target(world, monkeypatch):
+    """Our own row counts only once the GFS accepted the listing; a pending
+    / banned row falls back to the server's public directory."""
+    conns = _Conns([world["conn"]], own=["conn-1"])
+    conns.inactive = frozenset({"conn-1"})
+    world["svc"]._conn_repo = conns
+
+    async def _not_listed(self, conn, space_id):
+        return False
+
+    monkeypatch.setattr(GfsMemberPublishService, "_listed", _not_listed)
+    assert await world["svc"]._capable_listed(SPACE_ID) == []
+    conns.inactive = frozenset()
+    assert [c.id for c in await world["svc"]._capable_listed(SPACE_ID)] == ["conn-1"]

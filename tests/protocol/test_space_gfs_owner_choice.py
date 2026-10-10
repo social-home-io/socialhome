@@ -66,15 +66,26 @@ class _Resp:
     async def json(self):
         return self._body
 
+    @property
+    def content(self):
+        return self
+
+    async def read(self, n: int = -1) -> bytes:
+        return b"{}"
+
 
 class _RecordingSession:
     """Every request the household makes, by host."""
 
     def __init__(self) -> None:
         self.requests: list[tuple[str, str]] = []
+        #: The GFS is down for withdrawals (answers 503).
+        self.unpublish_down = False
 
     def _record(self, method: str, url: str) -> _Resp:
         self.requests.append((method, url))
+        if self.unpublish_down and url.endswith("/unpublish"):
+            return _Resp(503, {})
         return _Resp(200, {"status": "active"})
 
     def post(self, url, **kw):
@@ -316,3 +327,57 @@ async def test_startup_reconcile_is_idempotent_and_contacts_no_gfs(household):
     assert again.gfs_servers.issued_at == signed_at
     assert again.config_sequence == sequence
     assert h.session.requests == []
+
+
+async def test_an_approved_move_to_public_survives_a_restart(household):
+    """global → public (the quorum executed it as the owner) while the GFS
+    can't take the withdrawal: after a restart the space stays public, the
+    reconnect heal does not re-advertise it, and the withdrawal is retried
+    until it lands."""
+    h = household
+    space = await h.svc.create_space(
+        owner_username="alice",
+        name="Chess",
+        space_type=SpaceType.GLOBAL,
+        gfs_ids=["chosen"],
+    )
+    h.session.unpublish_down = True
+    await h.svc.update_config(
+        space.id, actor_username="alice", space_type=SpaceType.PUBLIC
+    )
+    assert len(await h.gfs_repo.list_publications_for_space(space.id)) == 1
+    h.session.requests.clear()
+
+    # Restart: the startup reconcile, then the GFS reconnect hooks.
+    await h.selection.reconcile_on_startup()
+    assert await h.gfs.heal_space_pins("chosen") == 0
+    await h.selection.retry_withdrawals("chosen")
+    assert (await h.spaces.get(space.id)).space_type is SpaceType.PUBLIC
+    paths = {urlsplit(u).path for _m, u in h.session.requests}
+    assert paths == {f"/gfs/spaces/{space.id}/unpublish"}
+
+    h.session.unpublish_down = False
+    await h.selection.reconcile_on_startup()
+    assert (await h.spaces.get(space.id)).space_type is SpaceType.PUBLIC
+    assert await h.gfs_repo.list_publications_for_space(space.id) == []
+    assert all(not u.endswith("/publish") for _m, u in h.session.requests)
+
+
+async def test_a_dissolved_spaces_listing_is_withdrawn_at_the_next_start(household):
+    h = household
+    space = await h.svc.create_space(
+        owner_username="alice",
+        name="Chess",
+        space_type=SpaceType.GLOBAL,
+        gfs_ids=["chosen"],
+    )
+    h.session.unpublish_down = True
+    await h.svc.dissolve_space(space.id, actor_username="alice")
+    assert len(await h.gfs_repo.list_publications_for_space(space.id)) == 1
+    h.session.unpublish_down = False
+    h.session.requests.clear()
+    await h.selection.reconcile_on_startup()
+    assert await h.gfs_repo.list_publications_for_space(space.id) == []
+    assert [
+        (urlsplit(u).hostname, urlsplit(u).path) for _m, u in h.session.requests
+    ] == [("chosen.example", f"/gfs/spaces/{space.id}/unpublish")]

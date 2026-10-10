@@ -3902,3 +3902,21 @@ async def test_tier_proposal_with_an_unknown_gfs_is_refused(client):
     )
     assert r.status == 422
     assert (await r.json())["error"]["code"] == "GFS_SELECTION_INVALID"
+
+
+@pytest.mark.security
+async def test_get_space_hides_the_gfs_list_from_non_members(client):
+    """Which GFSs list a space is the members' business: a local user who
+    is not a member (the detail route itself is open) sees no list."""
+    await _connect_gfs(client, "g1")
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Chess", "space_type": "global", "gfs_ids": ["g1"]},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._bob_token))
+    ).json()
+    assert body["gfs_servers"] is None
+    assert body["gfs_unlisted"] is False

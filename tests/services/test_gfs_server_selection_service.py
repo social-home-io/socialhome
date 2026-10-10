@@ -670,6 +670,9 @@ async def test_a_space_owned_elsewhere_is_never_listed_from_here(owner_env):
     with pytest.raises(SpacePermissionError):
         await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
     with pytest.raises(SpacePermissionError):
+        await env.svc.add_server("sp-1", actor_username="anna", gfs_id="g1")
+    # A household admin withdraws by ROW; without one nothing is contacted.
+    with pytest.raises(KeyError):
         await env.svc.remove_server(
             "sp-1", actor_username="anna", gfs_id="g1", household_admin=True
         )
@@ -958,3 +961,103 @@ async def test_reconcile_without_identity_does_nothing(owner_env):
     await env.gfs.publish_space("sp-1", "g1")
     assert await bare.reconcile_on_startup() == 0
     assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+
+
+# ── Leftover listings: one-shot promotion, withdrawal retry, locking ──────
+
+
+@pytest.mark.security
+async def test_reconcile_never_reverts_an_approved_move_to_public(owner_env):
+    """A quorum moved the space global → public but the withdrawal could not
+    reach the GFS (the row stays). Restarting must keep it public — the
+    space was signed a list while global — and withdraw the listing again."""
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    await env.svc.sync_snapshot("sp-1")  # global: a list is signed
+    space = await env.spaces.get("sp-1")
+    await env.spaces.save(dataclasses.replace(space, space_type=SpaceType.PUBLIC))
+    await env.svc.sync_snapshot("sp-1")  # left global: an empty list
+    env.publisher.fail = {"g1"}  # the GFS is still down at the restart
+
+    assert await env.svc.reconcile_on_startup() == 0
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+    assert env.publisher.calls == [("unpublish", "g1", False)]
+    assert len(await env.gfs.list_publications_for_space("sp-1")) == 1
+
+    env.publisher.fail = set()  # back up: the next start withdraws it
+    assert await env.svc.reconcile_on_startup() == 1
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+    assert await env.gfs.list_publications_for_space("sp-1") == []
+
+
+async def test_reconcile_promotes_only_on_an_active_listing(owner_env):
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1", "pending")
+    await env.svc.reconcile_on_startup()
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+    # Not promoted, so the pending listing is withdrawn instead.
+    assert env.publisher.calls == [("unpublish", "g1", False)]
+
+
+async def test_retry_withdrawals_scope(owner_env):
+    """Withdrawn: rows of a missing / dissolved space and of an owned space
+    that is no longer global. Kept: owned global, and a space hosted
+    elsewhere (its row is the household admin's to withdraw)."""
+    env = owner_env
+    await _connected(env, "g1", "g2")
+    await env.space("sp-glob")
+    await env.space("sp-priv", space_type=SpaceType.PRIVATE)
+    await env.space("sp-remote", space_type=SpaceType.PUBLIC, owner="elsewhere")
+    await env.space("sp-dis")
+    await env.spaces.save(
+        dataclasses.replace(await env.spaces.get("sp-dis"), dissolved=True)
+    )
+    for space_id in ("sp-glob", "sp-priv", "sp-remote", "sp-gone", "sp-dis"):
+        await env.gfs.publish_space(space_id, "g1")
+    await env.gfs.publish_space("sp-priv", "g2")
+
+    assert await env.svc.retry_withdrawals("g1") == 3
+    withdrawn = {g for _k, g, _a in env.publisher.calls}
+    assert withdrawn == {"g1"}
+    left = {
+        (p.space_id, p.gfs_connection_id)
+        for c in ("g1", "g2")
+        for p in await env.gfs.list_publications(c)
+    }
+    assert left == {("sp-glob", "g1"), ("sp-remote", "g1"), ("sp-priv", "g2")}
+    assert await env.svc.retry_withdrawals() == 1  # every connection
+    assert ("sp-priv", "g2") not in {
+        (p.space_id, p.gfs_connection_id) for p in await env.gfs.list_publications("g2")
+    }
+
+
+async def test_retry_withdrawals_without_identity_does_nothing(env):
+    assert await env.svc.retry_withdrawals() == 0
+
+
+async def test_concurrent_adds_hold_the_cap(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    ids = [f"g{i}" for i in range(MAX_GFS_SERVERS + 1)]
+    await _connected(env, *ids)
+    for gfs_id in ids[: MAX_GFS_SERVERS - 1]:
+        await env.gfs.publish_space("sp-1", gfs_id)
+    real = env.publisher.publish_space
+
+    async def _slow(space_id, gfs_id, *, announce=True):
+        await asyncio.sleep(0.01)
+        return await real(space_id, gfs_id, announce=announce)
+
+    env.publisher.publish_space = _slow
+    results = await asyncio.gather(
+        env.svc.add_server("sp-1", actor_username="anna", gfs_id=ids[-2]),
+        env.svc.add_server("sp-1", actor_username="anna", gfs_id=ids[-1]),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(r, GfsSelectionInvalidError) for r in results) == 1
+    assert len(await env.gfs.list_publications_for_space("sp-1")) == MAX_GFS_SERVERS
+    assert env.svc._change_locks == {}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import logging
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 import aiohttp
 import pytest
 
+from socialhome.domain.space import SpaceType
 from socialhome.domain.errors import (
     SpaceNotPublishableError,
     TierChangeRequiredError,
@@ -4493,3 +4495,54 @@ async def test_publish_body_never_names_the_other_listing_servers(env):
     body = json.dumps(session._last_body)
     assert "gfs_servers" not in body
     assert "elsewhere" not in body
+
+
+# ── Owner model: only the owner refreshes; only global relays ─────────────
+
+
+@pytest.mark.security
+async def test_heal_and_republish_skip_a_space_hosted_elsewhere(env):
+    """A legacy row for a space another household owns (a delegated admin's
+    old listing) is never refreshed, even though this household holds the
+    seed — only the owner lists a space."""
+    session = _AnonSession()
+    remote = dataclasses.replace(_fake_space("sp-r"), owner_instance_id="elsewhere")
+    repo = _FakeSpaceRepo({"sp-r": remote}, {"sp-r": b"\x01" * 32})
+    svc = await _heal_svc(env, session, gfs_id="g1", spaces=["sp-r"], space_repo=repo)
+    assert await svc.heal_space_pins("g1") == 0
+    assert await svc.republish_space("sp-r") == 0
+    assert session.posts == []
+
+
+@pytest.mark.security
+async def test_relay_needs_a_global_space_and_an_accepted_listing(env):
+    """A leftover row of a space that left the global tier, or a listing the
+    GFS still holds for review, gets no relayed content."""
+    session = _RecordingSession()
+    svc, _kp = await _publish_event_svc(
+        env, session, space_id="sp-relay", gfs_ids=["g1", "g2"]
+    )
+    svc._anon_publish.update({"g1": True, "g2": True})
+    _db, conn_repo = env
+    await conn_repo.publish_space("sp-relay", "g2", "pending")
+    spaces = _FakeSpaceRepo({"sp-relay": _fake_space("sp-relay")}, {})
+    svc._space_repo = spaces
+    envelope = {"space_id": "sp-relay"}
+    assert (
+        await svc.publish_space_event(
+            space_id="sp-relay", event_type="space_post_public", payload=envelope
+        )
+        == 1
+    )
+    assert [u for u, _b in session.posts] == ["https://g1.example/gfs/publish"]
+    session.posts.clear()
+    spaces._spaces["sp-relay"] = dataclasses.replace(
+        spaces._spaces["sp-relay"], space_type=SpaceType.PUBLIC
+    )
+    assert (
+        await svc.publish_space_event(
+            space_id="sp-relay", event_type="space_post_public", payload=envelope
+        )
+        == 0
+    )
+    assert session.posts == []

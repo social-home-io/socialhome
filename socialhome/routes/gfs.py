@@ -339,7 +339,9 @@ class GfsSpacePublishView(BaseView):
     households, and listing it on a GFS is making it global (a quorum-gated
     tier change); private / household answer 409 ``SPACE_NOT_PUBLIC``.
     DELETE is also open to a household admin: a withdrawal only narrows what
-    a GFS learns (the admin Spaces tab lists every publication).
+    a GFS learns (the admin Spaces tab lists every publication). It is keyed
+    on the publication row this household holds — a GFS without one is
+    never contacted (404).
     """
 
     async def post(self) -> web.Response:
