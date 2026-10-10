@@ -26,24 +26,15 @@
 -- matching all three) apply that check. They are needed once the old
 -- ``gfs_connections`` row is deleted, which every disconnect does.
 --
--- Pending legacy release: a pre-v44 follower mirror (no provenance) has no
--- recorded seat anywhere — nothing names the server that seats us. When its
--- last local follower leaves and no listing server took the unsubscribe
--- (the space was withdrawn from the directory, but the GFS keeps its relay
--- and subscribers), one row with ``gfs_instance_id = '*'`` ("seated on a
--- server we can't name") and the space's pinned authority key in
--- ``space_authority_pk`` is kept. A relay frame for that space that VERIFIES
--- against that key proves the relaying server seats us: it — only it — gets
--- the unsubscribe, and the row goes. Rows older than 30 days are dropped.
--- ``'*'`` is never a server id (ids are derived from keys), every seat read
--- excludes it, and a fresh subscribe of the space clears it.
---
 -- Backfill: a v_44+ mirror recorded the seating connection in
 -- ``spaces.mirror_gfs_id``; where that connection still exists and a local
 -- ``subscriber`` seat is held, the seat is recorded under its server id.
 -- Pre-v44 mirrors (NULL provenance) and those whose connection is gone are
--- not knowable here; the household tears those down reactively (a relay
--- frame for a space it holds no seat in → unsubscribe from that server).
+-- not knowable here. A pre-v44 mirror still listed somewhere has its seat
+-- recorded by its first reconnect re-subscribe; one whose space was
+-- withdrawn from every listing before the upgrade keeps its seat on the one
+-- GFS that already holds it until that GFS drops it (accepted residual,
+-- owner decision) — no other GFS learns anything.
 --
 -- CLAUDE.md "audit before a migration":
 --
@@ -75,9 +66,6 @@
 --         trust anchor from "this pairing" to "any pairing of that id",
 --         which a re-pair under a different key must not inherit; the
 --         stored key keeps that check possible after the old row is gone.
---       * A separate "pending legacy release" table — the marker is a seat
---         at an unknown server; one ``'*'`` row per space in this table
---         carries it with one extra nullable column.
 --   (3) Smallest change: one additive table + one index, no rewrite of any
 --       existing row; the backfill only inserts.
 
@@ -88,7 +76,6 @@ CREATE TABLE IF NOT EXISTS gfs_space_seats (
     gfs_connection_id TEXT,
     gfs_public_key    TEXT,
     gfs_inbox_url     TEXT,
-    space_authority_pk TEXT,
     PRIMARY KEY (space_id, gfs_instance_id)
 );
 

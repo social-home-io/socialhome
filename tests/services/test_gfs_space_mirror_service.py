@@ -9,11 +9,7 @@ import pytest
 import socialhome.services.gfs_directory as directory_mod
 import socialhome.services.gfs_space_mirror_service as mirror_mod
 
-from socialhome.crypto import (
-    derive_instance_id,
-    generate_identity_keypair,
-    generate_space_keypair,
-)
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
@@ -29,10 +25,6 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.space import SpaceConfigEventType
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    sign_authority_event,
-)
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gfs_connection_service import GfsConnectionError
 from socialhome.domain.public_space import PublicSpaceListing
@@ -1614,151 +1606,6 @@ def test_seat_bookkeeping_stays_bounded():
     late = mirror_mod.UNWANTED_RELAY_RETRY_S
     mirror_mod._remember(store, ("g", "new"), now=late)
     assert store == {("g", "new"): late}
-
-
-# ─── pending legacy release (pre-v44 seat at an unknown server) ─────────
-
-
-_SPACE_KP = generate_space_keypair()
-_OTHER_KP = generate_space_keypair()
-
-
-def _signed_frame(space_id: str, *, seed: bytes = _SPACE_KP.private_key) -> dict:
-    envelope = {"space_id": space_id, "epoch": 0, "encrypted_payload": "x"}
-    envelope.update(
-        sign_authority_event(
-            event_type=AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-            space_id=space_id,
-            payload=envelope,
-            space_seed=seed,
-        )
-    )
-    return {
-        "type": "relay",
-        "space_id": space_id,
-        "event_type": AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-        "payload": envelope,
-    }
-
-
-async def _legacy_unfollowed(env, svc, space_id: str = "sp-old") -> None:
-    """A pre-v44 follower mirror (no provenance, no seat) whose space was
-    withdrawn from every directory; its last follower leaves and the
-    proven-mirror teardown runs, then the stub row is purged."""
-    await _seat_subscription(env, space_id)
-    await env.db.enqueue(
-        "UPDATE spaces SET identity_public_key=? WHERE id=?",
-        (_SPACE_KP.public_key.hex(), space_id),
-    )
-    await env.spaces.delete_member(space_id, "u-local")
-    await svc.unsubscribe(space_id)
-    await env.db.enqueue("DELETE FROM spaces WHERE id=?", (space_id,))
-
-
-async def _legacy_world(env):
-    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
-    await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
-    session = _StubSession(
-        {
-            "https://a.test/gfs/spaces": _directory(),
-            "https://b.test/gfs/spaces": _directory(),
-        }
-    )
-    gfs = _StubGfs()
-    return gfs, _mirror(env, session, gfs)
-
-
-@pytest.mark.security
-async def test_a_validated_relay_releases_a_legacy_seat_on_its_server(env):
-    """H2 residual: nothing names the server, so nobody is told on leave; the
-    first relay frame that VERIFIES against the pinned authority key names
-    it — that server, only it, gets the unsubscribe, and the marker goes."""
-    gfs, svc = await _legacy_world(env)
-    await _legacy_unfollowed(env, svc)
-    assert gfs.unsubscribes == []
-
-    # Injected / mis-signed frames from another server: silence.
-    await svc.on_relay_frame({"space_id": "sp-old"}, gfs_id="gfs-2")
-    await svc.on_relay_frame(
-        _signed_frame("sp-old", seed=_OTHER_KP.private_key), gfs_id="gfs-2"
-    )
-    bad = _signed_frame("sp-old")
-    bad["payload"] = {**bad["payload"], "epoch": 1}  # tampered after signing
-    await svc.on_relay_frame(bad, gfs_id="gfs-2")
-    swapped = _signed_frame("sp-old")
-    swapped["space_id"] = "sp-other"  # frame names another space
-    await svc.on_relay_frame(swapped, gfs_id="gfs-2")
-    await svc.wait_idle()
-    assert gfs.unsubscribes == []
-
-    await svc.on_relay_frame(_signed_frame("sp-old"), gfs_id="gfs-1")
-    await svc.wait_idle()
-    assert gfs.unsubscribes == [("sp-old", "gfs-1")]
-    assert await env.seats.get_legacy_release("sp-old", max_age_days=30) is None
-    # Done: a later valid frame elsewhere tells nobody.
-    await svc.on_relay_frame(_signed_frame("sp-old"), gfs_id="gfs-2")
-    await svc.wait_idle()
-    assert gfs.unsubscribes == [("sp-old", "gfs-1")]
-
-
-@pytest.mark.security
-async def test_a_never_followed_space_stays_silent_even_on_a_valid_frame(env):
-    gfs, svc = await _legacy_world(env)
-    await svc.on_relay_frame(_signed_frame("sp-never"), gfs_id="gfs-1")
-    await svc.wait_idle()
-    assert gfs.unsubscribes == []
-
-
-async def test_a_failed_legacy_unsubscribe_keeps_the_marker(env):
-    _, svc = await _legacy_world(env)
-    await _legacy_unfollowed(env, svc)
-    svc._gfs.raise_on_unsubscribe = True  # type: ignore[attr-defined]
-    await svc.on_relay_frame(_signed_frame("sp-old"), gfs_id="gfs-1")
-    await svc.wait_idle()
-    assert await env.seats.get_legacy_release("sp-old", max_age_days=30) is not None
-
-
-async def test_a_legacy_marker_expires_and_is_purged(env):
-    gfs, svc = await _legacy_world(env)
-    await _legacy_unfollowed(env, svc)
-    await env.db.enqueue(
-        "UPDATE gfs_space_seats SET seated_at=datetime('now', '-31 days')"
-        " WHERE space_id='sp-old'"
-    )
-    await svc.on_relay_frame(_signed_frame("sp-old"), gfs_id="gfs-1")
-    await svc.wait_idle()
-    assert gfs.unsubscribes == []
-    await svc.resubscribe_all("gfs-1")
-    rows = await env.db.fetchall("SELECT * FROM gfs_space_seats")
-    assert rows == []
-
-
-async def test_a_listing_server_taking_the_unsubscribe_leaves_no_marker(env):
-    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
-    session = _StubSession({"https://a.test/gfs/spaces": _directory("sp-old")})
-    gfs = _StubGfs()
-    svc = _mirror(env, session, gfs)
-    await _legacy_unfollowed(env, svc)
-    assert gfs.unsubscribes == [("sp-old", "gfs-1")]
-    assert await env.seats.get_legacy_release("sp-old", max_age_days=30) is None
-
-
-async def test_following_again_clears_the_marker(env):
-    _, svc = await _legacy_world(env)
-    await _legacy_unfollowed(env, svc)
-    await svc.subscribe_to_gfs("sp-old", "gfs-1")
-    assert await env.seats.get_legacy_release("sp-old", max_age_days=30) is None
-
-
-async def test_a_re_followed_legacy_space_is_not_released(env):
-    """The marker is moot while a local user is seated again."""
-    gfs, svc = await _legacy_world(env)
-    await _legacy_unfollowed(env, svc)
-    await _seat_subscription(env, "sp-old")
-    await env.seats.mark_legacy_release("sp-old", _SPACE_KP.public_key.hex())
-    await svc.on_relay_frame(_signed_frame("sp-old"), gfs_id="gfs-1")
-    await svc.wait_idle()
-    assert gfs.unsubscribes == []
 
 
 # ─── pin-heal anchor across a re-pair ────────────────────────────────────

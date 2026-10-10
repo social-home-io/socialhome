@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.gfs_space_seat import UNKNOWN_GFS_SERVER, GfsSpaceSeat
+from ..domain.gfs_space_seat import GfsSpaceSeat
 
 # Re-exported for repo-level imports.
 __all__ = ["AbstractGfsSpaceSeatRepo", "GfsSpaceSeat", "SqliteGfsSpaceSeatRepo"]
@@ -26,12 +26,6 @@ class AbstractGfsSpaceSeatRepo(Protocol):
     async def get(self, space_id: str, gfs_instance_id: str) -> GfsSpaceSeat | None: ...
     async def list_for_space(self, space_id: str) -> list[GfsSpaceSeat]: ...
     async def list_for_gfs(self, gfs_instance_id: str) -> list[GfsSpaceSeat]: ...
-    async def mark_legacy_release(self, space_id: str, authority_pk: str) -> None: ...
-    async def get_legacy_release(
-        self, space_id: str, *, max_age_days: int
-    ) -> str | None: ...
-    async def clear_legacy_release(self, space_id: str) -> None: ...
-    async def purge_legacy_releases(self, *, max_age_days: int) -> int: ...
 
 
 class SqliteGfsSpaceSeatRepo:
@@ -70,8 +64,6 @@ class SqliteGfsSpaceSeatRepo:
         )
 
     async def get(self, space_id: str, gfs_instance_id: str) -> GfsSpaceSeat | None:
-        if gfs_instance_id == UNKNOWN_GFS_SERVER:
-            return None
         row = await self._db.fetchone(
             "SELECT * FROM gfs_space_seats WHERE space_id=? AND gfs_instance_id=?",
             (space_id, gfs_instance_id),
@@ -81,61 +73,19 @@ class SqliteGfsSpaceSeatRepo:
     async def list_for_space(self, space_id: str) -> list[GfsSpaceSeat]:
         """Every server's seat for *space_id*."""
         rows = await self._db.fetchall(
-            "SELECT * FROM gfs_space_seats WHERE space_id=? AND gfs_instance_id<>?"
-            " ORDER BY gfs_instance_id",
-            (space_id, UNKNOWN_GFS_SERVER),
+            "SELECT * FROM gfs_space_seats WHERE space_id=? ORDER BY gfs_instance_id",
+            (space_id,),
         )
         return [_seat(r) for r in rows]
 
     async def list_for_gfs(self, gfs_instance_id: str) -> list[GfsSpaceSeat]:
         """Every seat recorded under server id *gfs_instance_id* — the
         caller still checks the binding against the connection."""
-        if gfs_instance_id == UNKNOWN_GFS_SERVER:
-            return []
         rows = await self._db.fetchall(
             "SELECT * FROM gfs_space_seats WHERE gfs_instance_id=? ORDER BY space_id",
             (gfs_instance_id,),
         )
         return [_seat(r) for r in rows]
-
-    # ── Pending legacy release (a seat at a server we can't name) ─────────
-
-    async def mark_legacy_release(self, space_id: str, authority_pk: str) -> None:
-        """Remember that a pre-v44 follower seat of *space_id* is still held
-        somewhere unknown; *authority_pk* (the space's pinned key) is what a
-        relay frame must verify against to prove its server seats us."""
-        await self._db.enqueue(
-            "INSERT INTO gfs_space_seats(space_id, gfs_instance_id,"
-            " space_authority_pk) VALUES(?, ?, ?)"
-            " ON CONFLICT(space_id, gfs_instance_id) DO UPDATE SET"
-            " space_authority_pk=excluded.space_authority_pk,"
-            " seated_at=datetime('now')",
-            (space_id, UNKNOWN_GFS_SERVER, authority_pk),
-        )
-
-    async def get_legacy_release(
-        self, space_id: str, *, max_age_days: int
-    ) -> str | None:
-        """The pinned authority key of a pending legacy release younger
-        than *max_age_days*, or ``None``."""
-        row = await self._db.fetchone(
-            "SELECT space_authority_pk FROM gfs_space_seats"
-            " WHERE space_id=? AND gfs_instance_id=?"
-            " AND seated_at >= datetime('now', ?)",
-            (space_id, UNKNOWN_GFS_SERVER, f"-{int(max_age_days)} days"),
-        )
-        return None if row is None else row["space_authority_pk"]
-
-    async def clear_legacy_release(self, space_id: str) -> None:
-        await self.forget(space_id, UNKNOWN_GFS_SERVER)
-
-    async def purge_legacy_releases(self, *, max_age_days: int) -> int:
-        """Drop pending legacy releases older than *max_age_days*."""
-        return await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_seats WHERE gfs_instance_id=?"
-            " AND seated_at < datetime('now', ?)",
-            (UNKNOWN_GFS_SERVER, f"-{int(max_age_days)} days"),
-        )
 
 
 def _seat(row: Any) -> GfsSpaceSeat:

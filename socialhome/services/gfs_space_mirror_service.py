@@ -97,13 +97,6 @@ from .gfs_directory import GfsDirectoryCache
 from .gfs_envelope_sender import normalize_gfs_base
 from .gfs_http import MAX_GFS_BODY_BYTES, read_json_capped
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
-from ..authority_sig import (
-    AUTHORITY_EVENT_SPACE_POST_PUBLIC,
-    AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
-    UnsupportedAuthoritySuite,
-    strip_authority_sig_fields,
-    verify_authority_event,
-)
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceConfigEventType, SpaceRole
 from .space_service import can_seat_remote_stub, stub_space_from_metadata
 
@@ -146,16 +139,6 @@ UNWANTED_RELAY_RETRY_S = 600.0
 
 #: Most (server, space) keys remembered by each of the two maps above.
 _MAX_TRACKED_SEATS = 1024
-
-#: A pending legacy release (a pre-v44 seat at a server we can't name) is
-#: kept this long for a validated relay frame to reveal its server.
-LEGACY_RELEASE_MAX_AGE_DAYS = 30
-
-#: The relay frames whose space-authority signature proves the relaying
-#: server carries that space's real stream (and so seats us).
-_AUTHORITY_SIGNED_RELAYS = frozenset(
-    {AUTHORITY_EVENT_SPACE_POST_PUBLIC, AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF}
-)
 
 #: Background seat releases in flight at once; past it one is skipped
 #: (logged) — the next reconnect self-heal reconciles it.
@@ -694,9 +677,6 @@ class GfsSpaceMirrorService:
         """
         await self._gfs.subscribe_to_gfs_space(space_id, conn.id)
         await self._seats.record(_seat_on(space_id, conn))
-        # Seated (again) at a known server: any pending legacy release of
-        # this space is moot.
-        await self._seats.clear_legacy_release(space_id)
 
     # ── Seat lifecycle hooks ─────────────────────────────────────────────
 
@@ -923,9 +903,6 @@ class GfsSpaceMirrorService:
         # First: carry the pin-heal anchor over a genuine re-pair — before
         # the re-take below rebinds the seats to this connection.
         await self.rebind_mirrors(conn)
-        await self._seats.purge_legacy_releases(
-            max_age_days=LEGACY_RELEASE_MAX_AGE_DAYS
-        )
         keep: list[str] = []
         stale: list[str] = []
         recorded = await self._seats_on(conn)
@@ -1002,13 +979,11 @@ class GfsSpaceMirrorService:
         if await self._seats.list_for_space(space_id):
             await self.release_seats(space_id)
             return
-        released = False
         for conn in await self._gfs_conn_repo.list_active():
             if not await self._legacy_seated_on(space_id, conn):
                 continue
             try:
                 await self._gfs.unsubscribe_from_gfs_space(space_id, conn.id)
-                released = True
             except GfsConnectionError as exc:
                 log.warning(
                     "gfs_space_mirror: unsubscribe of %s from GFS %s failed: %s",
@@ -1016,20 +991,6 @@ class GfsSpaceMirrorService:
                     conn.id,
                     exc,
                 )
-        if released:
-            return
-        # No server is known to seat us and none listing the space took the
-        # unsubscribe (withdrawn from the directory — the GFS keeps its relay
-        # and subscribers). Remember it, with the pinned authority key, so a
-        # relay frame that VERIFIES against that key can name the server.
-        space = await self._spaces.get(space_id)
-        if space is not None and space.identity_public_key:
-            await self._seats.mark_legacy_release(space_id, space.identity_public_key)
-            log.info(
-                "gfs_space_mirror: legacy seat of %s is at an unknown server — "
-                "pending release on its next authority-verified relay",
-                space_id,
-            )
 
     async def _legacy_seated_on(self, space_id: str, conn: GfsConnection) -> bool:
         """Whether *conn* is where a pre-v44 follower mirror of *space_id*
@@ -1106,14 +1067,6 @@ class GfsSpaceMirrorService:
         hold) does nothing, so a server cannot use made-up frames to ask
         "do you follow X". The supervisor calls this only for frames its
         consumer accepted without raising.
-
-        The one exception is a pending legacy release (a pre-v44 seat at a
-        server we can't name, see :meth:`unsubscribe`): a frame for that
-        space whose space-authority signature VERIFIES against the key
-        pinned when it was followed proves the relaying server carries the
-        space's real stream to us, so it gets the unsubscribe (same rate
-        limit) and the marker goes on success. An unsigned / mis-signed
-        frame stays silent like any other.
         """
         space_id = frame.get("space_id")
         if "channel_id" in frame or not isinstance(space_id, str):
@@ -1123,46 +1076,14 @@ class GfsSpaceMirrorService:
         conn = await self._gfs_conn_repo.get(gfs_id)
         if conn is None or conn.status != "active":
             return
+        seat = await self._seats.get(space_id, conn.gfs_instance_id)
+        if seat is None or not _belongs(seat, conn):
+            return
         key = (conn.gfs_instance_id, space_id)
         last = self._unwanted_at.get(key)
         if last is not None and time.monotonic() - last < UNWANTED_RELAY_RETRY_S:
             return
-        seat = await self._seats.get(space_id, conn.gfs_instance_id)
-        if seat is not None and _belongs(seat, conn):
-            self._spawn(self._release_if_unwanted(space_id, conn), "reactive")
-            return
-        if seat is not None:
-            return  # recorded under this id but bound elsewhere: not ours
-        authority_pk = await self._seats.get_legacy_release(
-            space_id, max_age_days=LEGACY_RELEASE_MAX_AGE_DAYS
-        )
-        if authority_pk is None or not _authority_verified(
-            frame, space_id, authority_pk
-        ):
-            return
-        self._spawn(self._release_legacy(space_id, conn), "legacy")
-
-    async def _release_legacy(self, space_id: str, conn: GfsConnection) -> None:
-        if await self._wants_seat(space_id):
-            return
-        _remember(self._unwanted_at, (conn.gfs_instance_id, space_id))
-        log.info(
-            "gfs_space_mirror: GFS %s relays legacy-released space %s with a "
-            "valid authority signature — unsubscribing there",
-            conn.id,
-            space_id,
-        )
-        try:
-            await self._gfs.unsubscribe_from_gfs_space(space_id, conn.id)
-        except GfsConnectionError as exc:
-            log.warning(
-                "gfs_space_mirror: legacy unsubscribe of %s from GFS %s failed: %s",
-                space_id,
-                conn.id,
-                exc,
-            )
-            return
-        await self._seats.clear_legacy_release(space_id)
+        self._spawn(self._release_if_unwanted(space_id, conn), "reactive")
 
     async def _release_if_unwanted(self, space_id: str, conn: GfsConnection) -> None:
         if not await self._releasable(space_id, conn.gfs_instance_id):
@@ -1175,28 +1096,6 @@ class GfsSpaceMirrorService:
             space_id,
         )
         await self._release(space_id, conn)
-
-
-def _authority_verified(frame: dict, space_id: str, authority_pk_hex: str) -> bool:
-    """Whether *frame* is a space-authority-signed relay of *space_id*
-    whose signature verifies against *authority_pk_hex* (fail closed)."""
-    event_type = frame.get("event_type")
-    envelope = frame.get("payload")
-    if event_type not in _AUTHORITY_SIGNED_RELAYS or not isinstance(envelope, dict):
-        return False
-    if envelope.get("space_id") != space_id:
-        return False
-    try:
-        return verify_authority_event(
-            event_type=str(event_type),
-            space_id=space_id,
-            payload=strip_authority_sig_fields(envelope),
-            authority_sig=str(envelope.get("authority_sig") or ""),
-            authority_sig_suite=str(envelope.get("authority_sig_suite") or ""),
-            space_public_key=bytes.fromhex(authority_pk_hex),
-        )
-    except UnsupportedAuthoritySuite, ValueError:
-        return False
 
 
 def _seat_on(space_id: str, conn: GfsConnection) -> GfsSpaceSeat:

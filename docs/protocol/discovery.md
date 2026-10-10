@@ -578,21 +578,13 @@ cannot widen access through a missing field or Python truthiness.
     an unsubscribe there, in the background, at most once per 10 min per
     (server, space). A frame for a space THIS server holds no recorded seat
     of ours in does nothing, whatever other servers hold — so made-up frames
-    can't ask "do you follow X";
-  - **pending legacy release**: when the last follower of a pre-v44 mirror
-    (no recorded seat anywhere) leaves and no server listing the space takes
-    the unsubscribe — the space was withdrawn from the directory, but the
-    GFS keeps its relay and subscribers — the household keeps one marker row
-    (`gfs_instance_id = '*'`) with the authority key pinned for the space.
-    A relay frame for that space whose space-authority signature
-    (`space_post_public` / `space_subscriber_key_handoff`) VERIFIES against
-    that key proves the relaying server carries the space's real stream to
-    us: it, and only it, gets the unsubscribe (same rate limit) and the
-    marker goes. Unsigned, mis-signed or tampered frames stay silent, a
-    space never followed has no marker, a new subscribe clears it, and
-    markers expire after 30 days. (A server that itself holds authentic
-    signed frames of the space could replay one to learn the household once
-    followed it — an accepted residual, bounded by the 30 days.)
+    can't ask "do you follow X".
+
+  **Accepted residual (owner decision):** a pre-v44 follow on a space
+  withdrawn from every listing before the upgrade keeps its seat on the one
+  GFS that already holds it until that GFS drops it; no other GFS learns
+  anything. Nothing local names that server, and no reactive teardown is
+  attempted for it.
 
 ### `allow_subscribers: false` — listed, never relayed
 
