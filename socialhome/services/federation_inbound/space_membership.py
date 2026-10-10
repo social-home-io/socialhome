@@ -23,10 +23,13 @@ from ...domain.space import (
     SpaceFeatures,
     SpaceType,
 )
-from ...federation.host_equivalence import acts_as_host
+from ...federation.host_equivalence import (
+    acts_as_host,
+    touches_owner_household,
+)
 from ...infrastructure.event_bus import EventBus
 from ..child_protection_service import _VALID_MIN_AGES
-from ..space_authority_pin import owner_authority_cert_via
+from ..space_authority_pin import owner_authority_cert_via, owner_statement_via
 from ..space_service import space_metadata_for_federation, can_seat_remote_stub
 
 if TYPE_CHECKING:
@@ -289,12 +292,35 @@ class SpaceMembershipInboundHandlers:
             return False
         return True
 
+    async def _names_the_owner_household(
+        self, event: "FederationEvent", space_id: str, user_id: str
+    ) -> bool:
+        """A ban / unban from anyone but the owner (a trusted inviting
+        admin) that names a user of the owner household: refused — only the
+        owner decides about its own people."""
+        space = await self._space_repo.get(space_id)
+        if space is None or event.from_instance == space.owner_instance_id:
+            return False
+        if await touches_owner_household(
+            self._space_repo, self._seat_repo, space, user_id=user_id
+        ):
+            log.warning(
+                "%s for %s from %s names the owner household's user — dropping",
+                event.event_type,
+                space_id,
+                event.from_instance,
+            )
+            return True
+        return False
+
     async def _on_banned(self, event: "FederationEvent") -> None:
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
         if not space_id or not user_id:
             return
         if not await self._is_from_the_host(event, space_id):
+            return
+        if await self._names_the_owner_household(event, space_id, user_id):
             return
         banned_by = event.payload.get("banned_by")
         reason = str(event.payload.get("reason") or "")[:500]
@@ -318,6 +344,8 @@ class SpaceMembershipInboundHandlers:
         if not space_id or not user_id:
             return
         if not await self._is_from_the_host(event, space_id):
+            return
+        if await self._names_the_owner_household(event, space_id, user_id):
             return
         await self._space_repo.unban_member(space_id, user_id)
 
@@ -445,6 +473,7 @@ class SpaceMembershipInboundHandlers:
             "space_meta": space_metadata_for_federation(
                 space,
                 authority_cert=owner_authority_cert_via(self._federation, space),
+                owner_statement=owner_statement_via(self._federation, space),
             ),
         }
         try:

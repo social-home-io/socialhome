@@ -12,7 +12,9 @@ admin actions working as they did when such a stub named the admin as owner.
 The trust is narrow:
 
 * only the household recorded as THIS household's inviter, only for that
-  space;
+  space — and the join paths record one ONLY when the owner's signed
+  statement named the owner and the inviter proved it holds the space seed
+  (:func:`socialhome.services.space_service.resolve_join_owner`);
 * only while the space's ``delegated_admin_authority`` is ON (the owner's
   own opt-in to admins acting for it) — turning it off ends the trust;
 * only while that household still holds a live ``admin`` seat here.
@@ -23,8 +25,11 @@ proposal mirrors, the
 signing-seed share, the host writer exemption. It never covers owner-only
 settings: the owner-signed GFS list, ``private_gfs``, ``gfs_publish_mode``,
 the authority cert / ``host_identity_pk``, the config, dissolve and the age
-gate keep comparing against ``owner_instance_id`` alone. Nothing changes for
-the owner itself.
+gate keep comparing against ``owner_instance_id`` alone, and even a trusted
+inviter never acts on a user of the owner household
+(:func:`touches_owner_household`). The inviter's admin seat came from its own
+roster, so the trust truly ends when the owner's demotion or delegation-off
+reaches this household. Nothing changes for the owner itself.
 """
 
 from __future__ import annotations
@@ -83,4 +88,28 @@ async def acts_as_host(
     return await is_trusted_inviter(space_repo, seat_repo, space, sender)
 
 
-__all__ = ["acts_as_host", "is_trusted_inviter"]
+async def touches_owner_household(
+    space_repo: "AbstractSpaceRepo",
+    seat_repo: "AbstractSpaceRemoteMemberRepo | None",
+    space: "Space",
+    *,
+    user_id: str,
+    instance_id: str | None = None,
+) -> bool:
+    """Whether an admin action names a user of the OWNER household — the
+    space's owner seat, or any seat the owner's household holds. A trusted
+    inviting admin is host-equivalent for admin actions, but never over the
+    owner's own people: such an action from it is refused (only the owner
+    decides about its household's seats)."""
+    if instance_id and instance_id == space.owner_instance_id:
+        return True
+    if user_id and user_id == await space_repo.get_owner_user_id(space.id):
+        return True
+    if seat_repo is not None and user_id:
+        seat = await seat_repo.get(space.id, space.owner_instance_id, user_id)
+        if seat is not None:
+            return True
+    return False
+
+
+__all__ = ["acts_as_host", "is_trusted_inviter", "touches_owner_household"]

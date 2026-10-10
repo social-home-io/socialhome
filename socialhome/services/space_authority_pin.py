@@ -26,6 +26,7 @@ so a signature made with the old key fails everywhere automatically.
 
 from __future__ import annotations
 
+import json
 import logging
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
@@ -37,6 +38,8 @@ from ..authority_cert import (
     sign_authority_cert,
     verify_authority_cert,
 )
+
+from ..space_owner_statement import sign_owner_statement
 
 if TYPE_CHECKING:
     from ..domain.space import Space
@@ -90,6 +93,36 @@ def owner_authority_cert(
         authority_pk_hex=space.identity_public_key,
         key_epoch=space.authority_key_epoch,
     )
+
+
+def owner_statement_via(federation: object, space: "Space") -> dict | None:
+    """The owner household's ownership statement for ``space`` to ship in a
+    snapshot (migration 0091, :mod:`socialhome.space_owner_statement`).
+
+    Signed fresh when this household owns the space (its identity key off a
+    :class:`FederationService`); otherwise the owner's statement as last
+    verified here, relayed unchanged (``None`` when none is held)."""
+    own = getattr(federation, "own_instance_id", None) if federation else None
+    if own and space.owner_instance_id == own:
+        seed = getattr(federation, "own_identity_seed", None)
+        if not isinstance(seed, bytes) or len(seed) != 32:
+            return None
+        try:
+            return sign_owner_statement(
+                space_id=space.id,
+                owner_seed=seed,
+                authority_pk_hex=space.identity_public_key,
+                authority_key_epoch=space.authority_key_epoch,
+            )
+        except ValueError:
+            return None
+    if not space.owner_statement:
+        return None
+    try:
+        stored = json.loads(space.owner_statement)
+    except ValueError:
+        return None
+    return stored if isinstance(stored, dict) else None
 
 
 def owner_authority_cert_via(federation: object, space: "Space") -> dict | None:

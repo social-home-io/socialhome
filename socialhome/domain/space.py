@@ -1519,6 +1519,27 @@ class Space:
     #: identity key. Never written by ``save`` — only by ``set_gfs_servers``.
     #: ``None`` = not known.
     gfs_servers: SignedGfsServerList | None = None
+    #: The owner household's signed ownership statement as last verified
+    #: here (migration 0091, :mod:`socialhome.space_owner_statement`),
+    #: canonical JSON text — relayed in the snapshots this household sends.
+    #: Never written by ``save`` — only by ``set_owner_statement``.
+    owner_statement: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class JoinOwner:
+    """Who a §D1b join stub is seated under (migration 0091).
+
+    ``owner_instance_id`` — the stub's owner. ``trusted_inviter`` — the
+    delegated admin household that issued the invite, set ONLY when the
+    owner's signed statement and the inviter's seed-holder proof both
+    verified (it then becomes ``spaces.invited_by_instance``).
+    ``statement_json`` — the owner's verified statement to keep and relay.
+    """
+
+    owner_instance_id: str
+    trusted_inviter: str | None = None
+    statement_json: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

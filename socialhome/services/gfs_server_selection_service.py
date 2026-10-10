@@ -52,6 +52,7 @@ from ..domain.gfs_server import (
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceConfigEventType
 from ..gfs_server_list_sig import sign_gfs_server_list
 from ..infrastructure.event_bus import EventBus
+from ..space_owner_statement import MAX_STATEMENT_FUTURE_SKEW_MS
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 
@@ -84,7 +85,8 @@ class GfsServerSelectionService:
         # (:meth:`attach_identity`). Until then nothing is derived.
         self._own_instance_id = ""
         self._own_signing_key = b""
-        self._locks: dict[str, asyncio.Lock] = {}
+        #: space id → [lock, holders + waiters]; pruned when unused.
+        self._locks: dict[str, list] = {}
 
     def attach_identity(self, *, own_instance_id: str, own_signing_key: bytes) -> None:
         """The household's instance id and Ed25519 identity seed — the key
@@ -108,9 +110,17 @@ class GfsServerSelectionService:
     async def sync_snapshot(self, space_id: str) -> bool:
         """Re-derive the owner's GFS list for *space_id*; ``True`` when it
         changed (signed, stored, sequence raised, members told)."""
-        lock = self._locks.setdefault(space_id, asyncio.Lock())
-        async with lock:
-            return await self._sync_locked(space_id)
+        entry = self._locks.setdefault(space_id, [asyncio.Lock(), 0])
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                return await self._sync_locked(space_id)
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0:
+                # Nobody holds or waits for it: drop it, so the dict stays
+                # as small as the number of snapshots in flight.
+                self._locks.pop(space_id, None)
 
     async def _sync_locked(self, space_id: str) -> bool:
         if not self._own_instance_id or not self._own_signing_key:
@@ -137,6 +147,15 @@ class GfsServerSelectionService:
             return False
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         issued_at = max(now_ms, current.issued_at + 1 if current else 0)
+        if issued_at > now_ms + MAX_STATEMENT_FUTURE_SKEW_MS:
+            # Members refuse a list more than a day ahead; a runaway stored
+            # value must not wedge the owner. They keep their (higher) copy
+            # until the clock passes it, at most a day.
+            log.warning(
+                "space %s: stored GFS list is dated far ahead — signing at now",
+                space_id,
+            )
+            issued_at = now_ms
         signed = sign_gfs_server_list(
             space_id=space_id,
             servers=servers,

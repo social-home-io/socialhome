@@ -15,7 +15,11 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
-from socialhome.federation.host_equivalence import acts_as_host, is_trusted_inviter
+from socialhome.federation.host_equivalence import (
+    acts_as_host,
+    is_trusted_inviter,
+    touches_owner_household,
+)
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
@@ -104,3 +108,28 @@ async def test_none_space_or_sender(env):
     # Without a seat repo only the owner counts.
     assert await acts_as_host(spaces, None, space, ADMIN) is False
     assert await acts_as_host(spaces, None, space, OWNER) is True
+
+
+async def test_touches_owner_household(env):
+    spaces, seats = env
+    space = await spaces.get("sp-1")
+    await seats.add(
+        space_id="sp-1",
+        instance_id=OWNER,
+        user_id="u-o2",
+        user_pk=None,
+        display_name="o2",
+        role=SpaceRole.MEMBER.value,
+    )
+    await spaces.set_owner_user_id("sp-1", "u-owner")
+    for kwargs, expected in [
+        ({"user_id": "u-o2"}, True),  # a seat of the owner household
+        ({"user_id": "u-owner"}, True),  # the owner seat
+        ({"user_id": "x", "instance_id": OWNER}, True),
+        ({"user_id": "u-admin"}, False),
+        ({"user_id": "u-admin", "instance_id": ADMIN}, False),
+    ]:
+        assert (
+            await touches_owner_household(spaces, seats, space, **kwargs)
+        ) is expected
+    assert await touches_owner_household(spaces, None, space, user_id="u-o2") is False

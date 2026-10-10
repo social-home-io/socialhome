@@ -51,7 +51,7 @@ from .domain.federation import (
 )
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
-from .federation.sync_manager import SyncSessionManager
+from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
 from .federation.transport import (
     FederationTransport,
     HttpsInboxTransport,
@@ -1285,18 +1285,11 @@ def _wire_federation_stack(
         )
         return row is not None
 
-    async def _sync_reject_reason(space_id: str) -> str:
-        # SPACE_SYNC_BEGIN from a non-member: "removed" if we still host the
-        # space (requester was dropped from it) or "dissolved" if the space
-        # row is gone (a dissolve purged it). Drives the member's archive copy.
-        row = await db.fetchone("SELECT 1 FROM spaces WHERE id=?", (space_id,))
-        return "removed" if row is not None else "dissolved"
-
     sync_manager = SyncSessionManager(
         federation_repo,
         get_max_seq=_get_max_seq,
         check_member=_check_member,
-        reject_reason=_sync_reject_reason,
+        reject_reason=make_sync_reject_reason(space_repo, space_remote_member_repo),
     )
     federation_service.attach_sync_manager(sync_manager)
     federation_service.attach_idempotency_cache(idempotency_cache)
@@ -1641,6 +1634,8 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
         # §25.6 echo (0087): a periodic BEGIN carries it as ``have_seq``.
         applied_seqs=space_sync_watermark_repo,
+        # Migration 0091: a trusted inviting admin is a mesh target too.
+        seat_repo=space_remote_member_repo,
     )
     space_sync_scheduler.wire()
     app[K.space_sync_scheduler_key] = space_sync_scheduler

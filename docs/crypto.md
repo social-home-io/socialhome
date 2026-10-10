@@ -439,6 +439,23 @@ is about strengthening the *delivery channel*, not the AEAD primitive.
 Receivers reject unknown `key_suite` values rather than fall back —
 see `apply_space_content_key_from_metadata` for the validator.
 
+**Owner statement and inviter proof** (`space_meta.owner_statement`,
+`space_meta.inviter_proof`, `socialhome/space_owner_statement.py`, migration
+0091). Space ids are random, so "who owns this space" is signed: the OWNER
+HOUSEHOLD's identity key over `{space_id, owner_instance_id, owner_pk,
+authority_pk, authority_key_epoch, issued_at, owner_statement_sig_suite}`
+(`b"space-owner-statement:v1:"` + canonical JSON), checked with
+`derive_instance_id(owner_pk) == owner_instance_id` and against the
+authority key the snapshot pins; `issued_at` (unix ms) more than a day ahead
+is refused and never signed. The suite tag `owner_statement_sig_suite`
+(`SUPPORTED_OWNER_STATEMENT_SUITES`, `UnsupportedOwnerStatementSuite`) is
+rejected when unknown. The inviter proof is an ordinary space-authority
+signature (`authority_sig_suite`, event type `space_inviter_proof`) over
+`{space_id, owner_instance_id, inviter_instance_id, authority_pk}` — only
+seed holders can make one, and the inviter's id is bound in. The v_44
+authority cert was the nearest existing shape but exists only from key epoch
+1 (epoch 0 is TOFU and the GFS verifies certs with that rule).
+
 **The owner's GFS list** (`space_meta.gfs_servers`,
 `domain/gfs_server.py`, `gfs_server_list_sig.py`, migration 0091) — the
 GFSs members will send to, so it is signed by the OWNER HOUSEHOLD's Ed25519

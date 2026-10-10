@@ -122,6 +122,12 @@ class AbstractSpaceRepo(Protocol):
     async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
     async def set_invited_by(self, space_id: str, instance_id: str) -> None: ...
+    async def set_owner_statement(
+        self, space_id: str, statement_json: str | None
+    ) -> None: ...
+    async def expire_remote_invitations_except(
+        self, space_id: str, keep_instance_id: str
+    ) -> None: ...
     async def get_invited_by(self, space_id: str) -> str | None: ...
     async def set_cover_hash(
         self,
@@ -1059,6 +1065,30 @@ class SqliteSpaceRepo:
         await self._db.enqueue(
             "UPDATE spaces SET invited_by_instance=? WHERE id=?",
             (instance_id, space_id),
+        )
+
+    async def set_owner_statement(
+        self, space_id: str, statement_json: str | None
+    ) -> None:
+        """Store the owner's verified ownership statement (migration 0091).
+        The caller verified it and its freshness. Never written by ``save``."""
+        await self._db.enqueue(
+            "UPDATE spaces SET owner_statement=? WHERE id=?",
+            (statement_json, space_id),
+        )
+
+    async def expire_remote_invitations_except(
+        self, space_id: str, keep_instance_id: str
+    ) -> None:
+        """Expire this household's pending cross-household invitations into
+        *space_id* from any household but *keep_instance_id* — a stub
+        re-seated under its real owner must not be joined through another
+        household's earlier invitation."""
+        await self._db.enqueue(
+            "UPDATE space_invitations SET status='expired'"
+            " WHERE space_id=? AND status='pending'"
+            " AND remote_instance_id IS NOT NULL AND remote_instance_id != ?",
+            (space_id, keep_instance_id),
         )
 
     async def get_invited_by(self, space_id: str) -> str | None:
@@ -2744,6 +2774,7 @@ def _row_to_space(row: dict | None) -> Space | None:
         min_age=int(row.get("min_age") or 0),
         category=row.get("category"),
         gfs_servers=signed_gfs_server_list_from_column(row.get("gfs_servers")),
+        owner_statement=row.get("owner_statement"),
     )
 
 

@@ -2241,25 +2241,44 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   stays exactly as signed, so it can be relayed. Whoever sends to these
   servers (v_56, later) must use the SSRF-guarded `OutboundFetcher` path
   (resolve, pin, refuse private addresses) — a DNS name is not resolved here.
-- **Join stubs are seated under the real owner.** A §D1b stub's
-  `owner_instance_id` comes from the snapshot's `owner_instance_id`, not from
-  the inviting household, so an invite or link issued by a delegated admin no
-  longer makes that admin the stub's "owner" (which made every later
-  owner-only check trust the admin and ignore the owner). The anti-hijack
-  guard still compares the authenticated inviter against any row already
-  held, and the inviter's identity key is recorded as the host key only when
-  the inviter is the owner. An inviting admin's key is kept on its own
+- **Join stubs are seated under the real owner — only with proof.** Space
+  ids are random, not key-derived, so a snapshot's `owner_instance_id` is
+  just a claim. A §D1b stub issued by a household other than the claimed
+  owner is seated under that owner ONLY when the snapshot carries the
+  owner's signed **owner statement** (`socialhome/space_owner_statement.py`:
+  the owner household's identity key over `{space_id, owner_instance_id,
+  owner_pk, authority_pk, authority_key_epoch, issued_at,
+  owner_statement_sig_suite}`, binding the exact authority key the snapshot
+  pins) AND the issuer's **inviter proof** (its own id signed with the space
+  authority seed — only the owner and delegated admins hold it). Otherwise
+  the stub names the issuer itself, as before 0091, with no inviting-admin
+  trust. A claimed owner that is the receiving household or not a derived
+  instance id is refused outright. The owner signs a fresh statement into
+  every snapshot and config it sends; members keep the latest verified one
+  (`spaces.owner_statement`) and relay it.
+- **The real owner beats an unaccepted pre-seat.** If a stub held under
+  another owner has no accepted local member yet (it was only an
+  invitation), a properly resolved invite for a different owner replaces it:
+  the earlier inviter's seats, household rows, pinned key and pending
+  invitations are dropped (logged at WARNING). Once a member here accepted,
+  that stub stays (trust on first use). A stub's owner or trusted inviting
+  admin may re-invite into it. The inviter's identity key is recorded as the
+  host key only when the inviter is the owner. An inviting admin's key is kept on its own
   `space_instances` row for that space instead, so the §25.6 catch-up it
   streams to a joiner it reached over the mesh still verifies. That inviting
   admin household (`spaces.invited_by_instance`) is host-equivalent for
   content and admin actions while delegation is on and its admin seat lives
   — never for owner-only settings such as this list (see
   [spaces.md](spaces.md#membership-ops-offline-of-owner-delegated-invite--seat)).
-- **Residual (within the delegated-admin trust boundary):** a delegated admin
-  that LIES about who owns the space to a household it invites itself can
-  still name itself owner on that one fresh stub. It already holds the space
-  seed and reads all content; every other household, and every owner-only
-  fact the real owner signs, stays cryptographically owner-only.
+- **Residuals:** (1) a household that invites us claiming to own a space
+  itself (no statement needed for that) gets a stub naming itself — the
+  pre-0091 result; it can never name somebody else without that household's
+  signature. (2) Since space ids are not key-derived, two households can
+  both claim one id; between two unaccepted invitations the last one wins —
+  a denial of service, as before, never a takeover of an accepted stub.
+  (3) Main-era stubs that already name an admin as owner are not re-seated
+  automatically: a seed-holding admin could sign "I own it" exactly like the
+  owner, so nothing on such a stub can tell them apart.
 - An older receiver ignores the key; no protocol version gates it. Members
   store it (`spaces.gfs_servers`, migration 0091) but do not yet act on it —
   publishing to every listed server is a later protocol version.

@@ -139,10 +139,14 @@ from .space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
-from ..federation.host_equivalence import acts_as_host
+from ..federation.host_equivalence import (
+    acts_as_host,
+    touches_owner_household,
+)
 from .space_service import (
     apply_space_images_from_config_change,
     apply_gfs_servers_from_metadata,
+    apply_owner_statement_from_metadata,
     keep_local_space_state,
     stub_space_from_metadata,
 )
@@ -2612,6 +2616,23 @@ class FederationInboundService(ProtectionGateMixin):
             )
             return
         member_instance = str(event.payload.get("instance_id") or "")
+        if event.from_instance != space.owner_instance_id and (
+            await touches_owner_household(
+                self._space_repo,
+                self._space_remote_member_repo,
+                space,
+                user_id=user_id,
+                instance_id=member_instance or None,
+            )
+        ):
+            # A trusted inviting admin never changes the owner's own people.
+            log.warning(
+                "SPACE_MEMBER_ROLE_CHANGED for %s from %s names the owner "
+                "household's user — dropping",
+                space_id,
+                event.from_instance,
+            )
+            return
         own = (
             self._federation_service.own_instance_id
             if self._federation_service is not None
@@ -3008,6 +3029,15 @@ class FederationInboundService(ProtectionGateMixin):
                 self._space_repo,
                 space_id,
                 meta=meta,
+                owner_instance_id=existing.owner_instance_id,
+            )
+            # The owner's ownership statement (migration 0091), kept so we
+            # relay it in our own snapshots — only the owner's, and only for
+            # the authority key we pin.
+            await apply_owner_statement_from_metadata(
+                self._space_repo,
+                space_id,
+                meta={**meta, "identity_public_key": existing.identity_public_key},
                 owner_instance_id=existing.owner_instance_id,
             )
         await self._bus.publish(SpaceFeaturesApplied(space_id=space_id))

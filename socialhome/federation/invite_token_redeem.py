@@ -64,6 +64,7 @@ from ..domain.media_constraints import (
 from ..domain.space import (
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
+    JoinOwner,
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
@@ -74,6 +75,7 @@ from ..domain.space import (
 from ..services.space_authority_pin import (
     apply_authority_cert,
     owner_authority_cert_via,
+    owner_statement_via,
 )
 from ..services.space_service import (
     _coerce_min_age,
@@ -82,8 +84,9 @@ from ..services.space_service import (
     apply_space_icon_from_metadata,
     apply_gfs_servers_from_metadata,
     build_space_snapshot_for_federation,
+    admit_join_stub,
     can_seat_remote_stub,
-    seated_owner_instance,
+    seat_join_owner_state,
     stub_space_from_metadata,
 )
 from .invite_bootstrap import (
@@ -749,8 +752,24 @@ class SpaceInviteTokenRedeemCoordinator:
             # key. Compared against issuer_instance_id (the authenticated
             # sender), never meta["owner_instance_id"] (issuer-controlled).
             # Checked before any persistence so a conflict seats nothing.
-            if not await can_seat_remote_stub(
-                self._spaces, space_id, issuer_instance_id
+            # With a snapshot, ``admit_join_stub`` decides (migration 0091):
+            # the owner or our trusted inviting admin may refresh a row; a
+            # stub nobody here accepted yet gives way to the real owner.
+            join: JoinOwner | None = None
+            if meta_dict is not None:
+                join = await admit_join_stub(
+                    self._spaces,
+                    self._remote_members,
+                    space_id,
+                    meta_dict,
+                    issuer_instance_id,
+                    own_instance_id=self._federation.own_instance_id,
+                )
+            if (meta_dict is not None and join is None) or (
+                meta_dict is None
+                and not await can_seat_remote_stub(
+                    self._spaces, space_id, issuer_instance_id
+                )
             ):
                 log.warning(
                     "§D1b: refusing redeem seat — space=%s already owned "
@@ -789,24 +808,21 @@ class SpaceInviteTokenRedeemCoordinator:
             # don't ship it fall through to today's mapping-only
             # behaviour. SpaceMember is keyed on (space_id, user_id)
             # so a repeat redeem is a no-op via INSERT OR REPLACE.
-            if meta_dict is not None:
+            if meta_dict is not None and join is not None:
                 meta = meta_dict
-                # Seated under the space's OWNER as the snapshot names it —
-                # the issuer may be a delegated admin household (see
-                # ``seated_owner_instance``); the anti-hijack check above
-                # still compared the authenticated issuer.
-                owner_instance = seated_owner_instance(meta, issuer_instance_id)
+                # Seated under the space's OWNER: the issuer, or — for a
+                # delegated admin's link — the owner its signed statement
+                # names, when the admin also proved it holds the seed.
+                owner_instance = join.owner_instance_id
                 stub = stub_space_from_metadata(
                     space_id,
                     host_instance_id=owner_instance,
                     meta=meta,
                 )
                 await self._spaces.save(stub)
-                if owner_instance != issuer_instance_id:
-                    # A delegated admin household issued the link: trusted as
-                    # host-equivalent here while delegation stays on
-                    # (``host_equivalence``, migration 0091).
-                    await self._spaces.set_invited_by(space_id, issuer_instance_id)
+                await seat_join_owner_state(
+                    self._spaces, space_id, join, issuer_instance_id
+                )
                 # The owner's signed GFS list (migration 0091), relayed by
                 # the issuer; taken only under the owner's signature.
                 await apply_gfs_servers_from_metadata(
@@ -1356,6 +1372,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 # v_44 — the owner's cert for the current authority key, so
                 # a redeemer whose old stub pins a retired key re-pins.
                 authority_cert=owner_authority_cert_via(self._federation, space),
+                owner_statement=owner_statement_via(self._federation, space),
             )
         return ack_body
 

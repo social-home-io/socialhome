@@ -49,6 +49,10 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
 from socialhome.services.federation_inbound_service import FederationInboundService
+from socialhome.space_owner_statement import (
+    sign_inviter_proof,
+    sign_owner_statement,
+)
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
@@ -57,7 +61,11 @@ from socialhome.services.space_crypto_service import (
 pytestmark = pytest.mark.security
 
 SPACE = "sp-trust"
-OWNER = derive_instance_id(ed25519_public_key(b"\x41" * 32))
+OWNER_SEED = b"\x41" * 32
+OWNER = derive_instance_id(ed25519_public_key(OWNER_SEED))
+#: A third household with a plain member — what the inviting admin's
+#: admin actions are tested on (the owner's own people are protected).
+THIRD = derive_instance_id(ed25519_public_key(b"\x44" * 32))
 ADMIN_SEED = b"\x42" * 32
 ADMIN = derive_instance_id(ed25519_public_key(ADMIN_SEED))
 OTHER_SEED = b"\x43" * 32
@@ -90,12 +98,33 @@ def _meta(space_pk_hex: str, **over) -> dict:
         "roster": [
             {"user_id": "u-owner", "instance_id": OWNER, "role": "owner"},
             {"user_id": "u-o2", "instance_id": OWNER, "role": "member"},
+            {"user_id": "u-third", "instance_id": THIRD, "role": "member"},
             {"user_id": "u-admin", "instance_id": ADMIN, "role": "admin"},
             {"user_id": "u-other", "instance_id": OTHER_ADMIN, "role": "admin"},
         ],
     }
     meta.update(over)
     return meta
+
+
+def _proven(space_kp, meta: dict, *, inviter: str | None = None) -> dict:
+    """An honest delegated admin's snapshot (migration 0091): the owner's
+    signed statement and the inviter's proof that it holds the seed."""
+    return {
+        **meta,
+        "owner_statement": sign_owner_statement(
+            space_id=SPACE,
+            owner_seed=OWNER_SEED,
+            authority_pk_hex=space_kp.public_key.hex(),
+            authority_key_epoch=0,
+        ),
+        "inviter_proof": sign_inviter_proof(
+            space_id=SPACE,
+            owner_instance_id=OWNER,
+            inviter_instance_id=inviter or ADMIN,
+            space_seed=space_kp.private_key,
+        ),
+    }
 
 
 @pytest.fixture
@@ -117,7 +146,7 @@ async def joiner(db):
                 "invitee_user_id": "u-joiner",
                 "inviter_user_id": "u-admin",
                 "host_identity_pk": ed25519_public_key(ADMIN_SEED).hex(),
-                "space_meta": _meta(space_kp.public_key.hex()),
+                "space_meta": _proven(space_kp, _meta(space_kp.public_key.hex())),
             },
         )
     )
@@ -253,8 +282,8 @@ def _role_change(sender: str) -> FederationEvent:
         sender,
         {
             "space_id": SPACE,
-            "user_id": "u-o2",
-            "instance_id": OWNER,
+            "user_id": "u-third",
+            "instance_id": THIRD,
             "role": SpaceRole.MODERATOR.value,
         },
     )
@@ -275,7 +304,7 @@ async def test_role_changes_from_the_inviting_admin(
         space = await joiner.spaces.get(SPACE)
         await joiner.spaces.save(replace(space, features=SpaceFeatures()))
     await joiner.inbound._on_space_member_role_changed(_role_change(sender))
-    seat = await joiner.seats.get(SPACE, OWNER, "u-o2")
+    seat = await joiner.seats.get(SPACE, THIRD, "u-third")
     assert (seat.role == SpaceRole.MODERATOR.value) is applied
 
 
@@ -367,11 +396,11 @@ async def test_an_owner_invite_records_no_inviting_admin(db):
     assert await spaces.get_invited_by(SPACE) is None
 
 
-def _ban(event_type, sender: str) -> FederationEvent:
+def _ban(event_type, sender: str, user: str = "u-third") -> FederationEvent:
     return _event(
         event_type,
         sender,
-        {"space_id": SPACE, "user_id": "u-o2", "banned_by": "u-admin"},
+        {"space_id": SPACE, "user_id": user, "banned_by": "u-admin"},
     )
 
 
@@ -393,8 +422,41 @@ async def test_live_bans_from_the_inviting_admin(joiner, sender, delegation, app
         bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
     )
     await handlers._on_banned(_ban(FederationEventType.SPACE_MEMBER_BANNED, sender))
-    assert await joiner.spaces.is_banned(SPACE, "u-o2") is applied
+    assert await joiner.spaces.is_banned(SPACE, "u-third") is applied
     # The owner's ban always applies; the unban follows the same rule.
     await handlers._on_banned(_ban(FederationEventType.SPACE_MEMBER_BANNED, OWNER))
     await handlers._on_unbanned(_ban(FederationEventType.SPACE_MEMBER_UNBANNED, sender))
-    assert await joiner.spaces.is_banned(SPACE, "u-o2") is (not applied)
+    assert await joiner.spaces.is_banned(SPACE, "u-third") is (not applied)
+
+
+# ── The owner's own people are off limits to the inviting admin ──────────
+
+
+async def test_the_inviting_admin_cannot_demote_or_ban_the_owners_people(joiner):
+    await joiner.inbound._on_space_member_role_changed(
+        _event(
+            FederationEventType.SPACE_MEMBER_ROLE_CHANGED,
+            ADMIN,
+            {
+                "space_id": SPACE,
+                "user_id": "u-o2",
+                "instance_id": OWNER,
+                "role": SpaceRole.MODERATOR.value,
+            },
+        )
+    )
+    seat = await joiner.seats.get(SPACE, OWNER, "u-o2")
+    assert seat.role == SpaceRole.MEMBER.value
+    handlers = SpaceMembershipInboundHandlers(
+        bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
+    )
+    for user in ("u-o2", "u-owner"):
+        await handlers._on_banned(
+            _ban(FederationEventType.SPACE_MEMBER_BANNED, ADMIN, user)
+        )
+        assert await joiner.spaces.is_banned(SPACE, user) is False
+    # The owner itself still decides about its people.
+    await handlers._on_banned(
+        _ban(FederationEventType.SPACE_MEMBER_BANNED, OWNER, "u-o2")
+    )
+    assert await joiner.spaces.is_banned(SPACE, "u-o2") is True

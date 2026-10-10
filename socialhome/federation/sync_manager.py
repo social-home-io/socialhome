@@ -450,9 +450,16 @@ class SyncSessionManager:
                     # No classifier wired — preserve the S-1 silent drop.
                     return SyncDecision(accepted=False, reason="not_a_member")
                 try:
-                    reason = await self._reject_reason(space_id)
+                    reason = await self._reject_reason(space_id, requester_instance_id)
                 except Exception:
                     reason = "dissolved"
+                if reason is None:
+                    # A household this host has no record of at all — never
+                    # seated here (e.g. one a delegated admin invited that
+                    # our roster has not learned yet). A terminal reject
+                    # would make it archive a space it is joining: drop
+                    # silently instead, like S-1 without a classifier.
+                    return SyncDecision(accepted=False, reason="not_a_member")
                 return SyncDecision(
                     accepted=False,
                     reason="not_a_member",
@@ -728,3 +735,23 @@ class SyncSessionManager:
 def new_sync_id() -> str:
     """Return a fresh 128-bit URL-safe sync id (S-2)."""
     return secrets.token_urlsafe(16)
+
+
+def make_sync_reject_reason(space_repo, seat_repo):
+    """The S-1 classifier for a ``SPACE_SYNC_BEGIN`` from a non-member:
+    ``"dissolved"`` when the space row is gone (a dissolve purged it);
+    ``"removed"`` only when the requester held a seat here once (a
+    tombstone — kicked, banned or left); ``None`` for a household this host
+    has no record of at all, which gets no terminal answer: it may be joining
+    through a delegated admin before our roster learned of it, and must not
+    archive the space (:meth:`SyncSessionManager.begin_session`)."""
+
+    async def _reject_reason(space_id: str, requester: str) -> str | None:
+        if await space_repo.get(space_id) is None:
+            return "dissolved"
+        seats = await seat_repo.list_for_instance(
+            space_id, requester, include_tombstoned=True
+        )
+        return "removed" if seats else None
+
+    return _reject_reason

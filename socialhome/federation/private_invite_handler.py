@@ -38,6 +38,7 @@ from ..crypto import derive_instance_id, ed25519_public_key
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.space import (
     WRITER_ROLES,
+    JoinOwner,
     RemoteAdminOutcome,
     SpaceRole,
     cap_remote_role,
@@ -61,9 +62,9 @@ from ..services.space_service import (
     apply_space_content_key_from_metadata,
     apply_space_cover_from_metadata,
     apply_space_icon_from_metadata,
+    admit_join_stub,
     apply_gfs_servers_from_metadata,
-    can_seat_remote_stub,
-    seated_owner_instance,
+    seat_join_owner_state,
     stub_space_from_metadata,
 )
 
@@ -481,16 +482,38 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        known = await self._space_repo.get(space_id)
-        if known is not None and known.owner_instance_id != event.from_instance:
-            log.warning(
-                "SPACE_PRIVATE_INVITE for %s from %s — only the space's host "
-                "(%s) may invite into it; dropping",
+        meta = p.get("space_meta")
+        join: JoinOwner | None = None
+        if isinstance(meta, dict):
+            # Who the stub is seated under, and whether this invite may
+            # touch an existing one (migration 0091): see admit_join_stub.
+            join = await admit_join_stub(
+                self._space_repo,
+                self._remote_members,
                 space_id,
+                meta,
                 event.from_instance,
-                known.owner_instance_id,
+                own_instance_id=self._own_instance_id,
             )
-            return
+            if join is None:
+                log.warning(
+                    "SPACE_PRIVATE_INVITE for %s from %s refused — the stub "
+                    "here belongs to another owner or inviter; dropping",
+                    space_id,
+                    event.from_instance,
+                )
+                return
+        else:
+            known = await self._space_repo.get(space_id)
+            if known is not None and known.owner_instance_id != event.from_instance:
+                log.warning(
+                    "SPACE_PRIVATE_INVITE for %s from %s — only the space's "
+                    "host (%s) may invite into it; dropping",
+                    space_id,
+                    event.from_instance,
+                    known.owner_instance_id,
+                )
+                return
         inviter_user_id = str(p.get("inviter_user_id") or "")
         display_hint = p.get("space_display_hint")
         await self._space_repo.save_remote_invitation(
@@ -510,38 +533,24 @@ class PrivateSpaceInviteHandler:
         # idempotent. Older senders that don't ship ``space_meta`` get
         # the legacy behaviour — no stub, joiner sees the invite banner
         # but can't see the space until upstream upgrades.
-        meta = p.get("space_meta")
-        # §D1b anti-hijack — drop the snapshot (fall back to no-stub legacy
-        # behaviour) if a local space with this id is already owned by a
-        # different host, so a malicious inviter can't clobber its config +
-        # content key. Compared against the authenticated sender, never the
-        # issuer-controlled meta["owner_instance_id"].
-        if isinstance(meta, dict) and not await can_seat_remote_stub(
-            self._space_repo, space_id, event.from_instance
-        ):
-            log.warning(
-                "§D1b: refusing invite stub — space=%s already owned "
-                "locally by another host, inviter=%s",
-                space_id,
-                event.from_instance,
-            )
-            meta = None
-        if isinstance(meta, dict):
-            # The stub is seated under the space's OWNER, which the snapshot
-            # names — usually the inviter itself, but a delegated admin
-            # household may invite too, and seating the stub under the admin
-            # would make every later owner-only check trust the admin and
-            # ignore the real owner. ``can_seat_remote_stub`` above still
-            # compares the authenticated inviter, so the claim never
-            # overwrites a row we hold, and owner-only facts (the GFS list,
-            # the authority cert) are verified against the owner's own key.
-            owner_instance = seated_owner_instance(meta, event.from_instance)
+        # §D1b anti-hijack — ``admit_join_stub`` above refused any snapshot
+        # that would clobber a row we hold under another owner (except an
+        # invitation nobody here accepted yet, which the real owner's invite
+        # replaces).
+        if isinstance(meta, dict) and join is not None:
+            # The stub is seated under the space's OWNER: the inviter, or —
+            # for a delegated admin's invite — the owner its signed
+            # statement names, when the admin also proved it holds the seed.
+            owner_instance = join.owner_instance_id
             stub = stub_space_from_metadata(
                 space_id,
                 host_instance_id=owner_instance,
                 meta=meta,
             )
             await self._space_repo.save(stub)
+            await seat_join_owner_state(
+                self._space_repo, space_id, join, event.from_instance
+            )
             # The owner's signed GFS list (migration 0091), relayed by
             # whoever invited us; taken only under the owner's signature.
             await apply_gfs_servers_from_metadata(
@@ -550,11 +559,6 @@ class PrivateSpaceInviteHandler:
                 meta=meta,
                 owner_instance_id=owner_instance,
             )
-            # A delegated admin household invited us: remember it, so it
-            # is host-equivalent here for content and admin actions while
-            # delegation stays on (``host_equivalence``, migration 0091).
-            if owner_instance != event.from_instance:
-                await self._space_repo.set_invited_by(space_id, event.from_instance)
             # The inviter's identity key is the HOST key only when the
             # inviter is the owner; an admin's key must never be read as the
             # owner's (it would refuse the owner's own authority cert). An

@@ -56,6 +56,10 @@ from socialhome.federation.invite_token_redeem import (
 )
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
+from socialhome.space_owner_statement import (
+    sign_inviter_proof,
+    sign_owner_statement,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories import (
@@ -122,6 +126,27 @@ def _meta(space_pk_hex: str, *, gfs: dict | None, **over) -> dict:
         meta["gfs_servers"] = gfs
     meta.update(over)
     return meta
+
+
+def _proven(kp, meta: dict) -> dict:
+    """What an honest delegated admin's snapshot carries (migration 0091):
+    the owner's signed statement for this space and key, and the admin's
+    proof that it holds the space seed."""
+    return {
+        **meta,
+        "owner_statement": sign_owner_statement(
+            space_id=SPACE,
+            owner_seed=OWNER_SEED,
+            authority_pk_hex=kp.public_key.hex(),
+            authority_key_epoch=0,
+        ),
+        "inviter_proof": sign_inviter_proof(
+            space_id=SPACE,
+            owner_instance_id=OWNER,
+            inviter_instance_id=ADMIN,
+            space_seed=kp.private_key,
+        ),
+    }
 
 
 def _signed(meta: dict, *, author: str, space_seed: bytes) -> dict:
@@ -280,7 +305,9 @@ async def test_an_admin_invite_seats_the_real_owner_and_only_the_owners_list(
     db, gfs, expected
 ):
     kp = generate_space_keypair()
-    await _invite_handler(db)._on_invite(_invite(_meta(kp.public_key.hex(), gfs=gfs)))
+    await _invite_handler(db)._on_invite(
+        _invite(_proven(kp, _meta(kp.public_key.hex(), gfs=gfs)))
+    )
     space = await SqliteSpaceRepo(db).get(SPACE)
     assert space is not None
     assert space.owner_instance_id == OWNER
@@ -297,7 +324,9 @@ async def test_the_owners_later_config_reaches_a_household_an_admin_invited(db):
     list, and the admin's does not."""
     kp = generate_space_keypair()
     space_pk = kp.public_key.hex()
-    await _invite_handler(db)._on_invite(_invite(_meta(space_pk, gfs=None)))
+    await _invite_handler(db)._on_invite(
+        _invite(_proven(kp, _meta(space_pk, gfs=None)))
+    )
     inbound = _inbound(db, JOINER)
     repo = SqliteSpaceRepo(db)
 
@@ -372,7 +401,7 @@ async def test_an_admin_issued_link_seats_the_real_owner_and_only_the_owners_lis
         {
             "space_id": SPACE,
             "role": SpaceRole.MEMBER.value,
-            "space_meta": _meta(kp.public_key.hex(), gfs=gfs),
+            "space_meta": _proven(kp, _meta(kp.public_key.hex(), gfs=gfs)),
         },
         viewer_user_id="u-joiner",
         issuer_instance_id=ADMIN,
@@ -535,9 +564,9 @@ async def _admin_posts_chunk(signing_seed: bytes) -> bytes:
     return serialise_chunk(envelope)
 
 
-def _admin_invite(space_pk_hex: str) -> FederationEvent:
+def _admin_invite(kp) -> FederationEvent:
     meta = _meta(
-        space_pk_hex,
+        kp.public_key.hex(),
         gfs=None,
         roster=[
             {
@@ -554,7 +583,7 @@ def _admin_invite(space_pk_hex: str) -> FederationEvent:
             },
         ],
     )
-    event = _invite(meta)
+    event = _invite(_proven(kp, meta))
     event.payload["host_identity_pk"] = ed25519_public_key(ADMIN_SEED).hex()
     return event
 
@@ -570,7 +599,7 @@ async def test_an_admin_invited_household_applies_the_admins_catch_up_stream(
     and its members' content applies. A chunk signed by anyone else is
     dropped."""
     kp = generate_space_keypair()
-    await _invite_handler(db)._on_invite(_admin_invite(kp.public_key.hex()))
+    await _invite_handler(db)._on_invite(_admin_invite(kp))
     repo = SqliteSpaceRepo(db)
     space = await repo.get(SPACE)
     assert space is not None and space.owner_instance_id == OWNER
@@ -596,7 +625,7 @@ async def test_an_unrecorded_household_cannot_stream_into_the_space(db):
     """No paired row and no recorded key: an unpaired household that merely
     names the space id is not verified at all."""
     kp = generate_space_keypair()
-    await _invite_handler(db)._on_invite(_admin_invite(kp.public_key.hex()))
+    await _invite_handler(db)._on_invite(_admin_invite(kp))
     stranger_seed = b"\x34" * 32
     stranger = derive_instance_id(ed25519_public_key(stranger_seed))
     await _sync_receiver(db).on_chunk(

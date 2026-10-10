@@ -79,7 +79,9 @@ ALTER TABLE spaces ADD COLUMN gfs_servers TEXT
 -- ``spaces.invited_by_instance`` (same migration, same change): on a MEMBER
 -- household's stub, the delegated admin household that issued THIS
 -- household's invite (a §D1b private invite or an invite-link redeem ACK)
--- when it is not the space's owner. Owner decision 2026-10-10 ("trust the
+-- when it is not the space's owner — recorded ONLY when the snapshot carried
+-- the owner's signed statement (``spaces.owner_statement`` below) and the
+-- admin's seed-holder proof. Owner decision 2026-10-10 ("trust the
 -- inviting admin for sync"): while the space's ``delegated_admin_authority``
 -- is ON and that household still holds a live ``admin`` seat, it is
 -- host-equivalent here for CONTENT and admin actions (its full §25.6
@@ -112,3 +114,23 @@ ALTER TABLE spaces ADD COLUMN gfs_servers TEXT
 --       today's behaviour (no inviting-admin trust).
 
 ALTER TABLE spaces ADD COLUMN invited_by_instance TEXT;
+
+-- ``spaces.owner_statement`` (same migration): the owner household's signed
+-- ownership statement for this space (``socialhome/space_owner_statement.py``)
+-- as last verified here, a JSON object — kept so this household can relay it
+-- in the snapshots it sends (an honest delegated admin's invite carries the
+-- owner's statement). A joiner seats a stub under a claimed owner other than
+-- the inviting household ONLY with a valid statement from that owner binding
+-- the pinned authority key, plus the inviter's seed-holder proof; otherwise
+-- it seats under the inviter as before 0091 (no ``invited_by_instance``).
+-- NULL on owned spaces (the owner signs fresh) and on stubs that never got
+-- one. Audit: the v_44 authority cert is the nearest existing shape, but it
+-- exists only from key epoch 1 (epoch 0 is TOFU, never certified, and the GFS
+-- verifies certs with that rule), so it cannot name the owner of a space
+-- that never rotated; nothing else on the row is signed by the owner. One
+-- NULL-default column, written only by ``set_owner_statement``.
+
+ALTER TABLE spaces ADD COLUMN owner_statement TEXT
+    CHECK (owner_statement IS NULL
+           OR (json_valid(owner_statement)
+               AND json_type(owner_statement) = 'object'));

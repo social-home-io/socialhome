@@ -5196,3 +5196,18 @@ async def test_config_changed_owner_can_empty_the_list(db, bus, inbound):
     )
     assert got == empty
     assert got.servers() == ((), 0)
+
+
+async def test_config_changed_ignores_an_owner_list_dated_far_ahead(db, bus, inbound):
+    """A list more than a day ahead is refused, so a runaway counter can
+    never make every later owner list look older."""
+    far = int(datetime.now(timezone.utc).timestamp() * 1000) + 2 * 86_400_000
+    stored = _gfs_list("gfs-a", issued_at=5)
+    got = await _gs_config(
+        db,
+        inbound,
+        from_instance=_GS_OWNER,
+        gfs_list=_gfs_list("gfs-b", issued_at=far).to_wire(),
+        stored=stored,
+    )
+    assert got == stored

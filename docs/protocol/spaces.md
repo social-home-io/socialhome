@@ -1955,8 +1955,14 @@ WARNING — an anomaly, not a silent drop.
 **The invitee's view of the inviting admin** (owner decision 2026-10-10,
 migration 0091, `socialhome/federation/host_equivalence.py`). The invitee
 seats its stub under the space's REAL owner (`space_meta.owner_instance_id`),
-not under the admin that invited it, and records that admin household in
-`spaces.invited_by_instance` (both §D1b invites and invite-link redeems).
+not under the admin that invited it, ONLY when the snapshot carries the
+owner's signed owner statement for the pinned authority key and the admin's
+seed-holder proof (`socialhome/space_owner_statement.py`; a delegated
+admin's `build_space_snapshot_for_federation` adds the proof and relays the
+owner's latest statement). It then records that admin household in
+`spaces.invited_by_instance` (both §D1b invites and invite-link redeems);
+without both proofs the stub names the inviter itself and nothing below
+applies.
 While the space's `delegated_admin_authority` is ON and that household still
 holds a live `admin` seat, the invitee treats it as **host-equivalent for
 content and admin actions** — the owner is often offline, and the admin may
@@ -1977,7 +1983,16 @@ last-writer-wins owner path, dissolve, sync-rejected and the age gate
 compare against `owner_instance_id` alone. Any other
 admin household gets the member-provider rules. Turning delegation off — or
 demoting / removing that household's admin seat — ends the trust at once
-(checked on every use). Nothing changes for the owner.
+(checked on every use); the admin seat it holds here came from its own
+snapshot roster, so the trust ends for real only when the owner's role change
+or delegation-off reaches this household. Even while trusted it never
+changes, bans or unbans a user of the OWNER household (the owner seat or any
+seat the owner's household holds). The §25.6 mesh catch-up asks both the
+owner and the trusted inviter (the owner may not know this household yet),
+and an owner answers a household it never seated with no terminal
+`SPACE_SYNC_REJECTED` (only a tombstoned seat earns `removed`), so a joining
+household never archives the space it is joining. Nothing changes for the
+owner.
 
 #### Config edits offline-of-owner (`SPACE_CONFIG_CHANGED`, v_24+)
 

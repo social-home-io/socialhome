@@ -105,6 +105,11 @@ FEDERATED_TRANSFORMED: dict[str, str] = {
     # applied on its own, only after the owner signature + freshness check
     # (``apply_gfs_servers_from_metadata``).
     "gfs_servers": "shipped signed; applied separately, never via the stub",
+    # The owner household's ownership statement (migration 0091): signed
+    # fresh by the owner, relayed as stored by everyone else; a receiver
+    # keeps it only after verifying it (``apply_owner_statement_from_metadata``
+    # / the §D1b join), never through the stub.
+    "owner_statement": "shipped signed; applied separately, never via the stub",
 }
 
 #: Fields that MUST NOT federate (absent from ``space_meta`` entirely), each

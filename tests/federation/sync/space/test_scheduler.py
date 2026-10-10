@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -20,6 +20,7 @@ from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
+    SpaceMember,
     SpaceType,
 )
 from socialhome.federation.sync.space import scheduler as scheduler_mod
@@ -30,6 +31,10 @@ from socialhome.federation.sync.space.scheduler import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.reconnect_queue import ReconnectSyncQueue
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 
 
 class _FakeFederation:
@@ -1099,3 +1104,66 @@ async def test_a_member_space_host_still_gets_announce_and_catchup(
     await sched._tick_once()
     assert announced == ["host-m"]
     assert fed.mesh_catchups == [("sp-member", "host-m")]
+
+
+# ── Migration 0091: the trusted inviting admin is a mesh target too ───────
+
+
+@pytest.mark.parametrize("delegation", [True, False])
+async def test_mesh_catchup_also_asks_the_trusted_inviting_admin(db, delegation):
+    """A household a delegated admin invited may be unknown to the owner (or
+    the owner offline): the catch-up also goes to the inviting admin while it
+    is host-equivalent here — never once delegation is off. The authority
+    echo stays the owner's."""
+    spaces = SqliteSpaceRepo(db)
+    seats = SqliteSpaceRemoteMemberRepo(db)
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('joe','u-joe','J')"
+    )
+    await spaces.save(
+        Space(
+            id="sp-inv",
+            name="S",
+            owner_instance_id="owner-hh",
+            owner_username="o",
+            identity_public_key="aa" * 32,
+            config_sequence=1,
+            features=SpaceFeatures(delegated_admin_authority=delegation),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    await spaces.save_member(
+        SpaceMember(space_id="sp-inv", user_id="u-joe", role="member", joined_at="t")
+    )
+    await seats.add(
+        space_id="sp-inv",
+        instance_id="admin-hh",
+        user_id="u-admin",
+        user_pk=None,
+        display_name="A",
+        role=SpaceRole.ADMIN.value,
+    )
+    await spaces.set_invited_by("sp-inv", "admin-hh")
+    fed = MagicMock()
+    fed.is_confirmed_peer = AsyncMock(return_value=False)
+    fed.begin_mesh_catchup_sync = AsyncMock(return_value=True)
+    sched = SpaceSyncScheduler(
+        bus=EventBus(),
+        federation=fed,
+        federation_repo=MagicMock(),
+        space_repo=spaces,
+        queue=MagicMock(),
+        own_instance_id="self",
+        sync_manager=MagicMock(),
+        seat_repo=seats,
+    )
+    await sched._tick_mesh_catchup()
+    calls = {
+        c.kwargs["host_instance_id"]: c.kwargs.get("extra_payload")
+        for c in fed.begin_mesh_catchup_sync.await_args_list
+    }
+    expected = {"owner-hh", "admin-hh"} if delegation else {"owner-hh"}
+    assert set(calls) == expected
+    if delegation:
+        assert calls["admin-hh"] is None

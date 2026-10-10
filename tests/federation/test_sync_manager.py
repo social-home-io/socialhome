@@ -323,7 +323,7 @@ async def test_begin_session_rejects_non_member_dissolved_with_reason():
     async def check_member(space_id, instance_id):
         return False
 
-    async def reject_reason(space_id):
+    async def reject_reason(space_id, requester_instance_id):
         return "dissolved"
 
     mgr = SyncSessionManager(
@@ -353,7 +353,7 @@ async def test_begin_session_rejects_non_member_removed_with_reason():
     async def check_member(space_id, instance_id):
         return False
 
-    async def reject_reason(space_id):
+    async def reject_reason(space_id, requester_instance_id):
         return "removed"
 
     mgr = SyncSessionManager(
@@ -372,6 +372,35 @@ async def test_begin_session_rejects_non_member_removed_with_reason():
     assert d.next_payload["reason"] == "removed"
     assert d.next_payload["sync_id"] == "sid-2"
     assert d.next_payload["space_id"] == "sp-2"
+
+
+async def test_begin_session_never_seated_household_gets_no_terminal_reject():
+    """A household the host has no record of (``reject_reason`` → ``None``)
+    — e.g. one a delegated admin invited before the host's roster learned of
+    it — is dropped silently: a terminal reject would make it archive the
+    space it is joining. The classifier sees who is asking."""
+    asked: list[tuple[str, str]] = []
+
+    async def check_member(space_id, instance_id):
+        return False
+
+    async def reject_reason(space_id, requester_instance_id):
+        asked.append((space_id, requester_instance_id))
+        return None
+
+    mgr = SyncSessionManager(
+        _FakeFedRepo(), check_member=check_member, reject_reason=reject_reason
+    )
+    d = await mgr.begin_session(
+        sync_id="sid-n",
+        space_id="sp-n",
+        requester_instance_id="joining-hh",
+        provider_instance_id="me",
+    )
+    assert d.accepted is False
+    assert d.reason == "not_a_member"
+    assert d.next_event is None
+    assert asked == [("sp-n", "joining-hh")]
 
 
 async def test_begin_session_non_member_silent_without_classifier():
@@ -401,7 +430,7 @@ async def test_begin_session_rate_limit_fires_before_member_check():
     async def check_member(space_id, instance_id):
         return False
 
-    async def reject_reason(space_id):
+    async def reject_reason(space_id, requester_instance_id):
         return "removed"
 
     mgr = SyncSessionManager(

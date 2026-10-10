@@ -175,17 +175,49 @@ async def test_unchanged_snapshot_writes_and_sends_nothing(env):
 
 
 async def test_issued_at_only_goes_up(env):
-    """A list signed after a clock step back still outranks the stored one."""
+    """A list signed after a small clock step back still outranks the
+    stored one."""
     await env.space()
-    far_future = sign_gfs_server_list(
-        space_id="sp-1", servers=(), issued_at=2**60, owner_seed=_KP.private_key
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    ahead = sign_gfs_server_list(
+        space_id="sp-1",
+        servers=(),
+        issued_at=now_ms + 60_000,
+        owner_seed=_KP.private_key,
     )
-    await env.spaces.set_gfs_servers("sp-1", far_future)
+    await env.spaces.set_gfs_servers("sp-1", ahead)
     await env.listed("g1")
     await env.svc.sync_snapshot("sp-1")
     space = await env.spaces.get("sp-1")
     assert space is not None and space.gfs_servers is not None
-    assert space.gfs_servers.issued_at == 2**60 + 1
+    assert space.gfs_servers.issued_at == now_ms + 60_001
+
+
+async def test_a_runaway_stored_issued_at_does_not_wedge_the_owner(env, caplog):
+    """Members refuse a list dated more than a day ahead, so the owner never
+    signs one: a runaway stored value is answered with ``now``."""
+    await env.space()
+    await env.spaces.set_gfs_servers(
+        "sp-1",
+        sign_gfs_server_list(
+            space_id="sp-1", servers=(), issued_at=2**60, owner_seed=_KP.private_key
+        ),
+    )
+    await env.listed("g1")
+    with caplog.at_level(logging.WARNING):
+        await env.svc.sync_snapshot("sp-1")
+    space = await env.spaces.get("sp-1")
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    assert space is not None and space.gfs_servers is not None
+    assert space.gfs_servers.issued_at <= now_ms
+    assert "far ahead" in caplog.text
+
+
+async def test_snapshot_locks_are_pruned(env):
+    await env.space()
+    await env.listed("g1")
+    await asyncio.gather(*(env.svc.sync_snapshot("sp-1") for _ in range(3)))
+    assert env.svc._locks == {}
 
 
 async def test_pending_listing_and_suspended_connection_are_left_out(env):

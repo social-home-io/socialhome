@@ -46,6 +46,7 @@ from socialhome.domain.space import (
     Space,
     SpaceFeatureAccess,
     SpaceFeatures,
+    SpaceMember,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
@@ -223,6 +224,34 @@ class _FakeSpaceRepo:
 
     async def list_members(self, space_id):
         return [m for m in self.members if getattr(m, "space_id", None) == space_id]
+
+    # ── Migration 0091 (owner statement / inviting admin) ─────────────
+    async def get_space_seed(self, space_id):
+        return None
+
+    async def get_invited_by(self, space_id):
+        return None
+
+    async def set_invited_by(self, space_id, instance_id):
+        pass
+
+    async def set_owner_statement(self, space_id, statement_json):
+        pass
+
+    async def list_member_instances(self, space_id):
+        return [i for s, i in self.space_instances if s == space_id]
+
+    async def remove_space_instance(self, space_id, instance_id):
+        self.space_instances = [
+            p for p in self.space_instances if p != (space_id, instance_id)
+        ]
+
+    async def expire_remote_invitations_except(self, space_id, keep_instance_id):
+        pass
+
+    async def purge(self, space_id):
+        self.spaces.pop(space_id, None)
+        self.space_rows_for_get.pop(space_id, None)
 
 
 class _FakeRemoteMemberRepo:
@@ -660,14 +689,39 @@ async def test_redeem_refuses_when_space_owned_by_another_host():
         "sp-own",
         owner_instance_id="the-real-host",
     )
+    # …and a member here already joined it (migration 0091: only a stub
+    # nobody accepted yet gives way to another owner).
+    accepted = SpaceMember(
+        space_id="sp-own", user_id="u-earlier", role="member", joined_at="t"
+    )
+    sender._spaces.members.append(accepted)  # type: ignore[attr-defined]
     with pytest.raises(SpacePermissionError, match="conflicts"):
         await sender.request_redeem(
             "good-token",
             viewer_user_id="u-local",
             issuer_instance_id="issuer-1",
         )
-    assert sender._spaces.members == []  # type: ignore[attr-defined]
+    assert sender._spaces.members == [accepted]  # type: ignore[attr-defined]
     assert sender._spaces.space_instances == []  # type: ignore[attr-defined]
+
+
+async def test_redeem_replaces_a_stub_nobody_here_accepted():
+    """Migration 0091 — a stub seated by an earlier, never-accepted
+    invitation under another household gives way to the new owner."""
+    sender, _issuer, *_rest, issuer_repo, _im = _wire_pair(
+        {"space_id": "sp-own", "created_by": "owner", "uses_remaining": 1},
+    )
+    issuer_repo.space_rows_for_get["sp-own"] = _a_space("sp-own")
+    sender._spaces.space_rows_for_get["sp-own"] = _a_space(  # type: ignore[attr-defined]
+        "sp-own",
+        owner_instance_id="an-earlier-claimant",
+    )
+    await sender.request_redeem(
+        "good-token",
+        viewer_user_id="u-local",
+        issuer_instance_id="issuer-1",
+    )
+    assert sender._spaces.spaces["sp-own"].owner_instance_id == "issuer-1"  # type: ignore[attr-defined]
 
 
 async def test_redeem_with_expired_token_sends_deny():

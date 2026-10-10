@@ -38,7 +38,7 @@ from ..domain.media_constraints import (
 )
 from ..domain.space import SpaceConfigEventType
 from ..infrastructure.event_bus import EventBus
-from .space_authority_pin import owner_authority_cert_via
+from .space_authority_pin import owner_authority_cert_via, owner_statement_via
 from .space_crypto_service import sign_authority_event, strip_authority_sig_fields
 from .space_service import space_metadata_for_federation, embed_space_images
 
@@ -281,6 +281,9 @@ class SpaceConfigOutbound:
                 if seed is not None
                 else None
             ),
+            # Migration 0091 — the owner's ownership statement (fresh on the
+            # owner, relayed by a delegated admin).
+            owner_statement=owner_statement_via(self._federation, space),
         )
         if cover or icon:
             await embed_space_images(
