@@ -234,7 +234,9 @@ class GfsApp:
         *,
         db_path_override: str | Path | None = None,
     ) -> None:
-        # A cluster node without an explicit node_id refuses to start.
+        # A cluster node whose node_id falls back to the shared instance_id
+        # is logged at ERROR (not refused — that would break existing
+        # deployments).
         config.check_cluster_identity()
         self.config = config
         # The data dir is wherever the SQLite DB lives — the identity seed is
@@ -343,13 +345,14 @@ class GfsApp:
             repos.cluster,
             admin_repo=repos.admin,
             fed_repo=repos.federation,
-            # Unique per node. Cluster mode never reaches the fallback: a
-            # cluster node without an explicit node_id refused to start
-            # (``check_cluster_identity``) — the fallback is only the name a
-            # single node gives itself. ``instance_id`` is the public id
-            # every node shares, carried for the sibling identity guard.
+            # Unique per node. An empty node_id falls back to instance_id —
+            # fine for a single node, an ERROR in a cluster whose nodes share
+            # one public id (``check_cluster_identity``; the duplicate-node_id
+            # guard flags it at runtime). ``instance_id`` (+ aliases) is the
+            # public id every node shares, carried for the identity guard.
             node_id=config.cluster_node_id or config.instance_id,
             instance_id=config.instance_id,
+            instance_id_aliases=config.instance_id_aliases,
             self_url=config.cluster_self_url,
             peers=config.cluster_peers,
             signing_key=signing_key,

@@ -506,15 +506,29 @@ def test_an_alias_equal_to_an_env_instance_id_is_dropped(tmp_dir, monkeypatch):
     assert GfsConfig.load(p).instance_id_aliases == ("gfs-0",)
 
 
-def test_cluster_mode_requires_an_explicit_node_id():
-    """No fallback to instance_id: that id is shared by every node."""
-    with pytest.raises(ValueError, match="node_id"):
+def test_an_empty_node_id_with_aliases_is_logged_not_refused(caplog):
+    """No breaking change: node_id still falls back to instance_id. On a
+    cluster moving to one shared id (aliases set) that fallback gives every
+    node the same node_id — an ERROR, never a refusal."""
+    with caplog.at_level("ERROR"):
+        GfsConfig(
+            cluster_enabled=True,
+            cluster_node_id=" ",
+            instance_id="gfs-shared",
+            instance_id_aliases=("gfs-0",),
+        ).check_cluster_identity()
+    assert any("node_id" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        # Set, no aliases, or cluster mode off: silent.
+        GfsConfig(
+            cluster_enabled=True, cluster_node_id="gfs-0", instance_id_aliases=("x",)
+        ).check_cluster_identity()
         GfsConfig(cluster_enabled=True, cluster_node_id="").check_cluster_identity()
-    with pytest.raises(ValueError, match="node_id"):
-        GfsConfig(cluster_enabled=True, cluster_node_id="  ").check_cluster_identity()
-    # Set, or cluster mode off: fine.
-    GfsConfig(cluster_enabled=True, cluster_node_id="gfs-0").check_cluster_identity()
-    GfsConfig(cluster_enabled=False).check_cluster_identity()
+        GfsConfig(
+            cluster_enabled=False, instance_id_aliases=("x",)
+        ).check_cluster_identity()
+    assert caplog.records == []
 
 
 def test_example_toml_documents_the_shared_public_identity():

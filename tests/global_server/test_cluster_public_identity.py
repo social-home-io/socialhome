@@ -151,10 +151,13 @@ async def _healthz(server: TestServer) -> int:
 async def pair(tmp_dir: Path, request) -> AsyncIterator[tuple[TestServer, TestServer]]:
     """Two allocs on ONE data dir (one database, one seed): ``(a, b)``.
 
-    ``request.param`` is ``(id_a, id_b, aliases)``."""
-    id_a, id_b, aliases = request.param
-    a = await _node(tmp_dir, node_id="gfs-0", instance_id=id_a, aliases=aliases)
-    b = await _node(tmp_dir, node_id="gfs-1", instance_id=id_b, aliases=aliases)
+    ``request.param`` is ``(id_a, id_b, aliases)`` or
+    ``(id_a, id_b, aliases_a, aliases_b)``."""
+    id_a, id_b, *aliases = request.param
+    aliases_a = aliases[0]
+    aliases_b = aliases[-1]
+    a = await _node(tmp_dir, node_id="gfs-0", instance_id=id_a, aliases=aliases_a)
+    b = await _node(tmp_dir, node_id="gfs-1", instance_id=id_b, aliases=aliases_b)
     try:
         await _seed_state(a)
         yield a, b
@@ -210,28 +213,50 @@ async def test_during_migration_an_old_per_node_id_is_accepted_on_every_node(pai
     assert "gfs-0" not in str(info_a) and "gfs-1" not in str(info_b)
 
 
-@pytest.mark.parametrize("pair", [("gfs-0", "gfs-1", ())], indirect=True)
-async def test_a_sibling_hello_with_another_instance_id_fails_healthz(pair):
-    """A real HELLO between the two shared-seed nodes: each serves another
-    public id, so the receiver's /healthz fails."""
-    a, b = pair
-    assert await _healthz(b) == 200
+async def _hello(a: TestServer, b: TestServer) -> None:
+    """A real NODE_HELLO from node a to node b over /cluster/sync."""
     cluster_a = a.app[gfs_cluster_key]
     await cluster_a._post_to_peer(
         _url(b), NODE_HELLO, cluster_a._hello_payload(), to="", session=None
     )
-    assert await _healthz(b) == 503
+
+
+@pytest.mark.parametrize("pair", [("gfs-0", "gfs-1", ())], indirect=True)
+async def test_per_node_ids_are_flagged_but_never_fail_healthz(pair):
+    """Today's per-alloc cluster run on this build (an image-only upgrade):
+    flagged at ERROR in the admin view, but /healthz stays 200 — failing it
+    would pull every node out of the balancer."""
+    a, b = pair
+    await _hello(a, b)
+    assert await _healthz(b) == 200
     view = await b.app[gfs_cluster_key].admin_cluster()
     assert view["instance_id_mismatches"] == [
         {"node_id": "gfs-0", "instance_id": "gfs-0"}
     ]
 
 
-@pytest.mark.parametrize("pair", [("gfs-shared", "gfs-shared", ())], indirect=True)
-async def test_a_sibling_hello_with_the_same_instance_id_keeps_healthz_ok(pair):
+@pytest.mark.parametrize(
+    "pair", [("gfs-0", "gfs-shared", (), ("gfs-0", "gfs-1"))], indirect=True
+)
+async def test_a_rolling_instance_id_change_is_transitional_on_both_sides(pair):
+    """Node a still runs the old per-node id; node b already serves the
+    shared id with the old ids as aliases. Each side sees the other as a
+    rolling change (linked through b's aliases), not a mismatch."""
     a, b = pair
-    cluster_a = a.app[gfs_cluster_key]
-    await cluster_a._post_to_peer(
-        _url(b), NODE_HELLO, cluster_a._hello_payload(), to="", session=None
-    )
-    assert await _healthz(b) == 200
+    await _hello(a, b)
+    await _hello(b, a)
+    for node, other, other_id in ((a, "gfs-1", "gfs-shared"), (b, "gfs-0", "gfs-0")):
+        view = await node.app[gfs_cluster_key].admin_cluster()
+        assert view["instance_id_mismatches"] == []
+        assert view["instance_id_transitional"] == [
+            {"node_id": other, "instance_id": other_id}
+        ]
+        assert await _healthz(node) == 200
+
+
+@pytest.mark.parametrize("pair", [("gfs-shared", "gfs-shared", ())], indirect=True)
+async def test_a_sibling_hello_with_the_same_instance_id_flags_nothing(pair):
+    a, b = pair
+    await _hello(a, b)
+    view = await b.app[gfs_cluster_key].admin_cluster()
+    assert view["instance_id_mismatches"] == view["instance_id_transitional"] == []

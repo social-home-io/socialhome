@@ -1699,14 +1699,12 @@ def identity_clock() -> list[float]:
     return [1000.0]
 
 
-@pytest.fixture
-async def identity_cluster(gfs_db, hello_replies, identity_clock):
-    """node-a, serving the public id ``gfs-shared``, on a steerable clock."""
-    clock = identity_clock
+def _identity_svc(gfs_db, clock, *, aliases=(), instance_id="gfs-shared"):
     return ClusterService(
         SqliteClusterRepo(gfs_db),
         node_id="node-a",
-        instance_id="gfs-shared",
+        instance_id=instance_id,
+        instance_id_aliases=aliases,
         self_url="https://a.gfs.test",
         own_public_key_hex=_OWN,
         enabled=True,
@@ -1714,17 +1712,31 @@ async def identity_cluster(gfs_db, hello_replies, identity_clock):
     )
 
 
-def test_hello_and_heartbeat_payloads_carry_our_instance_id():
-    svc = ClusterService(None, node_id="node-a", instance_id="gfs-shared")  # type: ignore[arg-type]
-    assert svc._hello_payload()["instance_id"] == "gfs-shared"
+@pytest.fixture
+async def identity_cluster(gfs_db, hello_replies, identity_clock):
+    """node-a, serving the public id ``gfs-shared``, on a steerable clock."""
+    return _identity_svc(gfs_db, identity_clock)
 
 
-async def test_heartbeat_frame_carries_our_instance_id(gfs_db, monkeypatch):
+def test_hello_payload_carries_our_instance_id_and_aliases():
+    svc = ClusterService(
+        None,  # type: ignore[arg-type]
+        node_id="node-a",
+        instance_id="gfs-shared",
+        instance_id_aliases=("gfs-1", "gfs-0"),
+    )
+    payload = svc._hello_payload()
+    assert payload["instance_id"] == "gfs-shared"
+    assert payload["instance_id_aliases"] == ["gfs-0", "gfs-1"]
+
+
+async def test_heartbeat_frame_carries_our_instance_id_and_aliases(gfs_db, monkeypatch):
     repo = SqliteClusterRepo(gfs_db)
     svc = ClusterService(
         repo,
         node_id="node-a",
         instance_id="gfs-shared",
+        instance_id_aliases=("gfs-0",),
         self_url="https://a.gfs.test",
         own_public_key_hex=_OWN,
         enabled=True,
@@ -1745,10 +1757,11 @@ async def test_heartbeat_frame_carries_our_instance_id(gfs_db, monkeypatch):
     await svc._heartbeat_tick()
     (beat,) = [p for t, p in sent if t == NODE_HEARTBEAT]
     assert beat["instance_id"] == "gfs-shared"
+    assert beat["instance_id_aliases"] == ["gfs-0"]
 
 
 @pytest.mark.security
-async def test_a_sibling_under_our_key_with_another_instance_id_is_flagged(
+async def test_a_sibling_under_our_key_with_an_unlinked_instance_id_is_flagged(
     identity_cluster, caplog
 ):
     with caplog.at_level("ERROR"):
@@ -1758,7 +1771,6 @@ async def test_a_sibling_under_our_key_with_another_instance_id_is_flagged(
             public_key_hex=_OWN,
             instance_id="gfs-2",
         )
-    assert not identity_cluster.identity_consistent
     assert identity_cluster.identity_mismatches() == [
         {"node_id": "node-c", "instance_id": "gfs-2"}
     ]
@@ -1769,6 +1781,7 @@ async def test_a_sibling_under_our_key_with_another_instance_id_is_flagged(
     assert view["instance_id_mismatches"] == [
         {"node_id": "node-c", "instance_id": "gfs-2"}
     ]
+    assert view["instance_id_transitional"] == []
     # Re-reported on every heartbeat: logged once, not per heartbeat.
     caplog.clear()
     with caplog.at_level("ERROR"):
@@ -1776,21 +1789,55 @@ async def test_a_sibling_under_our_key_with_another_instance_id_is_flagged(
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
+@pytest.mark.parametrize(
+    "ours, theirs, their_aliases",
+    [
+        # Rolling forward: we already serve the new id and list the old one.
+        (("gfs-shared", ("gfs-0", "gfs-1")), "gfs-1", None),
+        # Rolling forward, seen from an old node: the new sibling lists us.
+        (("gfs-1", ()), "gfs-shared", ["gfs-0", "gfs-1"]),
+    ],
+)
+async def test_a_rolling_id_change_is_transitional_not_a_mismatch(
+    gfs_db, hello_replies, identity_clock, caplog, ours, theirs, their_aliases
+):
+    instance_id, aliases = ours
+    svc = _identity_svc(
+        gfs_db, identity_clock, instance_id=instance_id, aliases=aliases
+    )
+    with caplog.at_level("WARNING"):
+        await svc.handle_hello(
+            from_node_id="node-c",
+            url="https://c.gfs.test",
+            public_key_hex=_OWN,
+            instance_id=theirs,
+            instance_id_aliases=their_aliases,
+        )
+    assert svc.identity_mismatches() == []
+    assert svc.identity_transitional() == [{"node_id": "node-c", "instance_id": theirs}]
+    assert [r.levelname for r in caplog.records if "rolling" in r.getMessage()] == [
+        "WARNING"
+    ]
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    # Rolled through: the flag clears.
+    await svc.handle_heartbeat("node-c", {"instance_id": instance_id})
+    assert svc.identity_transitional() == []
+
+
 async def test_a_heartbeat_reporting_another_instance_id_is_flagged(identity_cluster):
     await identity_cluster.handle_hello(
         from_node_id="node-c", url="https://c.gfs.test", public_key_hex=_OWN
     )
-    assert identity_cluster.identity_consistent
+    assert identity_cluster.identity_mismatches() == []
     await identity_cluster.handle_heartbeat("node-c", {"instance_id": "gfs-3"})
-    assert not identity_cluster.identity_consistent
+    assert identity_cluster.identity_mismatches() != []
 
 
 @pytest.mark.parametrize("reported", [None, "", 42])
 async def test_a_sibling_that_does_not_report_an_instance_id_is_not_a_mismatch(
     identity_cluster, reported
 ):
-    """An older node sends no ``instance_id``: a rolling upgrade, where the
-    old allocs run beside new ones, must never fail the health check."""
+    """An older node sends no ``instance_id``: never flagged."""
     await identity_cluster.handle_hello(
         from_node_id="node-c",
         url="https://c.gfs.test",
@@ -1799,7 +1846,8 @@ async def test_a_sibling_that_does_not_report_an_instance_id_is_not_a_mismatch(
     )
     await identity_cluster.handle_heartbeat("node-c", {"active_sync_sessions": 0})
     await identity_cluster.handle_heartbeat("node-c", None)
-    assert identity_cluster.identity_consistent
+    assert identity_cluster.identity_mismatches() == []
+    assert identity_cluster.identity_transitional() == []
 
 
 async def test_a_matching_report_clears_the_mismatch(identity_cluster):
@@ -1810,7 +1858,7 @@ async def test_a_matching_report_clears_the_mismatch(identity_cluster):
         instance_id="gfs-2",
     )
     await identity_cluster.handle_heartbeat("node-c", {"instance_id": "gfs-shared"})
-    assert identity_cluster.identity_consistent
+    assert identity_cluster.identity_mismatches() == []
 
 
 async def test_a_mismatch_nobody_re_reports_expires(identity_cluster, identity_clock):
@@ -1821,7 +1869,7 @@ async def test_a_mismatch_nobody_re_reports_expires(identity_cluster, identity_c
         instance_id="gfs-2",
     )
     identity_clock[0] += CLUSTER_IDENTITY_MISMATCH_TTL_S + 1
-    assert identity_cluster.identity_consistent
+    assert identity_cluster.identity_mismatches() == []
 
 
 @pytest.mark.security
@@ -1837,7 +1885,30 @@ async def test_a_peer_under_its_own_approved_key_may_have_another_instance_id(
         instance_id="gfs-elsewhere",
     )
     await identity_cluster.handle_heartbeat("node-b", {"instance_id": "gfs-elsewhere"})
-    assert identity_cluster.identity_consistent
+    assert identity_cluster.identity_mismatches() == []
+
+
+async def test_a_second_node_announcing_our_node_id_is_flagged(
+    identity_cluster, caplog
+):
+    """Two nodes with one node_id (e.g. an empty node_id falling back to
+    the shared instance_id): an ERROR and an admin flag — our own HELLO,
+    looping back from the peer list at our own address, is not one."""
+    await identity_cluster.handle_hello(
+        from_node_id="node-a", url="https://a.gfs.test/", public_key_hex=_OWN
+    )
+    assert identity_cluster.duplicate_node_id_urls() == []
+    with caplog.at_level("ERROR"):
+        for _ in range(2):
+            await identity_cluster.handle_hello(
+                from_node_id="node-a", url="https://b.gfs.test", public_key_hex=_OWN
+            )
+    assert identity_cluster.duplicate_node_id_urls() == ["https://b.gfs.test"]
+    assert len([r for r in caplog.records if "node_id" in r.getMessage()]) == 1
+    view = await identity_cluster.admin_cluster()
+    assert view["duplicate_node_id_urls"] == ["https://b.gfs.test"]
+    # No row was created for "ourselves".
+    assert [n.node_id for n in await identity_cluster.list_nodes()] == []
 
 
 async def _healthz_app(tmp_dir, **kw):
@@ -1854,35 +1925,9 @@ async def _healthz_app(tmp_dir, **kw):
     return create_gfs_app(cfg)
 
 
-async def test_healthz_fails_while_a_sibling_serves_another_instance_id(
-    tmp_dir, hello_replies
-):
-    app = await _healthz_app(tmp_dir)
-    async with TestClient(TestServer(app)) as tc:
-        resp = await tc.get("/healthz")
-        assert (resp.status, await resp.json()) == (200, {"status": "ok"})
-        svc = app[gfs_cluster_key]
-        own = svc.own_public_key_hex
-        await svc.handle_hello(
-            from_node_id="node-c",
-            url="https://c.gfs.test",
-            public_key_hex=own,
-            instance_id="gfs-2",
-        )
-        resp = await tc.get("/healthz")
-        assert resp.status == 503
-        assert await resp.json() == {
-            "status": "unhealthy",
-            "reason": "cluster_instance_id_mismatch",
-        }
-        # Fixed (same id reported) → healthy again.
-        await svc.handle_heartbeat("node-c", {"instance_id": "gfs-shared"})
-        assert (await tc.get("/healthz")).status == 200
-
-
-async def test_healthz_stays_ok_when_a_sibling_sends_no_instance_id(
-    tmp_dir, hello_replies
-):
+async def test_healthz_never_fails_on_an_identity_mismatch(tmp_dir, hello_replies):
+    """Failing /healthz would pull EVERY node of a misconfigured cluster out
+    of the balancer at once — an outage worse than the misconfiguration."""
     app = await _healthz_app(tmp_dir)
     async with TestClient(TestServer(app)) as tc:
         svc = app[gfs_cluster_key]
@@ -1890,12 +1935,15 @@ async def test_healthz_stays_ok_when_a_sibling_sends_no_instance_id(
             from_node_id="node-c",
             url="https://c.gfs.test",
             public_key_hex=svc.own_public_key_hex,
+            instance_id="gfs-2",
         )
-        await svc.handle_heartbeat("node-c", {"active_sync_sessions": 1})
-        assert (await tc.get("/healthz")).status == 200
+        assert svc.identity_mismatches() != []
+        resp = await tc.get("/healthz")
+        assert (resp.status, await resp.json()) == (200, {"status": "ok"})
 
 
-def test_a_cluster_node_without_a_node_id_refuses_to_start(tmp_dir):
+def test_a_cluster_node_without_a_node_id_still_starts(tmp_dir):
+    """No breaking change: node_id falls back to instance_id."""
     cfg = GfsConfig(
         base_url="http://gfs.test",
         data_dir=str(tmp_dir),
@@ -1903,5 +1951,5 @@ def test_a_cluster_node_without_a_node_id_refuses_to_start(tmp_dir):
         cluster_enabled=True,
         cluster_node_id="",
     )
-    with pytest.raises(ValueError, match="node_id"):
-        create_gfs_app(cfg)
+    app = create_gfs_app(cfg)
+    assert app[gfs_cluster_key].node_id == "gfs-shared"

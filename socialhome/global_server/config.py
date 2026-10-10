@@ -242,21 +242,28 @@ class GfsConfig:
         return replace(self, instance_id_aliases=tuple(seen))
 
     def check_cluster_identity(self) -> None:
-        """Refuse a cluster node without an explicit ``[cluster] node_id``.
+        """Log an ERROR for a cluster node whose ``[cluster] node_id`` is
+        empty while ``instance_id_aliases`` is set.
 
-        Raises :class:`ValueError`. ``node_id`` is what tells cluster nodes
-        apart; it used to fall back to ``instance_id``, which is the public
-        identity every node of a cluster must share — so the fallback either
-        made nodes indistinguishable or tempted operators into giving each
-        node its own public id (households then saw a different server
-        behind every load-balancer hop).
+        ``node_id`` falls back to ``instance_id`` (kept: refusing to start
+        would break existing deployments). But ``instance_id`` is the public
+        identity every node of a cluster must share, so on a cluster moving
+        to one shared id (aliases set) the fallback gives every node the
+        same ``node_id``. Duplicate ``node_id``s are also detected at
+        runtime (:class:`ClusterService`). Never raises.
         """
-        if self.cluster_enabled and not self.cluster_node_id.strip():
-            raise ValueError(
-                "[cluster] enabled = true needs an explicit [cluster] node_id, "
-                "unique per node. It does not fall back to [server] "
-                "instance_id: that is the public identity and MUST be "
-                "identical on every node.",
+        if (
+            self.cluster_enabled
+            and not self.cluster_node_id.strip()
+            and self.instance_id_aliases
+        ):
+            log.error(
+                "[cluster] node_id is empty, so it falls back to [server] "
+                "instance_id %r — which every node of the cluster shares "
+                "(instance_id_aliases is set). Nodes with the same node_id "
+                "cannot be told apart: set a unique [cluster] node_id on "
+                "every node.",
+                self.instance_id,
             )
 
     @property
@@ -522,13 +529,17 @@ turn_secret = ""
 # never changes in place — to rotate, remove the peer and add it again.
 # Frames carry a timestamp that must be within 300 s of the receiver's
 # clock: keep every node on NTP, or they stop syncing with each other.
-# node_id MUST be unique per node and set explicitly — a node with cluster
-# mode on and no node_id refuses to start (there is no fallback to
-# [server] instance_id, which is the public identity and MUST be identical
-# on every node). Nodes sharing the identity seed compare their instance_id
-# on HELLO / heartbeat: a sibling reporting a different one is logged at
-# ERROR, listed in GET /admin/api/cluster, and fails GET /healthz so the load
-# balancer stops sending households to a node that answers under another id.
+# node_id MUST be unique per node — set it explicitly. Left empty it falls
+# back to [server] instance_id, which is the public identity and MUST be
+# identical on every node, so every node would get the same node_id (logged
+# at ERROR at startup when instance_id_aliases is set, and at runtime when a
+# node announces our node_id from another address; GET /admin/api/cluster
+# lists it under duplicate_node_id_urls). Nodes sharing the identity seed
+# compare their instance_id on HELLO / heartbeat: a sibling reporting an id
+# linked through either side's instance_id_aliases is a rolling id change
+# (WARNING, instance_id_transitional); any other difference is a
+# misconfiguration (ERROR, instance_id_mismatches) — fix it by giving every
+# node the same instance_id. Neither fails GET /healthz.
 # Set [server] trusted_proxies EXPLICITLY on every cluster node.
 # /cluster/sync budgets failed requests per client address (and failed
 # verifies per node + address), and trusted_proxies decides that address. A
