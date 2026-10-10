@@ -394,6 +394,7 @@ class GfsApp:
             config.instance_id,
             config.instance_id_aliases,
             public_key_hex=own_pk_hex,
+            node_id=config.cluster_node_id or config.instance_id,
         )
         member_publish = GfsMemberPublishService(
             federation=federation,
@@ -438,6 +439,7 @@ class GfsApp:
             envelope_relay=envelope_relay,
             member_publish=member_publish,
             channels=channels,
+            addressee=addressee,
             invites=invites,
         )
 
@@ -539,6 +541,8 @@ class GfsApp:
         # then hourly (the boot purge above stays for an immediate clean).
         await self.services.maintenance.start()
         await self.services.member_publish.start()
+        # Logs the alias stragglers on a timer (and the last ones at stop).
+        await self.services.addressee.start()
 
     async def _on_cleanup(self, app: web.Application) -> None:
         log.info("GFS: shutting down")
@@ -546,6 +550,7 @@ class GfsApp:
         await self.services.envelope_relay.close()
         await self.services.maintenance.stop()
         await self.services.member_publish.stop()
+        await self.services.addressee.stop()
         await self.services.cluster.stop()
         await self.services.ws_registry.close_all()
         session = app.get(K.gfs_http_session_key)

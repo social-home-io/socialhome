@@ -998,3 +998,33 @@ async def test_a_frame_naming_no_known_server_is_dropped(repos, public_moments):
     await _drain(handler)
     assert sess.posts == []
     assert "s-x" not in handler._sessions
+
+
+async def test_an_unbound_frame_naming_a_replaced_id_still_resolves(
+    repos, public_moments
+):
+    """L5: a frame naming an id the server signed it ``replaces`` (a household
+    not yet rebound, or an alias) resolves through ``known_instance_ids``."""
+    await _second_gfs(
+        repos, conn_id="conn-uuid", server_id="gfs-social-home", url="https://g2.test"
+    )
+    handler, _peers = _make_handler(repos)
+    handler.attach_known_ids(
+        lambda c: (
+            frozenset({c.gfs_instance_id})
+            | ({"gfs-1"} if c.id == "conn-uuid" else set())
+        )
+    )
+    sess = _StubSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    await handler.handle_signal(
+        {
+            "kind": "offer",
+            "session_id": "s-alias",
+            "user_id": "u1",
+            "gfs_id": "gfs-1",
+            "sdp": "v=0",
+        }
+    )
+    await _drain(handler)
+    assert [url for url, _ in sess.posts] == ["https://g2.test/gfs/moment_rtc/answer"]

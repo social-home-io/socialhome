@@ -119,3 +119,22 @@ def gfs_server_address(url: str) -> str:
     if port is None or port == _DEFAULT_PORTS.get(scheme):
         return f"{scheme}://{host}"
     return f"{scheme}://{host}:{port}"
+
+
+def refused_gfs_key(
+    body: dict, status: int, reason: str | None, *, signature_only: bool = False
+) -> bool:
+    """Whether a GFS refused *body* because it carried ``gfs_key`` — an older
+    node (a cluster mid-upgrade) that rejects the unknown field.
+
+    A 400 whose reason says the fields were unexpected (the old exact-key
+    parsers' wording). With *signature_only* — a request an older node
+    verifies by re-building the signed payload from the fields it knows (the
+    owner epoch notice) — a 403 counts too: the old node verified without
+    the key and the signature failed. The caller then drops the key for that
+    connection and tries once without it."""
+    if "gfs_key" not in body:
+        return False
+    if status == 400 and "unexpected" in (reason or "").lower():
+        return True
+    return signature_only and status == 403

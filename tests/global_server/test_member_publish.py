@@ -710,10 +710,10 @@ async def test_an_anonymous_publish_addressed_to_an_alias_passes_the_addressee_c
     """Strict mode checks the addressee first: an alias gets past it to the
     writer-key check (no key pinned here → the later refusal), while an
     unknown id is refused at the addressee check itself."""
-    svc = gfs.app_[gfs_member_publish_key]
-    assert svc.addressed_here(GFS_ID)
-    assert svc.addressed_here("gfs-shared")
-    assert not svc.addressed_here("gfs-node-b")
+    addressee = gfs.app_[gfs_member_publish_key]._addressee
+    assert addressee.accepts(GFS_ID)
+    assert addressee.accepts("gfs-shared")
+    assert not addressee.accepts("gfs-node-b")
 
 
 @pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
@@ -1720,3 +1720,15 @@ async def test_the_gfs_key_is_inside_the_household_signature(gfs):
     body = _body(gfs.publisher, gfs_key=await _own_key(gfs))
     del body["gfs_key"]
     await _assert_refused(await gfs.post("/gfs/member-publish", json=body))
+
+
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_a_connection_left_on_the_old_id_is_still_served_with_the_key(gfs):
+    """A household that paired this server twice keeps its second row on
+    the old id (the UNIQUE new id belongs to the first). Its requests name the
+    old id — an alias — bound to this server's own key: accepted."""
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json=_body(gfs.publisher, gfs_instance_id=GFS_ID, gfs_key=await _own_key(gfs)),
+    )
+    assert resp.status == 200

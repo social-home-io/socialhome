@@ -35,7 +35,7 @@ import json
 import logging
 import pathlib
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,6 +45,7 @@ import aiohttp
 
 from ..crypto import b64url_encode, sign_ed25519
 from ..domain.child_protection import ProtectedCapability
+from ..domain.federation import GfsConnection
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.moment_repo import AbstractMomentRepo
 from . import highlight_public_framing as framing
@@ -95,6 +96,7 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
         "_child_protection",
         "_moments",
         "_gfs_repo",
+        "_known_ids",
         "_http_client",
         "_signing_key",
         "_own_instance_id",
@@ -117,6 +119,10 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
     ) -> None:
         self._moments = moment_repo
         self._gfs_repo = gfs_repo
+        #: ``GfsConnectionService.known_instance_ids`` — the connection's id
+        #: plus the former ids its server signed it ``replaces``. Late-bound;
+        #: without it only the pinned id matches.
+        self._known_ids: Callable[[GfsConnection], frozenset[str]] | None = None
         self._http_client: aiohttp.ClientSession | None = None
         self._signing_key: bytes | None = None
         self._own_instance_id: str = ""
@@ -144,6 +150,13 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
     ) -> None:
         self._own_instance_id = own_instance_id
         self._signing_key = signing_key
+
+    def attach_known_ids(
+        self, known_ids: Callable[[GfsConnection], frozenset[str]]
+    ) -> None:
+        """Wire ``GfsConnectionService.known_instance_ids`` (alias / rebind
+        aware matching of an unbound frame's server id)."""
+        self._known_ids = known_ids
 
     def attach_ice_servers(self, servers: list[dict[str, Any]]) -> None:
         self._ice_servers = list(servers)
@@ -177,7 +190,12 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
         if not server_id:
             return ""
         for conn in await self._gfs_repo.list_active():
-            if conn.gfs_instance_id == server_id:
+            known = (
+                self._known_ids(conn)
+                if self._known_ids is not None
+                else frozenset({conn.gfs_instance_id})
+            )
+            if server_id in known:
                 return conn.id
         return ""
 

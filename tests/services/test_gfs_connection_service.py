@@ -4295,3 +4295,36 @@ async def test_the_addressee_key_is_bound_only_once_the_server_proves_it(env):
     svc._http_client.info = info  # type: ignore[union-attr]
     await svc.refresh_connection_metadata("g1")
     assert svc.addressee_key_for(conn) == _GFS_KP.public_key.hex()
+
+
+async def test_forget_addressee_key_until_the_next_verified_fetch(env):
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-shared"))
+    conn = await repo.get("g1")
+    info = _signed_info(
+        gfs_instance_id="gfs-shared",
+        capabilities={"anonymous_publish": True, "addressee_key": True},
+    )
+    info.update(gfs_instance_id="gfs-shared", public_key=_GFS_KP.public_key.hex())
+    svc, _rebound = _rebind_svc(repo, info)
+    await svc.refresh_connection_metadata("g1")
+    assert svc.addressee_key_for(conn) is not None
+    svc.forget_addressee_key(conn)
+    assert svc.addressee_key_for(conn) is None
+    await svc.refresh_connection_metadata("g1")
+    assert svc.addressee_key_for(conn) is not None
+
+
+async def test_refresh_if_stale_is_debounced_per_connection(env):
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-0"))
+    svc, rebound = _rebind_svc(repo, _served())
+    conn = await repo.get("g1")
+    fresh = await svc.refresh_if_stale(conn)
+    assert fresh is not None and fresh.gfs_instance_id == "gfs-shared"
+    assert rebound == ["g1"]
+    gets = len(svc._http_client.gets)  # type: ignore[union-attr]
+    await svc.refresh_if_stale(conn)
+    assert len(svc._http_client.gets) == gets  # type: ignore[union-attr]
+    await svc.refresh_if_stale(conn, min_interval_s=0)
+    assert len(svc._http_client.gets) == gets + 1  # type: ignore[union-attr]

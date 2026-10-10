@@ -446,11 +446,6 @@ class GfsMemberPublishService:
             len(targets),
         )
 
-    def addressed_here(self, gfs_instance_id: str) -> bool:
-        """Whether a request signed for *gfs_instance_id* is addressed to
-        this server: its ``instance_id`` or one of its aliases."""
-        return self._addressee.accepts(gfs_instance_id)
-
     # ── Publish ───────────────────────────────────────────────────────────
 
     async def publish(self, req: MemberPublishRequest) -> bool:

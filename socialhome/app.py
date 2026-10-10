@@ -3255,6 +3255,11 @@ def create_app(config: Config | None = None) -> web.Application:
             signing_key=identity_seed,
         )
         moment_public_signaling_handler.attach_ice_servers(public_ice_servers)
+        # An unbound frame's server id may be one the server signed it
+        # replaces (a rename): match those too.
+        moment_public_signaling_handler.attach_known_ids(
+            gfs_connection_service.known_instance_ids
+        )
         # Public-Momentum service + outbound subscriber. Same shape as
         # ``highlight_publication_service``: shared session + signing
         # key wired up after federation identity loads.

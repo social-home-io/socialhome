@@ -191,6 +191,12 @@ class _Gfs:
     def addressee_key_for(self, conn):
         return None
 
+    def forget_addressee_key(self, conn):
+        self.forgotten = [*getattr(self, "forgotten", []), conn.id]
+
+    async def refresh_if_stale(self, conn):
+        return conn
+
     def client(self):
         return self.session
 
@@ -1205,3 +1211,51 @@ async def test_a_member_never_uses_the_channel_while_the_stored_option_is_off(en
     )
     assert outcome.kind == "permanent"
     assert await _queued(env, env.member) == []
+
+
+async def test_a_grant_naming_an_unknown_id_refreshes_before_skipping(env):
+    """L2: the owner's grant names the server's NEW id, this member has not
+    rebound yet — its connection re-reads /gfs/info (debounced) and, once
+    rebound, the server is used instead of skipped."""
+    node = env.other
+    calls: list[str] = []
+    conns = node.svc._conn_repo
+
+    async def refresh(conn):
+        calls.append(conn.id)
+        conns.conn = replace(conns.conn, gfs_instance_id="gfs-new")
+        return conns.conn
+
+    node.gfs.refresh_if_stale = refresh  # type: ignore[method-assign]
+    got = await node.svc._capable_in(("gfs-new",))
+    assert [c.gfs_instance_id for c in got] == ["gfs-new"]
+    assert calls == ["conn-1"]
+
+    async def no_move(conn):
+        calls.append(conn.id)
+        return conn
+
+    node.gfs.refresh_if_stale = no_move  # type: ignore[method-assign]
+    assert await node.svc._capable_in(("gfs-elsewhere",)) == []
+
+
+async def test_a_refused_gfs_key_is_retried_once_without_it(env):
+    """L1: a channel request whose ``gfs_key`` an older node refused (the
+    post helper then forgets the key) runs once more, without it — and only
+    once; a request that bound no key is never repeated."""
+    svc, gfs = env.member.svc, env.member.gfs
+    conn = svc._conn_repo.conn
+    calls: list[str | None] = []
+    key = ["ab" * 32]
+    gfs.addressee_key_for = lambda c: key[0]  # type: ignore[method-assign]
+
+    async def attempt() -> str:
+        calls.append(key[0])
+        key[0] = None  # the node refused it: forgotten for this connection
+        return "done"
+
+    assert await svc._keyed(conn, attempt) == "done"
+    assert calls == ["ab" * 32, None]
+    calls.clear()
+    assert await svc._keyed(conn, attempt) == "done"
+    assert calls == [None]

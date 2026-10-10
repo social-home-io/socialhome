@@ -13,6 +13,7 @@ from socialhome.services.gfs_http import (
     gfs_server_address,
     read_body_capped,
     read_json_capped,
+    refused_gfs_key,
 )
 
 
@@ -137,3 +138,22 @@ async def test_read_body_capped_returns_bytes_or_refuses():
 )
 def test_gfs_server_address_normalizes(a, b, same):
     assert (gfs_server_address(a) == gfs_server_address(b)) is same
+
+
+@pytest.mark.parametrize(
+    "body, status, reason, signature_only, expected",
+    [
+        ({"gfs_key": "k"}, 400, "unexpected or missing fields", False, True),
+        ({"gfs_key": "k"}, 400, "subscribe: unexpected or missing fields", False, True),
+        ({"gfs_key": "k"}, 400, "invalid field: epoch", False, False),
+        ({"x": 1}, 400, "unexpected or missing fields", False, False),
+        ({"gfs_key": "k"}, 403, "Forbidden", False, False),
+        ({"gfs_key": "k"}, 403, "Forbidden", True, True),
+        ({"gfs_key": "k"}, 200, "OK", True, False),
+        ({"gfs_key": "k"}, 400, None, False, False),
+    ],
+)
+def test_refused_gfs_key(body, status, reason, signature_only, expected):
+    assert (
+        refused_gfs_key(body, status, reason, signature_only=signature_only) is expected
+    )

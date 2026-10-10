@@ -266,6 +266,12 @@ class _HouseholdGfs:
     def addressee_key_for(self, conn):
         return None
 
+    def forget_addressee_key(self, conn):
+        self.forgotten = [*getattr(self, "forgotten", []), conn.id]
+
+    async def refresh_if_stale(self, conn):
+        return conn
+
 
 class _TrustedSpaces:
     """A space repo holding the one (trusted-mode) public space."""

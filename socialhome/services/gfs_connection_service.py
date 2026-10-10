@@ -110,6 +110,10 @@ _REMOTE_DETAIL_READ_BYTES = 8192
 #: picked up within seconds.
 GFS_INFO_NEGATIVE_TTL_S: float = 30.0
 
+#: At most one on-demand ``/gfs/info`` refresh per connection this often
+#: (:meth:`GfsConnectionService.refresh_if_stale`).
+GFS_INFO_REFRESH_DEBOUNCE_S: float = 60.0
+
 
 async def _remote_detail(resp, *, context: str) -> str:
     """Read a GFS error body for display, bounded and truncated.
@@ -281,6 +285,7 @@ class GfsConnectionService:
         "_member_publish_strict",
         "_private_channels",
         "_addressee_key",
+        "_refreshed_at",
         "_member_publish_trusted",
         "_authority_rotation",
         "_rotation_warned",
@@ -368,6 +373,9 @@ class GfsConnectionService:
         # notices and channel requests. An older server refuses unknown
         # fields, so the key is bound only where proven (True only).
         self._addressee_key: dict[str, bool] = {}
+        # ``time.monotonic()`` of the last on-demand ``/gfs/info`` refresh per
+        # connection (:meth:`refresh_if_stale` — the debounce).
+        self._refreshed_at: dict[str, float] = {}
         # Same again for ``authority_rotation`` (v_44): whether the GFS
         # re-pins a space's authority key from an owner cert. A GFS without
         # it keeps the OLD key — and so keeps honouring a revoked admin's
@@ -1122,6 +1130,39 @@ class GfsConnectionService:
         if not self._addressee_key.get(conn.id) or not conn.public_key:
             return None
         return conn.public_key.lower()
+
+    def forget_addressee_key(self, conn: GfsConnection) -> None:
+        """Stop binding ``gfs_key`` for *conn* until the next verified
+        ``/gfs/info`` fetch says ``addressee_key`` again. Called when a node
+        refused a request carrying it as an unknown field — in a cluster
+        mid-upgrade, the balancer may route to an older node that does not
+        know the field although a newer one advertised it."""
+        if self._addressee_key.pop(conn.id, None):
+            log.info(
+                "GFS %r (%s) refused the gfs_key field (an older node?) — "
+                "sending without it until its /gfs/info says otherwise",
+                conn.display_name,
+                conn.inbox_url,
+            )
+
+    async def refresh_if_stale(
+        self,
+        conn: GfsConnection,
+        *,
+        min_interval_s: float = GFS_INFO_REFRESH_DEBOUNCE_S,
+    ) -> GfsConnection | None:
+        """Re-read *conn*'s ``/gfs/info`` now — at most once per
+        *min_interval_s* per connection — and return the connection as it
+        stands afterwards (``None`` when it is gone). For a caller that
+        found evidence the server moved on (an owner's grant naming an id
+        this connection does not know yet): it may rebind before the caller
+        gives up."""
+        now = time.monotonic()
+        last = self._refreshed_at.get(conn.id)
+        if last is None or now - last >= min_interval_s:
+            self._refreshed_at[conn.id] = now
+            await self.refresh_connection_metadata(conn.id)
+        return await self._repo.get(conn.id)
 
     async def warm_capabilities(
         self,

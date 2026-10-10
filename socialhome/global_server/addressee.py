@@ -20,6 +20,7 @@ operator can watch adoption and drop the aliases once they go quiet.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable, Iterable
@@ -33,7 +34,17 @@ ALIAS_LOG_INTERVAL_S: float = 600.0
 class GfsAddressee:
     """This server's public id plus the transitional aliases it answers to."""
 
-    __slots__ = ("_primary", "_aliases", "_key", "_hits", "_logged_at", "_clock")
+    __slots__ = (
+        "_primary",
+        "_aliases",
+        "_key",
+        "_node_id",
+        "_hits",
+        "_logged_at",
+        "_clock",
+        "_stop",
+        "_task",
+    )
 
     def __init__(
         self,
@@ -41,9 +52,13 @@ class GfsAddressee:
         aliases: Iterable[str] = (),
         *,
         public_key_hex: str = "",
+        node_id: str = "",
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._primary = instance_id
+        #: This node's cluster ``node_id``, named in the alias log line so an
+        #: operator sees which alloc still gets old-id traffic.
+        self._node_id = node_id
         #: This server's identity key (hex) — a request that names the key it
         #: is addressed to (``gfs_key``) must name exactly this one.
         self._key = public_key_hex.lower()
@@ -52,6 +67,8 @@ class GfsAddressee:
         self._hits: dict[str, int] = {}
         self._logged_at: dict[str, float] = {}
         self._clock = clock
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
 
     @property
     def instance_id(self) -> str:
@@ -86,13 +103,54 @@ class GfsAddressee:
         last = self._logged_at.get(alias)
         if last is not None and now - last < ALIAS_LOG_INTERVAL_S:
             return
-        count = self._hits.pop(alias)
+        self._log(alias, now)
+
+    def _log(self, alias: str, now: float) -> None:
+        count = self._hits.pop(alias, 0)
+        if not count:
+            return
         self._logged_at[alias] = now
         log.info(
-            "gfs: %d request(s) addressed to the alias %r instead of the "
-            "instance_id %r — households that have not re-read /gfs/info yet. "
-            "Drop the alias from [server] instance_id_aliases once these stop.",
+            "gfs: node %s: %d request(s) addressed to the alias %r instead of "
+            "the instance_id %r — households that have not re-read /gfs/info "
+            "yet. Drop the alias from [server] instance_id_aliases once these "
+            "stop.",
+            self._node_id or "-",
             count,
             alias,
             self._primary,
         )
+
+    def flush(self) -> None:
+        """Log every alias hit counted since its last line — so the last
+        stragglers before traffic stops (or before shutdown) are seen."""
+        now = self._clock()
+        for alias in sorted(self._hits):
+            self._log(alias, now)
+
+    async def start(self) -> None:
+        """Flush pending alias counts every :data:`ALIAS_LOG_INTERVAL_S`.
+        No-op without aliases. Idempotent."""
+        if not self._aliases or (self._task is not None and not self._task.done()):
+            return
+        self._stop.clear()
+        self._task = asyncio.create_task(self._loop(), name="gfs-alias-log")
+
+    async def stop(self) -> None:
+        """Stop the timer and flush what is pending."""
+        self._stop.set()
+        if self._task is not None:
+            try:
+                await asyncio.wait_for(self._task, timeout=5.0)
+            except asyncio.TimeoutError, asyncio.CancelledError:
+                self._task.cancel()
+            self._task = None
+        self.flush()
+
+    async def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=ALIAS_LOG_INTERVAL_S)
+                return
+            except asyncio.TimeoutError:
+                self.flush()

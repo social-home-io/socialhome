@@ -373,9 +373,11 @@ The Social Home ↔ GFS link is split by direction:
   - **Aliases (server side).** `[server] instance_id_aliases`
     (`GFS_INSTANCE_ID_ALIASES`) lists former ids still accepted as the
     addressee of a signed request, and is served ONLY inside the signed
-    capability block, as `replaces: [...]`. Each request addressed to an
-    alias is logged at INFO (at most once per alias per 10 minutes, with a
-    count) so the operator can drop them once households have moved.
+    capability block, as `replaces: [...]`. Requests addressed to an alias
+    are logged at INFO with a count and the node's `node_id` — at most once
+    per alias per 10 minutes, with the remaining count flushed every 10
+    minutes and at shutdown — so the operator can drop the aliases once
+    those lines stop on every node.
   - **Rebind (household side).** The pinned KEY is the trust anchor, the id a
     label — but a household moves its pin only when the server says so: the
     served `public_key` is the pinned key, the capability block verifies
@@ -392,7 +394,10 @@ The Social Home ↔ GFS link is split by direction:
     re-registers its channel and re-issues grants naming the new id; until
     they arrive, a grant naming a former id still matches when the server's
     signed `replaces` lists it (re-derived on every verified fetch, so it
-    survives a restart). The household's follow seats (`gfs_space_seats`,
+    survives a restart). The other way round — a grant already naming the
+    new id while this member has not rebound — re-reads that server's
+    `/gfs/info` at once (at most once a minute per connection) before the
+    server is skipped. The household's follow seats (`gfs_space_seats`,
     bound to server id + pinned key + address) move to the new id in the
     same step — only seats bound to the connection's pinned key AND address
     — and the reconnect reconcile repeats the move before reading seats, so
@@ -410,7 +415,16 @@ The Social Home ↔ GFS link is split by direction:
     request whose `gfs_key` is not its own key. A household sends it only to
     a server whose signed block proves `addressee_key: true` (an older
     server refuses unknown fields); without it the id alone decides, as
-    before.
+    before. **Mixed-version cluster:** a newer node may advertise
+    `addressee_key` while the balancer routes the next request to an older
+    node of the same id. That node refuses the field — a 400 "unexpected or
+    missing fields", or a 403 for the owner epoch notice, whose signature it
+    re-builds without the field. The household then drops `gfs_key` for that
+    connection, sends the request once more without it, and binds the key
+    again only after its next verified `/gfs/info` says `addressee_key`. A
+    connection left on an old id (the same server paired twice: the UNIQUE
+    new id belongs to the other row) keeps working — its old id is an alias
+    and its key is the server's own.
   - **Upgrade note (owner decision).** Older household builds verify the
     capability block under the id they pinned and never rebind. Once a
     cluster switches to one shared id, such a household keeps working while
