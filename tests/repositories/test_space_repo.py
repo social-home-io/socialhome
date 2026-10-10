@@ -2061,10 +2061,11 @@ async def test_an_answered_invitation_drops_its_join_snapshot(env):
     assert (await env.repo.get_invitation_by_token("t-2"))["join_snapshot"] is None
 
 
-async def test_count_pending_remote_invitations_counts_snapshots_per_issuer(env):
+async def test_count_pending_remote_invitations_counts_per_issuer(env):
+    """Snapshot or not, only invitations to OUR users, only pending ones."""
     await _remote_invite(env.repo, "t-1", "inst-a", snapshot='{"meta":{}}')
     await _remote_invite(env.repo, "t-2", "inst-a", snapshot='{"meta":{}}')
-    await _remote_invite(env.repo, "t-3", "inst-a")  # no snapshot: not counted
+    await _remote_invite(env.repo, "t-3", "inst-a")  # no snapshot: counted too
     await _remote_invite(env.repo, "t-4", "inst-b", snapshot='{"meta":{}}')
     await env.repo.save_remote_invitation(
         space_id="sp-y",
@@ -2074,10 +2075,18 @@ async def test_count_pending_remote_invitations_counts_snapshots_per_issuer(env)
         invite_token="t-5",
         join_snapshot='{"meta":{}}',
     )
-    assert await env.repo.count_pending_remote_invitations("inst-a") == 3
+    # A host-side row names a REMOTE invitee: not received, not counted.
+    await env.repo.save_remote_invitation(
+        space_id="sp-x",
+        invited_by="uid-alice",
+        remote_instance_id="inst-a",
+        remote_user_id="their-user",
+        invite_token="t-6",
+    )
+    assert await env.repo.count_pending_remote_invitations("inst-a") == 4
     assert (
-        await env.repo.count_pending_remote_invitations("inst-a", space_id="sp-x") == 2
+        await env.repo.count_pending_remote_invitations("inst-a", space_id="sp-x") == 3
     )
     row = await env.repo.get_invitation_by_token("t-1")
     await env.repo.update_invitation_status(row["id"], "declined")
-    assert await env.repo.count_pending_remote_invitations("inst-a") == 2
+    assert await env.repo.count_pending_remote_invitations("inst-a") == 3
