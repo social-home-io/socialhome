@@ -83,11 +83,14 @@ _MAX_ROSTER_SNAPSHOT_ENTRIES = 5000
 
 #: Receive-side caps on pending private invitations holding a join snapshot
 #: (migration 0093 stores each one until the user answers): per issuing
-#: household, and per (space id, issuing household). Counted per issuer, so
-#: one household's flood can never crowd out another household's invitation
-#: for the same space id. Over a cap the new invitation is refused (logged).
-MAX_PENDING_INVITATIONS_PER_ISSUER = 20
-MAX_PENDING_INVITATIONS_PER_SPACE_AND_ISSUER = 5
+#: household, and per (space id, issuing household) — the latter sized for
+#: one household's users. Counted per issuer, so one household's flood can
+#: never crowd out another household's invitation for the same space id. A
+#: re-invite of the same user supersedes the older one, so duplicates hold
+#: no slot, and a row pending for 90 days stops counting. Over a cap the new
+#: invitation is refused (logged). Snapshot-less invitations count too.
+MAX_PENDING_INVITATIONS_PER_ISSUER = 50
+MAX_PENDING_INVITATIONS_PER_SPACE_AND_ISSUER = 20
 
 #: Why a roster-gossip authority signature was refused (``None`` = verified).
 _SIG_MISSING = "missing"
@@ -391,22 +394,6 @@ class PrivateSpaceInviteHandler:
         meta = p.get("space_meta")
         snapshot: str | None = None
         if isinstance(meta, dict):
-            issuer = event.from_instance
-            if (
-                await self._space_repo.count_pending_remote_invitations(issuer)
-                >= MAX_PENDING_INVITATIONS_PER_ISSUER
-                or await self._space_repo.count_pending_remote_invitations(
-                    issuer, space_id=space_id
-                )
-                >= MAX_PENDING_INVITATIONS_PER_SPACE_AND_ISSUER
-            ):
-                log.warning(
-                    "SPACE_PRIVATE_INVITE for %s from %s refused — too many "
-                    "pending invitations from that household",
-                    space_id,
-                    issuer,
-                )
-                return
             received_at_ms = int(time.time() * 1000)
             join = await admit_join(
                 self._space_repo,
@@ -456,6 +443,27 @@ class PrivateSpaceInviteHandler:
                     known.owner_instance_id,
                 )
                 return
+        issuer = event.from_instance
+        # A re-invite of the same user supersedes the older invitation (its
+        # slot is freed before the caps are counted).
+        await self._space_repo.supersede_pending_remote_invitations(
+            space_id, issuer, invitee_user_id
+        )
+        if (
+            await self._space_repo.count_pending_remote_invitations(issuer)
+            >= MAX_PENDING_INVITATIONS_PER_ISSUER
+            or await self._space_repo.count_pending_remote_invitations(
+                issuer, space_id=space_id
+            )
+            >= MAX_PENDING_INVITATIONS_PER_SPACE_AND_ISSUER
+        ):
+            log.warning(
+                "SPACE_PRIVATE_INVITE for %s from %s refused — too many "
+                "pending invitations from that household",
+                space_id,
+                issuer,
+            )
+            return
         inviter_user_id = str(p.get("inviter_user_id") or "")
         display_hint = p.get("space_display_hint")
         await self._space_repo.save_remote_invitation(

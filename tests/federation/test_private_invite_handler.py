@@ -2263,7 +2263,7 @@ async def test_invite_records_its_receipt_time_and_resolved_owner(handler):
 
 @pytest.mark.parametrize(
     "per_issuer, per_space, kept",
-    [(0, 0, True), (20, 0, False), (3, 5, False), (19, 4, True)],
+    [(0, 0, True), (50, 0, False), (3, 20, False), (49, 19, True)],
 )
 async def test_invite_caps_per_issuer_and_per_space_issuer(
     handler, per_issuer, per_space, kept

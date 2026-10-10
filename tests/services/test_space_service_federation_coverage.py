@@ -28,6 +28,8 @@ from socialhome.space_owner_statement import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
+    DELIVERY_ERROR_MESH_DEFERRED,
+    DELIVERY_ERROR_RELAY_THROTTLED,
     DELIVERY_ERROR_QUEUED,
     DeliveryResult,
     FederationEvent,
@@ -2001,3 +2003,79 @@ async def test_an_unopenable_content_key_fails_the_accept(stack):
         await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
     stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
     assert await stack.space_repo.get("sp-snap") is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        DELIVERY_ERROR_QUEUED,
+        DELIVERY_ERROR_RELAY_THROTTLED,
+        DELIVERY_ERROR_MESH_DEFERRED,
+    ],
+)
+async def test_a_queued_accept_keeps_the_seat(stack, error):
+    """Round 8: a parked ACCEPT reaches the host later — the host WILL seat
+    us, so the stub and the accept stay (no rollback)."""
+    bob = await _user(stack, f"bobq{len(error)}")
+    await _snapshot_invite(stack, bob.user_id, token="t-peer", issuer="peer")
+    stack.fed_svc.send_with_mesh_fallback = AsyncMock(
+        return_value=DeliveryResult(instance_id="peer", ok=False, error=error)
+    )
+    await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+    assert (await stack.space_repo.get("sp-snap")).owner_instance_id == "peer"
+    assert await stack.space_repo.get_member("sp-snap", bob.user_id) is not None
+    assert (await stack.space_repo.get_invitation_by_token("t-peer"))[
+        "status"
+    ] == "accepted"
+
+
+@pytest.mark.parametrize("error", ["not_confirmed", "no_route", "relay_too_large"])
+async def test_a_definitive_accept_failure_rolls_back_with_a_clear_message(
+    stack, error
+):
+    bob = await _user(stack, f"bobd{len(error)}")
+    await _snapshot_invite(stack, bob.user_id, token="t-peer", issuer="peer")
+    stack.fed_svc.send_with_mesh_fallback = AsyncMock(
+        return_value=DeliveryResult(instance_id="peer", ok=False, error=error)
+    )
+    with pytest.raises(SpacePermissionError, match="cannot be reached"):
+        await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+    assert await stack.space_repo.get("sp-snap") is None
+    assert (await stack.space_repo.get_invitation_by_token("t-peer"))[
+        "status"
+    ] == "pending"
+
+
+async def test_startup_sweep_spares_gfs_mirror_stubs(stack):
+    """Round 8 L2: a public / global stub the household follows through a
+    GFS (mirror provenance or a recorded GFS seat) is never swept, even with
+    a private invitation for its id — its teardown is the mirror's."""
+    bob = await _user(stack, "bobmirror")
+    for sid in ("sp-mirror", "sp-seat"):
+        await stack.space_repo.save(
+            Space(
+                id=sid,
+                name=sid,
+                owner_instance_id="mal",
+                owner_username="o",
+                identity_public_key="ab" * 32,
+                config_sequence=0,
+                features=SpaceFeatures(),
+                space_type=SpaceType.GLOBAL,
+                join_mode=JoinMode.INVITE_ONLY,
+            )
+        )
+        await stack.space_repo.save_remote_invitation(
+            space_id=sid,
+            invited_by="u-mal",
+            remote_instance_id="mal",
+            remote_user_id=bob.user_id,
+            invite_token=f"t-{sid}",
+        )
+    await stack.db.enqueue("UPDATE spaces SET mirror_gfs_id='g1' WHERE id='sp-mirror'")
+    await stack.db.enqueue(
+        "INSERT INTO gfs_space_seats(space_id, gfs_instance_id) VALUES('sp-seat','g1')"
+    )
+    assert await stack.svc.sweep_unjoined_invitation_stubs() == 0
+    assert await stack.space_repo.get("sp-mirror") is not None
+    assert await stack.space_repo.get("sp-seat") is not None

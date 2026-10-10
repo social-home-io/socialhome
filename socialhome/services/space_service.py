@@ -115,6 +115,7 @@ from ..domain.events import (
     SpacePostModerated,
 )
 from ..domain.federation import (
+    DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
     DELIVERY_ERROR_RELAY_THROTTLED,
     BehindMember,
@@ -5880,11 +5881,35 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                     space_crypto_service=self._space_crypto,
                     inviter_identity_pk=opened.inviter_identity_pk,
                 )
-            await self._send_invite_envelope(
+            result = await self._federation.send_with_mesh_fallback(
                 to_instance_id=host_instance,
                 event_type=FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
                 payload=accept_payload,
             )
+            if not result.ok and result.error not in _ACCEPT_DELIVERED_LATER:
+                # Definitive: nothing was queued (not confirmed, no route,
+                # too large …) — the host will never see this accept.
+                log.warning(
+                    "space %s: ACCEPT to %s not deliverable (%s)",
+                    space_id,
+                    host_instance,
+                    result.error,
+                )
+                raise SpacePermissionError(
+                    "The inviting household cannot be reached right now — "
+                    "try accepting again later."
+                )
+            if not result.ok:
+                # Parked for redelivery (outbox / relay throttle / mesh
+                # retry): the host WILL seat us, so we keep the seat and
+                # the accept — rolling back would leave the host fanning
+                # content out to a household that dropped the space.
+                log.info(
+                    "space %s: ACCEPT to %s queued for redelivery (%s)",
+                    space_id,
+                    host_instance,
+                    result.error,
+                )
         except Exception:
             if fresh_seat:
                 log.warning(
@@ -5897,6 +5922,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         await self._spaces.update_invitation_status(
             invite["id"],
             "accepted",
+        )
+        # The issuer's other pending invitations to this user for the space
+        # are answered by this accept.
+        await self._spaces.supersede_pending_remote_invitations(
+            space_id, host_instance, user_id
         )
         if join is not None:
             await expire_superseded_invitations(
@@ -8537,6 +8567,17 @@ def stub_space_from_metadata(
         # (:func:`apply_gfs_servers_from_metadata`).
     )
 
+
+#: ``DeliveryResult.error`` values an ACCEPT can fail with that still
+#: reach the host later — the envelope is parked (durable outbox, relay
+#: throttle window, mesh retry queue). Any other failure is definitive.
+_ACCEPT_DELIVERED_LATER: frozenset[str] = frozenset(
+    {
+        DELIVERY_ERROR_QUEUED,
+        DELIVERY_ERROR_RELAY_THROTTLED,
+        DELIVERY_ERROR_MESH_DEFERRED,
+    }
+)
 
 #: What a derived instance id looks like (:func:`socialhome.crypto
 #: .derive_instance_id`): 32 lowercase base32 characters.

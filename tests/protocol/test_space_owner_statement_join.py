@@ -1192,3 +1192,107 @@ async def test_concurrent_accepts_of_r_and_mal_seat_exactly_one(joiner):
     assert (await _seated(joiner))[0] == winner
     instances = await joiner.spaces.list_member_instances(SPACE)
     assert loser not in instances
+
+
+# ── Round 8: de-dup and caps never drop a legitimate invitation ───────────
+
+
+async def _local_users(db, n: int) -> list[str]:
+    ids = [f"u-l{i}" for i in range(n)]
+    for uid in ids:
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (uid, uid, uid),
+        )
+    return ids
+
+
+def _r_invite_for(real_kp, *, token: str, user: str) -> FederationEvent:
+    return _invite(
+        R,
+        _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
+        token=token,
+        user=user,
+    )
+
+
+async def _pending_tokens(j, user: str) -> list[str]:
+    return sorted(
+        r["invite_token"] for r in await j.spaces.list_pending_remote_invites_for(user)
+    )
+
+
+async def test_a_reinvite_supersedes_the_older_one(joiner, db):
+    """R re-invites the same user six times: one pending invitation, the
+    newest — duplicates never pile up nor hold cap slots."""
+    await _local_users(db, 1)
+    real_kp = generate_space_keypair()
+    for i in range(6):
+        await joiner.handler._on_invite(
+            _r_invite_for(real_kp, token=f"t-r{i}", user="u-l0")
+        )
+    assert await _pending_tokens(joiner, "u-l0") == ["t-r5"]
+    assert (await joiner.spaces.get_invitation_by_token("t-r0"))[
+        "join_snapshot"
+    ] is None
+
+
+async def test_one_household_inviting_many_of_our_users_is_stored(joiner, db):
+    users = await _local_users(db, 20)
+    real_kp = generate_space_keypair()
+    for i, uid in enumerate(users):
+        await joiner.handler._on_invite(
+            _r_invite_for(real_kp, token=f"t-{i}", user=uid)
+        )
+    for uid in users:
+        assert len(await _pending_tokens(joiner, uid)) == 1
+    # The per-(space, issuer) cap (20) refuses the next, and only from R.
+    await _local_users_extra(db, "u-x")
+    await joiner.handler._on_invite(_r_invite_for(real_kp, token="t-x", user="u-x"))
+    assert await joiner.spaces.get_invitation_by_token("t-x") is None
+    mal_kp = generate_space_keypair()
+    await joiner.handler._on_invite(
+        _invite(MAL, _meta(mal_kp.public_key.hex(), MAL), token="t-m", user="u-x")
+    )
+    assert await _pending_tokens(joiner, "u-x") == ["t-m"]
+
+
+async def _local_users_extra(db, uid: str) -> None:
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (uid, uid, uid),
+    )
+
+
+async def test_a_stale_pending_invitation_stops_holding_a_slot(joiner, db):
+    users = await _local_users(db, 21)
+    real_kp = generate_space_keypair()
+    for i, uid in enumerate(users[:20]):
+        await joiner.handler._on_invite(
+            _r_invite_for(real_kp, token=f"t-{i}", user=uid)
+        )
+    await db.enqueue(
+        "UPDATE space_invitations SET created_at=datetime('now', '-91 days')"
+        " WHERE invite_token='t-0'"
+    )
+    await joiner.handler._on_invite(
+        _r_invite_for(real_kp, token="t-20", user=users[20])
+    )
+    assert await joiner.spaces.get_invitation_by_token("t-20") is not None
+
+
+async def test_an_accept_answers_the_issuers_other_invitations_to_that_user(joiner, db):
+    """Two live invitations from R to the same user (one a snapshot-less
+    legacy row): accepting one leaves none pending."""
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(_r_invite(real_kp))
+    await joiner.spaces.save_remote_invitation(
+        space_id=SPACE,
+        invited_by="u-r",
+        remote_instance_id=R,
+        remote_user_id="u-joe",
+        invite_token="t-legacy",
+    )
+    assert await _pending_tokens(joiner, "u-joe") == ["t-legacy", "t-r"]
+    await _accept(joiner, "t-r")
+    assert await _pending_tokens(joiner, "u-joe") == []

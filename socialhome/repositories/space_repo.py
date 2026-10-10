@@ -351,6 +351,9 @@ class AbstractSpaceRepo(Protocol):
         self, own_instance_id: str | None
     ) -> list[str]: ...
     async def expire_snapshotless_remote_invitations(self, space_id: str) -> int: ...
+    async def supersede_pending_remote_invitations(
+        self, space_id: str, issuer_instance_id: str, user_id: str
+    ) -> None: ...
     async def is_user_remote_member(
         self,
         space_id: str,
@@ -2568,12 +2571,17 @@ class SqliteSpaceRepo:
         self, issuer_instance_id: str, *, space_id: str | None = None
     ) -> int:
         """Pending invitations this household received from
-        *issuer_instance_id* (optionally for one *space_id*) that still hold
-        a join snapshot — what the receive-side caps bound (migration 0093)."""
+        *issuer_instance_id* (optionally for one *space_id*), with or
+        without a join snapshot — what the receive-side caps bound
+        (migration 0093). Received means addressed to one of OUR users (a
+        host-side row names the remote invitee). A row pending for more than
+        90 days no longer counts, so stale ones never hold a slot forever."""
         sql = (
             "SELECT COUNT(*) AS n FROM space_invitations"
             " WHERE remote_instance_id=? AND status='pending'"
-            " AND join_snapshot IS NOT NULL"
+            " AND EXISTS (SELECT 1 FROM users u"
+            " WHERE u.user_id = space_invitations.remote_user_id)"
+            " AND datetime(created_at) > datetime('now', '-90 days')"
         )
         params: tuple = (issuer_instance_id,)
         if space_id is not None:
@@ -2588,12 +2596,16 @@ class SqliteSpaceRepo:
         """Stubs a cross-household invitation seated before migration 0093
         that nobody here ever joined: a space we do not own, with no local
         member and at least one received invitation, none of them accepted.
-        (Invite-link and GFS-mirror stubs have no invitation row and are
-        never listed.)"""
+        Never a GFS-mirror stub (``mirror_gfs_id`` or a recorded
+        ``gfs_space_seats`` row — those are torn down through the mirror's
+        own path, with the GFS unsubscribe); invite-link stubs have no
+        invitation row."""
         rows = await self._db.fetchall(
             """
             SELECT s.id FROM spaces s
              WHERE s.owner_instance_id != ?
+               AND s.mirror_gfs_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM gfs_space_seats g WHERE g.space_id = s.id)
                AND NOT EXISTS (SELECT 1 FROM space_members m WHERE m.space_id = s.id)
                AND EXISTS (
                    SELECT 1 FROM space_invitations i
@@ -2606,6 +2618,19 @@ class SqliteSpaceRepo:
             (own_instance_id or "",),
         )
         return [str(r["id"]) for r in rows]
+
+    async def supersede_pending_remote_invitations(
+        self, space_id: str, issuer_instance_id: str, user_id: str
+    ) -> None:
+        """Expire the pending invitations *issuer_instance_id* sent our
+        *user_id* for *space_id* — a newer one from them (or the accept of
+        one) supersedes them, so re-invites never pile up (migration 0093)."""
+        await self._db.enqueue(
+            "UPDATE space_invitations SET status='expired', join_snapshot=NULL"
+            " WHERE space_id=? AND remote_instance_id=? AND remote_user_id=?"
+            " AND status='pending'",
+            (space_id, issuer_instance_id, user_id),
+        )
 
     async def expire_snapshotless_remote_invitations(self, space_id: str) -> int:
         """Expire the pending received invitations into *space_id* that

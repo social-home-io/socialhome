@@ -1380,19 +1380,27 @@ redeem and the GFS-mirror subscribe, re-reading the invitation and the space
 row inside it, so two joins for one space id never both seat. The stub is
 seated BEFORE the ACCEPT goes out, so the host's `SPACE_ROSTER_SNAPSHOT`
 (writer cert / key, channel grant) always finds it — the host re-sends that
-snapshot on its periodic sync tick too; a failed seat or send rolls a fresh
-stub back and leaves the invitation pending. Pending invitations for one
+snapshot on its periodic sync tick too. A failed seat, or a send that
+definitively cannot reach the host (not confirmed, no route, too large),
+rolls a fresh stub back and leaves the invitation pending; an ACCEPT parked
+for redelivery (durable outbox, relay throttle, mesh retry) reaches the
+host later, so the seat and the accept stay. Pending invitations for one
 space id from different households coexist and are each listed; after an
 accept the ones from any household but the space's owner and the issuer are
 expired. A space this household already joined under another owner refuses
 the accept (`403`), and so does an invitation whose owner no longer
 resolves as it did on receipt (never seated under the issuer instead) or
 whose sealed content key does not open here. An invitation that could only
-be refused is dropped on receipt; so is one over the receive-side caps (20
-pending per issuing household, 5 per space id and issuing household).
-Answering an invitation drops its snapshot. At startup, stubs older builds
-pre-seated for invitations nobody here accepted are dropped with their
-snapshot-less pending invitations, so the real owner can invite again.
+be refused is dropped on receipt; so is one over the receive-side caps (50
+pending per issuing household, 20 per space id and issuing household, with
+or without a snapshot; rows pending over 90 days stop counting). A new
+invitation from the same household to the same user for the same space
+supersedes the older one, and an accept answers the issuer's other pending
+ones to that user. Answering an invitation drops its snapshot. At startup,
+stubs older builds pre-seated for invitations nobody here accepted are
+dropped with their snapshot-less pending invitations, so the real owner can
+invite again — never a GFS-mirror stub (mirror provenance or a recorded
+GFS seat), whose teardown is the mirror's.
 
 ### Private invite over the federation mesh (v_6+)
 
