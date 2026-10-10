@@ -141,6 +141,7 @@ from .space_crypto_service import (
 )
 from .space_service import (
     apply_space_images_from_config_change,
+    apply_gfs_servers_from_metadata,
     keep_local_space_state,
     stub_space_from_metadata,
 )
@@ -2962,19 +2963,6 @@ class FederationInboundService(ProtectionGateMixin):
                     private_gfs=existing.features.private_gfs,
                 ),
             )
-        # ``gfs_servers`` (migration 0089) likewise, on every household: the
-        # GFSs the space is listed on are where every member publishes, so a
-        # delegated admin's list would aim members' publishes at a server of
-        # its choosing. Only the owner household's own word moves it.
-        if not is_owner and refreshed.gfs_servers != existing.gfs_servers:
-            if "gfs_servers" in meta:
-                log.info(
-                    "SPACE_CONFIG_CHANGED for %s from %s tried to change the "
-                    "owner-only gfs_servers — kept the stored value",
-                    space_id,
-                    event.from_instance,
-                )
-            refreshed = replace(refreshed, gfs_servers=existing.gfs_servers)
         refreshed = keep_local_space_state(
             refreshed,
             existing=existing,
@@ -3002,6 +2990,18 @@ class FederationInboundService(ProtectionGateMixin):
             # §24.11 envelope sender, not by the pinned key.
             await self._space_repo.save(refreshed)
             await self._space_repo.mark_config_authority(space_id)
+        # The owner's GFS list (migration 0089) is where every member will
+        # publish, so it is the OWNER household's alone on every household:
+        # ``save`` never writes it, and it is taken only when the owner
+        # household signed it (whoever relays it) and it is newer than ours.
+        # The owner derives its own list locally and takes none from outside.
+        if existing.owner_instance_id != own_instance_id:
+            await apply_gfs_servers_from_metadata(
+                self._space_repo,
+                space_id,
+                meta=meta,
+                owner_instance_id=existing.owner_instance_id,
+            )
         await self._bus.publish(SpaceFeaturesApplied(space_id=space_id))
         if (
             is_owner

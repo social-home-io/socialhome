@@ -927,6 +927,24 @@ def _build_pairing_gfs_reach(
     )
 
 
+def _build_gfs_server_selection(
+    *,
+    repos: SimpleNamespace,
+    bus: EventBus,
+    gfs_connection_service: GfsConnectionService,
+) -> GfsServerSelectionService:
+    """The owner's signed GFS list (``spaces.gfs_servers``, migration 0089):
+    re-derived after every listing change and every config change of a space
+    we own, and sent to the members in a config change. Signs nothing until
+    the household identity is attached at startup."""
+    selection = GfsServerSelectionService(
+        space_repo=repos.space, gfs_repo=repos.gfs_connection, bus=bus
+    )
+    gfs_connection_service.attach_on_listings_changed(selection.sync_snapshot)
+    selection.wire()
+    return selection
+
+
 def _build_peer_gfs_relay(
     *,
     federation_repo: AbstractFederationRepo,
@@ -2462,6 +2480,9 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── GFS connection service (§24) ────────────────────────────────────
     gfs_connection_service = GfsConnectionService(repos.gfs_connection)
+    gfs_server_selection = _build_gfs_server_selection(
+        repos=repos, bus=bus, gfs_connection_service=gfs_connection_service
+    )
     # Hook space_service so flipping a space's space_type to/from 'global'
     # auto-publishes / unpublishes to every active GFS (§D1).
     space_service.attach_gfs_connection_service(gfs_connection_service)
@@ -3205,17 +3226,9 @@ def create_app(config: Config | None = None) -> web.Application:
             cover_repo=repos.space_cover,
             icon_repo=repos.space_icon,
         )
-        # The owner's GFS list (``spaces.gfs_servers``, migration 0089):
-        # re-derived after every listing change on a space we own and sent
-        # to the members in a config change.
-        gfs_server_selection = GfsServerSelectionService(
-            space_repo=repos.space,
-            gfs_repo=repos.gfs_connection,
-            bus=bus,
-            own_instance_id=real_instance_id,
-        )
-        gfs_connection_service.attach_on_listings_changed(
-            gfs_server_selection.sync_snapshot
+        # The owner's GFS list is signed with the household identity key.
+        gfs_server_selection.attach_identity(
+            own_instance_id=real_instance_id, own_signing_key=identity_seed
         )
 
         # Short-lived signed URLs for browser-loaded media — see §23.21

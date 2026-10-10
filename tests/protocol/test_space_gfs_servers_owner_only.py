@@ -1,25 +1,28 @@
 """Release-blocker protocol tests: a space's GFS list (``gfs_servers``,
-migration 0089) is the OWNER's alone, on every household.
+migration 0089) is the OWNER household's alone, on every household.
 
 Members will publish to every GFS on that list — including servers their own
-household never connected to — so a delegated admin that could change it
-would aim every member's publishes at a server of its choosing. Two paths
-could carry such a change, and both must ignore it:
+household never connected to — so whoever could write it could aim every
+member's publishes at a server of its choosing. The list is signed by the
+owner household's identity key and taken only when that signature verifies
+(``derive_instance_id(owner_pk) == owner_instance_id``) and it is newer than
+the stored one. These tests drive every path that carries it:
 
 * the authority-signed ``SPACE_CONFIG_CHANGED`` a seed-holding delegated
-  admin broadcasts (accepted for the rest of its config block) — on the host
-  AND on a member mirror;
-* a config edit a remote admin forwards to the host
-  (``SPACE_REMOTE_ADMIN_ACTION`` ``update_config``), which the host runs AS
-  THE OWNER.
+  admin broadcasts — its own list is ignored, the owner's list it relays is
+  taken, a replayed older owner list is ignored;
+* a config edit a remote admin forwards to the host (runs AS the owner);
+* the §D1b join snapshots a delegated admin household sends (private invite
+  and invite-link redeem ACK): the stub is seated under the REAL owner, the
+  admin's planted list is ignored, the owner's relayed list is taken, and the
+  owner's later config still reaches the joiner.
 
-Driven through the real inbound handler / space service with real SQLite
-repos; only the federation transport is a mock.
+Driven through the real handlers / services with real SQLite repos; only the
+federation transport is a mock.
 """
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -28,19 +31,23 @@ import pytest
 
 from socialhome.crypto import (
     derive_instance_id,
+    ed25519_public_key,
     generate_identity_keypair,
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.domain.gfs_server import GfsServer
+from socialhome.domain.gfs_server import GfsServer, SignedGfsServerList
 from socialhome.domain.space import (
-    JoinMode,
     RemoteAdminOutcome,
     SpaceFeatures,
     SpaceRole,
-    SpaceType,
 )
+from socialhome.federation.invite_token_redeem import (
+    SpaceInviteTokenRedeemCoordinator,
+)
+from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories import (
@@ -62,144 +69,309 @@ from socialhome.services.user_service import UserService
 
 pytestmark = pytest.mark.security
 
-_OWNER_SERVER = GfsServer(
-    gfs_instance_id="gfs-owner",
-    inbox_url="https://gfs-owner.example",
-    public_key="ab" * 32,
-    gfs_key_suite="ed25519",
-    display_name="Owner's GFS",
-)
+SPACE = "sp-g"
+OWNER_SEED = b"\x31" * 32
+OWNER = derive_instance_id(ed25519_public_key(OWNER_SEED))
+ADMIN_SEED = b"\x32" * 32
+ADMIN = derive_instance_id(ed25519_public_key(ADMIN_SEED))
+JOINER = "joiner-i"
 
 
-def _evil_entry() -> dict:
-    return {
-        "gfs_instance_id": "gfs-evil",
-        "inbox_url": "https://gfs-evil.example",
-        "public_key": "cd" * 32,
-        "gfs_key_suite": "ed25519",
-        "display_name": "Admin's GFS",
-    }
-
-
-# ── Inbound SPACE_CONFIG_CHANGED (authority-signed) ──────────────────────
-
-
-async def _seed_space(db, *, space_id: str, space_pub_hex: str) -> None:
-    await db.enqueue(
-        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
-        " identity_public_key, space_type, join_mode, config_sequence,"
-        " gfs_servers) VALUES(?,?,?,?,?,?,?,?,?)",
-        (
-            space_id,
-            "Global",
-            "owner-i",
-            "owner",
-            space_pub_hex,
-            SpaceType.GLOBAL.value,
-            JoinMode.INVITE_ONLY.value,
-            5,
-            json.dumps([_OWNER_SERVER.to_wire()]),
+def _list(gid: str, *, issued_at: int, seed: bytes = OWNER_SEED) -> SignedGfsServerList:
+    return sign_gfs_server_list(
+        space_id=SPACE,
+        servers=(
+            GfsServer(
+                gfs_instance_id=gid,
+                inbox_url=f"https://{gid}.example",
+                public_key=(gid.encode().hex() * 32)[:64],
+                gfs_key_suite="ed25519",
+                display_name=gid,
+            ),
         ),
+        issued_at=issued_at,
+        owner_seed=seed,
     )
 
 
-def _signed_config(*, space_id: str, from_instance: str, seed: bytes, gfs) -> dict:
+#: The owner's list, and a list the ADMIN signed with its own key.
+OWNER_LIST = _list("gfs-owner", issued_at=20)
+ADMIN_LIST = _list("gfs-evil", issued_at=99, seed=ADMIN_SEED)
+
+
+def _meta(space_pk_hex: str, *, gfs: dict | None, **over) -> dict:
     meta = {
-        "name": "RenamedByAdmin",
-        "owner_instance_id": "owner-i",
+        "name": "Global",
+        "owner_instance_id": OWNER,
         "owner_username": "owner",
-        "identity_public_key": "ignored-by-stub",
-        "config_sequence": 9,
-        "config_author_instance": from_instance,
+        "identity_public_key": space_pk_hex,
+        "config_sequence": 5,
         "space_type": "global",
         "join_mode": "invite_only",
         "features": {},
-        "gfs_servers": gfs,
     }
+    if gfs is not None:
+        meta["gfs_servers"] = gfs
+    meta.update(over)
+    return meta
+
+
+def _signed(meta: dict, *, author: str, space_seed: bytes) -> dict:
+    meta = {**meta, "config_author_instance": author}
     meta.update(
         sign_authority_event(
             event_type="space_config_changed",
-            space_id=space_id,
+            space_id=SPACE,
             payload=strip_authority_sig_fields(meta),
-            space_seed=seed,
+            space_seed=space_seed,
         )
     )
     return meta
 
 
-def _config_event(space_id: str, from_instance: str, meta: dict) -> FederationEvent:
+def _event(event_type, from_instance: str, payload: dict) -> FederationEvent:
     return FederationEvent(
-        msg_id="m-cfg",
-        event_type=FederationEventType.SPACE_CONFIG_CHANGED,
+        msg_id=f"m-{event_type.value}-{from_instance}",
+        event_type=event_type,
         from_instance=from_instance,
-        to_instance="self",
+        to_instance=JOINER,
         timestamp=datetime.now(timezone.utc).isoformat(),
-        payload={
-            "space_id": space_id,
-            "sequence": 9,
-            "event_type": "feature_changed",
-            "space_meta": meta,
-        },
-        space_id=space_id,
+        payload=payload,
+        space_id=SPACE,
     )
+
+
+def _inbound(db, own: str) -> FederationInboundService:
+    inbound = FederationInboundService(
+        bus=EventBus(),
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+    )
+    inbound._federation_service = SimpleNamespace(own_instance_id=own)
+    return inbound
+
+
+async def _config(db, inbound, *, from_instance: str, meta: dict) -> None:
+    await inbound._on_space_config_changed(
+        _event(
+            FederationEventType.SPACE_CONFIG_CHANGED,
+            from_instance,
+            {
+                "space_id": SPACE,
+                "sequence": meta["config_sequence"],
+                "event_type": "feature_changed",
+                "space_meta": meta,
+            },
+        )
+    )
+
+
+# ── Inbound SPACE_CONFIG_CHANGED ──────────────────────────────────────────
+
+
+async def _seed_mirror(db, space_pk_hex: str, *, stored: SignedGfsServerList | None):
+    repo = SqliteSpaceRepo(db)
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key, space_type, join_mode, config_sequence)"
+        " VALUES(?,?,?,?,?,'global','invite_only',5)",
+        (SPACE, "Global", OWNER, "owner", space_pk_hex),
+    )
+    if stored is not None:
+        await repo.set_gfs_servers(SPACE, stored)
+    return repo
 
 
 @pytest.mark.parametrize("we_host", [True, False])
-@pytest.mark.parametrize("gfs", [[_evil_entry()], []])
-async def test_a_delegated_admins_signed_config_cannot_change_gfs_servers(
-    db, we_host, gfs
+async def test_a_delegated_admins_own_gfs_list_is_ignored(db, we_host):
+    kp = generate_space_keypair()
+    stored = _list("gfs-a", issued_at=10)
+    repo = await _seed_mirror(db, kp.public_key.hex(), stored=stored)
+    meta = _signed(
+        _meta(
+            kp.public_key.hex(),
+            gfs=ADMIN_LIST.to_wire(),
+            name="RenamedByAdmin",
+            config_sequence=9,
+        ),
+        author=ADMIN,
+        space_seed=kp.private_key,
+    )
+    await _config(
+        db, _inbound(db, OWNER if we_host else JOINER), from_instance=ADMIN, meta=meta
+    )
+    space = await repo.get(SPACE)
+    assert space is not None
+    assert space.name == "RenamedByAdmin"  # the rest of the block applied
+    assert space.gfs_servers == stored
+
+
+async def test_the_owners_list_relayed_by_an_admin_is_taken(db):
+    kp = generate_space_keypair()
+    repo = await _seed_mirror(db, kp.public_key.hex(), stored=_list("a", issued_at=1))
+    meta = _signed(
+        _meta(kp.public_key.hex(), gfs=OWNER_LIST.to_wire(), config_sequence=9),
+        author=ADMIN,
+        space_seed=kp.private_key,
+    )
+    await _config(db, _inbound(db, JOINER), from_instance=ADMIN, meta=meta)
+    space = await repo.get(SPACE)
+    assert space is not None and space.gfs_servers == OWNER_LIST
+
+
+async def test_a_replayed_older_owner_list_is_ignored(db):
+    kp = generate_space_keypair()
+    repo = await _seed_mirror(db, kp.public_key.hex(), stored=OWNER_LIST)
+    older = _list("gfs-old", issued_at=OWNER_LIST.issued_at - 1)
+    meta = _signed(
+        _meta(kp.public_key.hex(), gfs=older.to_wire(), config_sequence=9),
+        author=ADMIN,
+        space_seed=kp.private_key,
+    )
+    await _config(db, _inbound(db, JOINER), from_instance=ADMIN, meta=meta)
+    space = await repo.get(SPACE)
+    assert space is not None and space.gfs_servers == OWNER_LIST
+
+
+# ── Join snapshots sent by a delegated admin household ────────────────────
+
+
+def _invite(meta: dict) -> FederationEvent:
+    return _event(
+        FederationEventType.SPACE_PRIVATE_INVITE,
+        ADMIN,
+        {
+            "space_id": SPACE,
+            "invite_token": "tkn",
+            "invitee_user_id": "u-joiner",
+            "inviter_user_id": "u-admin",
+            "space_meta": meta,
+        },
+    )
+
+
+def _invite_handler(db) -> PrivateSpaceInviteHandler:
+    return PrivateSpaceInviteHandler(
+        bus=EventBus(),
+        space_repo=SqliteSpaceRepo(db),
+        remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+    )
+
+
+@pytest.mark.parametrize(
+    "gfs, expected",
+    [
+        (ADMIN_LIST.to_wire(), None),  # planted by the admin → ignored
+        (OWNER_LIST.to_wire(), OWNER_LIST),  # the owner's, relayed → taken
+    ],
+)
+async def test_an_admin_invite_seats_the_real_owner_and_only_the_owners_list(
+    db, gfs, expected
 ):
-    inbound = FederationInboundService(
-        bus=EventBus(),
-        conversation_repo=SqliteConversationRepo(db),
-        space_post_repo=SqliteSpacePostRepo(db),
-        space_repo=SqliteSpaceRepo(db),
-        user_repo=SqliteUserRepo(db),
-        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+    kp = generate_space_keypair()
+    await _invite_handler(db)._on_invite(_invite(_meta(kp.public_key.hex(), gfs=gfs)))
+    space = await SqliteSpaceRepo(db).get(SPACE)
+    assert space is not None
+    assert space.owner_instance_id == OWNER
+    assert space.gfs_servers == expected
+    # The admin's identity key is never recorded as the host's.
+    assert await SqliteSpaceRepo(db).get_host_identity_pk(SPACE) is None
+
+
+async def test_the_owners_later_config_reaches_a_household_an_admin_invited(db):
+    """Before the fix the stub named the inviting admin as owner, so the
+    real owner's configs were dropped forever and the admin's passed every
+    owner-only check. Now the owner's word moves ``private_gfs`` and the GFS
+    list, and the admin's does not."""
+    kp = generate_space_keypair()
+    space_pk = kp.public_key.hex()
+    await _invite_handler(db)._on_invite(_invite(_meta(space_pk, gfs=None)))
+    inbound = _inbound(db, JOINER)
+    repo = SqliteSpaceRepo(db)
+
+    # The admin tries owner-only changes: ignored.
+    await _config(
+        db,
+        inbound,
+        from_instance=ADMIN,
+        meta=_signed(
+            _meta(
+                space_pk,
+                gfs=ADMIN_LIST.to_wire(),
+                config_sequence=8,
+                features={"private_gfs": True, "gfs_publish_mode": "strict"},
+            ),
+            author=ADMIN,
+            space_seed=kp.private_key,
+        ),
     )
-    inbound._federation_service = SimpleNamespace(
-        own_instance_id="owner-i" if we_host else "member-i"
+    space = await repo.get(SPACE)
+    assert space is not None
+    assert space.gfs_servers is None
+    assert space.features.private_gfs is False
+    assert space.features.gfs_publish_mode == "trusted"
+
+    # The owner's own config applies — owner-only fields included.
+    await _config(
+        db,
+        inbound,
+        from_instance=OWNER,
+        meta=_signed(
+            _meta(
+                space_pk,
+                gfs=OWNER_LIST.to_wire(),
+                name="OwnerRenamed",
+                config_sequence=9,
+                features={"private_gfs": True, "gfs_publish_mode": "strict"},
+            ),
+            author=OWNER,
+            space_seed=kp.private_key,
+        ),
+    )
+    space = await repo.get(SPACE)
+    assert space is not None
+    assert space.name == "OwnerRenamed"
+    assert space.features.private_gfs is True
+    assert space.features.gfs_publish_mode == "strict"
+    assert space.gfs_servers == OWNER_LIST
+
+
+@pytest.mark.parametrize(
+    "gfs, expected",
+    [(ADMIN_LIST.to_wire(), None), (OWNER_LIST.to_wire(), OWNER_LIST)],
+)
+async def test_an_admin_issued_link_seats_the_real_owner_and_only_the_owners_list(
+    db, gfs, expected
+):
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("joe", "u-joiner", "Joe"),
+    )
+    coord = SpaceInviteTokenRedeemCoordinator(
+        bus=EventBus(),
+        federation_service=SimpleNamespace(own_instance_id=JOINER),  # type: ignore[arg-type]
+        space_repo=SqliteSpaceRepo(db),
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+        user_repo=SqliteUserRepo(db),
+        federation_repo=MagicMock(),
     )
     kp = generate_space_keypair()
-    await _seed_space(db, space_id="sp-g", space_pub_hex=kp.public_key.hex())
-
-    meta = _signed_config(
-        space_id="sp-g", from_instance="admin-i", seed=kp.private_key, gfs=gfs
+    await coord._seat_local_after_ack(
+        {
+            "space_id": SPACE,
+            "role": SpaceRole.MEMBER.value,
+            "space_meta": _meta(kp.public_key.hex(), gfs=gfs),
+        },
+        viewer_user_id="u-joiner",
+        issuer_instance_id=ADMIN,
     )
-    await inbound._on_space_config_changed(_config_event("sp-g", "admin-i", meta))
-
-    space = await SqliteSpaceRepo(db).get("sp-g")
+    space = await SqliteSpaceRepo(db).get(SPACE)
     assert space is not None
-    # The rest of the signed block applied…
-    assert space.name == "RenamedByAdmin"
-    assert space.config_sequence == 9
-    # …but the GFS list is still the owner's.
-    assert space.gfs_servers == (_OWNER_SERVER,)
-
-
-async def test_the_owners_signed_config_does_change_gfs_servers(db):
-    """Control: the same config from the owner household applies."""
-    inbound = FederationInboundService(
-        bus=EventBus(),
-        conversation_repo=SqliteConversationRepo(db),
-        space_post_repo=SqliteSpacePostRepo(db),
-        space_repo=SqliteSpaceRepo(db),
-        user_repo=SqliteUserRepo(db),
-        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
-    )
-    inbound._federation_service = SimpleNamespace(own_instance_id="member-i")
-    kp = generate_space_keypair()
-    await _seed_space(db, space_id="sp-g", space_pub_hex=kp.public_key.hex())
-    meta = _signed_config(
-        space_id="sp-g",
-        from_instance="owner-i",
-        seed=kp.private_key,
-        gfs=[_evil_entry()],
-    )
-    await inbound._on_space_config_changed(_config_event("sp-g", "owner-i", meta))
-    space = await SqliteSpaceRepo(db).get("sp-g")
-    assert space is not None
-    assert [s.gfs_instance_id for s in space.gfs_servers] == ["gfs-evil"]
+    assert space.owner_instance_id == OWNER
+    assert space.gfs_servers == expected
 
 
 # ── A forwarded config edit, run on the host as the owner ────────────────
@@ -244,7 +416,10 @@ async def host(tmp_dir):
         name="S",
         features=SpaceFeatures(delegated_admin_authority=True),
     )
-    await spaces.set_gfs_servers(space.id, (_OWNER_SERVER,))
+    owner_list = sign_gfs_server_list(
+        space_id=space.id, servers=(), issued_at=5, owner_seed=kp.private_key
+    )
+    await spaces.set_gfs_servers(space.id, owner_list)
     await remote.add(
         space_id=space.id,
         instance_id=ADMIN_HOUSE,
@@ -253,7 +428,9 @@ async def host(tmp_dir):
         display_name="Admin",
     )
     await remote.set_role(space.id, ADMIN_HOUSE, "u-admin", SpaceRole.ADMIN.value)
-    yield SimpleNamespace(svc=svc, spaces=spaces, space_id=space.id)
+    yield SimpleNamespace(
+        svc=svc, spaces=spaces, space_id=space.id, owner_list=owner_list
+    )
     await db.shutdown()
 
 
@@ -263,13 +440,13 @@ async def test_a_forwarded_config_edit_cannot_change_gfs_servers(host):
         actor_instance_id=ADMIN_HOUSE,
         actor_user_id="u-admin",
         action="update_config",
-        params={"name": "RenamedByAdmin", "gfs_servers": [_evil_entry()]},
+        params={"name": "RenamedByAdmin", "gfs_servers": ADMIN_LIST.to_wire()},
     )
     assert outcome is RemoteAdminOutcome.EXECUTED
     space = await host.spaces.get(host.space_id)
     assert space is not None
     assert space.name == "RenamedByAdmin"
-    assert space.gfs_servers == (_OWNER_SERVER,)
+    assert space.gfs_servers == host.owner_list
 
 
 def test_gfs_servers_is_not_a_remote_config_field() -> None:

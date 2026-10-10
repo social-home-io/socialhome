@@ -1,17 +1,24 @@
 -- 0089 — ``spaces.gfs_servers``: the GFSs a space is listed on, as the
--- owner names them. A JSON array of
--- ``{gfs_instance_id, inbox_url, public_key, gfs_key_suite, display_name}``
--- (``socialhome/domain/gfs_server.py``). NULL = not known yet (an older
+-- OWNER household signed them. A JSON object
+-- ``{servers: [{gfs_instance_id, inbox_url, public_key, gfs_key_suite,
+-- display_name}, ...], issued_at, owner_pk, gfs_servers_sig_suite,
+-- gfs_servers_sig}`` (``socialhome/domain/gfs_server.py``,
+-- ``socialhome/gfs_server_list_sig.py``), kept byte-identical to what the
+-- owner signed so any household can relay it. NULL = not known yet (an older
 -- owner, or a space this household never saw a list for) — readers fall back
--- to today's behaviour; ``[]`` = listed nowhere.
+-- to today's behaviour; a signed empty ``servers`` = listed nowhere.
 --
 -- * On the OWNER household it is derived from the space's active
 --   ``gfs_space_publications`` rows joined with ``gfs_connections``
 --   (``GfsServerSelectionService.sync_snapshot``); those rows stay the truth.
--- * On a MEMBER household it is the copy the owner sent inside the
---   encrypted, authority-signed ``space_meta`` (``SPACE_CONFIG_CHANGED`` and
---   the §D1b join snapshots). Owner-only: a delegated admin's value is
---   ignored on every household, like ``gfs_publish_mode`` / ``private_gfs``.
+--   Leaving the public tiers signs an empty list.
+-- * On a MEMBER household it is the owner's signed list from ``space_meta``
+--   (``SPACE_CONFIG_CHANGED``, the §D1b join snapshots, the rotation
+--   bundle), taken only when it verifies against the owner household's
+--   identity key (``derive_instance_id(owner_pk) == owner_instance_id``) and
+--   its ``issued_at`` is newer than the stored one. A delegated admin can
+--   relay the owner's list but cannot write, alter or replay one.
+-- * Written only by ``set_gfs_servers`` — never by the ``save`` upsert.
 --
 -- A member needs it to reach every GFS listing the space — including GFSs its
 -- own household never connected to — while the host is offline.
@@ -23,8 +30,10 @@
 --         ``SqliteGfsConnectionRepo.publish_space`` / ``unpublish_space``,
 --         reached only from ``GfsConnectionService.publish_space`` /
 --         ``unpublish_space`` (and the ``*_to_all`` / ``*_from_listed`` /
---         ``republish_space`` loops over them); FK
---         ``gfs_connection_id → gfs_connections(id) ON DELETE CASCADE``. It
+--         ``republish_space`` loops over them) — plus
+--         ``SqliteGfsConnectionRepo.delete``, which removes a connection's
+--         rows directly on disconnect (FK ``gfs_connection_id →
+--         gfs_connections(id) ON DELETE CASCADE`` as a backstop). It
 --         exists only on the household that published, keyed by ITS OWN
 --         connection ids — a member has no such rows.
 --       * ``gfs_connections`` (0001): this household's own pairings, so a
@@ -57,10 +66,12 @@
 --       * Memory only — a member needs the list across restarts while the
 --         host is offline, which is the whole point.
 --   (3) Smallest possible change: one NULL-default ``ADD COLUMN`` with a
---       CHECK that keeps it a JSON array — metadata-only, no rewrite, no
+--       CHECK that keeps it a JSON object — the signature and ``issued_at``
+--       live in the same value as the list they cover, not in extra
+--       columns — metadata-only, no rewrite, no
 --       backfill (the owner's fill happens in code, so members get it in a
 --       sequence-raised config broadcast). Nothing existing is changed.
 
 ALTER TABLE spaces ADD COLUMN gfs_servers TEXT
     CHECK (gfs_servers IS NULL
-           OR (json_valid(gfs_servers) AND json_type(gfs_servers) = 'array'));
+           OR (json_valid(gfs_servers) AND json_type(gfs_servers) = 'object'));

@@ -41,6 +41,7 @@ from socialhome.capabilities_sig import (
     sign_capabilities,
 )
 from socialhome.domain.gfs_server import GfsServer
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.domain import ClientInstance
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
@@ -288,6 +289,30 @@ async def test_refresh_connection_metadata_updates_changed_name(env):
     # Hit GET /gfs/info on the connection's inbox URL.
     assert session.calls and session.calls[0][0] == "GET"
     assert session.calls[0][1].endswith("/gfs/info")
+
+
+async def test_a_rename_re_snapshots_every_space_listed_on_that_gfs(env):
+    """The GFS name rides the owner's signed list members hold."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-1", status="active", inbox_url="https://gfs.test"))
+    await repo.save(_make_conn("gfs-2", status="active"))
+    await repo.publish_space("space-a", "gfs-1")
+    await repo.publish_space("space-b", "gfs-1")
+    await repo.publish_space("space-c", "gfs-2")
+    session = _StubSession(status=200, body={"server_name": "New Name"})
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.refresh_connection_metadata("gfs-1")
+    assert seen == ["space-a", "space-b"]
+    # Unchanged name → nothing to re-sign.
+    seen.clear()
+    await svc.refresh_connection_metadata("gfs-1")
+    assert seen == []
 
 
 async def test_refresh_connection_metadata_noop_when_unchanged(env):
@@ -4405,14 +4430,19 @@ async def test_publish_body_never_names_the_other_listing_servers(env):
     db, _ = env
     await SqliteSpaceRepo(db).set_gfs_servers(
         "space-body",
-        (
-            GfsServer(
-                gfs_instance_id="gfs-elsewhere",
-                inbox_url="https://elsewhere.example",
-                public_key="ab" * 32,
-                gfs_key_suite="ed25519",
-                display_name="Elsewhere",
+        sign_gfs_server_list(
+            space_id="space-body",
+            servers=(
+                GfsServer(
+                    gfs_instance_id="gfs-elsewhere",
+                    inbox_url="https://elsewhere.example",
+                    public_key="ab" * 32,
+                    gfs_key_suite="ed25519",
+                    display_name="Elsewhere",
+                ),
             ),
+            issued_at=1,
+            owner_seed=b"\x03" * 32,
         ),
     )
     await svc.publish_space("space-body", "hk-5")

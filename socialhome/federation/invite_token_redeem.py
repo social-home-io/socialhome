@@ -80,8 +80,10 @@ from ..services.space_service import (
     apply_space_content_key_from_metadata,
     apply_space_cover_from_metadata,
     apply_space_icon_from_metadata,
+    apply_gfs_servers_from_metadata,
     build_space_snapshot_for_federation,
     can_seat_remote_stub,
+    seated_owner_instance,
     stub_space_from_metadata,
 )
 from .invite_bootstrap import (
@@ -789,12 +791,25 @@ class SpaceInviteTokenRedeemCoordinator:
             # so a repeat redeem is a no-op via INSERT OR REPLACE.
             if meta_dict is not None:
                 meta = meta_dict
+                # Seated under the space's OWNER as the snapshot names it —
+                # the issuer may be a delegated admin household (see
+                # ``seated_owner_instance``); the anti-hijack check above
+                # still compared the authenticated issuer.
+                owner_instance = seated_owner_instance(meta, issuer_instance_id)
                 stub = stub_space_from_metadata(
                     space_id,
-                    host_instance_id=issuer_instance_id,
+                    host_instance_id=owner_instance,
                     meta=meta,
                 )
                 await self._spaces.save(stub)
+                # The owner's signed GFS list (migration 0089), relayed by
+                # the issuer; taken only under the owner's signature.
+                await apply_gfs_servers_from_metadata(
+                    self._spaces,
+                    space_id,
+                    meta=meta,
+                    owner_instance_id=owner_instance,
+                )
                 # v_44 — the ACK's cert records the authority-key epoch on
                 # the stub (and re-pins one that still names a retired key),
                 # so a replayed older cert can never move the pin back.
@@ -865,7 +880,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 # because that lives in the local ``space_members``
                 # row we just inserted.
                 roster = meta.get("roster")
-                owner_uid = owner_seat_from_roster(roster, issuer_instance_id)
+                owner_uid = owner_seat_from_roster(roster, owner_instance)
                 if owner_uid is not None:
                     await self._spaces.set_owner_user_id(space_id, owner_uid)
                 if isinstance(roster, list):

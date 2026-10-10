@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.domain.gfs_server import GfsServer, SignedGfsServerList
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -1900,15 +1902,20 @@ async def test_rebind_mirror_provenance_is_a_compare_and_set(env):
 # ── GFS server list (migration 0089) ──────────────────────────────────────
 
 
-def _gfs_server(gid: str = "gfs-a"):
-    from socialhome.domain.gfs_server import GfsServer
-
-    return GfsServer(
-        gfs_instance_id=gid,
-        inbox_url=f"https://{gid}.example",
-        public_key="ab" * 32,
-        gfs_key_suite="ed25519",
-        display_name=gid.upper(),
+def _signed_list(issued_at: int = 5) -> SignedGfsServerList:
+    return sign_gfs_server_list(
+        space_id="sp-g",
+        servers=(
+            GfsServer(
+                gfs_instance_id="gfs-a",
+                inbox_url="https://gfs-a.example",
+                public_key="ab" * 32,
+                gfs_key_suite="ed25519",
+                display_name="GFS A",
+            ),
+        ),
+        issued_at=issued_at,
+        owner_seed=b"\x01" * 32,
     )
 
 
@@ -1920,23 +1927,30 @@ async def test_gfs_servers_default_none(env):
     assert row["gfs_servers"] is None
 
 
-async def test_gfs_servers_round_trip_through_save(env):
-    servers = (_gfs_server("gfs-a"), _gfs_server("gfs-b"))
-    await env.repo.save(replace(_space("sp-g"), gfs_servers=servers))
-    got = await env.repo.get("sp-g")
-    assert got is not None and got.gfs_servers == servers
-    # The ON CONFLICT path writes it too, empty list included.
-    await env.repo.save(replace(got, gfs_servers=()))
-    got = await env.repo.get("sp-g")
-    assert got is not None and got.gfs_servers == ()
-
-
-async def test_set_gfs_servers_targeted_update(env):
+async def test_set_gfs_servers_round_trips(env):
     await env.repo.save(_space("sp-g"))
-    await env.repo.set_gfs_servers("sp-g", (_gfs_server(),))
+    await env.repo.set_gfs_servers("sp-g", _signed_list())
     got = await env.repo.get("sp-g")
-    assert got is not None and got.gfs_servers == (_gfs_server(),)
+    assert got is not None and got.gfs_servers == _signed_list()
     assert got.config_sequence == 0  # the caller bumps the sequence
     await env.repo.set_gfs_servers("sp-g", None)
     got = await env.repo.get("sp-g")
     assert got is not None and got.gfs_servers is None
+
+
+async def test_save_never_writes_gfs_servers(env):
+    """The generic upsert (a config snapshot, ``SPACE_CREATED``, a stub
+    re-seat) can neither wipe nor replace the owner's signed list."""
+    await env.repo.save(_space("sp-g"))
+    await env.repo.set_gfs_servers("sp-g", _signed_list())
+    got = await env.repo.get("sp-g")
+    assert got is not None
+    await env.repo.save(replace(got, name="Renamed", gfs_servers=None))
+    await env.repo.save(replace(got, gfs_servers=_signed_list(issued_at=9)))
+    got = await env.repo.get("sp-g")
+    assert got is not None
+    assert got.gfs_servers == _signed_list()
+    # A brand-new row seated with a value does not store it either.
+    await env.repo.save(replace(_space("sp-new"), gfs_servers=_signed_list()))
+    fresh = await env.repo.get("sp-new")
+    assert fresh is not None and fresh.gfs_servers is None

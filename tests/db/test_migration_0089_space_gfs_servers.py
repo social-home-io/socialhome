@@ -1,5 +1,5 @@
-"""Migration 0089 — ``spaces.gfs_servers``: the owner's GFS list, a JSON array
-or NULL."""
+"""Migration 0089 — ``spaces.gfs_servers``: the owner's signed GFS list, a
+JSON object or NULL."""
 
 from __future__ import annotations
 
@@ -51,22 +51,22 @@ def test_existing_rows_stay_null(conn) -> None:
 
 
 @pytest.mark.parametrize(
-    "value", ["[]", '[{"gfs_instance_id":"g","inbox_url":"https://g.example"}]']
+    "value", ["{}", '{"servers":[],"issued_at":1,"gfs_servers_sig":"x"}']
 )
-def test_json_arrays_accepted(conn, value) -> None:
+def test_json_objects_accepted(conn, value) -> None:
     conn.execute("UPDATE spaces SET gfs_servers=? WHERE id='old'", (value,))
     row = conn.execute("SELECT gfs_servers FROM spaces WHERE id='old'").fetchone()
     assert row[0] == value
 
 
-@pytest.mark.parametrize("value", ["not json", '{"a":1}', "3", '"x"', ""])
-def test_non_arrays_rejected(conn, value) -> None:
+@pytest.mark.parametrize("value", ["not json", "[]", '[{"a":1}]', "3", '"x"', ""])
+def test_non_objects_rejected(conn, value) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE spaces SET gfs_servers=? WHERE id='old'", (value,))
 
 
 def test_null_accepted_again(conn) -> None:
-    conn.execute("UPDATE spaces SET gfs_servers='[]' WHERE id='old'")
+    conn.execute("UPDATE spaces SET gfs_servers='{}' WHERE id='old'")
     conn.execute("UPDATE spaces SET gfs_servers=NULL WHERE id='old'")
     row = conn.execute("SELECT gfs_servers FROM spaces WHERE id='old'").fetchone()
     assert row[0] is None

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -13,7 +12,14 @@ from unittest.mock import MagicMock
 import pytest
 from PIL import Image as PILImage
 
-from socialhome.crypto import derive_user_id, generate_space_keypair
+from socialhome.crypto import (
+    derive_instance_id,
+    derive_user_id,
+    ed25519_public_key,
+    generate_space_keypair,
+)
+from socialhome.domain.gfs_server import GfsServer
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.domain.events import (
     SpaceFeaturesApplied,
     DmMessageDeleted,
@@ -5060,101 +5066,133 @@ async def test_config_changed_announces_the_applied_features(db, bus, inbound):
     assert [e.space_id for e in applied] == ["sp-applied"]
 
 
-# ── gfs_servers (migration 0089): the owner's GFS list, owner-only ──────────
+# ── gfs_servers (migration 0089): the owner's signed GFS list ───────────────
+
+_GS_OWNER_SEED = b"\x21" * 32
+_GS_OWNER = derive_instance_id(ed25519_public_key(_GS_OWNER_SEED))
 
 
-def _gfs_entry(gid: str) -> dict:
-    return {
-        "gfs_instance_id": gid,
-        "inbox_url": f"https://{gid}.example",
-        "public_key": "ab" * 32,
-        "gfs_key_suite": "ed25519",
-        "display_name": gid.upper(),
-    }
+def _gfs_list(*gids: str, issued_at: int = 10, seed: bytes = _GS_OWNER_SEED):
+    return sign_gfs_server_list(
+        space_id="sp-gs",
+        servers=tuple(
+            GfsServer(
+                gfs_instance_id=gid,
+                inbox_url=f"https://{gid}.example",
+                public_key=(gid.encode().hex() * 32)[:64],
+                gfs_key_suite="ed25519",
+                display_name=gid.upper(),
+            )
+            for gid in gids
+        ),
+        issued_at=issued_at,
+        owner_seed=seed,
+    )
 
 
-async def test_config_changed_takes_gfs_servers_from_the_owner(db, bus, inbound):
+async def _gs_config(db, inbound, *, from_instance, gfs_list, stored=None):
     kp = generate_space_keypair()
     await _seed_signed_space(
         db,
         space_id="sp-gs",
-        owner_instance="owner-i",
+        owner_instance=_GS_OWNER,
         space_pub_hex=kp.public_key.hex(),
         seq=5,
     )
+    if stored is not None:
+        await SqliteSpaceRepo(db).set_gfs_servers("sp-gs", stored)
     _own_instance(inbound, "own-i")
+    extra = {} if gfs_list is None else {"gfs_servers": gfs_list}
     await inbound._on_space_config_changed(
         _signed_cfg_event(
             space_id="sp-gs",
-            from_instance="owner-i",
-            owner_instance="owner-i",
+            from_instance=from_instance,
+            owner_instance=_GS_OWNER,
             sequence=9,
-            name="Listed",
+            name="Changed",
             seed=kp.private_key,
-            extra_meta={"gfs_servers": [_gfs_entry("gfs-a"), _gfs_entry("gfs-b")]},
+            extra_meta=extra,
         )
     )
     space = await SqliteSpaceRepo(db).get("sp-gs")
-    assert [s.gfs_instance_id for s in space.gfs_servers] == ["gfs-a", "gfs-b"]
+    assert space.name == "Changed"  # the rest of the config applied
+    return space.gfs_servers
+
+
+@pytest.mark.parametrize("from_instance", [_GS_OWNER, "admin-i"])
+async def test_config_changed_takes_the_owners_signed_gfs_list_from_anyone(
+    db, bus, inbound, from_instance
+):
+    """The owner's own list applies whoever relays it — the owner, or a
+    delegated admin carrying it in its signed config."""
+    signed = _gfs_list("gfs-a", "gfs-b")
+    got = await _gs_config(
+        db, inbound, from_instance=from_instance, gfs_list=signed.to_wire()
+    )
+    assert got == signed
+
+
+@pytest.mark.security
+async def test_config_changed_ignores_a_gfs_list_signed_by_anyone_else(
+    db, bus, inbound
+):
+    admin_list = _gfs_list("gfs-evil", seed=b"\x22" * 32)
+    stored = _gfs_list("gfs-a", issued_at=5)
+    got = await _gs_config(
+        db,
+        inbound,
+        from_instance="admin-i",
+        gfs_list=admin_list.to_wire(),
+        stored=stored,
+    )
+    assert got == stored
+
+
+@pytest.mark.security
+async def test_config_changed_ignores_a_replayed_older_owner_list(db, bus, inbound):
+    stored = _gfs_list("gfs-b", issued_at=20)
+    older = _gfs_list("gfs-a", issued_at=10)
+    got = await _gs_config(
+        db, inbound, from_instance="admin-i", gfs_list=older.to_wire(), stored=stored
+    )
+    assert got == stored
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not an object",
+        {"servers": []},
+        {**_gfs_list("gfs-a").to_wire(), "gfs_servers_sig_suite": "future"},
+        {**_gfs_list("gfs-a").to_wire(), "issued_at": 11},  # signature breaks
+    ],
+)
+async def test_config_changed_ignores_a_malformed_gfs_list(db, bus, inbound, bad):
+    stored = _gfs_list("gfs-b", issued_at=5)
+    got = await _gs_config(
+        db, inbound, from_instance=_GS_OWNER, gfs_list=bad, stored=stored
+    )
+    assert got == stored
 
 
 async def test_config_changed_without_gfs_servers_keeps_the_stored_list(
     db, bus, inbound
 ):
-    """An owner snapshot that does not carry the key (an older owner, or one
-    that does not know the list) is "unknown", not "listed nowhere"."""
-    kp = generate_space_keypair()
-    await _seed_signed_space(
-        db,
-        space_id="sp-gs2",
-        owner_instance="owner-i",
-        space_pub_hex=kp.public_key.hex(),
-        seq=5,
+    stored = _gfs_list("gfs-a")
+    got = await _gs_config(
+        db, inbound, from_instance=_GS_OWNER, gfs_list=None, stored=stored
     )
-    await db.enqueue(
-        "UPDATE spaces SET gfs_servers=? WHERE id='sp-gs2'",
-        (json.dumps([_gfs_entry("gfs-a")]),),
-    )
-    _own_instance(inbound, "own-i")
-    await inbound._on_space_config_changed(
-        _signed_cfg_event(
-            space_id="sp-gs2",
-            from_instance="owner-i",
-            owner_instance="owner-i",
-            sequence=9,
-            name="Renamed",
-            seed=kp.private_key,
-        )
-    )
-    space = await SqliteSpaceRepo(db).get("sp-gs2")
-    assert space.name == "Renamed"
-    assert [s.gfs_instance_id for s in space.gfs_servers] == ["gfs-a"]
+    assert got == stored
 
 
 async def test_config_changed_owner_can_empty_the_list(db, bus, inbound):
-    kp = generate_space_keypair()
-    await _seed_signed_space(
+    empty = _gfs_list(issued_at=11)
+    got = await _gs_config(
         db,
-        space_id="sp-gs3",
-        owner_instance="owner-i",
-        space_pub_hex=kp.public_key.hex(),
-        seq=5,
+        inbound,
+        from_instance=_GS_OWNER,
+        gfs_list=empty.to_wire(),
+        stored=_gfs_list("gfs-a", issued_at=10),
     )
-    await db.enqueue(
-        "UPDATE spaces SET gfs_servers=? WHERE id='sp-gs3'",
-        (json.dumps([_gfs_entry("gfs-a")]),),
-    )
-    _own_instance(inbound, "own-i")
-    await inbound._on_space_config_changed(
-        _signed_cfg_event(
-            space_id="sp-gs3",
-            from_instance="owner-i",
-            owner_instance="owner-i",
-            sequence=9,
-            name="Unlisted",
-            seed=kp.private_key,
-            extra_meta={"gfs_servers": []},
-        )
-    )
-    space = await SqliteSpaceRepo(db).get("sp-gs3")
-    assert space.gfs_servers == ()
+    assert got == empty
+    assert got.servers() == ((), 0)

@@ -390,8 +390,9 @@ class GfsConnectionService:
         #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
         self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
         #: Called with a space id after the space's publication rows changed
-        #: (a publish or unpublish succeeded, or a disconnect cascaded them
-        #: away) — re-derives the owner's ``spaces.gfs_servers`` snapshot.
+        #: (a publish or unpublish succeeded, a disconnect removed them) or a
+        #: listing GFS was renamed — re-derives the owner's
+        #: ``spaces.gfs_servers`` snapshot.
         self._on_listings_changed: Callable[[str], Awaitable[object]] | None = None
         self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
         #: Called in order with the connection id after it adopted the
@@ -1478,6 +1479,12 @@ class GfsConnectionService:
             new_name,
         )
         await self._repo.update_display_name(gfs_id, new_name)
+        # The name rides the owner's signed GFS list members hold.
+        for space_id in await self._spaces_listed_on(gfs_id):
+            await self._listings_changed(space_id)
+
+    async def _spaces_listed_on(self, gfs_id: str) -> list[str]:
+        return sorted({p.space_id for p in await self._repo.list_publications(gfs_id)})
 
     async def disconnect(self, gfs_id: str) -> None:
         """Remove a GFS connection and all its publications.
@@ -1493,11 +1500,10 @@ class GfsConnectionService:
                 await self._on_disconnect(conn)
             except Exception:
                 log.exception("gfs: on-disconnect hook failed for %s", gfs_id)
-        # The FK cascade drops this connection's publication rows without
-        # passing through :meth:`unpublish_space`, so note the spaces first.
-        listed = sorted(
-            {p.space_id for p in await self._repo.list_publications(gfs_id)}
-        )
+        # ``repo.delete`` removes this connection's publication rows itself,
+        # without passing through :meth:`unpublish_space`, so note the spaces
+        # first.
+        listed = await self._spaces_listed_on(gfs_id)
         await self._repo.delete(gfs_id)
         for space_id in listed:
             await self._listings_changed(space_id)

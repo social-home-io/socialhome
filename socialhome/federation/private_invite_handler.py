@@ -60,7 +60,9 @@ from ..services.space_service import (
     apply_space_content_key_from_metadata,
     apply_space_cover_from_metadata,
     apply_space_icon_from_metadata,
+    apply_gfs_servers_from_metadata,
     can_seat_remote_stub,
+    seated_owner_instance,
     stub_space_from_metadata,
 )
 
@@ -504,17 +506,38 @@ class PrivateSpaceInviteHandler:
             )
             meta = None
         if isinstance(meta, dict):
+            # The stub is seated under the space's OWNER, which the snapshot
+            # names — usually the inviter itself, but a delegated admin
+            # household may invite too, and seating the stub under the admin
+            # would make every later owner-only check trust the admin and
+            # ignore the real owner. ``can_seat_remote_stub`` above still
+            # compares the authenticated inviter, so the claim never
+            # overwrites a row we hold, and owner-only facts (the GFS list,
+            # the authority cert) are verified against the owner's own key.
+            owner_instance = seated_owner_instance(meta, event.from_instance)
             stub = stub_space_from_metadata(
                 space_id,
-                host_instance_id=event.from_instance,
+                host_instance_id=owner_instance,
                 meta=meta,
             )
             await self._space_repo.save(stub)
-            await self._record_host_identity_pk(
-                space_id=space_id,
-                host_instance_id=event.from_instance,
-                claimed_pk_hex=p.get("host_identity_pk"),
+            # The owner's signed GFS list (migration 0089), relayed by
+            # whoever invited us; taken only under the owner's signature.
+            await apply_gfs_servers_from_metadata(
+                self._space_repo,
+                space_id,
+                meta=meta,
+                owner_instance_id=owner_instance,
             )
+            # The inviter's identity key is the HOST key only when the
+            # inviter is the owner; an admin's key must never be read as the
+            # owner's (it would refuse the owner's own authority cert).
+            if owner_instance == event.from_instance:
+                await self._record_host_identity_pk(
+                    space_id=space_id,
+                    host_instance_id=event.from_instance,
+                    claimed_pk_hex=p.get("host_identity_pk"),
+                )
             await self._apply_meta_cert(space_id, meta)
             # §D1b cover bytes (#116) — when shipped inline, persist
             # so the stub renders the real cover rather than the
@@ -549,7 +572,7 @@ class PrivateSpaceInviteHandler:
             # own row. We skip the invitee's *own* user_id — that
             # comes in via ``space_members`` when she accepts.
             roster = meta.get("roster")
-            owner_uid = owner_seat_from_roster(roster, event.from_instance)
+            owner_uid = owner_seat_from_roster(roster, owner_instance)
             if owner_uid is not None:
                 await self._space_repo.set_owner_user_id(space_id, owner_uid)
             if isinstance(roster, list):

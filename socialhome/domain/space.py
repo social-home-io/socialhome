@@ -29,7 +29,7 @@ from typing import Literal, TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .errors import CodedError
-from .gfs_server import GfsServer
+from .gfs_server import SignedGfsServerList
 from .presence import truncate_coord
 
 if TYPE_CHECKING:
@@ -1512,11 +1512,13 @@ class Space:
     #: ``None`` = unset; normalizes to ``"general"`` on display. Shown only
     #: for public/global tiers. Replaces the legacy ``target_audience`` hint.
     category: str | None = None
-    #: The GFSs the space is listed on, as the OWNER names them (migration
-    #: 0089, :mod:`socialhome.domain.gfs_server`). On the owner it is derived
-    #: from its active publications; on a member it is the owner's copy from
-    #: ``space_meta``. Owner-only on every household. ``None`` = not known.
-    gfs_servers: tuple[GfsServer, ...] | None = None
+    #: The GFSs the space is listed on, as the OWNER household signed them
+    #: (migration 0089, :mod:`socialhome.domain.gfs_server`). On the owner it
+    #: is derived from its active publications; on a member it is the
+    #: owner's signed copy from ``space_meta``, verified against the owner's
+    #: identity key. Never written by ``save`` — only by ``set_gfs_servers``.
+    #: ``None`` = not known.
+    gfs_servers: SignedGfsServerList | None = None
 
 
 @dataclass(slots=True, frozen=True)

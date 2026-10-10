@@ -2194,30 +2194,66 @@ under the server-wide cap).
 
 ### The owner's GFS list in space metadata
 
-A space's config snapshot (`space_meta`, carried by `SPACE_CONFIG_CHANGED`
-and the §D1b invite / redeem-ACK snapshots) includes `gfs_servers`: the
-GFSs the owner lists the space on, one entry per server —
+A space's config snapshot (`space_meta`, carried by `SPACE_CONFIG_CHANGED`,
+the §D1b invite / redeem-ACK snapshots and the authority-rotation bundle)
+includes `gfs_servers`: the GFSs the owner lists the space on, **signed by
+the owner household's identity key** —
 
 ```json
-{"gfs_instance_id": "gfs-node-0", "inbox_url": "https://gfs.example",
- "public_key": "<ed25519 hex>", "gfs_key_suite": "ed25519",
- "display_name": "Example GFS"}
+{"servers": [{"gfs_instance_id": "gfs-node-0",
+              "inbox_url": "https://gfs.example",
+              "public_key": "<GFS ed25519 hex>", "gfs_key_suite": "ed25519",
+              "display_name": "Example GFS"}],
+ "issued_at": 1760000000000,
+ "owner_pk": "<owner household ed25519 hex>",
+ "gfs_servers_sig_suite": "ed25519",
+ "gfs_servers_sig": "<b64url>"}
 ```
 
-- **Members only, encrypted.** It rides inside the per-peer encrypted,
-  authority-signed `space_meta`; it is never part of a GFS publish body, so
-  no GFS learns which other servers list the space.
-- **Owner-only on every household.** The owner household derives it from its
-  active listings (`GfsServerSelectionService.sync_snapshot`, after every
-  publish / unpublish / disconnect) and sends it with a raised
-  `config_sequence` (event type `gfs_servers_changed`). A delegated admin's
-  signed config cannot change it, a forwarded config edit cannot carry it,
-  and a snapshot without the key leaves the stored list alone.
-- **Receivers are strict per entry, lenient per list**: an entry with an
-  unknown or missing `gfs_key_suite`, a bad key, or an `inbox_url` that is
-  not https (unless private) is dropped and logged; duplicates by
-  `gfs_instance_id` and anything past 8 entries are dropped. An absent key
-  means "not known"; `[]` means "listed nowhere".
+The signature covers `b"space-gfs-servers:v1:"` + canonical JSON of
+`{space_id, owner_instance_id, servers, issued_at, owner_pk,
+gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
+
+- **Members only, encrypted.** It rides inside the per-peer encrypted
+  `space_meta`; it is never part of a GFS publish body, so no GFS learns
+  which other servers list the space.
+- **Owner-signed, so owner-only on every household.** A receiver takes it
+  only when `derive_instance_id(owner_pk)` is the space's owner and the
+  signature verifies, and only when `issued_at` is above the stored list's —
+  whoever relays it. A delegated admin can therefore carry the owner's list
+  (its join snapshots do) but cannot write, change or replay one; a list it
+  signs itself is ignored. A forwarded config edit cannot carry it, `save`
+  never writes it, and a snapshot without the key leaves the stored list
+  alone.
+- **The owner keeps it current**: `GfsServerSelectionService.sync_snapshot`
+  derives it from its active listings after every publish / unpublish /
+  disconnect / GFS rename and every config change of a space it owns, signs
+  it with `issued_at = max(now_ms, stored + 1)`, raises `config_sequence` and
+  sends it as a `gfs_servers_changed` config change. A space that leaves the
+  public tiers gets a signed **empty** list at once, even if a GFS could not
+  be reached to withdraw the listing.
+- **Receivers check entries when they use them**: an entry with an unknown or
+  missing `gfs_key_suite`, a bad key, or an `inbox_url` that is not https
+  (unless private) is dropped; a loopback / RFC 1918 / link-local / ULA host
+  is dropped unless the receiver holds an active connection to the same
+  `gfs_instance_id` at the same URL; duplicates by id, URL or key and
+  anything past 8 entries are dropped, with one log line. The stored list
+  stays exactly as signed, so it can be relayed. Whoever sends to these
+  servers (v_56, later) must use the SSRF-guarded `OutboundFetcher` path
+  (resolve, pin, refuse private addresses) — a DNS name is not resolved here.
+- **Join stubs are seated under the real owner.** A §D1b stub's
+  `owner_instance_id` comes from the snapshot's `owner_instance_id`, not from
+  the inviting household, so an invite or link issued by a delegated admin no
+  longer makes that admin the stub's "owner" (which made every later
+  owner-only check trust the admin and ignore the owner). The anti-hijack
+  guard still compares the authenticated inviter against any row already
+  held, and the inviter's identity key is recorded as the host key only when
+  the inviter is the owner.
+- **Residual (within the delegated-admin trust boundary):** a delegated admin
+  that LIES about who owns the space to a household it invites itself can
+  still name itself owner on that one fresh stub. It already holds the space
+  seed and reads all content; every other household, and every owner-only
+  fact the real owner signs, stays cryptographically owner-only.
 - An older receiver ignores the key; no protocol version gates it. Members
   store it (`spaces.gfs_servers`, migration 0089) but do not yet act on it —
   publishing to every listed server is a later protocol version.
@@ -2320,10 +2356,14 @@ contest a ban.
   inbound routing); `socialhome/global_server/channels.py`,
   `socialhome/global_server/routes/channels.py` — GFS side (pins, the
   one-tier epoch, seats, relay), GFS migration `0016`.
-- `socialhome/domain/gfs_server.py` — the owner's GFS list entry
-  (`GfsServer`, `gfs_key_suite`, list / column codec);
+- `socialhome/domain/gfs_server.py` — the owner's GFS list shapes
+  (`GfsServer`, `SignedGfsServerList`, both suite tags, list / column codec,
+  the private-host filter); `socialhome/gfs_server_list_sig.py` — the owner
+  household's signature over it;
   `socialhome/services/gfs_server_selection_service.py` — the owner's
-  `spaces.gfs_servers` snapshot.
+  `spaces.gfs_servers` snapshot and the member read side
+  (`member_servers`); `space_service.apply_gfs_servers_from_metadata` /
+  `seated_owner_instance` — the receive side.
 - `socialhome/federation/keywrap_seal.py` — `seal_to_keywrap` /
   `open_keywrap` / `verify_keywrap_binding` (static-recipient sealed box).
 - `socialhome/global_server/routes/public.py`,

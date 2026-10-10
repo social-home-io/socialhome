@@ -98,6 +98,7 @@ from .space_authority_pin import apply_authority_cert, owner_authority_cert
 from .space_crypto_service import KEY_SUITE_AESGCM_256, SUPPORTED_KEY_SUITES
 from .space_service import (
     space_metadata_for_federation,
+    apply_gfs_servers_from_metadata,
     keep_local_space_state,
     stub_space_from_metadata,
 )
@@ -1445,6 +1446,12 @@ class SpaceAuthorityRotationService:
             older_than=cutoff,
         ):
             return
+        # The owner's signed GFS list rides the bundle's config too; ``save``
+        # never writes it, so apply it on its own (owner signature +
+        # freshness checked there).
+        await apply_gfs_servers_from_metadata(
+            self._spaces, space.id, meta=meta, owner_instance_id=owner
+        )
         if space.features.delegated_admin_authority and not (
             refreshed.features.delegated_admin_authority
         ):

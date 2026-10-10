@@ -46,6 +46,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from ..crypto import generate_identity_keypair
+from ..gfs_server_list_sig import verify_gfs_server_list
 from ..federation.invite_code import (
     build_invite_code,
     build_invite_payload,
@@ -133,7 +134,7 @@ from ..domain.post import (
 )
 from ..domain.mention import Mention
 from ..domain.presence import truncate_coord
-from ..domain.gfs_server import GfsServer, gfs_servers_from_wire, gfs_servers_to_wire
+from ..domain.gfs_server import SignedGfsServerList
 from ..domain.space import (
     ACCESS_FEATURES,
     InvalidSpaceLinkError,
@@ -7849,15 +7850,16 @@ def space_metadata_for_federation(
     """
     meta = space_metadata_fields(space)
     if space.gfs_servers is not None:
-        # The GFSs the owner lists the space on (migration 0089), so a member
-        # can reach every one of them while the host is offline. Rides only
-        # here — inside the encrypted, authority-signed ``space_meta`` member
-        # households get — never in a GFS publish body. Owner-only on every
-        # receiving household (the inbound config path pins it against
-        # anyone else). ``None`` ("not known") is left off rather than sent
-        # as ``[]``, which would mean "listed nowhere". An older receiver
-        # ignores the key.
-        meta["gfs_servers"] = gfs_servers_to_wire(space.gfs_servers)
+        # The GFSs the owner lists the space on (migration 0089), signed by
+        # the OWNER household, so a member can reach every one of them while
+        # the host is offline. Rides only here — inside the encrypted
+        # ``space_meta`` member households get — never in a GFS publish body.
+        # Any household may relay the owner's signed list (a delegated
+        # admin's join snapshot does); receivers verify it against the
+        # owner's identity key (:func:`apply_gfs_servers_from_metadata`).
+        # ``None`` ("not known") is left off. An older receiver ignores the
+        # key.
+        meta["gfs_servers"] = space.gfs_servers.to_wire()
     if authority_cert is not None:
         meta["authority_cert"] = authority_cert
         meta["authority_key_epoch"] = space.authority_key_epoch
@@ -8209,11 +8211,13 @@ def stub_space_from_metadata(
     space show up in their ``/api/spaces`` once they accept and a
     matching ``space_members`` row is inserted.
 
-    ``host_instance_id`` is the envelope's authenticated ``from_instance``
-    and becomes the stub's ``owner_instance_id`` (the issuer-supplied
-    ``meta["owner_instance_id"]`` is deliberately ignored — see below). The
-    resulting Space's ``owner_instance_id != my_instance`` is the runtime
-    signal for "this is a remote space" downstream.
+    ``host_instance_id`` becomes the stub's ``owner_instance_id`` (the
+    ``meta["owner_instance_id"]`` field itself is not read here). Config
+    paths pass the authenticated sender; the §D1b join paths pass
+    :func:`seated_owner_instance` — the snapshot's owner, since a delegated
+    admin household may issue the invite. The resulting Space's
+    ``owner_instance_id != my_instance`` is the runtime signal for "this is
+    a remote space" downstream.
     """
     # Faithful inverse of ``space_metadata_for_federation``'s
     # ``to_wire_dict``. ``from_wire_dict`` parses ``location_mode`` +
@@ -8229,12 +8233,10 @@ def stub_space_from_metadata(
         name=str(meta.get("name") or "Untitled space"),
         emoji=meta.get("emoji"),
         description=meta.get("description"),
-        # §D1b — the owner is the AUTHENTICATED envelope sender, never the
-        # issuer-controlled meta["owner_instance_id"]. In every legit flow
-        # the snapshot is built by the owning host itself, so meta's claim
-        # equals host_instance_id; ignoring the claim closes a footgun where
-        # a malicious issuer could stamp a spoofed owner on a brand-new stub
-        # (which the can_seat_remote_stub guard then trusts on later events).
+        # The caller decides the owner (see the docstring); this function
+        # never reads meta["owner_instance_id"] itself. Every owner-only
+        # fact applied later (authority cert, signed GFS list) is verified
+        # against that owner's own identity key.
         owner_instance_id=host_instance_id,
         owner_username=str(meta.get("owner_username") or ""),
         identity_public_key=str(meta.get("identity_public_key") or ""),
@@ -8266,18 +8268,83 @@ def stub_space_from_metadata(
         retention_exempt_types=normalize_retention_exempt_types(
             meta.get("retention_exempt_types")
         ),
-        gfs_servers=_coerce_gfs_servers(space_id, meta.get("gfs_servers")),
+        # ``gfs_servers`` is deliberately NOT rebuilt here: ``save`` never
+        # writes it, and the owner's signed list is applied separately, only
+        # after its signature and freshness check
+        # (:func:`apply_gfs_servers_from_metadata`).
     )
 
 
-def _coerce_gfs_servers(space_id: str, raw: object) -> tuple[GfsServer, ...] | None:
-    """The owner's GFS list from ``space_meta``: lenient per entry (an
-    unknown suite, a bad URL or key is dropped and logged), ``None`` when
-    absent or not a list."""
-    servers, dropped = gfs_servers_from_wire(raw)
-    for reason in dropped:
-        log.warning("space %s: dropped a gfs_servers entry — %s", space_id, reason)
-    return servers
+def seated_owner_instance(meta: dict | None, issuer_instance_id: str) -> str:
+    """The owner household a §D1b join stub is seated under.
+
+    The snapshot's ``owner_instance_id`` when it names one, else the issuer.
+    The issuer is the owner in the common case; when a delegated admin
+    household issued the invite / link, seating the stub under the ADMIN
+    would make every later owner-only check (``private_gfs``,
+    ``gfs_publish_mode``, the owner's signed GFS list, the authority cert)
+    trust the admin and ignore the real owner forever. The claim cannot
+    clobber a row we already hold (``can_seat_remote_stub`` still compares
+    the authenticated issuer), and every owner-only fact is then verified
+    against that owner's own key, so an inviter that LIES about the owner
+    gains nothing it did not already have as the issuer.
+    """
+    claimed = meta.get("owner_instance_id") if isinstance(meta, dict) else None
+    if isinstance(claimed, str) and claimed and len(claimed) <= 128:
+        return claimed
+    return issuer_instance_id
+
+
+async def apply_gfs_servers_from_metadata(
+    space_repo,
+    space_id: str,
+    *,
+    meta: dict,
+    owner_instance_id: str,
+) -> bool:
+    """Store the owner's signed GFS list a ``space_meta`` carries; ``True``
+    when it was stored.
+
+    Taken only when it is the OWNER household's signature for this space
+    (``derive_instance_id(owner_pk) == owner_instance_id``,
+    :func:`socialhome.gfs_server_list_sig.verify_gfs_server_list`) AND its
+    ``issued_at`` is newer than the stored list's. Anything else — absent,
+    malformed, an unknown suite, another household's signature, a replayed
+    older list — leaves the stored value alone (a fresh stub stays ``None``).
+    Whoever relays it does not matter: a delegated admin can carry the
+    owner's list, never its own.
+    """
+    if "gfs_servers" not in meta:
+        return False
+    try:
+        signed = SignedGfsServerList.from_wire(meta.get("gfs_servers"))
+    except ValueError as exc:  # UnsupportedGfsServersSigSuite included
+        log.warning("space %s: ignored a malformed GFS list — %s", space_id, exc)
+        return False
+    if not verify_gfs_server_list(
+        signed, space_id=space_id, owner_instance_id=owner_instance_id
+    ):
+        log.warning(
+            "space %s: ignored a GFS list not signed by the owner household %s",
+            space_id,
+            owner_instance_id,
+        )
+        return False
+    current = await space_repo.get(space_id)
+    if current is None:
+        return False
+    stored = current.gfs_servers
+    if stored is not None and signed.issued_at <= stored.issued_at:
+        if signed != stored:
+            log.info(
+                "space %s: ignored an older owner GFS list (issued_at %d <= %d)",
+                space_id,
+                signed.issued_at,
+                stored.issued_at,
+            )
+        return False
+    await space_repo.set_gfs_servers(space_id, signed)
+    return True
 
 
 def keep_local_space_state(
@@ -8298,9 +8365,6 @@ def keep_local_space_state(
 
     * Host-local state (join code, geo-gate, bot toggle, dissolve bookkeeping)
       never federates; the stored value always wins.
-    * The owner's GFS list (``gfs_servers``) is kept when the snapshot does
-      not carry it ("absent" is "unknown", not "listed nowhere"). Who may
-      change it is pinned by the caller (owner-only).
     * Retention is mirrored (it rides ``space_meta``) but enforced by the host
       alone, so the host pins its own values — a co-admin's mirror may be
       stale, and a co-admin's retention edit reaches the host as a forwarded
@@ -8310,9 +8374,6 @@ def keep_local_space_state(
     """
     keep_retention = we_host or "retention_days" not in meta
     keep_exempt = we_host or "retention_exempt_types" not in meta
-    # The owner's GFS list: a snapshot without the key (an older owner, or
-    # an owner that does not know its list yet) is "unknown" — keep ours.
-    keep_gfs_servers = "gfs_servers" not in meta
     return replace(
         refreshed,
         join_code=existing.join_code,
@@ -8330,9 +8391,7 @@ def keep_local_space_state(
             if keep_exempt
             else refreshed.retention_exempt_types
         ),
-        gfs_servers=(
-            existing.gfs_servers if keep_gfs_servers else refreshed.gfs_servers
-        ),
+        gfs_servers=existing.gfs_servers,
     )
 
 

@@ -19,6 +19,7 @@ import pytest
 from socialhome.authority_cert import sign_authority_cert
 from socialhome.authority_sig import sign_authority_event, strip_authority_sig_fields
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
     SpaceAdminAuthorityRevoked,
@@ -534,6 +535,38 @@ async def test_baseline_config_never_rolls_back_a_racing_new_key_edit(env, monke
     monkeypatch.setattr(env.spaces, "get_authority_config_epoch", _stale_read)
     await member._reset_config(space, meta, env.fed.own_instance_id, 9)
     assert (await env.spaces.get(SPACE)).name == "Racing edit"
+
+
+@pytest.mark.parametrize("by_owner", [True, False])
+async def test_the_bundle_config_carries_only_the_owners_gfs_list(env, by_owner):
+    """The rotation bundle's config snapshot carries the owner's signed GFS
+    list (migration 0089). ``save`` never writes it, so the reset applies it
+    on its own — and only under the owner household's signature."""
+    member, _handler = await _member_env(env)
+    k2 = generate_identity_keypair()
+    assert await env.spaces.adopt_authority_key(SPACE, k2.public_key.hex(), 9)
+    space = await env.spaces.get(SPACE)
+    signer = (
+        env.fed.own_identity_seed
+        if by_owner
+        else generate_identity_keypair().private_key
+    )
+    gfs_list = sign_gfs_server_list(
+        space_id=SPACE, servers=(), issued_at=3, owner_seed=signer
+    )
+    meta = {"name": "Baseline", "config_sequence": 1, "gfs_servers": gfs_list.to_wire()}
+    meta.update(
+        sign_authority_event(
+            event_type="space_config_changed",
+            space_id=SPACE,
+            payload=strip_authority_sig_fields(meta),
+            space_seed=k2.private_key,
+        )
+    )
+    await member._reset_config(space, meta, env.fed.own_instance_id, 9)
+    got = await env.spaces.get(SPACE)
+    assert got.name == "Baseline"
+    assert got.gfs_servers == (gfs_list if by_owner else None)
 
 
 # ── v_46: the authority epoch echo ────────────────────────────────────────
