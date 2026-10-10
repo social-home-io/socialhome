@@ -284,6 +284,7 @@ async def test_an_admin_invite_seats_the_real_owner_and_only_the_owners_list(
     space = await SqliteSpaceRepo(db).get(SPACE)
     assert space is not None
     assert space.owner_instance_id == OWNER
+    assert await SqliteSpaceRepo(db).get_invited_by(SPACE) == ADMIN
     assert space.gfs_servers == expected
     # The admin's identity key is never recorded as the host's.
     assert await SqliteSpaceRepo(db).get_host_identity_pk(SPACE) is None
@@ -379,6 +380,7 @@ async def test_an_admin_issued_link_seats_the_real_owner_and_only_the_owners_lis
     space = await SqliteSpaceRepo(db).get(SPACE)
     assert space is not None
     assert space.owner_instance_id == OWNER
+    assert await SqliteSpaceRepo(db).get_invited_by(SPACE) == ADMIN
     assert space.gfs_servers == expected
 
 

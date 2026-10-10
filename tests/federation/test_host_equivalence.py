@@ -1,0 +1,106 @@
+"""Tests for :mod:`socialhome.federation.host_equivalence` — who may act as
+the host of a space on THIS household: the owner, and the delegated admin
+household that invited us while delegation is on and its admin seat lives."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from socialhome.domain.space import (
+    JoinMode,
+    Space,
+    SpaceFeatures,
+    SpaceRole,
+    SpaceType,
+)
+from socialhome.federation.host_equivalence import acts_as_host, is_trusted_inviter
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
+from socialhome.repositories.space_repo import SqliteSpaceRepo
+
+OWNER = "owner-hh"
+ADMIN = "admin-hh"
+OTHER_ADMIN = "other-admin-hh"
+
+
+@pytest.fixture
+async def env(db):
+    spaces = SqliteSpaceRepo(db)
+    seats = SqliteSpaceRemoteMemberRepo(db)
+    space = Space(
+        id="sp-1",
+        name="S",
+        owner_instance_id=OWNER,
+        owner_username="owner",
+        identity_public_key="aa" * 32,
+        config_sequence=1,
+        features=SpaceFeatures(delegated_admin_authority=True),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    await spaces.save(space)
+    for hh, uid in ((ADMIN, "u-admin"), (OTHER_ADMIN, "u-other")):
+        await seats.add(
+            space_id="sp-1",
+            instance_id=hh,
+            user_id=uid,
+            user_pk=None,
+            display_name=uid,
+            role=SpaceRole.ADMIN.value,
+        )
+    await spaces.set_invited_by("sp-1", ADMIN)
+    return spaces, seats
+
+
+async def _check(env, sender: str) -> tuple[bool, bool]:
+    spaces, seats = env
+    space = await spaces.get("sp-1")
+    return (
+        await acts_as_host(spaces, seats, space, sender),
+        await is_trusted_inviter(spaces, seats, space, sender),
+    )
+
+
+async def test_the_owner_always_acts_as_host(env):
+    assert await _check(env, OWNER) == (True, False)
+
+
+async def test_the_inviting_admin_acts_as_host(env):
+    assert await _check(env, ADMIN) == (True, True)
+
+
+async def test_another_admin_household_does_not(env):
+    assert await _check(env, OTHER_ADMIN) == (False, False)
+
+
+async def test_delegation_off_ends_the_trust(env):
+    spaces, _ = env
+    space = await spaces.get("sp-1")
+    await spaces.save(replace(space, features=SpaceFeatures()))
+    assert await _check(env, ADMIN) == (False, False)
+    assert await _check(env, OWNER) == (True, False)
+
+
+async def test_a_demoted_or_removed_admin_seat_ends_the_trust(env):
+    _, seats = env
+    await seats.set_role("sp-1", ADMIN, "u-admin", SpaceRole.MEMBER.value)
+    assert await _check(env, ADMIN) == (False, False)
+
+
+async def test_no_marker_no_trust(env, db):
+    spaces, seats = env
+    await db.enqueue("UPDATE spaces SET invited_by_instance=NULL WHERE id='sp-1'")
+    assert await _check(env, ADMIN) == (False, False)
+
+
+async def test_none_space_or_sender(env):
+    spaces, seats = env
+    assert await acts_as_host(spaces, seats, None, OWNER) is False
+    space = await spaces.get("sp-1")
+    assert await acts_as_host(spaces, seats, space, "") is False
+    # Without a seat repo only the owner counts.
+    assert await acts_as_host(spaces, None, space, ADMIN) is False
+    assert await acts_as_host(spaces, None, space, OWNER) is True

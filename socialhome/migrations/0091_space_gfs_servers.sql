@@ -75,3 +75,40 @@
 ALTER TABLE spaces ADD COLUMN gfs_servers TEXT
     CHECK (gfs_servers IS NULL
            OR (json_valid(gfs_servers) AND json_type(gfs_servers) = 'object'));
+
+-- ``spaces.invited_by_instance`` (same migration, same change): on a MEMBER
+-- household's stub, the delegated admin household that issued THIS
+-- household's invite (a §D1b private invite or an invite-link redeem ACK)
+-- when it is not the space's owner. Owner decision 2026-10-10 ("trust the
+-- inviting admin for sync"): while the space's ``delegated_admin_authority``
+-- is ON and that household still holds a live ``admin`` seat, it is
+-- host-equivalent here for CONTENT and admin actions (its full §25.6
+-- catch-up stream incl. roster and bans, role changes, remote-member
+-- removals, proposal mirrors, the signing-seed share, the host writer
+-- exemption) — never for owner-only settings (the signed GFS list,
+-- ``private_gfs``, ``gfs_publish_mode``, the authority cert /
+-- ``host_identity_pk``, config, dissolve, age gate), which stay the owner's.
+-- NULL = invited by the owner itself (or an owned space / older stub).
+--
+-- Audit for this column:
+--   (1) Paths that touch the data: the two join paths
+--       (``PrivateSpaceInviteHandler._on_invite``,
+--       ``SpaceInviteTokenRedeemCoordinator._seat_local_after_ack``) write
+--       it; ``socialhome/federation/host_equivalence.py`` reads it for every
+--       host check listed above. The inviter is otherwise recorded only on
+--       the invitation row (``space_invitations.remote_instance_id``: §D1b
+--       invites only, not invite links, and a per-invitation row) and as a
+--       ``space_instances`` row (every member household has one) whose
+--       ``identity_pk`` (0078) is also written by host-side mesh claims
+--       for ANY space we host — none of them says "this household seated
+--       us into this space".
+--   (2) Rejected: deriving it from ``space_instances.identity_pk`` (not
+--       exclusive, see above), from the invitation rows (missing for invite
+--       links, several per space), from the roster (an admin seat does not
+--       say who invited us — any admin household would become a host),
+--       memory-only (the trust must survive a restart while the owner is
+--       offline, which is the case it exists for).
+--   (3) One NULL-default TEXT column, no backfill: every existing stub keeps
+--       today's behaviour (no inviting-admin trust).
+
+ALTER TABLE spaces ADD COLUMN invited_by_instance TEXT;

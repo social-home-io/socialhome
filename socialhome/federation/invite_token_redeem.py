@@ -802,6 +802,11 @@ class SpaceInviteTokenRedeemCoordinator:
                     meta=meta,
                 )
                 await self._spaces.save(stub)
+                if owner_instance != issuer_instance_id:
+                    # A delegated admin household issued the link: trusted as
+                    # host-equivalent here while delegation stays on
+                    # (``host_equivalence``, migration 0091).
+                    await self._spaces.set_invited_by(space_id, issuer_instance_id)
                 # The owner's signed GFS list (migration 0091), relayed by
                 # the issuer; taken only under the owner's signature.
                 await apply_gfs_servers_from_metadata(

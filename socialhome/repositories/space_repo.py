@@ -121,6 +121,8 @@ class AbstractSpaceRepo(Protocol):
     async def get_owner_user_id(self, space_id: str) -> str | None: ...
     async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
+    async def set_invited_by(self, space_id: str, instance_id: str) -> None: ...
+    async def get_invited_by(self, space_id: str) -> str | None: ...
     async def set_cover_hash(
         self,
         space_id: str,
@@ -1048,6 +1050,25 @@ class SqliteSpaceRepo:
             "UPDATE spaces SET host_identity_pk=? WHERE id=?",
             (pk_hex, space_id),
         )
+
+    async def set_invited_by(self, space_id: str, instance_id: str) -> None:
+        """Record the delegated admin household that issued THIS household's
+        invite into a space it does not own (migration 0091,
+        :mod:`socialhome.federation.host_equivalence`). Never written by
+        ``save``."""
+        await self._db.enqueue(
+            "UPDATE spaces SET invited_by_instance=? WHERE id=?",
+            (instance_id, space_id),
+        )
+
+    async def get_invited_by(self, space_id: str) -> str | None:
+        row = await self._db.fetchone(
+            "SELECT invited_by_instance FROM spaces WHERE id=?",
+            (space_id,),
+        )
+        if row is None or not row["invited_by_instance"]:
+            return None
+        return str(row["invited_by_instance"])
 
     async def get_host_identity_pk(self, space_id: str) -> str | None:
         """Return the host household's identity pubkey (hex), or ``None``.

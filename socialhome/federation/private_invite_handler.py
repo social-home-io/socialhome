@@ -55,6 +55,7 @@ from ..services.space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from .host_equivalence import acts_as_host
 from ..services.space_service import (
     SUPPORTED_SEED_SUITES,
     apply_space_content_key_from_metadata,
@@ -549,6 +550,11 @@ class PrivateSpaceInviteHandler:
                 meta=meta,
                 owner_instance_id=owner_instance,
             )
+            # A delegated admin household invited us: remember it, so it
+            # is host-equivalent here for content and admin actions while
+            # delegation stays on (``host_equivalence``, migration 0091).
+            if owner_instance != event.from_instance:
+                await self._space_repo.set_invited_by(space_id, event.from_instance)
             # The inviter's identity key is the HOST key only when the
             # inviter is the owner; an admin's key must never be read as the
             # owner's (it would refuse the owner's own authority cert). An
@@ -902,8 +908,10 @@ class PrivateSpaceInviteHandler:
         # household's space we merely mirror). Only the household that
         # hosts the space can say who is in it.
         local_space = await self._space_repo.get(space_id)
-        if local_space is None or (
-            local_space.owner_instance_id != event.from_instance
+        # The host — or the delegated admin household that invited us,
+        # while delegation is on (``host_equivalence``).
+        if not await acts_as_host(
+            self._space_repo, self._remote_members, local_space, event.from_instance
         ):
             log.debug(
                 "SPACE_REMOTE_MEMBER_REMOVED for %s from %s — not the host of "
@@ -1230,8 +1238,10 @@ class PrivateSpaceInviteHandler:
         if not space_id or not isinstance(view, dict):
             return
         space = await self._space_repo.get(space_id)
-        if space is None or space.owner_instance_id != event.from_instance:
-            return  # only the host may mirror proposal state
+        if not await acts_as_host(
+            self._space_repo, self._remote_members, space, event.from_instance
+        ):
+            return  # only the host (or our trusted inviter) mirrors proposals
         await self._approval_service.apply_mirror_update(space_id, view)
 
     async def _on_key_exchange_rekey(self, event: "FederationEvent") -> None:
@@ -1447,8 +1457,13 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        # SECURITY: only the authentic owner may distribute the signing seed.
-        if space.owner_instance_id != event.from_instance:
+        # SECURITY: only the authentic owner — or the delegated admin
+        # household that invited us, while delegation is on
+        # (``host_equivalence``) — may distribute the signing seed. The seed
+        # must still be the private half of the key we pin (below).
+        if not await acts_as_host(
+            self._space_repo, self._remote_members, space, event.from_instance
+        ):
             log.warning(
                 "SPACE_ADMIN_KEY_SHARE: %s is not the owner of %s (owner=%s) "
                 "— refusing signing-seed share",

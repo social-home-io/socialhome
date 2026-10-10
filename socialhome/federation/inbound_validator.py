@@ -64,6 +64,7 @@ from ..domain.federation import (
     RemoteInstance,
 )
 from ..domain.space import WRITER_ROLES, SpaceRole
+from .host_equivalence import acts_as_host
 from .space_scope import archive_refusal
 
 if TYPE_CHECKING:
@@ -1029,7 +1030,9 @@ def make_check_space_writer(
         live = [s for s in seats if not s.tombstoned]
         if any(s.role in _WRITER_ROLES for s in live):
             return
-        if await _sender_hosts_space(space_repo, space_id, event.from_instance):
+        if await _sender_hosts_space(
+            space_repo, space_id, event.from_instance, seat_repo=remote_member_repo
+        ):
             return
         if not seats and pending is not None:
             # No row at all for this household: it may simply have joined
@@ -1068,19 +1071,23 @@ def make_check_space_writer(
     return check_space_writer
 
 
-async def _sender_hosts_space(space_repo, space_id: str, sender: str) -> bool:
-    """``True`` when ``sender`` is the household hosting ``space_id``.
+async def _sender_hosts_space(
+    space_repo, space_id: str, sender: str, *, seat_repo=None
+) -> bool:
+    """``True`` when ``sender`` hosts ``space_id`` here — its owner, or the
+    delegated admin household that invited us while delegation is on
+    (:mod:`socialhome.federation.host_equivalence`).
 
     An unreadable space row is a "no": this is an exception to a refusal.
     """
     try:
         space = await space_repo.get(space_id)
+        return await acts_as_host(space_repo, seat_repo, space, sender)
     except Exception as exc:
         log.warning(
             "inbound: space-writer host lookup failed for %s: %s", space_id, exc
         )
         return False
-    return bool(space is not None and sender and space.owner_instance_id == sender)
 
 
 async def _subscriber_comment_allowed(

@@ -1444,7 +1444,7 @@ class SpaceSyncReceiver:
         Refusals are summarised once per chunk.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -1529,7 +1529,7 @@ class SpaceSyncReceiver:
         it), so a stale copy streamed later cannot create the comment.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -1614,7 +1614,7 @@ class SpaceSyncReceiver:
         Refusals are summarised once per chunk.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -1701,7 +1701,7 @@ class SpaceSyncReceiver:
         once per chunk.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -1798,7 +1798,7 @@ class SpaceSyncReceiver:
         Refusals are summarised once per chunk.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         is_host = (
             space is not None
             and self._page_conflicts is not None
@@ -2252,14 +2252,24 @@ class SpaceSyncReceiver:
         for page_id, seq in highest.items():
             await engine.raise_floor(space_id, page_id, seq, provider=provider)
 
+    async def _acts_as_host(self, space: Any, provider: str) -> bool:
+        """``provider`` hosts the space HERE: its owner, or the delegated
+        admin household that invited us while delegation is on
+        (:mod:`socialhome.federation.host_equivalence`) — whose chunks are
+        then taken whole, like the owner's. Without an authorship binder
+        (no seat repo) only the owner counts."""
+        if space is None or not provider:
+            return False
+        if space.owner_instance_id == provider:
+            return True
+        if self._authorship is None:
+            return False
+        return await self._authorship.acts_as_host(space, provider)
+
     async def _is_host(self, space_id: str, provider: str) -> bool:
         """Is ``provider`` the household hosting ``space_id``?"""
         space = await self._space_repo.get(space_id)
-        return (
-            bool(provider)
-            and space is not None
-            and (space.owner_instance_id == provider)
-        )
+        return await self._acts_as_host(space, provider)
 
     async def _is_host_version(
         self, space_id: str, provider: str, r: dict[str, Any]
@@ -2268,7 +2278,7 @@ class SpaceSyncReceiver:
         if "seq" not in r or not provider:
             return False
         space = await self._space_repo.get(space_id)
-        return space is not None and space.owner_instance_id == provider
+        return await self._acts_as_host(space, provider)
 
     async def _apply_page_version(
         self, page: Page, r: dict[str, Any], space_id: str, provider: str
@@ -2358,7 +2368,7 @@ class SpaceSyncReceiver:
                     reason,
                 )
                 return []
-        if space is not None and provider and space.owner_instance_id == provider:
+        if await self._acts_as_host(space, provider):
             return records
         if self._authorship is None:
             log.warning(

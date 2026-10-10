@@ -139,6 +139,7 @@ from .space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from ..federation.host_equivalence import acts_as_host
 from .space_service import (
     apply_space_images_from_config_change,
     apply_gfs_servers_from_metadata,
@@ -2595,8 +2596,15 @@ class FederationInboundService(ProtectionGateMixin):
         if space is None:
             return
         # Host authority: a role change is only valid from the owning
-        # instance. Reject anything else (a peer can't promote itself).
-        if space.owner_instance_id != event.from_instance:
+        # instance — or the delegated admin household that invited us, while
+        # delegation is on (``host_equivalence``). Reject anything else (a
+        # peer can't promote itself).
+        if not await acts_as_host(
+            self._space_repo,
+            self._space_remote_member_repo,
+            space,
+            event.from_instance,
+        ):
             log.debug(
                 "SPACE_MEMBER_ROLE_CHANGED for %s from non-host %s — dropping",
                 space_id,

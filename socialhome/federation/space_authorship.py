@@ -106,9 +106,10 @@ from .moderation_approval import (
 )
 
 from ..domain.federation import FederationEvent, FederationEventType
+from .host_equivalence import acts_as_host
 
 if TYPE_CHECKING:
-    from ..domain.space import SpaceModerationItem
+    from ..domain.space import Space, SpaceModerationItem
     from .pending_seat_buffer import PendingSeatBuffer
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.space_remote_member_repo import (
@@ -300,12 +301,19 @@ class SpaceAuthorship:
         return subscriber_ok and seat.role == SpaceRole.SUBSCRIBER.value
 
     async def is_host(self, event: "FederationEvent", space_id: str) -> bool:
-        """The sender is the household hosting ``space_id``."""
+        """The sender hosts ``space_id`` here: its owner, or the delegated
+        admin household that invited us while delegation is on
+        (:mod:`socialhome.federation.host_equivalence`)."""
         sender = str(event.from_instance or "")
         if not sender or not space_id:
             return False
         space = await self._spaces.get(space_id)
-        return space is not None and space.owner_instance_id == sender
+        return await self.acts_as_host(space, sender)
+
+    async def acts_as_host(self, space: "Space | None", sender: str) -> bool:
+        """:func:`~socialhome.federation.host_equivalence.acts_as_host` with
+        this binder's repos."""
+        return await acts_as_host(self._spaces, self._seats, space, sender)
 
     async def is_admin_household(self, event: "FederationEvent", space_id: str) -> bool:
         """The host, or a household holding a live ``admin`` seat here.

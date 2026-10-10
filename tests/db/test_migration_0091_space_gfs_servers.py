@@ -70,3 +70,15 @@ def test_null_accepted_again(conn) -> None:
     conn.execute("UPDATE spaces SET gfs_servers=NULL WHERE id='old'")
     row = conn.execute("SELECT gfs_servers FROM spaces WHERE id='old'").fetchone()
     assert row[0] is None
+
+
+def test_invited_by_instance_is_a_null_default_column(conn) -> None:
+    row = conn.execute(
+        "SELECT invited_by_instance FROM spaces WHERE id='old'"
+    ).fetchone()
+    assert row[0] is None
+    conn.execute("UPDATE spaces SET invited_by_instance='admin-hh' WHERE id='old'")
+    row = conn.execute(
+        "SELECT invited_by_instance FROM spaces WHERE id='old'"
+    ).fetchone()
+    assert row[0] == "admin-hh"

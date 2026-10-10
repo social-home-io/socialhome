@@ -1970,3 +1970,15 @@ async def test_space_instance_identity_pk_is_per_space_and_update_only(env):
     # A later seat refresh keeps it.
     await env.repo.add_space_instance("sp-a", "hh-1")
     assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") == "ab" * 32
+
+
+async def test_invited_by_round_trips_and_save_never_touches_it(env):
+    await env.repo.save(_space("sp-i"))
+    assert await env.repo.get_invited_by("sp-i") is None
+    await env.repo.set_invited_by("sp-i", "admin-hh")
+    assert await env.repo.get_invited_by("sp-i") == "admin-hh"
+    got = await env.repo.get("sp-i")
+    assert got is not None
+    await env.repo.save(replace(got, name="Renamed"))
+    assert await env.repo.get_invited_by("sp-i") == "admin-hh"
+    assert await env.repo.get_invited_by("nope") is None

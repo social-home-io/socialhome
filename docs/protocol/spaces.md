@@ -1952,6 +1952,32 @@ a delegation-ON, non-owner space ever lacks a seed (the Phase-1 share
 never landed) the roster gossip is skipped gracefully but logged at
 WARNING — an anomaly, not a silent drop.
 
+**The invitee's view of the inviting admin** (owner decision 2026-10-10,
+migration 0091, `socialhome/federation/host_equivalence.py`). The invitee
+seats its stub under the space's REAL owner (`space_meta.owner_instance_id`),
+not under the admin that invited it, and records that admin household in
+`spaces.invited_by_instance` (both §D1b invites and invite-link redeems).
+While the space's `delegated_admin_authority` is ON and that household still
+holds a live `admin` seat, the invitee treats it as **host-equivalent for
+content and admin actions** — the owner is often offline, and the admin may
+be the invitee's only way into the space:
+
+- its §25.6 catch-up stream is taken whole, like the host's (roster and bans
+  included); its chunks verify against its own identity key, kept on its
+  `space_instances` row for that space — never as `host_identity_pk`;
+- its `SPACE_MEMBER_ROLE_CHANGED`, `SPACE_REMOTE_MEMBER_REMOVED`,
+  `SPACE_ADMIN_PROPOSAL_UPDATED` mirrors and `SPACE_ADMIN_KEY_SHARE` (the
+  seed must still be the private half of the pinned key) apply, and the host
+  exemption of the space-writer gate covers it.
+
+**Owner-only stays owner-only**: the owner-signed GFS list, `private_gfs`,
+`gfs_publish_mode`, the authority cert / `host_identity_pk`, the config
+last-writer-wins owner path, dissolve, sync-rejected, the age gate and bans
+sent as live events compare against `owner_instance_id` alone. Any other
+admin household gets the member-provider rules. Turning delegation off — or
+demoting / removing that household's admin seat — ends the trust at once
+(checked on every use). Nothing changes for the owner.
+
 #### Config edits offline-of-owner (`SPACE_CONFIG_CHANGED`, v_24+)
 
 Phase 4a extends the same authority-signature model to a space's
