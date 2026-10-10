@@ -43,12 +43,13 @@ import re
 import unicodedata
 import uuid
 import weakref
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from ..crypto import ed25519_public_key, generate_identity_keypair
-from ..federation.host_equivalence import acts_as_host
+from ..federation.host_equivalence import acts_as_host, owner_statement_current
 from ..gfs_server_list_sig import verify_gfs_server_list
 from ..space_owner_statement import (
     MAX_STATEMENT_FUTURE_SKEW_MS,
@@ -3710,7 +3711,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     #: config forward. The host drops it here even if an old / forged client
     #: includes it; a remote admin changes it through the ``propose`` verb.
     #:
-    #: ``gfs_servers`` (migration 0092) is absent too, and ``update_config``
+    #: ``gfs_servers`` (migration 0093) is absent too, and ``update_config``
     #: takes no such keyword: which GFSs list the space — and so where every
     #: member publishes — is the OWNER's choice alone, and this path runs AS
     #: the owner, so its owner gates are no defence.
@@ -7351,6 +7352,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             space_id=space_id,
         )
 
+    async def purge_replaced_stub(self, space_id: str) -> None:
+        """Remove a stub a proven owner's invite replaces (migration 0093):
+        collect its media first, then drop the rows (``purge``'s contract)."""
+        await purge_space_and_media(
+            space_repo=self._spaces,
+            post_repo=self._posts,
+            gallery_repo=self._gallery,
+            bazaar_repo=self._bazaar,
+            media_dir=self._media_dir,
+            media_refs=self._media_refs,
+            space_id=space_id,
+        )
+
     async def list_subscriptions(self, user_id: str) -> list[dict]:
         return await self._spaces.list_subscriptions_for_user(user_id)
 
@@ -7720,7 +7734,7 @@ async def build_space_snapshot_for_federation(
 
     Sent by a household that is NOT the owner (a delegated admin's invite),
     the snapshot also carries ``inviter_proof``: this household's id signed
-    with the space authority seed it holds (migration 0092,
+    with the space authority seed it holds (migration 0093,
     :mod:`socialhome.space_owner_statement`), which — with the owner's
     statement — lets the joiner seat the stub under the real owner.
 
@@ -7747,6 +7761,15 @@ async def build_space_snapshot_for_federation(
     *our* instance, because from the joiner's perspective every
     member of this space lives somewhere else.
     """
+    if (
+        authority_cert is None
+        and own_instance_id
+        and space.owner_instance_id != own_instance_id
+        and space.authority_key_epoch > 0
+    ):
+        # A member relays the owner's cert for the key it pins, so the
+        # joiner pins the same epoch the owner's statement names.
+        authority_cert = await space_repo.get_authority_cert(space.id)
     meta = space_metadata_for_federation(
         space, authority_cert=authority_cert, owner_statement=owner_statement
     )
@@ -7761,6 +7784,7 @@ async def build_space_snapshot_for_federation(
                 owner_instance_id=space.owner_instance_id,
                 inviter_instance_id=own_instance_id,
                 space_seed=seed,
+                authority_key_epoch=space.authority_key_epoch,
             )
     local_members = await space_repo.list_members(space.id)
     local_users = await user_repo.list_by_ids({m.user_id for m in local_members})
@@ -7883,7 +7907,7 @@ def space_metadata_for_federation(
     receiver ignores both keys.
     """
     meta = space_metadata_fields(space)
-    # The owner household's ownership statement (migration 0092): signed
+    # The owner household's ownership statement (migration 0093): signed
     # fresh by the owner, relayed by everyone else, so a household a
     # delegated admin invites can seat the stub under the REAL owner.
     if owner_statement is None and space.owner_statement:
@@ -7895,7 +7919,7 @@ def space_metadata_for_federation(
     if owner_statement is not None:
         meta["owner_statement"] = owner_statement
     if space.gfs_servers is not None:
-        # The GFSs the owner lists the space on (migration 0092), signed by
+        # The GFSs the owner lists the space on (migration 0093), signed by
         # the OWNER household, so a member can reach every one of them while
         # the host is offline. Rides only here — inside the encrypted
         # ``space_meta`` member households get — never in a GFS publish body.
@@ -8325,20 +8349,44 @@ def stub_space_from_metadata(
 _DERIVED_INSTANCE_ID = re.compile(r"[a-z2-7]{32}")
 
 
+def meta_pinned_epoch(meta: dict) -> int:
+    """The authority-key epoch a ``space_meta`` pins: the epoch its authority
+    cert carries (the receiver applies the cert and pins that epoch), else 0
+    (the creation-time key, never certified)."""
+    epoch = meta.get("authority_key_epoch")
+    if (
+        meta.get("authority_cert") is None
+        or not isinstance(epoch, int)
+        or isinstance(epoch, bool)
+        or epoch < 0
+    ):
+        return 0
+    return epoch
+
+
 def _verified_owner_statement(
-    space_id: str, meta: dict, owner_instance_id: str
+    space_id: str,
+    meta: dict,
+    owner_instance_id: str,
+    *,
+    authority_key_epoch: int | None = None,
 ) -> str | None:
     """The canonical JSON of ``meta["owner_statement"]`` when it is the
-    owner's valid statement binding the key ``meta`` pins, else ``None``."""
+    owner's valid, recent statement binding the key ``meta`` pins at
+    *authority_key_epoch* (default: the epoch ``meta`` pins), else ``None``."""
     statement = meta.get("owner_statement")
     if statement is None:
         return None
+    epoch = (
+        meta_pinned_epoch(meta) if authority_key_epoch is None else authority_key_epoch
+    )
     try:
         verify_owner_statement(
             statement,
             space_id=space_id,
             owner_instance_id=owner_instance_id,
             authority_pk_hex=str(meta.get("identity_public_key") or ""),
+            authority_key_epoch=epoch,
         )
     except InvalidOwnerStatement as exc:  # UnsupportedOwnerStatementSuite too
         log.warning(
@@ -8363,7 +8411,7 @@ def resolve_join_owner(
 ) -> JoinOwner:
     """Who a §D1b join stub is seated under (invite or invite-link redeem).
 
-    The issuer, as before 0092 — unless the snapshot names ANOTHER owner and
+    The issuer, as before 0093 — unless the snapshot names ANOTHER owner and
     proves it: the owner household's signed statement binding this space to
     the authority key the snapshot pins
     (:func:`socialhome.space_owner_statement.verify_owner_statement`) AND the
@@ -8373,7 +8421,7 @@ def resolve_join_owner(
     with the issuer as its trusted inviter. A claimed owner that is this
     household itself, or not a derived instance id, is refused outright. So
     a household that merely CLAIMS somebody else owns a space — without the
-    owner's signature, or without the seed — gets exactly the pre-0092
+    owner's signature, or without the seed — gets exactly the pre-0093
     result: the stub names the claimant itself, and nothing is gained.
     """
     claimed = meta.get("owner_instance_id")
@@ -8399,6 +8447,7 @@ def resolve_join_owner(
         owner_instance_id=claimed,
         inviter_instance_id=issuer_instance_id,
         authority_pk_hex=str(meta.get("identity_public_key") or ""),
+        authority_key_epoch=meta_pinned_epoch(meta),
     )
     if statement_json is None or not proof_ok:
         log.warning(
@@ -8425,22 +8474,28 @@ async def admit_join_stub(
     issuer_instance_id: str,
     *,
     own_instance_id: str | None,
+    purge_stub: "Callable[[str], Awaitable[object]] | None" = None,
 ) -> JoinOwner | None:
     """May a §D1b join snapshot from *issuer_instance_id* seat (or refresh)
     the stub of *space_id* — and under which owner? ``None``: leave any
-    stub alone.
+    stub alone. *purge_stub* removes a replaced stub with its media
+    (:meth:`SpaceService.purge_replaced_stub`); without it only the rows go
+    and the media-orphan sweep reaps any file.
 
     * No local row: seat it (:func:`resolve_join_owner`).
     * A row under the SAME owner: refreshed only by that owner or by our
       trusted inviting admin (:mod:`socialhome.federation.host_equivalence`)
       — a delegated admin re-inviting another of our users.
-    * A row under ANOTHER owner: the owner wins only while nobody here has
-      accepted an invitation into it (no local member) — the earlier stub
-      was an unaccepted invitation, so it is dropped with everything that
-      came with it (its inviter's seats, households, pinned key, pending
-      invitations) and the new one is seated. Space ids are random, not
-      key-derived, so two households can both claim one; once a member here
-      accepted, the stub it accepted stays (trust on first use).
+    * A row under ANOTHER owner is replaced only when ALL hold: the
+      newcomer's owner is PROVEN (its signed statement verified — never an
+      issuer that merely names itself); the existing stub is NOT backed by
+      a current owner statement of its own; and nobody here ever accepted an
+      invitation into it (no local member, no accepted invitation). The
+      earlier stub is then dropped with everything that came with it (its
+      inviter's seats, households, pinned key, pending invitations). Space
+      ids are random, not key-derived, so two households can both claim
+      one: a claim backed by nothing gives way to a proven owner; a proven
+      or accepted stub stays (trust on first use).
     * Never our own space.
     """
     jo = resolve_join_owner(
@@ -8465,7 +8520,29 @@ async def admit_join_stub(
             issuer_instance_id,
         )
         return None
-    if await space_repo.list_members(space_id):
+    if jo.statement_json is None:
+        log.warning(
+            "space %s: join snapshot from %s claims owner %s without the "
+            "owner's signed statement — the stub here under %s stays",
+            space_id,
+            issuer_instance_id,
+            jo.owner_instance_id,
+            existing.owner_instance_id,
+        )
+        return None
+    if owner_statement_current(existing):
+        log.warning(
+            "space %s: join snapshot from %s names owner %s, but the stub here "
+            "is backed by %s's own statement — keeping it",
+            space_id,
+            issuer_instance_id,
+            jo.owner_instance_id,
+            existing.owner_instance_id,
+        )
+        return None
+    if await space_repo.list_members(
+        space_id
+    ) or await space_repo.any_invitation_accepted(space_id):
         log.warning(
             "space %s: join snapshot from %s names owner %s, but a member here "
             "already joined it under %s — keeping that one",
@@ -8487,7 +8564,10 @@ async def admit_join_stub(
     for instance_id in await space_repo.list_member_instances(space_id):
         await space_repo.remove_space_instance(space_id, instance_id)
     await space_repo.expire_remote_invitations_except(space_id, issuer_instance_id)
-    await space_repo.purge(space_id)
+    if purge_stub is not None:
+        await purge_stub(space_id)
+    else:
+        await space_repo.purge(space_id)
     return jo
 
 
@@ -8495,11 +8575,11 @@ async def seat_join_owner_state(
     space_repo, space_id: str, jo: JoinOwner, issuer_instance_id: str
 ) -> None:
     """After the stub was saved: record the trusted inviting admin and keep
-    the owner's verified statement (both migration 0092)."""
+    the owner's verified statement (both migration 0093)."""
     if jo.trusted_inviter:
         await space_repo.set_invited_by(space_id, jo.trusted_inviter)
     if jo.statement_json:
-        await _store_owner_statement(space_repo, space_id, jo.statement_json)
+        await store_owner_statement(space_repo, space_id, jo.statement_json)
 
 
 async def apply_owner_statement_from_metadata(
@@ -8508,28 +8588,39 @@ async def apply_owner_statement_from_metadata(
     *,
     meta: dict,
     owner_instance_id: str,
+    authority_key_epoch: int | None = None,
 ) -> bool:
     """Keep the owner's statement a ``space_meta`` carries — when it verifies
-    for the stub's owner and the key the snapshot pins, and is newer than the
-    one held. ``True`` when stored."""
-    statement_json = _verified_owner_statement(space_id, meta, owner_instance_id)
+    for the stub's owner and the key (and epoch) we pin, and is newer than
+    the one held. ``True`` when stored."""
+    statement_json = _verified_owner_statement(
+        space_id, meta, owner_instance_id, authority_key_epoch=authority_key_epoch
+    )
     if statement_json is None:
         return False
-    return await _store_owner_statement(space_repo, space_id, statement_json)
+    return await store_owner_statement(space_repo, space_id, statement_json)
 
 
-async def _store_owner_statement(
-    space_repo, space_id: str, statement_json: str
-) -> bool:
+async def store_owner_statement(space_repo, space_id: str, statement_json: str) -> bool:
+    """Store a VERIFIED statement unless the held one is better: one for
+    the same authority key at a higher ``(authority_key_epoch, issued_at)``.
+    A held statement for another key (a pin the space has moved on from)
+    always gives way."""
     current = await space_repo.get(space_id)
     if current is None:
         return False
     if current.owner_statement:
         try:
             held = json.loads(current.owner_statement)
-            if int(held.get("issued_at", -1)) >= int(
-                json.loads(statement_json)["issued_at"]
-            ):
+            new = json.loads(statement_json)
+            same_key = (
+                str(held.get("authority_pk", "")).lower()
+                == str(new["authority_pk"]).lower()
+            )
+            if same_key and (
+                int(held.get("authority_key_epoch", -1)),
+                int(held.get("issued_at", -1)),
+            ) >= (int(new["authority_key_epoch"]), int(new["issued_at"])):
                 return False
         except ValueError, TypeError, AttributeError, KeyError:
             pass

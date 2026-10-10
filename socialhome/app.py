@@ -178,6 +178,10 @@ from .repositories.space_remote_location_repo import (
 )
 from .repositories.space_remote_member_repo import SqliteSpaceRemoteMemberRepo
 from .repositories.space_proposal_repo import SqliteSpaceProposalRepo
+from .services.owner_statement_refresh_service import (
+    OwnerStatementRefreshService,
+)
+from .services.space_authority_pin import owner_statement_via
 from .services.space_approval_service import SpaceApprovalService
 from .repositories.report_repo import SqliteReportRepo
 from .repositories.search_repo import SqliteSearchRepo
@@ -927,13 +931,22 @@ def _build_pairing_gfs_reach(
     )
 
 
+def _build_owner_statement_refresh(
+    *, repos: SimpleNamespace, bus: EventBus
+) -> OwnerStatementRefreshService:
+    """The owner household re-signs and re-broadcasts the ownership
+    statements of the spaces it owns (migration 0093): every rotation and
+    well inside the window members accept them for."""
+    return OwnerStatementRefreshService(space_repo=repos.space, bus=bus)
+
+
 def _build_gfs_server_selection(
     *,
     repos: SimpleNamespace,
     bus: EventBus,
     gfs_connection_service: GfsConnectionService,
 ) -> GfsServerSelectionService:
-    """The owner's signed GFS list (``spaces.gfs_servers``, migration 0092):
+    """The owner's signed GFS list (``spaces.gfs_servers``, migration 0093):
     re-derived after every listing change and every config change of a space
     we own, and sent to the members in a config change. Signs nothing until
     the household identity is attached at startup."""
@@ -1285,11 +1298,17 @@ def _wire_federation_stack(
         )
         return row is not None
 
+    async def _owner_statement_for(space_id: str) -> dict | None:
+        # Migration 0093: what a household we never seated is answered with.
+        space = await space_repo.get(space_id)
+        return owner_statement_via(federation_service, space) if space else None
+
     sync_manager = SyncSessionManager(
         federation_repo,
         get_max_seq=_get_max_seq,
         check_member=_check_member,
         reject_reason=make_sync_reject_reason(space_repo, space_remote_member_repo),
+        owner_statement_for=_owner_statement_for,
     )
     federation_service.attach_sync_manager(sync_manager)
     federation_service.attach_idempotency_cache(idempotency_cache)
@@ -1634,7 +1653,7 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
         # §25.6 echo (0087): a periodic BEGIN carries it as ``have_seq``.
         applied_seqs=space_sync_watermark_repo,
-        # Migration 0092: a trusted inviting admin is a mesh target too.
+        # Migration 0093: a trusted inviting admin is a mesh target too.
         seat_repo=space_remote_member_repo,
     )
     space_sync_scheduler.wire()
@@ -2479,6 +2498,8 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_server_selection = _build_gfs_server_selection(
         repos=repos, bus=bus, gfs_connection_service=gfs_connection_service
     )
+    # Migration 0093: the owner keeps its signed ownership statements fresh.
+    owner_statement_refresh = _build_owner_statement_refresh(repos=repos, bus=bus)
     # Hook space_service so flipping a space's space_type to/from 'global'
     # auto-publishes / unpublishes to every active GFS (§D1).
     space_service.attach_gfs_connection_service(gfs_connection_service)
@@ -3224,6 +3245,9 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         # The owner's GFS list is signed with the household identity key.
         gfs_server_selection.attach_identity(
+            own_instance_id=real_instance_id, own_signing_key=identity_seed
+        )
+        owner_statement_refresh.attach_identity(
             own_instance_id=real_instance_id, own_signing_key=identity_seed
         )
 
@@ -4225,6 +4249,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # Failed GFS publishes (``POST /gfs/publish``) wait in an in-memory,
         # bounded retry queue owned by the connection service.
         await gfs_connection_service.start()
+        await owner_statement_refresh.start()
         if gfs_member_publish is not None:
             await gfs_member_publish.start()
         if gfs_channels is not None:
@@ -4518,6 +4543,7 @@ def create_app(config: Config | None = None) -> web.Application:
         await gfs_connection_service.stop()
         # Background seat releases ride the HTTP session too.
         await gfs_space_mirror.stop()
+        await owner_statement_refresh.stop()
         if gfs_member_publish is not None:
             await gfs_member_publish.stop()
         if gfs_channels is not None:

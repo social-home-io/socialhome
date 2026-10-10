@@ -97,7 +97,7 @@ def owner_authority_cert(
 
 def owner_statement_via(federation: object, space: "Space") -> dict | None:
     """The owner household's ownership statement for ``space`` to ship in a
-    snapshot (migration 0092, :mod:`socialhome.space_owner_statement`).
+    snapshot (migration 0093, :mod:`socialhome.space_owner_statement`).
 
     Signed fresh when this household owns the space (its identity key off a
     :class:`FederationService`); otherwise the owner's statement as last

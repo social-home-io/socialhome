@@ -15,6 +15,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.sync_manager import (
     ALLOWED_RESOURCES,
+    SYNC_REJECT_NOT_SEATED,
     MAX_ACTIVE_SESSIONS_PER_INSTANCE,
     MAX_PENDING_REQUESTS,
     PENDING_REQUEST_TTL_SECONDS,
@@ -903,3 +904,43 @@ async def test_a_capacity_refusal_does_not_spend_the_hourly_budget():
         provider_instance_id="me",
     )
     assert late.accepted, late.reason
+
+
+@pytest.mark.parametrize("statement", [{"owner_statement_sig": "x"}, None])
+async def test_begin_session_not_seated_answers_with_the_owner_statement(statement):
+    """Migration 0093: a household never seated here gets a NON-terminal
+    reject carrying the owner's statement — or the silent drop when there is
+    none to give."""
+
+    async def check_member(space_id, instance_id):
+        return False
+
+    async def reject_reason(space_id, requester_instance_id):
+        return SYNC_REJECT_NOT_SEATED
+
+    async def owner_statement_for(space_id):
+        return statement
+
+    mgr = SyncSessionManager(
+        _FakeFedRepo(),
+        check_member=check_member,
+        reject_reason=reject_reason,
+        owner_statement_for=owner_statement_for,
+    )
+    d = await mgr.begin_session(
+        sync_id="sid-ns",
+        space_id="sp-ns",
+        requester_instance_id="joining-hh",
+        provider_instance_id="me",
+    )
+    assert d.accepted is False
+    if statement is None:
+        assert d.next_event is None
+    else:
+        assert d.next_event is FederationEventType.SPACE_SYNC_REJECTED
+        assert d.next_payload == {
+            "sync_id": "sid-ns",
+            "space_id": "sp-ns",
+            "reason": SYNC_REJECT_NOT_SEATED,
+            "owner_statement": statement,
+        }

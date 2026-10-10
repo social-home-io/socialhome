@@ -51,6 +51,7 @@ from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import (
     ContentAction,
     SpaceMember,
+    SpaceRole,
     SpaceZone,
     parse_have_seq,
     validate_zone_color,
@@ -82,6 +83,7 @@ from ....domain.timetable import (
 from ....infrastructure.event_bus import EventBus
 from ....utils.timezones import coerce_tz
 from ....media.cleanup import unlink_unreferenced
+from ...host_equivalence import touches_owner_household
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -948,11 +950,55 @@ class SpaceSyncReceiver:
         # v_36: whoever streams it — the host included — a record may not
         # claim an owner-bound id for anybody but the user it commits to.
         records = [r for r in records if not _claims_bound_id(resource, space_id, r)]
+        records = await self._spare_owner_people(resource, space_id, records, provider)
         if records:
             await self._persist(
                 resource, space_id, records, provider=provider, held_back=held_back
             )
         return held_back
+
+    async def _spare_owner_people(
+        self,
+        resource: str,
+        space_id: str,
+        records: list[dict[str, Any]],
+        provider: str,
+    ) -> list[dict[str, Any]]:
+        """Roster and ban records from a provider that is NOT the owner — a
+        trusted inviting admin, whose stream is otherwise taken like the
+        host's (migration 0093) — never touch the owner household's people
+        (the owner seat or any seat the owner's household holds) and never
+        name anybody ``owner``. Only the owner decides about its own."""
+        if resource not in ("members", "bans") or not records:
+            return records
+        space = await self._space_repo.get(space_id)
+        if space is None or space.owner_instance_id == provider:
+            return records
+        seat_repo = self._authorship.seat_repo if self._authorship else None
+        kept: list[dict[str, Any]] = []
+        for r in records:
+            if resource == "members" and str(r.get("role") or "") == (
+                SpaceRole.OWNER.value
+            ):
+                continue
+            if await touches_owner_household(
+                self._space_repo,
+                seat_repo,
+                space,
+                user_id=str(r.get("user_id") or ""),
+            ):
+                continue
+            kept.append(r)
+        if len(kept) != len(records):
+            log.warning(
+                "space sync: dropped %d %s record(s) from non-owner %s for %s — "
+                "they named the owner household's people",
+                len(records) - len(kept),
+                resource,
+                provider,
+                space_id,
+            )
+        return kept
 
     async def _persist(
         self,

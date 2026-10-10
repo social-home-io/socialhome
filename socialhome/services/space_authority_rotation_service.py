@@ -1461,7 +1461,7 @@ class SpaceAuthorityRotationService:
         await apply_gfs_servers_from_metadata(
             self._spaces, space.id, meta=meta, owner_instance_id=owner
         )
-        # The owner's statement for the NEW key (migration 0092); the meta
+        # The owner's statement for the NEW key (migration 0093); the meta
         # is signed by that key, checked above.
         await apply_owner_statement_from_metadata(
             self._spaces, space.id, meta=meta, owner_instance_id=owner

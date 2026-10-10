@@ -1,4 +1,4 @@
-"""Who owns a space — the owner household's signed statement (migration 0092).
+"""Who owns a space — the owner household's signed statement (migration 0093).
 
 Space ids are random (``SpaceService.create_space``), never derived from a
 key, so a stub's owner is otherwise just whatever the inviting household
@@ -22,7 +22,7 @@ signatures, over keys it can bind first-hand, say so:
   can replay another household's proof.
 
 Without both, the join falls back to seating the stub under the inviting
-household itself (the pre-0092 behaviour): no inviting-admin trust.
+household itself (the pre-0093 behaviour): no inviting-admin trust.
 
 Signing bytes of the statement: ``b"space-owner-statement:v1:"`` +
 canonical JSON (sorted keys, compact) of the statement minus its signature.
@@ -63,6 +63,17 @@ SUPPORTED_OWNER_STATEMENT_SUITES: frozenset[str] = frozenset(
 
 #: How far ahead of the receiver's clock ``issued_at`` may be.
 MAX_STATEMENT_FUTURE_SKEW_MS: int = 24 * 60 * 60 * 1000
+
+#: How old a statement may be and still be taken. A statement names the
+#: authority key of its moment; an admin revoked by a rotation still holds
+#: the OLD key and the owner's old statement for it, so an old statement
+#: must expire. The owner re-signs on every rotation and every
+#: :data:`STATEMENT_REFRESH_MS` (well inside this window) and members relay
+#: the newest.
+MAX_STATEMENT_AGE_MS: int = 30 * 24 * 60 * 60 * 1000
+
+#: How often the owner household re-broadcasts a fresh statement.
+STATEMENT_REFRESH_MS: int = 7 * 24 * 60 * 60 * 1000
 
 MAX_STATEMENT_INT: int = 2**63 - 1
 
@@ -179,11 +190,14 @@ def verify_owner_statement(
     space_id: str,
     owner_instance_id: str,
     authority_pk_hex: str,
+    authority_key_epoch: int | None = None,
     now_ms: int | None = None,
+    max_age_ms: int | None = MAX_STATEMENT_AGE_MS,
 ) -> VerifiedOwnerStatement:
     """Verify that *owner_instance_id* signed that it owns *space_id* under
-    *authority_pk_hex*. Raises :class:`UnsupportedOwnerStatementSuite` or
-    :class:`InvalidOwnerStatement`; freshness against a stored statement is
+    *authority_pk_hex* (at *authority_key_epoch*, when given), no older than
+    *max_age_ms*. Raises :class:`UnsupportedOwnerStatementSuite` or
+    :class:`InvalidOwnerStatement`; ordering against a stored statement is
     the caller's decision."""
     if not isinstance(statement, dict):
         raise InvalidOwnerStatement("statement is not an object")
@@ -215,6 +229,10 @@ def verify_owner_statement(
     now = _now_ms() if now_ms is None else now_ms
     if issued_at > now + MAX_STATEMENT_FUTURE_SKEW_MS:
         raise InvalidOwnerStatement("issued_at is too far in the future")
+    if max_age_ms is not None and issued_at < now - max_age_ms:
+        raise InvalidOwnerStatement("statement is too old")
+    if authority_key_epoch is not None and epoch != authority_key_epoch:
+        raise InvalidOwnerStatement("statement names another key epoch")
     sig_text = statement["owner_statement_sig"]
     if not isinstance(sig_text, str):
         raise InvalidOwnerStatement("owner_statement_sig is not a string")
@@ -235,12 +253,17 @@ def verify_owner_statement(
 
 
 def _proof_body(
-    *, space_id: str, owner_instance_id: str, inviter_instance_id: str
+    *,
+    space_id: str,
+    owner_instance_id: str,
+    inviter_instance_id: str,
+    authority_key_epoch: int,
 ) -> dict:
     return {
         "space_id": space_id,
         "owner_instance_id": owner_instance_id,
         "inviter_instance_id": inviter_instance_id,
+        "authority_key_epoch": authority_key_epoch,
     }
 
 
@@ -250,12 +273,15 @@ def sign_inviter_proof(
     owner_instance_id: str,
     inviter_instance_id: str,
     space_seed: bytes,
+    authority_key_epoch: int = 0,
 ) -> dict:
-    """The inviting household proves it holds the space authority seed."""
+    """The inviting household proves it holds the space authority seed (of
+    the key at *authority_key_epoch*)."""
     body = _proof_body(
         space_id=space_id,
         owner_instance_id=owner_instance_id,
         inviter_instance_id=inviter_instance_id,
+        authority_key_epoch=authority_key_epoch,
     )
     body["authority_pk"] = ed25519_public_key(space_seed).hex()
     body.update(
@@ -276,16 +302,19 @@ def verify_inviter_proof(
     owner_instance_id: str,
     inviter_instance_id: str,
     authority_pk_hex: str,
+    authority_key_epoch: int = 0,
 ) -> bool:
     """Whether *inviter_instance_id* proved it holds the seed of
-    *authority_pk_hex* for *space_id* owned by *owner_instance_id*. An unknown
-    suite or any malformed field answers ``False``."""
+    *authority_pk_hex* (at *authority_key_epoch*) for *space_id* owned by
+    *owner_instance_id*. An unknown suite or any malformed field answers
+    ``False``."""
     if not isinstance(proof, dict):
         return False
     expected = _proof_body(
         space_id=space_id,
         owner_instance_id=owner_instance_id,
         inviter_instance_id=inviter_instance_id,
+        authority_key_epoch=authority_key_epoch,
     )
     expected["authority_pk"] = str(authority_pk_hex or "").lower()
     if strip_authority_sig_fields(proof) != expected:
@@ -309,6 +338,8 @@ def verify_inviter_proof(
 
 __all__ = [
     "INVITER_PROOF_EVENT",
+    "MAX_STATEMENT_AGE_MS",
+    "STATEMENT_REFRESH_MS",
     "MAX_STATEMENT_FUTURE_SKEW_MS",
     "OWNER_STATEMENT_FIELDS",
     "OWNER_STATEMENT_SUITE_ED25519",

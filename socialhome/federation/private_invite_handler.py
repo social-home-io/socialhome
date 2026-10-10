@@ -486,7 +486,7 @@ class PrivateSpaceInviteHandler:
         join: JoinOwner | None = None
         if isinstance(meta, dict):
             # Who the stub is seated under, and whether this invite may
-            # touch an existing one (migration 0092): see admit_join_stub.
+            # touch an existing one (migration 0093): see admit_join_stub.
             join = await admit_join_stub(
                 self._space_repo,
                 self._remote_members,
@@ -494,6 +494,11 @@ class PrivateSpaceInviteHandler:
                 meta,
                 event.from_instance,
                 own_instance_id=self._own_instance_id,
+                purge_stub=(
+                    self._space_service.purge_replaced_stub
+                    if self._space_service is not None
+                    else None
+                ),
             )
             if join is None:
                 log.warning(
@@ -551,7 +556,7 @@ class PrivateSpaceInviteHandler:
             await seat_join_owner_state(
                 self._space_repo, space_id, join, event.from_instance
             )
-            # The owner's signed GFS list (migration 0092), relayed by
+            # The owner's signed GFS list (migration 0093), relayed by
             # whoever invited us; taken only under the owner's signature.
             await apply_gfs_servers_from_metadata(
                 self._space_repo,

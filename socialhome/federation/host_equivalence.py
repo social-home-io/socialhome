@@ -1,4 +1,4 @@
-"""Who may act as a space's HOST on this household (migration 0092).
+"""Who may act as a space's HOST on this household (migration 0093).
 
 The host is the space's owner household (``spaces.owner_instance_id``). One
 more household is host-equivalent, on a MEMBER household only: the delegated
@@ -34,9 +34,12 @@ reaches this household. Nothing changes for the owner itself.
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..domain.space import SpaceRole
+from ..space_owner_statement import MAX_STATEMENT_AGE_MS
 
 if TYPE_CHECKING:
     from ..domain.space import Space
@@ -44,6 +47,28 @@ if TYPE_CHECKING:
         AbstractSpaceRemoteMemberRepo,
     )
     from ..repositories.space_repo import AbstractSpaceRepo
+
+
+def owner_statement_current(space: "Space", *, now_ms: int | None = None) -> bool:
+    """Whether the owner statement this household holds for *space* (already
+    verified when stored) names the authority key and epoch the space pins
+    and is younger than :data:`MAX_STATEMENT_AGE_MS`."""
+    if not space.owner_statement:
+        return False
+    try:
+        held = json.loads(space.owner_statement)
+        issued_at = int(held["issued_at"])
+        same_key = (
+            str(held["authority_pk"]).lower()
+            == str(space.identity_public_key or "").lower()
+        )
+        same_epoch = int(held["authority_key_epoch"]) == space.authority_key_epoch
+    except ValueError, TypeError, KeyError:
+        return False
+    now = (
+        int(datetime.now(timezone.utc).timestamp() * 1000) if now_ms is None else now_ms
+    )
+    return same_key and same_epoch and issued_at >= now - MAX_STATEMENT_AGE_MS
 
 
 async def is_trusted_inviter(
@@ -66,6 +91,11 @@ async def is_trusted_inviter(
     if not getattr(features, "delegated_admin_authority", False):
         return False
     if await space_repo.get_invited_by(space.id) != sender:
+        return False
+    if not owner_statement_current(space):
+        # The owner's word for the key we pin has lapsed (or the pin moved):
+        # an admin revoked by a rotation must not stay trusted on the old
+        # key. A refreshed statement from the owner restores it.
         return False
     seats = await seat_repo.list_for_instance(
         space.id, sender, include_tombstoned=False
@@ -112,4 +142,9 @@ async def touches_owner_household(
     return False
 
 
-__all__ = ["acts_as_host", "is_trusted_inviter", "touches_owner_household"]
+__all__ = [
+    "acts_as_host",
+    "is_trusted_inviter",
+    "owner_statement_current",
+    "touches_owner_household",
+]

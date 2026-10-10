@@ -5066,7 +5066,7 @@ async def test_config_changed_announces_the_applied_features(db, bus, inbound):
     assert [e.space_id for e in applied] == ["sp-applied"]
 
 
-# ── gfs_servers (migration 0092): the owner's signed GFS list ───────────────
+# ── gfs_servers (migration 0093): the owner's signed GFS list ───────────────
 
 _GS_OWNER_SEED = b"\x21" * 32
 _GS_OWNER = derive_instance_id(ed25519_public_key(_GS_OWNER_SEED))

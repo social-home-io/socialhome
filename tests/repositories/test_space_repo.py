@@ -1899,7 +1899,7 @@ async def test_rebind_mirror_provenance_is_a_compare_and_set(env):
     assert await env.repo.get_mirror_provenance("sp-m") == ("conn-new", 4)
 
 
-# ── GFS server list (migration 0092) ──────────────────────────────────────
+# ── GFS server list (migration 0093) ──────────────────────────────────────
 
 
 def _signed_list(issued_at: int = 5) -> SignedGfsServerList:
@@ -1982,3 +1982,11 @@ async def test_invited_by_round_trips_and_save_never_touches_it(env):
     await env.repo.save(replace(got, name="Renamed"))
     assert await env.repo.get_invited_by("sp-i") == "admin-hh"
     assert await env.repo.get_invited_by("nope") is None
+
+
+async def test_a_moved_pin_ends_the_inviting_admins_mark(env):
+    """Migration 0093: the inviting admin proved the seed of the OLD key."""
+    await env.repo.save(_space("sp-r"))
+    await env.repo.set_invited_by("sp-r", "admin-hh")
+    assert await env.repo.adopt_authority_key("sp-r", "cd" * 32, 1)
+    assert await env.repo.get_invited_by("sp-r") is None

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1106,7 +1108,7 @@ async def test_a_member_space_host_still_gets_announce_and_catchup(
     assert fed.mesh_catchups == [("sp-member", "host-m")]
 
 
-# ── Migration 0092: the trusted inviting admin is a mesh target too ───────
+# ── Migration 0093: the trusted inviting admin is a mesh target too ───────
 
 
 @pytest.mark.parametrize("delegation", [True, False])
@@ -1145,6 +1147,13 @@ async def test_mesh_catchup_also_asks_the_trusted_inviting_admin(db, delegation)
         role=SpaceRole.ADMIN.value,
     )
     await spaces.set_invited_by("sp-inv", "admin-hh")
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    await spaces.set_owner_statement(
+        "sp-inv",
+        json.dumps(
+            {"authority_pk": "aa" * 32, "authority_key_epoch": 0, "issued_at": now_ms}
+        ),
+    )
     fed = MagicMock()
     fed.is_confirmed_peer = AsyncMock(return_value=False)
     fed.begin_mesh_catchup_sync = AsyncMock(return_value=True)

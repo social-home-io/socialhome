@@ -162,7 +162,7 @@ class SpaceSyncScheduler:
     ) -> None:
         self._bus = bus
         #: The roster mirror: a trusted inviting admin household is a mesh
-        #: catch-up target too (migration 0092). ``None``: owner only.
+        #: catch-up target too (migration 0093). ``None``: owner only.
         self._seat_repo = seat_repo
         #: §25.6 echo (migration 0087): the provider snapshot of the last
         #: stream we applied cleanly, per (space, provider) — a periodic

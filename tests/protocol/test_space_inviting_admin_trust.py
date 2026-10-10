@@ -1,6 +1,6 @@
 """Release-blocker protocol tests: the delegated admin household that invited
 this household is host-equivalent here for content and admin actions — and
-for nothing owner-only (owner decision 2026-10-10, migration 0092,
+for nothing owner-only (owner decision 2026-10-10, migration 0093,
 ``socialhome/federation/host_equivalence.py``).
 
 A household a delegated admin invited is seated under the REAL owner O. While
@@ -108,7 +108,7 @@ def _meta(space_pk_hex: str, **over) -> dict:
 
 
 def _proven(space_kp, meta: dict, *, inviter: str | None = None) -> dict:
-    """An honest delegated admin's snapshot (migration 0092): the owner's
+    """An honest delegated admin's snapshot (migration 0093): the owner's
     signed statement and the inviter's proof that it holds the seed."""
     return {
         **meta,
@@ -460,3 +460,40 @@ async def test_the_inviting_admin_cannot_demote_or_ban_the_owners_people(joiner)
         _ban(FederationEventType.SPACE_MEMBER_BANNED, OWNER, "u-o2")
     )
     assert await joiner.spaces.is_banned(SPACE, "u-o2") is True
+
+
+async def test_the_inviting_admins_stream_spares_the_owners_people(joiner):
+    """The §25.6 roster / bans from a trusted inviter are taken like the
+    host's — except records about the owner household's people, and any
+    record naming somebody ``owner``."""
+    receiver = _receiver(joiner)
+    await receiver.on_chunk(
+        await _chunk(
+            ADMIN_SEED,
+            "members",
+            [
+                {"user_id": "u-o2", "role": "admin", "joined_at": "t"},
+                {"user_id": "u-usurper", "role": "owner", "joined_at": "t"},
+                {"user_id": "u-fine", "role": "member", "joined_at": "t"},
+            ],
+        ),
+        from_instance=ADMIN,
+    )
+    assert await joiner.spaces.get_member(SPACE, "u-o2") is None
+    assert await joiner.spaces.get_member(SPACE, "u-usurper") is None
+    assert await joiner.spaces.get_member(SPACE, "u-fine") is not None
+    await receiver.on_chunk(
+        await _chunk(
+            ADMIN_SEED,
+            "bans",
+            [
+                {"user_id": "u-o2", "banned_by": "u-admin"},
+                {"user_id": "u-owner", "banned_by": "u-admin"},
+                {"user_id": "u-third", "banned_by": "u-admin"},
+            ],
+        ),
+        from_instance=ADMIN,
+    )
+    assert await joiner.spaces.is_banned(SPACE, "u-o2") is False
+    assert await joiner.spaces.is_banned(SPACE, "u-owner") is False
+    assert await joiner.spaces.is_banned(SPACE, "u-third") is True

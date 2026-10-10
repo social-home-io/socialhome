@@ -310,6 +310,11 @@ class SpaceAuthorship:
         space = await self._spaces.get(space_id)
         return await self.acts_as_host(space, sender)
 
+    @property
+    def seat_repo(self) -> "AbstractSpaceRemoteMemberRepo":
+        """The roster mirror this binder reads."""
+        return self._seats
+
     async def acts_as_host(self, space: "Space | None", sender: str) -> bool:
         """:func:`~socialhome.federation.host_equivalence.acts_as_host` with
         this binder's repos."""

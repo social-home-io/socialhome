@@ -2251,18 +2251,36 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   owner_statement_sig_suite}`, binding the exact authority key the snapshot
   pins) AND the issuer's **inviter proof** (its own id signed with the space
   authority seed — only the owner and delegated admins hold it). Otherwise
-  the stub names the issuer itself, as before 0092, with no inviting-admin
+  the stub names the issuer itself, as before 0093, with no inviting-admin
   trust. A claimed owner that is the receiving household or not a derived
   instance id is refused outright. The owner signs a fresh statement into
   every snapshot and config it sends; members keep the latest verified one
   (`spaces.owner_statement`) and relay it.
-- **The real owner beats an unaccepted pre-seat.** If a stub held under
-  another owner has no accepted local member yet (it was only an
-  invitation), a properly resolved invite for a different owner replaces it:
-  the earlier inviter's seats, household rows, pinned key and pending
-  invitations are dropped (logged at WARNING). Once a member here accepted,
-  that stub stays (trust on first use). A stub's owner or trusted inviting
-  admin may re-invite into it. The inviter's identity key is recorded as the
+- **A proven owner beats an unproven, unaccepted pre-seat.** A stub held
+  under another owner is replaced only when the newcomer's owner is PROVEN
+  (its signed statement verified), the existing stub is NOT backed by a
+  current statement of its own, and nobody here ever accepted an invitation
+  into it (no local member, no accepted invitation). The earlier inviter's
+  seats, household rows, pinned key, media and pending invitations are then
+  dropped (logged at WARNING). An issuer that merely names itself owner
+  never replaces anything. A stub's owner or trusted inviting admin may
+  re-invite into it.
+- **Statements expire and follow the key.** A statement is taken only while
+  younger than 30 days and only for the key AND epoch the snapshot pins; the
+  inviter proof binds the epoch too. The owner re-signs on every rotation
+  and every 7 days (`OwnerStatementRefreshService`, a sequence-raised config
+  broadcast), and members relay the newest. A trusted inviter stays trusted
+  only while the statement held here is current for the pinned key and
+  epoch; a moved pin (a rotation re-pin) clears `invited_by_instance`. So an
+  admin revoked by a rotation — still holding the old seed and the owner's
+  old statement — loses a household it seated on the old key once the
+  statement ages out, or sooner: the owner answers a catch-up from a
+  household it never seated with a non-terminal `SPACE_SYNC_REJECTED`
+  (`reason: "not_seated"`) carrying its CURRENT statement, and when that
+  names another key / epoch than the inviter pinned, the owner wins
+  (re-pin to the newer epoch, inviter trust cleared). A household with any
+  record of membership on the owner (a seat row or tombstone, an accepted
+  invitation) still gets the terminal `removed`. The inviter's identity key is recorded as the
   host key only when the inviter is the owner. An inviting admin's key is kept on its own
   `space_instances` row for that space instead, so the §25.6 catch-up it
   streams to a joiner it reached over the mesh still verifies. That inviting
@@ -2272,15 +2290,17 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   [spaces.md](spaces.md#membership-ops-offline-of-owner-delegated-invite--seat)).
 - **Residuals:** (1) a household that invites us claiming to own a space
   itself (no statement needed for that) gets a stub naming itself — the
-  pre-0092 result; it can never name somebody else without that household's
-  signature. (2) Since space ids are not key-derived, two households can
-  both claim one id; between two unaccepted invitations the last one wins —
-  a denial of service, as before, never a takeover of an accepted stub.
+  pre-0093 result; it can never name somebody else without that household's
+  signature, and such an unproven stub can be replaced by the proven owner's
+  invite. (2) Since space ids are not key-derived, two households can both
+  claim one id with statements of their own; then the first one seated
+  stays (unless never accepted and unproven) — at worst a denial of
+  service, as before, never a takeover of an accepted or proven stub.
   (3) Main-era stubs that already name an admin as owner are not re-seated
   automatically: a seed-holding admin could sign "I own it" exactly like the
   owner, so nothing on such a stub can tell them apart.
 - An older receiver ignores the key; no protocol version gates it. Members
-  store it (`spaces.gfs_servers`, migration 0092) but do not yet act on it —
+  store it (`spaces.gfs_servers`, migration 0093) but do not yet act on it —
   publishing to every listed server is a later protocol version.
 
 ## Flow — publish + browse + join

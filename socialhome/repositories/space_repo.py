@@ -121,7 +121,11 @@ class AbstractSpaceRepo(Protocol):
     async def get_owner_user_id(self, space_id: str) -> str | None: ...
     async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
-    async def set_invited_by(self, space_id: str, instance_id: str) -> None: ...
+    async def set_invited_by(self, space_id: str, instance_id: str | None) -> None: ...
+    async def instance_accepted_invitation(
+        self, space_id: str, instance_id: str
+    ) -> bool: ...
+    async def any_invitation_accepted(self, space_id: str) -> bool: ...
     async def set_owner_statement(
         self, space_id: str, statement_json: str | None
     ) -> None: ...
@@ -708,7 +712,7 @@ class SqliteSpaceRepo:
     async def set_gfs_servers(
         self, space_id: str, servers: SignedGfsServerList | None
     ) -> None:
-        """Store the owner's signed GFS list (migration 0092) — the ONLY
+        """Store the owner's signed GFS list (migration 0093) — the ONLY
         writer of the column: ``save`` never touches it, so a config
         snapshot, a ``SPACE_CREATED`` or any other upsert cannot wipe or
         replace it. The caller verified the signature and its freshness."""
@@ -872,6 +876,9 @@ class SqliteSpaceRepo:
         changed = await self._db.enqueue_rowcount(
             "UPDATE spaces SET identity_public_key=?, authority_key_epoch=?,"
             " identity_private_key=NULL,"
+            # Migration 0093: the inviting admin proved the seed of the OLD
+            # key; a moved pin ends its trust until it proves the new one.
+            " invited_by_instance=NULL,"
             " authority_baseline_epoch=CASE"
             "  WHEN ABS(authority_baseline_epoch) < authority_key_epoch"
             "  THEN -authority_key_epoch ELSE authority_baseline_epoch END"
@@ -1016,7 +1023,8 @@ class SqliteSpaceRepo:
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE spaces SET identity_public_key=?, gfs_rotation_seq=?,"
-            " identity_private_key=NULL WHERE id=? AND mirror_gfs_id=?"
+            " identity_private_key=NULL, invited_by_instance=NULL"
+            " WHERE id=? AND mirror_gfs_id=?"
             " AND gfs_rotation_seq < ?",
             (public_key_hex, rotation_seq, space_id, gfs_id, rotation_seq),
         )
@@ -1057,9 +1065,9 @@ class SqliteSpaceRepo:
             (pk_hex, space_id),
         )
 
-    async def set_invited_by(self, space_id: str, instance_id: str) -> None:
+    async def set_invited_by(self, space_id: str, instance_id: str | None) -> None:
         """Record the delegated admin household that issued THIS household's
-        invite into a space it does not own (migration 0092,
+        invite into a space it does not own (migration 0093,
         :mod:`socialhome.federation.host_equivalence`). Never written by
         ``save``."""
         await self._db.enqueue(
@@ -1070,7 +1078,7 @@ class SqliteSpaceRepo:
     async def set_owner_statement(
         self, space_id: str, statement_json: str | None
     ) -> None:
-        """Store the owner's verified ownership statement (migration 0092).
+        """Store the owner's verified ownership statement (migration 0093).
         The caller verified it and its freshness. Never written by ``save``."""
         await self._db.enqueue(
             "UPDATE spaces SET owner_statement=? WHERE id=?",
@@ -1090,6 +1098,28 @@ class SqliteSpaceRepo:
             " AND remote_instance_id IS NOT NULL AND remote_instance_id != ?",
             (space_id, keep_instance_id),
         )
+
+    async def instance_accepted_invitation(
+        self, space_id: str, instance_id: str
+    ) -> bool:
+        """Whether *instance_id* accepted a cross-household invitation into
+        *space_id* we sent (host side) — evidence it was a member once."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM space_invitations WHERE space_id=?"
+            " AND remote_instance_id=? AND status='accepted' LIMIT 1",
+            (space_id, instance_id),
+        )
+        return row is not None
+
+    async def any_invitation_accepted(self, space_id: str) -> bool:
+        """Whether any invitation into *space_id* was ever accepted here —
+        a stub somebody here joined, even if they all left since."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM space_invitations WHERE space_id=?"
+            " AND status='accepted' LIMIT 1",
+            (space_id,),
+        )
+        return row is not None
 
     async def get_invited_by(self, space_id: str) -> str | None:
         row = await self._db.fetchone(

@@ -8,6 +8,7 @@ publishes a local domain event so the admin UI sees the change.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -27,10 +28,16 @@ from ...federation.host_equivalence import (
     acts_as_host,
     touches_owner_household,
 )
+from ...federation.sync_manager import SYNC_REJECT_NOT_SEATED
 from ...infrastructure.event_bus import EventBus
+from ...space_owner_statement import verify_owner_statement
 from ..child_protection_service import _VALID_MIN_AGES
 from ..space_authority_pin import owner_authority_cert_via, owner_statement_via
-from ..space_service import space_metadata_for_federation, can_seat_remote_stub
+from ..space_service import (
+    can_seat_remote_stub,
+    space_metadata_for_federation,
+    store_owner_statement,
+)
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
@@ -205,6 +212,11 @@ class SpaceMembershipInboundHandlers:
         if not space_id:
             return
         reason = str(event.payload.get("reason") or "")
+        if reason == SYNC_REJECT_NOT_SEATED:
+            # Not terminal (migration 0093): the host never seated us. Keep
+            # our copy; take the owner's statement it answered with.
+            await self._apply_owner_statement_answer(event, space_id)
+            return
         if reason not in ("dissolved", "removed"):
             log.warning(
                 "SPACE_SYNC_REJECTED for %s with unknown reason %r — dropping",
@@ -227,6 +239,61 @@ class SpaceMembershipInboundHandlers:
             return  # already terminally archived — idempotent
         await self._space_repo.set_archived(space_id, True, reason=reason)
         await self._bus.publish(RemoteSpaceDissolved(space_id=space_id))
+
+    async def _apply_owner_statement_answer(
+        self, event: "FederationEvent", space_id: str
+    ) -> None:
+        """The OWNER answered our catch-up with its current ownership
+        statement (it never seated us). When it names the key we pin, it is
+        a refresh. When it names another key or epoch than the one we pinned
+        through an inviter, the owner wins (migration 0093): the inviting
+        admin stops being trusted, and a newer epoch is pinned — an admin
+        revoked by a rotation that seated us on the OLD key loses us here."""
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return
+        if space.owner_instance_id != event.from_instance:
+            log.warning(
+                "owner statement for %s from non-owner %s — dropping",
+                space_id,
+                event.from_instance,
+            )
+            return
+        statement = event.payload.get("owner_statement")
+        if not isinstance(statement, dict):
+            return
+        try:
+            verified = verify_owner_statement(
+                statement,
+                space_id=space_id,
+                owner_instance_id=space.owner_instance_id,
+                authority_pk_hex=str(statement.get("authority_pk") or ""),
+            )
+        except ValueError as exc:
+            log.warning("owner statement for %s refused — %s", space_id, exc)
+            return
+        statement_json = json.dumps(statement, separators=(",", ":"), sort_keys=True)
+        pinned = (
+            str(space.identity_public_key or "").lower(),
+            space.authority_key_epoch,
+        )
+        if (verified.authority_pk_hex, verified.authority_key_epoch) == pinned:
+            await store_owner_statement(self._space_repo, space_id, statement_json)
+            return
+        log.warning(
+            "space %s: the owner names authority key epoch %d, we pinned epoch "
+            "%d through an inviter — the owner wins; ending the inviter's trust",
+            space_id,
+            verified.authority_key_epoch,
+            space.authority_key_epoch,
+        )
+        await self._space_repo.set_invited_by(space_id, None)
+        if verified.authority_key_epoch > space.authority_key_epoch and (
+            await self._space_repo.adopt_authority_key(
+                space_id, verified.authority_pk_hex, verified.authority_key_epoch
+            )
+        ):
+            await store_owner_statement(self._space_repo, space_id, statement_json)
 
     async def _on_instance_left(self, event: "FederationEvent") -> None:
         """A member household left (all its seats, or ``user_id``'s).

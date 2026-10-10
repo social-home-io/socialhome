@@ -225,7 +225,7 @@ class _FakeSpaceRepo:
     async def list_members(self, space_id):
         return [m for m in self.members if getattr(m, "space_id", None) == space_id]
 
-    # ── Migration 0092 (owner statement / inviting admin) ─────────────
+    # ── Migration 0093 (owner statement / inviting admin) ─────────────
     async def get_space_seed(self, space_id):
         return None
 
@@ -689,7 +689,7 @@ async def test_redeem_refuses_when_space_owned_by_another_host():
         "sp-own",
         owner_instance_id="the-real-host",
     )
-    # …and a member here already joined it (migration 0092: only a stub
+    # …and a member here already joined it (migration 0093: only a stub
     # nobody accepted yet gives way to another owner).
     accepted = SpaceMember(
         space_id="sp-own", user_id="u-earlier", role="member", joined_at="t"
@@ -705,9 +705,11 @@ async def test_redeem_refuses_when_space_owned_by_another_host():
     assert sender._spaces.space_instances == []  # type: ignore[attr-defined]
 
 
-async def test_redeem_replaces_a_stub_nobody_here_accepted():
-    """Migration 0092 — a stub seated by an earlier, never-accepted
-    invitation under another household gives way to the new owner."""
+async def test_an_unproven_claim_never_replaces_another_stub():
+    """Migration 0093 — a stub seated by an earlier, never-accepted
+    invitation under another household gives way only to an owner PROVEN by
+    its signed statement; an issuer that merely names itself (no statement)
+    is refused and the earlier stub stays."""
     sender, _issuer, *_rest, issuer_repo, _im = _wire_pair(
         {"space_id": "sp-own", "created_by": "owner", "uses_remaining": 1},
     )
@@ -716,12 +718,13 @@ async def test_redeem_replaces_a_stub_nobody_here_accepted():
         "sp-own",
         owner_instance_id="an-earlier-claimant",
     )
-    await sender.request_redeem(
-        "good-token",
-        viewer_user_id="u-local",
-        issuer_instance_id="issuer-1",
-    )
-    assert sender._spaces.spaces["sp-own"].owner_instance_id == "issuer-1"  # type: ignore[attr-defined]
+    with pytest.raises(SpacePermissionError, match="conflicts"):
+        await sender.request_redeem(
+            "good-token",
+            viewer_user_id="u-local",
+            issuer_instance_id="issuer-1",
+        )
+    assert "sp-own" not in sender._spaces.spaces  # type: ignore[attr-defined]
 
 
 async def test_redeem_with_expired_token_sends_deny():

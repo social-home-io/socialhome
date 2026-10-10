@@ -256,7 +256,7 @@ async def test_current_cert_backfills_a_pin_adopted_before_v46(env):
     assert await env.repo.get_authority_cert(SPACE) == cert
 
 
-# ── Migration 0092: the owner statement a snapshot ships ─────────────────
+# ── Migration 0093: the owner statement a snapshot ships ─────────────────
 
 
 def _bare_space(owner: str, *, statement: str | None = None) -> Space:

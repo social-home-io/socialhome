@@ -5,7 +5,7 @@ of them — including GFSs their own household never connected to — so the
 owner hands them the list inside the encrypted ``space_meta``
 (``SPACE_CONFIG_CHANGED``), signed with the owner household's identity key
 (:mod:`socialhome.gfs_server_list_sig`). This service keeps the owner's copy
-(migration 0092, :mod:`socialhome.domain.gfs_server`) in step with the truth:
+(migration 0093, :mod:`socialhome.domain.gfs_server`) in step with the truth:
 the space's ACTIVE ``gfs_space_publications`` rows on ACTIVE connections.
 
 :meth:`GfsServerSelectionService.sync_snapshot` re-derives the list and, only

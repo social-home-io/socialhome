@@ -731,6 +731,17 @@ paired peer and a `SPACE_ROUTED` envelope for a mesh-only one. A bare
 `send_event` toward an unpaired household is an un-queued `unknown_instance`
 drop, so no sync helper uses one for a possibly-unpaired counterpart.
 
+**Rejecting a non-member BEGIN** (S-1, `make_sync_reject_reason`).
+`SPACE_SYNC_REJECTED` carries a `reason`: `dissolved` (the space row is gone)
+and `removed` (the requester was a member once — a seat row or tombstone, or
+an accepted invitation) are terminal and archive the requester's copy;
+`not_seated` (migration 0093 — no record at all, e.g. a household a
+delegated admin invited before the host's roster learned of it, or after a
+restore from an older backup) is NOT terminal and carries the owner's current
+signed `owner_statement`, which the requester uses to end a stale inviting-admin
+trust (see discovery.md). With no statement to give, the host drops silently.
+Older receivers drop an unknown reason.
+
 The HTTPS chunk handler (`_handle_space_sync_chunk`) validates that the
 envelope's `from_instance` matches the session's recorded provider and
 then forwards the inner payload to `SpaceSyncReceiver.on_chunk` — the

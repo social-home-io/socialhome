@@ -1953,7 +1953,7 @@ never landed) the roster gossip is skipped gracefully but logged at
 WARNING — an anomaly, not a silent drop.
 
 **The invitee's view of the inviting admin** (owner decision 2026-10-10,
-migration 0092, `socialhome/federation/host_equivalence.py`). The invitee
+migration 0093, `socialhome/federation/host_equivalence.py`). The invitee
 seats its stub under the space's REAL owner (`space_meta.owner_instance_id`),
 not under the admin that invited it, ONLY when the snapshot carries the
 owner's signed owner statement for the pinned authority key and the admin's
@@ -1962,7 +1962,11 @@ admin's `build_space_snapshot_for_federation` adds the proof and relays the
 owner's latest statement). It then records that admin household in
 `spaces.invited_by_instance` (both §D1b invites and invite-link redeems);
 without both proofs the stub names the inviter itself and nothing below
-applies.
+applies. Both bind the authority key epoch, and the statement must be younger
+than 30 days; the trust holds only while the statement held here is current
+for the pinned key and epoch (the owner re-signs every 7 days and on every
+rotation), and a re-pin clears it (see discovery.md, "Statements expire and
+follow the key").
 While the space's `delegated_admin_authority` is ON and that household still
 holds a live `admin` seat, the invitee treats it as **host-equivalent for
 content and admin actions** — the owner is often offline, and the admin may

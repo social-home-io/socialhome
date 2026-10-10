@@ -1043,6 +1043,9 @@ class SpaceConfigEventType(StrEnum):
     #: The owner's GFS list (``Space.gfs_servers``) changed — federates as a
     #: ``SPACE_CONFIG_CHANGED`` snapshot like any other config edit.
     GFS_SERVERS_CHANGED = "gfs_servers_changed"
+    #: The owner household re-signed its ownership statement (migration
+    #: 0093) — federates as a config snapshot that carries it.
+    OWNER_STATEMENT_REFRESHED = "owner_statement_refreshed"
 
 
 def role_change_event_type(
@@ -1513,14 +1516,14 @@ class Space:
     #: for public/global tiers. Replaces the legacy ``target_audience`` hint.
     category: str | None = None
     #: The GFSs the space is listed on, as the OWNER household signed them
-    #: (migration 0092, :mod:`socialhome.domain.gfs_server`). On the owner it
+    #: (migration 0093, :mod:`socialhome.domain.gfs_server`). On the owner it
     #: is derived from its active publications; on a member it is the
     #: owner's signed copy from ``space_meta``, verified against the owner's
     #: identity key. Never written by ``save`` — only by ``set_gfs_servers``.
     #: ``None`` = not known.
     gfs_servers: SignedGfsServerList | None = None
     #: The owner household's signed ownership statement as last verified
-    #: here (migration 0092, :mod:`socialhome.space_owner_statement`),
+    #: here (migration 0093, :mod:`socialhome.space_owner_statement`),
     #: canonical JSON text — relayed in the snapshots this household sends.
     #: Never written by ``save`` — only by ``set_owner_statement``.
     owner_statement: str | None = None
@@ -1528,7 +1531,7 @@ class Space:
 
 @dataclass(slots=True, frozen=True)
 class JoinOwner:
-    """Who a §D1b join stub is seated under (migration 0092).
+    """Who a §D1b join stub is seated under (migration 0093).
 
     ``owner_instance_id`` — the stub's owner. ``trusted_inviter`` — the
     delegated admin household that issued the invite, set ONLY when the

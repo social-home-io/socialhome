@@ -1,5 +1,5 @@
 """Tests for the owner household's ownership statement and the inviter's
-seed-holder proof (migration 0092)."""
+seed-holder proof (migration 0093)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.space_owner_statement import (
+    MAX_STATEMENT_AGE_MS,
     MAX_STATEMENT_FUTURE_SKEW_MS,
     OWNER_STATEMENT_SUITE_ED25519,
     SUPPORTED_OWNER_STATEMENT_SUITES,
@@ -198,3 +199,27 @@ def test_inviter_proof_unknown_suite_is_false() -> None:
     proof = _proof()
     proof["authority_sig_suite"] = "future"
     assert _vproof(proof) is False
+
+
+def test_an_old_statement_expires() -> None:
+    """An admin revoked by a rotation still holds the owner's statement for
+    the old key: it must stop counting."""
+    old = _stmt(issued_at_ms=NOW - MAX_STATEMENT_AGE_MS - 1)
+    with pytest.raises(InvalidOwnerStatement):
+        _verify(old)
+    _verify(_stmt(issued_at_ms=NOW - MAX_STATEMENT_AGE_MS))
+    # The window can be lifted for a caller that only orders statements.
+    _verify(old, max_age_ms=None)
+
+
+def test_the_key_epoch_is_bound() -> None:
+    stmt = _stmt(authority_key_epoch=3)
+    _verify(stmt, authority_key_epoch=3)
+    with pytest.raises(InvalidOwnerStatement):
+        _verify(stmt, authority_key_epoch=2)
+
+
+def test_inviter_proof_binds_the_key_epoch() -> None:
+    proof = _proof(authority_key_epoch=4)
+    assert _vproof(proof, authority_key_epoch=4) is True
+    assert _vproof(proof, authority_key_epoch=0) is False
