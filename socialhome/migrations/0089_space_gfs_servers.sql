@@ -1,0 +1,66 @@
+-- 0089 — ``spaces.gfs_servers``: the GFSs a space is listed on, as the
+-- owner names them. A JSON array of
+-- ``{gfs_instance_id, inbox_url, public_key, gfs_key_suite, display_name}``
+-- (``socialhome/domain/gfs_server.py``). NULL = not known yet (an older
+-- owner, or a space this household never saw a list for) — readers fall back
+-- to today's behaviour; ``[]`` = listed nowhere.
+--
+-- * On the OWNER household it is derived from the space's active
+--   ``gfs_space_publications`` rows joined with ``gfs_connections``
+--   (``GfsServerSelectionService.sync_snapshot``); those rows stay the truth.
+-- * On a MEMBER household it is the copy the owner sent inside the
+--   encrypted, authority-signed ``space_meta`` (``SPACE_CONFIG_CHANGED`` and
+--   the §D1b join snapshots). Owner-only: a delegated admin's value is
+--   ignored on every household, like ``gfs_publish_mode`` / ``private_gfs``.
+--
+-- A member needs it to reach every GFS listing the space — including GFSs its
+-- own household never connected to — while the host is offline.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this data.
+--       * ``gfs_space_publications`` (0001, 0027): written only by
+--         ``SqliteGfsConnectionRepo.publish_space`` / ``unpublish_space``,
+--         reached only from ``GfsConnectionService.publish_space`` /
+--         ``unpublish_space`` (and the ``*_to_all`` / ``*_from_listed`` /
+--         ``republish_space`` loops over them); FK
+--         ``gfs_connection_id → gfs_connections(id) ON DELETE CASCADE``. It
+--         exists only on the household that published, keyed by ITS OWN
+--         connection ids — a member has no such rows.
+--       * ``gfs_connections`` (0001): this household's own pairings, so a
+--         member can describe only GFSs it is itself connected to.
+--       * ``peer_gfs_routes`` (0081): per paired PEER, which of OUR
+--         connections reach it — no space in it at all.
+--       * ``spaces.gfs_channel_id`` / ``gfs_channel_pk`` /
+--         ``gfs_channel_healed_at`` and ``space_keys.gfs_channel`` (0077):
+--         the PRIVATE space's opaque channel and the member's grant. The
+--         grant's ``gfs_ids`` (``GfsChannelGrant``) are bare
+--         ``gfs_instance_id`` values — no URL, no key — and sit under the
+--         authority ``binding_sig``; public / global spaces have no grant.
+--       * ``space_metadata_for_federation`` / ``stub_space_from_metadata``
+--         (space_service) and the inbound ``SPACE_CONFIG_CHANGED`` handler
+--         (federation_inbound_service, with its owner-only pins for
+--         ``gfs_publish_mode`` / ``private_gfs``) and the forwarded-edit
+--         path (``SpaceService._run_admin_action`` /
+--         ``_REMOTE_CONFIG_FIELDS``): the config carriage carries no GFS
+--         list today — nothing on a member names the servers a space is on.
+--   (2) Non-migration alternatives considered and rejected:
+--       * Member-side ``gfs_space_publications`` rows — the FK needs a
+--         ``gfs_connections`` row, which a member does not have for a GFS it
+--         never connected to (and must not create: that is a pairing).
+--       * A new table — one small list per space is exactly the row's grain;
+--         a table adds joins and a second home for the same fact.
+--       * Carrying it only in the channel grant — changes the grant's
+--         ``binding_sig`` shape, and public / global spaces have no grant.
+--       * Computing it at read time — the owner can (from its publication
+--         rows), a member cannot: it holds none of those rows.
+--       * Memory only — a member needs the list across restarts while the
+--         host is offline, which is the whole point.
+--   (3) Smallest possible change: one NULL-default ``ADD COLUMN`` with a
+--       CHECK that keeps it a JSON array — metadata-only, no rewrite, no
+--       backfill (the owner's fill happens in code, so members get it in a
+--       sequence-raised config broadcast). Nothing existing is changed.
+
+ALTER TABLE spaces ADD COLUMN gfs_servers TEXT
+    CHECK (gfs_servers IS NULL
+           OR (json_valid(gfs_servers) AND json_type(gfs_servers) = 'array'));

@@ -40,8 +40,10 @@ from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     sign_capabilities,
 )
+from socialhome.domain.gfs_server import GfsServer
 from socialhome.global_server.domain import ClientInstance
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services import gfs_connection_service
 from socialhome.services.gfs_connection_service import (
     GFS_INFO_NEGATIVE_TTL_S,
@@ -4328,3 +4330,92 @@ async def test_refresh_if_stale_is_debounced_per_connection(env):
     assert len(svc._http_client.gets) == gets  # type: ignore[union-attr]
     await svc.refresh_if_stale(conn, min_interval_s=0)
     assert len(svc._http_client.gets) == gets + 1  # type: ignore[union-attr]
+
+
+# ── Listing-change hook (the owner's ``spaces.gfs_servers`` snapshot) ──────
+
+
+async def test_publish_space_runs_the_listing_hook_after_success(env):
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(env, session, "hk-1", space_id="space-hk")
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.publish_space("space-hk", "hk-1")
+    assert seen == ["space-hk"]
+
+
+async def test_failed_publish_does_not_run_the_listing_hook(env):
+    session = _StubSession(status=500)
+    svc = await _publishable_svc(env, session, "hk-2", space_id="space-hk2")
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    with pytest.raises(GfsConnectionError):
+        await svc.publish_space("space-hk2", "hk-2")
+    assert seen == []
+
+
+async def test_unpublish_space_runs_the_listing_hook_and_survives_its_failure(
+    env, caplog
+):
+    _, repo = env
+    await repo.save(_make_conn("hk-3"))
+    await repo.publish_space("space-hk3", "hk-3")
+    svc, _pk = _signing_svc(repo, _StubSession(status=200))
+
+    async def _hook(space_id: str) -> None:
+        raise RuntimeError("boom")
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.unpublish_space("space-hk3", "hk-3")  # does not raise
+    assert await repo.list_publications_for_space("space-hk3") == []
+    assert "listing" in caplog.text
+
+
+async def test_disconnect_runs_the_listing_hook_for_each_listed_space(env):
+    _, repo = env
+    await repo.save(_make_conn("hk-4"))
+    await repo.publish_space("space-a", "hk-4")
+    await repo.publish_space("space-b", "hk-4")
+    svc = GfsConnectionService(repo, http_client=_StubSession())  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        # Runs after the cascade: the rows are gone by now.
+        assert await repo.list_publications_for_space(space_id) == []
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.disconnect("hk-4")
+    assert sorted(seen) == ["space-a", "space-b"]
+
+
+async def test_publish_body_never_names_the_other_listing_servers(env):
+    """The owner's GFS list is for members only: no GFS learns which other
+    servers list the space."""
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(env, session, "hk-5", space_id="space-body")
+    db, _ = env
+    await SqliteSpaceRepo(db).set_gfs_servers(
+        "space-body",
+        (
+            GfsServer(
+                gfs_instance_id="gfs-elsewhere",
+                inbox_url="https://elsewhere.example",
+                public_key="ab" * 32,
+                gfs_key_suite="ed25519",
+                display_name="Elsewhere",
+            ),
+        ),
+    )
+    await svc.publish_space("space-body", "hk-5")
+    body = json.dumps(session._last_body)
+    assert "gfs_servers" not in body
+    assert "elsewhere" not in body

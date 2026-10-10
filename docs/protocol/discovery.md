@@ -2192,6 +2192,36 @@ under the server-wide cap).
 6. **The owner replaces a channel another key holder moved past it**
    (self-heal above).
 
+### The owner's GFS list in space metadata
+
+A space's config snapshot (`space_meta`, carried by `SPACE_CONFIG_CHANGED`
+and the §D1b invite / redeem-ACK snapshots) includes `gfs_servers`: the
+GFSs the owner lists the space on, one entry per server —
+
+```json
+{"gfs_instance_id": "gfs-node-0", "inbox_url": "https://gfs.example",
+ "public_key": "<ed25519 hex>", "gfs_key_suite": "ed25519",
+ "display_name": "Example GFS"}
+```
+
+- **Members only, encrypted.** It rides inside the per-peer encrypted,
+  authority-signed `space_meta`; it is never part of a GFS publish body, so
+  no GFS learns which other servers list the space.
+- **Owner-only on every household.** The owner household derives it from its
+  active listings (`GfsServerSelectionService.sync_snapshot`, after every
+  publish / unpublish / disconnect) and sends it with a raised
+  `config_sequence` (event type `gfs_servers_changed`). A delegated admin's
+  signed config cannot change it, a forwarded config edit cannot carry it,
+  and a snapshot without the key leaves the stored list alone.
+- **Receivers are strict per entry, lenient per list**: an entry with an
+  unknown or missing `gfs_key_suite`, a bad key, or an `inbox_url` that is
+  not https (unless private) is dropped and logged; duplicates by
+  `gfs_instance_id` and anything past 8 entries are dropped. An absent key
+  means "not known"; `[]` means "listed nowhere".
+- An older receiver ignores the key; no protocol version gates it. Members
+  store it (`spaces.gfs_servers`, migration 0089) but do not yet act on it —
+  publishing to every listed server is a later protocol version.
+
 ## Flow — publish + browse + join
 
 ```mermaid
@@ -2290,6 +2320,10 @@ contest a ban.
   inbound routing); `socialhome/global_server/channels.py`,
   `socialhome/global_server/routes/channels.py` — GFS side (pins, the
   one-tier epoch, seats, relay), GFS migration `0016`.
+- `socialhome/domain/gfs_server.py` — the owner's GFS list entry
+  (`GfsServer`, `gfs_key_suite`, list / column codec);
+  `socialhome/services/gfs_server_selection_service.py` — the owner's
+  `spaces.gfs_servers` snapshot.
 - `socialhome/federation/keywrap_seal.py` — `seal_to_keywrap` /
   `open_keywrap` / `verify_keywrap_binding` (static-recipient sealed box).
 - `socialhome/global_server/routes/public.py`,

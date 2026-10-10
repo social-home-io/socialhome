@@ -296,6 +296,7 @@ class GfsConnectionService:
         "_on_rebound",
         "_rebind_warned",
         "_replaces",
+        "_on_listings_changed",
     )
 
     def __init__(
@@ -388,6 +389,10 @@ class GfsConnectionService:
         #: v_49 — called after a publish that carried the owner's authority
         #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
         self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
+        #: Called with a space id after the space's publication rows changed
+        #: (a publish or unpublish succeeded, or a disconnect cascaded them
+        #: away) — re-derives the owner's ``spaces.gfs_servers`` snapshot.
+        self._on_listings_changed: Callable[[str], Awaitable[object]] | None = None
         self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
         #: Called in order with the connection id after it adopted the
         #: server's new public id (:meth:`_rebind_to_served_id`): the seat
@@ -427,6 +432,27 @@ class GfsConnectionService:
     def attach_on_repinned(self, hook: Callable[[str, str], Awaitable[object]]) -> None:
         """Wire the v_49 epoch re-announce run after a re-pinning publish."""
         self._on_repinned = hook
+
+    def attach_on_listings_changed(
+        self, hook: Callable[[str], Awaitable[object]]
+    ) -> None:
+        """Wire the owner's GFS-list snapshot, run after a space's listings
+        changed (:meth:`GfsServerSelectionService.sync_snapshot`)."""
+        self._on_listings_changed = hook
+
+    async def _listings_changed(self, space_id: str) -> None:
+        """Run the listing hook, fail-soft: the GFS round-trip already
+        happened and its row is written; a failed snapshot is logged and
+        re-derived on the next change."""
+        if self._on_listings_changed is None:
+            return
+        try:
+            await self._on_listings_changed(space_id)
+        except Exception:
+            log.exception(
+                "GFS listing snapshot failed for space %s after a listing change",
+                space_id,
+            )
 
     async def start(self) -> None:
         """Start the GFS publish retry loop (app ``on_startup``)."""
@@ -1467,7 +1493,14 @@ class GfsConnectionService:
                 await self._on_disconnect(conn)
             except Exception:
                 log.exception("gfs: on-disconnect hook failed for %s", gfs_id)
+        # The FK cascade drops this connection's publication rows without
+        # passing through :meth:`unpublish_space`, so note the spaces first.
+        listed = sorted(
+            {p.space_id for p in await self._repo.list_publications(gfs_id)}
+        )
         await self._repo.delete(gfs_id)
+        for space_id in listed:
+            await self._listings_changed(space_id)
 
     async def list_connections(self) -> list[GfsConnection]:
         """Return ALL GFS connections for this household — active, pending,
@@ -1551,6 +1584,9 @@ class GfsConnectionService:
                     space_id,
                     gfs_id,
                 )
+        # Last: members learn about this server only once the publish (and
+        # any epoch re-announce above) has landed there.
+        await self._listings_changed(space_id)
         return publication
 
     def _warn_no_authority_rotation(self, conn: GfsConnection) -> None:
@@ -1777,6 +1813,7 @@ class GfsConnectionService:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         await self._repo.unpublish_space(space_id, gfs_id)
+        await self._listings_changed(space_id)
 
     async def publish_invite(
         self,

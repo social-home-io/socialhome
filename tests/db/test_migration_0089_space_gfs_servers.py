@@ -1,0 +1,72 @@
+"""Migration 0089 — ``spaces.gfs_servers``: the owner's GFS list, a JSON array
+or NULL."""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from socialhome.db.migrations import discover_migrations
+
+_VERSION = 89
+
+
+def _apply_through(conn: sqlite3.Connection, last: int) -> None:
+    done = {r[0] for r in conn.execute("SELECT version FROM schema_version")}
+    for mig in discover_migrations():
+        if mig.version in done:
+            continue
+        if mig.version > last:
+            break
+        mig.apply(conn)
+        conn.execute(
+            "INSERT INTO schema_version(version, description) VALUES (?,?)",
+            (mig.version, mig.description),
+        )
+
+
+@pytest.fixture
+def conn(tmp_path):
+    c = sqlite3.connect(tmp_path / "t.db", isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=ON")
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS schema_version ("
+        " version INTEGER PRIMARY KEY, description TEXT,"
+        " applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
+    )
+    _apply_through(c, _VERSION - 1)
+    c.execute(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key, space_type) VALUES('old','S','host','anna','ab','global')"
+    )
+    _apply_through(c, _VERSION)
+    return c
+
+
+def test_existing_rows_stay_null(conn) -> None:
+    row = conn.execute("SELECT gfs_servers FROM spaces WHERE id='old'").fetchone()
+    assert row[0] is None
+
+
+@pytest.mark.parametrize(
+    "value", ["[]", '[{"gfs_instance_id":"g","inbox_url":"https://g.example"}]']
+)
+def test_json_arrays_accepted(conn, value) -> None:
+    conn.execute("UPDATE spaces SET gfs_servers=? WHERE id='old'", (value,))
+    row = conn.execute("SELECT gfs_servers FROM spaces WHERE id='old'").fetchone()
+    assert row[0] == value
+
+
+@pytest.mark.parametrize("value", ["not json", '{"a":1}', "3", '"x"', ""])
+def test_non_arrays_rejected(conn, value) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE spaces SET gfs_servers=? WHERE id='old'", (value,))
+
+
+def test_null_accepted_again(conn) -> None:
+    conn.execute("UPDATE spaces SET gfs_servers='[]' WHERE id='old'")
+    conn.execute("UPDATE spaces SET gfs_servers=NULL WHERE id='old'")
+    row = conn.execute("SELECT gfs_servers FROM spaces WHERE id='old'").fetchone()
+    assert row[0] is None

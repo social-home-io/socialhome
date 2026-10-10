@@ -32,6 +32,11 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..infrastructure.hlc import HLC
+from ..domain.gfs_server import (
+    GfsServer,
+    gfs_servers_from_column,
+    gfs_servers_to_column,
+)
 from ..domain.space import (
     INVITE_VIA_GFS,
     INVITE_VIAS,
@@ -127,6 +132,9 @@ class AbstractSpaceRepo(Protocol):
         icon_hash: str | None,
     ) -> None: ...
     async def set_tz(self, space_id: str, tz: str) -> None: ...
+    async def set_gfs_servers(
+        self, space_id: str, servers: tuple[GfsServer, ...] | None
+    ) -> None: ...
     async def list_by_type(self, space_type: SpaceType) -> list[Space]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
     async def list_location_shared_spaces_for_user(
@@ -517,9 +525,9 @@ class SqliteSpaceRepo:
                 allow_post_event, allow_post_location, allow_post_highlight_share,
                 lat, lon, radius_km, bot_enabled, allow_here_mention,
                 dissolved, archived, archived_reason, about_markdown, cover_hash, tz,
-                min_age, category
+                min_age, category, gfs_servers
             ) VALUES(
-                -- 60 placeholders, one per column listed above.
+                -- 61 placeholders, one per column listed above.
                 ?, ?, ?, ?,                   -- id, name, description, emoji
                 ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
                 ?, ?, ?,                      -- config_sequence, roster_sequence, config_hlc
@@ -539,7 +547,7 @@ class SqliteSpaceRepo:
                 ?, ?, ?,                      -- allow_post_event, allow_post_location, allow_post_highlight_share
                 ?, ?, ?, ?, ?,                -- lat, lon, radius_km, bot_enabled, allow_here_mention
                 ?, ?, ?, ?, ?, ?,             -- dissolved, archived, archived_reason, about_markdown, cover_hash, tz
-                ?, ?                          -- min_age, category
+                ?, ?, ?                       -- min_age, category, gfs_servers
             )
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
@@ -597,7 +605,8 @@ class SqliteSpaceRepo:
                 cover_hash=excluded.cover_hash,
                 tz=excluded.tz,
                 min_age=excluded.min_age,
-                category=excluded.category
+                category=excluded.category,
+                gfs_servers=excluded.gfs_servers
             """,
             (
                 space.id,
@@ -660,6 +669,7 @@ class SqliteSpaceRepo:
                 space.tz,
                 int(space.min_age or 0),
                 space.category,
+                gfs_servers_to_column(space.gfs_servers),
             ),
         )
 
@@ -681,6 +691,16 @@ class SqliteSpaceRepo:
         await self._db.enqueue(
             "UPDATE spaces SET icon_hash=? WHERE id=?",
             (icon_hash, space_id),
+        )
+
+    async def set_gfs_servers(
+        self, space_id: str, servers: tuple[GfsServer, ...] | None
+    ) -> None:
+        """Store the owner's GFS list (migration 0089). The caller bumps
+        ``config_sequence`` and publishes the config change."""
+        await self._db.enqueue(
+            "UPDATE spaces SET gfs_servers=? WHERE id=?",
+            (gfs_servers_to_column(servers), space_id),
         )
 
     async def set_tz(self, space_id: str, tz: str) -> None:
@@ -2669,6 +2689,7 @@ def _row_to_space(row: dict | None) -> Space | None:
         tz=row.get("tz") or "UTC",
         min_age=int(row.get("min_age") or 0),
         category=row.get("category"),
+        gfs_servers=gfs_servers_from_column(row.get("gfs_servers")),
     )
 
 

@@ -29,6 +29,7 @@ from typing import Literal, TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .errors import CodedError
+from .gfs_server import GfsServer
 from .presence import truncate_coord
 
 if TYPE_CHECKING:
@@ -1039,6 +1040,9 @@ class SpaceConfigEventType(StrEnum):
     COVER_UPDATED = "cover_updated"
     ICON_UPDATED = "icon_updated"
     ABOUT_UPDATED = "about_updated"
+    #: The owner's GFS list (``Space.gfs_servers``) changed — federates as a
+    #: ``SPACE_CONFIG_CHANGED`` snapshot like any other config edit.
+    GFS_SERVERS_CHANGED = "gfs_servers_changed"
 
 
 def role_change_event_type(
@@ -1508,6 +1512,11 @@ class Space:
     #: ``None`` = unset; normalizes to ``"general"`` on display. Shown only
     #: for public/global tiers. Replaces the legacy ``target_audience`` hint.
     category: str | None = None
+    #: The GFSs the space is listed on, as the OWNER names them (migration
+    #: 0089, :mod:`socialhome.domain.gfs_server`). On the owner it is derived
+    #: from its active publications; on a member it is the owner's copy from
+    #: ``space_meta``. Owner-only on every household. ``None`` = not known.
+    gfs_servers: tuple[GfsServer, ...] | None = None
 
 
 @dataclass(slots=True, frozen=True)

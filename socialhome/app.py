@@ -374,6 +374,7 @@ from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_relay_inbound import GfsRelayInbound
 from .services.gfs_route_discovery_service import GfsRouteDiscoveryService
 from .services.gfs_directory import GfsDirectoryCache
+from .services.gfs_server_selection_service import GfsServerSelectionService
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
 from .services.link_preview_service import LinkPreviewService
 from .services.map_tile_service import MapTileService
@@ -3203,6 +3204,18 @@ def create_app(config: Config | None = None) -> web.Application:
             theme_repo=repos.theme,
             cover_repo=repos.space_cover,
             icon_repo=repos.space_icon,
+        )
+        # The owner's GFS list (``spaces.gfs_servers``, migration 0089):
+        # re-derived after every listing change on a space we own and sent
+        # to the members in a config change.
+        gfs_server_selection = GfsServerSelectionService(
+            space_repo=repos.space,
+            gfs_repo=repos.gfs_connection,
+            bus=bus,
+            own_instance_id=real_instance_id,
+        )
+        gfs_connection_service.attach_on_listings_changed(
+            gfs_server_selection.sync_snapshot
         )
 
         # Short-lived signed URLs for browser-loaded media — see §23.21

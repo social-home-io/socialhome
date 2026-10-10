@@ -1895,3 +1895,48 @@ async def test_rebind_mirror_provenance_is_a_compare_and_set(env):
     )
     # The seq is kept: the heal still needs a strictly higher one.
     assert await env.repo.get_mirror_provenance("sp-m") == ("conn-new", 4)
+
+
+# ── GFS server list (migration 0089) ──────────────────────────────────────
+
+
+def _gfs_server(gid: str = "gfs-a"):
+    from socialhome.domain.gfs_server import GfsServer
+
+    return GfsServer(
+        gfs_instance_id=gid,
+        inbox_url=f"https://{gid}.example",
+        public_key="ab" * 32,
+        gfs_key_suite="ed25519",
+        display_name=gid.upper(),
+    )
+
+
+async def test_gfs_servers_default_none(env):
+    await env.repo.save(_space("sp-g"))
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers is None
+    row = await env.db.fetchone("SELECT gfs_servers FROM spaces WHERE id='sp-g'")
+    assert row["gfs_servers"] is None
+
+
+async def test_gfs_servers_round_trip_through_save(env):
+    servers = (_gfs_server("gfs-a"), _gfs_server("gfs-b"))
+    await env.repo.save(replace(_space("sp-g"), gfs_servers=servers))
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers == servers
+    # The ON CONFLICT path writes it too, empty list included.
+    await env.repo.save(replace(got, gfs_servers=()))
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers == ()
+
+
+async def test_set_gfs_servers_targeted_update(env):
+    await env.repo.save(_space("sp-g"))
+    await env.repo.set_gfs_servers("sp-g", (_gfs_server(),))
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers == (_gfs_server(),)
+    assert got.config_sequence == 0  # the caller bumps the sequence
+    await env.repo.set_gfs_servers("sp-g", None)
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers is None

@@ -133,6 +133,7 @@ from ..domain.post import (
 )
 from ..domain.mention import Mention
 from ..domain.presence import truncate_coord
+from ..domain.gfs_server import GfsServer, gfs_servers_from_wire, gfs_servers_to_wire
 from ..domain.space import (
     ACCESS_FEATURES,
     InvalidSpaceLinkError,
@@ -3696,6 +3697,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     #: :class:`SpaceApprovalService`), so it is never applied via a direct
     #: config forward. The host drops it here even if an old / forged client
     #: includes it; a remote admin changes it through the ``propose`` verb.
+    #:
+    #: ``gfs_servers`` (migration 0089) is absent too, and ``update_config``
+    #: takes no such keyword: which GFSs list the space — and so where every
+    #: member publishes — is the OWNER's choice alone, and this path runs AS
+    #: the owner, so its owner gates are no defence.
     _REMOTE_CONFIG_FIELDS = frozenset(
         {
             "name",
@@ -7842,6 +7848,16 @@ def space_metadata_for_federation(
     receiver ignores both keys.
     """
     meta = space_metadata_fields(space)
+    if space.gfs_servers is not None:
+        # The GFSs the owner lists the space on (migration 0089), so a member
+        # can reach every one of them while the host is offline. Rides only
+        # here — inside the encrypted, authority-signed ``space_meta`` member
+        # households get — never in a GFS publish body. Owner-only on every
+        # receiving household (the inbound config path pins it against
+        # anyone else). ``None`` ("not known") is left off rather than sent
+        # as ``[]``, which would mean "listed nowhere". An older receiver
+        # ignores the key.
+        meta["gfs_servers"] = gfs_servers_to_wire(space.gfs_servers)
     if authority_cert is not None:
         meta["authority_cert"] = authority_cert
         meta["authority_key_epoch"] = space.authority_key_epoch
@@ -8250,7 +8266,18 @@ def stub_space_from_metadata(
         retention_exempt_types=normalize_retention_exempt_types(
             meta.get("retention_exempt_types")
         ),
+        gfs_servers=_coerce_gfs_servers(space_id, meta.get("gfs_servers")),
     )
+
+
+def _coerce_gfs_servers(space_id: str, raw: object) -> tuple[GfsServer, ...] | None:
+    """The owner's GFS list from ``space_meta``: lenient per entry (an
+    unknown suite, a bad URL or key is dropped and logged), ``None`` when
+    absent or not a list."""
+    servers, dropped = gfs_servers_from_wire(raw)
+    for reason in dropped:
+        log.warning("space %s: dropped a gfs_servers entry — %s", space_id, reason)
+    return servers
 
 
 def keep_local_space_state(
@@ -8271,6 +8298,9 @@ def keep_local_space_state(
 
     * Host-local state (join code, geo-gate, bot toggle, dissolve bookkeeping)
       never federates; the stored value always wins.
+    * The owner's GFS list (``gfs_servers``) is kept when the snapshot does
+      not carry it ("absent" is "unknown", not "listed nowhere"). Who may
+      change it is pinned by the caller (owner-only).
     * Retention is mirrored (it rides ``space_meta``) but enforced by the host
       alone, so the host pins its own values — a co-admin's mirror may be
       stale, and a co-admin's retention edit reaches the host as a forwarded
@@ -8280,6 +8310,9 @@ def keep_local_space_state(
     """
     keep_retention = we_host or "retention_days" not in meta
     keep_exempt = we_host or "retention_exempt_types" not in meta
+    # The owner's GFS list: a snapshot without the key (an older owner, or
+    # an owner that does not know its list yet) is "unknown" — keep ours.
+    keep_gfs_servers = "gfs_servers" not in meta
     return replace(
         refreshed,
         join_code=existing.join_code,
@@ -8296,6 +8329,9 @@ def keep_local_space_state(
             existing.retention_exempt_types
             if keep_exempt
             else refreshed.retention_exempt_types
+        ),
+        gfs_servers=(
+            existing.gfs_servers if keep_gfs_servers else refreshed.gfs_servers
         ),
     )
 

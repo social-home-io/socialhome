@@ -2962,6 +2962,19 @@ class FederationInboundService(ProtectionGateMixin):
                     private_gfs=existing.features.private_gfs,
                 ),
             )
+        # ``gfs_servers`` (migration 0089) likewise, on every household: the
+        # GFSs the space is listed on are where every member publishes, so a
+        # delegated admin's list would aim members' publishes at a server of
+        # its choosing. Only the owner household's own word moves it.
+        if not is_owner and refreshed.gfs_servers != existing.gfs_servers:
+            if "gfs_servers" in meta:
+                log.info(
+                    "SPACE_CONFIG_CHANGED for %s from %s tried to change the "
+                    "owner-only gfs_servers — kept the stored value",
+                    space_id,
+                    event.from_instance,
+                )
+            refreshed = replace(refreshed, gfs_servers=existing.gfs_servers)
         refreshed = keep_local_space_state(
             refreshed,
             existing=existing,

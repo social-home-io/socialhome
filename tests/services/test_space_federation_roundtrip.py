@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 import json
 
+from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -83,6 +84,10 @@ FEDERATED_ROUNDTRIP: frozenset[str] = frozenset(
         # pins it against an inbound snapshot.
         "retention_days",
         "retention_exempt_types",
+        # The GFSs the owner lists the space on (migration 0089): a member
+        # reaches each of them while the host is offline. Owner-only on every
+        # household — the inbound config path pins it against non-owners.
+        "gfs_servers",
     }
 )
 
@@ -228,6 +233,15 @@ def _fully_non_default_space() -> Space:
         tz="Europe/Berlin",
         min_age=18,
         category="gaming",
+        gfs_servers=(
+            GfsServer(
+                gfs_instance_id="gfs-a",
+                inbox_url="https://gfs-a.example",
+                public_key="ab" * 32,
+                gfs_key_suite="ed25519",
+                display_name="GFS A",
+            ),
+        ),
     )
 
 
@@ -358,6 +372,33 @@ def test_older_sender_meta_fails_soft() -> None:
     assert stub.features == SpaceFeatures()
     assert stub.retention_days is None
     assert stub.retention_exempt_types == ()
+    assert stub.gfs_servers is None
     # Transform still holds for the older shape.
     assert stub.owner_instance_id == "host.example"
     assert stub.id == "legacy-space"
+
+
+def test_unknown_gfs_servers_is_not_on_the_wire() -> None:
+    """``None`` ("not known") never ships — an empty list would tell members
+    the space is listed nowhere."""
+    space = dataclasses.replace(_fully_non_default_space(), gfs_servers=None)
+    assert "gfs_servers" not in space_metadata_for_federation(space)
+    listed_nowhere = dataclasses.replace(space, gfs_servers=())
+    assert space_metadata_for_federation(listed_nowhere)["gfs_servers"] == []
+
+
+def test_gfs_servers_from_the_wire_drop_bad_entries() -> None:
+    space = _fully_non_default_space()
+    meta = space_metadata_for_federation(space)
+    good = meta["gfs_servers"][0]
+    meta["gfs_servers"] = [
+        good,
+        {**good, "gfs_instance_id": "gfs-b", "gfs_key_suite": "future"},
+        {**good, "gfs_instance_id": "gfs-c", "inbox_url": "http://public.example"},
+        "junk",
+    ]
+    stub = stub_space_from_metadata(space.id, host_instance_id="h", meta=meta)
+    assert stub.gfs_servers == space.gfs_servers
+    meta["gfs_servers"] = "not a list"
+    stub = stub_space_from_metadata(space.id, host_instance_id="h", meta=meta)
+    assert stub.gfs_servers is None
