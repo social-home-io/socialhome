@@ -885,8 +885,8 @@ the OFF space has no channel. Polls every 3 s, backs off on 429.
 dir ``/tmp/sh-demo/gfs-b``, own identity key, public id ``gfs-b``);
 ``gfs-b-down`` stops it. ``gfs-multi-listing`` (after the rest of the gfs
 chain, before ``verify``): a and e connect to B; a creates a TRUSTED global,
-publicly readable space and lists it on A and B through the existing publish
-route (PR 2's server-selection API is not on main yet) — both servers list
+publicly readable space and lists it on A and B through the owner's server
+selection (``PUT /api/spaces/{id}/gfs-servers``) — both servers list
 it with the writer key pinned. a invites d (registered on A only); d holds
 the owner's signed two-server list and the writer key (v_57 hands it out in
 trusted spaces). d restarts with loopback treated as public — a

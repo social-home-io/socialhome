@@ -5854,8 +5854,8 @@ def cmd_gfs_multi_listing() -> None:
     a while and restarts a and d), before ``verify``.
 
     1. a and e connect to B. a creates a TRUSTED global space, publicly
-       readable, and lists it on A and on B (``POST /api/spaces/{id}/publish/
-       {gfs_id}`` — PR 2's selection API is not on main yet). Both servers
+       readable, and lists it on A and on B (owner selection, ``PUT
+       /api/spaces/{id}/gfs-servers``). Both servers
        list it and pin the epoch's writer key (the first-listing notice).
     2. a invites d (paired, registered on A only); d accepts. d holds the
        owner's signed list naming A and B, and the writer key (trusted
@@ -5911,9 +5911,16 @@ def cmd_gfs_multi_listing() -> None:
     )
     _must("a makes it publicly readable", st, body)
     a_a_id = state["gfs"]["pairings"]["a"]["id"]
-    for gfs_id, name in ((a_a_id, "A"), (a_b["id"], "B")):
-        st, body = _as(state, "a", "POST", f"/api/spaces/{space_id}/publish/{gfs_id}")
-        _must(f"a lists the space on GFS {name}", st, body, ok=(200, 201))
+    st, body = _as(
+        state,
+        "a",
+        "PUT",
+        f"/api/spaces/{space_id}/gfs-servers",
+        {"gfs_ids": [a_a_id, a_b["id"]]},
+    )
+    body = _must("a lists the space on GFS A and B", st, body)
+    if sorted(body.get("listed") or []) != sorted([a_a_id, a_b["id"]]):
+        raise SystemExit(f"gfs-multi-listing: owner selection answered {body!r}")
     for name, rows_of in (("A", _gfs_rows), ("B", _gfs_b_rows)):
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
