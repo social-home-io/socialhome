@@ -3801,6 +3801,14 @@ def create_app(config: Config | None = None) -> web.Application:
         invite_forwarder.attach_space_service(real_space_service)
         invite_forwarder.attach_to(federation_service)
         real_space_service.attach_invite_forwarder(invite_forwarder)
+        # Migration 0093: an invitation no longer seats a stub before its
+        # accept. Drop the stubs older builds pre-seated for invitations
+        # nobody here ever accepted — they would block the real owner's
+        # invitation for the same id. Idempotent; fail-soft.
+        try:
+            await real_space_service.sweep_unjoined_invitation_stubs()
+        except Exception:
+            log.exception("spaces: unjoined invitation stub sweep failed at startup")
         # §D2b — redeeming an invite link from a household we have never
         # met. The sealed blob goes out through a connection server
         # addressed by instance id only; the key-wrap triple is this

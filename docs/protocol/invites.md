@@ -1354,8 +1354,11 @@ sequenceDiagram
     Note over B: store the invitation + its snapshot<br/>(content key KEK-wrapped) — no stub
     Note over B: user sees invitation<br/>in UI
     alt user accepts
+        Note over B: per-space seating lock held
+        B->>B: seat stub + key + roster<br/>from THIS invitation's snapshot
         B->>A: SPACE_PRIVATE_INVITE_ACCEPT
-        B->>B: seat stub + key + roster<br/>from THIS invitation's snapshot,<br/>expire other households' invitations
+        Note over B: send failed → roll the fresh stub back
+        B->>B: mark accepted, expire other<br/>households' invitations
         A->>A: add SpaceRemoteMember
         A->>B: SPACE_MEMBER_JOINED + SPACE_KEY_EXCHANGE
     else user declines
@@ -1368,14 +1371,28 @@ household stores the invitation row with the issuer's `space_meta`
 (`space_invitations.join_snapshot`; the content key in it KEK-wrapped and
 bound to that invitation) and writes no space row, household rows, seats,
 pinned key, cover or icon. Accepting seats the stub from that invitation's
-own snapshot — owner statement, inviter proof and epoch are checked then
-(see [discovery.md](./discovery.md), "An invitation seats nothing until the
-user accepts it") — and the §CP.F1 age gate reads the snapshot's `min_age`.
-Pending invitations for one space id from different households coexist and
-are each listed; after an accept the ones from any household but the
-space's owner and the issuer are expired. A space this household already
-joined under another owner refuses the accept (`403`); an invitation that
-could only be refused is dropped on receipt.
+own snapshot — owner statement, inviter proof and epoch are checked then,
+the statement's freshness judged at the RECEIPT time stored with it (see
+[discovery.md](./discovery.md), "An invitation seats nothing until the user
+accepts it") — and the §CP.F1 age gate reads the snapshot's `min_age`. The
+accept runs under a per-space seating lock shared with the invite-link
+redeem and the GFS-mirror subscribe, re-reading the invitation and the space
+row inside it, so two joins for one space id never both seat. The stub is
+seated BEFORE the ACCEPT goes out, so the host's `SPACE_ROSTER_SNAPSHOT`
+(writer cert / key, channel grant) always finds it — the host re-sends that
+snapshot on its periodic sync tick too; a failed seat or send rolls a fresh
+stub back and leaves the invitation pending. Pending invitations for one
+space id from different households coexist and are each listed; after an
+accept the ones from any household but the space's owner and the issuer are
+expired. A space this household already joined under another owner refuses
+the accept (`403`), and so does an invitation whose owner no longer
+resolves as it did on receipt (never seated under the issuer instead) or
+whose sealed content key does not open here. An invitation that could only
+be refused is dropped on receipt; so is one over the receive-side caps (20
+pending per issuing household, 5 per space id and issuing household).
+Answering an invitation drops its snapshot. At startup, stubs older builds
+pre-seated for invitations nobody here accepted are dropped with their
+snapshot-less pending invitations, so the real owner can invite again.
 
 ### Private invite over the federation mesh (v_6+)
 

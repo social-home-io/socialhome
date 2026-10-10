@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
@@ -79,6 +80,14 @@ log = logging.getLogger(__name__)
 #: make us verify — a space roster is far smaller; this only caps the work
 #: a malformed or hostile snapshot can cause.
 _MAX_ROSTER_SNAPSHOT_ENTRIES = 5000
+
+#: Receive-side caps on pending private invitations holding a join snapshot
+#: (migration 0093 stores each one until the user answers): per issuing
+#: household, and per (space id, issuing household). Counted per issuer, so
+#: one household's flood can never crowd out another household's invitation
+#: for the same space id. Over a cap the new invitation is refused (logged).
+MAX_PENDING_INVITATIONS_PER_ISSUER = 20
+MAX_PENDING_INVITATIONS_PER_SPACE_AND_ISSUER = 5
 
 #: Why a roster-gossip authority signature was refused (``None`` = verified).
 _SIG_MISSING = "missing"
@@ -382,6 +391,23 @@ class PrivateSpaceInviteHandler:
         meta = p.get("space_meta")
         snapshot: str | None = None
         if isinstance(meta, dict):
+            issuer = event.from_instance
+            if (
+                await self._space_repo.count_pending_remote_invitations(issuer)
+                >= MAX_PENDING_INVITATIONS_PER_ISSUER
+                or await self._space_repo.count_pending_remote_invitations(
+                    issuer, space_id=space_id
+                )
+                >= MAX_PENDING_INVITATIONS_PER_SPACE_AND_ISSUER
+            ):
+                log.warning(
+                    "SPACE_PRIVATE_INVITE for %s from %s refused — too many "
+                    "pending invitations from that household",
+                    space_id,
+                    issuer,
+                )
+                return
+            received_at_ms = int(time.time() * 1000)
             join = await admit_join(
                 self._space_repo,
                 self._remote_members,
@@ -389,6 +415,7 @@ class PrivateSpaceInviteHandler:
                 meta,
                 event.from_instance,
                 own_instance_id=self._own_instance_id,
+                now_ms=received_at_ms,
             )
             if join is None:
                 log.warning(
@@ -407,6 +434,8 @@ class PrivateSpaceInviteHandler:
                     invite_token=invite_token,
                     host_identity_pk=p.get("host_identity_pk"),
                     space_crypto_service=self._space_crypto,
+                    received_at_ms=received_at_ms,
+                    owner_instance_id=join.owner_instance_id,
                 )
             except UnsupportedKeySuite as exc:
                 log.warning(

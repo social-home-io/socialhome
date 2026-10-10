@@ -180,7 +180,8 @@ ALTER TABLE spaces ADD COLUMN owner_statement TEXT
 
 -- ``space_invitations.join_snapshot`` (same migration): on the INVITEE
 -- household, the issuer's ``space_meta`` for a pending §D1b private invite,
--- as a JSON object ``{meta, host_identity_pk}`` — the space content key in
+-- as a JSON object ``{meta, host_identity_pk, received_at_ms,
+-- owner_instance_id}`` (set back to NULL once the invitation is answered) — the space content key in
 -- it KEK-wrapped (never plaintext at rest). Owner decision 2026-10-10: an
 -- invitation never seats a stub until the user accepts it. Receipt stores
 -- only this row; the accept seats the stub from THIS invitation's snapshot

@@ -286,6 +286,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_bootstrap_hints",
         "_rate_limiter",
         "_space_service",
+        "_seat_locks",
         "_redeem_locks",
         "_writer_certs",
     )
@@ -368,6 +369,11 @@ class SpaceInviteTokenRedeemCoordinator:
         #: seat the other committed). Weak values: a lock lives only while
         #: a redeem holds or awaits it.
         self._redeem_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
+        #: Per-space seating locks, used only when no space service (which
+        #: owns the shared ones) is attached.
+        self._seat_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
         #: v_49 writer certs: the issuer puts the redeemer's own cert in the
@@ -683,7 +689,38 @@ class SpaceInviteTokenRedeemCoordinator:
             issuer_instance_id=issuer_instance_id,
         )
 
+    def _seating_lock(self, space_id: str) -> asyncio.Lock:
+        """The space service's per-space seating lock (shared with the
+        private-invite accept, migration 0093), or our own when no space
+        service is attached (unit fixtures)."""
+        if self._space_service is not None:
+            return self._space_service.seating_lock(space_id)
+        lock = self._seat_locks.get(space_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._seat_locks[space_id] = lock
+        return lock
+
     async def _seat_local_after_ack(
+        self,
+        result: dict,
+        *,
+        viewer_user_id: str,
+        issuer_instance_id: str,
+        bootstrap: InviteBootstrapHint | None = None,
+    ) -> dict:
+        """:meth:`_seat_local_after_ack_locked` under the space's seating
+        lock, so a redeem and an accept (or two redeems) for one space id
+        from different households never both seat."""
+        async with self._seating_lock(str(result.get("space_id") or "")):
+            return await self._seat_local_after_ack_locked(
+                result,
+                viewer_user_id=viewer_user_id,
+                issuer_instance_id=issuer_instance_id,
+                bootstrap=bootstrap,
+            )
+
+    async def _seat_local_after_ack_locked(
         self,
         result: dict,
         *,

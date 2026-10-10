@@ -1546,6 +1546,25 @@ class JoinOwner:
 
 
 @dataclass(slots=True, frozen=True)
+class InvitationSnapshot:
+    """A pending private invite's stored join snapshot, opened (migration
+    0093, ``space_invitations.join_snapshot``).
+
+    ``meta`` — the issuer's ``space_meta``, its content key back in wire
+    shape. ``inviter_identity_pk`` — the issuer's claimed identity key.
+    ``received_at_ms`` — when the invitation arrived here: the owner
+    statement's freshness is judged at that moment, so an invitation that
+    was fresh on receipt stays acceptable. ``owner_instance_id`` — the owner
+    resolved on receipt; the accept refuses rather than seat under another.
+    """
+
+    meta: dict
+    inviter_identity_pk: str | None = None
+    received_at_ms: int | None = None
+    owner_instance_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceMember:
     """A single member row in a space.
 

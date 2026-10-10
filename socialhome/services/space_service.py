@@ -152,6 +152,7 @@ from ..domain.presence import truncate_coord
 from ..domain.gfs_server import SignedGfsServerList
 from ..domain.space import (
     ACCESS_FEATURES,
+    InvitationSnapshot,
     AgeRestrictedError,
     owner_seat_from_roster,
     InvalidSpaceLinkError,
@@ -5721,6 +5722,31 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         )
         return token
 
+    def seating_lock(self, space_id: str) -> asyncio.Lock:
+        """The per-space lock held by every path that seats or tears down
+        the local stub of *space_id*: a GFS-mirror subscribe and teardown, a
+        private-invite accept and an invite-link redeem (the redeem
+        coordinator shares it). Two joins for one space id from different
+        households therefore never both seat — the second re-reads the row
+        the first left and is refused (migration 0093)."""
+        return self._mirror_lock(space_id)
+
+    async def _purge_unjoined_stub(self, space_id: str) -> None:
+        """Drop a stub nobody here joined, with everything that came with it:
+        its household rows (``space_instances`` has no cascade), then the
+        space row and its cascaded graph, collecting media first."""
+        for instance_id in await self._spaces.list_member_instances(space_id):
+            await self._spaces.remove_space_instance(space_id, instance_id)
+        await purge_space_and_media(
+            space_repo=self._spaces,
+            post_repo=self._posts,
+            gallery_repo=self._gallery,
+            bazaar_repo=self._bazaar,
+            media_dir=self._media_dir,
+            media_refs=self._media_refs,
+            space_id=space_id,
+        )
+
     async def accept_remote_invite(
         self,
         *,
@@ -5731,13 +5757,27 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         invite. Sends a SPACE_PRIVATE_INVITE_ACCEPT back to the host.
 
         Migration 0093: the invitation seated nothing on receipt — the stub
-        is seated HERE, from this invitation's own stored snapshot
-        (:func:`admit_join` decides the owner, or refuses a space this
-        household already joined under another owner), and the pending
-        invitations from other households for the space are expired.
+        is seated HERE, from this invitation's own stored snapshot, under
+        :meth:`seating_lock` (re-reading the invitation and the space row
+        inside it): :func:`admit_join` decides the owner, judging the owner
+        statement's freshness at the RECEIPT time, or refuses a space this
+        household already joined under another owner — and refuses rather
+        than seat under anyone but the owner resolved on receipt. The stub
+        is seated BEFORE the ACCEPT goes out, so the host's roster snapshot
+        (credentials included) always finds it; a failed seat or send rolls
+        a fresh stub back. Then the pending invitations from other
+        households for the space are expired.
         """
         if self._federation is None:
             raise RuntimeError("federation not attached")
+        invite = await self._spaces.get_invitation_by_token(token)
+        if invite is None:
+            raise InviteExpiredError()
+        async with self.seating_lock(str(invite["space_id"])):
+            await self._accept_remote_invite_locked(token=token, user_id=user_id)
+
+    async def _accept_remote_invite_locked(self, *, token: str, user_id: str) -> None:
+        assert self._federation is not None
         invite = await self._spaces.get_invitation_by_token(token)
         if invite is None:
             raise InviteExpiredError()
@@ -5749,18 +5789,17 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             or str(invite.get("remote_user_id") or "") != user_id
         ):
             # Another user's invitation, or one already answered / expired
-            # (a later accept seated the space under another household).
+            # (a concurrent accept seated the space under another household).
             raise InviteExpiredError()
         space_id = str(invite["space_id"])
         opened = open_join_snapshot(invite, space_crypto_service=self._space_crypto)
-        # §CP.F1 — block an under-age protected minor BEFORE we send the
-        # ACCEPT envelope, so the host never sees a join the invitee's
-        # household refuses to seat (no split-brain). The host's ``min_age``
-        # rides in the invitation's stored ``space_meta``; an invitation
-        # received before 0093 has it on its pre-seated stub instead.
+        # §CP.F1 — block an under-age protected minor BEFORE we seat or send
+        # anything (no split-brain). The host's ``min_age`` rides in the
+        # invitation's stored ``space_meta``; an invitation received before
+        # 0093 has it on its pre-seated stub instead.
         if self._child_protection is not None:
             if opened is not None:
-                min_age = join_snapshot_min_age(opened[0])
+                min_age = join_snapshot_min_age(opened.meta)
                 if not await self._child_protection.is_age_allowed(user_id, min_age):
                     raise AgeRestrictedError(min_age)
             else:
@@ -5771,23 +5810,37 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 self._spaces,
                 self._remote_members,
                 space_id,
-                opened[0],
+                opened.meta,
                 host_instance,
                 own_instance_id=self._own_instance_id,
+                now_ms=opened.received_at_ms,
             )
             if join is None:
                 raise SpacePermissionError(
                     "This invite points at a space that conflicts with one "
                     "you already belong to under a different host."
                 )
+            if (
+                opened.owner_instance_id is not None
+                and join.owner_instance_id != opened.owner_instance_id
+            ):
+                # Never degrade: an invitation proven for the real owner on
+                # receipt is never seated under its issuer instead.
+                log.warning(
+                    "space %s: invitation from %s resolved to owner %s on "
+                    "receipt but %s now — refusing the accept",
+                    space_id,
+                    host_instance,
+                    opened.owner_instance_id,
+                    join.owner_instance_id,
+                )
+                raise SpacePermissionError(
+                    "This invitation's proof of the space's owner no longer "
+                    "holds — ask for a new invitation."
+                )
         # Look up the accepting user so the ACCEPT envelope can carry
-        # their human-readable name to the host. The protocol method is
-        # ``get_by_user_id``; an earlier draft of this code looked up
-        # ``get_by_id`` (which doesn't exist on the repo), so the
-        # ``hasattr`` guard was always False → ``display`` stayed None
-        # → the host's member roster showed the raw ``user_id`` instead
-        # of the user's display name. Symptom Pascal hit when
-        # Jacqueline accepted his invite.
+        # their human-readable name to the host (``get_by_user_id`` — the
+        # host's roster otherwise shows the raw ``user_id``).
         display = None
         user_pk = None
         user = await self._users.get_by_user_id(user_id)
@@ -5809,27 +5862,38 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and await self._federation_repo.get_instance(host_instance) is None
         ):
             accept_payload.update(mesh_member_claim(self._federation.own_identity_pk))
-        await self._send_invite_envelope(
-            to_instance_id=host_instance,
-            event_type=FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
-            payload=accept_payload,
-        )
-        if opened is not None and join is not None:
-            await seat_join_stub(
-                space_repo=self._spaces,
-                remote_member_repo=self._remote_members,
-                bus=self._bus,
-                space_id=space_id,
-                meta=opened[0],
-                join=join,
-                issuer_instance_id=host_instance,
-                joining_user_id=user_id,
-                own_instance_id=self._own_instance_id,
-                cover_repo=self._covers,
-                icon_repo=self._icons,
-                space_crypto_service=self._space_crypto,
-                inviter_identity_pk=opened[1],
+        fresh_seat = opened is not None and await self._spaces.get(space_id) is None
+        try:
+            if opened is not None and join is not None:
+                await seat_join_stub(
+                    space_repo=self._spaces,
+                    remote_member_repo=self._remote_members,
+                    bus=self._bus,
+                    space_id=space_id,
+                    meta=opened.meta,
+                    join=join,
+                    issuer_instance_id=host_instance,
+                    joining_user_id=user_id,
+                    own_instance_id=self._own_instance_id,
+                    cover_repo=self._covers,
+                    icon_repo=self._icons,
+                    space_crypto_service=self._space_crypto,
+                    inviter_identity_pk=opened.inviter_identity_pk,
+                )
+            await self._send_invite_envelope(
+                to_instance_id=host_instance,
+                event_type=FederationEventType.SPACE_PRIVATE_INVITE_ACCEPT,
+                payload=accept_payload,
             )
+        except Exception:
+            if fresh_seat:
+                log.warning(
+                    "space %s: accept failed — rolling back the stub seated "
+                    "from the invitation",
+                    space_id,
+                )
+                await self._purge_unjoined_stub(space_id)
+            raise
         await self._spaces.update_invitation_status(
             invite["id"],
             "accepted",
@@ -5843,17 +5907,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # …) federate back to the host. Without this row,
         # ``broadcast_to_space_members`` returns no targets on the
         # invitee side and the events go nowhere.
-        await self._spaces.add_space_instance(
-            invite["space_id"],
-            host_instance,
-        )
+        await self._spaces.add_space_instance(space_id, host_instance)
         # Kick a §25.6 catch-up so we pull the space's historical posts /
         # gallery / media from the host. When the host is reachable only via the
         # mesh (not a confirmed direct peer), the SpaceSyncScheduler never
         # triggers — so initiate it explicitly here. No-op + fail-soft for a
-        # confirmed host or an unwired sync stack.
+        # confirmed host or an unwired sync stack. (A roster snapshot the
+        # host sends on seat is also re-sent on its periodic sync tick.)
         await self._federation.begin_mesh_catchup_sync(
-            space_id=invite["space_id"],
+            space_id=space_id,
             host_instance_id=host_instance,
         )
         # §D1b — seat the local membership row pointing at the stub
@@ -5861,15 +5923,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # invitation received before 0093, pre-seated on receipt).
         # ``list_for_user`` JOINs on ``space_members``, so this is
         # what actually surfaces the space in the invitee's
-        # ``/api/spaces``. If the stub doesn't exist (older sender,
-        # no metadata shipped), the FK constraint will trip and we
-        # log+skip — the invitee can still accept, just won't see
-        # the space until upstream upgrades.
-        stub = await self._spaces.get(invite["space_id"])
+        # ``/api/spaces``. No stub (older sender, no metadata shipped):
+        # log + skip — the space shows up once SPACE_CONFIG_CHANGED
+        # upserts it.
+        stub = await self._spaces.get(space_id)
         if stub is not None:
             await self._spaces.save_member(
                 SpaceMember(
-                    space_id=invite["space_id"],
+                    space_id=space_id,
                     user_id=user_id,
                     role=SpaceRole.MEMBER.value,
                     joined_at=datetime.now(timezone.utc).isoformat(),
@@ -5881,8 +5942,39 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 " space_id=%s — invitee will see the invite as accepted"
                 " but the space won't show up locally until SPACE_CONFIG"
                 "_CHANGED upserts the stub. Sender on older protocol?",
-                invite["space_id"],
+                space_id,
             )
+
+    async def sweep_unjoined_invitation_stubs(self) -> int:
+        """Startup (idempotent): drop stubs seated by a private invitation
+        before migration 0093 that nobody here ever joined — no local
+        member, no accepted invitation — with their snapshot-less pending
+        invitations. Such a stub would block the real owner's invitation
+        for the same id forever. Returns how many were dropped."""
+        dropped = 0
+        expired = 0
+        for space_id in await self._spaces.list_unjoined_invitation_stubs(
+            self._own_instance_id
+        ):
+            async with self.seating_lock(space_id):
+                if space_id not in await self._spaces.list_unjoined_invitation_stubs(
+                    self._own_instance_id
+                ):
+                    continue
+                await self._purge_unjoined_stub(space_id)
+                expired += await self._spaces.expire_snapshotless_remote_invitations(
+                    space_id
+                )
+                dropped += 1
+        if dropped:
+            log.warning(
+                "spaces: dropped %d stub(s) seated by never-accepted invitations "
+                "before 0093, and expired %d of their pending invitation(s) — "
+                "the inviter may invite again",
+                dropped,
+                expired,
+            )
+        return dropped
 
     async def decline_remote_invite(
         self,
@@ -5898,6 +5990,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         host_instance = invite.get("remote_instance_id")
         if not host_instance:
             raise ValueError("not a cross-household invite")
+        if (
+            str(invite.get("status") or "pending") != "pending"
+            or str(invite.get("remote_user_id") or "") != user_id
+        ):
+            # Only the invited user may answer, and only once.
+            raise InviteExpiredError()
         await self._send_invite_envelope(
             to_instance_id=host_instance,
             event_type=FederationEventType.SPACE_PRIVATE_INVITE_DECLINE,
@@ -8466,10 +8564,12 @@ def _verified_owner_statement(
     owner_instance_id: str,
     *,
     authority_key_epoch: int | None = None,
+    now_ms: int | None = None,
 ) -> str | None:
     """The canonical JSON of ``meta["owner_statement"]`` when it is the
     owner's valid, recent statement binding the key ``meta`` pins at
-    *authority_key_epoch* (default: the epoch ``meta`` pins), else ``None``."""
+    *authority_key_epoch* (default: the epoch ``meta`` pins), else ``None``.
+    Recent as of *now_ms* (default: the clock)."""
     statement = meta.get("owner_statement")
     if statement is None:
         return None
@@ -8483,6 +8583,7 @@ def _verified_owner_statement(
             owner_instance_id=owner_instance_id,
             authority_pk_hex=str(meta.get("identity_public_key") or ""),
             authority_key_epoch=epoch,
+            now_ms=now_ms,
         )
     except InvalidOwnerStatement as exc:  # UnsupportedOwnerStatementSuite too
         log.warning(
@@ -8504,8 +8605,12 @@ def resolve_join_owner(
     issuer_instance_id: str,
     *,
     own_instance_id: str | None,
+    now_ms: int | None = None,
 ) -> JoinOwner:
     """Who a §D1b join stub is seated under (invite or invite-link redeem).
+
+    *now_ms* — the moment the owner statement's freshness is judged at
+    (default: the clock; an invitation's accept passes its receipt time).
 
     The issuer, as before 0093 — unless the snapshot names ANOTHER owner and
     proves it: the owner household's signed statement binding this space to
@@ -8525,7 +8630,7 @@ def resolve_join_owner(
         return JoinOwner(
             owner_instance_id=issuer_instance_id,
             statement_json=_verified_owner_statement(
-                space_id, meta, issuer_instance_id
+                space_id, meta, issuer_instance_id, now_ms=now_ms
             ),
         )
     if claimed == own_instance_id or _DERIVED_INSTANCE_ID.fullmatch(claimed) is None:
@@ -8536,7 +8641,7 @@ def resolve_join_owner(
             issuer_instance_id,
         )
         return JoinOwner(owner_instance_id=issuer_instance_id)
-    statement_json = _verified_owner_statement(space_id, meta, claimed)
+    statement_json = _verified_owner_statement(space_id, meta, claimed, now_ms=now_ms)
     proof_ok = verify_inviter_proof(
         meta.get("inviter_proof"),
         space_id=space_id,
@@ -8571,6 +8676,7 @@ async def admit_join(
     issuer_instance_id: str,
     *,
     own_instance_id: str | None,
+    now_ms: int | None = None,
 ) -> JoinOwner | None:
     """May a §D1b join snapshot from *issuer_instance_id* seat (or refresh)
     the stub of *space_id* — and under which owner? ``None``: refused.
@@ -8592,7 +8698,11 @@ async def admit_join(
       the row over.
     """
     jo = resolve_join_owner(
-        space_id, meta, issuer_instance_id, own_instance_id=own_instance_id
+        space_id,
+        meta,
+        issuer_instance_id,
+        own_instance_id=own_instance_id,
+        now_ms=now_ms,
     )
     existing = await space_repo.get(space_id)
     if existing is None:
@@ -8635,11 +8745,15 @@ def seal_join_snapshot(
     invite_token: str,
     host_identity_pk: object,
     space_crypto_service,
+    received_at_ms: int | None = None,
+    owner_instance_id: str | None = None,
 ) -> str:
     """The ``space_invitations.join_snapshot`` JSON for a pending private
     invite (migration 0093): the issuer's ``space_meta`` with its content
-    key KEK-wrapped for this invitation (dropped when this household has no
-    key store), plus the issuer's claimed identity key. Raises
+    key KEK-wrapped for this invitation, the issuer's claimed identity key,
+    the receipt time and the owner resolved on receipt. A key that cannot
+    be sealed here (no key store, malformed) is kept only as a marker, so
+    the accept refuses rather than seat a space it cannot decrypt. Raises
     :class:`UnsupportedKeySuite` for a key suite this build does not know."""
     stored = dict(meta)
     key = stored.pop("space_content_key", None)
@@ -8654,21 +8768,25 @@ def seal_join_snapshot(
             raw = base64.b64decode(str(key.get("key_base64") or ""), validate=True)
         except binascii.Error, ValueError:
             raw = None
+        sealed = None
         if space_crypto_service is not None and raw is not None and len(raw) == 32:
-            stored["space_content_key"] = {
-                "key_suite": suite,
-                "epoch": key.get("epoch"),
-                "rotated_by": key.get("rotated_by"),
-                "sealed_key": space_crypto_service.seal_at_rest(
-                    raw, context=_invitation_key_context(space_id, invite_token)
-                ),
-            }
+            sealed = space_crypto_service.seal_at_rest(
+                raw, context=_invitation_key_context(space_id, invite_token)
+            )
+        stored["space_content_key"] = {
+            "key_suite": suite,
+            "epoch": key.get("epoch"),
+            "rotated_by": key.get("rotated_by"),
+            "sealed_key": sealed,
+        }
     return json.dumps(
         {
             "meta": stored,
             "host_identity_pk": (
                 host_identity_pk if isinstance(host_identity_pk, str) else None
             ),
+            "received_at_ms": received_at_ms,
+            "owner_instance_id": owner_instance_id,
         },
         separators=(",", ":"),
     )
@@ -8676,11 +8794,14 @@ def seal_join_snapshot(
 
 def open_join_snapshot(
     invite: dict, *, space_crypto_service
-) -> tuple[dict, str | None] | None:
-    """``(space_meta, host_identity_pk)`` of a pending invitation's stored
-    snapshot, its content key unwrapped back into the wire shape — or
-    ``None`` for an invitation stored without one (before 0093, or an older
-    sender that shipped no ``space_meta``)."""
+) -> InvitationSnapshot | None:
+    """A pending invitation's stored snapshot, its content key unwrapped
+    back into the wire shape — or ``None`` for an invitation stored without
+    one (before 0093, or an older sender that shipped no ``space_meta``).
+
+    Raises :class:`SpacePermissionError` when the snapshot carries a content
+    key that does not open here (no key store, a changed KEK, a tampered
+    row): seating a space this household cannot decrypt helps nobody."""
     raw = invite.get("join_snapshot")
     if not raw:
         return None
@@ -8693,10 +8814,13 @@ def open_join_snapshot(
         return None
     meta = dict(meta)
     key = meta.pop("space_content_key", None)
-    if isinstance(key, dict) and space_crypto_service is not None:
+    if isinstance(key, dict):
+        sealed = key.get("sealed_key")
         try:
+            if space_crypto_service is None or not isinstance(sealed, str):
+                raise KeyManagerError("no sealed key or no key store")
             clear = space_crypto_service.open_at_rest(
-                str(key.get("sealed_key") or ""),
+                sealed,
                 context=_invitation_key_context(
                     str(invite.get("space_id") or ""),
                     str(invite.get("invite_token") or ""),
@@ -8704,19 +8828,33 @@ def open_join_snapshot(
             )
         except KeyManagerError:
             log.warning(
-                "space %s: the invitation's sealed content key does not open — "
-                "joining without it",
+                "space %s: the invitation's sealed content key does not open "
+                "here — refusing the accept",
                 invite.get("space_id"),
             )
-        else:
-            meta["space_content_key"] = {
-                "key_suite": key.get("key_suite", KEY_SUITE_AESGCM_256),
-                "epoch": key.get("epoch"),
-                "rotated_by": key.get("rotated_by"),
-                "key_base64": base64.b64encode(clear).decode("ascii"),
-            }
+            raise SpacePermissionError(
+                "This invitation's space key cannot be opened on this "
+                "household — ask for a new invitation."
+            ) from None
+        meta["space_content_key"] = {
+            "key_suite": key.get("key_suite", KEY_SUITE_AESGCM_256),
+            "epoch": key.get("epoch"),
+            "rotated_by": key.get("rotated_by"),
+            "key_base64": base64.b64encode(clear).decode("ascii"),
+        }
     host_pk = snapshot.get("host_identity_pk")
-    return meta, (host_pk if isinstance(host_pk, str) else None)
+    received = snapshot.get("received_at_ms")
+    owner = snapshot.get("owner_instance_id")
+    return InvitationSnapshot(
+        meta=meta,
+        inviter_identity_pk=host_pk if isinstance(host_pk, str) else None,
+        received_at_ms=(
+            received
+            if isinstance(received, int) and not isinstance(received, bool)
+            else None
+        ),
+        owner_instance_id=owner if isinstance(owner, str) else None,
+    )
 
 
 def join_snapshot_min_age(meta: dict) -> int:

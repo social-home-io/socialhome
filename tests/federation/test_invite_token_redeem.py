@@ -3338,3 +3338,30 @@ def test_a_claimed_proto_version_fails_closed(raw, expected):
     """A §D2b request's ``proto_version`` that is absent or malformed reads
     as v1, so the moderator gate seats a member rather than raising."""
     assert itr._int_or_one(raw) == expected
+
+
+async def test_a_redeem_seats_under_the_space_services_seating_lock():
+    """M1: a redeem and a private-invite accept for one space id share the
+    space service's per-space lock — the redeem's local seat waits for it."""
+    coord = _make_coordinator()
+    held = asyncio.Lock()
+    coord.attach_space_service(SimpleNamespace(seating_lock=lambda sid: held))
+    assert coord._seating_lock("sp-x") is held
+    await held.acquire()
+    task = asyncio.create_task(
+        coord._seat_local_after_ack(
+            {"space_id": "sp-x"},
+            viewer_user_id="u-local",
+            issuer_instance_id="issuer-1",
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert not task.done()
+    held.release()
+    await task
+
+
+def test_without_a_space_service_the_seating_lock_is_per_space():
+    coord = _make_coordinator()
+    assert coord._seating_lock("a") is coord._seating_lock("a")
+    assert coord._seating_lock("a") is not coord._seating_lock("b")

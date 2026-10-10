@@ -2270,8 +2270,16 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   its owner and the issuer are expired. Declining only answers the issuer.
   Invitations do not expire for the user: the invitee-side `expires_at` is
   informational (the listing, the accept and the issuer's answer check all
-  ignore it). An invitation received before 0093 was pre-seated on receipt
-  and is accepted as before.
+  ignore it). The accept holds a per-space seating lock (shared with the
+  invite-link redeem and the GFS-mirror subscribe) and seats the stub before
+  the ACCEPT goes out, rolling a fresh stub back if the send fails. The owner
+  statement's freshness is judged at the invitation's receipt time, and an
+  accept never degrades: when the owner no longer resolves as it did on
+  receipt the accept is refused, never seated under the issuer. Receive-side
+  caps: 20 pending invitations per issuing household, 5 per space id and
+  issuing household. An invitation received before 0093 was pre-seated on
+  receipt; a startup sweep drops such stubs nobody here joined (with their
+  snapshot-less pending invitations) so they cannot block the real owner.
 - **The first accepted join stays.** Once this household joined a space, a
   later join snapshot (an invite, an accept, a link redeem) is taken only
   from its owner or its trusted inviting admin; one naming another owner is

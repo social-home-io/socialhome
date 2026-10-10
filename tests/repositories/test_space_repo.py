@@ -2047,3 +2047,37 @@ async def test_expire_remote_invitations_except_keeps_the_named_households(env):
     assert status == {"t-a": "pending", "t-b": "pending", "t-c": "expired"}
     await env.repo.expire_remote_invitations_except("sp-x", frozenset())
     assert (await env.repo.get_invitation_by_token("t-a"))["status"] == "expired"
+
+
+async def test_an_answered_invitation_drops_its_join_snapshot(env):
+    await _remote_invite(env.repo, "t-1", "inst-a", snapshot='{"meta":{}}')
+    row = await env.repo.get_invitation_by_token("t-1")
+    await env.repo.update_invitation_status(row["id"], "pending")
+    assert (await env.repo.get_invitation_by_token("t-1"))["join_snapshot"]
+    await env.repo.update_invitation_status(row["id"], "declined")
+    assert (await env.repo.get_invitation_by_token("t-1"))["join_snapshot"] is None
+    await _remote_invite(env.repo, "t-2", "inst-b", snapshot='{"meta":{}}')
+    await env.repo.expire_remote_invitations_except("sp-x", frozenset({"inst-a"}))
+    assert (await env.repo.get_invitation_by_token("t-2"))["join_snapshot"] is None
+
+
+async def test_count_pending_remote_invitations_counts_snapshots_per_issuer(env):
+    await _remote_invite(env.repo, "t-1", "inst-a", snapshot='{"meta":{}}')
+    await _remote_invite(env.repo, "t-2", "inst-a", snapshot='{"meta":{}}')
+    await _remote_invite(env.repo, "t-3", "inst-a")  # no snapshot: not counted
+    await _remote_invite(env.repo, "t-4", "inst-b", snapshot='{"meta":{}}')
+    await env.repo.save_remote_invitation(
+        space_id="sp-y",
+        invited_by="u",
+        remote_instance_id="inst-a",
+        remote_user_id="uid-alice",
+        invite_token="t-5",
+        join_snapshot='{"meta":{}}',
+    )
+    assert await env.repo.count_pending_remote_invitations("inst-a") == 3
+    assert (
+        await env.repo.count_pending_remote_invitations("inst-a", space_id="sp-x") == 2
+    )
+    row = await env.repo.get_invitation_by_token("t-1")
+    await env.repo.update_invitation_status(row["id"], "declined")
+    assert await env.repo.count_pending_remote_invitations("inst-a") == 2

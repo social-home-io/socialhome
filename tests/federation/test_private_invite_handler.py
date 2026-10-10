@@ -26,7 +26,7 @@ from socialhome.domain.events import (
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
 )
-from socialhome.domain.space import RemoteAdminOutcome, SpaceRole
+from socialhome.domain.space import RemoteAdminOutcome, SpacePermissionError, SpaceRole
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -103,6 +103,8 @@ def handler():
     # case) so the §D1b anti-hijack guard (can_seat_remote_stub) allows the
     # stub. Tests that exercise a collision override this per-test.
     space_repo.get = AsyncMock(return_value=None)
+    # Under the receive-side caps (migration 0093) by default.
+    space_repo.count_pending_remote_invitations = AsyncMock(return_value=0)
     remote_members = AsyncMock()
     remote_members.add = AsyncMock()
     remote_members.remove = AsyncMock()
@@ -149,7 +151,7 @@ async def _accept_seat(handler, ev) -> None:
         space_crypto_service=None,
     )
     assert opened is not None
-    meta, inviter_pk = opened
+    meta, inviter_pk = opened.meta, opened.inviter_identity_pk
     await seat_join_stub(
         space_repo=handler.space_repo,
         remote_member_repo=handler.remote_members,
@@ -2221,22 +2223,57 @@ async def test_invite_keeps_the_content_key_kek_wrapped_until_the_accept(handler
         "space_id": "sp-key",
         "invite_token": "tkn-key",
     }
-    meta, _pk = open_join_snapshot(invite, space_crypto_service=crypto)
-    assert meta["space_content_key"]["key_base64"] == b64
-    assert meta["space_content_key"]["epoch"] == 2
-    # Bound to its invitation: under another token it does not open.
-    meta, _pk = open_join_snapshot(
-        {**invite, "invite_token": "other"}, space_crypto_service=crypto
-    )
-    assert "space_content_key" not in meta
+    opened = open_join_snapshot(invite, space_crypto_service=crypto)
+    assert opened.meta["space_content_key"]["key_base64"] == b64
+    assert opened.meta["space_content_key"]["epoch"] == 2
+    # Bound to its invitation: under another token it does not open, and
+    # the accept is refused rather than seat an undecryptable space.
+    with pytest.raises(SpacePermissionError):
+        open_join_snapshot(
+            {**invite, "invite_token": "other"}, space_crypto_service=crypto
+        )
 
 
-async def test_invite_without_a_key_store_drops_the_key(handler):
+async def test_invite_without_a_key_store_keeps_only_a_marker(handler):
+    """No key store here: the key is never kept in plaintext — only a
+    marker, so the accept refuses instead of seating an undecryptable
+    space."""
     b64 = base64.b64encode(b"\x42" * 32).decode("ascii")
     await handler.h._on_invite(_keyed_invite({"epoch": 2, "key_base64": b64}))
     kw = handler.space_repo.save_remote_invitation.await_args.kwargs
     assert b64 not in kw["join_snapshot"]
-    assert "space_content_key" not in json.loads(kw["join_snapshot"])["meta"]
+    stored = json.loads(kw["join_snapshot"])["meta"]["space_content_key"]
+    assert stored["sealed_key"] is None
+    invite = {
+        "join_snapshot": kw["join_snapshot"],
+        "space_id": "sp-key",
+        "invite_token": "tkn-key",
+    }
+    with pytest.raises(SpacePermissionError):
+        open_join_snapshot(invite, space_crypto_service=None)
+
+
+async def test_invite_records_its_receipt_time_and_resolved_owner(handler):
+    await handler.h._on_invite(_keyed_invite({}))
+    kw = handler.space_repo.save_remote_invitation.await_args.kwargs
+    snap = json.loads(kw["join_snapshot"])
+    assert isinstance(snap["received_at_ms"], int) and snap["received_at_ms"] > 0
+    assert snap["owner_instance_id"] == "peer-1"
+
+
+@pytest.mark.parametrize(
+    "per_issuer, per_space, kept",
+    [(0, 0, True), (20, 0, False), (3, 5, False), (19, 4, True)],
+)
+async def test_invite_caps_per_issuer_and_per_space_issuer(
+    handler, per_issuer, per_space, kept
+):
+    async def _count(issuer, *, space_id=None):
+        return per_space if space_id is not None else per_issuer
+
+    handler.space_repo.count_pending_remote_invitations = AsyncMock(side_effect=_count)
+    await handler.h._on_invite(_keyed_invite({}))
+    assert handler.space_repo.save_remote_invitation.await_count == (1 if kept else 0)
 
 
 async def test_invite_with_an_unknown_key_suite_is_refused(handler):

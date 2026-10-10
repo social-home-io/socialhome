@@ -19,6 +19,8 @@ never touch each other.
 
 from __future__ import annotations
 
+import asyncio
+
 import json
 
 import orjson
@@ -36,6 +38,7 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.domain.federation import (
+    DeliveryResult,
     FederationEvent,
     FederationEventType,
 )
@@ -1155,3 +1158,37 @@ async def test_the_stream_that_carried_a_reproof_is_not_recorded_clean(joiner):
             chunk_count=0,
         )
         recorded.assert_awaited_once()
+
+
+async def test_concurrent_accepts_of_r_and_mal_seat_exactly_one(joiner):
+    """Round-7 probe: the user accepts R's and MAL's invitations at once,
+    each ACCEPT send still in flight — exactly one seats, the other fails
+    cleanly, and the loser's household never lands in ``space_instances``
+    (space content must never fan out to a non-member)."""
+    mal_kp = generate_space_keypair()
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(_mal_invite(mal_kp))
+    await joiner.handler._on_invite(_r_invite(real_kp))
+    gate = asyncio.Event()
+
+    async def _slow_send(**kwargs):
+        await gate.wait()
+        return DeliveryResult(instance_id="x", ok=True)
+
+    joiner.svc._federation.send_with_mesh_fallback = AsyncMock(side_effect=_slow_send)
+    tasks = [
+        asyncio.create_task(_accept(joiner, "t-r")),
+        asyncio.create_task(_accept(joiner, "t-mal")),
+    ]
+    await asyncio.sleep(0.05)
+    gate.set()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    assert sorted(type(r).__name__ for r in results) == [
+        "InviteExpiredError",
+        "NoneType",
+    ]
+    winner = R if results[0] is None else MAL
+    loser = MAL if winner == R else R
+    assert (await _seated(joiner))[0] == winner
+    instances = await joiner.spaces.list_member_instances(SPACE)
+    assert loser not in instances

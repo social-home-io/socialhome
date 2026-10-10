@@ -8,11 +8,24 @@ a real peer connection.
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from socialhome.crypto import derive_instance_id, generate_identity_keypair
+from socialhome.crypto import (
+    derive_instance_id,
+    ed25519_public_key,
+    generate_identity_keypair,
+    generate_space_keypair,
+)
+from socialhome.space_owner_statement import (
+    MAX_STATEMENT_AGE_MS,
+    sign_inviter_proof,
+    sign_owner_statement,
+)
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     DELIVERY_ERROR_QUEUED,
@@ -32,6 +45,7 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceMember,
     SpacePermissionError,
+    Space,
     SpaceRole,
     SpaceType,
 )
@@ -1724,11 +1738,14 @@ async def test_accept_refuses_a_space_held_under_another_owner(stack):
     with pytest.raises(InviteExpiredError):
         # Expired by the first accept.
         await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
-    await stack.space_repo.update_invitation_status(
-        (await stack.space_repo.get_invitation_by_token("t-peer"))["id"], "pending"
-    )
+    # The expired invitation's snapshot is gone (L2); a fresh one from the
+    # other household still cannot take the space over.
+    assert (await stack.space_repo.get_invitation_by_token("t-peer"))[
+        "join_snapshot"
+    ] is None
+    await _snapshot_invite(stack, bob.user_id, token="t-peer-2", issuer="peer")
     with pytest.raises(SpacePermissionError, match="conflicts"):
-        await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+        await stack.svc.accept_remote_invite(token="t-peer-2", user_id=bob.user_id)
     stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
     assert (await stack.space_repo.get("sp-snap")).owner_instance_id == "other"
 
@@ -1747,5 +1764,240 @@ async def test_accept_age_gate_reads_the_snapshots_min_age(stack):
         await stack.svc.accept_remote_invite(token="t-18", user_id=bob.user_id)
     gate.is_age_allowed.assert_awaited_once_with(bob.user_id, 18)
     gate.check_space_age_gate.assert_not_awaited()
+    stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
+    assert await stack.space_repo.get("sp-snap") is None
+
+
+async def test_concurrent_accepts_for_one_space_seat_exactly_one(stack):
+    """M1 probe: two accepts for the same space id from different households
+    racing across the (awaited) ACCEPT send — exactly one seats, the other
+    fails cleanly, and no foreign household lands in ``space_instances``."""
+    bob = await _user(stack, "bobrace")
+    await _snapshot_invite(stack, bob.user_id, token="t-peer", issuer="peer")
+    await _snapshot_invite(stack, bob.user_id, token="t-other", issuer="other")
+    gate = asyncio.Event()
+
+    async def _slow_send(**kwargs):
+        await gate.wait()
+        return DeliveryResult(instance_id="x", ok=True)
+
+    stack.fed_svc.send_with_mesh_fallback = AsyncMock(side_effect=_slow_send)
+    first = asyncio.create_task(
+        stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+    )
+    second = asyncio.create_task(
+        stack.svc.accept_remote_invite(token="t-other", user_id=bob.user_id)
+    )
+    await asyncio.sleep(0.05)
+    gate.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    # Whichever took the lock first wins; the other is refused cleanly.
+    assert sorted(type(r).__name__ for r in results) == [
+        "InviteExpiredError",
+        "NoneType",
+    ]
+    winner = "peer" if results[0] is None else "other"
+    assert (await stack.space_repo.get("sp-snap")).owner_instance_id == winner
+    assert await stack.space_repo.list_member_instances("sp-snap") == [winner]
+
+
+async def test_a_failed_accept_send_rolls_the_seat_back(stack):
+    """M3/L5: the stub is seated before the ACCEPT goes out; a send that
+    fails leaves nothing behind and the invitation pending."""
+    bob = await _user(stack, "bobfail")
+    await _snapshot_invite(
+        stack,
+        bob.user_id,
+        token="t-peer",
+        issuer="peer",
+        roster=[{"user_id": "u-p", "instance_id": "peer", "role": "owner"}],
+    )
+    seen: list[bool] = []
+
+    async def _failing_send(**kwargs):
+        seen.append(await stack.space_repo.get("sp-snap") is not None)
+        return DeliveryResult(instance_id="peer", ok=False)
+
+    stack.fed_svc.send_with_mesh_fallback = AsyncMock(side_effect=_failing_send)
+    with pytest.raises(SpacePermissionError):
+        await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+    assert seen == [True]  # seated before the ACCEPT left
+    assert await stack.space_repo.get("sp-snap") is None
+    assert await stack.space_repo.list_member_instances("sp-snap") == []
+    row = await stack.space_repo.get_invitation_by_token("t-peer")
+    assert row["status"] == "pending" and row["join_snapshot"]
+
+
+async def test_a_failed_seat_leaves_nothing_and_sends_nothing(stack, monkeypatch):
+    bob = await _user(stack, "bobseat")
+    await _snapshot_invite(stack, bob.user_id, token="t-peer", issuer="peer")
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("cover write failed")
+
+    monkeypatch.setattr(
+        "socialhome.services.space_service.apply_space_cover_from_metadata", _boom
+    )
+    with pytest.raises(RuntimeError):
+        await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+    stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
+    assert await stack.space_repo.get("sp-snap") is None
+
+
+async def test_decline_checks_the_user_and_the_status(stack):
+    bob = await _user(stack, "bobdecline")
+    await _snapshot_invite(stack, bob.user_id, token="t-peer", issuer="peer")
+    with pytest.raises(InviteExpiredError):
+        await stack.svc.decline_remote_invite(token="t-peer", user_id="someone-else")
+    await stack.svc.decline_remote_invite(token="t-peer", user_id=bob.user_id)
+    row = await stack.space_repo.get_invitation_by_token("t-peer")
+    assert row["status"] == "declined" and row["join_snapshot"] is None
+    with pytest.raises(InviteExpiredError):
+        await stack.svc.decline_remote_invite(token="t-peer", user_id=bob.user_id)
+
+
+async def test_startup_sweep_drops_pre_0093_unjoined_stubs_only(stack):
+    """L1: a stub an older build pre-seated for a never-accepted invitation
+    is dropped with its snapshot-less pending invitation; a joined stub and
+    an invite-link stub (no invitation row) stay."""
+    bob = await _user(stack, "bobsweep")
+
+    def _stub(space_id: str, owner: str) -> Space:
+        return Space(
+            id=space_id,
+            name=space_id,
+            owner_instance_id=owner,
+            owner_username="o",
+            identity_public_key="ab" * 32,
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+
+    for sid in ("sp-dust", "sp-joined", "sp-link"):
+        await stack.space_repo.save(_stub(sid, "mal"))
+    await stack.space_repo.add_space_instance("sp-dust", "mal")
+    for sid, tok in (("sp-dust", "t-dust"), ("sp-joined", "t-joined")):
+        await stack.space_repo.save_remote_invitation(
+            space_id=sid,
+            invited_by="u-mal",
+            remote_instance_id="mal",
+            remote_user_id=bob.user_id,
+            invite_token=tok,
+        )
+    await stack.space_repo.update_invitation_status(
+        (await stack.space_repo.get_invitation_by_token("t-joined"))["id"], "accepted"
+    )
+    assert await stack.svc.sweep_unjoined_invitation_stubs() == 1
+    assert await stack.space_repo.get("sp-dust") is None
+    assert await stack.space_repo.list_member_instances("sp-dust") == []
+    assert (await stack.space_repo.get_invitation_by_token("t-dust"))[
+        "status"
+    ] == "expired"
+    assert await stack.space_repo.get("sp-joined") is not None
+    assert await stack.space_repo.get("sp-link") is not None
+    assert await stack.svc.sweep_unjoined_invitation_stubs() == 0  # idempotent
+
+
+async def test_a_delayed_accept_judges_freshness_at_receipt(stack):
+    """M2: an admin's invitation proven fresh on receipt is still seated
+    under the REAL owner when accepted after the statement's window."""
+    owner_seed = b"\x51" * 32
+    owner = derive_instance_id(ed25519_public_key(owner_seed))
+    admin = derive_instance_id(ed25519_public_key(b"\x52" * 32))
+    kp = generate_space_keypair()
+    received = int(time.time() * 1000) - MAX_STATEMENT_AGE_MS - 3_600_000
+    statement = sign_owner_statement(
+        space_id="sp-snap",
+        owner_seed=owner_seed,
+        authority_pk_hex=kp.public_key.hex(),
+        authority_key_epoch=0,
+        issued_at_ms=received - 60_000,
+    )
+    bob = await _user(stack, "bobdelay")
+    meta = {
+        "name": "Snap",
+        "owner_instance_id": owner,
+        "owner_username": "o",
+        "identity_public_key": kp.public_key.hex(),
+        "owner_statement": statement,
+        "inviter_proof": sign_inviter_proof(
+            space_id="sp-snap",
+            owner_instance_id=owner,
+            inviter_instance_id=admin,
+            space_seed=kp.private_key,
+        ),
+    }
+    await stack.space_repo.save_remote_invitation(
+        space_id="sp-snap",
+        invited_by="u-admin",
+        remote_instance_id=admin,
+        remote_user_id=bob.user_id,
+        invite_token="t-admin",
+        join_snapshot=seal_join_snapshot(
+            meta,
+            space_id="sp-snap",
+            invite_token="t-admin",
+            host_identity_pk=None,
+            space_crypto_service=None,
+            received_at_ms=received,
+            owner_instance_id=owner,
+        ),
+    )
+    await stack.svc.accept_remote_invite(token="t-admin", user_id=bob.user_id)
+    assert (await stack.space_repo.get("sp-snap")).owner_instance_id == owner
+
+
+async def test_an_accept_never_degrades_to_the_issuer(stack):
+    """M2: when the owner resolved on receipt no longer resolves, the accept
+    is refused — never seated under the issuer — and other invitations stay
+    pending."""
+    bob = await _user(stack, "bobdegrade")
+    await _snapshot_invite(stack, bob.user_id, token="t-other", issuer="other")
+    meta = {
+        "name": "Snap",
+        "owner_instance_id": "peer",
+        "owner_username": "o",
+        "identity_public_key": "ab" * 32,
+    }
+    await stack.space_repo.save_remote_invitation(
+        space_id="sp-snap",
+        invited_by="u-admin",
+        remote_instance_id="admin-hh",
+        remote_user_id=bob.user_id,
+        invite_token="t-admin",
+        join_snapshot=seal_join_snapshot(
+            meta,
+            space_id="sp-snap",
+            invite_token="t-admin",
+            host_identity_pk=None,
+            space_crypto_service=None,
+            received_at_ms=int(time.time() * 1000),
+            owner_instance_id="peer",  # what receipt resolved
+        ),
+    )
+    with pytest.raises(SpacePermissionError, match="no longer"):
+        await stack.svc.accept_remote_invite(token="t-admin", user_id=bob.user_id)
+    stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
+    assert await stack.space_repo.get("sp-snap") is None
+    assert (await stack.space_repo.get_invitation_by_token("t-other"))[
+        "status"
+    ] == "pending"
+
+
+async def test_an_unopenable_content_key_fails_the_accept(stack):
+    """L6: the snapshot carries a key this household cannot open — refuse
+    rather than seat a space it can never decrypt."""
+    bob = await _user(stack, "bobkey")
+    await _snapshot_invite(
+        stack,
+        bob.user_id,
+        token="t-peer",
+        issuer="peer",
+        space_content_key={"epoch": 0, "key_base64": "AA=="},
+    )
+    with pytest.raises(SpacePermissionError, match="key"):
+        await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
     stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
     assert await stack.space_repo.get("sp-snap") is None

@@ -344,6 +344,13 @@ class AbstractSpaceRepo(Protocol):
         invitation_id: str,
         status: str,
     ) -> None: ...
+    async def count_pending_remote_invitations(
+        self, issuer_instance_id: str, *, space_id: str | None = None
+    ) -> int: ...
+    async def list_unjoined_invitation_stubs(
+        self, own_instance_id: str | None
+    ) -> list[str]: ...
+    async def expire_snapshotless_remote_invitations(self, space_id: str) -> int: ...
     async def is_user_remote_member(
         self,
         space_id: str,
@@ -1110,7 +1117,7 @@ class SqliteSpaceRepo:
         household can no longer be joined (migration 0093)."""
         keep = sorted(keep_instance_ids)
         sql = (
-            "UPDATE space_invitations SET status='expired'"
+            "UPDATE space_invitations SET status='expired', join_snapshot=NULL"
             " WHERE space_id=? AND status='pending'"
             " AND remote_instance_id IS NOT NULL"
         )
@@ -2548,10 +2555,75 @@ class SqliteSpaceRepo:
     ) -> None:
         if status not in ("pending", "accepted", "declined", "expired"):
             raise ValueError(f"invalid invitation status {status!r}")
+        # An answered invitation's join snapshot (migration 0093) has done
+        # its job — drop it with the pending state.
         await self._db.enqueue(
-            "UPDATE space_invitations SET status=? WHERE id=?",
-            (status, invitation_id),
+            "UPDATE space_invitations SET status=?,"
+            " join_snapshot=CASE WHEN ?='pending' THEN join_snapshot END"
+            " WHERE id=?",
+            (status, status, invitation_id),
         )
+
+    async def count_pending_remote_invitations(
+        self, issuer_instance_id: str, *, space_id: str | None = None
+    ) -> int:
+        """Pending invitations this household received from
+        *issuer_instance_id* (optionally for one *space_id*) that still hold
+        a join snapshot — what the receive-side caps bound (migration 0093)."""
+        sql = (
+            "SELECT COUNT(*) AS n FROM space_invitations"
+            " WHERE remote_instance_id=? AND status='pending'"
+            " AND join_snapshot IS NOT NULL"
+        )
+        params: tuple = (issuer_instance_id,)
+        if space_id is not None:
+            sql += " AND space_id=?"
+            params = (issuer_instance_id, space_id)
+        row = await self._db.fetchone(sql, params)
+        return int(row["n"]) if row is not None else 0
+
+    async def list_unjoined_invitation_stubs(
+        self, own_instance_id: str | None
+    ) -> list[str]:
+        """Stubs a cross-household invitation seated before migration 0093
+        that nobody here ever joined: a space we do not own, with no local
+        member and at least one received invitation, none of them accepted.
+        (Invite-link and GFS-mirror stubs have no invitation row and are
+        never listed.)"""
+        rows = await self._db.fetchall(
+            """
+            SELECT s.id FROM spaces s
+             WHERE s.owner_instance_id != ?
+               AND NOT EXISTS (SELECT 1 FROM space_members m WHERE m.space_id = s.id)
+               AND EXISTS (
+                   SELECT 1 FROM space_invitations i
+                    WHERE i.space_id = s.id AND i.remote_instance_id IS NOT NULL)
+               AND NOT EXISTS (
+                   SELECT 1 FROM space_invitations i
+                    WHERE i.space_id = s.id AND i.status = 'accepted')
+             ORDER BY s.id
+            """,
+            (own_instance_id or "",),
+        )
+        return [str(r["id"]) for r in rows]
+
+    async def expire_snapshotless_remote_invitations(self, space_id: str) -> int:
+        """Expire the pending received invitations into *space_id* that
+        carry no join snapshot (pre-0093: they relied on a pre-seated stub).
+        Returns how many."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM space_invitations WHERE space_id=?"
+            " AND status='pending' AND remote_instance_id IS NOT NULL"
+            " AND join_snapshot IS NULL",
+            (space_id,),
+        )
+        await self._db.enqueue(
+            "UPDATE space_invitations SET status='expired' WHERE space_id=?"
+            " AND status='pending' AND remote_instance_id IS NOT NULL"
+            " AND join_snapshot IS NULL",
+            (space_id,),
+        )
+        return int(row["n"]) if row is not None else 0
 
     # ── Join requests ──────────────────────────────────────────────────
 
