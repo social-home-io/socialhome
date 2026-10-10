@@ -542,24 +542,46 @@ class GfsServerSelectionService:
             }
             for s in servers or ()
         ]
-        return view, not view
+        # "Global, not listed" means the OWNER's signed list is empty — not
+        # that this household can't use any entry of it (a private-network
+        # GFS it isn't connected to is dropped from ``view`` above).
+        return view, space.gfs_servers.servers_json == "[]"
 
     async def owner_view(self, space_id: str, *, actor_username: str) -> dict:
-        """``GET /api/spaces/{id}/gfs-servers`` — the owner's picker: which
-        of this household's active connections list the space, and the
-        cap."""
+        """``GET /api/spaces/{id}/gfs-servers`` — the owner's picker.
+
+        ``listings``: EVERY connection holding a publication row for the
+        space, whatever the connection's state (a suspended / pending one
+        included), so the owner can see and withdraw each. ``available``:
+        the ACTIVE connections a listing can be added on. Plus the cap and
+        the members' signed list."""
         space = await self._require_owner(space_id, actor_username)
         listed = {
             p.gfs_connection_id: p.status
             for p in await self._gfs.list_publications_for_space(space_id)
         }
         servers, unlisted = await self.describe(space)
+        listings = []
+        for gfs_id in sorted(listed):
+            conn = await self._gfs.get(gfs_id)
+            if conn is None:
+                continue
+            listings.append(
+                {
+                    "gfs_id": conn.id,
+                    "display_name": conn.display_name,
+                    "inbox_url": conn.inbox_url,
+                    "connection_status": conn.status,
+                    "listing_status": listed[gfs_id],
+                }
+            )
         return {
             "space_type": space.space_type.value,
             "gfs_ids": sorted(listed),
             "max": MAX_GFS_SERVERS,
             "unlisted": unlisted,
             "servers": servers,
+            "listings": listings,
             "available": [
                 {
                     "gfs_id": c.id,

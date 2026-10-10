@@ -1061,3 +1061,73 @@ async def test_concurrent_adds_hold_the_cap(owner_env):
     assert sum(isinstance(r, GfsSelectionInvalidError) for r in results) == 1
     assert len(await env.gfs.list_publications_for_space("sp-1")) == MAX_GFS_SERVERS
     assert env.svc._change_locks == {}
+
+
+async def test_a_private_network_gfs_we_cant_use_is_still_a_listing(owner_env):
+    """A member not connected to the owner's LAN GFS drops that entry from
+    its view — the space is still listed, so it is not "global, not
+    listed"."""
+    env = owner_env
+    await _owned_space(env)
+    await env.gfs.save(
+        GfsConnection(
+            id="lan",
+            gfs_instance_id="inst-lan",
+            display_name="LAN GFS",
+            public_key="cd" * 32,
+            inbox_url="http://192.168.1.5:8080",
+            status="active",
+            paired_at="2026-10-01T00:00:00+00:00",
+        )
+    )
+    await env.gfs.publish_space("sp-1", "lan")
+    await env.svc.sync_snapshot("sp-1")
+    space = await env.spaces.get("sp-1")
+    servers, unlisted = await env.svc.describe(space)
+    assert [s["inbox_url"] for s in servers] == ["http://192.168.1.5:8080"]
+    assert unlisted is False
+    await env.gfs.delete("lan")  # now we are a household without that route
+    servers, unlisted = await env.svc.describe(space)
+    assert servers == []
+    assert unlisted is False
+
+
+async def test_owner_view_lists_listings_on_every_connection_state(owner_env):
+    """A listing on a suspended / pending connection stays visible (and
+    removable) for the owner; only active connections are offered to add."""
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g-act")
+    await _connected(env, "g-sus", status="suspended")
+    await _connected(env, "g-pen", status="pending")
+    await env.gfs.publish_space("sp-1", "g-act")
+    await env.gfs.publish_space("sp-1", "g-sus")
+    await env.gfs.publish_space("sp-1", "g-pen", "pending")
+    view = await env.svc.owner_view("sp-1", actor_username="anna")
+    assert view["listings"] == [
+        {
+            "gfs_id": "g-act",
+            "display_name": "GFS g-act",
+            "inbox_url": "https://g-act.example",
+            "connection_status": "active",
+            "listing_status": "active",
+        },
+        {
+            "gfs_id": "g-pen",
+            "display_name": "GFS g-pen",
+            "inbox_url": "https://g-pen.example",
+            "connection_status": "pending",
+            "listing_status": "pending",
+        },
+        {
+            "gfs_id": "g-sus",
+            "display_name": "GFS g-sus",
+            "inbox_url": "https://g-sus.example",
+            "connection_status": "suspended",
+            "listing_status": "active",
+        },
+    ]
+    assert [a["gfs_id"] for a in view["available"]] == ["g-act"]
+    # The suspended one can be withdrawn by the owner.
+    await env.svc.remove_server("sp-1", actor_username="anna", gfs_id="g-sus")
+    assert ("unpublish", "g-sus", False) in env.publisher.calls
