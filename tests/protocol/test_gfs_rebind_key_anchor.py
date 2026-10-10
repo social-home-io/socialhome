@@ -38,7 +38,10 @@ PINNED_SEED = "a7" * 32
 IMPOSTOR_SEED = "3c" * 32
 
 
-async def _gfs(data_dir: Path, *, seed_hex: str, instance_id: str) -> TestServer:
+async def _gfs(
+    data_dir: Path, *, seed_hex: str, instance_id: str, aliases=("gfs-0",)
+) -> TestServer:
+    """A GFS serving *instance_id* and signing that it replaces *aliases*."""
     app = create_gfs_app(
         GfsConfig(
             host="127.0.0.1",
@@ -46,6 +49,7 @@ async def _gfs(data_dir: Path, *, seed_hex: str, instance_id: str) -> TestServer
             base_url="http://127.0.0.1:1",
             data_dir=str(data_dir),
             instance_id=instance_id,
+            instance_id_aliases=aliases,
             signing_seed_hex=seed_hex,
         )
     )
@@ -161,3 +165,24 @@ async def test_the_same_server_under_the_pinned_key_is_followed_to_its_new_id(
         assert svc._anon_publish.get("conn-1") is True
     finally:
         await moved.close()
+
+
+async def test_the_same_key_serving_an_id_that_does_not_replace_the_pin_is_not_followed(
+    tmp_path, household
+):
+    """The pinned key itself, under another id that does not sign that it
+    replaces the pinned one (a sibling still on its own per-node id): no
+    move — only an explicit, signed ``replaces`` moves a pin."""
+    lateral = await _gfs(
+        tmp_path / "lateral", seed_hex=PINNED_SEED, instance_id="gfs-2", aliases=()
+    )
+    try:
+        await _pin(household, lateral)
+        svc, trusted = await _refresh(household)
+        conn = await household.get("conn-1")
+        assert conn is not None and conn.gfs_instance_id == "gfs-0"
+        assert svc.known_instance_ids(conn) == frozenset({"gfs-0"})
+        # The block is the pinned key's, so its capabilities still count.
+        assert trusted is True
+    finally:
+        await lateral.close()

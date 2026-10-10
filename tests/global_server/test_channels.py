@@ -548,7 +548,7 @@ async def test_every_channel_request_addressed_to_an_alias_is_accepted(gfs) -> N
     )
     info = await (await gfs.get("/gfs/info")).json()
     assert info["gfs_instance_id"] == "gfs-shared"
-    assert GFS_ID not in json.dumps(info)
+    assert info["capabilities"]["replaces"] == [GFS_ID]
 
 
 # ── Trusted publish ──────────────────────────────────────────────────────

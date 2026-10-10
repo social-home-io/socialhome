@@ -715,11 +715,14 @@ async def test_an_anonymous_publish_addressed_to_an_alias_passes_the_addressee_c
 
 
 @pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
-async def test_info_serves_and_signs_only_the_instance_id_never_an_alias(gfs):
+async def test_info_serves_the_instance_id_and_signs_the_aliases_as_replaces(gfs):
+    """The served id is always ``instance_id``; an alias appears only inside
+    the SIGNED block, as ``replaces`` — what lets a household pinned to it
+    move (and nothing else does)."""
     resp = await gfs.get("/gfs/info")
     info = await resp.json()
     assert info["gfs_instance_id"] == "gfs-shared"
-    assert GFS_ID not in json.dumps(info)
+    assert info["capabilities"]["replaces"] == [GFS_ID]
     assert verify_capabilities(
         info["public_key"],
         "gfs-shared",

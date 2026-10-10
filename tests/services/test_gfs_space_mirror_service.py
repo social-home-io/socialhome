@@ -2280,7 +2280,7 @@ async def test_a_follow_seated_under_the_old_id_survives_a_real_rebind(env):
     await env.seats.forget("sp-1", "inst-conn-1")
     await env.seats.record(replace(seat, gfs_instance_id="gfs-1"))
 
-    caps = {"anonymous_publish": True}
+    caps = {"anonymous_publish": True, "replaces": ["gfs-1"]}
     sig, suite = sign_capabilities(kp.private_key, "gfs-social-home", caps)
     info = {
         "gfs_instance_id": "gfs-social-home",

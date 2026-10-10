@@ -122,7 +122,7 @@ class GfsInfoView(GfsBaseView):
         # Signed because the household offers that one-click path only when
         # it is proven — a forged flag would only waste one request, but a
         # bare flag is never what a household trusts.
-        capabilities = {
+        capabilities: dict[str, object] = {
             "anonymous_publish": True,
             "envelope_relay": True,
             "invite_links": True,
@@ -132,6 +132,12 @@ class GfsInfoView(GfsBaseView):
             "private_channels": True,
             "open_signup": bool(cfg.open_signup),
         }
+        if cfg.instance_id_aliases:
+            # The former ids this server answers to (``instance_id_aliases``),
+            # SIGNED: a household pinned to one of them adopts
+            # ``instance_id`` — and only then (no lateral moves between the
+            # ids of a cluster still on per-node ids).
+            capabilities["replaces"] = sorted(cfg.instance_id_aliases)
         sig, suite = cluster.sign_capabilities_block(cfg.instance_id, capabilities)
         body = {
             "gfs_instance_id": cfg.instance_id,

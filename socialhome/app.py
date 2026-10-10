@@ -89,6 +89,7 @@ from .infrastructure.task_deadline_scheduler import TaskDeadlineScheduler
 from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
 from .infrastructure.gfs_capability_warmup import GfsCapabilityWarmup
+from .infrastructure.gfs_info_refresh_scheduler import GfsInfoRefreshScheduler
 from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
 from .infrastructure.dm_gc_scheduler import DmGcScheduler
 from .infrastructure.media_orphan_sweep_scheduler import MediaOrphanSweepScheduler
@@ -2969,6 +2970,7 @@ def create_app(config: Config | None = None) -> web.Application:
     stale_call_scheduler: StaleCallCleanupScheduler | None = None
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
     gfs_capability_warmup: GfsCapabilityWarmup | None = None
+    gfs_info_refresh: GfsInfoRefreshScheduler | None = None
     routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
     gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
@@ -4139,6 +4141,14 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_connection_service.warm_capabilities
         )
         await gfs_capability_warmup.start()
+        # Re-read every server's /gfs/info about hourly (jittered), so a
+        # household whose socket stays up for days still adopts its
+        # server's new public id (only one the server signs it replaces).
+        nonlocal gfs_info_refresh
+        gfs_info_refresh = GfsInfoRefreshScheduler(
+            gfs_connection_service.refresh_all_metadata
+        )
+        await gfs_info_refresh.start()
 
         # 6. OutboxProcessor — drains federation_outbox in the background.
         peer_unpair_service = app[K.peer_unpair_service_key]
@@ -4473,6 +4483,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await stale_call_scheduler.stop()
         if gfs_capability_warmup is not None:
             await gfs_capability_warmup.stop()
+        if gfs_info_refresh is not None:
+            await gfs_info_refresh.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
         # Before the publish session closes: a retry rides it.

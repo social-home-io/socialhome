@@ -209,8 +209,9 @@ async def test_during_migration_an_old_per_node_id_is_accepted_on_every_node(pai
         info_b["capabilities_sig"],
         info_b["capabilities_sig_suite"],
     )
-    # The aliases are never served.
-    assert "gfs-0" not in str(info_a) and "gfs-1" not in str(info_b)
+    # The aliases are served only inside the SIGNED block, as ``replaces`` —
+    # what lets a household pinned to one of them move to the shared id.
+    assert info_a["capabilities"]["replaces"] == ["gfs-0", "gfs-1"]
 
 
 async def _hello(a: TestServer, b: TestServer) -> None:
