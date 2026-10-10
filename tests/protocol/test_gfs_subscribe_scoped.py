@@ -31,6 +31,7 @@ from socialhome.domain.space import (
 )
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.repositories.gfs_space_seat_repo import SqliteGfsSpaceSeatRepo
 from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
@@ -126,8 +127,13 @@ async def household(tmp_dir):
         " identity_public_key, routing_secret) VALUES(?,?,?,?)",
         (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
     )
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name)"
+        " VALUES('local','u-local','Local')"
+    )
     spaces = SqliteSpaceRepo(db, key_manager=KeyManager(b"\x09" * 32))
     conns = SqliteGfsConnectionRepo(db)
+    seats = SqliteGfsSpaceSeatRepo(db)
     public = SqlitePublicSpaceRepo(db)
     await conns.save(_conn("listing", LISTING_GFS))
     await conns.save(_conn("other", OTHER_GFS))
@@ -170,6 +176,8 @@ async def household(tmp_dir):
             await spaces.set_mirror_provenance(
                 space_id, gfs_id=seated_by, rotation_seq=0
             )
+            # What ``take_seat`` recorded when the follower subscribed.
+            await seats.record(space_id, f"inst-{seated_by}")
     session = _Session()
     gfs = GfsConnectionService(conns, http_client=session)
     gfs.attach_publish_context(
@@ -179,11 +187,12 @@ async def household(tmp_dir):
         space_repo=spaces,
         gfs_connection_repo=conns,
         gfs_connection_service=gfs,
+        seat_repo=seats,
         public_space_repo=public,
     )
     mirror.attach_session(session)
     try:
-        yield mirror, session, iid
+        yield mirror, session, iid, conns
     finally:
         await db.shutdown()
 
@@ -203,7 +212,7 @@ def _leaks_to_other(session: _Session, iid: str) -> list[tuple[str, str, dict]]:
 
 
 async def test_unsubscribe_never_reaches_a_gfs_that_did_not_seat_it(household):
-    mirror, session, iid = household
+    mirror, session, iid, _conns = household
     await mirror.unsubscribe("sp-mirrored")
     await mirror.unsubscribe("sp-legacy")
     assert _leaks_to_other(session, iid) == []
@@ -216,7 +225,7 @@ async def test_unsubscribe_never_reaches_a_gfs_that_did_not_seat_it(household):
 
 
 async def test_reconnect_never_subscribes_on_a_gfs_that_did_not_seat_it(household):
-    mirror, session, iid = household
+    mirror, session, iid, _conns = household
     assert await mirror.resubscribe_all("other") == 0
     assert _leaks_to_other(session, iid) == []
     assert not any(m == "POST" for m, _url, _b in session.requests)
@@ -227,7 +236,7 @@ async def test_reconnect_never_subscribes_on_a_gfs_that_did_not_seat_it(househol
 async def test_mirror_detail_fetch_never_probes_a_gfs_that_does_not_list_it(
     household,
 ):
-    mirror, session, iid = household
+    mirror, session, iid, _conns = household
     # Listed nowhere: only whole-directory reads, no per-space request at all.
     assert await mirror.ensure_mirror("sp-nowhere") is None
     assert not any("sp-nowhere" in url for _m, url, _b in session.requests)
@@ -236,3 +245,35 @@ async def test_mirror_detail_fetch_never_probes_a_gfs_that_does_not_list_it(
     assert got is not None and got[1] == "listing"
     assert _leaks_to_other(session, iid) == []
     assert ("GET", f"{LISTING_GFS}/gfs/spaces/sp-new", {}) in session.requests
+
+
+async def test_a_re_paired_server_keeps_the_seat_and_nobody_else_learns_it(
+    household,
+):
+    """H1: a disconnect + re-pair mints a new local connection id for the
+    same server. The seat is re-taken there and torn down there — and the
+    other server never hears of it."""
+    mirror, session, iid, conns = household
+    await conns.delete("listing")
+    await conns.save(
+        GfsConnection(
+            id="listing-again",
+            gfs_instance_id="inst-listing",
+            display_name="listing",
+            public_key="pk",
+            inbox_url=LISTING_GFS,
+            status="active",
+            paired_at="2025-02-01T00:00:00+00:00",
+        )
+    )
+    assert await mirror.resubscribe_all("other") == 0
+    assert await mirror.resubscribe_all("listing-again") == 2
+    await mirror.unsubscribe("sp-mirrored")
+    assert _leaks_to_other(session, iid) == []
+    posts = [
+        (body["action"], body["space_id"])
+        for m, url, body in session.requests
+        if m == "POST" and url == f"{LISTING_GFS}/gfs/subscribe"
+    ]
+    assert ("unsubscribe", "sp-mirrored") in posts
+    assert ("subscribe", "sp-mirrored") in posts

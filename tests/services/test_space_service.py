@@ -6273,16 +6273,22 @@ async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
         )
     )
     down = _DownGfs()
+    from socialhome.repositories.gfs_space_seat_repo import SqliteGfsSpaceSeatRepo
+
+    seats = SqliteGfsSpaceSeatRepo(stack.db)
     real_mirror = GfsSpaceMirrorService(
         space_repo=stack.space_repo,
         gfs_connection_repo=conn_repo,
         gfs_connection_service=down,
+        seat_repo=seats,
         public_space_repo=public_repo,
     )
     # Seat the stub the way ensure_mirror would, then subscribe locally.
     seeder = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(seeder)
     await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    # What ``take_seat`` records for the GFS subscribe the fake stood in for.
+    await seats.record("remote-sp", "inst-1")
     stack.space_svc.attach_gfs_space_mirror(real_mirror)
 
     await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")

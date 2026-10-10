@@ -109,6 +109,7 @@ from ..domain.space_item import (
     required_scope,
 )
 from ..domain.writer_cert import WriterCert, scope_permits
+from .gfs_directory import GfsDirectoryCache
 from .gfs_publish_retry import (
     GfsPublish,
     GfsPublishRetryQueue,
@@ -125,15 +126,12 @@ if TYPE_CHECKING:
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_channel_service import GfsChannelService
     from .gfs_connection_service import GfsConnectionService
+    from .gfs_space_mirror_service import GfsSpaceMirrorService
     from .space_crypto_service import SpaceContentEncryption
     from .space_writer_cert_service import SpaceWriterCertService
 
 log = logging.getLogger(__name__)
 
-
-#: How long a "space X is listed on GFS Y" answer is trusted (seconds).
-LISTING_TTL_S: float = 600.0
-LISTING_NEGATIVE_TTL_S: float = 60.0
 
 #: Background publishes in flight at once; past it a new one is dropped
 #: (logged) — the host's copy still reaches every follower.
@@ -211,10 +209,11 @@ class GfsMemberPublishService:
         "_conn_repo",
         "_crypto",
         "_gfs",
-        "_listing",
+        "_directories",
         "_own_identity_seed",
         "_own_instance_id",
         "_retry",
+        "_seats",
         "_spaces",
         "_subscribed",
         "_stopping",
@@ -232,6 +231,7 @@ class GfsMemberPublishService:
         writer_certs: "SpaceWriterCertService",
         own_instance_id: str,
         own_identity_seed: bytes,
+        directories: GfsDirectoryCache | None = None,
     ) -> None:
         self._gfs = gfs
         self._conn_repo = conn_repo
@@ -240,9 +240,16 @@ class GfsMemberPublishService:
         self._writer_certs = writer_certs
         self._own_instance_id = own_instance_id
         self._own_identity_seed = own_identity_seed
-        #: conn id → ({space id: publish mode} of its public directory,
-        #: monotonic time). Cleared on every key import and config change.
-        self._listing: dict[str, tuple[dict[str, str], float]] = {}
+        #: Each server's whole public directory — the cache shared with the
+        #: mirror (``app`` wires one instance into both), read over the
+        #: cookie-less publish session. Cleared on every key import and
+        #: config change.
+        self._directories = directories or GfsDirectoryCache(
+            lambda: gfs.publish_client()
+        )
+        #: The keeper of this household's GFS subscriber seats; every
+        #: auto-subscribe is recorded there so a leave can tear it down.
+        self._seats: "GfsSpaceMirrorService | None" = None
         self._retry = GfsPublishRetryQueue(self._retry_send)
         #: (conn id, space id) pairs this process already subscribed.
         self._subscribed: set[tuple[str, str]] = set()
@@ -253,6 +260,11 @@ class GfsMemberPublishService:
         #: ``private_gfs`` on. ``None`` → private spaces always take the host
         #: path.
         self._channels: "GfsChannelService | None" = None
+
+    def attach_seats(self, seats: "GfsSpaceMirrorService") -> None:
+        """Wire the seat keeper: auto-subscribes go through
+        :meth:`GfsSpaceMirrorService.take_seat`, which records the seat."""
+        self._seats = seats
 
     def attach_channels(self, channels: "GfsChannelService") -> None:
         """Wire the private-space channel service (v_51)."""
@@ -342,65 +354,23 @@ class GfsMemberPublishService:
             and bool(space.features.allow_subscribers)
         )
 
-    async def _directory(self, conn: GfsConnection) -> dict[str, str] | None:
-        """*conn*'s public directory as ``{space id: publish mode}``
-        (``GET /gfs/spaces``, the WHOLE listing, cached per connection), or
-        ``None`` when it can't be fetched. Never a space-specific probe —
-        asking the server about one space would tell it which spaces this
-        household cares about — and over the cookie-less publish session, so
-        it links to nothing. ``member_publish_mode`` (v_50) is absent on an
-        older server, which reads as ``trusted``."""
-        cached = self._listing.get(conn.id)
-        now = time.monotonic()
-        if cached is not None:
-            listed, at = cached
-            if now - at < (LISTING_TTL_S if listed else LISTING_NEGATIVE_TTL_S):
-                return listed
-        client = self._gfs.publish_client()
-        if client is None:
-            return None
-        try:
-            async with client.get(
-                f"{conn.inbox_url}/gfs/spaces",
-                allow_redirects=False,
-                timeout=_HTTP_TIMEOUT,
-            ) as resp:
-                body = await resp.json() if resp.status == 200 else {}
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            log.info(
-                "gfs.member_publish: directory fetch from %s failed: %s", conn.id, exc
-            )
-            return None
-        spaces = body.get("spaces") if isinstance(body, dict) else None
-        listed = {
-            str(sp.get("space_id")): (
-                GFS_PUBLISH_MODE_STRICT
-                if sp.get("member_publish_mode") == GFS_PUBLISH_MODE_STRICT
-                else "trusted"
-            )
-            for sp in (spaces if isinstance(spaces, list) else [])
-            if isinstance(sp, dict) and sp.get("space_id")
-        }
-        self._listing[conn.id] = (listed, now)
-        return listed
-
     async def _listed(self, conn: GfsConnection, space_id: str) -> bool:
-        """Whether *space_id* is in *conn*'s public directory."""
-        listed = await self._directory(conn)
-        return listed is not None and space_id in listed
+        """Whether *space_id* is in *conn*'s public directory (the WHOLE
+        listing — never a space-specific probe, which would tell the server
+        which spaces this household cares about)."""
+        return await self._directories.lists(conn, space_id)
 
     async def _listed_strict(self, conn: GfsConnection, space_id: str) -> bool:
         """Whether *conn*'s public directory says *space_id* is in strict
         mode (v_50) — then nothing identified may go there, whatever our own
         copy of the setting says (it may lag the owner's switch)."""
-        listed = await self._directory(conn)
-        return listed is not None and listed.get(space_id) == GFS_PUBLISH_MODE_STRICT
+        return await self._directories.mode(conn, space_id) == GFS_PUBLISH_MODE_STRICT
 
     def forget_directories(self, *_: object) -> None:
         """Drop the cached directories, so the next decision re-reads each
         server's listing — on a key import (a rotation, which a switch to
         strict causes) and on a config change."""
-        self._listing.clear()
+        self._directories.forget()
 
     async def _capable_listed(
         self, space_id: str, *, strict: bool = False, identified_items: bool = False
@@ -919,7 +889,10 @@ class GfsMemberPublishService:
             if (conn.id, space_id) in self._subscribed:
                 continue
             try:
-                await self._gfs.subscribe_to_gfs_space(space_id, conn.id)
+                if self._seats is not None:
+                    await self._seats.take_seat(space_id, conn)
+                else:
+                    await self._gfs.subscribe_to_gfs_space(space_id, conn.id)
             except Exception as exc:  # GfsConnectionError and transport errors
                 log.info(
                     "gfs.member_publish: subscribing space %s on %s failed: %s",

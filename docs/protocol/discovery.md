@@ -454,9 +454,14 @@ cannot widen access through a missing field or Python truthiness.
   GET names the space, so sending it to every paired GFS would tell each
   operator (and hand it the household's address) which space this household
   is after. The directory read is non-specific — the same request the
-  discovery poll makes — and is reused for 30 s, so arbitrary ids typed into
-  the subscribe endpoint don't re-download it from every server. An
-  unreadable directory proves no listing: that server gets no detail GET.
+  discovery poll makes — and comes from one cache shared with member publish
+  (`services/gfs_directory.py`, over the cookie-less publish session): the
+  servers' directories are read concurrently, each kept 10 min (an empty one
+  1 min, an unreadable one 5 s), concurrent misses share one download, and a
+  directory over 50 000 ids is refused (logged) rather than truncated. A
+  cached copy lacking the id is re-read once it is 5 s old, so a space
+  published a moment ago is followable at once. An unreadable directory
+  proves no listing: that server gets no detail GET.
 - **Fail-closed validation.** The listing must be `status: "active"` and must
   carry a well-formed 32-byte-hex `identity_public_key`; anything else is
   skipped rather than mirrored. A stub with an unverifiable pin would accept
@@ -512,9 +517,9 @@ cannot widen access through a missing field or Python truthiness.
   refusal (public-tier check, ban, §CP.F1 age gate) has passed, so a
   locally-refused user is never registered on the relay.
 - **Teardown, on positive evidence only.** When the last local subscriber of
-  a mirrored space leaves, the household unsubscribes from the GFS that
-  seated the mirror (best-effort — a down GFS never blocks the local leave)
-  and purges the stub; the `spaces` cascade takes `space_keys` with it, so the content key
+  a mirrored space leaves, the household unsubscribes from every server
+  that seats it (below; best-effort — a down GFS never blocks the local
+  leave) and purges the stub; the `spaces` cascade takes `space_keys` with it, so the content key
   doesn't outlive the mirror. Both steps run **only** when the row is
   provably a GFS mirror: `space_type=global`, owned by another instance, no
   space seed held, no local member left, *and* a `public_space_cache` row for
@@ -527,12 +532,30 @@ cannot widen access through a missing field or Python truthiness.
 - **(Un)subscribes go only where the seat is.** The household's
   `/gfs/subscribe` (subscribe or unsubscribe) is signed and identity-bound,
   so sending it to a GFS that never seated the subscription would tell that
-  operator the household follows the space. Both the teardown unsubscribe and
-  the reconnect re-subscribe below therefore target only the GFS recorded as
-  the mirror's provenance (`spaces.mirror_gfs_id`, v_44) — a purely local
-  lookup. A mirror seated before v_44 has no provenance; it falls back to the
-  GFSs whose **whole** directory (`GET /gfs/spaces`, never a per-space probe)
-  lists the space, and contacts none when the directory can't be read.
+  operator the household follows the space. Every subscribe — a follower's,
+  the reconnect self-heal's, a member's auto-subscribe — therefore records
+  the seat in `gfs_space_seats` (0090) under the server's own
+  `gfs_instance_id`, which survives a disconnect + re-pair (the local
+  connection id does not). Teardown and re-subscribe reach exactly the
+  recorded servers:
+  - when the **last local user** of a space leaves (follower unsubscribe,
+    member leave or removal — `SpaceMemberLeft`), every recorded seat is
+    released; a server that is not connected right now keeps its row until
+    it reconnects;
+  - each GFS-WS **reconnect** re-takes that server's recorded seats still
+    wanted and releases those no local user wants any more (a leave missed
+    while it was down);
+  - a pre-v44 mirror (no provenance, no recorded seat) falls back to the
+    servers whose **whole** directory lists the space, and contacts none
+    when it can't be read;
+  - **reactive teardown**: a seat nothing local records — such a mirror
+    whose space was withdrawn from the directory (the GFS keeps its relay and
+    subscribers), a connection re-paired away before 0090 — shows itself when
+    that server relays the space. A relay frame for a space no local user is
+    seated in proves that server seats us, so it — and only it — gets an
+    unsubscribe, at most once per 10 min per (server, space). A seat taken in
+    the last 2 min is spared (the local member row is written after the
+    subscribe succeeds).
 
 ### `allow_subscribers: false` — listed, never relayed
 
@@ -606,10 +629,11 @@ was withdrawn from them.
 **Readers re-register on reconnect.** The GFS seat is registered only on a
 household's first-ever subscribe, so a purged seat would otherwise never come
 back — the household would show "subscribed" forever and receive nothing.
-Every GFS-WS (re)connect therefore re-POSTs `/gfs/subscribe` for each local
-subscription mirrored from that server — and only those: a space seated from
-another GFS is never re-subscribed here
-(`GfsSpaceMirrorService.resubscribe_all`, wired beside the pin self-heal). The
+Every GFS-WS (re)connect therefore re-POSTs `/gfs/subscribe` for each seat
+recorded on that server (and the spaces this household writes in that it
+lists) — and only those: a space seated from another GFS is never
+re-subscribed here (`GfsSpaceMirrorService.resubscribe_all`, wired beside the
+pin self-heal). The
 GFS's `add_subscriber` is an upsert, so a seat we still hold is a no-op, and a
 `403` (the owner really did withdraw readability) is swallowed at DEBUG. This
 is what makes the purge recoverable: turn the flag back on and the readers

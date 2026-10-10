@@ -555,6 +555,27 @@ async def test_a_writer_household_subscribes_to_its_spaces(world):
     assert world["gfs"].subscribed == [(SPACE_ID, "conn-1")]
 
 
+async def test_an_auto_subscribe_is_a_recorded_seat(world):
+    """M1: with the seat keeper wired, every auto-subscribe goes through
+    ``take_seat`` (which records it), so a leave can tear it down."""
+    spaces = world["spaces"]
+    spaces.local[SPACE_ID] = ["u1"]
+    spaces.members[SPACE_ID] = [_member("u1", SpaceRole.MEMBER)]
+
+    class _Seats:
+        def __init__(self):
+            self.taken: list[tuple[str, str]] = []
+
+        async def take_seat(self, space_id, conn):
+            self.taken.append((space_id, conn.gfs_instance_id))
+
+    seats = _Seats()
+    world["svc"].attach_seats(seats)
+    assert await world["svc"].subscribe_member_spaces("conn-1") == 1
+    assert seats.taken == [(SPACE_ID, world["conn"].gfs_instance_id)]
+    assert world["gfs"].subscribed == []  # never the raw, unrecorded path
+
+
 @pytest.mark.parametrize("case", ["follower_only", "seed_holder", "incapable", "none"])
 async def test_auto_subscribe_skips_what_it_must(world, case):
     spaces = world["spaces"]
@@ -1156,18 +1177,18 @@ async def test_the_directory_cache_is_dropped_on_a_key_or_config_change(world):
     bus = EventBus()
     svc.wire(bus)
     assert not await svc._listed_strict(world["conn"], SPACE_ID)
-    assert svc._listing
+    assert len(svc._directories) == 1
     await _gfs_strict(world)
     # Still cached as trusted …
     assert not await svc._listed_strict(world["conn"], SPACE_ID)
     # … until a key import (the switch to strict rotates) re-reads it.
     await bus.publish(SpaceContentKeyImported(space_id=SPACE_ID, epoch=4))
-    assert svc._listing == {}
+    assert len(svc._directories) == 0
     assert await svc._listed_strict(world["conn"], SPACE_ID)
     await bus.publish(
         SpaceConfigChanged(space_id=SPACE_ID, event_type="x", payload={}, sequence=1)
     )
-    assert svc._listing == {}
+    assert len(svc._directories) == 0
 
 
 # ── Private spaces: the opaque channel (v_51) ────────────────────────────
