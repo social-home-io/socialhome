@@ -14,7 +14,9 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { EmojiField } from './EmojiField'
 import { RadioCardGroup } from './RadioCardGroup'
 import { ChipRadioGroup } from './ChipRadioGroup'
-import { GfsChecklist, defaultGfsSelection, type GfsChoice } from './GfsChecklist'
+import {
+  GfsChecklist, defaultGfsSelection, revealGfsChecklist, type GfsChoice,
+} from './GfsChecklist'
 import { SpaceGfsListing } from './SpaceGfsListing'
 import { joinOptionsForVisibility } from './spaceModeOptions'
 import { showToast } from './Toast'
@@ -154,6 +156,9 @@ export function SpaceSettings({
   const tierGfsChoices = useSignal<GfsChoice[]>([])
   const tierGfsSelected = useSignal<string[]>([])
   const tierGfsError = useSignal<string | null>(null)
+  // ``/api/gfs/connections`` failed: say so with a Retry instead of
+  // claiming no GFS is connected.
+  const tierGfsLoadFailed = useSignal(false)
   const locationEnabled = useSignal(Boolean(space.features?.location))
   const locationMode = useSignal<'gps' | 'zone_only'>(
     space.features?.location_mode ?? 'gps',
@@ -272,10 +277,10 @@ export function SpaceSettings({
   // Mirrors the save logic below: a positive whole number turns the sweep on.
   const retentionOn = (parseInt(retentionDays, 10) || 0) > 0
 
-  useEffect(() => {
-    // The tier block's GFS checklist: only the owner household chooses
-    // GFSs, so a remote stub loads nothing.
-    if (isRemoteSpace) return
+  // The tier block's GFS checklist: only the owner household chooses
+  // GFSs, so a remote stub loads nothing.
+  const loadTierGfs = () => {
+    tierGfsLoadFailed.value = false
     void api.get<GfsConnection[]>('/api/gfs/connections')
       .then((rows) => {
         const active = rows
@@ -285,7 +290,13 @@ export function SpaceSettings({
         // Exactly one server: nothing to decide, so it starts ticked.
         tierGfsSelected.value = defaultGfsSelection(active)
       })
-      .catch(() => { tierGfsChoices.value = [] })
+      .catch(() => {
+        tierGfsChoices.value = []
+        tierGfsLoadFailed.value = true
+      })
+  }
+  useEffect(() => {
+    if (!isRemoteSpace) loadTierGfs()
   }, [space.id, isRemoteSpace])
 
   const save = async () => {
@@ -513,6 +524,7 @@ export function SpaceSettings({
     if (tierChoice.value === space.space_type) return
     if (choosesGfs && tierGfsSelected.value.length === 0) {
       tierGfsError.value = t('error.gfs_selection_required')
+      revealGfsChecklist('space-tier')
       return
     }
     try {
@@ -1030,10 +1042,12 @@ export function SpaceSettings({
         <label>{t('space.tier.label')}
           <select
             value={tierChoice.value}
-            onChange={(e) =>
-              (tierChoice.value = (e.target as HTMLSelectElement)
-                .value as Space['space_type'])
-            }
+            onChange={(e) => {
+              tierChoice.value = (e.target as HTMLSelectElement)
+                .value as Space['space_type']
+              // A new choice starts without the last one's complaint.
+              tierGfsError.value = null
+            }}
           >
             <option value="private">{t('space.tier.private')}</option>
             <option value="household">{t('space.tier.household')}</option>
@@ -1060,7 +1074,15 @@ export function SpaceSettings({
             error={tierGfsError.value}
           />
         )}
-        {choosesGfs && tierGfsChoices.value.length === 0 && (
+        {choosesGfs && tierGfsLoadFailed.value && (
+          <p class="sh-form-error" role="alert" data-testid="tier-gfs-load-failed">
+            {t('space.gfs_listing.load_failed')}{' '}
+            <Button variant="secondary" onClick={loadTierGfs}>
+              {t('common.retry')}
+            </Button>
+          </p>
+        )}
+        {choosesGfs && !tierGfsLoadFailed.value && tierGfsChoices.value.length === 0 && (
           <p class="sh-muted" data-testid="tier-gfs-none">
             {currentUser.value?.is_admin === true ? (
               <>
@@ -1098,8 +1120,12 @@ export function SpaceSettings({
         </div>
       </div>
 
-
-      <SpaceGfsListing space={space} isOwner={isOwner} isRemoteSpace={isRemoteSpace} />
+      {/* While the owner household picks GFSs for a move into Global, the
+       *  current tier's note ("public spaces are only visible…") would
+       *  contradict the checklist above — hide it until they're done. */}
+      {!choosesGfs && (
+        <SpaceGfsListing space={space} isOwner={isOwner} isRemoteSpace={isRemoteSpace} />
+      )}
 
       <hr />
       <h3>{t('space.archive.heading')}</h3>

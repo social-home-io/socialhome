@@ -11,7 +11,9 @@ import { Button } from './Button'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { EmojiField } from './EmojiField'
 import { RadioCardGroup } from './RadioCardGroup'
-import { GfsChecklist, defaultGfsSelection, type GfsChoice } from './GfsChecklist'
+import {
+  GfsChecklist, defaultGfsSelection, revealGfsChecklist, type GfsChoice,
+} from './GfsChecklist'
 import {
   visibilityOptions as tierOptions,
   SPACE_CATEGORIES,
@@ -109,6 +111,7 @@ export function SpaceCreateDialog() {
     // choice (GFS_SELECTION_REQUIRED), so say it beside the list instead.
     if (isGlobal() && gfsSelected.value.length === 0) {
       gfsError.value = t('error.gfs_selection_required')
+      revealGfsChecklist('space-create')
       return
     }
     submitting.value = true

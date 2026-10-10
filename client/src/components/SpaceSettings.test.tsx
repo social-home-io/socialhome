@@ -1563,3 +1563,66 @@ describe('SpaceSettings — proposing Global names the GFSs', () => {
     expect(pub.queryByTestId('gfs-listing-owner')).toBeNull()
   })
 })
+
+describe('SpaceSettings — the Global checklist, edge states', () => {
+  const town = { id: 'g-a', gfs_instance_id: 'i1', display_name: 'Town GFS',
+    inbox_url: 'https://town.example', status: 'active', paired_at: '',
+    published_space_count: 0 }
+  const club = { ...town, id: 'g-b', gfs_instance_id: 'i2', display_name: 'Club GFS',
+    inbox_url: 'https://club.example' }
+  const tierSelect = (c: Element) => [...c.querySelectorAll('select')].find(s =>
+    [...s.options].some(o => o.value === 'global')) as HTMLSelectElement
+
+  beforeEach(() => {
+    apiMock.post = vi.fn().mockResolvedValue({ proposal: { status: 'pending' } })
+  })
+
+  it('a failed connections load offers Retry, not "connect a GFS first"', async () => {
+    apiMock.get.mockReset()
+    apiMock.get.mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue([town])
+    const { container, getByTestId, queryByTestId, getByText } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(getByTestId('tier-gfs-load-failed').textContent).toContain('space.gfs_listing.load_failed')
+    expect(queryByTestId('tier-gfs-none')).toBeNull()
+    fireEvent.click(getByText('common.retry'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(queryByTestId('tier-gfs-load-failed')).toBeNull()
+    expect(container.querySelector('input[name="space-tier-gfs"]')).toBeTruthy()
+  })
+
+  it('a new tier choice clears the "choose at least one" error', async () => {
+    apiMock.get.mockReset()
+    apiMock.get.mockResolvedValue([town, club])
+    const { container, getByText } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    fireEvent.click(getByText('space.tier.propose'))
+    expect(container.querySelector('#space-tier-error')).toBeTruthy()
+    // The error focuses the list's first box.
+    await vi.waitFor(() => expect(document.activeElement)
+      .toBe(container.querySelector('input[name="space-tier-gfs"]')))
+    fireEvent.change(tierSelect(container), { target: { value: 'household' } })
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(container.querySelector('#space-tier-error')).toBeNull()
+  })
+
+  it('hides the public-space note while the Global checklist is open', async () => {
+    apiMock.get.mockReset()
+    apiMock.get.mockResolvedValue([town])
+    const { container, queryByTestId } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} isOwner />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    expect(queryByTestId('gfs-public-note')).toBeTruthy()
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(queryByTestId('gfs-public-note')).toBeNull()
+    fireEvent.change(tierSelect(container), { target: { value: 'public' } })
+    expect(queryByTestId('gfs-public-note')).toBeTruthy()
+  })
+})

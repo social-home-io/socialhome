@@ -13,7 +13,7 @@
  *   (``space.gfs_servers``), with a hint for each GFS their own household
  *   isn't connected to.
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import { api } from '@/api'
 import { addBase } from '@/baseUrl'
@@ -24,7 +24,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { gfsHost } from './GfsChecklist'
 import { showToast } from './Toast'
 import type {
-  GfsSelectionOutcome, Space, SpaceGfsServer, SpaceGfsServersView,
+  Space, SpaceGfsServer, SpaceGfsServersView,
 } from '@/types'
 
 type Available = SpaceGfsServersView['available'][number]
@@ -52,7 +52,7 @@ async function copyToClipboard(text: string): Promise<void> {
 function UnlistedBanner({ owner }: { owner: boolean }): JSX.Element {
   return (
     <p class="sh-gfs-banner" role="status" data-testid="gfs-unlisted-banner">
-      ⚠️ {owner
+      <span aria-hidden="true">⚠️</span> {owner
         ? t('space.gfs_listing.unlisted_owner')
         : t('space.gfs_listing.unlisted_member')}
     </p>
@@ -93,6 +93,7 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
   // The last listed GFS awaiting a confirm (removing it leaves the space
   // "global, not listed").
   const [confirmLast, setConfirmLast] = useState<Available | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
 
   const load = async () => {
     try {
@@ -126,54 +127,59 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
     ? addChoice
     : (others[0]?.gfs_id ?? '')
 
+  /** The removed row's button is gone: put focus somewhere that still
+   *  exists — the Add picker, else the section heading. */
+  const refocusAfterRemove = () => {
+    setTimeout(() => {
+      const root = rootRef.current
+      const target = root?.querySelector<HTMLElement>('[data-testid="gfs-add-select"]')
+        ?? root?.closest('section')?.querySelector<HTMLElement>('h3')
+      target?.focus()
+    }, 0)
+  }
+
   const remove = async (row: Available) => {
     if (busy) return
     setBusy(row.gfs_id)
+    let removed = false
     try {
       await api.delete(`/api/spaces/${spaceId}/publish/${row.gfs_id}`)
+      removed = true
       showToast(t('space.gfs_listing.removed', { name: row.display_name }), 'success')
     } catch (e: any) {
       showToast(e.message || t('common.error'), 'error')
     } finally {
-      setBusy(null)
+      // Stay busy until the fresh list is in, so a second click can't
+      // fire another DELETE for a row that's already gone.
       await load()
+      setBusy(null)
     }
+    if (removed) refocusAfterRemove()
   }
 
+  // One GFS at a time (POST /publish/{gfs_id}): an atomic add on the
+  // server, so it never drops a listing this view doesn't show (a held
+  // connection) or undo a change made in another tab.
   const add = async () => {
     const row = others.find(o => o.gfs_id === choice)
     if (!row || busy) return
     setBusy('add')
     try {
-      const res = await api.put<GfsSelectionOutcome>(
-        `/api/spaces/${spaceId}/gfs-servers`,
-        { gfs_ids: [...listed.map(l => l.gfs_id), row.gfs_id] },
-      )
-      // One GFS that can't be reached never aborts the rest: name it.
-      const failed = res?.failed ?? []
-      for (const f of failed) {
-        const name = view.available.find(a => a.gfs_id === f.gfs_id)?.display_name
-          ?? f.gfs_id
-        showToast(
-          f.reason === 'unpublish_failed'
-            ? t('space.gfs_listing.remove_failed', { name })
-            : t('space.gfs_listing.add_failed', { name }),
-          'error',
-        )
-      }
-      if (!failed.some(f => f.gfs_id === row.gfs_id)) {
-        showToast(t('space.gfs_listing.added', { name: row.display_name }), 'success')
-      }
+      await api.post(`/api/spaces/${spaceId}/publish/${row.gfs_id}`)
+      showToast(t('space.gfs_listing.added', { name: row.display_name }), 'success')
     } catch (e: any) {
-      showToast(e.message || t('common.error'), 'error')
+      showToast(
+        e.message || t('space.gfs_listing.add_failed', { name: row.display_name }),
+        'error',
+      )
     } finally {
-      setBusy(null)
       await load()
+      setBusy(null)
     }
   }
 
   return (
-    <div class="sh-gfs-listing" data-testid="gfs-listing-owner">
+    <div class="sh-gfs-listing" data-testid="gfs-listing-owner" ref={rootRef}>
       <p class="sh-muted" style={{ marginTop: 0 }}>{t('space.gfs_listing.intro_owner')}</p>
       {view.unlisted && <UnlistedBanner owner />}
       {listed.length > 0 && (
@@ -369,7 +375,7 @@ export function SpaceGfsListing({
   return (
     <section class="sh-gfs-listing-section" aria-labelledby={`gfs-listing-${space.id}`}>
       <hr />
-      <h3 id={`gfs-listing-${space.id}`}>{t('space.federation')}</h3>
+      <h3 tabIndex={-1} id={`gfs-listing-${space.id}`}>{t('space.federation')}</h3>
       {body}
     </section>
   )

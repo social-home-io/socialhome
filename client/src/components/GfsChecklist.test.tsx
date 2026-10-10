@@ -48,11 +48,27 @@ describe('GfsChecklist', () => {
   })
 
   it('disables unticked boxes once the cap is reached', () => {
-    const { getByLabelText } = render(
+    const { getByLabelText, getByTestId } = render(
       <GfsChecklist name="t" choices={[A, B]} selected={['a']} max={1} onChange={() => {}} />,
     )
     expect((getByLabelText(/Town GFS/) as HTMLInputElement).disabled).toBe(false)
     expect((getByLabelText(/Club GFS/) as HTMLInputElement).disabled).toBe(true)
+    // …and says why the rest are greyed out.
+    expect(getByTestId('t-at-max').textContent).toBe('error.gfs_selection.too_many')
+  })
+
+  it('shows no cap hint while every box can still be ticked', () => {
+    const { queryByTestId } = render(
+      <GfsChecklist name="t" choices={[A, B]} selected={['a', 'b']} max={2} onChange={() => {}} />,
+    )
+    expect(queryByTestId('t-at-max')).toBeNull()
+  })
+
+  it('keeps the decorative globe away from screen readers', () => {
+    const { container } = render(
+      <GfsChecklist name="t" choices={[A]} selected={[]} onChange={() => {}} />,
+    )
+    expect(container.querySelector('legend [aria-hidden="true"]')!.textContent).toBe('🌐')
   })
 
   it('ties the error to the group for screen readers', () => {

@@ -33,6 +33,18 @@ export function defaultGfsSelection(choices: GfsChoice[]): string[] {
   return choices.length === 1 ? [choices[0].id] : []
 }
 
+/** Bring the checklist named *name* into view and focus its first box —
+ *  its error may sit below the fold (a long dialog on a phone). Runs after
+ *  the error has rendered. */
+export function revealGfsChecklist(name: string): void {
+  setTimeout(() => {
+    const fs = document.querySelector<HTMLElement>(`[data-testid="${name}-checklist"]`)
+    if (!fs) return
+    fs.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    fs.querySelector<HTMLInputElement>('input:not(:disabled)')?.focus({ preventScroll: true })
+  }, 0)
+}
+
 export function GfsChecklist({
   name,
   choices,
@@ -67,8 +79,8 @@ export function GfsChecklist({
       data-testid={`${name}-checklist`}
       aria-describedby={error ? errorId : undefined}
     >
-      <legend>🌐 {t('space.gfs_choice.legend')}</legend>
-      <p class="sh-muted" style={{ marginTop: 0 }}>
+      <legend><span aria-hidden="true">🌐</span> {t('space.gfs_choice.legend')}</legend>
+      <p class="sh-muted sh-gfs-checklist__intro">
         {intro ?? t('space.gfs_choice.intro')}
       </p>
       {choices.map((c) => {
@@ -91,6 +103,12 @@ export function GfsChecklist({
           </label>
         )
       })}
+      {atMax && choices.length > selected.length && (
+        // Why the remaining boxes are greyed out.
+        <p class="sh-form-hint" data-testid={`${name}-at-max`}>
+          {t('error.gfs_selection.too_many', { max: String(max) })}
+        </p>
+      )}
       {error && (
         <p id={errorId} class="sh-form-error" role="alert">{error}</p>
       )}

@@ -332,6 +332,9 @@ describe('SpaceCreateDialog — choosing the GFSs of a global space', () => {
     expect(err.textContent).toBe('error.gfs_selection_required')
     expect(err.getAttribute('role')).toBe('alert')
     expect(checklist(container)!.getAttribute('aria-describedby')).toBe('space-create-error')
+    // The error may be below the fold on a phone: the list is brought into
+    // view and its first box takes focus.
+    await waitFor(() => expect(document.activeElement).toBe(boxes(container)[0]))
     // Ticking one clears the error and the create goes through with it.
     await act(async () => { fireEvent.click(boxes(container)[1]) })
     expect(container.querySelector('#space-create-error')).toBeNull()
