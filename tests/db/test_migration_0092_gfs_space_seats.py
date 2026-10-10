@@ -1,4 +1,4 @@
-"""Migration 0090 — ``gfs_space_seats``.
+"""Migration 0092 — ``gfs_space_seats``.
 
 Additive: one table keyed by the server's own id (survives a re-pair), and a
 backfill from the v_44 mirror provenance where the seating connection still
@@ -13,7 +13,7 @@ import pytest
 
 from socialhome.db.migrations import discover_migrations
 
-_VERSION = 90
+_VERSION = 92
 
 
 def _apply_through(conn: sqlite3.Connection, last: int) -> None:
@@ -84,9 +84,10 @@ def test_backfills_resolvable_follower_mirrors_only(conn):
     _member(conn, "sp-remote", "far-user", "subscriber", local=False)
     _apply_through(conn, _VERSION)
     rows = conn.execute(
-        "SELECT space_id, gfs_instance_id FROM gfs_space_seats ORDER BY space_id"
+        "SELECT space_id, gfs_instance_id, gfs_connection_id, gfs_public_key"
+        " FROM gfs_space_seats ORDER BY space_id"
     ).fetchall()
-    assert [tuple(r) for r in rows] == [("sp-follow", "gfs-a")]
+    assert [tuple(r) for r in rows] == [("sp-follow", "gfs-a", "conn-1", "pk")]
 
 
 def test_one_row_per_space_and_server(conn):

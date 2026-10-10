@@ -218,7 +218,7 @@ class GfsSpaceMirrorService:
         # with member publish (over the cookie-less publish session);
         # standalone wiring reads it over the mirror's own session.
         self._directories = directories or GfsDirectoryCache(lambda: self._http_client)
-        # The servers holding a subscriber seat of ours, per space (0090) —
+        # The servers holding a subscriber seat of ours, per space (0092) —
         # the only servers an identity-bound (un)subscribe may go to.
         self._seats = seat_repo
         # (gfs_instance_id, space_id) → monotonic time of the last seat taken
@@ -453,6 +453,7 @@ class GfsSpaceMirrorService:
         conn = await self._gfs_conn_repo.get(gfs_id)
         if conn is None:
             return 0
+        await self.rebind_mirrors(conn)
         moved = 0
         for space_id in await self._spaces.list_subscribed_space_ids():
             if not await self.was_gfs_listed(space_id):
@@ -654,8 +655,57 @@ class GfsSpaceMirrorService:
         :class:`GfsConnectionError`; nothing is recorded then.
         """
         await self._gfs.subscribe_to_gfs_space(space_id, conn.id)
-        await self._seats.record(space_id, conn.gfs_instance_id)
+        await self._seats.record(
+            space_id,
+            conn.gfs_instance_id,
+            gfs_connection_id=conn.id,
+            gfs_public_key=conn.public_key,
+        )
         _remember(self._seated_at, (conn.gfs_instance_id, space_id))
+
+    async def rebind_mirrors(self, conn: GfsConnection) -> int:
+        """Move the v_44 pin-heal anchor of every mirror seated from an
+        earlier pairing of *conn*'s server onto *conn* (a disconnect +
+        re-pair mints a new local connection id). Returns how many moved.
+
+        No trust widening: only a mirror whose ``mirror_gfs_id`` is the
+        connection its seat on this server was taken over, and only when
+        *conn* pins the SAME server key that connection did. A re-pair under
+        a different key — or a mirror seated from another server, or one
+        with no recorded seat (its key unknowable) — keeps its old anchor,
+        and so never heals from this connection.
+        """
+        moved = 0
+        for space_id in await self._seats.list_for_gfs(conn.gfs_instance_id):
+            binding = await self._seats.get_binding(space_id, conn.gfs_instance_id)
+            if binding is None:
+                continue
+            old_conn_id, old_key = binding
+            if old_conn_id is None or old_conn_id == conn.id:
+                continue
+            if not old_key or old_key != conn.public_key:
+                continue
+            mirror_gfs, _ = await self._spaces.get_mirror_provenance(space_id)
+            if (
+                mirror_gfs == old_conn_id
+                and await self._spaces.rebind_mirror_provenance(
+                    space_id, from_gfs_id=old_conn_id, to_gfs_id=conn.id
+                )
+            ):
+                moved += 1
+                log.info(
+                    "gfs_space_mirror: mirror %s re-anchored to re-paired GFS %s",
+                    space_id,
+                    conn.id,
+                )
+            # The seat now lives on this pairing (same server, same key).
+            await self._seats.record(
+                space_id,
+                conn.gfs_instance_id,
+                gfs_connection_id=conn.id,
+                gfs_public_key=conn.public_key,
+            )
+        return moved
 
     def wire(self, bus: EventBus) -> None:
         """Release a space's seats when its last local member leaves."""
@@ -772,6 +822,9 @@ class GfsSpaceMirrorService:
                 if await self._subscribe_logged(space_id, gfs_id):
                     restored += 1
             return restored
+        # First: carry the pin-heal anchor over a same-key re-pair — before
+        # the re-take below rebinds the seats to this connection.
+        await self.rebind_mirrors(conn)
         recorded = await self._seats.list_for_gfs(conn.gfs_instance_id)
         keep: list[str] = []
         stale: list[str] = []
@@ -867,7 +920,7 @@ class GfsSpaceMirrorService:
         pre-v44 follower mirror subscribed.
 
         A mirror carrying provenance (v_44, ``spaces.mirror_gfs_id``) had its
-        seat recorded — by :meth:`take_seat`, or by the 0090 backfill when
+        seat recorded — by :meth:`take_seat`, or by the 0092 backfill when
         its connection still existed — so no recorded seat means either it
         is gone already or its connection was re-paired away; neither is
         knowable, and the reactive teardown (:meth:`on_relay_frame`) reaches

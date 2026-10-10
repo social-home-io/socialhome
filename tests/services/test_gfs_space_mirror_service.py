@@ -448,7 +448,9 @@ async def _mirrored(env, space_id: str = "sp-1", *, gfs: str | None = "gfs-1"):
     repo = await _seat_subscription(env, space_id)
     if gfs is not None:
         await env.spaces.set_mirror_provenance(space_id, gfs_id=gfs, rotation_seq=0)
-        await env.seats.record(space_id, f"inst-{gfs}")
+        await env.seats.record(
+            space_id, f"inst-{gfs}", gfs_connection_id=gfs, gfs_public_key="pk"
+        )
     return repo
 
 
@@ -1262,7 +1264,9 @@ async def test_reconnect_tears_down_a_seat_nobody_wants(env, monkeypatch):
     next reconnect — but a seat taken moments ago (the member row is written
     after the subscribe) is left alone."""
     await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
-    await env.seats.record("sp-gone", "inst-gfs-1")
+    await env.seats.record(
+        "sp-gone", "inst-gfs-1", gfs_connection_id="gfs-1", gfs_public_key="pk"
+    )
     gfs = _StubGfs()
     svc = _mirror(env, _StubSession(), gfs)
     await svc.take_seat("sp-fresh", await env.conns.get("gfs-1"))
@@ -1352,3 +1356,61 @@ def test_seat_bookkeeping_stays_bounded():
     late = mirror_mod.UNWANTED_RELAY_RETRY_S
     mirror_mod._remember(store, ("g", "new"), now=late)
     assert store == {("g", "new"): late}
+
+
+# ─── pin-heal anchor across a re-pair ────────────────────────────────────
+
+
+async def _seated_follower(env, *, seated_by: str = "gfs-1", key: str = "pk"):
+    await _follower(env)  # provenance gfs-1, conns gfs-1 + gfs-2 (key "pk")
+    await env.seats.record(
+        "sp-1", f"inst-{seated_by}", gfs_connection_id=seated_by, gfs_public_key=key
+    )
+
+
+@pytest.mark.security
+async def test_rebind_moves_the_anchor_only_for_the_same_server_and_key(env):
+    await _seated_follower(env)
+    await _repair(env, "gfs-1", "gfs-1b", "https://gfs.test")
+    svc = _mirror(env, _StubSession())
+    assert await svc.rebind_mirrors(await env.conns.get("gfs-1b")) == 1
+    assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1b", 0)
+    assert await env.seats.get_binding("sp-1", "inst-gfs-1") == ("gfs-1b", "pk")
+    # Idempotent.
+    assert await svc.rebind_mirrors(await env.conns.get("gfs-1b")) == 0
+
+
+@pytest.mark.security
+async def test_rebind_refuses_a_different_key(env):
+    await _seated_follower(env)
+    await env.conns.delete("gfs-1")
+    await env.conns.save(
+        GfsConnection(
+            id="gfs-1b",
+            gfs_instance_id="inst-gfs-1",
+            display_name="G",
+            public_key="another-key",
+            inbox_url="https://gfs.test",
+            status="active",
+            paired_at="2025-02-01T00:00:00+00:00",
+        )
+    )
+    svc = _mirror(env, _StubSession())
+    assert await svc.rebind_mirrors(await env.conns.get("gfs-1b")) == 0
+    assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1", 0)
+    assert await env.seats.get_binding("sp-1", "inst-gfs-1") == ("gfs-1", "pk")
+
+
+async def test_rebind_leaves_a_mirror_seated_from_another_server(env):
+    """A member seat on gfs-2 (same key there) must not pull the anchor of a
+    mirror gfs-1 seated."""
+    await _follower(env)
+    await env.seats.record(
+        "sp-1", "inst-gfs-2", gfs_connection_id="gfs-2", gfs_public_key="pk"
+    )
+    await _repair(env, "gfs-2", "gfs-2b", "https://other.test")
+    svc = _mirror(env, _StubSession())
+    assert await svc.rebind_mirrors(await env.conns.get("gfs-2b")) == 0
+    assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1", 0)
+    # The seat itself follows its server's re-pair (same key).
+    assert await env.seats.get_binding("sp-1", "inst-gfs-2") == ("gfs-2b", "pk")

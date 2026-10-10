@@ -493,7 +493,13 @@ cannot widen access through a missing field or Python truthiness.
   HIGHER seq than the one it stored (`spaces.gfs_rotation_seq`). **Trust
   model:** the same trust a follower already places in that one GFS for its
   first (TOFU) pin; the seq bound stops it from rolling the pin back, and no
-  other connection server can move it. A household with a real seat, or a
+  other connection server can move it. A disconnect + re-pair of that same
+  server mints a new local connection id; on the next reconnect the anchor
+  moves to it only when the new pairing has the same `gfs_instance_id` AND
+  pins the same server public key as the connection the seat was taken over
+  (both kept on the `gfs_space_seats` row, since the old connection row is
+  deleted). A re-pair under a different key inherits nothing — that mirror
+  keeps its old anchor and no longer heals. A household with a real seat, or a
   private stub (a pending invite), never takes a pin from a GFS — it re-pins
   from the owner's own cert, delivered over federation (`spaces.md`). A
   mirror seated before v_44 has no recorded provenance and does not heal
@@ -534,7 +540,7 @@ cannot widen access through a missing field or Python truthiness.
   so sending it to a GFS that never seated the subscription would tell that
   operator the household follows the space. Every subscribe — a follower's,
   the reconnect self-heal's, a member's auto-subscribe — therefore records
-  the seat in `gfs_space_seats` (0090) under the server's own
+  the seat in `gfs_space_seats` (0092) under the server's own
   `gfs_instance_id`, which survives a disconnect + re-pair (the local
   connection id does not). Teardown and re-subscribe reach exactly the
   recorded servers:
@@ -550,7 +556,7 @@ cannot widen access through a missing field or Python truthiness.
     when it can't be read;
   - **reactive teardown**: a seat nothing local records — such a mirror
     whose space was withdrawn from the directory (the GFS keeps its relay and
-    subscribers), a connection re-paired away before 0090 — shows itself when
+    subscribers), a connection re-paired away before 0092 — shows itself when
     that server relays the space. A relay frame for a space no local user is
     seated in proves that server seats us, so it — and only it — gets an
     unsubscribe, at most once per 10 min per (server, space). A seat taken in

@@ -41,6 +41,7 @@ pytestmark = pytest.mark.security
 
 LISTING_GFS = "https://listing.gfs.example"
 OTHER_GFS = "https://other.gfs.example"
+ROTATED_PIN = "bb" * 32
 
 
 class _Resp:
@@ -93,6 +94,16 @@ class _Session:
                     "status": "active",
                     "identity_public_key": "aa" * 32,
                     "allow_subscribers": True,
+                },
+            )
+        if url == f"{LISTING_GFS}/gfs/spaces/sp-mirrored":
+            # The owner rotated: the listing GFS re-pinned to a new key.
+            return _Resp(
+                200,
+                {
+                    "space_id": "sp-mirrored",
+                    "identity_public_key": ROTATED_PIN,
+                    "authority_rotation_seq": 1,
                 },
             )
         if url == f"{OTHER_GFS}/gfs/spaces":
@@ -177,7 +188,12 @@ async def household(tmp_dir):
                 space_id, gfs_id=seated_by, rotation_seq=0
             )
             # What ``take_seat`` recorded when the follower subscribed.
-            await seats.record(space_id, f"inst-{seated_by}")
+            await seats.record(
+                space_id,
+                f"inst-{seated_by}",
+                gfs_connection_id=seated_by,
+                gfs_public_key="pk",
+            )
     session = _Session()
     gfs = GfsConnectionService(conns, http_client=session)
     gfs.attach_publish_context(
@@ -192,7 +208,7 @@ async def household(tmp_dir):
     )
     mirror.attach_session(session)
     try:
-        yield mirror, session, iid, conns
+        yield mirror, session, iid, conns, spaces
     finally:
         await db.shutdown()
 
@@ -212,7 +228,7 @@ def _leaks_to_other(session: _Session, iid: str) -> list[tuple[str, str, dict]]:
 
 
 async def test_unsubscribe_never_reaches_a_gfs_that_did_not_seat_it(household):
-    mirror, session, iid, _conns = household
+    mirror, session, iid, _conns, _spaces = household
     await mirror.unsubscribe("sp-mirrored")
     await mirror.unsubscribe("sp-legacy")
     assert _leaks_to_other(session, iid) == []
@@ -225,7 +241,7 @@ async def test_unsubscribe_never_reaches_a_gfs_that_did_not_seat_it(household):
 
 
 async def test_reconnect_never_subscribes_on_a_gfs_that_did_not_seat_it(household):
-    mirror, session, iid, _conns = household
+    mirror, session, iid, _conns, _spaces = household
     assert await mirror.resubscribe_all("other") == 0
     assert _leaks_to_other(session, iid) == []
     assert not any(m == "POST" for m, _url, _b in session.requests)
@@ -236,7 +252,7 @@ async def test_reconnect_never_subscribes_on_a_gfs_that_did_not_seat_it(househol
 async def test_mirror_detail_fetch_never_probes_a_gfs_that_does_not_list_it(
     household,
 ):
-    mirror, session, iid, _conns = household
+    mirror, session, iid, _conns, _spaces = household
     # Listed nowhere: only whole-directory reads, no per-space request at all.
     assert await mirror.ensure_mirror("sp-nowhere") is None
     assert not any("sp-nowhere" in url for _m, url, _b in session.requests)
@@ -253,7 +269,7 @@ async def test_a_re_paired_server_keeps_the_seat_and_nobody_else_learns_it(
     """H1: a disconnect + re-pair mints a new local connection id for the
     same server. The seat is re-taken there and torn down there — and the
     other server never hears of it."""
-    mirror, session, iid, conns = household
+    mirror, session, iid, conns, _spaces = household
     await conns.delete("listing")
     await conns.save(
         GfsConnection(
@@ -277,3 +293,44 @@ async def test_a_re_paired_server_keeps_the_seat_and_nobody_else_learns_it(
     ]
     assert ("unsubscribe", "sp-mirrored") in posts
     assert ("subscribe", "sp-mirrored") in posts
+
+
+async def _re_pair_listing(conns, *, public_key: str) -> None:
+    await conns.delete("listing")
+    await conns.save(
+        GfsConnection(
+            id="listing-again",
+            gfs_instance_id="inst-listing",
+            display_name="listing",
+            public_key=public_key,
+            inbox_url=LISTING_GFS,
+            status="active",
+            paired_at="2025-02-01T00:00:00+00:00",
+        )
+    )
+
+
+async def test_a_same_key_re_pair_keeps_healing_the_follower_pin(household):
+    """The v_44 pin heal trusts only the GFS that seated the mirror. A
+    re-pair of that same server under the SAME key carries the anchor over
+    (the reconnect self-heal moves it before re-taking the seat), so a
+    rotation still heals."""
+    mirror, _session, _iid, conns, spaces = household
+    await _re_pair_listing(conns, public_key="pk")
+    await mirror.resubscribe_all("listing-again")
+    assert await mirror.refresh_authority_pins("listing-again") == 1
+    assert (await spaces.get("sp-mirrored")).identity_public_key == ROTATED_PIN
+    assert await spaces.get_mirror_provenance("sp-mirrored") == ("listing-again", 1)
+
+
+async def test_a_re_pair_under_another_key_inherits_no_pin_trust(household):
+    """Same server id, DIFFERENT pinned key: nothing proves it is the server
+    that seated the mirror, so its listing never re-pins the space — not on
+    reconnect, not after the seat was re-taken over it."""
+    mirror, _session, _iid, conns, spaces = household
+    await _re_pair_listing(conns, public_key="a-different-key")
+    await mirror.resubscribe_all("listing-again")
+    assert await mirror.refresh_authority_pins("listing-again") == 0
+    assert await mirror.refresh_authority_pins("listing-again") == 0
+    assert (await spaces.get("sp-mirrored")).identity_public_key == ""
+    assert await spaces.get_mirror_provenance("sp-mirrored") == ("listing", 0)

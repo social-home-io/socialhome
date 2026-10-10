@@ -6288,7 +6288,9 @@ async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
     stack.space_svc.attach_gfs_space_mirror(seeder)
     await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
     # What ``take_seat`` records for the GFS subscribe the fake stood in for.
-    await seats.record("remote-sp", "inst-1")
+    await seats.record(
+        "remote-sp", "inst-1", gfs_connection_id="gfs-1", gfs_public_key="pk"
+    )
     stack.space_svc.attach_gfs_space_mirror(real_mirror)
 
     await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")

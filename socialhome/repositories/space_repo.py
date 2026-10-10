@@ -97,6 +97,9 @@ class AbstractSpaceRepo(Protocol):
         self, space_id: str, *, gfs_id: str, rotation_seq: int
     ) -> None: ...
     async def get_mirror_provenance(self, space_id: str) -> tuple[str | None, int]: ...
+    async def rebind_mirror_provenance(
+        self, space_id: str, *, from_gfs_id: str, to_gfs_id: str
+    ) -> bool: ...
     async def adopt_gfs_pin(
         self, space_id: str, *, gfs_id: str, public_key_hex: str, rotation_seq: int
     ) -> bool: ...
@@ -954,6 +957,19 @@ class SqliteSpaceRepo:
         if row is None:
             return None, 0
         return row["mirror_gfs_id"], int(row["gfs_rotation_seq"] or 0)
+
+    async def rebind_mirror_provenance(
+        self, space_id: str, *, from_gfs_id: str, to_gfs_id: str
+    ) -> bool:
+        """Move a mirror's provenance to a re-paired connection of the SAME
+        server (v_44 pin-heal anchor). Compare-and-set on the old connection
+        id; ``gfs_rotation_seq`` is kept, so the heal still only moves to a
+        strictly higher seq. The caller proves same server + same key."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE spaces SET mirror_gfs_id=? WHERE id=? AND mirror_gfs_id=?",
+            (to_gfs_id, space_id, from_gfs_id),
+        )
+        return changed > 0
 
     async def adopt_gfs_pin(
         self, space_id: str, *, gfs_id: str, public_key_hex: str, rotation_seq: int
