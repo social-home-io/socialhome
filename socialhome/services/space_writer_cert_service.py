@@ -30,11 +30,14 @@ service is the one place that
   newest epoch we hold, or at the previous one for
   :data:`WRITER_CERT_EPOCH_GRACE_S` after the newest key arrived).
 
-**Writer group key (v_50, strict mode).** In a space whose owner set
-``gfs_publish_mode = "strict"``, the same per-peer channels also carry the
-epoch's writer GROUP key (:mod:`socialhome.writer_key`) under
-``writer_key``, next to the cert — only to a v_50 household that holds a
-publishing scope (``write`` OR ``comment``: the connection server must not
+**Writer group key (v_50 strict mode; v_57 every publicly readable space).**
+In a space whose owner set ``gfs_publish_mode = "strict"`` — and, since v_57,
+in a TRUSTED space that is publicly readable (a public tier with followers,
+so members publish anonymously to every GFS on the owner's list) — the same
+per-peer channels also carry the epoch's writer GROUP key
+(:mod:`socialhome.writer_key`) under ``writer_key``, next to the cert — only
+to a household at the version that mode needs (:func:`writer_key_min_version`)
+that holds a publishing scope (``write`` OR ``comment``: the connection server must not
 be able to tell the two apart), never to a non-publisher. Seed holders derive
 it from the space seed and store nothing; every other household verifies a
 delivered grant against the pinned space key and keeps it KEK-wrapped on that
@@ -54,7 +57,7 @@ from typing import TYPE_CHECKING
 from ..crypto import b64url_decode, derive_instance_id, ed25519_public_key
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODE_STRICT
-from ..domain.space import SpaceFeatureAccess, SpaceRole
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceFeatureAccess, SpaceRole
 from ..domain.writer_cert import (
     MAX_WRITER_USERS,
     WRITER_SCOPE_COMMENT,
@@ -501,19 +504,22 @@ class SpaceWriterCertService:
         """The writer group key grant to deliver to peer ``instance_id`` at
         ``epoch`` (default: our current content epoch), or ``None``.
 
-        Only in a STRICT space, only from a seed holder whose seed matches
-        the pin, only to a v_50 peer that holds a publishing scope (``write``
-        or ``comment`` alike) — never to a non-publisher, never to an older
-        household (it gets no key and keeps the host path)."""
+        Only from a seed holder whose seed matches the pin, only to a peer
+        that holds a publishing scope (``write`` or ``comment`` alike) — never
+        to a non-publisher — and only where the peer can use it: in a STRICT
+        space to a v_50 peer; in a TRUSTED publicly readable space (v_57 —
+        the key is how a member publishes anonymously to every server on the
+        owner's list) to a v_57 peer. An older household gets no key (strict:
+        the host path; trusted: identified to its own servers)."""
         if self._federation is None or instance_id == self._own_instance_id:
             return None
-        if not await self._federation.space_member_supports(
-            instance_id,
-            min_version=FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH,
-        ):
-            return None
         space = await self._spaces.get(space_id)
-        if space is None or space.features.gfs_publish_mode != GFS_PUBLISH_MODE_STRICT:
+        min_version = writer_key_min_version(space)
+        if space is None or min_version is None:
+            return None
+        if not await self._federation.space_member_supports(
+            instance_id, min_version=min_version
+        ):
             return None
         seed = await self._matching_seed(space)
         if seed is None:
@@ -578,7 +584,7 @@ class SpaceWriterCertService:
             return None
         seed = await self._matching_seed(space)
         if seed is not None:
-            if space.features.gfs_publish_mode != GFS_PUBLISH_MODE_STRICT:
+            if writer_key_min_version(space) is None:
                 return None
             return derive_writer_seed(seed, space_id, epoch)
         if self._kek is None:
@@ -609,10 +615,11 @@ class SpaceWriterCertService:
 
     async def writer_key_cert_wire(self, space_id: str, epoch: int) -> dict | None:
         """The authority-signed ``writer_key_cert`` a seed holder pins at the
-        GFS for ``epoch`` (v_50) — only for a STRICT space and while our seed
+        GFS for ``epoch`` (v_50) — for a space whose writers get a writer key
+        (strict; trusted and publicly readable since v_57) and while our seed
         matches the pin; else ``None``."""
         space = await self._spaces.get(space_id)
-        if space is None or space.features.gfs_publish_mode != GFS_PUBLISH_MODE_STRICT:
+        if space is None or writer_key_min_version(space) is None:
             return None
         seed = await self._matching_seed(space)
         if seed is None:
@@ -810,6 +817,26 @@ class SpaceWriterCertService:
             return b64url_decode(WriterCert.from_wire(raw).instance_pk)
         except Exception:
             return None
+
+
+def writer_key_min_version(space: "Space | None") -> int | None:
+    """The ``proto_version`` a member household needs to be handed the
+    space's writer group key, or ``None`` when the space has none.
+
+    * strict (``gfs_publish_mode = "strict"``) → v_50: the key is the only way
+      to publish over a connection server there;
+    * trusted and publicly readable (a public tier with followers) → v_57:
+      the key lets a member publish anonymously to EVERY server on the
+      owner's signed list, including ones it never connected to;
+    * anything else (a private space — its channel has its own key — or a
+      space nobody may follow) → none."""
+    if space is None:
+        return None
+    if space.features.gfs_publish_mode == GFS_PUBLISH_MODE_STRICT:
+        return FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH
+    if space.space_type in PUBLIC_SPACE_TIERS and space.features.allow_subscribers:
+        return FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH
+    return None
 
 
 def _supersedes(new: WriterCert, held: WriterCert) -> bool:

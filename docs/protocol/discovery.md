@@ -2325,9 +2325,9 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   is dropped unless the receiver holds an active connection to the same
   `gfs_instance_id` at the same URL; duplicates by id, URL or key and
   anything past 8 entries are dropped, with one log line. The stored list
-  stays exactly as signed, so it can be relayed. Whoever sends to these
-  servers (v_56, later) must use the SSRF-guarded `OutboundFetcher` path
-  (resolve, pin, refuse private addresses) — a DNS name is not resolved here.
+  stays exactly as signed, so it can be relayed. A server we are not
+  registered on is reached only through the SSRF-guarded pinned session
+  (v_57, below) — a DNS name is not resolved here.
 - **Join stubs are seated under the real owner — only with proof.** Space
   ids are random, not key-derived, so a snapshot's `owner_instance_id` is
   just a claim. A §D1b stub issued by a household other than the claimed
@@ -2415,8 +2415,97 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   automatically: a seed-holding admin could sign "I own it" exactly like the
   owner, so nothing on such a stub can tell them apart.
 - An older receiver ignores the key; no protocol version gates it. Members
-  store it (`spaces.gfs_servers`, migration 0093) but do not yet act on it —
-  publishing to every listed server is a later protocol version.
+  store it (`spaces.gfs_servers`, migration 0093) and, from v_57 on, publish
+  to every server on it (below).
+
+### Members publish to every listed GFS (v_57)
+
+Every GFS the owner lists a space on must get every item, so a follower who
+uses only one of them sees what a member published through another — even
+while the host is offline. A member therefore sends each item to **every**
+server on the owner's list, including servers its own household never
+connected to (`FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH`).
+
+**Targets** (`GfsConnectionService.server_targets`,
+`services/gfs_server_targets.py`). For each usable list entry: our own
+active connection to that server (same pinned key, an id that connection
+knows — its current one or one its server signed it `replaces`) — else an
+in-memory **listing target**: `registered=False`, the key and URL the owner
+signed, and an id `listing:<sha256(id, key, normalized URL)>` — every RAM
+cache and the retry queue are keyed by it, so one space's stale entry never
+affects another space's delivery; targets no list has named for a day are
+evicted. A listing target is never stored and gets only anonymous requests,
+each over its own cookie-less session pinned to the vetted public address
+its URL resolves to (`outbound_fetch.open_pinned_session`: refused when any
+address is private, no redirects, no cookie jar, no proxy, `User-Agent:
+SocialHome`). Its `/gfs/info` capability block is verified against the key
+on the owner's list, and when the block offers `proof_of_possession` the
+server must first sign a fresh nonce bound to the LISTED URL (`POST
+/gfs/proof`, same session; reused for an hour, then proven again before the
+next answer). A failed proof is a sticky verdict for that target (it is
+unsupported, the relay included, until the hour passes); a busy or
+unreachable proof is no verdict — the previous answers stay and retries
+wait instead of dropping. A key one of our own connections already
+ratcheted must prove here too: a block that stopped offering the proof is
+refused. Nothing about a listing target touches `proof_required_at`. The
+URL in the target id is normalized as the proof binds it (lower case, IDNA,
+default port dropped), so one server is one target. Accepted cost of the
+isolation: when the owner moves a server to a new URL or key, items still
+queued for the old entry are dropped (its target is no longer on the list);
+the new entry gets everything published after the list change. On the
+OWNER household sends also follow its live listing rows, so a server it
+just withdrew from gets nothing in the moment before the re-signed list. Every identified sender
+refuses it (`GfsConnectionService.require_registered`). Without a list (an
+older owner), every path keeps its pre-v_57 targets: our own connections.
+
+| Request | Where it goes |
+|---|---|
+| item, writer key held — `POST /gfs/member-publish-anon` | every target proving `member_publish_strict` (one ciphertext, anonymous everywhere) |
+| item, no writer key (trusted, member below v_57) — `POST /gfs/member-publish` | our own registered connections still on the list |
+| owner's epoch notice (household-signed) | the owner's own connections |
+| delegated admin's epoch notice (authority-signed, anonymous) | every target proving `member_publish_trusted` |
+| host relay — `POST /gfs/publish` (identity-free) | every target proving `anonymous_publish` |
+| member auto-subscribe, follower subscribe | our own registered connections only |
+
+**The writer key in trusted spaces.** Publishing to a server it is not
+registered on needs the anonymous path, so a seed holder hands the epoch's
+writer group key to v_57 writer households in a trusted, publicly readable
+space as well (strict spaces: v_50 as before), and the owner's epoch notice
+pins its `writer_key_cert` there; the GFS takes `member-publish-anon` for
+any space with a pinned writer key, whatever its mode. A member that crosses
+v_57 is re-sent the owner's roster snapshot, which carries the key.
+
+**Ordering.** The owner announces the epoch (pinning the writer key) on a
+server right after its first listing there, before the list naming it goes
+to members — so a member's first anonymous publish there is accepted.
+
+**Retries** re-resolve the list on every attempt: an item queued for a
+server the owner has since delisted is dropped, an anonymous item whose key
+is gone is dropped (never downgraded to identified), and a listing target
+whose address check fails is retried only for a DNS / network failure.
+
+**Receivers** subscribed on several of the space's servers get each item
+once per server and drop the copies by id (posts, comments, edits, deletes;
+reactions by their signed stamp) — pinned per type in
+`tests/protocol/test_gfs_member_publish_items.py`.
+
+```mermaid
+sequenceDiagram
+    participant D as Member d (registered on A)
+    participant A as GFS A
+    participant B as GFS B (d never connected)
+    participant E as Follower e (on B only)
+    Note over D: holds the epoch's writer key
+    D->>A: POST /gfs/member-publish-anon (cookie-less session)
+    D->>B: GET /gfs/info (pinned session, verified against the owner-listed key)
+    D->>B: POST /gfs/member-publish-anon (pinned session, no identity)
+    B-->>E: space_item frame (ciphertext)
+    A-->>D: own echo (dropped by origin)
+```
+
+What a server the member never connected to learns, and why the owner
+accepted it: [principles.md](../principles.md#sign-off-a-member-publishes-to-gfss-it-never-connected-to-v_57).
+Pinned by `tests/protocol/test_gfs_multi_listing_blind.py`.
 
 ## Flow — publish + browse + join
 

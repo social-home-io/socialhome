@@ -34,6 +34,7 @@ from socialhome.services.space_writer_cert_service import (
     WRITER_CERT_EPOCH_GRACE_S,
     SpaceWriterCertService,
     scope_weakened,
+    writer_key_min_version,
 )
 from socialhome.writer_cert import (
     InvalidWriterCert,
@@ -797,10 +798,91 @@ async def test_writer_key_never_goes_to_an_older_household():
     assert await svc.writer_key_for_peer("sp-1", "old") is None
 
 
-async def test_writer_key_only_in_a_strict_space():
+async def test_writer_key_not_in_a_trusted_space_nobody_may_follow():
     svc, _ = _strict_svc(space=_space(), remote_rows=[_remote("peer", "member")])
     assert await svc.writer_key_for_peer("sp-1", "peer") is None
     assert await svc.writer_key_cert_wire("sp-1", 2) is None
+    assert await svc.own_writer_key("sp-1", 2) is None
+
+
+# ── v_57: the writer key in a trusted, publicly readable space ────────────
+
+_V57 = FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH
+
+
+def _trusted_svc(**kw):
+    kw.setdefault("space", _space(allow_subscribers=True))
+    kw.setdefault("versions", {"peer": _V57, "v56": _V57 - 1, "v50": _V50})
+    kw.setdefault("kek", KeyManager(os.urandom(32)))
+    return _svc(**kw)
+
+
+async def test_trusted_publicly_readable_space_hands_the_key_to_a_v57_writer():
+    svc, _ = _trusted_svc(remote_rows=[_remote("peer", "member")])
+    grant = await svc.writer_key_for_peer("sp-1", "peer")
+    assert grant is not None
+    seed = verify_writer_key_grant(
+        WriterKeyGrant.from_wire(grant), space_pubkey=SPACE_PK, space_id="sp-1"
+    )
+    assert seed == derive_writer_seed(SEED, "sp-1", 2)
+
+
+async def test_trusted_space_key_is_gated_on_v57_not_v50():
+    """A v_50..v_56 household knows the key but would never publish to a
+    server it is not connected to: it keeps its identified path."""
+    svc, _ = _trusted_svc(
+        remote_rows=[_remote("v56", "member"), _remote("v50", "member")]
+    )
+    assert await svc.writer_key_for_peer("sp-1", "v56") is None
+    assert await svc.writer_key_for_peer("sp-1", "v50") is None
+
+
+async def test_strict_space_key_stays_at_v50():
+    svc, _ = _trusted_svc(
+        space=_space(gfs_publish_mode="strict", allow_subscribers=True),
+        remote_rows=[_remote("v50", "member")],
+    )
+    assert await svc.writer_key_for_peer("sp-1", "v50") is not None
+
+
+async def test_trusted_space_seed_holder_derives_and_pins_the_key():
+    svc, _ = _trusted_svc()
+    assert await svc.own_writer_key("sp-1", 4) == derive_writer_seed(SEED, "sp-1", 4)
+    wire = await svc.writer_key_cert_wire("sp-1", 4)
+    expected = issue_writer_key_grant(
+        space_seed=SEED, space_id="sp-1", epoch=4
+    ).writer_key_cert
+    pk = verify_writer_key_cert(
+        expected, space_pubkey=SPACE_PK, space_id="sp-1", epoch=4
+    )
+    assert wire is not None and wire["writer_pk"] == b64url_encode(pk)
+
+
+@pytest.mark.parametrize(
+    "space",
+    [
+        replace(_space(allow_subscribers=True), space_type=SpaceType.PRIVATE),
+        replace(_space(allow_subscribers=True), space_type=SpaceType.HOUSEHOLD),
+    ],
+)
+async def test_no_trusted_key_outside_the_public_tiers(space):
+    svc, _ = _trusted_svc(space=space, remote_rows=[_remote("peer", "member")])
+    assert await svc.writer_key_for_peer("sp-1", "peer") is None
+    assert await svc.writer_key_cert_wire("sp-1", 2) is None
+    assert await svc.own_writer_key("sp-1", 2) is None
+
+
+def test_writer_key_min_version():
+    assert writer_key_min_version(None) is None
+    assert writer_key_min_version(_space()) is None
+    assert writer_key_min_version(_space(allow_subscribers=True)) == _V57
+    assert writer_key_min_version(_space(gfs_publish_mode="strict")) == _V50
+    assert (
+        writer_key_min_version(
+            replace(_space(allow_subscribers=True), space_type=SpaceType.GLOBAL)
+        )
+        == _V57
+    )
 
 
 async def test_writer_key_needs_a_matching_seed():

@@ -2330,6 +2330,7 @@
   "capability.gfs_fallback_later": "De GFS-terugvaloptie later aanzetten",
   "capability.space_chat": "Chat in ruimtes",
   "capability.synced_recurring_events": "Herhalende afspraken bij ruimte-inhaalsync",
+  "capability.multi_gfs_posting": "Plaatsen op elke GFS waar een ruimte op staat",
   "settings.tab.security": "Beveiliging",
   "settings.could_not_save": "Kon niet opslaan: {error}",
   "settings.profile.save_failed": "Opslaan mislukt: {error}",

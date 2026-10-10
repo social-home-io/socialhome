@@ -397,6 +397,76 @@ epoch, plus the 600 s grace. A household that cannot publish anonymously
 identified path — its items take the host path. Pinned by
 `tests/protocol/test_gfs_member_publish_strict_blind.py`.
 
+### Sign-off: a member publishes to GFSs it never connected to (v_57)
+
+**Owner decision (2026-10-10).** A global space is listed on GFSs its owner
+chose, and every listed GFS must get every item — a follower who uses only
+GFS B must see what a member published through A, even while the host is
+offline. So a member household publishes each item to **every** server on
+the owner-signed list (`spaces.gfs_servers`), including servers it never
+connected to. **What that concedes, exactly:**
+
+- **A GFS a member never connected to sees the member's IP address and
+  publish timing — never its household identity.** Nothing identified ever
+  goes to such a server: no instance id, no household signature, no
+  household key, no writer cert in the clear, no cookie (each one is reached
+  over its own cookie-less session), no subscribe and no pairing. It gets
+  only the anonymous `member-publish-anon` request, a delegated admin's
+  authority-signed epoch notice and the identity-free `/gfs/publish` relay,
+  and it keeps no `client_instances` row for the household. IP and timing
+  are the same accepted limit as every anonymous GFS path above; a member
+  that does not want any server it never chose to see its address has to
+  route its traffic through something that hides it.
+- **Trusted mode becomes anonymous everywhere once a member holds the
+  writer key.** To reach a server it is not registered on, a member needs
+  the writer group key, so a v_57 seed holder now hands it out in trusted
+  publicly readable spaces too. A member holding it sends every item
+  anonymously to every listed server, the ones it is registered on
+  included: one ciphertext sent identified to one server and anonymously to
+  another would let two colluding servers name the anonymous copy. The
+  consequence for operators: **a GFS loses per-household bans and limits
+  for that member** — it can no longer tell which household published. It
+  keeps the per-IP limit (and the per-space and per-key budgets of strict
+  mode), receivers still enforce writer-cert scope and the author signature
+  on every item, and the owner revokes a writer by rotating the content key
+  (the writer key rotates with it). A member below v_57 gets no key in a
+  trusted space and keeps publishing identified — to its own servers only.
+- **Only servers the owner signed.** Targets come only from the owner's
+  signed list (a delegated admin cannot change it). A listed URL that names
+  a private or local address is dropped unless this household holds the
+  same connection itself; every other listed host is resolved when a
+  request is sent and refused unless every address it resolves to is public,
+  and the connection is pinned to those addresses (no DNS rebinding, no
+  redirects) — an owner's list can never aim a member's requests at the
+  member's own network. A server's capability block is verified against the
+  key the owner's list names.
+  A server that offers proof of possession must also sign a fresh nonce
+  bound to the LISTED URL before anything is sent to it (re-proven hourly);
+  one that fails is skipped.
+- **The owner can make members open connections to a host of its choice.**
+  Any public `https://host:port` the owner signs into the list (a member
+  never connected there) gets a TLS connection from every member that
+  publishes — public addresses only, https only, the pinned address only,
+  nothing identifying on it, and a neutral `User-Agent: SocialHome`. The
+  owner already decides where its space's content goes; this is the cost of
+  members reaching every listed server while the owner is offline.
+- **Each listed entry is its own target.** A listing target is keyed by
+  (server id, key, URL), so a stale or hostile entry in one space's list
+  never blocks or fills the retry queue of another space's delivery to the
+  same server; targets no list has named for a day are forgotten.
+- **What it does not change:** a GFS without `member_publish_strict` (an
+  older build) gets nothing from a member holding the writer key — never an
+  identified copy — only the host's relay; a server whose `/gfs/info` cannot
+  be read right now is skipped, exactly as a registered one is; and the
+  writer key in a public (not global) space is harmless: it is only usable
+  at a GFS that pinned it, i.e. one the owner listed the space on.
+- **Order:** the owner pins the epoch and the writer key on a server before
+  the list that adds it reaches members, so a member's first anonymous
+  publish there is not refused.
+
+Pinned by `tests/protocol/test_gfs_multi_listing_blind.py` and the trusted
+case in `tests/protocol/test_gfs_member_publish_strict_blind.py`.
+
 ### Sign-off: a private space's opaque channel shows the server its link-joined households (v_51)
 
 **Flagged for owner sign-off.** A PRIVATE space whose members include

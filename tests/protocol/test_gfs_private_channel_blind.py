@@ -118,6 +118,9 @@ class _Gfs:
     async def member_publish_strict_supported(self, conn):
         return True
 
+    async def server_targets(self, space_id):
+        return None
+
 
 class _Spaces:
     def __init__(self, space: Space, *, seed: bytes | None) -> None:

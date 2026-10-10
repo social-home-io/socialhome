@@ -8,7 +8,23 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 56
+    assert fc.OURS == 57
+
+
+def test_multi_gfs_publish_capability_threshold():
+    """v_57 — the writer group key in trusted spaces, so members publish
+    anonymously to every GFS on the owner's list. A lagging household keeps
+    publishing identified to its own servers: labelled, not space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH == 57
+    assert fc.FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(56) == [
+        "Posting to every GFS a space is listed on"
+    ]
+    assert fc.features_missing_below(57) == []
+    assert fc.CAPABILITY_FEATURE_KEYS[57] == "multi_gfs_posting"
 
 
 def test_sync_series_rows_capability_threshold():
@@ -20,8 +36,10 @@ def test_sync_series_rows_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_SYNC_SERIES_ROWS not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(55) == ["Recurring events in space catch-up"]
-    assert fc.features_missing_below(56) == []
+    assert fc.features_missing_below(55) == [
+        "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
+    ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
 
@@ -34,8 +52,12 @@ def test_space_chat_capability_threshold():
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
-    assert fc.features_missing_below(55) == ["Recurring events in space catch-up"]
+    assert fc.features_missing_below(55) == [
+        "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
+    ]
     assert fc.space_features_missing_below(54) == ["Chat in spaces"]
     assert fc.space_feature_keys_missing_below(54) == ["space_chat"]
     assert fc.CAPABILITY_FEATURE_KEYS[55] == "space_chat"
@@ -53,10 +75,12 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -73,11 +97,13 @@ def test_gfs_relay_routes_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -93,6 +119,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -126,6 +153,7 @@ def test_space_authority_rotation_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -138,6 +166,7 @@ def test_space_authority_rotation_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -167,6 +196,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -675,6 +705,7 @@ def test_forwarded_role_change_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -699,6 +730,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -718,6 +750,7 @@ def test_member_gfs_publish_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -736,6 +769,7 @@ def test_strict_member_publish_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -754,6 +788,7 @@ def test_private_channels_capability_threshold():
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
+        "Posting to every GFS a space is listed on",
     ]
 
 
@@ -815,6 +850,7 @@ _PINNED_FEATURE_KEYS = {
     54: "gfs_fallback_later",
     55: "space_chat",
     56: "synced_recurring_events",
+    57: "multi_gfs_posting",
 }
 
 

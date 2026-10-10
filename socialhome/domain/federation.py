@@ -1570,6 +1570,12 @@ class GfsConnection:
     #: key (``POST /gfs/proof``); from then on the proof is REQUIRED (0094).
     #: ``None`` = never proven (an older GFS, or not checked yet).
     proof_required_at: str | None = None
+    #: ``False`` for an in-memory LISTING target (v_57): a server on the
+    #: space owner's signed GFS list this household is NOT registered on.
+    #: Never stored; only anonymous requests go to it, over a cookie-less
+    #: session pinned to a vetted public address
+    #: (:mod:`socialhome.services.gfs_server_targets`).
+    registered: bool = True
 
 
 @dataclass(slots=True, frozen=True)

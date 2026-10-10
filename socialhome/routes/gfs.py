@@ -47,6 +47,8 @@ def _conn_dict(
     d = asdict(conn)
     # Remove sensitive key material from the API response.
     d.pop("public_key", None)
+    # In-memory only (a listing target is never listed here).
+    d.pop("registered", None)
     h = health if health is not None else _DEFAULT_HEALTH
     d["connected"] = bool(h.get("connected", False))
     d["last_error"] = h.get("last_error")

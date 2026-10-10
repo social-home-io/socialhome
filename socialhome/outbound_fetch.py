@@ -239,9 +239,13 @@ class _Target:
     addresses: list[str]
 
 
-def check_url_shape(url: str) -> tuple[str, str, int]:
+def check_url_shape(
+    url: str, *, allowed_ports: frozenset[int] | None = ALLOWED_PORTS
+) -> tuple[str, str, int]:
     """Validate scheme / host / user-info / port; return ``(scheme, host, port)``.
 
+    ``allowed_ports=None`` accepts any port (a connection server may listen
+    on one of its own; the address check is what keeps it off the LAN).
     Raises :class:`OutboundFetchRefused` on any violation.
     """
     if not isinstance(url, str) or not url or len(url) > 2048:
@@ -262,9 +266,57 @@ def check_url_shape(url: str) -> tuple[str, str, int]:
     if parts.username is not None or parts.password is not None:
         raise OutboundFetchRefused("userinfo")
     effective = port if port is not None else (443 if scheme == "https" else 80)
-    if effective not in ALLOWED_PORTS:
+    if allowed_ports is not None and effective not in allowed_ports:
         raise OutboundFetchRefused("port", str(effective))
     return scheme, host, effective
+
+
+async def _vet_target(
+    url: str, resolve: HostResolver, *, allowed_ports: frozenset[int] | None
+) -> _Target:
+    """Check *url*'s shape, resolve its host HERE and refuse it unless every
+    address is public (see the module docstring)."""
+    _scheme, _host, port = check_url_shape(url, allowed_ports=allowed_ports)
+    # Vet the host aiohttp will actually use. ``urlsplit`` keeps a
+    # Unicode host while yarl applies UTS46 mapping, and the two can
+    # disagree: exotic digits such as U+1FBF1 map to ASCII ``1`` under
+    # UTS46 only, so ``🯱🯲🯷.0.0.1`` would be vetted as a DNS name and
+    # then *connected to* as the IP literal 127.0.0.1, skipping the
+    # pinned resolver. Everything below works on ``raw_host``.
+    try:
+        yurl = yarl.URL(url)
+        host = yurl.raw_host or ""
+    except (ValueError, UnicodeError) as exc:
+        raise OutboundFetchRefused("malformed") from exc
+    if not host:
+        raise OutboundFetchRefused("malformed", "no host")
+    literal = parse_ip_literal(host)
+    if literal is None and (":" in host or host.replace(".", "").isdigit()):
+        # aiohttp's own "is this an IP" heuristic would bypass the
+        # resolver for this host, so it MUST be a parseable address.
+        raise OutboundFetchRefused("malformed", "ambiguous address")
+    if literal is not None:
+        if not is_public_address(literal):
+            raise OutboundFetchRefused("private_address", host)
+        return _Target(url=yurl, host=host, port=port, addresses=[str(literal)])
+    try:
+        raw = await resolve(host, port)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise OutboundFetchRefused("dns", host) from exc
+    if not raw:
+        raise OutboundFetchRefused("dns", host)
+    addresses: list[str] = []
+    for value in raw:
+        try:
+            ip = ipaddress.ip_address(value.split("%", 1)[0])
+        except ValueError as exc:
+            raise OutboundFetchRefused("dns", host) from exc
+        # One private answer is enough to refuse: a name that resolves
+        # to both a public and a LAN address is the rebinding setup.
+        if not is_public_address(ip):
+            raise OutboundFetchRefused("private_address", host)
+        addresses.append(str(ip))
+    return _Target(url=yurl, host=host, port=port, addresses=addresses)
 
 
 class OutboundFetcher:
@@ -284,47 +336,7 @@ class OutboundFetcher:
         self._ssl = ssl
 
     async def _vet(self, url: str) -> _Target:
-        _scheme, _host, port = check_url_shape(url)
-        # Vet the host aiohttp will actually use. ``urlsplit`` keeps a
-        # Unicode host while yarl applies UTS46 mapping, and the two can
-        # disagree: exotic digits such as U+1FBF1 map to ASCII ``1`` under
-        # UTS46 only, so ``🯱🯲🯷.0.0.1`` would be vetted as a DNS name and
-        # then *connected to* as the IP literal 127.0.0.1, skipping the
-        # pinned resolver. Everything below works on ``raw_host``.
-        try:
-            yurl = yarl.URL(url)
-            host = yurl.raw_host or ""
-        except (ValueError, UnicodeError) as exc:
-            raise OutboundFetchRefused("malformed") from exc
-        if not host:
-            raise OutboundFetchRefused("malformed", "no host")
-        literal = parse_ip_literal(host)
-        if literal is None and (":" in host or host.replace(".", "").isdigit()):
-            # aiohttp's own "is this an IP" heuristic would bypass the
-            # resolver for this host, so it MUST be a parseable address.
-            raise OutboundFetchRefused("malformed", "ambiguous address")
-        if literal is not None:
-            if not is_public_address(literal):
-                raise OutboundFetchRefused("private_address", host)
-            return _Target(url=yurl, host=host, port=port, addresses=[str(literal)])
-        try:
-            raw = await self._resolve(host, port)
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise OutboundFetchRefused("dns", host) from exc
-        if not raw:
-            raise OutboundFetchRefused("dns", host)
-        addresses: list[str] = []
-        for value in raw:
-            try:
-                ip = ipaddress.ip_address(value.split("%", 1)[0])
-            except ValueError as exc:
-                raise OutboundFetchRefused("dns", host) from exc
-            # One private answer is enough to refuse: a name that resolves
-            # to both a public and a LAN address is the rebinding setup.
-            if not is_public_address(ip):
-                raise OutboundFetchRefused("private_address", host)
-            addresses.append(str(ip))
-        return _Target(url=yurl, host=host, port=port, addresses=addresses)
+        return await _vet_target(url, self._resolve, allowed_ports=ALLOWED_PORTS)
 
     async def fetch(
         self,
@@ -452,6 +464,56 @@ class OutboundFetcher:
                 type(exc).__name__,
             )
             raise OutboundFetchRefused("network", type(exc).__name__) from exc
+
+
+#: The ``User-Agent`` of a :func:`open_pinned_session` request: the software
+#: name only — no version, no platform, nothing that splits households.
+PINNED_SESSION_USER_AGENT: str = "SocialHome"
+
+#: Default budget of a :func:`open_pinned_session` request.
+PINNED_SESSION_TIMEOUT = aiohttp.ClientTimeout(
+    total=15, connect=CONNECT_TIMEOUT_S, sock_connect=CONNECT_TIMEOUT_S
+)
+
+
+async def open_pinned_session(
+    url: str,
+    *,
+    resolver: HostResolver = system_resolve,
+    ssl: Any = True,
+    timeout: aiohttp.ClientTimeout = PINNED_SESSION_TIMEOUT,
+) -> aiohttp.ClientSession:
+    """A session for requests to the origin of *url* — an address ANOTHER
+    household handed us (a connection server on a space owner's signed list,
+    v_57) — that can only ever reach what *url*'s host resolves to right now,
+    and only when every one of those addresses is public.
+
+    The same scheme / user-info / resolve / vet / pin rules as
+    :meth:`OutboundFetcher.fetch`, minus the port allow-list (a GFS may
+    listen on a port of its own) and minus redirect-following: the caller
+    sends with ``allow_redirects=False``, and a request to any other host
+    fails in the pinned resolver. Anonymous like every request here — no
+    cookie jar, no proxy from the environment, and a neutral ``User-Agent``
+    (:data:`PINNED_SESSION_USER_AGENT`). The caller closes it.
+
+    Raises :class:`OutboundFetchRefused` (``reason`` ``"dns"`` for a name
+    that does not resolve now, ``"private_address"`` for one that resolves
+    into a private range, ``"malformed"`` / ``"scheme"`` / ``"userinfo"``
+    for a bad URL).
+    """
+    target = await _vet_target(url, resolver, allowed_ports=None)
+    connector = aiohttp.TCPConnector(
+        resolver=_PinnedResolver(target.host, target.addresses),
+        use_dns_cache=False,
+        ssl=ssl,
+    )
+    return aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+        cookie_jar=aiohttp.DummyCookieJar(),
+        trust_env=False,
+        headers={"User-Agent": PINNED_SESSION_USER_AGENT},
+    )
 
 
 async def _read_capped(

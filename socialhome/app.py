@@ -939,7 +939,8 @@ def _build_gfs_server_selection(
     """The owner's signed GFS list (``spaces.gfs_servers``, migration 0093):
     re-derived after every listing change and every config change of a space
     we own, and sent to the members in a config change. Signs nothing until
-    the household identity is attached at startup."""
+    the household identity is attached at startup. Its read side tells the
+    connection service where a space's items go (v_57)."""
     selection = GfsServerSelectionService(
         space_repo=repos.space,
         gfs_repo=repos.gfs_connection,
@@ -949,6 +950,9 @@ def _build_gfs_server_selection(
     )
     gfs_connection_service.attach_on_listings_changed(selection.sync_snapshot)
     gfs_connection_service.attach_change_lock(selection.changing)
+    # v_57 — every send to a space's GFSs (member publish, delegated-admin
+    # notices, the host relay) reaches every server on the owner's list.
+    gfs_connection_service.attach_member_servers(selection.member_servers)
     selection.wire()
     return selection
 

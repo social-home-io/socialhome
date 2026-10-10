@@ -44,9 +44,10 @@ space keeps two concurrent snapshots from signing out of order.
 
 :meth:`GfsServerSelectionService.member_servers` is the read side: the
 servers of a space THIS household may contact, with private-host entries
-dropped unless we hold the same connection ourselves. Whoever sends to them
-(federation v_56) must still go through the SSRF-guarded
-:class:`socialhome.outbound_fetch.OutboundFetcher` path, since a DNS name is
+dropped unless we hold the same connection ourselves. It feeds
+:meth:`GfsConnectionService.server_targets` (federation v_57), which reaches a
+server we are not registered on only through the SSRF-guarded
+:func:`socialhome.outbound_fetch.open_pinned_session`, since a DNS name is
 not resolved here.
 """
 

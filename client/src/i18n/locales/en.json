@@ -2641,6 +2641,7 @@
   "capability.gfs_fallback_later": "Turning on the GFS fallback later",
   "capability.space_chat": "Chat in spaces",
   "capability.synced_recurring_events": "Recurring events in space catch-up",
+  "capability.multi_gfs_posting": "Posting to every GFS a space is listed on",
   "settings.tab.security": "Security",
   "settings.could_not_save": "Could not save: {error}",
   "settings.profile.save_failed": "Save failed: {error}",

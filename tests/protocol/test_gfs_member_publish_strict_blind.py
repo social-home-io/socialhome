@@ -108,6 +108,9 @@ class _Gfs:
     async def subscribe_to_gfs_space(self, space_id, gfs_id):
         self.subscribed.append((space_id, gfs_id))
 
+    async def server_targets(self, space_id):
+        return None
+
 
 class _Certs:
     def __init__(self, household: _Household) -> None:
@@ -297,6 +300,31 @@ async def test_two_households_publish_indistinguishable_requests(gfs):
         assert leak not in json.dumps(b)
     for leak in gfs.writer_b.leaks():
         assert leak not in json.dumps(a)
+
+
+async def test_a_trusted_space_with_a_pinned_writer_key_takes_it_just_as_blind(
+    gfs, caplog
+):
+    """v_57: the owner pins the writer key in a TRUSTED space too — the
+    server takes the anonymous publish there unchanged (no GFS-side change),
+    and it is exactly as blind as in a strict space."""
+    epochs = gfs.app_[gfs_space_epoch_repo_key]
+    await epochs.set_publish_mode(SPACE_ID, "trusted", at=int(time.time()) + 1)
+    strict = await epochs.get_strict(SPACE_ID)
+    assert strict is not None and strict.publish_mode == "trusted"
+    assert strict.writer_pk_for(EPOCH) is not None
+    log: list = []
+    with caplog.at_level(logging.DEBUG):
+        await _publish(gfs, gfs.writer_a, log)
+        await gfs.app_[gfs_member_publish_key].wait_idle()
+    queued = await gfs.app_[gfs_envelope_queue_repo_key].list_for(
+        gfs.follower.instance_id, now=0
+    )
+    assert len(queued) == 1
+    assert set(queued[0].sealed) == MEMBER_PUBLISH_ANON_FRAME_KEYS
+    for blob in (json.dumps(log), json.dumps(queued[0].sealed), caplog.text):
+        for leak in (*gfs.writer_a.leaks(), *USERS, "writer_cert", '"signature"'):
+            assert leak not in blob
 
 
 async def test_an_identified_publish_into_a_strict_space_is_refused(gfs):

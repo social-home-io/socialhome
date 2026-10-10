@@ -15,6 +15,8 @@ import time
 from datetime import datetime
 from dataclasses import dataclass, field, replace
 
+from contextlib import asynccontextmanager
+
 import aiohttp
 import pytest
 from aiohttp import web
@@ -52,6 +54,7 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.services.gfs_member_publish_service import (
     ANON_TS_JITTER_S,
     GfsMemberPublishService,
@@ -223,6 +226,32 @@ class _Gfs:
     async def subscribe_to_gfs_space(self, space_id, gfs_id):
         self.subscribed.append((space_id, gfs_id))
         return "subscribed"
+
+    #: v_57 — what ``server_targets`` answers (``None`` = no owner list).
+    targets: list | None = None
+    #: The session a listing target is reached through, and every target an
+    #: anonymous session was opened for.
+    listing_session: object = None
+    listing_opened: list = []
+
+    async def server_targets(self, space_id):
+        return self.targets
+
+    #: What ``capability_unknown`` answers (the server did not answer).
+    unknown: bool = False
+
+    def capability_unknown(self, conn):
+        return self.unknown
+
+    @asynccontextmanager
+    async def anon_session(self, conn):
+        if conn.registered:
+            yield self.session
+            return
+        self.listing_opened = [*self.listing_opened, conn.id]
+        if isinstance(self.listing_session, Exception):
+            raise self.listing_session
+        yield self.listing_session
 
 
 def _space(*, owner: str = "host.home", public=True, readable=True, sid=SPACE_ID):
@@ -1047,6 +1076,9 @@ async def test_strict_retry_needs_the_strict_capability(world):
         payload={"epoch": 3, "payload": "x"},
     )
     assert (await svc._retry_send("conn-1", item)).kind == "permanent"
+    # Merely unknown (the server did not answer): the retry waits.
+    world["gfs"].unknown = True
+    assert (await svc._retry_send("conn-1", item)).kind == "transient"
 
 
 async def test_strict_without_a_cookie_less_session_sends_nothing(world):
@@ -1417,3 +1449,206 @@ async def test_a_pending_own_listing_is_not_a_target(world, monkeypatch):
     assert await world["svc"]._capable_listed(SPACE_ID) == []
     conns.inactive = frozenset()
     assert [c.id for c in await world["svc"]._capable_listed(SPACE_ID)] == ["conn-1"]
+
+
+# ── v_57: every listed GFS, anonymously ───────────────────────────────────
+
+
+async def _gfs_trusted_pin(world, epoch: int = 3) -> None:
+    """What the owner's v_57 notice establishes in a TRUSTED space: the
+    epoch confirmed and the writer key pinned — no strict mode."""
+    epochs = world["app"][gfs_space_epoch_repo_key]
+    await epochs.confirm(SPACE_ID, epoch, now=int(time.time()))
+    wkc = issue_writer_key_grant(
+        space_seed=SPACE_SEED, space_id=SPACE_ID, epoch=epoch
+    ).writer_key_cert
+    await epochs.pin_writer_key(SPACE_ID, epoch, wkc.writer_pk, replace=True)
+
+
+def _listing(world) -> GfsConnection:
+    """The space's GFS, as a server on the owner's list we never joined."""
+    return replace(world["conn"], id=f"listing:{GFS_ID}", registered=False)
+
+
+def _multi_world(world, *, key: bool = True):
+    """A trusted, publicly readable space; the owner's list names the GFS
+    as a listing target. Returns the three recorders (identified, the shared
+    cookie-less session, the listing target's own session)."""
+    if key:
+        world["svc"]._writer_certs.strict_epochs.add(3)
+    gfs = world["gfs"]
+    identified = _Recorder(world["tc"].session)
+    anon = _Recorder(world["tc"].session)
+    listing = _Recorder(world["tc"].session)
+    gfs.client = lambda: identified  # type: ignore[method-assign]
+    gfs.publish_client = lambda: anon  # type: ignore[method-assign]
+    gfs.listing_session = listing
+    gfs.targets = [_listing(world)]
+    return identified, anon, listing
+
+
+def _tail(posts) -> list[str]:
+    return [u.rsplit("/", 1)[-1] for u, _ in posts]
+
+
+@pytest.mark.security
+async def test_with_the_key_a_trusted_space_publishes_anonymously_to_a_listed_gfs(
+    world,
+):
+    """v_57: a member never registered on a listed server still reaches it —
+    anonymously, over that server's own session — and the server (trusted
+    mode, writer key pinned) relays it to its followers."""
+    await _gfs_trusted_pin(world)
+    identified, anon, listing = _multi_world(world)
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    assert [(c.id, c.registered) for c in targets] == [(f"listing:{GFS_ID}", False)]
+    accepted = await svc.publish_post(SPACE_ID, _inner(), targets)
+    assert [c.id for c in accepted] == [f"listing:{GFS_ID}"]
+    assert identified.posts == [] and anon.posts == []
+    assert world["gfs"].subscribed == []
+    [(url, body)] = listing.posts
+    assert url.endswith("/gfs/member-publish-anon")
+    blob = json.dumps(body)
+    for leak in (world["me"].instance_id, b64url_encode(world["me"].pk)):
+        assert leak not in blob
+    for field_name in ("instance_id", "signature", "writer_cert"):
+        assert field_name not in body
+    [row] = await _queued(world)
+    assert "writer_cert" not in row.sealed
+
+
+@pytest.mark.security
+async def test_with_the_key_every_listed_server_gets_the_same_anonymous_item(world):
+    """Registered and listing targets alike get the anonymous form; nothing
+    goes identified anywhere — one ciphertext, every server."""
+    await _gfs_trusted_pin(world)
+    identified, anon, listing = _multi_world(world)
+    world["gfs"].targets = [world["conn"], _listing(world)]
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    assert [c.id for c in targets] == ["conn-1", f"listing:{GFS_ID}"]
+    await svc.publish_post(SPACE_ID, _inner(), targets)
+    assert identified.posts == []
+    assert _tail(anon.posts) == ["member-publish-anon"]
+    assert _tail(listing.posts) == ["member-publish-anon"]
+    assert anon.posts[0][1]["payload"] == listing.posts[0][1]["payload"]
+
+
+@pytest.mark.security
+async def test_with_the_key_a_server_without_the_strict_capability_gets_nothing(
+    world,
+):
+    identified, anon, listing = _multi_world(world)
+    world["gfs"].targets = [world["conn"], _listing(world)]
+    world["gfs"].strict_capable = False
+    svc = world["svc"]
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
+    assert identified.posts == [] and anon.posts == [] and listing.posts == []
+
+
+@pytest.mark.security
+async def test_without_the_key_only_registered_listed_servers_get_it_identified(
+    world,
+):
+    """A household below v_57 (no key in a trusted space): identified, and
+    only to its own registered connections still on the owner's list —
+    never to a listing target, even one handed to it."""
+    _identified, _anon, listing = _multi_world(world, key=False)
+    world["gfs"].targets = [world["conn"], _listing(world)]
+    svc = world["svc"]
+    targets = await svc.plan_post(SPACE_ID, AUTHOR)
+    assert [c.id for c in targets] == ["conn-1"]
+    await svc.publish_post(SPACE_ID, _inner(), [_listing(world)])
+    assert listing.posts == [] and world["gfs"].listing_opened == []
+    # Delisted: the registered connection gets nothing either.
+    world["gfs"].targets = [_listing(world)]
+    assert await svc.plan_post(SPACE_ID, AUTHOR) == []
+
+
+@pytest.mark.security
+async def test_an_identified_attempt_at_a_listing_target_is_refused(world):
+    identified, _anon, listing = _multi_world(world, key=False)
+    svc = world["svc"]
+    data = {
+        "epoch": 3,
+        "writer_cert": (await svc._writer_certs.own_cert(SPACE_ID, 3)).to_wire(),
+        "payload": "Y3Q",
+    }
+    outcome = await svc._post_item(_listing(world), SPACE_ID, data)
+    assert outcome.kind == "permanent"
+    assert identified.posts == [] and listing.posts == []
+    item = GfsPublish(space_id=SPACE_ID, event_type="space_item", payload=data)
+    assert (await svc._retry_send(f"listing:{GFS_ID}", item)).kind == "permanent"
+
+
+@pytest.mark.security
+async def test_a_retry_for_a_delisted_server_is_dropped(world):
+    await _gfs_trusted_pin(world)
+    identified, _anon, listing = _multi_world(world)
+    svc = world["svc"]
+    item = GfsPublish(
+        space_id=SPACE_ID,
+        event_type="space_item_anon",
+        payload={"epoch": 3, "payload": "Y3Q"},
+    )
+    world["gfs"].targets = []
+    assert (await svc._retry_send(f"listing:{GFS_ID}", item)).kind == "permanent"
+    assert listing.posts == []
+    # Still listed: re-resolved and sent over the listing target's session.
+    world["gfs"].targets = [_listing(world)]
+    await svc._retry_send(f"listing:{GFS_ID}", item)
+    assert _tail(listing.posts) == ["member-publish-anon"]
+    # An identified item for our own connection the owner delisted: dropped.
+    data = {
+        "epoch": 3,
+        "writer_cert": (await svc._writer_certs.own_cert(SPACE_ID, 3)).to_wire(),
+        "payload": "Y3Q",
+    }
+    ident = GfsPublish(space_id=SPACE_ID, event_type="space_item", payload=data)
+    assert (await svc._retry_send("conn-1", ident)).kind == "permanent"
+    assert identified.posts == []
+
+
+@pytest.mark.security
+async def test_a_refused_listing_address_is_never_retried_elsewhere(world):
+    _identified, anon, _listing_rec = _multi_world(world)
+    world["gfs"].listing_session = OutboundFetchRefused("private_address")
+    svc = world["svc"]
+    accepted = await svc.publish_post(SPACE_ID, _inner(), [_listing(world)])
+    assert accepted == []
+    assert anon.posts == []
+    assert not svc._retry.pending(f"listing:{GFS_ID}")
+
+
+async def test_a_delegated_admin_notice_reaches_every_listed_server(world):
+    """The seed-only notice is anonymous: it goes to the listing target too,
+    over its own session — the owner's (identified) one never does."""
+    world["spaces"].seeds[SPACE_ID] = SPACE_SEED
+    world["spaces"].spaces[SPACE_ID] = _space(owner="someone-else")
+    identified, _anon, listing = _multi_world(world)
+    svc = world["svc"]
+    svc._writer_certs.pin_epochs.add(3)
+    await svc.announce_epoch(SPACE_ID)
+    [(url, body)] = listing.posts
+    assert url.endswith(f"/gfs/spaces/{SPACE_ID}/epoch")
+    assert "owning_instance" not in body and "writer_key_cert" in body
+    assert identified.posts == []
+    outcome = await svc._post_notice(
+        _listing(world), SPACE_ID, {"epoch": 3, "owner": True}
+    )
+    assert outcome.kind == "permanent"
+
+
+async def test_the_owner_notice_goes_only_to_its_own_connections(world):
+    identified, _anon, listing = _multi_world(world)
+    owner = _owner_svc(world)
+    await owner.announce_epoch(SPACE_ID)
+    assert listing.posts == []
+    assert _tail(identified.posts) == ["epoch"]
+
+
+async def test_auto_subscribe_never_goes_to_a_listing_target(world):
+    svc = world["svc"]
+    assert await svc._subscribe([_listing(world)], SPACE_ID) == 0
+    assert world["gfs"].subscribed == []

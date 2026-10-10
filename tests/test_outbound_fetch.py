@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -661,3 +662,90 @@ async def test_caller_budget_only_shortens_the_deadline() -> None:
             "https://slow.example/", accept=HTML, max_bytes=1, timeout_s=0
         )
     assert spent.value.reason == "timeout"
+
+
+# ─── open_pinned_session (v_57: GFSs on a space owner's list) ─────────────
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:18765",
+        "https://10.0.0.5:8443",
+        "https://[::1]:443",
+        "https://169.254.169.254",
+    ],
+)
+async def test_pinned_session_refuses_private_literals(url: str) -> None:
+    with pytest.raises(OutboundFetchRefused) as exc:
+        await outbound_fetch.open_pinned_session(url, resolver=_resolver({}))
+    assert exc.value.reason == "private_address"
+
+
+async def test_pinned_session_refuses_a_name_resolving_private() -> None:
+    resolve = _resolver({"gfs.example": ["93.184.216.34", "192.168.1.10"]})
+    with pytest.raises(OutboundFetchRefused) as exc:
+        await outbound_fetch.open_pinned_session(
+            "https://gfs.example:8443", resolver=resolve
+        )
+    assert exc.value.reason == "private_address"
+
+
+async def test_pinned_session_names_a_dns_failure() -> None:
+    with pytest.raises(OutboundFetchRefused) as exc:
+        await outbound_fetch.open_pinned_session(
+            "https://gone.example", resolver=_resolver({})
+        )
+    assert exc.value.reason == "dns"
+
+
+@pytest.mark.parametrize(
+    ("url", "reason"),
+    [("https://u:p@gfs.example", "userinfo"), ("ftp://gfs.example", "scheme")],
+)
+async def test_pinned_session_refuses_userinfo_and_scheme(url, reason) -> None:
+    with pytest.raises(OutboundFetchRefused) as exc:
+        await outbound_fetch.open_pinned_session(
+            url, resolver=_resolver({"gfs.example": ["93.184.216.34"]})
+        )
+    assert exc.value.reason == reason
+
+
+async def test_pinned_session_is_cookieless_any_port_and_pinned(
+    loopback_is_public,
+) -> None:
+    """Any port is fine (a GFS may use its own), the request carries no
+    cookie the server set before, and the connection reaches only the one
+    vetted answer — DNS is asked once, another host fails."""
+    seen: list[dict] = []
+
+    async def info(request: web.Request) -> web.Response:
+        seen.append(dict(request.headers))
+        resp = web.json_response({"ok": True})
+        resp.set_cookie("lb", "sticky")
+        return resp
+
+    server = await _serve([web.get("/gfs/info", info)])
+    resolve = _resolver({"gfs.test": ["127.0.0.1"]})
+    try:
+        session = await outbound_fetch.open_pinned_session(
+            f"http://gfs.test:{server.port}", resolver=resolve
+        )
+        try:
+            for _ in range(2):
+                async with session.get(
+                    f"http://gfs.test:{server.port}/gfs/info", allow_redirects=False
+                ) as resp:
+                    assert resp.status == 200
+            with pytest.raises(aiohttp.ClientError):
+                async with session.get(f"http://other.test:{server.port}/gfs/info"):
+                    pass
+        finally:
+            await session.close()
+    finally:
+        await server.close()
+    assert len(seen) == 2
+    assert all("Cookie" not in h for h in seen)
+    # A neutral User-Agent: no library or Python version that splits households.
+    assert {h["User-Agent"] for h in seen} == {outbound_fetch.PINNED_SESSION_USER_AGENT}
+    assert resolve.calls == ["gfs.test"]  # type: ignore[attr-defined]
