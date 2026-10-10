@@ -1266,10 +1266,13 @@ def cmd_gfs_pair() -> None:
             )
         # The demo GFS signs ``proof_of_possession`` (its base_url is this
         # very loopback URL), so every pairing must come back proven.
-        if resp.get("possession_proven") is not True:
+        if resp.get("possession_proven") is not True or not resp.get(
+            "proof_required_at"
+        ):
             raise SystemExit(
                 f"{label}: GFS pairing not proven (possession_proven="
-                f"{resp.get('possession_proven')!r})",
+                f"{resp.get('possession_proven')!r}, proof_required_at="
+                f"{resp.get('proof_required_at')!r})",
             )
     _save(state)
     print("gfs-pair: ok (a + d + e connected to GFS, possession proven)")

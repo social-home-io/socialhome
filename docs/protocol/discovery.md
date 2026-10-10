@@ -496,7 +496,7 @@ sequenceDiagram
     Note over H: verify signed capabilities against the key<br/>in this response (TOFU) — require open_signup
     opt signed block offers proof_of_possession
         H->>G: POST /gfs/proof {nonce} (fresh, 32 random bytes)
-        G-->>H: {proof_sig, proof_sig_suite} over {base_url, id, nonce}
+        G-->>H: {proof_sig, proof_sig_suite} over {base_url, key, nonce}
         Note over H: verify against the key from /gfs/info<br/>and the URL H used — else 422 GFS_PROOF_FAILED
     end
     H->>G: POST /gfs/signup-token (no body)
@@ -534,30 +534,48 @@ What the household checks and sends:
   `proof_of_possession`, the household (QR and open sign-up alike) first sends
   `POST /gfs/proof {nonce}` — a fresh random 32-byte challenge, nothing about
   the household — and verifies the returned signature against the key it is
-  about to pin, the `gfs_instance_id` from the descriptor, and **the URL it
-  used**. The GFS signs its OWN configured `base_url`, never one the requester
-  names, so an impostor relaying the challenge to the real server still fails
-  at its own address. A failure is `422 GFS_PROOF_FAILED` (no answer / 5xx is
-  `502 GFS_UNREACHABLE`), raised before `/gfs/register`: no token is spent and
-  no identity is sent. Signature shape and suite: [crypto](../crypto.md).
+  about to pin and **the URL it used**. The proof binds the KEY, not the
+  instance id: the key is the cluster-wide identity (every node of a
+  load-balanced GFS shares the seed and `base_url`), while the id may differ
+  per node or move to a shared one (`replaces`), so `/gfs/info` and
+  `/gfs/proof` may land on different nodes. The GFS signs its OWN configured
+  `base_url`, never one the requester names, so an impostor relaying the
+  challenge to the real server still fails at its own address. A failure is
+  `422 GFS_PROOF_FAILED`; no answer, a 5xx, or a 404 / 405 from a node that
+  does not know the route yet (rolling deploy) is `502 GFS_UNREACHABLE`; a
+  429 is `503 GFS_BUSY` — all raised before `/gfs/register`: no token is
+  spent and no identity is sent. Hosts compare in their IDNA (punycode)
+  form. Signature shape and suite: [crypto](../crypto.md).
   Consequence for operators: the address a household pairs with must be the
   GFS's `base_url` (the QR code already carries exactly that; an open-sign-up
   `[gfs] default_url` must match it up to case, default port and trailing
   slash).
-- **Older GFS: paired, recorded unproven.** A GFS whose signed block does not
-  offer `proof_of_possession` pairs as before, logged at INFO; the household
-  records the connection as unproven (`possession_proven: false` on
-  `GET /api/gfs/connections`). The record is RAM-only like the capability
-  cache — it describes the live server at an address — and is re-proven on
-  every GFS-WebSocket (re)connect: a failed proof, or a server that proved
-  possession earlier in this process and no longer offers it (a replayed old
-  block, a rollback, another server at that address), is a WARNING and marks
-  the connection unproven. `GfsConnectionService.verify_gfs_possession(conn)`
-  runs the same challenge on demand — the check for re-binding to a GFS that
-  moved to a new URL with the same id and key (pass the connection with the
-  candidate `inbox_url`). A replayed pre-proof block still makes an impostor
-  look like an older GFS at pairing; such a connection is never *proven*, so
-  every check that requires the proof fails.
+- **The ratchet: once proven, always required.** The first successful proof
+  stamps `gfs_connections.proof_required_at` (migration 0094; also exposed on
+  `GET /api/gfs/connections`). From then on, on every GFS-WebSocket
+  (re)connect, the identity-bound reconcile — pin heal, seat re-subscribe,
+  member epoch notices, the name push, the content-key reconcile — runs only
+  after a fresh proof at that address (one proof is reused for 5 minutes).
+  A failed or retryable proof skips it with a WARNING until a later connect
+  proves the key again; a server that no longer advertises the capability (a
+  rollback, a replayed pre-proof descriptor) is warned about and challenged
+  anyway — only a fresh proof lets the reconcile run. Pairing another
+  connection under a key this household holds a proven connection for
+  requires the proof too. A connection paired before its GFS learnt the
+  proof gets the ratchet on its first successful proof at a reconnect.
+- **Older GFS: paired, unproven, not enforced.** A GFS whose signed block
+  does not offer `proof_of_possession` (and whose key has no ratchet here)
+  pairs and reconnects as before, logged at INFO; `possession_proven` reads
+  `false`. **What is not enforced:** an impostor that replays a descriptor
+  signed before the GFS learnt the proof, for a key this household never saw
+  proven, still pairs as such an "older GFS" — the proof cannot help before
+  it has been seen once.
+- **A follow seat moves only with a proof.** A seat whose server comes back
+  under the same id and pinned key at a NEW address is re-bound to it (and
+  the v_44 pin anchor follows) only when the server there passes a fresh
+  proof bound to the new address (`GfsConnectionService.verify_gfs_possession`,
+  called by `GfsSpaceMirrorService.rebind_mirrors`); otherwise the
+  "needs re-follow" WARNING stands.
 - **Nothing new reaches the GFS.** The token request has no body. The
   registration body is built by the same code as QR pairing: instance id,
   public key, display name, and the key-wrap public key + its
@@ -703,10 +721,10 @@ cannot widen access through a missing field or Python truthiness.
   over. A connection is a seat's server only when id, key AND (normalized)
   URL all match: pairing reads id and key off an unauthenticated
   `/gfs/info`, so an impostor can claim both but cannot answer at the real
-  server's address. A proof of possession — the server signing a fresh
-  household nonce at pairing and at re-pair — is planned in a follow-up (a
-  GFS-side signed-nonce endpoint); it closes the remaining gap of an
-  attacker who also controls that address. Teardown and
+  server's address. Proof of possession (`POST /gfs/proof`, see "Connecting a
+  household" above) is what lets a seat follow its server to a new address;
+  an attacker who controls the old address itself is out of its reach.
+  Teardown and
   re-subscribe reach exactly the matching servers:
   - when **no local user** is seated in a space any more (follower
     unsubscribe, member leave or removal, a local / federated / synced ban —
@@ -740,9 +758,11 @@ cannot widen access through a missing field or Python truthiness.
     already re-took is left alone, and an unpair never detaches a seat
     another remaining pairing still matches;
   - a server whose id and key come back at a DIFFERENT address (a domain
-    change, http → https) is not re-bound: that could be an impostor, and
-    only the proof of possession planned in a follow-up can tell. Each such
-    seat is logged once at WARNING ("needs re-follow: server address
+    change, http → https) is re-bound only when the server at the new
+    address proves possession of the pinned key there (a fresh nonce, bound
+    to the new address) — an impostor replaying the descriptor cannot; an
+    older GFS without the proof is not re-bound. Each seat not re-bound is
+    logged once at WARNING ("needs re-follow: server address
     changed", remembered on the row); the user re-follows, and an
     unfollow while it is unreleased keeps the row as an unsubscribe-only
     tombstone for that follow-up to release. The same id and address under

@@ -40,6 +40,8 @@ def _conn_dict(
     holds the pinned key (``POST /gfs/proof``) at pairing or its latest
     connect: ``true``, ``false`` (an older GFS without the proof, or a failed
     one) or ``null`` (not checked since this household started).
+    ``proof_required_at`` (from the row, migration 0094) is when the server
+    first proved it — from then on the reconnect reconcile needs a fresh proof.
     """
     d = asdict(conn)
     # Remove sensitive key material from the API response.

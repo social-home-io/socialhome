@@ -4091,6 +4091,14 @@ def create_app(config: Config | None = None) -> web.Application:
             if gfs_route_discovery_scheduler is not None:
                 gfs_route_discovery_scheduler.trigger()
             await gfs_connection_service.refresh_connection_metadata(gfs_id)
+            # Proof of possession: once this connection's server has proved
+            # it holds the pinned key (the persisted ratchet), everything
+            # below — identity-bound subscribes, pin heal, epoch notices, the
+            # name push, the key reconcile — runs only after a fresh proof at
+            # this address, so an impostor there learns none of it. The gate
+            # logs its own WARNING; the next (re)connect retries.
+            if not await gfs_connection_service.possession_gate(gfs_id):
+                return
             # Self-heal the space-authority pins on the GFS: ``/gfs/publish``
             # authorizes a relay on the space's TOFU-pinned authority key
             # alone, so a space whose GFS row pinned none (published before

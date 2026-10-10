@@ -713,3 +713,35 @@ async def test_unpublish_gfs_not_found(client):
         headers=_auth(client._tok),
     )
     assert r.status == 422
+
+
+# ─── Reconnect reconcile behind the proof-of-possession gate ─────────
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+async def test_reconnect_reconcile_runs_only_past_the_possession_gate(
+    client, monkeypatch, trusted
+):
+    """Once a connection's server proved its key (the ratchet), the
+    identity-bound reconnect reconcile (pin heal, seat re-subscribe, …) runs
+    only after a fresh proof — an impostor at the address learns nothing."""
+    svc = client.app[gfs_connection_service_key]
+    supervisor = client.app[gfs_ws_supervisor_key]
+    healed: list[str] = []
+
+    async def _refresh(self, gfs_id):
+        return None
+
+    async def _gate(self, gfs_id):
+        return trusted
+
+    async def _heal(self, gfs_id):
+        healed.append(gfs_id)
+        return 0
+
+    cls = type(svc)
+    monkeypatch.setattr(cls, "refresh_connection_metadata", _refresh)
+    monkeypatch.setattr(cls, "possession_gate", _gate)
+    monkeypatch.setattr(cls, "heal_space_pins", _heal)
+    await supervisor._on_connected("gfs-1")
+    assert healed == (["gfs-1"] if trusted else [])

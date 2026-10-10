@@ -12,9 +12,10 @@ The proof is a challenge/response over ``POST /gfs/proof``:
 * the household sends a fresh random 32-byte ``nonce`` (b64url) and nothing
   else — no identity, so the GFS learns no more than a ``/gfs/info`` fetch
   tells it;
-* the GFS signs ``b"gfs-proof:v1:" + canonical({gfs_instance_id, nonce,
-  base_url, suite})`` with its identity key and returns the signature + its
-  ``proof_sig_suite``;
+* the GFS signs ``b"gfs-proof:v1:" + canonical({base_url, gfs_key, nonce,
+  suite})`` with its identity key and returns the signature + its
+  ``proof_sig_suite``. The KEY, not the instance id, is what is proven: it is
+  the cluster-wide identity, while the id may differ per node;
 * the household verifies against the key it is about to pin (pairing) or
   already pinned (reconnect / re-bind), with the URL **it** used.
 
@@ -45,7 +46,13 @@ import json
 import secrets
 from urllib.parse import urlsplit
 
-from .crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
+from .crypto import (
+    b64url_decode,
+    b64url_encode,
+    ed25519_public_key,
+    sign_ed25519,
+    verify_ed25519,
+)
 
 #: Suite identifier for the proof signature, shipped on the wire as
 #: ``proof_sig_suite`` and bound into the signed bytes (crypto-suite rule).
@@ -117,7 +124,7 @@ def normalize_gfs_base_url(url: object) -> str:
     except ValueError:
         return ""
     scheme = parts.scheme.lower()
-    host = (parts.hostname or "").lower()
+    host = _ascii_host(parts.hostname or "")
     if scheme not in _DEFAULT_PORTS or not host or parts.query or parts.fragment:
         return ""
     if parts.username is not None or parts.password is not None:
@@ -126,6 +133,31 @@ def normalize_gfs_base_url(url: object) -> str:
         host = f"[{host}]"
     netloc = host if port in (None, _DEFAULT_PORTS[scheme]) else f"{host}:{port}"
     return f"{scheme}://{netloc}{parts.path.rstrip('/')}"
+
+
+def _ascii_host(host: str) -> str:
+    """*host* lower-cased in its ASCII (IDNA / punycode) form, or ``""``.
+
+    So ``bücher.example`` and ``xn--bcher-kva.example`` — the same DNS name
+    — compare equal whichever spelling the operator configured and the
+    household typed. An IP literal passes through; a name IDNA refuses (or
+    one with characters no hostname has) is ``""``.
+    """
+    host = host.strip().lower()
+    if not host:
+        return ""
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    try:
+        ascii_host = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return ""
+    if not all(ch.isalnum() or ch in "-." for ch in ascii_host):
+        return ""
+    return ascii_host
 
 
 def bindable_base_url(url: object) -> str:
@@ -150,21 +182,25 @@ def bindable_base_url(url: object) -> str:
 
 
 def proof_signing_bytes(
-    gfs_instance_id: str,
+    gfs_key_hex: str,
     nonce: str,
     base_url: str,
     suite: str,
 ) -> bytes:
     """Canonical, domain-separated bytes for one proof.
 
-    Binds the server id, the household's nonce, the server's normalized base
-    URL and the suite (so a signature can't be re-labelled under another
-    suite).
+    Binds the server's identity KEY (lowercase hex), the household's nonce,
+    the server's normalized base URL and the suite (so a signature can't be
+    re-labelled under another suite). Deliberately NOT the instance id: the
+    key is the cluster-wide identity, while the id may still differ per node
+    of a load-balanced cluster (or move to a shared id, signed as
+    ``replaces``) — binding it would fail whenever ``/gfs/info`` and
+    ``/gfs/proof`` land on different nodes.
     """
     body = json.dumps(
         {
             "base_url": normalize_gfs_base_url(base_url),
-            "gfs_instance_id": gfs_instance_id,
+            "gfs_key": gfs_key_hex.strip().lower(),
             "nonce": nonce,
             "suite": suite,
         },
@@ -176,21 +212,18 @@ def proof_signing_bytes(
 
 def sign_possession_proof(
     seed: bytes,
-    gfs_instance_id: str,
     nonce: str,
     base_url: str,
 ) -> tuple[str, str]:
     """Sign a proof with the GFS identity seed → ``(proof_sig, proof_sig_suite)``."""
     suite = PROOF_SIG_SUITE_ED25519
-    sig = sign_ed25519(
-        seed, proof_signing_bytes(gfs_instance_id, nonce, base_url, suite)
-    )
+    key_hex = ed25519_public_key(seed).hex()
+    sig = sign_ed25519(seed, proof_signing_bytes(key_hex, nonce, base_url, suite))
     return b64url_encode(sig), suite
 
 
 def verify_possession_proof(
     public_key_hex: str,
-    gfs_instance_id: str,
     nonce: str,
     base_url: str,
     sig_b64url: str,
@@ -212,6 +245,6 @@ def verify_possession_proof(
         return False
     return verify_ed25519(
         public_key,
-        proof_signing_bytes(gfs_instance_id, nonce, base_url, suite),
+        proof_signing_bytes(public_key_hex, nonce, base_url, suite),
         sig,
     )

@@ -187,9 +187,9 @@ class GfsProofView(GfsBaseView):
 
     Body ``{nonce}``: a fresh b64url 32-byte challenge from the household and
     nothing else — no identity, so the GFS learns no more than a ``/gfs/info``
-    fetch tells it. Answers ``{gfs_instance_id, base_url, nonce, proof_sig,
+    fetch tells it. Answers ``{gfs_instance_id, gfs_key, base_url, nonce, proof_sig,
     proof_sig_suite}``, the signature over ``b"gfs-proof:v1:" +
-    canonical({base_url, gfs_instance_id, nonce, suite})`` with the identity
+    canonical({base_url, gfs_key, nonce, suite})`` with the identity
     key ``/gfs/info`` publishes (:mod:`socialhome.gfs_proof`).
 
     ``base_url`` is this server's own ``[server] base_url`` — never the Host
@@ -217,10 +217,12 @@ class GfsProofView(GfsBaseView):
         if not _can_prove(cfg, cluster):
             return web.json_response({"error": "unavailable"}, status=503)
         base_url = bindable_base_url(cfg.base_url)
-        sig, suite = cluster.sign_possession_proof(cfg.instance_id, nonce, base_url)
+        sig, suite = cluster.sign_possession_proof(nonce, base_url)
         return web.json_response(
             {
+                # Informational: the proof binds the key, not this node's id.
                 "gfs_instance_id": cfg.instance_id,
+                "gfs_key": cluster.own_public_key_hex,
                 "base_url": base_url,
                 "nonce": nonce,
                 "proof_sig": sig,

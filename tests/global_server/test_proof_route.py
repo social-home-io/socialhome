@@ -71,18 +71,19 @@ async def test_proof_verifies_against_the_info_key(client):
     body = await resp.json()
     assert set(body) == {
         "gfs_instance_id",
+        "gfs_key",
         "base_url",
         "nonce",
         "proof_sig",
         "proof_sig_suite",
     }
     assert body["gfs_instance_id"] == "gfs-proof"
+    assert body["gfs_key"] == info["public_key"]
     assert body["base_url"] == BASE_URL
     assert body["nonce"] == nonce
     assert body["proof_sig_suite"] == PROOF_SIG_SUITE_ED25519
     assert verify_possession_proof(
         info["public_key"],
-        info["gfs_instance_id"],
         nonce,
         BASE_URL,
         body["proof_sig"],
@@ -105,7 +106,6 @@ async def test_proof_binds_the_configured_base_url_not_the_host_header(client):
     assert body["base_url"] == BASE_URL
     assert not verify_possession_proof(
         info["public_key"],
-        info["gfs_instance_id"],
         nonce,
         "https://impostor.example",
         body["proof_sig"],
@@ -198,10 +198,50 @@ async def test_wildcard_inferred_base_url_does_not_offer_the_proof(tmp_path):
 
 async def test_cluster_signs_nothing_without_a_key(client, monkeypatch):
     cluster = client.server.app[gfs_cluster_key]
-    sig, suite = cluster.sign_possession_proof("gfs-proof", new_proof_nonce(), BASE_URL)
+    sig, suite = cluster.sign_possession_proof(new_proof_nonce(), BASE_URL)
     assert sig and suite == PROOF_SIG_SUITE_ED25519
     monkeypatch.setattr(cluster, "_signing_key", b"")
-    assert cluster.sign_possession_proof("gfs-proof", new_proof_nonce(), BASE_URL) == (
-        "",
-        "",
-    )
+    assert cluster.sign_possession_proof(new_proof_nonce(), BASE_URL) == ("", "")
+
+
+async def test_nodes_with_a_shared_seed_and_different_ids_prove_the_same_key(
+    tmp_path,
+):
+    """A load-balanced cluster: every node shares the seed and base_url, ids
+    may differ per node. A proof from ANY node verifies against the key any
+    node's /gfs/info published — the id is not part of what is proven."""
+    seed = "11" * 32
+    clients = []
+    for n, iid in enumerate(("gfs-node-a", "gfs-node-b")):
+        (tmp_path / str(n)).mkdir()
+        app = create_gfs_app(
+            GfsConfig(
+                host="127.0.0.1",
+                port=0,
+                base_url=BASE_URL,
+                data_dir=str(tmp_path / str(n)),
+                instance_id=iid,
+                signing_seed_hex=seed,
+            )
+        )
+        tc = TestClient(TestServer(app))
+        await tc.start_server()
+        clients.append(tc)
+    try:
+        info_a = await (await clients[0].get("/gfs/info")).json()
+        nonce = new_proof_nonce()
+        resp = await clients[1].post(
+            PROOF_ROUTE, json={"nonce": nonce}, headers=_ip(10)
+        )
+        body = await resp.json()
+        assert body["gfs_instance_id"] == "gfs-node-b"
+        assert verify_possession_proof(
+            info_a["public_key"],
+            nonce,
+            BASE_URL,
+            body["proof_sig"],
+            body["proof_sig_suite"],
+        )
+    finally:
+        for tc in clients:
+            await tc.close()

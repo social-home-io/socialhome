@@ -23,6 +23,7 @@ class AbstractGfsConnectionRepo(Protocol):
     async def update_gfs_instance_id(
         self, gfs_id: str, gfs_instance_id: str
     ) -> bool: ...
+    async def mark_proof_required(self, gfs_id: str, at: str) -> bool: ...
     async def delete(self, gfs_id: str) -> None: ...
     async def publish_space(
         self, space_id: str, gfs_id: str, status: str = "active"
@@ -53,15 +54,20 @@ class SqliteGfsConnectionRepo:
             """
             INSERT INTO gfs_connections(
                 id, gfs_instance_id, display_name, public_key,
-                inbox_url, status, paired_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                inbox_url, status, paired_at, proof_required_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 gfs_instance_id=excluded.gfs_instance_id,
                 display_name=excluded.display_name,
                 public_key=excluded.public_key,
                 inbox_url=excluded.inbox_url,
                 status=excluded.status,
-                paired_at=excluded.paired_at
+                paired_at=excluded.paired_at,
+                -- The proof ratchet only ever gets set, never cleared.
+                proof_required_at=COALESCE(
+                    gfs_connections.proof_required_at,
+                    excluded.proof_required_at
+                )
             """,
             (
                 conn.id,
@@ -71,6 +77,7 @@ class SqliteGfsConnectionRepo:
                 conn.inbox_url,
                 conn.status,
                 conn.paired_at,
+                conn.proof_required_at,
             ),
         )
 
@@ -129,6 +136,22 @@ class SqliteGfsConnectionRepo:
         except sqlite3.IntegrityError:
             # Another connection took the id between the read and the write.
             return False
+        return True
+
+    async def mark_proof_required(self, gfs_id: str, at: str) -> bool:
+        """Set the proof-of-possession ratchet (0094) the first time; returns
+        whether this call set it. Never moves or clears an existing stamp."""
+        row = await self._db.fetchone(
+            "SELECT proof_required_at FROM gfs_connections WHERE id=?",
+            (gfs_id,),
+        )
+        if row is None or row["proof_required_at"] is not None:
+            return False
+        await self._db.enqueue(
+            "UPDATE gfs_connections SET proof_required_at=?"
+            " WHERE id=? AND proof_required_at IS NULL",
+            (at, gfs_id),
+        )
         return True
 
     async def delete(self, gfs_id: str) -> None:
@@ -269,4 +292,5 @@ def _row_to_conn(r: dict) -> GfsConnection:
         status=r["status"],
         paired_at=r["paired_at"],
         created_at=r.get("created_at"),
+        proof_required_at=r.get("proof_required_at"),
     )

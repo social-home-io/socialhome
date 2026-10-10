@@ -142,12 +142,26 @@ class _StubSession:
 class _StubGfs:
     """Records subscribe / unsubscribe calls against the GFS service seam."""
 
-    __slots__ = ("subscribes", "unsubscribes", "raise_on_unsubscribe")
+    __slots__ = (
+        "subscribes",
+        "unsubscribes",
+        "raise_on_unsubscribe",
+        "possession",
+        "challenged",
+    )
 
-    def __init__(self, *, raise_on_unsubscribe: bool = False):
+    def __init__(self, *, raise_on_unsubscribe: bool = False, possession=False):
         self.subscribes: list[tuple[str, str]] = []
         self.unsubscribes: list[tuple[str, str]] = []
         self.raise_on_unsubscribe = raise_on_unsubscribe
+        #: What ``verify_gfs_possession`` answers (a fresh proof of the
+        #: pinned key at the connection's URL).
+        self.possession = possession
+        self.challenged: list[tuple[str, str, str]] = []
+
+    async def verify_gfs_possession(self, conn) -> bool:
+        self.challenged.append((conn.id, conn.public_key, conn.inbox_url))
+        return self.possession
 
     async def subscribe_to_gfs_space(self, space_id: str, gfs_id: str) -> str:
         self.subscribes.append((space_id, gfs_id))
@@ -1741,10 +1755,11 @@ async def test_disconnect_never_waits_on_the_network(env):
     assert gfs.unsubscribes == [("sp-x", "gfs-1")]
 
 
+@pytest.mark.security
 async def test_a_moved_server_address_is_logged_once_and_not_rebound(env, caplog):
     """M1: same id + key at another address is a genuine move or an
-    impostor — not re-bound until the proof-of-possession follow-up; one
-    WARNING per seat asks for a re-follow."""
+    impostor — without a proof of possession at the new address it is not
+    re-bound; one WARNING per seat asks for a re-follow."""
 
     await env.conns.save(_conn("gfs-1", inbox_url="https://old.test"))
     await _seat(env, "sp-1", "gfs-1")
@@ -1880,6 +1895,48 @@ def test_seat_bookkeeping_stays_bounded():
     late = mirror_mod.UNWANTED_RELAY_RETRY_S
     mirror_mod._remember(store, ("g", "new"), now=late)
     assert store == {("g", "new"): late}
+
+
+@pytest.mark.security
+async def test_a_moved_server_that_proves_its_key_rebinds_the_seat(env, caplog):
+    """Same id + key at a new address, and the server THERE signs a fresh
+    nonce with the pinned key bound to that address: a genuine move — the
+    seat (and the pin-heal anchor) follow it, no re-follow needed."""
+    await _follower(env)
+    await _seat(env, "sp-1", "gfs-1")
+    await _repair(env, "gfs-1", "gfs-1b", "https://new.test")
+    gfs = _StubGfs(possession=True)
+    svc = _mirror(env, _StubSession(), gfs)
+    conn = await env.conns.get("gfs-1b")
+    with caplog.at_level(logging.WARNING):
+        assert await svc.rebind_mirrors(conn) == 1
+        await svc.sweep_orphan_seats()
+    # Challenged once, with the PINNED key at the NEW address.
+    assert gfs.challenged == [("gfs-1b", "pk", "https://new.test")]
+    assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1b", 0)
+    seat = await env.seats.get("sp-1", "inst-gfs-1")
+    assert (seat.gfs_connection_id, seat.gfs_inbox_url) == (
+        "gfs-1b",
+        "https://new.test",
+    )
+    assert "needs re-follow" not in caplog.text
+    # Bound now: no second challenge.
+    assert await svc.rebind_mirrors(conn) == 0
+    assert len(gfs.challenged) == 1
+
+
+@pytest.mark.security
+async def test_a_moved_server_under_another_key_is_never_challenged(env):
+    """A different key at the new address is a different server: nothing to
+    prove, nothing re-bound."""
+    await _follower(env)
+    await _seat(env, "sp-1", "gfs-1")
+    await _repair(env, "gfs-1", "gfs-1b", "https://new.test", key="other")
+    gfs = _StubGfs(possession=True)
+    svc = _mirror(env, _StubSession(), gfs)
+    assert await svc.rebind_mirrors(await env.conns.get("gfs-1b")) == 0
+    assert gfs.challenged == []
+    assert await _binding(env, "sp-1", "inst-gfs-1") == ("gfs-1", "pk")
 
 
 # ─── pin-heal anchor across a re-pair ────────────────────────────────────

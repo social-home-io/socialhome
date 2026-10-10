@@ -783,12 +783,14 @@ Ed25519 with the same identity key) and `proof_sig_suite`
 (`PROOF_SIG_SUITE_ED25519 = "ed25519"`, validated against
 `SUPPORTED_PROOF_SIG_SUITES`; unknown → `UnsupportedProofSigSuite`, never a
 default). Signing bytes are `b"gfs-proof:v1:"` + canonical JSON of
-`{base_url, gfs_instance_id, nonce, suite}`: the nonce makes every proof
+`{base_url, gfs_key, nonce, suite}` — the KEY (lowercase hex), not the
+instance id, which may differ per node of a load-balanced cluster sharing the
+seed: the nonce makes every proof
 single-use (no timestamp — freshness comes from the nonce, and a clock check
 would only let a skewed GFS clock break pairing), the suite inside the bytes
 stops a signature being re-labelled under another suite, and `base_url` is the
-GFS's OWN configured `[server] base_url` (normalized: lower-cased scheme and
-host, default port and trailing slash dropped). Binding the server's own URL
+GFS's OWN configured `[server] base_url` (normalized: lower-cased scheme,
+host in its IDNA / punycode form, default port and trailing slash dropped). Binding the server's own URL
 rather than one the requester names is what stops a **relaying impostor**: a
 host at another address that forwards the challenge to the real GFS gets back
 a genuine signature over the real GFS's URL, which fails when the household
@@ -796,11 +798,11 @@ verifies with the address it actually used. The prefix is not JSON, so a
 proof can never collide with a cluster frame (canonical JSON) or a capability
 block signed by the same key. The household demands the proof at pairing
 (before registering — an impostor learns neither the token nor the
-household's identity) and on every GFS-WebSocket (re)connect; an older GFS
-without the capability pairs as before, recorded unproven. Residual
-downgrade: an impostor can replay an OLD signed block from before the GFS
-learnt the proof and so look like an older GFS — that pairing is recorded
-unproven, never proven, and every check that requires a proof still fails.
+household's identity). The first success sets a persisted ratchet
+(`gfs_connections.proof_required_at`): from then on the reconnect reconcile
+runs only after a fresh proof. Not enforced: an impostor replaying a block
+signed before the GFS learnt the proof, for a key the household never saw
+proven, looks like an older GFS and pairs unproven.
 
 The suite-tag retrofit promised in earlier revisions of this doc is
 shipped — every cryptographic wire format in the federation surface

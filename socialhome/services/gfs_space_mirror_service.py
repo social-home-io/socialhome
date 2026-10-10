@@ -1077,9 +1077,10 @@ class GfsSpaceMirrorService:
         self, seat: GfsSpaceSeat, conns: list[GfsConnection]
     ) -> None:
         """One WARNING per seat (flag on the row) when its server's id
-        reappears at another address, or under another key at the same
-        address: neither is re-bound without the proof of possession planned
-        in a follow-up, so the user has to re-follow."""
+        reappears at another address without proving possession of the
+        pinned key there (:meth:`_rebind_moved_seats`), or under another key
+        at the same address: neither is re-bound, so the user has to
+        re-follow."""
         if seat.refollow_warned:
             return
         moved = next((c for c in conns if _moved(seat, c)), None)
@@ -1362,7 +1363,17 @@ class GfsSpaceMirrorService:
         copy. A re-pair under a different key or URL — or a mirror seated
         from another server, or one with no recorded seat — keeps its old
         anchor, and so never heals from this connection.
+
+        One exception, proven: a seat whose server returns under the same id
+        and PINNED key at a NEW address (:func:`_moved`) is re-bound to
+        *conn* when the server at that address passes a fresh proof of
+        possession (``GfsConnectionService.verify_gfs_possession`` — a nonce
+        signed with the pinned key, bound to *conn*'s URL). An impostor
+        replaying the server's ``/gfs/info`` there cannot sign it; an older
+        GFS without the proof is not re-bound (the re-follow WARNING stands).
+        One challenge per call, only when such a seat exists.
         """
+        await self._rebind_moved_seats(conn)
         moved = 0
         for seat in await self._seats_on(conn):
             if seat.gfs_connection_id is None or seat.gfs_connection_id == conn.id:
@@ -1385,6 +1396,41 @@ class GfsSpaceMirrorService:
             # The seat now lives on this pairing (same server, key and URL).
             await self._seats.record(_seat_on(seat.space_id, conn))
         return moved
+
+    async def _rebind_moved_seats(self, conn: GfsConnection) -> int:
+        """Re-bind the seats whose server moved to *conn*'s address, once the
+        server there proved possession of the pinned key. Returns how many."""
+        moved = [
+            seat
+            for seat in await self._seats.list_for_gfs(conn.gfs_instance_id)
+            if _moved(seat, conn)
+        ]
+        if not moved:
+            return 0
+        if not await self._gfs.verify_gfs_possession(conn):
+            return 0
+        for seat in moved:
+            log.info(
+                "gfs_space_mirror: seat on %s follows GFS %s to its new address "
+                "%s (proved possession of the pinned key)",
+                seat.space_id,
+                conn.gfs_instance_id,
+                _address(conn.inbox_url),
+            )
+            # Only the address moves here; the seat keeps its old connection
+            # id so the anchor loop in :meth:`rebind_mirrors` (which now sees
+            # it as this server's) carries the pin-heal anchor over and binds
+            # the seat to *conn* — the same path as a re-pair in place.
+            await self._seats.record(
+                GfsSpaceSeat(
+                    space_id=seat.space_id,
+                    gfs_instance_id=seat.gfs_instance_id,
+                    gfs_connection_id=seat.gfs_connection_id,
+                    gfs_public_key=seat.gfs_public_key,
+                    gfs_inbox_url=conn.inbox_url,
+                )
+            )
+        return len(moved)
 
     # ── Reactive teardown ────────────────────────────────────────────────
 
@@ -1499,7 +1545,8 @@ def _rekeyed(seat: GfsSpaceSeat, conn: GfsConnection) -> bool:
 
 def _moved(seat: GfsSpaceSeat, conn: GfsConnection) -> bool:
     """Same server id and key as the seat, at another address — a genuine
-    move or an impostor; only a proof of possession (planned) can tell."""
+    move or an impostor; only a proof of possession at the new address
+    (:meth:`GfsSpaceMirrorService._rebind_moved_seats`) can tell."""
     return (
         seat.gfs_instance_id == conn.gfs_instance_id
         and seat.gfs_public_key is not None

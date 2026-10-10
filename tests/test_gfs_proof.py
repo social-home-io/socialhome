@@ -11,6 +11,7 @@ challenge to the real server still fails at its own address.
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 
 import pytest
@@ -36,8 +37,12 @@ from socialhome.gfs_proof import (
 URL = "https://gfs.example.com"
 
 
-def _signed(kp, nonce: str, *, gfs_id: str = "gfs-1", url: str = URL):
-    return sign_possession_proof(kp.private_key, gfs_id, nonce, url)
+def _signed(kp, nonce: str, *, url: str = URL):
+    return sign_possession_proof(kp.private_key, nonce, url)
+
+
+def _pk(kp) -> str:
+    return kp.public_key.hex()
 
 
 def test_constants():
@@ -61,35 +66,45 @@ def test_sign_then_verify_round_trips():
     nonce = new_proof_nonce()
     sig, suite = _signed(kp, nonce)
     assert suite == PROOF_SIG_SUITE_ED25519
-    assert verify_possession_proof(kp.public_key.hex(), "gfs-1", nonce, URL, sig, suite)
+    assert verify_possession_proof(_pk(kp), nonce, URL, sig, suite)
+
+
+def test_proof_names_no_instance_id():
+    """The key is the cluster-wide identity; the instance id is a per-node
+    label on a cluster still on per-node ids. Binding it would make a proof
+    from node B fail against the descriptor node A served."""
+    raw = proof_signing_bytes("aa" * 32, new_proof_nonce(), URL, "ed25519")
+    body = json.loads(raw.removeprefix(PROOF_SIGNING_PREFIX))
+    assert set(body) == {"base_url", "gfs_key", "nonce", "suite"}
+    assert body["gfs_key"] == "aa" * 32
+
+
+def test_key_is_bound_case_insensitively():
+    raw_lower = proof_signing_bytes("ab" * 32, "n", URL, "ed25519")
+    assert raw_lower == proof_signing_bytes("AB" * 32, "n", URL, "ed25519")
 
 
 @pytest.mark.parametrize(
-    ("gfs_id", "nonce_other", "url"),
+    ("nonce_other", "url"),
     [
-        ("gfs-2", False, URL),  # another server's id
-        ("gfs-1", True, URL),  # a stale / other nonce (replay)
-        ("gfs-1", False, "https://impostor.example.net"),  # another address
-        ("gfs-1", False, "http://gfs.example.com"),  # downgraded scheme
+        (True, URL),  # a stale / other nonce (replay)
+        (False, "https://impostor.example.net"),  # another address
+        (False, "http://gfs.example.com"),  # downgraded scheme
     ],
 )
-def test_every_bound_field_is_checked(gfs_id, nonce_other, url):
+def test_every_bound_field_is_checked(nonce_other, url):
     kp = generate_identity_keypair()
     nonce = new_proof_nonce()
     sig, suite = _signed(kp, nonce)
     check_nonce = new_proof_nonce() if nonce_other else nonce
-    assert not verify_possession_proof(
-        kp.public_key.hex(), gfs_id, check_nonce, url, sig, suite
-    )
+    assert not verify_possession_proof(_pk(kp), check_nonce, url, sig, suite)
 
 
 def test_wrong_key_fails():
     kp, other = generate_identity_keypair(), generate_identity_keypair()
     nonce = new_proof_nonce()
     sig, suite = _signed(kp, nonce)
-    assert not verify_possession_proof(
-        other.public_key.hex(), "gfs-1", nonce, URL, sig, suite
-    )
+    assert not verify_possession_proof(_pk(other), nonce, URL, sig, suite)
 
 
 def test_unknown_suite_is_rejected_never_defaulted():
@@ -97,35 +112,38 @@ def test_unknown_suite_is_rejected_never_defaulted():
     nonce = new_proof_nonce()
     sig, _ = _signed(kp, nonce)
     with pytest.raises(UnsupportedProofSigSuite):
-        verify_possession_proof(kp.public_key.hex(), "gfs-1", nonce, URL, sig, "rsa")
+        verify_possession_proof(_pk(kp), nonce, URL, sig, "rsa")
 
 
 def test_malformed_material_is_false_not_raise():
     nonce = new_proof_nonce()
-    assert not verify_possession_proof("zz", "gfs-1", nonce, URL, "sig", "ed25519")
+    assert not verify_possession_proof("zz", nonce, URL, "sig", "ed25519")
     kp = generate_identity_keypair()
-    assert not verify_possession_proof(
-        kp.public_key.hex(), "gfs-1", nonce, URL, "!!", "ed25519"
-    )
+    assert not verify_possession_proof(_pk(kp), nonce, URL, "!!", "ed25519")
 
 
 def test_signing_bytes_are_domain_separated_and_bind_the_suite():
     nonce = new_proof_nonce()
-    raw = proof_signing_bytes("gfs-1", nonce, URL, PROOF_SIG_SUITE_ED25519)
+    raw = proof_signing_bytes("aa" * 32, nonce, URL, PROOF_SIG_SUITE_ED25519)
     assert raw.startswith(PROOF_SIGNING_PREFIX)
     # Not JSON — so it can never collide with a cluster frame (canonical
     # JSON) or the capability block (another prefix) this key also signs.
     assert not raw.startswith(b"{")
-    assert raw != proof_signing_bytes("gfs-1", nonce, URL, "ed25519+mldsa65")
+    assert raw != proof_signing_bytes("aa" * 32, nonce, URL, "ed25519+mldsa65")
 
 
 def test_url_is_compared_normalized():
     """The GFS's configured URL and the one the household used may differ in
-    case, a default port, or a trailing slash — never in substance."""
+    case, a default port, a trailing slash or IDNA spelling — never in
+    substance."""
     kp = generate_identity_keypair()
     nonce = new_proof_nonce()
     sig, suite = _signed(kp, nonce, url="https://GFS.Example.com:443/")
-    assert verify_possession_proof(kp.public_key.hex(), "gfs-1", nonce, URL, sig, suite)
+    assert verify_possession_proof(_pk(kp), nonce, URL, sig, suite)
+    sig, suite = _signed(kp, nonce, url="https://bücher.example")
+    assert verify_possession_proof(
+        _pk(kp), nonce, "https://xn--bcher-kva.example/", sig, suite
+    )
 
 
 @pytest.mark.parametrize(
@@ -142,6 +160,9 @@ def test_url_is_compared_normalized():
         ("not a url", ""),
         ("ftp://gfs.example.com", ""),
         ("https://gfs.example.com/?q=1", ""),
+        ("https://Bücher.Example/", "https://xn--bcher-kva.example"),
+        ("https://xn--bcher-kva.example", "https://xn--bcher-kva.example"),
+        ("https://exa mple.com", ""),
     ],
 )
 def test_normalize_gfs_base_url(raw, expected):
