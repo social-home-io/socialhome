@@ -2491,6 +2491,9 @@ def create_app(config: Config | None = None) -> web.Application:
     # An unpair keeps the seats (detached) and unsubscribes in the
     # background — never inside the unpair request.
     gfs_connection_service.attach_on_disconnect(gfs_space_mirror.on_disconnect)
+    # A connection adopted its server's new public id (same key, same
+    # address): the follow seats move to the new id in the same step.
+    gfs_connection_service.attach_on_rebound(gfs_space_mirror.on_gfs_rebound)
 
     # ── Public space discovery (GFS poll) ────────────────────────────────
     public_space_discovery = PublicSpaceDiscoveryService(

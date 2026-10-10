@@ -7,11 +7,14 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
+from dataclasses import replace
+
 import pytest
 
 import socialhome.services.gfs_directory as directory_mod
 import socialhome.services.gfs_space_mirror_service as mirror_mod
 
+from socialhome.capabilities_sig import sign_capabilities
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import GfsConnection
@@ -2172,3 +2175,136 @@ async def test_the_sweep_retries_a_tombstone_once_its_server_is_back(env):
     await mirror.sweep_orphan_seats()
     assert gfs.unsubscribes == [("sp-x", "gfs-1b")]
     assert await _seat_ids(env, "sp-x") == []
+
+
+# ─── seats follow the server's new public id (C1 rebind) ─────────────────
+
+
+async def _rename(env, conn_id: str, new_id: str) -> None:
+    """What ``GfsConnectionService`` does on a rebind: the connection row
+    (same local id, key and URL) adopts the server's new public id."""
+    assert await env.conns.update_gfs_instance_id(conn_id, new_id)
+
+
+@pytest.mark.security
+async def test_a_follow_survives_the_servers_rename_via_the_rebind_hook(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    repo = await _mirrored(env, "sp-1", gfs="gfs-1")
+    gfs = _StubGfs()
+    mirror = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+
+    await _rename(env, "gfs-1", "gfs-social-home")
+    await mirror.on_gfs_rebound("gfs-1")
+    assert await _seat_ids(env, "sp-1") == ["gfs-social-home"]
+    assert await _binding(env, "sp-1", "gfs-social-home") == ("gfs-1", "pk")
+
+    # The reconnect re-takes (keeps) the seat …
+    assert await mirror.resubscribe_all("gfs-1") == 1
+    assert gfs.subscribes == [("sp-1", "gfs-1")]
+    # … and the unfollow reaches the server.
+    await env.spaces.delete_member("sp-1", "u-local")
+    await mirror.unsubscribe("sp-1")
+    assert gfs.unsubscribes == [("sp-1", "gfs-1")]
+    assert await _seat_ids(env, "sp-1") == []
+
+
+@pytest.mark.security
+async def test_a_rename_missed_by_the_hook_is_healed_on_the_next_reconnect(env):
+    """A crash between the connection's rebind and the seat move leaves the
+    seats under the old id: the reconnect self-heal moves them (same key,
+    same address) before reading them."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    repo = await _mirrored(env, "sp-1", gfs="gfs-1")
+    gfs = _StubGfs()
+    mirror = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+    await _rename(env, "gfs-1", "gfs-social-home")
+    assert await mirror.resubscribe_all("gfs-1") == 1
+    assert gfs.subscribes == [("sp-1", "gfs-1")]
+    assert await _seat_ids(env, "sp-1") == ["gfs-social-home"]
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("bound", ["other-key", "other-url"])
+async def test_a_seat_bound_to_another_key_or_address_never_follows_a_rename(
+    env, bound
+):
+    """Only the server the seat was taken on (same key AND address) carries
+    it to its new id — never a connection that merely shares the old id."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    repo = await _mirrored(env, "sp-1", gfs=None)
+    await _seat(
+        env,
+        "sp-1",
+        "gfs-1",
+        key="pk-evil" if bound == "other-key" else None,
+        url="https://evil.test" if bound == "other-url" else None,
+    )
+    gfs = _StubGfs()
+    mirror = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+    await _rename(env, "gfs-1", "gfs-social-home")
+    await mirror.on_gfs_rebound("gfs-1")
+    await mirror.resubscribe_all("gfs-1")
+    assert await _seat_ids(env, "sp-1") == ["inst-gfs-1"]
+    assert gfs.subscribes == []
+
+
+async def test_a_rebind_of_an_unknown_connection_moves_nothing(env):
+    mirror = _mirror(env, _StubSession())
+    assert await mirror.on_gfs_rebound("nope") == 0
+
+
+@pytest.mark.security
+async def test_a_follow_seated_under_the_old_id_survives_a_real_rebind(env):
+    """End to end through the real ``GfsConnectionService`` rebind: a follow
+    seated under ``gfs-1``; the server now serves ``gfs-social-home`` under
+    the pinned key; the reconnect's metadata refresh rebinds the connection
+    and (hook) moves the seat; the reconnect reconcile keeps the seat and
+    the unfollow reaches the server."""
+    kp = generate_identity_keypair()
+    await env.conns.save(
+        GfsConnection(
+            id="conn-1",
+            gfs_instance_id="gfs-1",
+            display_name="GFS",
+            public_key=kp.public_key.hex(),
+            inbox_url="https://gfs.test",
+            status="active",
+            paired_at="2025-01-01T00:00:00+00:00",
+        )
+    )
+    repo = await _seat_subscription(env, "sp-1")
+    await env.spaces.set_mirror_provenance("sp-1", gfs_id="conn-1", rotation_seq=0)
+    await _seat(env, "sp-1", "conn-1")
+    # ``_seat`` names the server ``inst-{conn}``; this one is ``gfs-1``.
+    seat = await env.seats.get("sp-1", "inst-conn-1")
+    await env.seats.forget("sp-1", "inst-conn-1")
+    await env.seats.record(replace(seat, gfs_instance_id="gfs-1"))
+
+    caps = {"anonymous_publish": True}
+    sig, suite = sign_capabilities(kp.private_key, "gfs-social-home", caps)
+    info = {
+        "gfs_instance_id": "gfs-social-home",
+        "public_key": kp.public_key.hex(),
+        "server_name": "GFS",
+        "capabilities": caps,
+        "capabilities_sig": sig,
+        "capabilities_sig_suite": suite,
+    }
+    conns = GfsConnectionService(
+        env.conns,
+        http_client=_StubSession({"https://gfs.test/gfs/info": (200, info)}),  # type: ignore[arg-type]
+    )
+    gfs = _StubGfs()
+    mirror = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+    conns.attach_on_rebound(mirror.on_gfs_rebound)
+
+    await conns.refresh_connection_metadata("conn-1")
+    assert (await env.conns.get("conn-1")).gfs_instance_id == "gfs-social-home"
+    assert await _seat_ids(env, "sp-1") == ["gfs-social-home"]
+
+    assert await mirror.resubscribe_all("conn-1") == 1
+    assert gfs.subscribes == [("sp-1", "conn-1")]
+    await env.spaces.delete_member("sp-1", "u-local")
+    await mirror.unsubscribe("sp-1")
+    assert gfs.unsubscribes == [("sp-1", "conn-1")]
+    assert await _seat_ids(env, "sp-1") == []

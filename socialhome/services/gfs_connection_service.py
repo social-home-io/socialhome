@@ -367,10 +367,11 @@ class GfsConnectionService:
         #: cert succeeded (the GFS re-pinned and forgot the space's epoch).
         self._on_repinned: Callable[[str, str], Awaitable[object]] | None = None
         self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
-        #: Called with the connection id after it adopted the server's new
-        #: public id (:meth:`_rebind_to_served_id`) — the private-channel
-        #: owner re-registers and re-issues grants naming the new id.
-        self._on_rebound: Callable[[str], Awaitable[object]] | None = None
+        #: Called in order with the connection id after it adopted the
+        #: server's new public id (:meth:`_rebind_to_served_id`): the seat
+        #: keeper moves this household's follow seats to the new id, the
+        #: private-channel owner re-registers and re-issues grants.
+        self._on_rebound: list[Callable[[str], Awaitable[object]]] = []
         #: ``(connection id, served id)`` pairs already WARNed about — one
         #: line per refused rebind per process, not one per reconnect.
         self._rebind_warned: set[tuple[str, str]] = set()
@@ -388,8 +389,9 @@ class GfsConnectionService:
         self._on_disconnect = hook
 
     def attach_on_rebound(self, hook: Callable[[str], Awaitable[object]]) -> None:
-        """Wire the hook run after a connection adopted a new public id."""
-        self._on_rebound = hook
+        """Add a hook run after a connection adopted a new public id (hooks
+        run in the order attached; one failing never skips the next)."""
+        self._on_rebound.append(hook)
 
     def known_instance_ids(self, conn: GfsConnection) -> frozenset[str]:
         """*conn*'s pinned public id plus the ids it was pinned under before
@@ -973,9 +975,9 @@ class GfsConnectionService:
             fresh.gfs_instance_id,
         )
         self._previous_ids.setdefault(conn.id, set()).add(fresh.gfs_instance_id)
-        if self._on_rebound is not None:
+        for hook in self._on_rebound:
             try:
-                await self._on_rebound(conn.id)
+                await hook(conn.id)
             except Exception:
                 log.exception("GFS %s: rebind hook failed", conn.id)
 
