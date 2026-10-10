@@ -102,8 +102,9 @@ class GfsConfig:
     #: Former ``instance_id`` values still accepted as the ADDRESSEE of a
     #: household-signed request — a migration bridge after a change of
     #: ``instance_id``, while households re-read ``/gfs/info`` and adopt the
-    #: new id. Never served, never signed. Drop them once the INFO log of
-    #: alias use goes quiet.
+    #: new id. Served only inside the SIGNED capability block, as
+    #: ``replaces`` (what lets a household pinned to one of them move). Drop
+    #: them once the INFO log of alias use goes quiet.
     instance_id_aliases: tuple[str, ...] = ()
     #: Optional 64-hex-char (32-byte) override for this GFS's Ed25519 identity
     #: seed, for operators who inject secrets from a vault instead of letting
@@ -455,8 +456,9 @@ data_dir = "/var/lib/sh-gfs"
 instance_id = "gfs-node-0"
 # Former instance_id values still accepted as the addressee of a household's
 # request — a migration bridge after changing instance_id, while households
-# re-read /gfs/info and adopt the new id (they do so on their next
-# reconnect, keyed on the unchanged identity key). Never served or signed.
+# re-read /gfs/info and adopt the new id (on their next reconnect or hourly
+# refresh, keyed on the unchanged identity key: /gfs/info signs these as
+# "replaces", and a household moves only off an id listed there).
 # Each use is logged at INFO; drop the aliases once those lines stop.
 # Env override: GFS_INSTANCE_ID_ALIASES="gfs-0,gfs-1" (empty string = []).
 instance_id_aliases = []

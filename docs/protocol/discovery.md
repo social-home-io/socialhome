@@ -352,39 +352,65 @@ The Social Home ↔ GFS link is split by direction:
   nodes of a cluster share one identity key and one `base_url` behind a load
   balancer, so a household's `/gfs/info` and its next request usually reach
   DIFFERENT nodes — `instance_id` MUST be identical on every node. Nodes are
-  told apart by `[cluster] node_id`, which MUST be unique and explicit (a
-  cluster node without one refuses to start). Guards and the migration path:
-  - **Sibling check.** `NODE_HELLO` / `NODE_HEARTBEAT` carry the sender's
-    `instance_id` (additive). A sibling whose frame verified under this
-    node's own key and reports another one is logged at ERROR, listed in
-    `GET /admin/api/cluster` (`instance_id_mismatches`) and fails `GET
-    /healthz` (503), so the load balancer stops routing to the disagreeing
-    node and a rollout that introduced it fails its health check. A missing
-    field is unknown, never a mismatch — old nodes in a rolling upgrade
-    don't trip it.
+  told apart by `[cluster] node_id`, which MUST be unique: set it explicitly.
+  An empty one still falls back to `instance_id` (no breaking change), which
+  gives every node of a shared-id cluster the same `node_id` — logged at
+  ERROR at startup when `instance_id_aliases` is set, and at runtime when a
+  node under our key announces our `node_id` from another address
+  (`duplicate_node_id_urls` in `GET /admin/api/cluster`). Guards and the
+  migration path:
+  - **Sibling check (flag, never an outage).** `NODE_HELLO` /
+    `NODE_HEARTBEAT` carry the sender's `instance_id` and
+    `instance_id_aliases` (additive; a missing field is unknown, never a
+    mismatch). A sibling under this node's own key whose id differs but is
+    linked through either side's aliases is a **rolling id change** —
+    WARNING, `instance_id_transitional`. Any other difference is a
+    **mismatch** — ERROR, `instance_id_mismatches`. Neither fails
+    `/healthz`: pulling every node of a misconfigured cluster out of the
+    balancer is worse than the misconfiguration. **Operator action:** give
+    every node the same `instance_id`, list the old per-node ids in
+    `instance_id_aliases` on every node, and set a unique `node_id` on each.
   - **Aliases (server side).** `[server] instance_id_aliases`
     (`GFS_INSTANCE_ID_ALIASES`) lists former ids still accepted as the
-    addressee of a signed request — never served, never signed. Each use is
-    logged at INFO (at most once per alias per 10 minutes, with a count) so
-    the operator can drop them once households have moved.
+    addressee of a signed request, and is served ONLY inside the signed
+    capability block, as `replaces: [...]`. Each request addressed to an
+    alias is logged at INFO (at most once per alias per 10 minutes, with a
+    count) so the operator can drop them once households have moved.
   - **Rebind (household side).** The pinned KEY is the trust anchor, the id a
-    label: when `/gfs/info` serves a different `gfs_instance_id` together
-    with the pinned `public_key`, and the capability block verifies under
-    (pinned key, served id), the household adopts the served id (INFO log)
-    on its next reconnect. A different key is refused with a WARNING (a new
-    key means re-pairing); an id another connection already holds (the same
-    server paired twice) leaves both connections untouched, with a WARNING.
-    The owner of a private space then re-registers its channel and
-    re-issues grants naming the new id; until they arrive, a grant naming
-    the id this connection held before the rebind still matches it (in
-    memory, for the life of the process). The household's follow seats
-    (`gfs_space_seats`, bound to server id + pinned key + address) move to
-    the new id in the same step — only seats bound to the connection's
-    pinned key AND address — and the reconnect reconcile repeats the move
-    before reading seats, so a crash in between heals. Moment signalling
-    (`moment_signal` frames) is answered through the connection the frame
-    arrived on, never by matching the frame's `gfs_id` (the server's public
-    id) against local connection ids.
+    label — but a household moves its pin only when the server says so: the
+    served `public_key` is the pinned key, the capability block verifies
+    under (pinned key, served id), AND that block's `replaces` names the
+    pinned id. Then the household adopts the served id (INFO log). A node
+    that merely serves another id under the same key (a cluster still on
+    per-node ids, or an old node mid-rollout) never moves it — no lateral
+    moves, no flipping back. A different key is refused with a WARNING (a
+    new key means re-pairing); an id another connection already holds (the
+    same server paired twice) leaves both connections untouched, with a
+    WARNING. Households re-read `/gfs/info` on every reconnect, at startup
+    and about hourly (jittered, `GfsInfoRefreshScheduler`), so even a
+    household whose socket stays up converges. The owner of a private space
+    re-registers its channel and re-issues grants naming the new id; until
+    they arrive, a grant naming a former id still matches when the server's
+    signed `replaces` lists it (re-derived on every verified fetch, so it
+    survives a restart). The household's follow seats (`gfs_space_seats`,
+    bound to server id + pinned key + address) move to the new id in the
+    same step — only seats bound to the connection's pinned key AND address
+    — and the reconnect reconcile repeats the move before reading seats, so
+    a crash in between heals. Moment signalling (`moment_signal` frames) is
+    answered through the connection the frame arrived on, never by matching
+    the frame's `gfs_id` (the server's public id) against local connection
+    ids.
+  - **Key binding (`gfs_key`).** An alias such as `gfs-0` may be ANOTHER
+    operator's real id, so the id alone no longer rules out replaying a
+    request captured there. Every household- or channel-signed request
+    (member publish, anonymous member publish, owner epoch notice, channel
+    register / epoch / unregister / subscribe / unsubscribe / publish /
+    publish-anon) takes an optional `gfs_key` — the addressed server's
+    pinned key, lowercase hex — inside the signed bytes; the GFS refuses a
+    request whose `gfs_key` is not its own key. A household sends it only to
+    a server whose signed block proves `addressee_key: true` (an older
+    server refuses unknown fields); without it the id alone decides, as
+    before.
   - **Upgrade note (owner decision).** Older household builds verify the
     capability block under the id they pinned and never rebind. Once a
     cluster switches to one shared id, such a household keeps working while
@@ -392,8 +418,7 @@ The Social Home ↔ GFS link is split by direction:
     an old id, which the aliases accept); after a restart it cannot verify
     the block any more and stops relaying through that GFS until it
     upgrades. Accepted: before the switch those households succeeded only
-    when the load balancer happened to hit the node they pinned. The
-    `/healthz` guard stays.
+    when the load balancer happened to hit the node they pinned.
 
 ```mermaid
 sequenceDiagram
@@ -402,16 +427,16 @@ sequenceDiagram
     participant N0 as Node gfs-0 (key K)
     participant N1 as Node gfs-1 (key K)
     Note over N0,N1: instance_id = "gfs-shared" on both,<br/>instance_id_aliases = ["gfs-0", "gfs-1"]
-    N0->>N1: NODE_HELLO {node_id, url, public_key, instance_id}
-    Note over N1: same key, same instance_id → healthy
+    N0->>N1: NODE_HELLO {node_id, url, public_key, instance_id, instance_id_aliases}
+    Note over N1: same key, same instance_id → nothing flagged
     H->>LB: POST /gfs/member-publish {gfs_instance_id: "gfs-1", …}
     LB->>N0: (round robin)
     Note over N0: "gfs-1" is an alias → accepted, INFO
-    H->>LB: GET /gfs/info (WS reconnect)
+    H->>LB: GET /gfs/info (reconnect / hourly refresh)
     LB->>N1: (round robin)
-    N1-->>H: {gfs_instance_id: "gfs-shared", public_key: K, capabilities_sig}
-    Note over H: key == pinned K and block verifies<br/>under (K, "gfs-shared") → rebind
-    H->>LB: POST /gfs/member-publish {gfs_instance_id: "gfs-shared", …}
+    N1-->>H: {gfs_instance_id: "gfs-shared", public_key: K,<br/>capabilities: {…, replaces: ["gfs-0","gfs-1"], addressee_key}, capabilities_sig}
+    Note over H: key == pinned K, block verifies under (K, "gfs-shared"),<br/>"gfs-1" ∈ replaces → rebind (seats move too)
+    H->>LB: POST /gfs/member-publish {gfs_instance_id: "gfs-shared", gfs_key: K, …}
 ```
 
 ### Connecting a household: QR code or open sign-up

@@ -743,10 +743,11 @@ that gossip state over `POST /cluster/sync`. Each node announces
 address its peers reach it at; behind a shared load balancer every node must
 advertise its own address (node IP + port), or frames reach a random node
 and are refused `wrong_recipient`. Nodes are told apart by `[cluster]
-node_id` (unique, explicit — a cluster node without one refuses to start);
-`[server] instance_id` is the GFS's public identity that households pin and
-sign into requests, so it is the SAME on every node (HELLO / heartbeat carry
-it, and a same-key sibling reporting another one fails `/healthz`; see
+node_id` (unique — set it; an empty one falls back to `instance_id` and a
+duplicate is flagged); `[server] instance_id` is the GFS's public identity
+that households pin and sign into requests, so it is the SAME on every node
+(HELLO / heartbeat carry it and the aliases; a same-key sibling reporting an
+unlinked id is flagged in the admin view, never a `/healthz` failure; see
 [`protocol/discovery.md`](protocol/discovery.md) "One public identity per
 GFS"). Membership is operator-approved,
 never trust-on-first-use: a node is a member **if and only if** its frames

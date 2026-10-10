@@ -9,8 +9,11 @@ never be replayed at another connection server. The id is pinned at pairing.
 changes ``instance_id`` (e.g. a cluster whose nodes once each had their own id
 moves to one shared id), households still holding an old id keep being
 served until they re-read ``/gfs/info`` and adopt the new one (they rebind
-on a matching key). An alias is accepted as an ADDRESSEE only — it is never
-served, never signed, never put in a capability block. Every request that
+on a matching key — the capability block lists the aliases, signed, as
+``replaces``, and a household moves only off an id listed there). An alias
+is accepted as an ADDRESSEE; it is never the served id. A request may also
+bind the server's KEY (``gfs_key``), which closes the replay gap an alias
+opens (``gfs-0`` may be another operator's real id). Every request that
 used an alias is logged at INFO (rate-limited per alias, with a count), so an
 operator can watch adoption and drop the aliases once they go quiet.
 """
