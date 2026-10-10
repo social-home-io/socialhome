@@ -440,6 +440,26 @@ connected to. **What that concedes, exactly:**
   redirects) — an owner's list can never aim a member's requests at the
   member's own network. A server's capability block is verified against the
   key the owner's list names.
+  A server that offers proof of possession must also sign a fresh nonce
+  bound to the LISTED URL before anything is sent to it (re-proven hourly);
+  one that fails is skipped.
+- **The owner can make members open connections to a host of its choice.**
+  Any public `https://host:port` the owner signs into the list (a member
+  never connected there) gets a TLS connection from every member that
+  publishes — public addresses only, https only, the pinned address only,
+  nothing identifying on it, and a neutral `User-Agent: SocialHome`. The
+  owner already decides where its space's content goes; this is the cost of
+  members reaching every listed server while the owner is offline.
+- **Each listed entry is its own target.** A listing target is keyed by
+  (server id, key, URL), so a stale or hostile entry in one space's list
+  never blocks or fills the retry queue of another space's delivery to the
+  same server; targets no list has named for a day are forgotten.
+- **What it does not change:** a GFS without `member_publish_strict` (an
+  older build) gets nothing from a member holding the writer key — never an
+  identified copy — only the host's relay; a server whose `/gfs/info` cannot
+  be read right now is skipped, exactly as a registered one is; and the
+  writer key in a public (not global) space is harmless: it is only usable
+  at a GFS that pinned it, i.e. one the owner listed the space on.
 - **Order:** the owner pins the epoch and the writer key on a server before
   the list that adds it reaches members, so a member's first anonymous
   publish there is not refused.

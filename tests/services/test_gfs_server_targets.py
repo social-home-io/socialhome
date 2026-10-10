@@ -14,6 +14,7 @@ from socialhome.services.gfs_server_targets import (
     is_listing_target_id,
     listing_target,
     listing_target_id,
+    normalized_url,
     refusal_outcome,
     resolve_server_targets,
 )
@@ -51,7 +52,8 @@ def _ids(conn: GfsConnection) -> frozenset[str]:
 def test_listing_target_is_unregistered_and_carries_the_owner_entry():
     t = listing_target(_server("gfs-b", KEY_B))
     assert t.registered is False
-    assert t.id == listing_target_id("gfs-b") == f"{LISTING_TARGET_PREFIX}gfs-b"
+    assert t.id == listing_target_id(_server("gfs-b", KEY_B))
+    assert t.id.startswith(LISTING_TARGET_PREFIX)
     assert is_listing_target_id(t.id)
     assert not is_listing_target_id("c-uuid")
     assert (t.gfs_instance_id, t.public_key, t.inbox_url, t.status) == (
@@ -67,7 +69,10 @@ def test_own_connection_is_used_listing_target_for_the_rest():
     targets = resolve_server_targets(
         [_server("gfs-a", KEY_A), _server("gfs-b", KEY_B)], [own], known_ids=_ids
     )
-    assert [t.id for t in targets] == ["c1", "listing:gfs-b"]
+    assert [t.id for t in targets] == [
+        "c1",
+        listing_target_id(_server("gfs-b", KEY_B)),
+    ]
     assert [t.registered for t in targets] == [True, False]
 
 
@@ -97,7 +102,9 @@ def test_a_key_mismatch_uses_the_owner_entry_and_warns_once(caplog):
             targets = resolve_server_targets(
                 [_server("gfs-a", KEY_A)], [own], known_ids=_ids, warned=warned
             )
-            assert [(t.id, t.public_key) for t in targets] == [("listing:gfs-a", KEY_A)]
+            assert [(t.id, t.public_key) for t in targets] == [
+                (listing_target_id(_server("gfs-a", KEY_A)), KEY_A)
+            ]
     assert caplog.text.count("other than the one this household pinned") == 1
 
 
@@ -135,3 +142,25 @@ def test_an_empty_list_has_no_targets():
 )
 def test_refusal_outcome(reason, kind):
     assert refusal_outcome(OutboundFetchRefused(reason)).kind == kind
+
+
+def test_a_listing_target_id_covers_id_key_and_url():
+    """Two spaces naming one server id under another key or URL never share
+    a target (caches, retry queue); spellings of one URL do."""
+    base = listing_target_id(_server("gfs-x", KEY_A, "https://x.example"))
+    assert base != listing_target_id(_server("gfs-x", KEY_B, "https://x.example"))
+    assert base != listing_target_id(_server("gfs-x", KEY_A, "https://y.example"))
+    assert base != listing_target_id(_server("gfs-y", KEY_A, "https://x.example"))
+    assert base == listing_target_id(_server("gfs-x", KEY_A, "https://X.example/"))
+
+
+@pytest.mark.parametrize(
+    ("url", "want"),
+    [
+        ("HTTPS://GFS.Example/", "https://gfs.example"),
+        ("https://gfs.example:8443/base/", "https://gfs.example:8443/base"),
+        ("http://[::1]:18767", "http://[::1]:18767"),
+    ],
+)
+def test_normalized_url(url, want):
+    assert normalized_url(url) == want

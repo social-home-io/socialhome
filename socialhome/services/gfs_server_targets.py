@@ -17,8 +17,13 @@ household is connected to.
   yet — is that connection, ``registered=True``. Identified and anonymous
   requests may go there, exactly as before;
 * every other entry becomes an in-memory LISTING target:
-  ``registered=False``, id :data:`LISTING_TARGET_PREFIX` + the server's id,
-  the key and URL the owner signed. A listing target is never stored and
+  ``registered=False``, the key and URL the owner signed, and an id derived
+  from ALL THREE of (server id, key, normalized URL) —
+  :func:`listing_target_id`. Every RAM cache (capabilities, the negative
+  info TTL, the proof of possession) and the retry queue are keyed by that
+  id, so two spaces whose lists name the same server id under another key or
+  URL never share — a stale or hostile entry in one space's list cannot
+  block, poison or fill the retry slots of another space's delivery. A listing target is never stored and
   never receives anything that names this household: only the anonymous
   member publish, the seed-only epoch notice and the identity-free relay,
   over a cookie-less session pinned to a vetted public address
@@ -33,8 +38,10 @@ for the listed server is never sent somewhere it cannot be verified.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable, Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 from ..domain.federation import GfsConnection
 from ..domain.gfs_server import GfsServer
@@ -48,9 +55,31 @@ log = logging.getLogger(__name__)
 LISTING_TARGET_PREFIX: str = "listing:"
 
 
-def listing_target_id(gfs_instance_id: str) -> str:
-    """The in-memory id of the listing target for *gfs_instance_id*."""
-    return f"{LISTING_TARGET_PREFIX}{gfs_instance_id}"
+def normalized_url(url: str) -> str:
+    """*url* with a lower-case scheme and host and no trailing slash — two
+    spellings of one address name one listing target."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    netloc = f"[{host}]" if ":" in host else host
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit(
+        (parts.scheme.lower(), netloc, parts.path.rstrip("/"), parts.query, "")
+    )
+
+
+def listing_target_id(server: GfsServer) -> str:
+    """The in-memory id of the listing target for one list entry: a digest
+    of (server id, key, normalized URL), so an entry differing in any of the
+    three is a different target with caches of its own."""
+    material = "\x00".join(
+        (
+            server.gfs_instance_id,
+            server.public_key.lower(),
+            normalized_url(server.inbox_url),
+        )
+    ).encode("utf-8")
+    return f"{LISTING_TARGET_PREFIX}{hashlib.sha256(material).hexdigest()[:32]}"
 
 
 def is_listing_target_id(conn_id: str) -> bool:
@@ -60,7 +89,7 @@ def is_listing_target_id(conn_id: str) -> bool:
 def listing_target(server: GfsServer) -> GfsConnection:
     """An unregistered send target for one entry of the owner's list."""
     return GfsConnection(
-        id=listing_target_id(server.gfs_instance_id),
+        id=listing_target_id(server),
         gfs_instance_id=server.gfs_instance_id,
         display_name=server.display_name,
         public_key=server.public_key,

@@ -2430,13 +2430,19 @@ connected to (`FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH`).
 `services/gfs_server_targets.py`). For each usable list entry: our own
 active connection to that server (same pinned key, an id that connection
 knows — its current one or one its server signed it `replaces`) — else an
-in-memory **listing target**: `registered=False`, id
-`listing:<gfs_instance_id>`, the key and URL the owner signed. A listing
-target is never stored and gets only anonymous requests, each over its own
-cookie-less session pinned to the vetted public address its URL resolves to
-(`outbound_fetch.open_pinned_session`: refused when any address is private,
-no redirects, no cookie jar, no proxy). Its `/gfs/info` capability block is
-verified against the key on the owner's list. Every identified sender
+in-memory **listing target**: `registered=False`, the key and URL the owner
+signed, and an id `listing:<sha256(id, key, normalized URL)>` — every RAM
+cache and the retry queue are keyed by it, so one space's stale entry never
+affects another space's delivery; targets no list has named for a day are
+evicted. A listing target is never stored and gets only anonymous requests,
+each over its own cookie-less session pinned to the vetted public address
+its URL resolves to (`outbound_fetch.open_pinned_session`: refused when any
+address is private, no redirects, no cookie jar, no proxy, `User-Agent:
+SocialHome`). Its `/gfs/info` capability block is verified against the key
+on the owner's list, and when the block offers `proof_of_possession` the
+server must first sign a fresh nonce bound to the LISTED URL (`POST
+/gfs/proof`, same session; reused for an hour; a failure skips it). Nothing
+about a listing target touches `proof_required_at`. Every identified sender
 refuses it (`GfsConnectionService.require_registered`). Without a list (an
 older owner), every path keeps its pre-v_57 targets: our own connections.
 

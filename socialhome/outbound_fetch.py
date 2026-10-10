@@ -466,6 +466,10 @@ class OutboundFetcher:
             raise OutboundFetchRefused("network", type(exc).__name__) from exc
 
 
+#: The ``User-Agent`` of a :func:`open_pinned_session` request: the software
+#: name only — no version, no platform, nothing that splits households.
+PINNED_SESSION_USER_AGENT: str = "SocialHome"
+
 #: Default budget of a :func:`open_pinned_session` request.
 PINNED_SESSION_TIMEOUT = aiohttp.ClientTimeout(
     total=15, connect=CONNECT_TIMEOUT_S, sock_connect=CONNECT_TIMEOUT_S
@@ -489,7 +493,8 @@ async def open_pinned_session(
     listen on a port of its own) and minus redirect-following: the caller
     sends with ``allow_redirects=False``, and a request to any other host
     fails in the pinned resolver. Anonymous like every request here — no
-    cookie jar, no proxy from the environment. The caller closes it.
+    cookie jar, no proxy from the environment, and a neutral ``User-Agent``
+    (:data:`PINNED_SESSION_USER_AGENT`). The caller closes it.
 
     Raises :class:`OutboundFetchRefused` (``reason`` ``"dns"`` for a name
     that does not resolve now, ``"private_address"`` for one that resolves
@@ -507,6 +512,7 @@ async def open_pinned_session(
         timeout=timeout,
         cookie_jar=aiohttp.DummyCookieJar(),
         trust_env=False,
+        headers={"User-Agent": PINNED_SESSION_USER_AGENT},
     )
 
 

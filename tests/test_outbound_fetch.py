@@ -746,4 +746,6 @@ async def test_pinned_session_is_cookieless_any_port_and_pinned(
         await server.close()
     assert len(seen) == 2
     assert all("Cookie" not in h for h in seen)
+    # A neutral User-Agent: no library or Python version that splits households.
+    assert {h["User-Agent"] for h in seen} == {outbound_fetch.PINNED_SESSION_USER_AGENT}
     assert resolve.calls == ["gfs.test"]  # type: ignore[attr-defined]

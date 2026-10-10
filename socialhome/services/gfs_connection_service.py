@@ -310,6 +310,14 @@ GateResult = Literal["pass", "retry", "refuse"]
 #: challenges again — a flapping socket costs one challenge per window.
 PROOF_REUSE_S: float = 300.0
 
+#: v_57 — how long a listing target's proof of possession is trusted before
+#: the next capability question proves again.
+LISTING_PROOF_TTL_S: float = 3600.0
+
+#: v_57 — a listing target no space's list has named for this long has its
+#: RAM caches evicted.
+LISTING_TARGET_IDLE_S: float = 24 * 3600.0
+
 
 def _possession_key(conn: GfsConnection) -> tuple[str, str]:
     """(connection id, normalized address) — so a check of a candidate copy
@@ -364,7 +372,8 @@ class GfsConnectionService:
         "_change_lock",
         "_member_servers",
         "_listing_sessions",
-        "_listing_keys",
+        "_listing_seen",
+        "_listing_proven_at",
         "_target_warned",
     )
 
@@ -512,9 +521,15 @@ class GfsConnectionService:
         #: :func:`socialhome.outbound_fetch.open_pinned_session`; a seam for
         #: tests, which cannot reach a loopback server through it.
         self._listing_sessions = listing_sessions
-        #: Listing target id → the key its capability caches were learned
-        #: under; a different key in a newer list drops them.
-        self._listing_keys: dict[str, str] = {}
+        #: Listing target id → ``time.monotonic()`` it was last named by a
+        #: space's list. RAM caches of a target no list has named for
+        #: :data:`LISTING_TARGET_IDLE_S` are evicted (:meth:`_evict_idle`).
+        self._listing_seen: dict[str, float] = {}
+        #: Listing target id → ``time.monotonic()`` of its latest successful
+        #: proof of possession (bound to the listed URL). A target whose
+        #: server offers the proof is trusted only for
+        #: :data:`LISTING_PROOF_TTL_S` after one.
+        self._listing_proven_at: dict[str, float] = {}
         #: Key-mismatch warnings already logged (connection id, listed id).
         self._target_warned: set[tuple[str, str]] = set()
 
@@ -548,31 +563,46 @@ class GfsConnectionService:
             known_ids=self.known_instance_ids,
             warned=self._target_warned,
         )
+        now = time.monotonic()
         for t in targets:
-            if not t.registered:
-                self._note_listing_key(t)
+            if t.registered:
+                continue
+            self._listing_seen[t.id] = now
+            proven = self._listing_proven_at.get(t.id)
+            if proven is not None and now - proven >= LISTING_PROOF_TTL_S:
+                # The proof aged out: forget what it vouched for, so the next
+                # capability question re-reads /gfs/info and proves again.
+                self._forget_listing(t.id)
+        self._evict_idle(now)
         return targets
 
-    def _note_listing_key(self, conn: GfsConnection) -> None:
-        """A listing target's capability caches hold only under the key they
-        were verified with: a list naming a new key for the same server
-        starts it from "unknown" again."""
-        key = conn.public_key.lower()
-        if self._listing_keys.get(conn.id, key) != key:
-            for cache in (
-                self._anon_publish,
-                self._envelope_relay,
-                self._invite_links,
-                self._member_publish_trusted,
-                self._member_publish_strict,
-                self._private_channels,
-                self._addressee_key,
-                self._authority_rotation,
-            ):
-                cache.pop(conn.id, None)
-            self._info_failed_at.pop(conn.id, None)
-            self._replaces.pop(conn.id, None)
-        self._listing_keys[conn.id] = key
+    def _forget_listing(self, target_id: str) -> None:
+        """Drop every RAM cache of one listing target."""
+        for cache in (
+            self._anon_publish,
+            self._envelope_relay,
+            self._invite_links,
+            self._member_publish_trusted,
+            self._member_publish_strict,
+            self._private_channels,
+            self._addressee_key,
+            self._authority_rotation,
+            self._proof_offered,
+            self._info_failed_at,
+            self._replaces,
+            self._refreshed_at,
+            self._listing_proven_at,
+        ):
+            cache.pop(target_id, None)
+
+    def _evict_idle(self, now: float) -> None:
+        """Forget listing targets no space's list has named for
+        :data:`LISTING_TARGET_IDLE_S` (a delisted server, an owner's list
+        that moved on), so the caches stay as small as the lists."""
+        for target_id, seen in list(self._listing_seen.items()):
+            if now - seen >= LISTING_TARGET_IDLE_S:
+                del self._listing_seen[target_id]
+                self._forget_listing(target_id)
 
     @staticmethod
     def require_registered(conn: GfsConnection) -> None:
@@ -945,7 +975,13 @@ class GfsConnectionService:
             for c in await self._repo.list_all()
         )
 
-    async def _prove(self, gfs_url: str, public_key_hex: str) -> ProofOutcome:
+    async def _prove(
+        self,
+        gfs_url: str,
+        public_key_hex: str,
+        *,
+        client: aiohttp.ClientSession | None = None,
+    ) -> ProofOutcome:
         """One ``POST {gfs_url}/gfs/proof`` challenge. Never raises.
 
         Verifies against *public_key_hex* (the key being pinned, or the one
@@ -953,12 +989,14 @@ class GfsConnectionService:
         per-node label and not part of the proof) and against *gfs_url* — the
         address THIS household used, never one the server reports. Every
         answered-but-wrong case is ``failed`` and logged at WARNING with what
-        the server reported.
+        the server reported. *client* overrides the shared session (a v_57
+        listing target's own pinned, cookie-less one).
         """
-        try:
-            client = self._client()
-        except RuntimeError:
-            return "unreachable"
+        if client is None:
+            try:
+                client = self._client()
+            except RuntimeError:
+                return "unreachable"
         nonce = new_proof_nonce()
         try:
             async with client.post(
@@ -1347,17 +1385,7 @@ class GfsConnectionService:
         never rebound (there is no row to move).
         """
         if not conn.registered:
-            try:
-                async with self.anon_session(conn) as session:
-                    info = await self._get_info(session, conn)
-            except OutboundFetchRefused:
-                self._info_failed_at[conn.id] = time.monotonic()
-                return None
-            if info is None:
-                return None
-            self._note_replaces(conn, conn.gfs_instance_id, info)
-            self._record_capabilities(conn, info)
-            return info
+            return await self._fetch_listing_info(conn)
         try:
             client = self._client()
         except RuntimeError:
@@ -1367,6 +1395,54 @@ class GfsConnectionService:
             return None
         current = await self._rebind_to_served_id(conn, info)
         self._note_replaces(conn, current, info)
+        self._record_capabilities(conn, info)
+        return info
+
+    async def _fetch_listing_info(self, conn: GfsConnection) -> dict | None:
+        """``/gfs/info`` of a LISTING target, over its own pinned session.
+
+        Its capability block must verify against the key the owner's list
+        names; and when that block offers ``proof_of_possession``, the server
+        must also sign a fresh nonce bound to the LISTED URL
+        (``POST /gfs/proof``, the same session) before anything in the block
+        is trusted — a fresh proof is reused for :data:`LISTING_PROOF_TTL_S`.
+        A failed or unavailable proof trusts nothing (WARNING on a failed
+        one) and suppresses the target for the negative TTL. A server that
+        does not offer the proof (an older build) is trusted on the signed
+        block alone, as a registered connection's is. Nothing here touches
+        ``proof_required_at`` — a listing target is never stored."""
+        try:
+            async with self.anon_session(conn) as session:
+                info = await self._get_info(session, conn)
+                if info is None or session is None:
+                    return None
+                caps = self._verified_capabilities(conn, info)
+                if caps is not None and caps.get(PROOF_CAPABILITY) is True:
+                    proven = self._listing_proven_at.get(conn.id)
+                    fresh = (
+                        proven is not None
+                        and time.monotonic() - proven < LISTING_PROOF_TTL_S
+                    )
+                    if not fresh:
+                        outcome = await self._prove(
+                            conn.inbox_url, conn.public_key, client=session
+                        )
+                        if outcome != "proven":
+                            self._info_failed_at[conn.id] = time.monotonic()
+                            if outcome == "failed":
+                                log.warning(
+                                    "GFS %r (%s) on a space owner's list failed "
+                                    "proof of possession of the listed key — "
+                                    "nothing is sent to it",
+                                    conn.display_name,
+                                    conn.inbox_url,
+                                )
+                            return None
+                        self._listing_proven_at[conn.id] = time.monotonic()
+        except OutboundFetchRefused:
+            self._info_failed_at[conn.id] = time.monotonic()
+            return None
+        self._note_replaces(conn, conn.gfs_instance_id, info)
         self._record_capabilities(conn, info)
         return info
 

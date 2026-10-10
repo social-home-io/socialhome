@@ -20,9 +20,11 @@ owner's signed list names A and B. Checked:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
+import socket
 import time
 from datetime import datetime, timezone
 
@@ -57,6 +59,7 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.gfs_connection_service import GfsConnectionService
 from socialhome.services.gfs_member_publish_service import GfsMemberPublishService
 from socialhome.services.gfs_publish_retry import GfsPublish
+from socialhome.services.gfs_server_targets import listing_target_id
 from socialhome.services.gfs_server_selection_service import (
     GfsServerSelectionService,
 )
@@ -101,11 +104,20 @@ def _recorder(seen: list):
     return record
 
 
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 async def _gfs(tmp_dir, gid: str, seen: list) -> TestClient:
+    # The server's base_url is the address households reach it at, so its
+    # proof of possession (bound to that URL) verifies for the listed URL.
+    port = _free_port()
     cfg = GfsConfig(
         host="127.0.0.1",
-        port=0,
-        base_url=f"http://{gid}.test",
+        port=port,
+        base_url=f"http://127.0.0.1:{port}",
         data_dir=str(tmp_dir / gid),
         instance_id=gid,
         cluster_enabled=False,
@@ -115,7 +127,7 @@ async def _gfs(tmp_dir, gid: str, seen: list) -> TestClient:
     (tmp_dir / gid).mkdir()
     app = create_gfs_app(cfg)
     app.middlewares.append(_recorder(seen))
-    tc = TestClient(TestServer(app))
+    tc = TestClient(TestServer(app, host="127.0.0.1", port=port))
     await tc.start_server()
     return tc
 
@@ -351,6 +363,7 @@ async def world(tmp_dir):
         "sent": sent,
         "listing_opened": listing_opened,
         "url_b": url_b,
+        "b_target": listing_target_id(servers["list"][1]),
         "db": db,
         "repo": repo,
     }
@@ -384,11 +397,15 @@ async def _publish(world, n: int = 1) -> list:
 async def test_nothing_reaching_an_unregistered_gfs_names_the_household(world, caplog):
     with caplog.at_level(logging.DEBUG):
         accepted = await _publish(world)
-    assert sorted(c.id for c in accepted) == ["conn-a", "listing:gfs-b"]
+    assert sorted(c.id for c in accepted) == sorted(["conn-a", world["b_target"]])
     b_requests = world["seen_b"]
     assert b_requests, "B received nothing"
-    assert {(r["method"], r["path"]) for r in b_requests} <= {
+    paths = {(r["method"], r["path"]) for r in b_requests}
+    # B offers proof of possession: it had to prove the listed key at the
+    # listed URL (a bare nonce — nothing of ours) before we published.
+    assert paths == {
         ("GET", "/gfs/info"),
+        ("POST", "/gfs/proof"),
         ("POST", "/gfs/member-publish-anon"),
     }
     url_b = world["url_b"]
@@ -449,7 +466,7 @@ async def test_a_ciphertext_sent_anonymously_never_goes_identified(world):
         event_type="space_item_anon",
         payload={"epoch": EPOCH, "payload": payload},
     )
-    for conn_id in ("conn-a", "listing:gfs-b"):
+    for conn_id in ("conn-a", world["b_target"]):
         outcome = await world["svc"]._retry_send(conn_id, item)
         assert outcome.kind == "permanent"
     for _name, method, url, body in world["sent"]:
@@ -468,6 +485,25 @@ async def test_targets_come_only_from_the_owners_list(world):
     assert [c.id for c in accepted] == ["conn-a"]
     assert world["seen_b"] == []
     assert world["listing_opened"] == []
+
+
+async def test_a_listed_server_that_cannot_prove_the_listed_url_gets_nothing(world):
+    """B offers proof of possession, but the owner's entry names it at an
+    address its proof is not bound to (``localhost`` instead of its base
+    URL — what a relay or an impostor replaying B's descriptor looks like):
+    nothing is published there."""
+    a_entry, b_entry = world["servers"]["list"]
+    port = world["url_b"].rsplit(":", 1)[1]
+    world["servers"]["list"] = (
+        a_entry,
+        dataclasses.replace(b_entry, inbox_url=f"http://localhost:{port}"),
+    )
+    accepted = await _publish(world)
+    assert [c.id for c in accepted] == ["conn-a"]
+    assert {(r["method"], r["path"]) for r in world["seen_b"]} == {
+        ("GET", "/gfs/info"),
+        ("POST", "/gfs/proof"),
+    }
 
 
 async def test_a_listed_private_address_we_never_joined_is_dropped(world):
@@ -517,7 +553,7 @@ async def test_a_delisted_server_gets_no_retry(world):
         payload={"epoch": EPOCH, "payload": "Y3Q"},
     )
     world["servers"]["list"] = world["servers"]["list"][:1]
-    outcome = await world["svc"]._retry_send("listing:gfs-b", item)
+    outcome = await world["svc"]._retry_send(world["b_target"], item)
     assert outcome.kind == "permanent"
     assert world["seen_b"] == []
 
