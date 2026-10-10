@@ -1,4 +1,4 @@
--- 0091 — ``spaces.gfs_servers``: the GFSs a space is listed on, as the
+-- 0092 — ``spaces.gfs_servers``: the GFSs a space is listed on, as the
 -- OWNER household signed them. A JSON object
 -- ``{servers: [{gfs_instance_id, inbox_url, public_key, gfs_key_suite,
 -- display_name}, ...], issued_at, owner_pk, gfs_servers_sig_suite,
@@ -122,7 +122,7 @@ ALTER TABLE spaces ADD COLUMN invited_by_instance TEXT;
 -- owner's statement). A joiner seats a stub under a claimed owner other than
 -- the inviting household ONLY with a valid statement from that owner binding
 -- the pinned authority key, plus the inviter's seed-holder proof; otherwise
--- it seats under the inviter as before 0091 (no ``invited_by_instance``).
+-- it seats under the inviter as before 0092 (no ``invited_by_instance``).
 -- NULL on owned spaces (the owner signs fresh) and on stubs that never got
 -- one. Audit: the v_44 authority cert is the nearest existing shape, but it
 -- exists only from key epoch 1 (epoch 0 is TOFU, never certified, and the GFS

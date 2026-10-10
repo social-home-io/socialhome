@@ -1,5 +1,5 @@
 """Tests for the owner household's ownership statement and the inviter's
-seed-holder proof (migration 0091)."""
+seed-holder proof (migration 0092)."""
 
 from __future__ import annotations
 

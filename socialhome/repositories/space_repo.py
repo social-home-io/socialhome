@@ -708,7 +708,7 @@ class SqliteSpaceRepo:
     async def set_gfs_servers(
         self, space_id: str, servers: SignedGfsServerList | None
     ) -> None:
-        """Store the owner's signed GFS list (migration 0091) — the ONLY
+        """Store the owner's signed GFS list (migration 0092) — the ONLY
         writer of the column: ``save`` never touches it, so a config
         snapshot, a ``SPACE_CREATED`` or any other upsert cannot wipe or
         replace it. The caller verified the signature and its freshness."""
@@ -1059,7 +1059,7 @@ class SqliteSpaceRepo:
 
     async def set_invited_by(self, space_id: str, instance_id: str) -> None:
         """Record the delegated admin household that issued THIS household's
-        invite into a space it does not own (migration 0091,
+        invite into a space it does not own (migration 0092,
         :mod:`socialhome.federation.host_equivalence`). Never written by
         ``save``."""
         await self._db.enqueue(
@@ -1070,7 +1070,7 @@ class SqliteSpaceRepo:
     async def set_owner_statement(
         self, space_id: str, statement_json: str | None
     ) -> None:
-        """Store the owner's verified ownership statement (migration 0091).
+        """Store the owner's verified ownership statement (migration 0092).
         The caller verified it and its freshness. Never written by ``save``."""
         await self._db.enqueue(
             "UPDATE spaces SET owner_statement=? WHERE id=?",

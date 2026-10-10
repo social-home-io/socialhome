@@ -100,12 +100,12 @@ FEDERATED_TRANSFORMED: dict[str, str] = {
     # ``meta['owner_instance_id']`` — closes an owner-spoof footgun where a
     # malicious issuer stamps a forged owner on a brand-new stub.
     "owner_instance_id": "set to host_instance_id (authenticated sender)",
-    # The owner's SIGNED GFS list (migration 0091) travels in meta but is
+    # The owner's SIGNED GFS list (migration 0092) travels in meta but is
     # never rebuilt onto the stub (``save`` does not write it): it is
     # applied on its own, only after the owner signature + freshness check
     # (``apply_gfs_servers_from_metadata``).
     "gfs_servers": "shipped signed; applied separately, never via the stub",
-    # The owner household's ownership statement (migration 0091): signed
+    # The owner household's ownership statement (migration 0092): signed
     # fresh by the owner, relayed as stored by everyone else; a receiver
     # keeps it only after verifying it (``apply_owner_statement_from_metadata``
     # / the §D1b join), never through the stub.

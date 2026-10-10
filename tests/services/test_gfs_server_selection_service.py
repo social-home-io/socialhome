@@ -1,5 +1,5 @@
 """Tests for :class:`GfsServerSelectionService` — the owner's signed
-``spaces.gfs_servers`` snapshot (migration 0091), derived from its active
+``spaces.gfs_servers`` snapshot (migration 0092), derived from its active
 GFS listings and handed to members in a sequence-raised config change."""
 
 from __future__ import annotations

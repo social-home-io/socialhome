@@ -1106,7 +1106,7 @@ async def test_a_member_space_host_still_gets_announce_and_catchup(
     assert fed.mesh_catchups == [("sp-member", "host-m")]
 
 
-# ── Migration 0091: the trusted inviting admin is a mesh target too ───────
+# ── Migration 0092: the trusted inviting admin is a mesh target too ───────
 
 
 @pytest.mark.parametrize("delegation", [True, False])

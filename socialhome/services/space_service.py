@@ -3710,7 +3710,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     #: config forward. The host drops it here even if an old / forged client
     #: includes it; a remote admin changes it through the ``propose`` verb.
     #:
-    #: ``gfs_servers`` (migration 0091) is absent too, and ``update_config``
+    #: ``gfs_servers`` (migration 0092) is absent too, and ``update_config``
     #: takes no such keyword: which GFSs list the space — and so where every
     #: member publishes — is the OWNER's choice alone, and this path runs AS
     #: the owner, so its owner gates are no defence.
@@ -7720,7 +7720,7 @@ async def build_space_snapshot_for_federation(
 
     Sent by a household that is NOT the owner (a delegated admin's invite),
     the snapshot also carries ``inviter_proof``: this household's id signed
-    with the space authority seed it holds (migration 0091,
+    with the space authority seed it holds (migration 0092,
     :mod:`socialhome.space_owner_statement`), which — with the owner's
     statement — lets the joiner seat the stub under the real owner.
 
@@ -7883,7 +7883,7 @@ def space_metadata_for_federation(
     receiver ignores both keys.
     """
     meta = space_metadata_fields(space)
-    # The owner household's ownership statement (migration 0091): signed
+    # The owner household's ownership statement (migration 0092): signed
     # fresh by the owner, relayed by everyone else, so a household a
     # delegated admin invites can seat the stub under the REAL owner.
     if owner_statement is None and space.owner_statement:
@@ -7895,7 +7895,7 @@ def space_metadata_for_federation(
     if owner_statement is not None:
         meta["owner_statement"] = owner_statement
     if space.gfs_servers is not None:
-        # The GFSs the owner lists the space on (migration 0091), signed by
+        # The GFSs the owner lists the space on (migration 0092), signed by
         # the OWNER household, so a member can reach every one of them while
         # the host is offline. Rides only here — inside the encrypted
         # ``space_meta`` member households get — never in a GFS publish body.
@@ -8363,7 +8363,7 @@ def resolve_join_owner(
 ) -> JoinOwner:
     """Who a §D1b join stub is seated under (invite or invite-link redeem).
 
-    The issuer, as before 0091 — unless the snapshot names ANOTHER owner and
+    The issuer, as before 0092 — unless the snapshot names ANOTHER owner and
     proves it: the owner household's signed statement binding this space to
     the authority key the snapshot pins
     (:func:`socialhome.space_owner_statement.verify_owner_statement`) AND the
@@ -8373,7 +8373,7 @@ def resolve_join_owner(
     with the issuer as its trusted inviter. A claimed owner that is this
     household itself, or not a derived instance id, is refused outright. So
     a household that merely CLAIMS somebody else owns a space — without the
-    owner's signature, or without the seed — gets exactly the pre-0091
+    owner's signature, or without the seed — gets exactly the pre-0092
     result: the stub names the claimant itself, and nothing is gained.
     """
     claimed = meta.get("owner_instance_id")
@@ -8495,7 +8495,7 @@ async def seat_join_owner_state(
     space_repo, space_id: str, jo: JoinOwner, issuer_instance_id: str
 ) -> None:
     """After the stub was saved: record the trusted inviting admin and keep
-    the owner's verified statement (both migration 0091)."""
+    the owner's verified statement (both migration 0092)."""
     if jo.trusted_inviter:
         await space_repo.set_invited_by(space_id, jo.trusted_inviter)
     if jo.statement_json:

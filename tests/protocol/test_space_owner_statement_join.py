@@ -1,10 +1,10 @@
 """Release-blocker protocol tests: who a §D1b join stub names as its owner
-(migration 0091, ``socialhome/space_owner_statement.py``).
+(migration 0092, ``socialhome/space_owner_statement.py``).
 
 A household invited by somebody other than the owner seats the stub under
 the claimed owner ONLY with the owner's signed statement binding this space
 to the authority key the snapshot pins, plus the inviter's proof that it
-holds that key's seed. Anything less gets the pre-0091 result: the stub
+holds that key's seed. Anything less gets the pre-0092 result: the stub
 names the inviter itself, with no inviting-admin trust. A stub nobody here
 accepted yet gives way to the real owner's invite, dropping everything the
 earlier inviter brought; an accepted one stays (trust on first use).
@@ -152,7 +152,7 @@ async def _seated(j):
 async def test_mal_without_the_owners_statement_seats_only_itself(joiner):
     mal_kp = generate_space_keypair()
     await _mal_preseats(joiner, mal_kp)
-    # The pre-0091 result: the stub names MAL itself — nothing gained.
+    # The pre-0092 result: the stub names MAL itself — nothing gained.
     assert await _seated(joiner) == (MAL, None, mal_kp.public_key.hex())
 
 

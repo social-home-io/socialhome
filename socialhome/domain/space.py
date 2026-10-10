@@ -1513,14 +1513,14 @@ class Space:
     #: for public/global tiers. Replaces the legacy ``target_audience`` hint.
     category: str | None = None
     #: The GFSs the space is listed on, as the OWNER household signed them
-    #: (migration 0091, :mod:`socialhome.domain.gfs_server`). On the owner it
+    #: (migration 0092, :mod:`socialhome.domain.gfs_server`). On the owner it
     #: is derived from its active publications; on a member it is the
     #: owner's signed copy from ``space_meta``, verified against the owner's
     #: identity key. Never written by ``save`` — only by ``set_gfs_servers``.
     #: ``None`` = not known.
     gfs_servers: SignedGfsServerList | None = None
     #: The owner household's signed ownership statement as last verified
-    #: here (migration 0091, :mod:`socialhome.space_owner_statement`),
+    #: here (migration 0092, :mod:`socialhome.space_owner_statement`),
     #: canonical JSON text — relayed in the snapshots this household sends.
     #: Never written by ``save`` — only by ``set_owner_statement``.
     owner_statement: str | None = None
@@ -1528,7 +1528,7 @@ class Space:
 
 @dataclass(slots=True, frozen=True)
 class JoinOwner:
-    """Who a §D1b join stub is seated under (migration 0091).
+    """Who a §D1b join stub is seated under (migration 0092).
 
     ``owner_instance_id`` — the stub's owner. ``trusted_inviter`` — the
     delegated admin household that issued the invite, set ONLY when the

@@ -540,7 +540,7 @@ async def test_baseline_config_never_rolls_back_a_racing_new_key_edit(env, monke
 @pytest.mark.parametrize("by_owner", [True, False])
 async def test_the_bundle_config_carries_only_the_owners_gfs_list(env, by_owner):
     """The rotation bundle's config snapshot carries the owner's signed GFS
-    list (migration 0091). ``save`` never writes it, so the reset applies it
+    list (migration 0092). ``save`` never writes it, so the reset applies it
     on its own — and only under the owner household's signature."""
     member, _handler = await _member_env(env)
     k2 = generate_identity_keypair()

@@ -1,4 +1,4 @@
-"""Who may act as a space's HOST on this household (migration 0091).
+"""Who may act as a space's HOST on this household (migration 0092).
 
 The host is the space's owner household (``spaces.owner_instance_id``). One
 more household is host-equivalent, on a MEMBER household only: the delegated

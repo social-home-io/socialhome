@@ -752,7 +752,7 @@ class SpaceInviteTokenRedeemCoordinator:
             # key. Compared against issuer_instance_id (the authenticated
             # sender), never meta["owner_instance_id"] (issuer-controlled).
             # Checked before any persistence so a conflict seats nothing.
-            # With a snapshot, ``admit_join_stub`` decides (migration 0091):
+            # With a snapshot, ``admit_join_stub`` decides (migration 0092):
             # the owner or our trusted inviting admin may refresh a row; a
             # stub nobody here accepted yet gives way to the real owner.
             join: JoinOwner | None = None
@@ -823,7 +823,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 await seat_join_owner_state(
                     self._spaces, space_id, join, issuer_instance_id
                 )
-                # The owner's signed GFS list (migration 0091), relayed by
+                # The owner's signed GFS list (migration 0092), relayed by
                 # the issuer; taken only under the owner's signature.
                 await apply_gfs_servers_from_metadata(
                     self._spaces,

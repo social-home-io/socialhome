@@ -3019,7 +3019,7 @@ class FederationInboundService(ProtectionGateMixin):
             # §24.11 envelope sender, not by the pinned key.
             await self._space_repo.save(refreshed)
             await self._space_repo.mark_config_authority(space_id)
-        # The owner's GFS list (migration 0091) is where every member will
+        # The owner's GFS list (migration 0092) is where every member will
         # publish, so it is the OWNER household's alone on every household:
         # ``save`` never writes it, and it is taken only when the owner
         # household signed it (whoever relays it) and it is newer than ours.
@@ -3031,7 +3031,7 @@ class FederationInboundService(ProtectionGateMixin):
                 meta=meta,
                 owner_instance_id=existing.owner_instance_id,
             )
-            # The owner's ownership statement (migration 0091), kept so we
+            # The owner's ownership statement (migration 0092), kept so we
             # relay it in our own snapshots — only the owner's, and only for
             # the authority key we pin.
             await apply_owner_statement_from_metadata(

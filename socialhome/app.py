@@ -933,7 +933,7 @@ def _build_gfs_server_selection(
     bus: EventBus,
     gfs_connection_service: GfsConnectionService,
 ) -> GfsServerSelectionService:
-    """The owner's signed GFS list (``spaces.gfs_servers``, migration 0091):
+    """The owner's signed GFS list (``spaces.gfs_servers``, migration 0092):
     re-derived after every listing change and every config change of a space
     we own, and sent to the members in a config change. Signs nothing until
     the household identity is attached at startup."""
@@ -1634,7 +1634,7 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
         # §25.6 echo (0087): a periodic BEGIN carries it as ``have_seq``.
         applied_seqs=space_sync_watermark_repo,
-        # Migration 0091: a trusted inviting admin is a mesh target too.
+        # Migration 0092: a trusted inviting admin is a mesh target too.
         seat_repo=space_remote_member_repo,
     )
     space_sync_scheduler.wire()

@@ -1,5 +1,5 @@
 """Release-blocker protocol tests: a space's GFS list (``gfs_servers``,
-migration 0091) is the OWNER household's alone, on every household.
+migration 0092) is the OWNER household's alone, on every household.
 
 Members will publish to every GFS on that list — including servers their own
 household never connected to — so whoever could write it could aim every
@@ -129,7 +129,7 @@ def _meta(space_pk_hex: str, *, gfs: dict | None, **over) -> dict:
 
 
 def _proven(kp, meta: dict) -> dict:
-    """What an honest delegated admin's snapshot carries (migration 0091):
+    """What an honest delegated admin's snapshot carries (migration 0092):
     the owner's signed statement for this space and key, and the admin's
     proof that it holds the space seed."""
     return {

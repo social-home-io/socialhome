@@ -1,4 +1,4 @@
-"""Who owns a space — the owner household's signed statement (migration 0091).
+"""Who owns a space — the owner household's signed statement (migration 0092).
 
 Space ids are random (``SpaceService.create_space``), never derived from a
 key, so a stub's owner is otherwise just whatever the inviting household
@@ -22,7 +22,7 @@ signatures, over keys it can bind first-hand, say so:
   can replay another household's proof.
 
 Without both, the join falls back to seating the stub under the inviting
-household itself (the pre-0091 behaviour): no inviting-admin trust.
+household itself (the pre-0092 behaviour): no inviting-admin trust.
 
 Signing bytes of the statement: ``b"space-owner-statement:v1:"`` +
 canonical JSON (sorted keys, compact) of the statement minus its signature.

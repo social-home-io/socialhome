@@ -1953,7 +1953,7 @@ never landed) the roster gossip is skipped gracefully but logged at
 WARNING — an anomaly, not a silent drop.
 
 **The invitee's view of the inviting admin** (owner decision 2026-10-10,
-migration 0091, `socialhome/federation/host_equivalence.py`). The invitee
+migration 0092, `socialhome/federation/host_equivalence.py`). The invitee
 seats its stub under the space's REAL owner (`space_meta.owner_instance_id`),
 not under the admin that invited it, ONLY when the snapshot carries the
 owner's signed owner statement for the pinned authority key and the admin's

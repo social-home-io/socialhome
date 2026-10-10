@@ -281,7 +281,7 @@ class SpaceConfigOutbound:
                 if seed is not None
                 else None
             ),
-            # Migration 0091 — the owner's ownership statement (fresh on the
+            # Migration 0092 — the owner's ownership statement (fresh on the
             # owner, relayed by a delegated admin).
             owner_statement=owner_statement_via(self._federation, space),
         )

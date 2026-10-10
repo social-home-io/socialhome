@@ -2251,7 +2251,7 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   owner_statement_sig_suite}`, binding the exact authority key the snapshot
   pins) AND the issuer's **inviter proof** (its own id signed with the space
   authority seed — only the owner and delegated admins hold it). Otherwise
-  the stub names the issuer itself, as before 0091, with no inviting-admin
+  the stub names the issuer itself, as before 0092, with no inviting-admin
   trust. A claimed owner that is the receiving household or not a derived
   instance id is refused outright. The owner signs a fresh statement into
   every snapshot and config it sends; members keep the latest verified one
@@ -2272,7 +2272,7 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   [spaces.md](spaces.md#membership-ops-offline-of-owner-delegated-invite--seat)).
 - **Residuals:** (1) a household that invites us claiming to own a space
   itself (no statement needed for that) gets a stub naming itself — the
-  pre-0091 result; it can never name somebody else without that household's
+  pre-0092 result; it can never name somebody else without that household's
   signature. (2) Since space ids are not key-derived, two households can
   both claim one id; between two unaccepted invitations the last one wins —
   a denial of service, as before, never a takeover of an accepted stub.
@@ -2280,7 +2280,7 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   automatically: a seed-holding admin could sign "I own it" exactly like the
   owner, so nothing on such a stub can tell them apart.
 - An older receiver ignores the key; no protocol version gates it. Members
-  store it (`spaces.gfs_servers`, migration 0091) but do not yet act on it —
+  store it (`spaces.gfs_servers`, migration 0092) but do not yet act on it —
   publishing to every listed server is a later protocol version.
 
 ## Flow — publish + browse + join

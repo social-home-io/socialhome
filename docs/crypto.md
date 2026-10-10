@@ -441,7 +441,7 @@ see `apply_space_content_key_from_metadata` for the validator.
 
 **Owner statement and inviter proof** (`space_meta.owner_statement`,
 `space_meta.inviter_proof`, `socialhome/space_owner_statement.py`, migration
-0091). Space ids are random, so "who owns this space" is signed: the OWNER
+0092). Space ids are random, so "who owns this space" is signed: the OWNER
 HOUSEHOLD's identity key over `{space_id, owner_instance_id, owner_pk,
 authority_pk, authority_key_epoch, issued_at, owner_statement_sig_suite}`
 (`b"space-owner-statement:v1:"` + canonical JSON), checked with
@@ -457,7 +457,7 @@ authority cert was the nearest existing shape but exists only from key epoch
 1 (epoch 0 is TOFU and the GFS verifies certs with that rule).
 
 **The owner's GFS list** (`space_meta.gfs_servers`,
-`domain/gfs_server.py`, `gfs_server_list_sig.py`, migration 0091) — the
+`domain/gfs_server.py`, `gfs_server_list_sig.py`, migration 0092) — the
 GFSs members will send to, so it is signed by the OWNER HOUSEHOLD's Ed25519
 identity key: `{servers, issued_at, owner_pk, gfs_servers_sig_suite,
 gfs_servers_sig}`, signature over `b"space-gfs-servers:v1:"` + canonical

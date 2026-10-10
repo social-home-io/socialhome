@@ -1899,7 +1899,7 @@ async def test_rebind_mirror_provenance_is_a_compare_and_set(env):
     assert await env.repo.get_mirror_provenance("sp-m") == ("conn-new", 4)
 
 
-# ── GFS server list (migration 0091) ──────────────────────────────────────
+# ── GFS server list (migration 0092) ──────────────────────────────────────
 
 
 def _signed_list(issued_at: int = 5) -> SignedGfsServerList:

@@ -1,6 +1,6 @@
 """Release-blocker protocol tests: the delegated admin household that invited
 this household is host-equivalent here for content and admin actions — and
-for nothing owner-only (owner decision 2026-10-10, migration 0091,
+for nothing owner-only (owner decision 2026-10-10, migration 0092,
 ``socialhome/federation/host_equivalence.py``).
 
 A household a delegated admin invited is seated under the REAL owner O. While
@@ -108,7 +108,7 @@ def _meta(space_pk_hex: str, **over) -> dict:
 
 
 def _proven(space_kp, meta: dict, *, inviter: str | None = None) -> dict:
-    """An honest delegated admin's snapshot (migration 0091): the owner's
+    """An honest delegated admin's snapshot (migration 0092): the owner's
     signed statement and the inviter's proof that it holds the seed."""
     return {
         **meta,

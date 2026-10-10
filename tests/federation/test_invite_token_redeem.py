@@ -225,7 +225,7 @@ class _FakeSpaceRepo:
     async def list_members(self, space_id):
         return [m for m in self.members if getattr(m, "space_id", None) == space_id]
 
-    # ── Migration 0091 (owner statement / inviting admin) ─────────────
+    # ── Migration 0092 (owner statement / inviting admin) ─────────────
     async def get_space_seed(self, space_id):
         return None
 
@@ -689,7 +689,7 @@ async def test_redeem_refuses_when_space_owned_by_another_host():
         "sp-own",
         owner_instance_id="the-real-host",
     )
-    # …and a member here already joined it (migration 0091: only a stub
+    # …and a member here already joined it (migration 0092: only a stub
     # nobody accepted yet gives way to another owner).
     accepted = SpaceMember(
         space_id="sp-own", user_id="u-earlier", role="member", joined_at="t"
@@ -706,7 +706,7 @@ async def test_redeem_refuses_when_space_owned_by_another_host():
 
 
 async def test_redeem_replaces_a_stub_nobody_here_accepted():
-    """Migration 0091 — a stub seated by an earlier, never-accepted
+    """Migration 0092 — a stub seated by an earlier, never-accepted
     invitation under another household gives way to the new owner."""
     sender, _issuer, *_rest, issuer_repo, _im = _wire_pair(
         {"space_id": "sp-own", "created_by": "owner", "uses_remaining": 1},
