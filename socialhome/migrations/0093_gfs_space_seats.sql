@@ -1,4 +1,4 @@
--- 0092 — which connection servers hold a subscriber seat of THIS household,
+-- 0093 — which connection servers hold a subscriber seat of THIS household,
 -- per space. A seat is taken by a signed ``POST /gfs/subscribe`` — by a
 -- follower subscribing to a GFS-mirrored space
 -- (``GfsSpaceMirrorService.subscribe_to_gfs``) or by a member's auto-subscribe

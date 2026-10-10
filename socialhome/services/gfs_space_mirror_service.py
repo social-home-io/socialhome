@@ -232,7 +232,7 @@ class GfsSpaceMirrorService:
         # with member publish (over the cookie-less publish session);
         # standalone wiring reads it over the mirror's own session.
         self._directories = directories or GfsDirectoryCache(lambda: self._http_client)
-        # The servers holding a subscriber seat of ours, per space (0092) —
+        # The servers holding a subscriber seat of ours, per space (0093) —
         # the only servers an identity-bound (un)subscribe may go to.
         self._seats = seat_repo
         # (gfs_instance_id, space_id) → monotonic time of the last seat taken
@@ -999,7 +999,7 @@ class GfsSpaceMirrorService:
         A recorded seat anywhere means the household knows exactly where it
         is seated (the fallback must not add seats on further servers). A
         mirror carrying provenance (v_44, ``spaces.mirror_gfs_id``) had its
-        seat recorded — by :meth:`take_seat`, or by the 0092 backfill when
+        seat recorded — by :meth:`take_seat`, or by the 0093 backfill when
         its connection still existed — so no recorded seat means it is gone
         or its connection was re-paired away; neither is knowable. Only a
         mirror with NO provenance falls back to *conn*'s WHOLE public

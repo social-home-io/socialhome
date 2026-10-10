@@ -1,4 +1,4 @@
-"""Direct SQLite tests for ``SqliteGfsSpaceSeatRepo`` (migration 0092)."""
+"""Direct SQLite tests for ``SqliteGfsSpaceSeatRepo`` (migration 0093)."""
 
 from __future__ import annotations
 

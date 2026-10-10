@@ -1,4 +1,4 @@
-"""Migration 0092 — ``gfs_space_seats``.
+"""Migration 0093 — ``gfs_space_seats``.
 
 Additive: one table keyed by the server's own id (survives a re-pair), and a
 backfill from the v_44 mirror provenance where the seating connection still
@@ -13,7 +13,7 @@ import pytest
 
 from socialhome.db.migrations import discover_migrations
 
-_VERSION = 92
+_VERSION = 93
 
 
 def _apply_through(conn: sqlite3.Connection, last: int) -> None:

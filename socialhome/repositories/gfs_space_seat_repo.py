@@ -1,4 +1,4 @@
-"""GFS subscriber-seat repository — wraps ``gfs_space_seats`` (0092).
+"""GFS subscriber-seat repository — wraps ``gfs_space_seats`` (0093).
 
 A row says "the connection server ``gfs_instance_id`` holds a subscriber
 seat of this household for ``space_id``": the only servers an

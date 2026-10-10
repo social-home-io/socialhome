@@ -544,7 +544,7 @@ cannot widen access through a missing field or Python truthiness.
   so sending it to a GFS that never seated the subscription would tell that
   operator the household follows the space. Every subscribe — a follower's,
   the reconnect self-heal's, a member's auto-subscribe — therefore records
-  the seat in `gfs_space_seats` (0092) under the server's own
+  the seat in `gfs_space_seats` (0093) under the server's own
   `gfs_instance_id`, which survives a disconnect + re-pair (the local
   connection id does not), bound to the server key and URL it was taken
   over. A connection is a seat's server only when id, key AND (normalized)
