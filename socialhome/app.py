@@ -933,7 +933,7 @@ def _build_gfs_server_selection(
     bus: EventBus,
     gfs_connection_service: GfsConnectionService,
 ) -> GfsServerSelectionService:
-    """The owner's signed GFS list (``spaces.gfs_servers``, migration 0089):
+    """The owner's signed GFS list (``spaces.gfs_servers``, migration 0091):
     re-derived after every listing change and every config change of a space
     we own, and sent to the members in a config change. Signs nothing until
     the household identity is attached at startup."""

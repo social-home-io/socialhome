@@ -1,5 +1,5 @@
 """Release-blocker protocol tests: a space's GFS list (``gfs_servers``,
-migration 0089) is the OWNER household's alone, on every household.
+migration 0091) is the OWNER household's alone, on every household.
 
 Members will publish to every GFS on that list — including servers their own
 household never connected to — so whoever could write it could aim every
@@ -15,7 +15,9 @@ the stored one. These tests drive every path that carries it:
 * the §D1b join snapshots a delegated admin household sends (private invite
   and invite-link redeem ACK): the stub is seated under the REAL owner, the
   admin's planted list is ignored, the owner's relayed list is taken, and the
-  owner's later config still reaches the joiner.
+  owner's later config still reaches the joiner — while the §25.6 catch-up
+  stream that admin sends still verifies (against the admin's own key, never
+  as the host's) and its members' content applies.
 
 Driven through the real handlers / services with real SQLite repos; only the
 federation transport is a mock.
@@ -23,10 +25,12 @@ federation transport is a mock.
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 
 from socialhome.crypto import (
@@ -43,6 +47,10 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceRole,
 )
+from socialhome.federation.encoder import FederationEncoder
+from socialhome.federation.space_authorship import SpaceAuthorship
+from socialhome.federation.sync.space.exporter import serialise_chunk
+from socialhome.federation.sync.space.receiver import SpaceSyncReceiver
 from socialhome.federation.invite_token_redeem import (
     SpaceInviteTokenRedeemCoordinator,
 )
@@ -451,3 +459,147 @@ async def test_a_forwarded_config_edit_cannot_change_gfs_servers(host):
 
 def test_gfs_servers_is_not_a_remote_config_field() -> None:
     assert "gfs_servers" not in SpaceService._REMOTE_CONFIG_FIELDS
+
+
+# ── The catch-up stream an inviting admin sends still verifies ───────────
+
+
+class _B64Crypto:
+    """Chunk payload codec standing in for the space content key."""
+
+    async def encrypt_chunk(self, *, space_id, sync_id, plaintext):
+        return 0, base64.urlsafe_b64encode(plaintext).decode("ascii")
+
+    async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
+        return base64.urlsafe_b64decode(ciphertext)
+
+
+def _sync_receiver(db) -> SpaceSyncReceiver:
+    spaces = SqliteSpaceRepo(db)
+    remote = SqliteSpaceRemoteMemberRepo(db)
+    users = SqliteUserRepo(db)
+    # The joiner is paired with NOBODY: every chunk comes from an unpaired
+    # household (the admin reached it over the mesh).
+    unpaired = SimpleNamespace(get_instance=AsyncMock(return_value=None))
+    return SpaceSyncReceiver(
+        bus=EventBus(),
+        encoder=FederationEncoder(generate_identity_keypair().private_key),
+        crypto=_B64Crypto(),  # type: ignore[arg-type]
+        federation_repo=unpaired,  # type: ignore[arg-type]
+        space_repo=spaces,
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_task_repo=MagicMock(),
+        page_repo=MagicMock(),
+        sticky_repo=MagicMock(),
+        space_calendar_repo=MagicMock(),
+        gallery_repo=MagicMock(),
+        authorship=SpaceAuthorship(
+            space_repo=spaces, remote_member_repo=remote, user_repo=users
+        ),
+    )
+
+
+async def _admin_posts_chunk(signing_seed: bytes) -> bytes:
+    _, ciphertext = await _B64Crypto().encrypt_chunk(
+        space_id=SPACE,
+        sync_id="sync-1",
+        plaintext=orjson.dumps(
+            {
+                "records": [
+                    {
+                        "id": "p-admin-1",
+                        "author": "u-admin",
+                        "type": "text",
+                        "content": "hello from the admin household",
+                        "created_at": "2026-10-01T00:00:00+00:00",
+                    }
+                ]
+            }
+        ),
+    )
+    envelope = {
+        "sync_id": "sync-1",
+        "resource": "posts",
+        "space_id": SPACE,
+        "epoch": 0,
+        "seq_start": 0,
+        "seq_end": 0,
+        "is_last": False,
+        "encrypted_payload": ciphertext,
+    }
+    envelope["signatures"] = FederationEncoder(signing_seed).sign_envelope_all(
+        orjson.dumps(envelope), suite="ed25519"
+    )
+    return serialise_chunk(envelope)
+
+
+def _admin_invite(space_pk_hex: str) -> FederationEvent:
+    meta = _meta(
+        space_pk_hex,
+        gfs=None,
+        roster=[
+            {
+                "user_id": "u-owner",
+                "instance_id": OWNER,
+                "display_name": "Owner",
+                "role": "owner",
+            },
+            {
+                "user_id": "u-admin",
+                "instance_id": ADMIN,
+                "display_name": "Admin",
+                "role": "admin",
+            },
+        ],
+    )
+    event = _invite(meta)
+    event.payload["host_identity_pk"] = ed25519_public_key(ADMIN_SEED).hex()
+    return event
+
+
+@pytest.mark.parametrize("signer", [ADMIN_SEED, b"\x33" * 32])
+async def test_an_admin_invited_household_applies_the_admins_catch_up_stream(
+    db, signer
+):
+    """Owner offline / unpaired; the joiner reached the space only through
+    the delegated admin that invited it. The stub names the REAL owner, yet
+    the admin's §25.6 catch-up stream still verifies — against the admin's
+    own key, kept on its ``space_instances`` row, never as the host key —
+    and its members' content applies. A chunk signed by anyone else is
+    dropped."""
+    kp = generate_space_keypair()
+    await _invite_handler(db)._on_invite(_admin_invite(kp.public_key.hex()))
+    repo = SqliteSpaceRepo(db)
+    space = await repo.get(SPACE)
+    assert space is not None and space.owner_instance_id == OWNER
+    assert await repo.get_host_identity_pk(SPACE) is None
+    assert await repo.get_space_instance_identity_pk(SPACE, ADMIN) == (
+        ed25519_public_key(ADMIN_SEED).hex()
+    )
+
+    await _sync_receiver(db).on_chunk(
+        await _admin_posts_chunk(signer),
+        from_instance=ADMIN,
+        expected_space_id=SPACE,
+    )
+    held = await SqliteSpacePostRepo(db).get("p-admin-1")
+    if signer == ADMIN_SEED:
+        assert held is not None and held[0] == SPACE
+        assert held[1].author == "u-admin"
+    else:
+        assert held is None
+
+
+async def test_an_unrecorded_household_cannot_stream_into_the_space(db):
+    """No paired row and no recorded key: an unpaired household that merely
+    names the space id is not verified at all."""
+    kp = generate_space_keypair()
+    await _invite_handler(db)._on_invite(_admin_invite(kp.public_key.hex()))
+    stranger_seed = b"\x34" * 32
+    stranger = derive_instance_id(ed25519_public_key(stranger_seed))
+    await _sync_receiver(db).on_chunk(
+        await _admin_posts_chunk(stranger_seed),
+        from_instance=stranger,
+        expected_space_id=SPACE,
+    )
+    assert await SqliteSpacePostRepo(db).get("p-admin-1") is None

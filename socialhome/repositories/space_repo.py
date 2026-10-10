@@ -188,6 +188,12 @@ class AbstractSpaceRepo(Protocol):
     async def add_space_instance(self, space_id: str, instance_id: str) -> None: ...
     async def remove_space_instance(self, space_id: str, instance_id: str) -> None: ...
     async def instance_in_any_space(self, instance_id: str) -> bool: ...
+    async def set_space_instance_identity_pk(
+        self, space_id: str, instance_id: str, pk_hex: str
+    ) -> None: ...
+    async def get_space_instance_identity_pk(
+        self, space_id: str, instance_id: str
+    ) -> str | None: ...
     async def list_member_instances(self, space_id: str) -> list[str]: ...
 
     # ── Bans ───────────────────────────────────────────────────────────
@@ -694,7 +700,7 @@ class SqliteSpaceRepo:
     async def set_gfs_servers(
         self, space_id: str, servers: SignedGfsServerList | None
     ) -> None:
-        """Store the owner's signed GFS list (migration 0089) — the ONLY
+        """Store the owner's signed GFS list (migration 0091) — the ONLY
         writer of the column: ``save`` never touches it, so a config
         snapshot, a ``SPACE_CREATED`` or any other upsert cannot wipe or
         replace it. The caller verified the signature and its freshness."""
@@ -1573,6 +1579,33 @@ class SqliteSpaceRepo:
             """,
             (space_id, instance_id),
         )
+
+    async def set_space_instance_identity_pk(
+        self, space_id: str, instance_id: str, pk_hex: str
+    ) -> None:
+        """Record a member household's identity key on its existing
+        ``space_instances`` row for ONE space (migration 0078's column).
+        UPDATE-only: never creates membership. The caller checked
+        ``derive_instance_id(pk) == instance_id``."""
+        await self._db.enqueue(
+            "UPDATE space_instances SET identity_pk=?"
+            " WHERE space_id=? AND instance_id=?",
+            (pk_hex, space_id, instance_id),
+        )
+
+    async def get_space_instance_identity_pk(
+        self, space_id: str, instance_id: str
+    ) -> str | None:
+        """The identity key recorded for *instance_id* on its
+        ``space_instances`` row of *space_id*, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT identity_pk FROM space_instances"
+            " WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+        if row is None or not row["identity_pk"]:
+            return None
+        return str(row["identity_pk"])
 
     async def remove_space_instance(
         self,

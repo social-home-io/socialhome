@@ -440,7 +440,7 @@ Receivers reject unknown `key_suite` values rather than fall back —
 see `apply_space_content_key_from_metadata` for the validator.
 
 **The owner's GFS list** (`space_meta.gfs_servers`,
-`domain/gfs_server.py`, `gfs_server_list_sig.py`, migration 0089) — the
+`domain/gfs_server.py`, `gfs_server_list_sig.py`, migration 0091) — the
 GFSs members will send to, so it is signed by the OWNER HOUSEHOLD's Ed25519
 identity key: `{servers, issued_at, owner_pk, gfs_servers_sig_suite,
 gfs_servers_sig}`, signature over `b"space-gfs-servers:v1:"` + canonical

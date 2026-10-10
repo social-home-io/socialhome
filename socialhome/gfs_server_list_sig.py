@@ -1,4 +1,4 @@
-"""The owner household's signature over a space's GFS list (migration 0089).
+"""The owner household's signature over a space's GFS list (migration 0091).
 
 The list (:class:`socialhome.domain.gfs_server.SignedGfsServerList`) tells
 member households which GFSs list the space, so members will send to those

@@ -1,4 +1,4 @@
--- 0089 — ``spaces.gfs_servers``: the GFSs a space is listed on, as the
+-- 0091 — ``spaces.gfs_servers``: the GFSs a space is listed on, as the
 -- OWNER household signed them. A JSON object
 -- ``{servers: [{gfs_instance_id, inbox_url, public_key, gfs_key_suite,
 -- display_name}, ...], issued_at, owner_pk, gfs_servers_sig_suite,

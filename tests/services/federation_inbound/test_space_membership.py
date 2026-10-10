@@ -875,7 +875,7 @@ async def test_instance_left_elsewhere_keeps_the_old_semantics(repo, handlers):
 
 async def test_space_created_never_wipes_the_owners_gfs_list(db):
     """A re-sent ``SPACE_CREATED`` rebuilds the row from scratch; the owner's
-    signed GFS list (migration 0089) must survive it — ``save`` never writes
+    signed GFS list (migration 0091) must survive it — ``save`` never writes
     the column."""
     repo = SqliteSpaceRepo(db)
     handlers = SpaceMembershipInboundHandlers(bus=EventBus(), space_repo=repo)

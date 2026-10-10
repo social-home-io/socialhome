@@ -354,8 +354,19 @@ class PrivateSpaceInviteHandler:
         space_id: str,
         host_instance_id: str,
         claimed_pk_hex: object,
+        owner_instance_id: str | None = None,
     ) -> None:
-        """Store the host household's identity pubkey on the space stub.
+        """Store the inviting household's identity pubkey for the space.
+
+        ``host_instance_id`` is the INVITER. When it is the space's owner
+        (``owner_instance_id``, the default), the key lands on the stub as
+        ``host_identity_pk`` — the owner's key, which the authority-cert
+        check also reads. When a delegated admin household invited us, its
+        key must never stand in for the owner's: it is recorded instead on
+        that household's own ``space_instances`` row (migration 0078's
+        ``identity_pk``), the slot the sync receiver reads for a member
+        provider it is not paired with — so the catch-up stream that admin
+        sends still verifies, without the admin passing any owner check.
 
         Why this exists (#648): a member that joined over the mesh is not a
         paired peer of the host, so it has no ``remote_instances`` row — and
@@ -410,7 +421,16 @@ class PrivateSpaceInviteHandler:
                 space_id,
             )
             return
-        await self._space_repo.set_host_identity_pk(space_id, claimed_pk_hex)
+        if owner_instance_id is None or owner_instance_id == host_instance_id:
+            await self._space_repo.set_host_identity_pk(space_id, claimed_pk_hex)
+            return
+        # The admin household holds the space (it invited us into it), so
+        # it is one of its households from our side too; the accept would
+        # add the same row. Then the key goes on that row only.
+        await self._space_repo.add_space_instance(space_id, host_instance_id)
+        await self._space_repo.set_space_instance_identity_pk(
+            space_id, host_instance_id, claimed_pk_hex.lower()
+        )
 
     async def _apply_meta_cert(self, space_id: str, meta: dict) -> None:
         """Apply the owner's authority cert a ``space_meta`` carries (v_44).
@@ -521,7 +541,7 @@ class PrivateSpaceInviteHandler:
                 meta=meta,
             )
             await self._space_repo.save(stub)
-            # The owner's signed GFS list (migration 0089), relayed by
+            # The owner's signed GFS list (migration 0091), relayed by
             # whoever invited us; taken only under the owner's signature.
             await apply_gfs_servers_from_metadata(
                 self._space_repo,
@@ -531,13 +551,14 @@ class PrivateSpaceInviteHandler:
             )
             # The inviter's identity key is the HOST key only when the
             # inviter is the owner; an admin's key must never be read as the
-            # owner's (it would refuse the owner's own authority cert).
-            if owner_instance == event.from_instance:
-                await self._record_host_identity_pk(
-                    space_id=space_id,
-                    host_instance_id=event.from_instance,
-                    claimed_pk_hex=p.get("host_identity_pk"),
-                )
+            # owner's (it would refuse the owner's own authority cert). An
+            # admin's key is kept as a member provider's key instead.
+            await self._record_host_identity_pk(
+                space_id=space_id,
+                host_instance_id=event.from_instance,
+                claimed_pk_hex=p.get("host_identity_pk"),
+                owner_instance_id=owner_instance,
+            )
             await self._apply_meta_cert(space_id, meta)
             # §D1b cover bytes (#116) — when shipped inline, persist
             # so the stub renders the real cover rather than the

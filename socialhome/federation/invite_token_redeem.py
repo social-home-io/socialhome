@@ -802,7 +802,7 @@ class SpaceInviteTokenRedeemCoordinator:
                     meta=meta,
                 )
                 await self._spaces.save(stub)
-                # The owner's signed GFS list (migration 0089), relayed by
+                # The owner's signed GFS list (migration 0091), relayed by
                 # the issuer; taken only under the owner's signature.
                 await apply_gfs_servers_from_metadata(
                     self._spaces,

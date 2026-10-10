@@ -3699,7 +3699,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     #: config forward. The host drops it here even if an old / forged client
     #: includes it; a remote admin changes it through the ``propose`` verb.
     #:
-    #: ``gfs_servers`` (migration 0089) is absent too, and ``update_config``
+    #: ``gfs_servers`` (migration 0091) is absent too, and ``update_config``
     #: takes no such keyword: which GFSs list the space — and so where every
     #: member publishes — is the OWNER's choice alone, and this path runs AS
     #: the owner, so its owner gates are no defence.
@@ -7850,7 +7850,7 @@ def space_metadata_for_federation(
     """
     meta = space_metadata_fields(space)
     if space.gfs_servers is not None:
-        # The GFSs the owner lists the space on (migration 0089), signed by
+        # The GFSs the owner lists the space on (migration 0091), signed by
         # the OWNER household, so a member can reach every one of them while
         # the host is offline. Rides only here — inside the encrypted
         # ``space_meta`` member households get — never in a GFS publish body.

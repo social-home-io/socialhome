@@ -8,7 +8,7 @@ hands it to every member household inside the encrypted ``space_meta``
 member can reach every listed GFS — including ones its own household never
 connected to — while the host is offline.
 
-Signed list (wire and ``spaces.gfs_servers`` column, migration 0089)::
+Signed list (wire and ``spaces.gfs_servers`` column, migration 0091)::
 
     {"servers": [{gfs_instance_id, inbox_url, public_key, gfs_key_suite,
                   display_name}, ...],

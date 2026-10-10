@@ -1513,7 +1513,7 @@ class Space:
     #: for public/global tiers. Replaces the legacy ``target_audience`` hint.
     category: str | None = None
     #: The GFSs the space is listed on, as the OWNER household signed them
-    #: (migration 0089, :mod:`socialhome.domain.gfs_server`). On the owner it
+    #: (migration 0091, :mod:`socialhome.domain.gfs_server`). On the owner it
     #: is derived from its active publications; on a member it is the
     #: owner's signed copy from ``space_meta``, verified against the owner's
     #: identity key. Never written by ``save`` — only by ``set_gfs_servers``.

@@ -2248,14 +2248,20 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   owner-only check trust the admin and ignore the owner). The anti-hijack
   guard still compares the authenticated inviter against any row already
   held, and the inviter's identity key is recorded as the host key only when
-  the inviter is the owner.
+  the inviter is the owner. An inviting admin's key is kept on its own
+  `space_instances` row for that space instead, so the §25.6 catch-up it
+  streams to a joiner it reached over the mesh still verifies; as for any
+  non-host provider, its records are admitted by the member rules (content
+  its own household's members wrote; the roster comes from the invite
+  snapshot and the owner), and the full stream comes from the owner, whom
+  the periodic mesh catch-up targets as the stub's host.
 - **Residual (within the delegated-admin trust boundary):** a delegated admin
   that LIES about who owns the space to a household it invites itself can
   still name itself owner on that one fresh stub. It already holds the space
   seed and reads all content; every other household, and every owner-only
   fact the real owner signs, stays cryptographically owner-only.
 - An older receiver ignores the key; no protocol version gates it. Members
-  store it (`spaces.gfs_servers`, migration 0089) but do not yet act on it —
+  store it (`spaces.gfs_servers`, migration 0091) but do not yet act on it —
   publishing to every listed server is a later protocol version.
 
 ## Flow — publish + browse + join

@@ -1,4 +1,4 @@
-"""Migration 0089 — ``spaces.gfs_servers``: the owner's signed GFS list, a
+"""Migration 0091 — ``spaces.gfs_servers``: the owner's signed GFS list, a
 JSON object or NULL."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import pytest
 
 from socialhome.db.migrations import discover_migrations
 
-_VERSION = 89
+_VERSION = 91
 
 
 def _apply_through(conn: sqlite3.Connection, last: int) -> None:

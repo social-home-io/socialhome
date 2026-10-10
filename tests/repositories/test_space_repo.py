@@ -1899,7 +1899,7 @@ async def test_rebind_mirror_provenance_is_a_compare_and_set(env):
     assert await env.repo.get_mirror_provenance("sp-m") == ("conn-new", 4)
 
 
-# ── GFS server list (migration 0089) ──────────────────────────────────────
+# ── GFS server list (migration 0091) ──────────────────────────────────────
 
 
 def _signed_list(issued_at: int = 5) -> SignedGfsServerList:
@@ -1954,3 +1954,19 @@ async def test_save_never_writes_gfs_servers(env):
     await env.repo.save(replace(_space("sp-new"), gfs_servers=_signed_list()))
     fresh = await env.repo.get("sp-new")
     assert fresh is not None and fresh.gfs_servers is None
+
+
+async def test_space_instance_identity_pk_is_per_space_and_update_only(env):
+    await env.repo.save(_space("sp-a"))
+    await env.repo.save(_space("sp-b"))
+    # No row → nothing is created.
+    await env.repo.set_space_instance_identity_pk("sp-a", "hh-1", "ab" * 32)
+    assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") is None
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    await env.repo.add_space_instance("sp-b", "hh-1")
+    await env.repo.set_space_instance_identity_pk("sp-a", "hh-1", "ab" * 32)
+    assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") == "ab" * 32
+    assert await env.repo.get_space_instance_identity_pk("sp-b", "hh-1") is None
+    # A later seat refresh keeps it.
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") == "ab" * 32
