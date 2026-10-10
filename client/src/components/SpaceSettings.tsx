@@ -1,6 +1,7 @@
 /**
  * SpaceSettings — space admin settings panel (§23.91).
- * Includes a Federation section for GFS publish/unpublish.
+ * Includes the space's GFS listing (``SpaceGfsListing``) and, for a move
+ * into the global tier, the owner household's choice of GFSs.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { signal, useSignal } from '@preact/signals'
@@ -13,11 +14,14 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { EmojiField } from './EmojiField'
 import { RadioCardGroup } from './RadioCardGroup'
 import { ChipRadioGroup } from './ChipRadioGroup'
+import { GfsChecklist, defaultGfsSelection, type GfsChoice } from './GfsChecklist'
+import { SpaceGfsListing } from './SpaceGfsListing'
 import { joinOptionsForVisibility } from './spaceModeOptions'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
+import { currentUser } from '@/store/auth'
 import type {
-  Space, GfsConnection, GfsPublishMode, GfsSpacePublication, SpaceAccessLevel,
+  Space, GfsConnection, GfsPublishMode, SpaceAccessLevel,
 } from '@/types'
 import {
   ACCESS_FEATURES,
@@ -73,17 +77,6 @@ const RETENTION_EXEMPT_TYPES: [string, string][] = [
 ]
 
 const showDissolve = signal(false)
-const gfsServers = signal<GfsConnection[]>([])
-const publications = signal<GfsSpacePublication[]>([])
-const federationLoading = signal(false)
-// GFS connection ids whose publish/unpublish request is in flight, so the
-// per-row Button can show a spinner and be disabled — blocks a double-click
-// from firing duplicate publish/unpublish requests.
-const pendingPublish = signal<Set<string>>(new Set())
-// GFS connection id awaiting publish confirmation (publishing makes a space
-// world-discoverable, so it's gated behind a confirm like dissolve). ``null``
-// = no dialog open.
-const confirmPublishGfs = signal<string | null>(null)
 
 /** A household named by a 409 ``PRIVATE_GFS_LINK_MEMBERS``. */
 interface LinkMemberHousehold {
@@ -124,106 +117,6 @@ function privateGfsLinkMembers(err: unknown): LinkMemberHousehold[] | null {
   })
 }
 
-async function loadFederationData(spaceId: string) {
-  federationLoading.value = true
-  try {
-    const [servers, pubs] = await Promise.all([
-      api.get<GfsConnection[]>('/api/gfs/connections'),
-      api.get<GfsSpacePublication[]>(`/api/spaces/${spaceId}/publications`),
-    ])
-    gfsServers.value = servers
-    publications.value = pubs
-  } catch {
-    gfsServers.value = []
-    publications.value = []
-  }
-  federationLoading.value = false
-}
-
-function isPublished(gfsId: string): boolean {
-  return publications.value.some(p => p.gfs_connection_id === gfsId)
-}
-
-/** The publication row for this GFS, if any — exposes ``.status`` so the
- *  UI can distinguish live (``active``) from held (``pending``) and
- *  rejected (``banned``) publications, not just the boolean. */
-function publicationFor(gfsId: string): GfsSpacePublication | undefined {
-  return publications.value.find(p => p.gfs_connection_id === gfsId)
-}
-
-/**
- * Build the GFS-side public URL for this space.
- *
- * The GFS exposes a server-rendered ``/spaces/{space_id}`` page (see
- * ``socialhome/global_server/public.py``). ``inbox_url`` is stored on
- * the connection as the GFS root (``https://gfs.example.com``) — the
- * routes ``/gfs/...`` are concatenated onto it for federation calls,
- * so stripping a trailing slash is enough to land on the public root
- * for browser links.
- */
-function publicSpaceUrl(inboxUrl: string, spaceId: string): string {
-  return `${inboxUrl.replace(/\/+$/, '')}/spaces/${spaceId}`
-}
-
-async function copyToClipboard(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text)
-    showToast(t('space.gfs.public_link_copied'), 'success')
-  } catch {
-    // Older browsers / locked-down WebViews fall through to a manual
-    // selection prompt rather than silently failing.
-    showToast(t('space.gfs.public_link_copy_failed'), 'info')
-  }
-}
-
-function setPending(gfsId: string, on: boolean) {
-  const next = new Set(pendingPublish.value)
-  if (on) next.add(gfsId)
-  else next.delete(gfsId)
-  pendingPublish.value = next
-}
-
-/**
- * Run the publish/unpublish mutation. Unpublish fires straight away;
- * publish is funnelled through a confirm dialog (``confirmPublishGfs``)
- * because it makes the space world-discoverable. The per-row in-flight
- * flag guards against a double-click firing a duplicate request and is
- * always cleared in ``finally``.
- */
-async function togglePublish(spaceId: string, gfsId: string) {
-  if (!isPublished(gfsId)) {
-    // Defer the actual POST to the confirm handler.
-    confirmPublishGfs.value = gfsId
-    return
-  }
-  if (pendingPublish.value.has(gfsId)) return
-  setPending(gfsId, true)
-  try {
-    await api.delete(`/api/spaces/${spaceId}/publish/${gfsId}`)
-    publications.value = publications.value.filter(p => p.gfs_connection_id !== gfsId)
-    showToast(t('space.unpublish_from_gfs'), 'success')
-  } catch (e: any) {
-    showToast(e.message || t('common.error'), 'error')
-  } finally {
-    setPending(gfsId, false)
-  }
-}
-
-/** Confirmed publish — pushes the returned publication (carrying
- *  ``status`` so the row reflects active-vs-pending immediately). */
-async function doPublish(spaceId: string, gfsId: string) {
-  if (pendingPublish.value.has(gfsId)) return
-  setPending(gfsId, true)
-  try {
-    const pub = await api.post<GfsSpacePublication>(`/api/spaces/${spaceId}/publish/${gfsId}`)
-    publications.value = [...publications.value, pub]
-    showToast(t('space.publish_to_gfs'), 'success')
-  } catch (e: any) {
-    showToast(e.message || t('common.error'), 'error')
-  } finally {
-    setPending(gfsId, false)
-  }
-}
 
 export function SpaceSettings({
   space,
@@ -235,7 +128,8 @@ export function SpaceSettings({
   onUpdate: () => void
   /** True when this space is hosted on another household (we hold a stub).
    *  General config, archive, dissolve + tier proposals all forward to the
-   *  host, but GFS publication is the host's own concern — hide it. */
+   *  host, but choosing GFSs is the owner household's concern — a remote
+   *  admin sees the list read-only. */
   isRemoteSpace?: boolean
   /** The caller is the space owner. Owner-only settings (the connection
    *  server publish mode) render only then — the server answers anyone
@@ -254,6 +148,12 @@ export function SpaceSettings({
   // Publication tier (space_type) is quorum-gated (v_16) — changing it is a
   // *proposal*, separate from the rest of the config form below.
   const tierChoice = useSignal(space.space_type)
+  // Moving into the global tier from the owner household names the GFSs it
+  // is listed on (the household's active connections; at least one). A
+  // remote admin's proposal can't — the owner picks them later.
+  const tierGfsChoices = useSignal<GfsChoice[]>([])
+  const tierGfsSelected = useSignal<string[]>([])
+  const tierGfsError = useSignal<string | null>(null)
   const locationEnabled = useSignal(Boolean(space.features?.location))
   const locationMode = useSignal<'gps' | 'zone_only'>(
     space.features?.location_mode ?? 'gps',
@@ -301,8 +201,6 @@ export function SpaceSettings({
   // and a space already strict keeps it visible so the owner can always
   // switch back. A private space: exactly while it uses the connection
   // server (the live switch above); with it off the choice means nothing.
-  // Only these tiers may be listed on a GFS directory.
-  const publishableTier = space.space_type === 'public' || space.space_type === 'global'
   const showGfsPublishMode = isOwner && (
     isPrivate
       ? privateGfs.value
@@ -375,8 +273,19 @@ export function SpaceSettings({
   const retentionOn = (parseInt(retentionDays, 10) || 0) > 0
 
   useEffect(() => {
-    // GFS publication is host-local; on a remote stub there's nothing to load.
-    if (!isRemoteSpace) loadFederationData(space.id)
+    // The tier block's GFS checklist: only the owner household chooses
+    // GFSs, so a remote stub loads nothing.
+    if (isRemoteSpace) return
+    void api.get<GfsConnection[]>('/api/gfs/connections')
+      .then((rows) => {
+        const active = rows
+          .filter(g => g.status === 'active')
+          .map(({ id, display_name, inbox_url }) => ({ id, display_name, inbox_url }))
+        tierGfsChoices.value = active
+        // Exactly one server: nothing to decide, so it starts ticked.
+        tierGfsSelected.value = defaultGfsSelection(active)
+      })
+      .catch(() => { tierGfsChoices.value = [] })
   }, [space.id, isRemoteSpace])
 
   const save = async () => {
@@ -596,8 +505,16 @@ export function SpaceSettings({
     }
   }
 
+  // Proposing Global from the owner household: the GFSs to list it on.
+  const choosesGfs = tierChoice.value === 'global'
+    && space.space_type !== 'global'
+    && !isRemoteSpace
   const proposeTier = async () => {
     if (tierChoice.value === space.space_type) return
+    if (choosesGfs && tierGfsSelected.value.length === 0) {
+      tierGfsError.value = t('error.gfs_selection_required')
+      return
+    }
     try {
       // Publication-tier changes are quorum-gated (v_16): this opens a
       // proposal. Solo-admin spaces apply immediately; otherwise it needs a
@@ -607,6 +524,7 @@ export function SpaceSettings({
       }>(`/api/spaces/${space.id}/proposals`, {
         action: 'set_public_tier',
         space_type: tierChoice.value,
+        ...(choosesGfs ? { gfs_ids: tierGfsSelected.value } : {}),
       })
       if (res?.proposal?.status === 'executed') {
         showToast(t('space.tier.changed'), 'success')
@@ -1130,10 +1048,47 @@ export function SpaceSettings({
         {isRestricted('public_spaces') && (
           <ProtectedNotice capability="public_spaces" />
         )}
+        {choosesGfs && tierGfsChoices.value.length > 0 && (
+          <GfsChecklist
+            name="space-tier"
+            choices={tierGfsChoices.value}
+            selected={tierGfsSelected.value}
+            onChange={(ids) => {
+              tierGfsSelected.value = ids
+              tierGfsError.value = null
+            }}
+            error={tierGfsError.value}
+          />
+        )}
+        {choosesGfs && tierGfsChoices.value.length === 0 && (
+          <p class="sh-muted" data-testid="tier-gfs-none">
+            {currentUser.value?.is_admin === true ? (
+              <>
+                {t('space.create.gfs_hint_before')}
+                <a href={addBase('/connections')}>{t('space.create.gfs_hint_link')}</a>
+                {t('space.create.gfs_hint_after')}
+              </>
+            ) : t('space.create.gfs_hint_member')}
+          </p>
+        )}
+        {tierChoice.value === 'global' && space.space_type !== 'global'
+          && isRemoteSpace && (
+          <p class="sh-muted" data-testid="tier-gfs-owner-chooses">
+            {t('space.tier.owner_chooses_gfs')}
+          </p>
+        )}
+        {space.space_type === 'global' && tierChoice.value !== 'global' && (
+          <p class="sh-muted" data-testid="tier-leaving-global">
+            {t('space.tier.leaving_global')}
+          </p>
+        )}
         <div class="sh-form-actions">
           <Button
             variant="secondary"
-            disabled={tierChoice.value === space.space_type}
+            disabled={
+              tierChoice.value === space.space_type
+              || (choosesGfs && tierGfsChoices.value.length === 0)
+            }
             onClick={proposeTier}
           >
             {tierChoice.value === space.space_type
@@ -1143,110 +1098,8 @@ export function SpaceSettings({
         </div>
       </div>
 
-      {!isRemoteSpace && <hr />}
-      {!isRemoteSpace && <h3>{t('space.federation')}</h3>}
-      {!isRemoteSpace && (federationLoading.value ? (
-        <p class="sh-muted">{t('common.loading')}</p>
-      ) : gfsServers.value.length === 0 ? (
-        <p class="sh-muted">{t('space.no_gfs_connections')}</p>
-      ) : (
-        <div class="sh-federation-list">
-          {!publishableTier && (
-            <p class="sh-muted" data-testid="gfs-publish-tier-note">
-              {t('space.gfs_publish_needs_public')}
-            </p>
-          )}
-          {/* You can only publish to a GFS that has accepted your household
-              (``active``); pending/suspended connections get no publish row.
-              The backend now returns those non-active connections too, so we
-              filter here and surface the held count below. */}
-          {gfsServers.value.filter(g => g.status === 'active').map(gfs => {
-            const pub = publicationFor(gfs.id)
-            const published = pub != null
-            // Only a live (``active``) publication has a resolvable public
-            // page; a pending/banned space's GFS page 404s, so suppress the
-            // link in those states.
-            const isLive = pub?.status === 'active'
-            const isPending = pub?.status === 'pending'
-            const inFlight = pendingPublish.value.has(gfs.id)
-            const publicUrl = publicSpaceUrl(gfs.inbox_url, space.id)
-            // Status label honesty: green only when actually live; pending and
-            // rejected get muted treatments so the admin never mistakes a
-            // held/removed publication for a discoverable one.
-            const statusLabel = !published
-              ? t('space.not_published')
-              : isLive
-                ? t('space.published')
-                : isPending
-                  ? t('space.publish_pending')
-                  : t('space.publish_rejected')
-            const statusClass = isLive
-              ? 'sh-text-success'
-              : isPending
-                ? 'sh-text-warning'
-                : 'sh-muted'
-            return (
-              <div key={gfs.id} class="sh-federation-row" data-testid={`gfs-row-${gfs.id}`}>
-                <div class="sh-connection-info">
-                  <span class={`sh-status-dot sh-status-dot--${gfs.status === 'active' ? 'active' : gfs.status === 'suspended' ? 'unreachable' : 'pending'}`} />
-                  <strong>{gfs.display_name}</strong>
-                  <span class="sh-muted">{gfs.inbox_url}</span>
-                </div>
-                {isLive && (
-                  <div class="sh-federation-public-url">
-                    <span class="sh-muted">🔗 {t('space.gfs.public_link')}</span>
-                    <a
-                      href={publicUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="sh-federation-public-url__link"
-                      title={publicUrl}
-                    >
-                      {publicUrl}
-                    </a>
-                    <button
-                      type="button"
-                      class="sh-federation-public-url__copy"
-                      onClick={() => void copyToClipboard(publicUrl)}
-                      aria-label={t('space.gfs.copy_public_link')}
-                      title={t('space.gfs.copy')}
-                    >
-                      📋
-                    </button>
-                  </div>
-                )}
-                {isPending && (
-                  <p class="sh-muted sh-federation-pending-hint">
-                    {t('space.publish_pending_hint')}
-                  </p>
-                )}
-                <div class="sh-federation-actions">
-                  <span class={statusClass}>{statusLabel}</span>
-                  {/* Only public / global spaces may be listed on a GFS (the
-                      server refuses the rest with SPACE_NOT_PUBLIC). An old
-                      listing can still be withdrawn. */}
-                  {(published || publishableTier) && (
-                    <Button
-                      variant={published ? 'danger' : 'primary'}
-                      loading={inFlight}
-                      onClick={() => togglePublish(space.id, gfs.id)}
-                    >
-                      {published ? t('gfs.unpublish') : t('gfs.publish')}
-                    </Button>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-          {gfsServers.value.some(g => g.status !== 'active') && (
-            <p class="sh-muted">
-              {t('space.gfs_pending_note', {
-                n: String(gfsServers.value.filter(g => g.status !== 'active').length),
-              })}
-            </p>
-          )}
-        </div>
-      ))}
+
+      <SpaceGfsListing space={space} isOwner={isOwner} isRemoteSpace={isRemoteSpace} />
 
       <hr />
       <h3>{t('space.archive.heading')}</h3>
@@ -1285,18 +1138,6 @@ export function SpaceSettings({
       <h3>{t('space.dissolve.heading')}</h3>
       <p class="sh-muted">{t('space.dissolve.intro')}</p>
       <Button variant="danger" onClick={() => showDissolve.value = true}>{t('space.dissolve.button')}</Button>
-      <ConfirmDialog
-        open={confirmPublishGfs.value !== null}
-        title={t('space.gfs.publish_confirm_title')}
-        message={t('space.gfs.publish_confirm_body')}
-        confirmLabel={t('gfs.publish')}
-        onConfirm={() => {
-          const gfsId = confirmPublishGfs.value
-          confirmPublishGfs.value = null
-          if (gfsId) doPublish(space.id, gfsId)
-        }}
-        onCancel={() => { confirmPublishGfs.value = null }}
-      />
       <ConfirmDialog
         open={peersTooOld.value !== null}
         title={t('space.access.peers_too_old.title')}

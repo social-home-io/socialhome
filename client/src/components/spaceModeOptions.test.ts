@@ -11,7 +11,7 @@ describe('spaceModeOptions', () => {
 
   it('labels tiers and join modes from the catalog', () => {
     expect(visibilityOptions()[0].title).toBe('Private')
-    expect(visibilityOptions()[3].subtitle).toBe('Published worldwide through your GFS.')
+    expect(visibilityOptions()[3].subtitle).toBe('Listed on GFSs the owner picks, for anyone to find.')
     expect(joinModeOptions().map(o => o.title)).toEqual([
       'Invite only', 'Request to join', 'Open',
     ])

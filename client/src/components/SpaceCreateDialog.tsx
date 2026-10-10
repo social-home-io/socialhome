@@ -11,6 +11,7 @@ import { Button } from './Button'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { EmojiField } from './EmojiField'
 import { RadioCardGroup } from './RadioCardGroup'
+import { GfsChecklist, defaultGfsSelection, type GfsChoice } from './GfsChecklist'
 import {
   visibilityOptions as tierOptions,
   SPACE_CATEGORIES,
@@ -35,9 +36,14 @@ const submitting = signal(false)
 // Discovery metadata, sent only for public/global spaces (§23.50).
 const minAge = signal(0)
 const category = signal('general')
-// Whether the household has at least one active global server connection —
-// gates the Global visibility tier. Loaded on open from /api/gfs/connections.
-const hasActiveGfs = signal(false)
+// The household's active GFS connections — a global space is listed on the
+// ones the creator ticks (never on every connected GFS), and none at all
+// gates the Global tier. Loaded on open from /api/gfs/connections.
+const gfsChoices = signal<GfsChoice[]>([])
+const gfsSelected = signal<string[]>([])
+// "Choose at least one GFS" — shown under the checklist after a submit
+// with nothing ticked; cleared by the next tick.
+const gfsError = signal<string | null>(null)
 
 // Minimum-age options for the discovery audience gate. 0 = no restriction.
 const MIN_AGE_OPTIONS = [0, 13, 16, 18]
@@ -54,14 +60,24 @@ export function openSpaceCreate() {
   locating.value = false
   minAge.value = 0
   category.value = 'general'
-  hasActiveGfs.value = false
+  gfsChoices.value = []
+  gfsSelected.value = []
+  gfsError.value = null
   // The Global tier is only offered when an active GFS connection exists.
-  void api.get<{ status: string }[]>('/api/gfs/connections')
-    .then((c) => { hasActiveGfs.value = c.some((g) => g.status === 'active') })
-    .catch(() => { hasActiveGfs.value = false })
+  void api.get<(GfsChoice & { status: string })[]>('/api/gfs/connections')
+    .then((c) => {
+      const active = c
+        .filter((g) => g.status === 'active')
+        .map(({ id, display_name, inbox_url }) => ({ id, display_name, inbox_url }))
+      gfsChoices.value = active
+      // Exactly one server: nothing to decide, so it starts ticked.
+      gfsSelected.value = defaultGfsSelection(active)
+    })
+    .catch(() => { gfsChoices.value = [] })
 }
 
 const isPublic = () => spaceType.value === 'public'
+const isGlobal = () => spaceType.value === 'global'
 const isDiscoverable = () =>
   spaceType.value === 'public' || spaceType.value === 'global'
 
@@ -89,6 +105,12 @@ function useMyLocation() {
 export function SpaceCreateDialog() {
   const handleSubmit = async () => {
     if (!name.value.trim() || submitting.value) return
+    // A global space must be listed somewhere: the server refuses an empty
+    // choice (GFS_SELECTION_REQUIRED), so say it beside the list instead.
+    if (isGlobal() && gfsSelected.value.length === 0) {
+      gfsError.value = t('error.gfs_selection_required')
+      return
+    }
     submitting.value = true
     try {
       const discoverable = isDiscoverable()
@@ -103,6 +125,7 @@ export function SpaceCreateDialog() {
           : {}),
         ...(discoverable ? { category: category.value } : {}),
         ...(discoverable && minAge.value ? { min_age: minAge.value } : {}),
+        ...(isGlobal() ? { gfs_ids: gfsSelected.value } : {}),
       })
       // Refresh the cached spaces list so the new row appears on the
       // list page without a hard reload.
@@ -123,7 +146,8 @@ export function SpaceCreateDialog() {
 
   // The Global tier is disabled (with an explanatory subtitle) until an
   // active global server connection exists.
-  const visibilityOptions = hasActiveGfs.value
+  const hasActiveGfs = gfsChoices.value.length > 0
+  const visibilityOptions = hasActiveGfs
     ? tierOptions()
     : tierOptions().map((o) =>
       o.value === 'global'
@@ -179,7 +203,7 @@ export function SpaceCreateDialog() {
           }}
         />
         {tierLocked && <ProtectedNotice capability="public_spaces" />}
-        {!tierLocked && !hasActiveGfs.value && (
+        {!tierLocked && !hasActiveGfs && (
           <p class="sh-muted" style={{ marginTop: 'calc(-1 * var(--sh-space-sm))' }}>
             {isAdmin ? (
               <>
@@ -191,6 +215,18 @@ export function SpaceCreateDialog() {
               <>{t('space.create.gfs_hint_member')}</>
             )}
           </p>
+        )}
+        {isGlobal() && hasActiveGfs && (
+          <GfsChecklist
+            name="space-create"
+            choices={gfsChoices.value}
+            selected={gfsSelected.value}
+            onChange={(ids) => {
+              gfsSelected.value = ids
+              gfsError.value = null
+            }}
+            error={gfsError.value}
+          />
         )}
         <RadioCardGroup
           legend={t('space.join.legend')}

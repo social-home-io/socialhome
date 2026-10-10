@@ -21,6 +21,9 @@ import { Button } from '@/components/Button'
 import { MarkdownView } from '@/components/MarkdownView'
 import { Spinner } from '@/components/Spinner'
 import { SpaceSettings } from '@/components/SpaceSettings'
+import {
+  SpaceGfsServersReadOnly, hasGfsServersToShow,
+} from '@/components/SpaceGfsListing'
 import { SpaceThemeStudio } from '@/components/SpaceThemeStudio'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
@@ -200,6 +203,16 @@ export default function SpaceSettingsPage() {
         <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-sm)' }}>
           {t('space.settings_page.member_note')}
         </p>
+      )}
+      {/* A plain member never sees the General tab, so where a global space
+       *  is listed (and whether their household can reach it while the
+       *  host is offline) is shown here, read-only. */}
+      {!canAdmin && hasGfsServersToShow(space) && (
+        <section class="sh-gfs-listing-section" data-testid="member-gfs-servers">
+          <h3>{t('space.federation')}</h3>
+          <SpaceGfsServersReadOnly space={space} />
+          <hr />
+        </section>
       )}
 
       {activeTab.value === 'general' && (
