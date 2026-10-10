@@ -1264,8 +1264,18 @@ def cmd_gfs_pair() -> None:
                 f"{label}: expected GFS connection status=active, got"
                 f" {resp['status']!r}",
             )
+        # The demo GFS signs ``proof_of_possession`` (its base_url is this
+        # very loopback URL), so every pairing must come back proven.
+        if resp.get("possession_proven") is not True or not resp.get(
+            "proof_required_at"
+        ):
+            raise SystemExit(
+                f"{label}: GFS pairing not proven (possession_proven="
+                f"{resp.get('possession_proven')!r}, proof_required_at="
+                f"{resp.get('proof_required_at')!r})",
+            )
     _save(state)
-    print("gfs-pair: ok (a + d + e connected to GFS)")
+    print("gfs-pair: ok (a + d + e connected to GFS, possession proven)")
 
 
 def cmd_gfs_open_signup() -> None:
@@ -1324,7 +1334,11 @@ def cmd_gfs_open_signup() -> None:
         f"{base}/api/gfs/connections/default", token=c["token"], method="POST"
     )
     _must("gfs-open-signup(connect)", s, conn, ok=(201,))
-    if conn.get("status") != "active" or conn.get("inbox_url") != gfs_url:
+    if (
+        conn.get("status") != "active"
+        or conn.get("inbox_url") != gfs_url
+        or conn.get("possession_proven") is not True
+    ):
         raise SystemExit(f"gfs-open-signup: unexpected connection {conn!r}")
     print(f"  c: connected via open sign-up — id={conn['id'][:8]} status=active")
 

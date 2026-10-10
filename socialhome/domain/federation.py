@@ -1566,6 +1566,10 @@ class GfsConnection:
     status: str  # pending | active | suspended
     paired_at: str
     created_at: str | None = None
+    #: When this connection's server first proved possession of the pinned
+    #: key (``POST /gfs/proof``); from then on the proof is REQUIRED (0094).
+    #: ``None`` = never proven (an older GFS, or not checked yet).
+    proof_required_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

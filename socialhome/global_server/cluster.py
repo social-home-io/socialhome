@@ -42,6 +42,7 @@ from ..crypto import (
 )
 from ..domain.space import normalize_category, normalize_join_mode
 from ..capabilities_sig import sign_capabilities
+from ..gfs_proof import sign_possession_proof
 from .domain import ClientInstance, ClusterNode, GfsFraudReport, GlobalSpace
 from .envelope_relay import ENVELOPE_INSTANCE_ID_RE
 from .federation import certified_authority_repin
@@ -808,6 +809,25 @@ class ClusterService:
         if not self._signing_key:
             return "", ""
         return sign_capabilities(self._signing_key, gfs_instance_id, capabilities)
+
+    @property
+    def has_signing_key(self) -> bool:
+        """Whether this node can sign (capability block, possession proof)."""
+        return bool(self._signing_key)
+
+    def sign_possession_proof(self, nonce: str, base_url: str) -> tuple[str, str]:
+        """Answer a household's ``POST /gfs/proof`` challenge with the
+        identity key (:mod:`socialhome.gfs_proof`).
+
+        Returns ``(proof_sig, proof_sig_suite)``, or ``("", "")`` when no
+        signing key is wired — the route then answers ``503`` and ``/gfs/info``
+        does not advertise ``proof_of_possession``. Same key as the capability
+        block; no new key is minted. The proof binds the KEY (shared by
+        every node of a cluster), never this node's instance id.
+        """
+        if not self._signing_key:
+            return "", ""
+        return sign_possession_proof(self._signing_key, nonce, base_url)
 
     # ─── Node registry API ────────────────────────────────────────────
 

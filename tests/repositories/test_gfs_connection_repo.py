@@ -7,6 +7,8 @@ the implementation the GFS publish path runs in production.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from socialhome.domain.federation import GfsConnection
@@ -178,3 +180,28 @@ async def test_list_active_listings_for_space(repo):
     rows = await repo.list_active_listings_for_space("space-1")
     assert [c.id for c in rows] == ["gfs-1", "gfs-2"]
     assert await repo.list_active_listings_for_space("space-9") == []
+
+
+async def test_proof_required_starts_unset_and_ratchets(repo):
+    await repo.save(_conn("gfs-1"))
+    assert (await repo.get("gfs-1")).proof_required_at is None
+    assert await repo.mark_proof_required("gfs-1", "2026-10-10T00:00:00+00:00")
+    assert (await repo.get("gfs-1")).proof_required_at == "2026-10-10T00:00:00+00:00"
+    # Never moves once set — the first proof is what is remembered.
+    assert not await repo.mark_proof_required("gfs-1", "2027-01-01T00:00:00+00:00")
+    assert (await repo.get("gfs-1")).proof_required_at == "2026-10-10T00:00:00+00:00"
+
+
+async def test_save_never_clears_the_proof_ratchet(repo):
+    await repo.save(_conn("gfs-1"))
+    await repo.mark_proof_required("gfs-1", "2026-10-10T00:00:00+00:00")
+    # A later save of an object read before the stamp (None) keeps it.
+    await repo.save(_conn("gfs-1"))
+    assert (await repo.get("gfs-1")).proof_required_at == "2026-10-10T00:00:00+00:00"
+
+
+async def test_save_persists_a_proof_stamp(repo):
+    await repo.save(
+        replace(_conn("gfs-1"), proof_required_at="2026-10-10T01:00:00+00:00")
+    )
+    assert (await repo.get("gfs-1")).proof_required_at == "2026-10-10T01:00:00+00:00"

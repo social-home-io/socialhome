@@ -23,6 +23,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from ...gfs_proof import PROOF_ROUTE
 from ...domain.gfs_channel import (
     CHANNEL_EPOCH_ROUTE,
     CHANNEL_PUBLISH_ANON_ROUTE,
@@ -80,6 +81,7 @@ from .cluster import (
 from .relay import (
     AppealView,
     GfsInfoView,
+    GfsProofView,
     HealthzView,
     InstanceUpdateView,
     PublishView,
@@ -165,6 +167,10 @@ def register_routes(
     # public_key}``.
     app.router.add_view("/gfs/info", GfsInfoView)
     app.router.add_view("/gfs/register", RegisterView)
+    # Proof of possession: the GFS signs a household's fresh nonce, bound to
+    # its own base_url, so a host replaying ``/gfs/info`` elsewhere can't pass
+    # for it. Unauthenticated, identity-free, rate-limited per IP.
+    app.router.add_view(PROOF_ROUTE, GfsProofView)
     # Open sign-up (operator opt-in): a fresh pairing token over JSON, so
     # household onboarding can connect without scanning the QR code.
     app.router.add_view("/gfs/signup-token", SignupTokenView)

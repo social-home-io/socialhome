@@ -1,0 +1,36 @@
+-- 0094 — ``gfs_connections.proof_required_at``: the proof-of-possession
+-- ratchet. Follows 0093 (space GFS servers).
+--
+-- A household pins a GFS's id + key from the unauthenticated ``/gfs/info``.
+-- A GFS that advertises ``proof_of_possession`` signs a fresh nonce bound to
+-- its base_url (``POST /gfs/proof``, ``socialhome/gfs_proof.py``). The first
+-- time a connection's server proves it, the household stamps this column
+-- (UTC, tz-aware ISO 8601 like ``paired_at``). From then on that connection
+-- REQUIRES the proof: a verified failure makes the household skip the
+-- reconnect bulk reconcile (identity-bound subscribe / pin heal / epoch
+-- notice to that address); a retryable answer holds it for a bounded retry;
+-- and pairing another connection under the same key needs a proof. NULL =
+-- never proven (an older GFS, or not yet checked).
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every code path touching ``gfs_connections``:
+--       ``repositories/gfs_connection_repo.py`` (save / get / list /
+--       update_status / update_display_name / update_gfs_instance_id /
+--       delete), ``GfsConnectionService`` pairing + ``/gfs/info`` refresh +
+--       id rebind (#871), ``gfs_space_seats`` (0092, binds a seat to id + key
+--       + URL, no FK), ``peer_gfs_routes`` (0081, FK cascade only). None of
+--       them records anything about the live server's proof.
+--   (2) Non-migration alternatives considered and rejected:
+--       * RAM-only (the first revision of this change): lost on restart, so
+--         an impostor replaying a pre-proof block after a household restart
+--         downgrades it for good — exactly what the ratchet must stop.
+--       * ``status`` — a pairing state machine with a CHECK; overloading it
+--         would change every ``status='active'`` read.
+--       * A key-value settings row keyed by connection id — no cascade on
+--         unpair (orphan rows), and a second place to read connection state.
+--       * Deriving it from the capability block — the block is static and
+--         replayable; the point is to remember that a proof WAS given.
+--   (3) Smallest change: one ``ADD COLUMN`` with a NULL default, no backfill,
+--       no rewrite of any existing row.
+
+ALTER TABLE gfs_connections ADD COLUMN proof_required_at TEXT;

@@ -44,6 +44,18 @@ body, or strip it to deny the relay:
 * **https:// at pair time.** A GFS URL must be ``https://`` unless its host is
   loopback / RFC1918 / link-local, so the pinning fetch itself can't be
   rewritten on-path.
+
+The descriptor is *static*, so it proves nothing about the server answering
+it: anyone can replay a real GFS's ``/gfs/info`` from another address. A GFS
+whose signed block offers ``proof_of_possession`` therefore also has to sign a
+fresh nonce with its KEY, bound to the URL this household used
+(:mod:`socialhome.gfs_proof`, ``POST /gfs/proof``), before the household
+registers. The first successful proof sets a persisted ratchet
+(``gfs_connections.proof_required_at``): from then on every GFS-WS (re)connect
+runs the identity-bound reconcile only after a fresh proof
+(:meth:`GfsConnectionService.possession_gate`).
+:meth:`GfsConnectionService.verify_gfs_possession` is the same check for
+callers that must re-bind to a GFS at a new address.
 """
 
 from __future__ import annotations
@@ -62,6 +74,14 @@ from typing import Literal
 import aiohttp
 
 from ..capabilities_sig import UnsupportedCapsSigSuite, verify_capabilities
+from ..gfs_proof import (
+    PROOF_CAPABILITY,
+    PROOF_ROUTE,
+    UnsupportedProofSigSuite,
+    new_proof_nonce,
+    normalize_gfs_base_url,
+    verify_possession_proof,
+)
 from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.media_constraints import (
@@ -200,7 +220,11 @@ class GfsSignupError(GfsConnectionError):
       endpoint said no (403/404);
     * ``busy`` — the GFS rate-limited the token request (429);
     * ``refused`` — the GFS turned the registration down (e.g. an expired
-      token).
+      token);
+    * ``unproven`` — the GFS offers proof of possession but could not prove
+      it holds the key ``/gfs/info`` names at the address used (an impostor
+      replaying a real descriptor, a relay, or a ``base_url`` that differs
+      from the address the household was given).
     """
 
     __slots__ = ("reason",)
@@ -222,22 +246,22 @@ def _contact_reason(exc: GfsConnectionError, *, answered: str) -> str:
     return answered
 
 
-def _descriptor_offers_open_signup(info: dict) -> bool:
-    """Whether a ``/gfs/info`` body proves ``open_signup`` under its OWN key.
+def _descriptor_capabilities(info: dict) -> dict | None:
+    """The capability block of a ``/gfs/info`` body, verified under its OWN key.
 
     Before pairing there is no pinned key yet, so the block is verified
     against the ``public_key`` in the same response — the key about to be
     pinned (TOFU, the trust :meth:`GfsConnectionService.pair` already
     extends to the key itself). Missing block, bad signature or an unknown
-    suite all answer ``False``; the unsigned top-level flags never count.
+    suite all answer ``None``; the unsigned top-level flags never count.
     """
     caps = info.get("capabilities")
     sig = info.get("capabilities_sig")
     suite = info.get("capabilities_sig_suite")
     if not isinstance(caps, dict) or not isinstance(sig, str) or not sig:
-        return False
+        return None
     if not isinstance(suite, str):
-        return False
+        return None
     try:
         ok = verify_capabilities(
             str(info.get("public_key") or ""),
@@ -249,11 +273,43 @@ def _descriptor_offers_open_signup(info: dict) -> bool:
     except UnsupportedCapsSigSuite:
         log.warning(
             "GFS /gfs/info signed its capability block with the unknown suite"
-            " %r — open sign-up not offered",
+            " %r — treating it as unsigned",
             suite,
         )
-        return False
-    return bool(ok) and caps.get("open_signup") is True
+        return None
+    return caps if ok else None
+
+
+def _descriptor_offers_open_signup(info: dict) -> bool:
+    """Whether a ``/gfs/info`` body proves ``open_signup`` under its OWN key."""
+    caps = _descriptor_capabilities(info)
+    return caps is not None and caps.get("open_signup") is True
+
+
+#: Outcome of one ``POST /gfs/proof`` challenge. ``failed`` is the only
+#: identity verdict: a 200 whose signature does not verify against the key at
+#: this address (an impostor, a relay, a ``base_url`` that differs from the
+#: stored address), or whose proof is malformed / names an unknown suite.
+#: ``busy`` (429) and ``unreachable`` (no answer, a 5xx, a 404 / 405 from a
+#: node that does not know the route yet — a rolling deploy behind a balancer
+#: — or any other unexpected status: a 3xx, a WAF's 403, a 400) are retryable
+#: and say nothing about identity.
+ProofOutcome = Literal["proven", "failed", "busy", "unreachable"]
+
+#: What :meth:`GfsConnectionService.possession_gate` answers: ``pass`` (run the
+#: reconnect reconcile), ``retry`` (hold it — retryable; schedule a retry) or
+#: ``refuse`` (a verified failure on a connection that must prove its key).
+GateResult = Literal["pass", "retry", "refuse"]
+
+#: How long a successful proof is reused by the reconnect gate before it
+#: challenges again — a flapping socket costs one challenge per window.
+PROOF_REUSE_S: float = 300.0
+
+
+def _possession_key(conn: GfsConnection) -> tuple[str, str]:
+    """(connection id, normalized address) — so a check of a candidate copy
+    at another URL never overwrites the connection's own answer."""
+    return (conn.id, normalize_gfs_base_url(conn.inbox_url))
 
 
 def _replaces_of(caps: dict) -> frozenset[str]:
@@ -297,6 +353,9 @@ class GfsConnectionService:
         "_rebind_warned",
         "_replaces",
         "_on_listings_changed",
+        "_possession",
+        "_proof_offered",
+        "_proven_at",
     )
 
     def __init__(
@@ -411,6 +470,19 @@ class GfsConnectionService:
         #: What a grant issued before a rebind may still name for this server
         #: (:meth:`known_instance_ids`).
         self._replaces: dict[str, frozenset[str]] = {}
+        # Proof of possession per connection, as last observed in this
+        # process: ``True`` = the server at the connection's URL signed a fresh
+        # nonce with the pinned key, ``False`` = it does not offer the proof
+        # (an older GFS) or failed it, absent = not checked yet. What is
+        # ENFORCED is the persisted ratchet (``proof_required_at``, see
+        # :meth:`possession_gate`); this map only reports.
+        self._possession: dict[tuple[str, str], bool] = {}
+        # Whether the latest verified capability block of a connection offered
+        # ``proof_of_possession`` (RAM, refreshed with every /gfs/info fetch).
+        self._proof_offered: dict[str, bool] = {}
+        # ``time.monotonic()`` of each connection's latest successful proof —
+        # the reconnect gate's reuse window (:data:`PROOF_REUSE_S`).
+        self._proven_at: dict[str, float] = {}
 
     def attach_on_disconnect(
         self, hook: Callable[[GfsConnection], Awaitable[object]]
@@ -620,9 +692,14 @@ class GfsConnectionService:
         own_keywrap_public_key_hex: str,
         own_keywrap_sig: str,
     ) -> GfsConnection:
-        """:meth:`_register`, with its failure classified for the routes."""
+        """:meth:`_register`, with its failure classified for the routes.
+
+        Proof of possession runs FIRST: an impostor learns neither the token
+        nor this household's identity.
+        """
+        proven = await self._require_possession(gfs_url, info)
         try:
-            return await self._register(
+            conn = await self._register(
                 gfs_url,
                 info,
                 token,
@@ -631,6 +708,7 @@ class GfsConnectionService:
                 own_display_name=own_display_name,
                 own_keywrap_public_key_hex=own_keywrap_public_key_hex,
                 own_keywrap_sig=own_keywrap_sig,
+                proven=proven,
             )
         except GfsConnectionError as exc:
             # No status = never answered; a 5xx = the GFS is having trouble.
@@ -640,6 +718,181 @@ class GfsConnectionService:
                 reason=_contact_reason(exc, answered="refused"),
                 status=exc.status,
             ) from exc
+        self._possession[_possession_key(conn)] = proven
+        if proven:
+            self._proven_at[conn.id] = time.monotonic()
+        return conn
+
+    async def _require_possession(self, gfs_url: str, info: dict) -> bool:
+        """Demand proof of possession from a GFS that offers it.
+
+        Returns ``True`` when the GFS proved it holds the key in *info* at
+        *gfs_url*, ``False`` when its signed block doesn't offer the proof
+        (an older GFS — paired as before, recorded unproven, logged at INFO).
+        Raises :class:`GfsSignupError`: ``unproven`` when it offers the proof
+        and fails it — or offers none while this household already holds a
+        PROVEN connection under the same key (the ratchet: a replayed
+        pre-proof descriptor at another address) — ``busy`` on a 429,
+        ``unreachable`` when the challenge got no usable answer.
+
+        Residual: a replayed pre-proof descriptor for a key this household
+        never saw proven still pairs as "older GFS" — recorded unproven, and
+        every check that requires the proof (the reconnect gate once a later
+        proof ratchets it, :meth:`verify_gfs_possession`) refuses it.
+        """
+        caps = _descriptor_capabilities(info)
+        public_key = str(info.get("public_key") or "")
+        if caps is None or caps.get(PROOF_CAPABILITY) is not True:
+            if await self._key_requires_proof(public_key):
+                log.warning(
+                    "GFS %s serves the key of a connection that proved "
+                    "possession before, but offers no %s — refusing (a replayed "
+                    "old descriptor, or that GFS rolled back)",
+                    gfs_url,
+                    PROOF_CAPABILITY,
+                )
+                raise GfsSignupError(
+                    "The GFS no longer proves it holds its key",
+                    reason="unproven",
+                )
+            log.info(
+                "GFS %s (%r) does not offer %s — pairing without proof that it "
+                "holds the key its /gfs/info names (older GFS); the connection "
+                "is recorded as unproven",
+                gfs_url,
+                str(info.get("gfs_instance_id") or ""),
+                PROOF_CAPABILITY,
+            )
+            return False
+        outcome = await self._prove(gfs_url, public_key)
+        if outcome == "proven":
+            return True
+        if outcome == "busy":
+            raise GfsSignupError(
+                "The GFS rate-limited the proof of possession", reason="busy"
+            )
+        if outcome == "unreachable":
+            raise GfsSignupError(
+                "GFS unreachable while proving possession of its key",
+                reason="unreachable",
+            )
+        raise GfsSignupError(
+            "The GFS could not prove it holds the key its /gfs/info names",
+            reason="unproven",
+        )
+
+    async def _key_requires_proof(self, public_key: str) -> bool:
+        """Whether a connection pinning *public_key* has the proof ratchet."""
+        key = public_key.strip().lower()
+        return any(
+            c.proof_required_at is not None and c.public_key.strip().lower() == key
+            for c in await self._repo.list_all()
+        )
+
+    async def _prove(self, gfs_url: str, public_key_hex: str) -> ProofOutcome:
+        """One ``POST {gfs_url}/gfs/proof`` challenge. Never raises.
+
+        Verifies against *public_key_hex* (the key being pinned, or the one
+        already pinned — the cluster-wide identity; the instance id is a
+        per-node label and not part of the proof) and against *gfs_url* — the
+        address THIS household used, never one the server reports. Every
+        answered-but-wrong case is ``failed`` and logged at WARNING with what
+        the server reported.
+        """
+        try:
+            client = self._client()
+        except RuntimeError:
+            return "unreachable"
+        nonce = new_proof_nonce()
+        try:
+            async with client.post(
+                f"{gfs_url}{PROOF_ROUTE}",
+                json={"nonce": nonce},
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 429:
+                    log.warning("GFS %s rate-limited %s", gfs_url, PROOF_ROUTE)
+                    return "busy"
+                if resp.status != 200:
+                    # A 5xx, a 404 / 405 from a node that does not know the
+                    # route (yet) — a rolling deploy behind a balancer — a
+                    # redirect, a WAF's 403, a 400: unexpected, retryable,
+                    # never a verdict about the key.
+                    log.warning(
+                        "GFS %s %s answered HTTP %d — retryable, not a verdict "
+                        "about its key",
+                        gfs_url,
+                        PROOF_ROUTE,
+                        resp.status,
+                    )
+                    return "unreachable"
+                try:
+                    body = await resp.json()
+                except aiohttp.ContentTypeError, ValueError:
+                    body = None
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning("GFS %s unreachable during %s: %s", gfs_url, PROOF_ROUTE, exc)
+            return "unreachable"
+        if not isinstance(body, dict):
+            log.warning("GFS %s returned a malformed possession proof", gfs_url)
+            return "failed"
+        sig = body.get("proof_sig")
+        suite = body.get("proof_sig_suite")
+        if not isinstance(sig, str) or not isinstance(suite, str):
+            log.warning("GFS %s returned a malformed possession proof", gfs_url)
+            return "failed"
+        try:
+            ok = verify_possession_proof(public_key_hex, nonce, gfs_url, sig, suite)
+        except UnsupportedProofSigSuite:
+            log.warning(
+                "GFS %s signed its possession proof with the unknown suite %r",
+                gfs_url,
+                suite[:64],
+            )
+            return "failed"
+        if not ok:
+            log.warning(
+                "GFS %s FAILED proof of possession: the signature does not "
+                "verify against the key %s… at this address. The server "
+                "reported instance id %r and base_url %r — an impostor "
+                "replaying the descriptor, a relay, or a GFS whose base_url "
+                "differs from the address this household uses",
+                gfs_url,
+                public_key_hex[:16],
+                str(body.get("gfs_instance_id") or "")[:128],
+                str(body.get("base_url") or "")[:200],
+            )
+            return "failed"
+        return "proven"
+
+    def possession_proven(self, conn: GfsConnection) -> bool | None:
+        """Whether *conn*'s server proved possession of the pinned key.
+
+        ``True`` proven at pairing / the latest WS connect, ``False`` an older
+        GFS without the proof or a failed proof, ``None`` not checked yet in
+        this process. RAM cache only — never a network call.
+        """
+        return self._possession.get(_possession_key(conn))
+
+    async def verify_gfs_possession(self, conn: GfsConnection) -> bool:
+        """Challenge *conn*'s server NOW: does the server at ``conn.inbox_url``
+        hold the key this household pinned (``conn.public_key``)?
+
+        The hook for re-binding to a GFS that moved: pass a copy of the
+        connection with the candidate address
+        (``dataclasses.replace(conn, inbox_url=new_url)``) — ``True`` only
+        when the server there signs a fresh nonce with the PINNED key, bound
+        to that address. An older GFS without ``/gfs/proof``, an unreachable
+        one, or any failure answers ``False``. Never raises. Records the answer
+        under (connection id, address) — a candidate copy never overwrites
+        the connection's own entry — unless the outcome was retryable; never
+        touches the persisted ratchet.
+        """
+        outcome = await self._prove(conn.inbox_url.rstrip("/"), conn.public_key)
+        if outcome in ("failed", "proven"):
+            self._possession[_possession_key(conn)] = outcome == "proven"
+        return outcome == "proven"
 
     async def pair_open_signup(
         self,
@@ -833,8 +1086,10 @@ class GfsConnectionService:
         own_display_name: str,
         own_keywrap_public_key_hex: str,
         own_keywrap_sig: str,
+        proven: bool = False,
     ) -> GfsConnection:
-        """Register with *token*, pin the key from *info*, save the row.
+        """Register with *token*, pin the key from *info*, save the row
+        (with the proof ratchet set when the GFS just proved possession).
 
         Shared by QR pairing and open sign-up so the two can never send
         different fields: the register body below is the whole of what a
@@ -908,6 +1163,7 @@ class GfsConnectionService:
             inbox_url=gfs_url,
             status=local_status,
             paired_at=now,
+            proof_required_at=now if proven else None,
         )
         await self._repo.save(conn)
         # Seed the capability cache from the descriptor we already fetched, so
@@ -1147,6 +1403,8 @@ class GfsConnectionService:
             self._envelope_relay[conn.id] = True
         if caps is not None and caps.get("addressee_key") is True:
             self._addressee_key[conn.id] = True
+        if caps is not None:
+            self._proof_offered[conn.id] = caps.get(PROOF_CAPABILITY) is True
 
     def addressee_key_for(self, conn: GfsConnection) -> str | None:
         """The server key to bind into a request to *conn* (``gfs_key``,
@@ -1485,6 +1743,107 @@ class GfsConnectionService:
 
     async def _spaces_listed_on(self, gfs_id: str) -> list[str]:
         return sorted({p.space_id for p in await self._repo.list_publications(gfs_id)})
+
+    async def possession_gate(self, gfs_id: str) -> GateResult:
+        """Whether the GFS-WS (re)connect's BULK reconcile may run now for
+        *gfs_id*: pin heal, seat re-subscribe (and seat rebind), member epoch
+        notices, the name push and the content-key reconcile — the
+        identity-bound requests the household sends on its own on every
+        connect.
+
+        What it does not cover: the socket's signed hello has already been
+        sent by then (the supervisor connects before this runs), and
+        user-driven traffic (a publish, a follow, a report) is not gated.
+        The gate withholds only that bulk reconcile.
+
+        Call it right after :meth:`refresh_connection_metadata` (which warms
+        the capability cache). Rules:
+
+        * **Proof required** — this connection has the ratchet
+          (``proof_required_at``, persisted), or another connection pinning
+          the same key has it: a fresh proof (or one within
+          :data:`PROOF_REUSE_S`) → ``pass``; a verified failure →
+          ``refuse``; anything retryable (no answer, 5xx, 404 / 405, 429,
+          another unexpected status) → ``retry`` — the caller retries
+          gate + reconcile later, so a rolling deploy never costs the
+          reconcile. A server that no longer advertises the capability is
+          warned about and challenged anyway.
+        * **Not required, capability offered**: one challenge. Proven → the
+          ratchet is set, ``pass``. Anything else → ``pass`` (a ``failed``
+          proof with a WARNING, no ratchet): the ratchet protects only
+          connections that once proved — a self-hosted GFS paired at a LAN
+          address or alias other than its ``base_url`` keeps working.
+        * **Not offered, not required** (an older GFS): ``pass``, unproven.
+
+        Never raises; an unknown connection answers ``pass`` (nothing to gate).
+        """
+        conn = await self._repo.get(gfs_id)
+        if conn is None:
+            return "pass"
+        required = conn.proof_required_at is not None or (
+            await self._key_requires_proof(conn.public_key)
+        )
+        offered = self._proof_offered.get(conn.id, False)
+        key = _possession_key(conn)
+        if not required and not offered:
+            self._possession[key] = False
+            return "pass"
+        if required and not offered:
+            log.warning(
+                "GFS %r (%s) proved possession of its key before and now offers "
+                "no %s — a rollback, a replayed old descriptor, or another "
+                "server at that address; challenging anyway",
+                conn.display_name,
+                conn.inbox_url,
+                PROOF_CAPABILITY,
+            )
+        last = self._proven_at.get(conn.id)
+        if last is not None and time.monotonic() - last < PROOF_REUSE_S:
+            return "pass"
+        outcome = await self._prove(conn.inbox_url.rstrip("/"), conn.public_key)
+        if outcome == "proven":
+            self._possession[key] = True
+            self._proven_at[conn.id] = time.monotonic()
+            if conn.proof_required_at is None:
+                await self._repo.mark_proof_required(
+                    conn.id, datetime.now(timezone.utc).isoformat()
+                )
+                log.info(
+                    "GFS %r (%s) proved possession of its key — required from now on",
+                    conn.display_name,
+                    conn.inbox_url,
+                )
+            return "pass"
+        self._proven_at.pop(conn.id, None)
+        if outcome == "failed":
+            self._possession[key] = False
+        if not required:
+            if outcome == "failed":
+                log.warning(
+                    "GFS %r (%s) offers proof of possession but did not prove "
+                    "its key at this address (often: paired at a LAN address "
+                    "or alias other than its base_url) — reconciling anyway, "
+                    "nothing proven here yet to enforce",
+                    conn.display_name,
+                    conn.inbox_url,
+                )
+            return "pass"
+        if outcome == "failed":
+            log.warning(
+                "GFS %r (%s) FAILED proof of possession of the key it proved "
+                "before — skipping the reconnect reconcile",
+                conn.display_name,
+                conn.inbox_url,
+            )
+            return "refuse"
+        log.warning(
+            "GFS %r (%s): proof of possession not available on this connect "
+            "(%s) — holding the reconnect reconcile for a retry",
+            conn.display_name,
+            conn.inbox_url,
+            outcome,
+        )
+        return "retry"
 
     async def disconnect(self, gfs_id: str) -> None:
         """Remove a GFS connection and all its publications.

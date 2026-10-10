@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import aiohttp
@@ -14,9 +15,12 @@ from socialhome.app_keys import (
     gfs_ws_supervisor_key,
 )
 from socialhome.auth import sha256_token_hash
+from socialhome.capabilities_sig import sign_capabilities
 from socialhome.config import Config
-from socialhome.crypto import derive_user_id
+from socialhome.crypto import derive_user_id, generate_identity_keypair
 from socialhome.domain.federation import GfsConnection
+from socialhome.gfs_proof import PROOF_CAPABILITY
+from socialhome.infrastructure import gfs_reconcile_retry as reconcile_retry_mod
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 
 from .conftest import _auth
@@ -439,6 +443,52 @@ async def test_pair_answers_422_gfs_pairing_failed_for_an_insecure_url(client):
     assert session.posted == []
 
 
+def _info_offering_proof() -> dict:
+    """A descriptor whose SIGNED block offers ``proof_of_possession``."""
+    kp = generate_identity_keypair()
+    caps = {PROOF_CAPABILITY: True}
+    sig, suite = sign_capabilities(kp.private_key, "inst-remote", caps)
+    return {
+        **_GFS_INFO,
+        "public_key": kp.public_key.hex(),
+        "capabilities": caps,
+        "capabilities_sig": sig,
+        "capabilities_sig_suite": suite,
+    }
+
+
+async def test_pair_answers_422_gfs_proof_failed_when_the_proof_fails(client):
+    """The GFS offers proof of possession and can't give one (here: the
+    challenge answer carries no signature) — refused before registering."""
+    session = _StubSession(get_body=_info_offering_proof(), body={"nope": True})
+    r = await _pair(client, session)
+    assert r.status == 422, await r.text()
+    body = await r.json()
+    assert body["error"]["code"] == "GFS_PROOF_FAILED"
+    # Only the challenge left the household — never the registration.
+    assert [set(b) for b in session.posted] == [{"nonce"}]
+
+
+async def test_pair_reports_possession_unproven_for_an_older_gfs(client):
+    session = _StubSession(get_body=_GFS_INFO, body={"status": "registered"})
+    r = await _pair(client, session)
+    assert r.status == 201, await r.text()
+    assert (await r.json())["possession_proven"] is False
+
+
+async def test_list_and_detail_report_possession_from_the_cache(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_gfs(client, "gfs-2")
+    svc = client.app[gfs_connection_service_key]
+    svc._possession[("gfs-1", "https://gfs.example.com")] = True
+    r = await client.get("/api/gfs/connections", headers=_auth(client._tok))
+    body = {c["id"]: c for c in await r.json()}
+    assert body["gfs-1"]["possession_proven"] is True
+    assert body["gfs-2"]["possession_proven"] is None
+    r = await client.get("/api/gfs/connections/gfs-1", headers=_auth(client._tok))
+    assert (await r.json())["possession_proven"] is True
+
+
 # ─── GET /api/gfs/connections/{id} ──────────────────────────────────
 
 
@@ -665,3 +715,61 @@ async def test_unpublish_gfs_not_found(client):
         headers=_auth(client._tok),
     )
     assert r.status == 422
+
+
+# ─── Reconnect reconcile behind the proof-of-possession gate ─────────
+
+
+def _patch_gate(monkeypatch, svc, answers: list[str], healed: list[str]) -> None:
+    async def _refresh(self, gfs_id):
+        return None
+
+    async def _gate(self, gfs_id):
+        return answers.pop(0) if answers else "retry"
+
+    async def _heal(self, gfs_id):
+        healed.append(gfs_id)
+        return 0
+
+    cls = type(svc)
+    monkeypatch.setattr(cls, "refresh_connection_metadata", _refresh)
+    monkeypatch.setattr(cls, "possession_gate", _gate)
+    monkeypatch.setattr(cls, "heal_space_pins", _heal)
+
+
+@pytest.mark.parametrize(("gate", "runs"), [("pass", True), ("refuse", False)])
+async def test_reconnect_reconcile_runs_only_past_the_possession_gate(
+    client, monkeypatch, gate, runs
+):
+    """Once a connection's server proved its key (the ratchet), the bulk
+    reconnect reconcile (pin heal, seat re-subscribe, …) runs only after a
+    fresh proof; a verified failure skips it."""
+    monkeypatch.setattr(reconcile_retry_mod, "RETRY_DELAYS_S", (0.01,))
+    healed: list[str] = []
+    _patch_gate(monkeypatch, client.app[gfs_connection_service_key], [gate], healed)
+    await client.app[gfs_ws_supervisor_key]._on_connected("gfs-1")
+    await asyncio.sleep(0.05)
+    assert healed == (["gfs-1"] if runs else [])
+
+
+async def test_a_retryable_gate_answer_runs_the_reconcile_after_a_retry(
+    client, monkeypatch
+):
+    """A ratcheted connection whose proof got a retryable answer (a rolling
+    deploy's 404, a 503, a 429) does not lose its reconcile for the life of
+    the socket: the bounded retry runs gate + reconcile again."""
+    monkeypatch.setattr(reconcile_retry_mod, "RETRY_DELAYS_S", (0.01, 0.01, 0.01))
+    healed: list[str] = []
+    _patch_gate(
+        monkeypatch,
+        client.app[gfs_connection_service_key],
+        ["retry", "retry", "pass"],
+        healed,
+    )
+    await client.app[gfs_ws_supervisor_key]._on_connected("gfs-1")
+    assert healed == []
+    for _ in range(100):
+        if healed:
+            break
+        await asyncio.sleep(0.01)
+    assert healed == ["gfs-1"]

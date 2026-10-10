@@ -90,6 +90,7 @@ from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
 from .infrastructure.gfs_capability_warmup import GfsCapabilityWarmup
 from .infrastructure.gfs_info_refresh_scheduler import GfsInfoRefreshScheduler
+from .infrastructure.gfs_reconcile_retry import GfsReconcileRetry
 from .infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
 from .infrastructure.dm_gc_scheduler import DmGcScheduler
 from .infrastructure.media_orphan_sweep_scheduler import MediaOrphanSweepScheduler
@@ -3022,6 +3023,7 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
     gfs_capability_warmup: GfsCapabilityWarmup | None = None
     gfs_info_refresh: GfsInfoRefreshScheduler | None = None
+    gfs_reconcile_retry: GfsReconcileRetry | None = None
     routed_handler: SpaceRoutedHandler | None = None
     replay_cache_scheduler: ReplayCachePruneScheduler | None = None
     gfs_route_discovery_scheduler: GfsRouteDiscoveryScheduler | None = None
@@ -4091,6 +4093,17 @@ def create_app(config: Config | None = None) -> web.Application:
             if gfs_route_discovery_scheduler is not None:
                 gfs_route_discovery_scheduler.trigger()
             await gfs_connection_service.refresh_connection_metadata(gfs_id)
+            # Proof of possession: once this connection's server has proved
+            # it holds the pinned key (the persisted ratchet), the bulk
+            # reconcile below — pin heal, seat re-subscribe, epoch notices,
+            # the name push, the key reconcile — runs only after a fresh
+            # proof at this address. (The socket's signed hello is already
+            # out; user-driven traffic is not gated.) A retryable answer
+            # holds it for a bounded retry instead of dropping it.
+            await _gated_gfs_reconcile(gfs_id)
+
+        async def _gfs_reconcile(gfs_id: str) -> None:
+            """The bulk reconnect reconcile, run past the possession gate."""
             # Self-heal the space-authority pins on the GFS: ``/gfs/publish``
             # authorizes a relay on the space's TOFU-pinned authority key
             # alone, so a space whose GFS row pinned none (published before
@@ -4162,6 +4175,33 @@ def create_app(config: Config | None = None) -> web.Application:
             if space_subscriber_key_outbound is not None:
                 await space_subscriber_key_outbound.reconcile(gfs_id)
 
+        async def _gated_gfs_reconcile(gfs_id: str) -> str:
+            """Gate + reconcile; a ``retry`` answer is handed to the bounded
+            retry (15 s, 1 min, 5 min, then the hourly pass). Returns the
+            retry vocabulary: ``done`` / ``retry`` / ``skip``."""
+            result = await gfs_connection_service.possession_gate(gfs_id)
+            if result == "pass":
+                reconcile_retry.cancel(gfs_id)
+                await _gfs_reconcile(gfs_id)
+                return "done"
+            if result == "retry":
+                reconcile_retry.schedule(gfs_id)
+                return "retry"
+            reconcile_retry.cancel(gfs_id)
+            return "skip"
+
+        async def _retry_gfs_reconcile(gfs_id: str) -> str:
+            """One retry attempt (the retry loop owns the pending state)."""
+            result = await gfs_connection_service.possession_gate(gfs_id)
+            if result == "pass":
+                await _gfs_reconcile(gfs_id)
+                return "done"
+            return "retry" if result == "retry" else "skip"
+
+        reconcile_retry = GfsReconcileRetry(_retry_gfs_reconcile)
+        nonlocal gfs_reconcile_retry
+        gfs_reconcile_retry = reconcile_retry
+
         # Post-restore authority rotation BEFORE any transport starts (GFS
         # WebSocket, outbox, reconnect queue): until it runs, the hosted
         # space rows are the restored ones, and nothing arriving from a peer
@@ -4213,9 +4253,17 @@ def create_app(config: Config | None = None) -> web.Application:
         # household whose socket stays up for days still adopts its
         # server's new public id (only one the server signs it replaces).
         nonlocal gfs_info_refresh
-        gfs_info_refresh = GfsInfoRefreshScheduler(
-            gfs_connection_service.refresh_all_metadata
-        )
+
+        async def _hourly_gfs_refresh(*, should_stop) -> int:
+            refreshed = await gfs_connection_service.refresh_all_metadata(
+                should_stop=should_stop
+            )
+            # A reconcile still held back by a retryable proof answer gets
+            # another gate + reconcile each pass until it runs or is refused.
+            await reconcile_retry.run_pending()
+            return refreshed
+
+        gfs_info_refresh = GfsInfoRefreshScheduler(_hourly_gfs_refresh)
         await gfs_info_refresh.start()
 
         # 6. OutboxProcessor — drains federation_outbox in the background.
@@ -4553,6 +4601,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_capability_warmup.stop()
         if gfs_info_refresh is not None:
             await gfs_info_refresh.stop()
+        if gfs_reconcile_retry is not None:
+            await gfs_reconcile_retry.stop()
         if gfs_ws_supervisor is not None:
             await gfs_ws_supervisor.stop()
         # Before the publish session closes: a retry rides it.

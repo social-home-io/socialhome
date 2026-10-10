@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict
 
 from aiohttp import web
 
 from .. import app_keys as K
+from ...gfs_proof import PROOF_CAPABILITY, bindable_base_url, parse_proof_nonce
 from ..admin_service import verify_report_signature
 from ..public import (
     PAIR_TOKEN_TTL_SECONDS,
@@ -28,6 +30,10 @@ _SUBSCRIBE_ACTIONS = frozenset({"subscribe", "unsubscribe"})
 #: reached the SQLite bind and produced a 500 + ERROR traceback on every
 #: unauthenticated hit — a log-volume DoS.
 _MAX_WIRE_ID_CHARS = 128
+
+#: Body cap for ``POST /gfs/proof`` — a ``{"nonce": "<43 chars>"}`` object is
+#: ~60 bytes; anything near this is not a proof request.
+_PROOF_MAX_BODY_BYTES = 1024
 
 
 def public_space_dict(space) -> dict:
@@ -122,6 +128,12 @@ class GfsInfoView(GfsBaseView):
         # Signed because the household offers that one-click path only when
         # it is proven — a forged flag would only waste one request, but a
         # bare flag is never what a household trusts.
+        # ``proof_of_possession``: this GFS answers ``POST /gfs/proof`` with a
+        # nonce signature bound to its ``base_url`` (:mod:`socialhome
+        # .gfs_proof`), so a household can tell it from a host replaying this
+        # very descriptor elsewhere. Only advertised when it can actually sign
+        # one. Signed like its siblings; a replayed OLD block without it makes
+        # a household pair "unproven", never "proven".
         capabilities: dict[str, object] = {
             "anonymous_publish": True,
             "envelope_relay": True,
@@ -135,6 +147,7 @@ class GfsInfoView(GfsBaseView):
             # key) on member publish, epoch notices and channel requests, and
             # refuses one that is not its own key.
             "addressee_key": True,
+            PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         if cfg.instance_id_aliases:
             # The former ids this server answers to (``instance_id_aliases``),
@@ -161,6 +174,61 @@ class GfsInfoView(GfsBaseView):
                 "relay space events to this server until it is signed",
             )
         return web.json_response(body)
+
+
+def _can_prove(cfg, cluster) -> bool:
+    """Whether this node can answer ``POST /gfs/proof`` at all: it needs its
+    identity key and a configured public URL to bind the proof to."""
+    return cluster.has_signing_key and bool(bindable_base_url(cfg.base_url))
+
+
+class GfsProofView(GfsBaseView):
+    """``POST /gfs/proof`` — prove this server holds its identity key.
+
+    Body ``{nonce}``: a fresh b64url 32-byte challenge from the household and
+    nothing else — no identity, so the GFS learns no more than a ``/gfs/info``
+    fetch tells it. Answers ``{gfs_instance_id, gfs_key, base_url, nonce, proof_sig,
+    proof_sig_suite}``, the signature over ``b"gfs-proof:v1:" +
+    canonical({base_url, gfs_key, nonce, suite})`` with the identity
+    key ``/gfs/info`` publishes (:mod:`socialhome.gfs_proof`).
+
+    ``base_url`` is this server's own ``[server] base_url`` — never the Host
+    header or anything in the body. That is the point: an impostor at another
+    address that forwards the challenge here gets back a proof for THIS
+    address, which fails at its own.
+
+    Unauthenticated: body-capped (:data:`_PROOF_MAX_BODY_BYTES`) and
+    rate-limited per IP (:func:`~socialhome.global_server.public
+    .build_proof_rate_limit`). ``400`` for a missing / malformed nonce,
+    ``503`` when this node cannot sign.
+    """
+
+    async def post(self) -> web.Response:
+        raw = await self.bounded_raw(_PROOF_MAX_BODY_BYTES)
+        try:
+            body = json.loads(raw)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(reason="Invalid JSON body") from exc
+        nonce = parse_proof_nonce(body.get("nonce") if isinstance(body, dict) else None)
+        if nonce is None:
+            raise web.HTTPBadRequest(reason="Invalid field: nonce")
+        cfg = self.svc(K.gfs_config_key)
+        cluster = self.svc(K.gfs_cluster_key)
+        if not _can_prove(cfg, cluster):
+            return web.json_response({"error": "unavailable"}, status=503)
+        base_url = bindable_base_url(cfg.base_url)
+        sig, suite = cluster.sign_possession_proof(nonce, base_url)
+        return web.json_response(
+            {
+                # Informational: the proof binds the key, not this node's id.
+                "gfs_instance_id": cfg.instance_id,
+                "gfs_key": cluster.own_public_key_hex,
+                "base_url": base_url,
+                "nonce": nonce,
+                "proof_sig": sig,
+                "proof_sig_suite": suite,
+            }
+        )
 
 
 class SignupTokenView(GfsBaseView):

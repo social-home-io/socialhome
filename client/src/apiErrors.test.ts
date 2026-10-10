@@ -123,6 +123,7 @@ describe('apiErrorMessage — fallbacks', () => {
     [503, 'GFS_BUSY', 'The GFS is busy. Try again in a minute.'],
     [422, 'GFS_IDENTITY_MISMATCH', "This doesn't look like the Social Home GFS. Check the address."],
     [422, 'GFS_PAIRING_FAILED', "The GFS didn't accept this household."],
+    [422, 'GFS_PROOF_FAILED', "The server at this address couldn't prove it is the GFS it claims to be. Check the address."],
     [409, 'ALREADY_CONNECTED', "You're already connected to this GFS."],
   ])('a GFS connect refusal (%i %s) is translated, never the server detail', (status, code, text) => {
     expect(apiErrorMessage(status, '/api/gfs/connections', { code, detail: 'server words' })).toBe(text)

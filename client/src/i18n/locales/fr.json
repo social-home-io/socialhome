@@ -2956,6 +2956,7 @@
   "error.gfs_signup_closed": "Ce GFS n'accepte pas d'inscriptions pour le moment. Demandez un code d'appairage à son opérateur.",
   "error.gfs_busy": "Le GFS est occupé. Réessayez dans une minute.",
   "error.gfs_identity_mismatch": "Ce n'est apparemment pas le GFS de Social Home. Vérifiez l'adresse.",
+  "error.gfs_proof_failed": "Le serveur à cette adresse n'a pas pu prouver qu'il est bien le GFS qu'il prétend être. Vérifiez l'adresse.",
   "error.gfs_pairing_failed": "Le GFS n'a pas accepté ce foyer.",
   "error.gfs_already_connected": "Vous êtes déjà connecté à ce GFS.",
   "error.storage_full": "Votre Social Home n'a plus d'espace de stockage. Libérez de l'espace ou contactez votre admin.",

@@ -13,6 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from aiohttp.test_utils import TestServer
 
 from socialhome.app import create_app
 from socialhome import config as config_mod
@@ -32,15 +33,20 @@ PATH = "/api/gfs/connections/default"
 async def _gfs(aiohttp_client, tmp_dir: Path, *, open_signup: bool = True):
     data = tmp_dir / "gfs"
     data.mkdir(exist_ok=True)
+    # Served at exactly its configured base_url: the household demands proof
+    # of possession, which the GFS binds to that URL.
+    port = _free_port()
     cfg = GfsConfig(
         host="127.0.0.1",
-        port=0,
-        base_url="http://gfs.test",
+        port=port,
+        base_url=f"http://127.0.0.1:{port}",
         data_dir=str(data),
         instance_id="gfs-default",
         open_signup=open_signup,
     )
-    return await aiohttp_client(create_gfs_app(cfg))
+    return await aiohttp_client(
+        TestServer(create_gfs_app(cfg), host="127.0.0.1", port=port)
+    )
 
 
 def _url(tc) -> str:
