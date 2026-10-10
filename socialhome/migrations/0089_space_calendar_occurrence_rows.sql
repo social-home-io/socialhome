@@ -1,4 +1,4 @@
--- 0090 — Remove the virtual-occurrence rows an older §25.6 sync stored as
+-- 0089 — Remove the virtual-occurrence rows an older §25.6 sync stored as
 -- one-off space calendar events, and keep that shape out for good.
 --
 -- Until SYNC_SHAPE_VERSION 3 the ``calendar`` sync exporter read the

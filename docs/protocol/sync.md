@@ -160,7 +160,7 @@ what the space's retention keeps (`federation/sync/space/window.py`):
     and events drifted across the window's edge so a full and an
     incremental session disagreed. A receiver skips an `<id>@<start>`
     record whose suffix is its own start, from an older provider: it is a
-    view of a series, never a row — and migration 0090 removed the ones
+    view of a series, never a row — and migration 0089 removed the ones
     already stored, with their RSVPs and reminders, and refuses the shape
     at insert.)
   - the **post and comment tombstones** — only the host runs the post
@@ -423,7 +423,7 @@ Fail-safe toward more data, never less:
   every stream must not make every session full for the whole archive.
   When the archive is lifted (any path: a local unarchive, the host's
   config, a refreshed snapshot) the `spaces_unarchive_drops_applied_seq`
-  trigger (migration 0091) clears the space's `applied_seq`, so the next
+  trigger (migration 0090) clears the space's `applied_seq`, so the next
   periodic BEGIN carries no `have_seq` and streams the whole window;
 - **daily anti-entropy** — a full stream at least every 24 h per
   household, a backstop for anything a stamp could not express. No known

@@ -1,4 +1,4 @@
-"""Migration 0091 — lifting a space's archive drops the §25.6 echo
+"""Migration 0090 — lifting a space's archive drops the §25.6 echo
 (``space_instances.applied_seq``) for that space, so the next periodic sync
 streams in full and delivers what the archive refused."""
 
@@ -8,7 +8,7 @@ import sqlite3
 
 from socialhome.db.migrations import discover_migrations
 
-_VERSION = 91
+_VERSION = 90
 
 
 def _apply_through(conn: sqlite3.Connection, last: int) -> None:

@@ -26,7 +26,7 @@ def is_occurrence_id(event_id: str, start_iso: str) -> bool:
     where ``<start>`` is the occurrence's own start (``start_iso``)? The
     exact shape the expansion mints, so an id that merely contains ``@``
     (an ICS-style ``uid@host`` a legacy peer might use) is not one. The
-    database refuses the same shape (migration 0090)."""
+    database refuses the same shape (migration 0089)."""
     suffix = f"{OCCURRENCE_ID_SEPARATOR}{start_iso}"
     return bool(start_iso) and len(event_id) > len(suffix) and event_id.endswith(suffix)
 

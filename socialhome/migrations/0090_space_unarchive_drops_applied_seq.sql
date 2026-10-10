@@ -1,4 +1,4 @@
--- 0091 — Lifting a space's archive drops this household's §25.6 echo for
+-- 0090 — Lifting a space's archive drops this household's §25.6 echo for
 -- it, so the next periodic sync from every provider streams in full.
 --
 -- While a space is (reversibly) archived here, the sync receiver refuses a

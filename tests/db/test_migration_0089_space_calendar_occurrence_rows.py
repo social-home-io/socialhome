@@ -1,4 +1,4 @@
-"""Migration 0090 — the virtual-occurrence rows an older §25.6 sync stored
+"""Migration 0089 — the virtual-occurrence rows an older §25.6 sync stored
 as one-off space calendar events (``<series id>@<start>``) are removed with
 everything hanging off them, and no such row can be stored again."""
 
@@ -8,7 +8,7 @@ import sqlite3
 
 from socialhome.db.migrations import discover_migrations
 
-_VERSION = 90
+_VERSION = 89
 
 SERIES = "5e71e5"
 OCC_START = "2026-10-14T09:20:24.929393+00:00"
