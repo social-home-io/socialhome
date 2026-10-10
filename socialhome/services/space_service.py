@@ -7222,9 +7222,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     async def _maybe_purge_gfs_mirror(self, space_id: str) -> None:
         """Drop a GFS-mirrored stub once its last local subscriber leaves.
 
-        Both of the things this does — telling every paired GFS we are gone,
-        and deleting the row with its posts / gallery / bazaar / media — are
-        irreversible and visible to third parties, so they run only on
+        Both of the things this does — telling the GFS that seated the mirror
+        we are gone, and deleting the row with its posts / gallery / bazaar /
+        media — are irreversible and visible to third parties, so they run only on
         *positive* evidence that the row is a GFS mirror:
 
         * the space is ``GLOBAL`` (what the mirror seats), owned by another

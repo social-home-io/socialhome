@@ -361,16 +361,106 @@ async def test_subscribe_to_gfs_delegates(env):
     assert gfs.subscribes == [("sp-1", "gfs-1")]
 
 
-async def test_unsubscribe_hits_every_active_connection(env):
+def _directory(*space_ids: str) -> tuple[int, dict]:
+    """A whole ``GET /gfs/spaces`` directory body listing *space_ids*."""
+    return (200, {"spaces": [{"space_id": sid} for sid in space_ids]})
+
+
+async def _mirrored(env, space_id: str = "sp-1", *, gfs: str | None = "gfs-1"):
+    """A follower stub; ``gfs`` is the seating connection (``None`` = a
+    pre-v44 mirror with no recorded provenance)."""
+    repo = await _seat_subscription(env, space_id)
+    if gfs is not None:
+        await env.spaces.set_mirror_provenance(space_id, gfs_id=gfs, rotation_seq=0)
+    return repo
+
+
+@pytest.mark.security
+async def test_unsubscribe_reaches_only_the_gfs_that_seated_the_mirror(env):
+    """The unsubscribe is signed and identity-bound: sending it to a GFS that
+    never seated our subscription tells that operator we follow the space."""
     await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
     await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
+    await _mirrored(env, gfs="gfs-2")
+    gfs = _StubGfs()
+    session = _StubSession()
+    await _mirror(env, session, gfs).unsubscribe("sp-1")
+    assert gfs.unsubscribes == [("sp-1", "gfs-2")]
+    # Provenance is local — no GFS is even asked.
+    assert session.calls == []
+
+
+async def test_unsubscribe_skips_an_inactive_seating_gfs(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test", status="pending"))
+    await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
+    await _mirrored(env, gfs="gfs-1")
     gfs = _StubGfs()
     await _mirror(env, _StubSession(), gfs).unsubscribe("sp-1")
-    assert gfs.unsubscribes == [("sp-1", "gfs-1"), ("sp-1", "gfs-2")]
+    assert gfs.unsubscribes == []
+
+
+@pytest.mark.security
+async def test_unsubscribe_legacy_mirror_uses_the_whole_directory(env):
+    """A pre-v44 mirror has no provenance: fall back to the GFSs whose WHOLE
+    directory lists the space — never a space-specific probe."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
+    await _mirrored(env, gfs=None)
+    session = _StubSession(
+        {
+            "https://a.test/gfs/spaces": _directory("sp-1", "sp-x"),
+            "https://b.test/gfs/spaces": _directory("sp-x"),
+        }
+    )
+    gfs = _StubGfs()
+    await _mirror(env, session, gfs).unsubscribe("sp-1")
+    assert gfs.unsubscribes == [("sp-1", "gfs-1")]
+    assert session.calls == ["https://a.test/gfs/spaces", "https://b.test/gfs/spaces"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        (500, {}),
+        (200, {"spaces": "nope"}),
+        (200, {"spaces": [1, {"space_id": ["sp-1"]}, {}]}),
+        (200, {}, b"not json"),
+    ],
+)
+async def test_unsubscribe_legacy_unreadable_directory_contacts_nobody(env, entry):
+    """Fail closed: a directory we can't read proves nothing."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _mirrored(env, gfs=None)
+    session = _StubSession({"https://a.test/gfs/spaces": entry})
+    gfs = _StubGfs()
+    await _mirror(env, session, gfs).unsubscribe("sp-1")
+    assert gfs.unsubscribes == []
+
+
+async def test_unsubscribe_legacy_directory_transport_error_contacts_nobody(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _mirrored(env, gfs=None)
+    gfs = _StubGfs()
+    await _mirror(env, _StubSession(raise_for="a.test"), gfs).unsubscribe("sp-1")
+    assert gfs.unsubscribes == []
+
+
+async def test_unsubscribe_legacy_without_session_contacts_nobody(env):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _mirrored(env, gfs=None)
+    gfs = _StubGfs()
+    svc = GfsSpaceMirrorService(
+        space_repo=env.spaces,
+        gfs_connection_repo=env.conns,
+        gfs_connection_service=gfs,
+    )
+    await svc.unsubscribe("sp-1")
+    assert gfs.unsubscribes == []
 
 
 async def test_unsubscribe_swallows_gfs_errors(env):
     await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _mirrored(env, gfs="gfs-1")
     gfs = _StubGfs(raise_on_unsubscribe=True)
     # Must not propagate — a down GFS never blocks a local unsubscribe.
     await _mirror(env, _StubSession(), gfs).unsubscribe("sp-1")
@@ -663,7 +753,7 @@ async def test_resubscribe_all_restores_a_purged_seat(env):
     re-taken — the household shows "subscribed" forever and receives nothing.
     A (re)connect re-POSTs ``/gfs/subscribe`` for every local subscription."""
     await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
-    repo = await _seat_subscription(env, "sp-sub")
+    repo = await _mirrored(env, "sp-sub")
     gfs = _StubGfs()
     svc = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
 
@@ -691,8 +781,8 @@ async def test_resubscribe_all_swallows_a_refusal_per_space(env, caplog):
     import logging
 
     await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
-    repo = await _seat_subscription(env, "sp-403")
-    await _seat_subscription(env, "sp-ok")
+    repo = await _mirrored(env, "sp-403")
+    await _mirrored(env, "sp-ok")
 
     class _Refusing(_StubGfs):
         async def subscribe_to_gfs_space(self, space_id: str, gfs_id: str) -> str:
@@ -719,7 +809,7 @@ async def test_resubscribe_all_shuffles_writer_spaces_into_the_follower_batch(
     run of identical signed subscribes and can't separate writer seats by
     order or timing."""
     await env.conns.save(_conn("gfs-1", inbox_url="https://gfs.test"))
-    repo = await _seat_subscription(env, "sp-follow")
+    repo = await _mirrored(env, "sp-follow")
     gfs = _StubGfs()
     svc = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
     shuffled: list[list[str]] = []
@@ -733,6 +823,48 @@ async def test_resubscribe_all_shuffles_writer_spaces_into_the_follower_batch(
     # One batch, de-duplicated, shuffled as a whole.
     assert shuffled == [["sp-follow", "sp-write"]]
     assert gfs.subscribes == [("sp-write", "gfs-1"), ("sp-follow", "gfs-1")]
+
+
+@pytest.mark.security
+async def test_resubscribe_all_never_subscribes_on_a_gfs_that_did_not_seat_it(env):
+    """A reconnect to GFS B must not re-POST a subscribe for a space mirrored
+    from GFS A: the signed, identity-bound request would tell B's operator
+    that this household follows a space B may never have listed."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
+    repo = await _mirrored(env, "sp-a", gfs="gfs-1")
+    await _mirrored(env, "sp-b", gfs="gfs-2")
+    gfs = _StubGfs()
+    session = _StubSession()
+    svc = _mirror(env, session, gfs, public_space_repo=repo)
+
+    assert await svc.resubscribe_all("gfs-2") == 1
+    assert gfs.subscribes == [("sp-b", "gfs-2")]
+    assert session.calls == []
+
+
+@pytest.mark.security
+async def test_resubscribe_all_legacy_mirror_needs_the_directory_listing(env):
+    """No provenance (pre-v44): re-subscribe only where the WHOLE directory
+    lists the space — fetched once per reconnect, never per space."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    repo = await _mirrored(env, "sp-listed", gfs=None)
+    await _mirrored(env, "sp-elsewhere", gfs=None)
+    session = _StubSession({"https://a.test/gfs/spaces": _directory("sp-listed")})
+    gfs = _StubGfs()
+    svc = _mirror(env, session, gfs, public_space_repo=repo)
+
+    assert await svc.resubscribe_all("gfs-1") == 1
+    assert gfs.subscribes == [("sp-listed", "gfs-1")]
+    assert session.calls == ["https://a.test/gfs/spaces"]
+
+
+async def test_resubscribe_all_unknown_connection_subscribes_nothing(env):
+    repo = await _mirrored(env, "sp-1", gfs="gfs-gone")
+    gfs = _StubGfs()
+    svc = _mirror(env, _StubSession(), gfs, public_space_repo=repo)
+    assert await svc.resubscribe_all("gfs-gone") == 0
+    assert gfs.subscribes == []
 
 
 # ─── v_44: a follower heals its pin from the GFS that seated it ──────────

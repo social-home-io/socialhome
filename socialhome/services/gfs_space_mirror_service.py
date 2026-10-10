@@ -77,12 +77,17 @@ from collections.abc import Iterable
 
 import aiohttp
 
+from ..domain.federation import GfsConnection
 from ..domain.space import Space, normalize_join_mode
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.public_space_repo import AbstractPublicSpaceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
-from .gfs_http import MAX_GFS_BODY_BYTES, read_json_capped
+from .gfs_http import (
+    MAX_GFS_BODY_BYTES,
+    MAX_GFS_DIRECTORY_BODY_BYTES,
+    read_json_capped,
+)
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole
 from .space_service import can_seat_remote_stub, stub_space_from_metadata
@@ -603,7 +608,9 @@ class GfsSpaceMirrorService:
         reason :meth:`SpaceService._maybe_purge_gfs_mirror` is: a public/global
         stub learned from a direct peer is nobody's mirror, and a signed,
         identity-bound subscribe would disclose our interest in a space to a
-        GFS operator who never knew it existed.
+        GFS operator who never knew it existed. For the same reason a
+        followed space is re-subscribed only on the GFS that seated its
+        mirror (:meth:`_seated_on`) — never on every server we reconnect to.
 
         Fail-soft per space: this is a background self-heal, so one space's
         failure must never skip the rest or break the caller's reconnect
@@ -615,9 +622,16 @@ class GfsSpaceMirrorService:
         of the identical signed subscribes never tell the server which seats
         are writers' and which are followers'.
         """
+        conn = await self._gfs_conn_repo.get(gfs_id)
+        if conn is None:
+            return 0
+        # Fetched at most once per reconnect, and only for a legacy mirror.
+        directory: dict[str, frozenset[str] | None] = {}
         batch: list[str] = []
         for space_id in await self._spaces.list_subscribed_space_ids():
-            if await self.was_gfs_listed(space_id):
+            if not await self.was_gfs_listed(space_id):
+                continue
+            if await self._seated_on(space_id, conn, directory):
                 batch.append(space_id)
         batch = list(dict.fromkeys([*batch, *also]))
         secrets.SystemRandom().shuffle(batch)
@@ -652,14 +666,19 @@ class GfsSpaceMirrorService:
         return restored
 
     async def unsubscribe(self, space_id: str) -> None:
-        """Best-effort removal from every paired GFS's subscriber set.
+        """Best-effort removal from the GFS that holds our subscriber seat.
 
-        We don't record which GFS a subscription came from, and the GFS treats
-        an unknown unsubscribe as success (404 → idempotent), so this fans out
-        to every active connection. A :class:`GfsConnectionError` is logged and
-        swallowed — a GFS that is down must never block a local unsubscribe.
+        The (un)subscribe is signed and identity-bound, so sending it to a
+        GFS that never seated us would tell that operator this household
+        follows the space — only the server(s) :meth:`_seated_on` names are
+        contacted. The GFS treats an unknown unsubscribe as success (404 →
+        idempotent). A :class:`GfsConnectionError` is logged and swallowed —
+        a GFS that is down must never block a local unsubscribe.
         """
+        directory: dict[str, frozenset[str] | None] = {}
         for conn in await self._gfs_conn_repo.list_active():
+            if not await self._seated_on(space_id, conn, directory):
+                continue
             try:
                 await self._gfs.unsubscribe_from_gfs_space(space_id, conn.id)
             except GfsConnectionError as exc:
@@ -669,3 +688,68 @@ class GfsSpaceMirrorService:
                     conn.id,
                     exc,
                 )
+
+    async def _seated_on(
+        self,
+        space_id: str,
+        conn: GfsConnection,
+        directory: dict[str, frozenset[str] | None],
+    ) -> bool:
+        """Whether *conn* is a GFS that may hear about our subscription to
+        *space_id*.
+
+        ``SpaceService.subscribe_to_space`` POSTs the subscribe to exactly one
+        server — the one :meth:`ensure_mirror` seated the stub from, recorded
+        as the mirror provenance (v_44, ``spaces.mirror_gfs_id``). That is the
+        answer whenever it is known: purely local, no request at all.
+
+        A mirror seated before v_44 has no provenance. Then the fallback is
+        *conn*'s WHOLE public directory (``GET /gfs/spaces`` — never a
+        space-specific probe, which would itself disclose the interest): a
+        server that lists the space already knows it, and is where the
+        subscribe went. *directory* memoises that fetch per connection for
+        the caller's loop. Fail closed: an unreadable directory proves
+        nothing, so the server is not contacted.
+        """
+        mirror_gfs, _ = await self._spaces.get_mirror_provenance(space_id)
+        if mirror_gfs is not None:
+            return mirror_gfs == conn.id
+        if conn.id not in directory:
+            directory[conn.id] = await self._fetch_directory(conn)
+        listed = directory[conn.id]
+        return listed is not None and space_id in listed
+
+    async def _fetch_directory(self, conn: GfsConnection) -> frozenset[str] | None:
+        """The space ids in *conn*'s whole directory, or ``None`` when it
+        can't be read (no session, transport error, non-200, bad body)."""
+        client = self._http_client
+        if client is None:
+            return None
+        url = f"{conn.inbox_url.rstrip('/')}/gfs/spaces"
+        try:
+            async with client.get(
+                url,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=_MIRROR_FETCH_TIMEOUT_S),
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(
+                        "gfs_space_mirror: directory %s returned HTTP %d",
+                        url,
+                        resp.status,
+                    )
+                    return None
+                body = await read_json_capped(
+                    resp, url=url, limit=MAX_GFS_DIRECTORY_BODY_BYTES
+                )
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            log.warning("gfs_space_mirror: directory fetch failed for %s: %s", url, exc)
+            return None
+        spaces = body.get("spaces") if isinstance(body, dict) else None
+        if not isinstance(spaces, list):
+            return None
+        return frozenset(
+            sp["space_id"]
+            for sp in spaces
+            if isinstance(sp, dict) and isinstance(sp.get("space_id"), str)
+        )

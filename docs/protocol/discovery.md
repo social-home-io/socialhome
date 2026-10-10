@@ -504,9 +504,9 @@ cannot widen access through a missing field or Python truthiness.
   refusal (public-tier check, ban, §CP.F1 age gate) has passed, so a
   locally-refused user is never registered on the relay.
 - **Teardown, on positive evidence only.** When the last local subscriber of
-  a mirrored space leaves, the household unsubscribes from every paired GFS
-  (best-effort — a down GFS never blocks the local leave) and purges the
-  stub; the `spaces` cascade takes `space_keys` with it, so the content key
+  a mirrored space leaves, the household unsubscribes from the GFS that
+  seated the mirror (best-effort — a down GFS never blocks the local leave)
+  and purges the stub; the `spaces` cascade takes `space_keys` with it, so the content key
   doesn't outlive the mirror. Both steps run **only** when the row is
   provably a GFS mirror: `space_type=global`, owned by another instance, no
   space seed held, no local member left, *and* a `public_space_cache` row for
@@ -516,6 +516,15 @@ cannot widen access through a missing field or Python truthiness.
   GFS operator a relationship with a space they never knew about, and the
   purge would destroy content nobody asked us to forget. Without the
   evidence, only the local member row goes.
+- **(Un)subscribes go only where the seat is.** The household's
+  `/gfs/subscribe` (subscribe or unsubscribe) is signed and identity-bound,
+  so sending it to a GFS that never seated the subscription would tell that
+  operator the household follows the space. Both the teardown unsubscribe and
+  the reconnect re-subscribe below therefore target only the GFS recorded as
+  the mirror's provenance (`spaces.mirror_gfs_id`, v_44) — a purely local
+  lookup. A mirror seated before v_44 has no provenance; it falls back to the
+  GFSs whose **whole** directory (`GET /gfs/spaces`, never a per-space probe)
+  lists the space, and contacts none when the directory can't be read.
 
 ### `allow_subscribers: false` — listed, never relayed
 
@@ -590,7 +599,8 @@ was withdrawn from them.
 household's first-ever subscribe, so a purged seat would otherwise never come
 back — the household would show "subscribed" forever and receive nothing.
 Every GFS-WS (re)connect therefore re-POSTs `/gfs/subscribe` for each local
-subscription mirrored from that server
+subscription mirrored from that server — and only those: a space seated from
+another GFS is never re-subscribed here
 (`GfsSpaceMirrorService.resubscribe_all`, wired beside the pin self-heal). The
 GFS's `add_subscriber` is an upsert, so a seat we still hold is a no-op, and a
 `403` (the owner really did withdraw readability) is swallowed at DEBUG. This

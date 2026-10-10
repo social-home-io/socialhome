@@ -5964,6 +5964,11 @@ class _FakeGfsMirror:
             },
         )
         await self._spaces.save(space)
+        # Like the real ``ensure_mirror``: remember which GFS seated it (the
+        # teardown unsubscribe targets that server only).
+        await self._spaces.set_mirror_provenance(
+            space_id, gfs_id=self._gfs_id, rotation_seq=0
+        )
         if self._ban_user_id is not None:
             await self._spaces.ban_member(
                 space_id, self._ban_user_id, banned_by="remote", reason="t"
