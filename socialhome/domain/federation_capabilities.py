@@ -851,7 +851,23 @@ from __future__ import annotations
 #:   chunks as before). A moderation release of a calendar event carries
 #:   ``capacity`` only to a v_56 household: an older one's fail-closed
 #:   release check refuses a key it does not classify.
-OURS: int = 56
+#: * **v_57** (2026-10-10) — members publish to EVERY GFS the owner listed a
+#:   space on (the owner-signed ``gfs_servers`` list), including servers
+#:   their own household never connected to, so a follower who uses only one
+#:   of them still gets every item while the host is offline. A server this
+#:   household is not registered on is sent only anonymous requests
+#:   (``/gfs/member-publish-anon``, the seed-only epoch notice, the
+#:   identity-free ``/gfs/publish`` relay), over a cookie-less session pinned
+#:   to a vetted public address. For that, a seed holder now also delivers
+#:   the epoch's writer GROUP key (``writer_key``, unchanged wire shape) in a
+#:   TRUSTED publicly readable space, and pins its ``writer_key_cert`` there;
+#:   a member holding the key publishes every item anonymously, to every
+#:   listed server — one ciphertext is never sent identified anywhere. No new
+#:   event type. **Gated, degraded fallback**: a member household below v_57
+#:   is sent no writer key in a trusted space, so it keeps publishing
+#:   identified to the servers it is registered on (today's behaviour); an
+#:   older owner sends no list, and members fall back the same way.
+OURS: int = 57
 
 
 class FederationCapability:
@@ -1317,6 +1333,14 @@ class FederationCapability:
     #: its own copy of the calendar).
     MIN_FOR_SYNC_SERIES_ROWS = 56
 
+    #: v_57 — a seed holder delivers the writer group key in a TRUSTED
+    #: publicly readable space too, so the member publishes anonymously to
+    #: every GFS on the owner's signed list (including servers it never
+    #: connected to). Below it a member gets no key in a trusted space and
+    #: keeps publishing identified to its own servers. Not space-scoped (as
+    #: v_50): a lagging household still publishes, through fewer servers.
+    MIN_FOR_MULTI_GFS_PUBLISH = 57
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1529,6 +1553,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SYNC_SERIES_ROWS,
         "Recurring events in space catch-up",
     ),
+    (
+        FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH,
+        "Posting to every GFS a space is listed on",
+    ),
 ]
 
 
@@ -1596,6 +1624,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE: "gfs_fallback_later",
     FederationCapability.MIN_FOR_SPACE_CHAT: "space_chat",
     FederationCapability.MIN_FOR_SYNC_SERIES_ROWS: "synced_recurring_events",
+    FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH: "multi_gfs_posting",
 }
 
 

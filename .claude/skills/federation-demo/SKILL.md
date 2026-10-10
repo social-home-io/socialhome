@@ -777,7 +777,10 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py gfs-private-channel
+python .claude/skills/federation-demo/harness.py gfs-b-up
+python .claude/skills/federation-demo/harness.py gfs-multi-listing
 python .claude/skills/federation-demo/harness.py verify
+python .claude/skills/federation-demo/harness.py gfs-b-down
 python .claude/skills/federation-demo/harness.py gfs-down
 ```
 
@@ -875,6 +878,29 @@ channel row and no seat and never holds the space id or the post. ``verify``
 then checks a, b and e agree on the channel, e's grant is stored
 KEK-wrapped, the GFS row names no space, b holds a seat, a holds none, and
 the OFF space has no channel. Polls every 3 s, backs off on 429.
+
+### ``gfs-b-up`` / ``gfs-multi-listing`` / ``gfs-b-down`` — every listed GFS gets every item (v_57)
+
+``gfs-b-up`` boots a SECOND, independent GFS on ``127.0.0.1:18767`` (own data
+dir ``/tmp/sh-demo/gfs-b``, own identity key, public id ``gfs-b``);
+``gfs-b-down`` stops it. ``gfs-multi-listing`` (after the rest of the gfs
+chain, before ``verify``): a and e connect to B; a creates a TRUSTED global,
+publicly readable space and lists it on A and B through the existing publish
+route (PR 2's server-selection API is not on main yet) — both servers list
+it with the writer key pinned. a invites d (registered on A only); d holds
+the owner's signed two-server list and the writer key (v_57 hands it out in
+trusted spaces). d restarts with loopback treated as public — a
+**harness-only** ``-c`` prelude (``_LOOPBACK_IS_PUBLIC_PRELUDE``): a member
+drops an owner-listed private address it never joined and the pinned session
+refuses non-public addresses, both on purpose, and the demo's B is on
+127.0.0.1. e leaves A, discovers the space on B and follows it there only. a
+goes offline; d posts, comments and reacts; e receives all three over B.
+Asserts B holds no ``client_instances`` row for d, its log shows only
+anonymous ``/gfs/member-publish-anon`` publishes (never the identified
+route), and the log names neither d (id, key hex / base64url) nor the
+content. Clean-up: a and d restart normally, e reconnects to A. ``verify``
+then pins ``MIN_FOR_MULTI_GFS_PUBLISH`` at v_57 and checks d's writer key,
+d's two-server list and e's copy of the post.
 
 ### ``gfs-fallback-switch`` — the GFS fallback for an existing pair (v_54)
 

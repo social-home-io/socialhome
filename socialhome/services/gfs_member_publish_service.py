@@ -67,6 +67,19 @@ subscribes on the spot (an identified subscribe right before an anonymous
 publish would link the two); the auto-subscribe runs only on a seat and on
 every (re)connect, with the SAME signed body a follower's subscribe and
 re-subscribe carry — nothing in it says "writer".
+
+**Every listed GFS (v_57).** Once the owner's signed GFS list is known
+(:meth:`GfsConnectionService.server_targets`), a household holding the writer
+key — handed out in trusted publicly readable spaces too since v_57 — sends
+each item ANONYMOUSLY to every listed server proving ``member_publish_strict``,
+including servers it never connected to ("listing targets",
+``registered=False``, reached over their own address-pinned cookie-less
+session). One ciphertext is never sent identified anywhere. Without the key,
+identified items go only to registered servers still on the list; a
+delegated admin's anonymous epoch notice goes to every listed server, the
+owner's identified one only to its own connections. Retries re-resolve the
+list and drop an item whose server was delisted. Without a list (an older
+owner) everything keeps the pre-v_57 targets.
 """
 
 from __future__ import annotations
@@ -109,6 +122,8 @@ from ..domain.space_item import (
     required_scope,
 )
 from ..domain.writer_cert import WriterCert, scope_permits
+from ..outbound_fetch import OutboundFetchRefused
+from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_directory import GfsDirectoryCache
 from .gfs_http import refused_gfs_key
 from .gfs_publish_retry import (
@@ -117,6 +132,7 @@ from .gfs_publish_retry import (
     PublishOutcome,
     classify_publish_status,
 )
+from .gfs_server_targets import is_listing_target_id, refusal_outcome
 from ..writer_key import sign_with_writer_key
 from .space_writer_cert_service import WRITER_CERT_FIELD
 
@@ -126,7 +142,6 @@ if TYPE_CHECKING:
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_channel_service import GfsChannelService
-    from .gfs_connection_service import GfsConnectionService
     from .gfs_space_mirror_service import GfsSpaceMirrorService
     from .space_crypto_service import SpaceContentEncryption
     from .space_writer_cert_service import SpaceWriterCertService
@@ -453,7 +468,7 @@ class GfsMemberPublishService:
         if epoch is not None and (
             await self._writer_certs.own_writer_key(space_id, epoch) is not None
         ):
-            return await self._capable_listed(space_id, strict=True)
+            return await self._anon_targets(space_id)
         if space.features.gfs_publish_mode == GFS_PUBLISH_MODE_STRICT:
             log.info(
                 "gfs.member_publish: strict space %s and no writer key for the "
@@ -461,12 +476,35 @@ class GfsMemberPublishService:
                 space_id,
             )
             return []
-        targets = await self._capable_listed(space_id, identified_items=True)
+        targets = await self._identified_targets(space_id)
         # A writer that publishes wants the other members' items too (a seed
         # holder receives them over federation).
         if not seed_holder:
             await self._subscribe(targets, space_id)
         return targets
+
+    async def _anon_targets(self, space_id: str) -> list[GfsConnection]:
+        """v_57 — where an ANONYMOUS item goes: every server on the owner's
+        signed list (our own connections and the listing targets we never
+        connected to alike) whose signed block proves
+        ``member_publish_strict``. Without a list: our own connections that
+        list the space (v_50)."""
+        listed = await self._gfs.server_targets(space_id)
+        if listed is None:
+            return await self._capable_listed(space_id, strict=True)
+        return [t for t in listed if await self._gfs.member_publish_strict_supported(t)]
+
+    async def _identified_targets(self, space_id: str) -> list[GfsConnection]:
+        """Where an IDENTIFIED item goes (a household without the writer key:
+        below v_57, or before the key arrived): only servers this household
+        is registered on — never a listing target — and, once the owner's
+        list is known, only those still on it."""
+        targets = await self._capable_listed(space_id, identified_items=True)
+        listed = await self._gfs.server_targets(space_id)
+        if listed is None:
+            return targets
+        keep = {t.id for t in listed if t.registered}
+        return [c for c in targets if c.id in keep]
 
     # ── Publishing an item ────────────────────────────────────────────────
 
@@ -554,6 +592,9 @@ class GfsMemberPublishService:
                 await self._gfs.member_publish_strict_supported(conn)
             ):
                 continue
+            if item.event_type == _KIND_ITEM and not conn.registered:
+                # Nothing identified ever goes to a server we never joined.
+                continue
             if await self._first_attempt(conn, item):
                 accepted.append(conn)
         return accepted
@@ -640,6 +681,11 @@ class GfsMemberPublishService:
     async def _post_item(
         self, conn: GfsConnection, space_id: str, data: dict
     ) -> PublishOutcome:
+        try:
+            GfsConnectionService.require_registered(conn)
+        except GfsConnectionError as exc:
+            log.warning("gfs.member_publish: %s — item not sent there", exc)
+            return PublishOutcome.permanent()
         space = await self._spaces.get(space_id)
         if space is None or space.features.gfs_publish_mode == GFS_PUBLISH_MODE_STRICT:
             # The space went strict after this was queued: an identified
@@ -672,8 +718,7 @@ class GfsMemberPublishService:
         session)."""
         epoch = int(data["epoch"])
         writer_seed = await self._writer_certs.own_writer_key(space_id, epoch)
-        client = self._gfs.publish_client()
-        if writer_seed is None or client is None:
+        if writer_seed is None:
             return PublishOutcome.permanent()
         req = MemberPublishAnonRequest(
             gfs_instance_id=conn.gfs_instance_id,
@@ -689,9 +734,29 @@ class GfsMemberPublishService:
         body = replace(
             req, writer_sig=sign_with_writer_key(writer_seed, req.signing_bytes())
         ).to_wire()
-        return await self._post(
-            client, f"{conn.inbox_url}{MEMBER_PUBLISH_ANON_ROUTE}", body, conn
+        return await self._post_anon(
+            conn, f"{conn.inbox_url}{MEMBER_PUBLISH_ANON_ROUTE}", body
         )
+
+    async def _post_anon(
+        self, conn: GfsConnection, url: str, body: dict
+    ) -> PublishOutcome:
+        """POST an ANONYMOUS body: over the shared cookie-less publish session
+        to a server we are registered on; over a listing target's own
+        cookie-less session pinned to its vetted public address otherwise
+        (v_57). A refused address is never retried through another path."""
+        if conn.registered:
+            client = self._gfs.publish_client()
+            if client is None:
+                return PublishOutcome.permanent()
+            return await self._post(client, url, body, conn)
+        try:
+            async with self._gfs.anon_session(conn) as client:
+                if client is None:
+                    return PublishOutcome.permanent()
+                return await self._post(client, url, body, conn)
+        except OutboundFetchRefused as exc:
+            return refusal_outcome(exc)
 
     # ── Epoch notices ─────────────────────────────────────────────────────
 
@@ -754,12 +819,30 @@ class GfsMemberPublishService:
             )
         item = GfsPublish(space_id=space_id, event_type=_KIND_NOTICE, payload=data)
         done = 0
-        for conn in await self._capable_listed(space_id):
+        for conn in await self._notice_targets(space_id, owner=is_owner):
             if only is not None and conn.id != only:
                 continue
             if await self._first_attempt(conn, item):
                 done += 1
         return done
+
+    async def _notice_targets(
+        self, space_id: str, *, owner: bool
+    ) -> list[GfsConnection]:
+        """Where an epoch notice goes. The OWNER's notice is identified (its
+        household signature): only its own registered connections listing
+        the space. A delegated admin's is anonymous (the space authority
+        signature alone): v_57 — every server on the owner's signed list
+        proving ``member_publish_trusted``, including ones it never joined;
+        without a list its own connections."""
+        if owner:
+            return await self._capable_listed(space_id)
+        listed = await self._gfs.server_targets(space_id)
+        if listed is None:
+            return await self._capable_listed(space_id)
+        return [
+            t for t in listed if await self._gfs.member_publish_trusted_supported(t)
+        ]
 
     async def _post_notice(
         self, conn: GfsConnection, space_id: str, data: dict
@@ -770,6 +853,8 @@ class GfsMemberPublishService:
         strict_ok = await self._gfs.member_publish_strict_supported(conn)
         wkc = data.get("writer_key_cert") if strict_ok else None
         if data.get("owner"):
+            if not conn.registered:
+                return PublishOutcome.permanent()
             ts = datetime.now(timezone.utc).isoformat()
             mode = data.get("publish_mode") if strict_ok else None
             payload = owner_epoch_notice_signing_payload(
@@ -803,9 +888,6 @@ class GfsMemberPublishService:
             return await self._post(self._gfs.client(), url, body, conn)
         # Seed-only form: anonymous — authorized by the authority signature
         # alone, so it rides the cookie-less publish session.
-        client = self._gfs.publish_client()
-        if client is None:
-            return PublishOutcome.permanent()
         body = {
             "epoch": int(data["epoch"]),
             "authority_sig": data["authority_sig"],
@@ -813,7 +895,7 @@ class GfsMemberPublishService:
         }
         if wkc is not None:
             body["writer_key_cert"] = wkc
-        return await self._post(client, url, body, conn)
+        return await self._post_anon(conn, url, body)
 
     # ── Transport + retries ───────────────────────────────────────────────
 
@@ -892,10 +974,11 @@ class GfsMemberPublishService:
         return outcome.kind == "delivered"
 
     async def _retry_send(self, conn_id: str, item: GfsPublish) -> PublishOutcome:
-        """One retry: the connection must still be active and still prove the
-        capability, or the item is dropped (never sent identified to a GFS
-        that cannot take it)."""
-        conn = await self._conn_repo.get(conn_id)
+        """One retry: the target is re-resolved (:meth:`_retry_target`) and
+        must still be active and still prove the capability, or the item is
+        dropped (never sent identified to a GFS that cannot take it, never
+        to a server the owner delisted)."""
+        conn = await self._retry_target(conn_id, item)
         if conn is None or conn.status != "active":
             return PublishOutcome.permanent()
         if item.event_type == _KIND_ANON:
@@ -904,6 +987,38 @@ class GfsMemberPublishService:
         elif not await self._gfs.member_publish_trusted_supported(conn):
             return PublishOutcome.permanent()
         return await self._send(conn, item)
+
+    async def _retry_target(
+        self, conn_id: str, item: GfsPublish
+    ) -> GfsConnection | None:
+        """The target a queued item may still go to, re-read now. An
+        identified item (or the owner's notice) only to our own connection;
+        an item also only while that server is on the owner's list (v_57). An
+        anonymous item (or a delegated admin's notice) to whatever the list
+        names under that id now — a delisted server is dropped (INFO)."""
+        identified = item.event_type == _KIND_ITEM or (
+            item.event_type == _KIND_NOTICE and bool(item.payload.get("owner"))
+        )
+        if identified and is_listing_target_id(conn_id):
+            return None
+        if identified and item.event_type == _KIND_NOTICE:
+            return await self._conn_repo.get(conn_id)
+        listed = await self._gfs.server_targets(item.space_id)
+        if listed is None:
+            return await self._conn_repo.get(conn_id)
+        match = next(
+            (t for t in listed if t.id == conn_id and (t.registered or not identified)),
+            None,
+        )
+        if match is None:
+            log.info(
+                "gfs.member_publish: %s for space %s — GFS %s is no longer on "
+                "the owner's list; dropped",
+                item.event_type,
+                item.space_id,
+                conn_id,
+            )
+        return match
 
     # ── Auto-subscribe ────────────────────────────────────────────────────
 
@@ -920,7 +1035,8 @@ class GfsMemberPublishService:
     async def _subscribe(self, conns: list[GfsConnection], space_id: str) -> int:
         done = 0
         for conn in conns:
-            if (conn.id, space_id) in self._subscribed:
+            if not conn.registered or (conn.id, space_id) in self._subscribed:
+                # A subscribe is identified: only where we are registered.
                 continue
             try:
                 if self._seats is not None:

@@ -47,6 +47,9 @@ from socialhome.capabilities_sig import (
     sign_capabilities,
 )
 from socialhome.domain.gfs_server import GfsServer
+from socialhome.outbound_fetch import OutboundFetchRefused
+from socialhome.services.gfs_publish_retry import GfsPublish
+from socialhome.services.gfs_server_targets import listing_target
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.domain import ClientInstance
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
@@ -3916,10 +3919,35 @@ async def test_a_re_pinning_publish_re_announces_the_epoch(env, monkeypatch):
     assert calls == [("sp-r", "rp-1")]
 
 
-async def test_a_plain_publish_does_not_re_announce(env, monkeypatch):
+async def test_a_first_listing_announces_but_a_plain_re_publish_does_not(
+    env, monkeypatch
+):
+    """v_57: a server that just listed the space gets the epoch notice (and
+    the writer-key pin) before the members' list names it; a plain metadata
+    re-publish where it is already listed sends none."""
     svc, calls = await _repin_svc(env, monkeypatch, with_cert=False)
     await svc.publish_space("sp-r", "rp-1")
-    assert calls == []
+    assert calls == [("sp-r", "rp-1")]
+    await svc.publish_space("sp-r", "rp-1")
+    assert calls == [("sp-r", "rp-1")]
+
+
+async def test_the_epoch_is_announced_before_members_hear_of_the_server(
+    env, monkeypatch
+):
+    svc, _calls = await _repin_svc(env, monkeypatch, with_cert=False)
+    order: list[str] = []
+
+    async def _announce(space_id, gfs_id):
+        order.append("announce")
+
+    async def _listings(space_id):
+        order.append("members")
+
+    svc.attach_on_repinned(_announce)
+    svc.attach_on_listings_changed(_listings)
+    await svc.publish_space("sp-r", "rp-1")
+    assert order == ["announce", "members"]
 
 
 async def test_a_failing_re_announce_never_fails_the_publish(env, monkeypatch):
@@ -4575,3 +4603,208 @@ async def test_heal_and_refresh_relist_under_the_change_lock(env):
     assert await svc.republish_space("sp-a") == 0
     assert locked == ["sp-a", "sp-a"]
     assert session.posts == []
+
+
+# ─── v_57: listing targets (servers on the owner's list we never joined) ──
+
+_LISTED_KP = generate_identity_keypair()
+
+
+def _listed(gid: str, *, kp=None, url: str = "") -> GfsServer:
+    return GfsServer(
+        gfs_instance_id=gid,
+        inbox_url=url or f"https://{gid}.example",
+        public_key=(kp or _LISTED_KP).public_key.hex(),
+        gfs_key_suite="ed25519",
+        display_name=gid,
+    )
+
+
+class _ListingSession:
+    """A session a listing target is reached through: serves a ``/gfs/info``
+    signed for its id, records everything, knows whether it was closed."""
+
+    def __init__(self, gid: str, *, kp=None, caps=None, status: int = 200) -> None:
+        self.info = _signed_info(
+            gfs_instance_id=gid,
+            kp=kp or _LISTED_KP,
+            capabilities=caps
+            if caps is not None
+            else {"anonymous_publish": True, "member_publish_strict": True},
+        )
+        self.status = status
+        self.gets: list[str] = []
+        self.posts: list[tuple[str, dict, dict]] = []
+        self.closed = False
+
+    def get(self, url, **kw):
+        self.gets.append(url)
+        return _StubResp(200, self.info)
+
+    def post(self, url, *, json=None, **kw):
+        self.posts.append((url, json or {}, kw))
+        return _StubResp(self.status, {})
+
+    async def close(self):
+        self.closed = True
+
+
+class _Factory:
+    def __init__(self, session=None, refuse: str | None = None) -> None:
+        self.session = session
+        self.refuse = refuse
+        self.urls: list[str] = []
+
+    async def __call__(self, url: str):
+        self.urls.append(url)
+        if self.refuse is not None:
+            raise OutboundFetchRefused(self.refuse)
+        return self.session
+
+
+async def _targets_svc(env, *, servers, factory=None, own=()):
+    _db, repo = env
+    for conn in own:
+        await repo.save(conn)
+    shared = _RecordingSession()
+    svc = GfsConnectionService(
+        repo,
+        http_client=shared,
+        publish_client=shared,
+        listing_sessions=factory or _Factory(),
+    )
+
+    async def _servers(space_id):
+        return servers
+
+    svc.attach_member_servers(_servers)
+    svc.attach_publish_context(
+        space_repo=None,
+        own_instance_id="alpha.home",
+        own_signing_key=generate_identity_keypair().private_key,
+    )
+    return svc, shared
+
+
+async def test_server_targets_is_none_without_a_list(env):
+    _db, repo = env
+    svc = GfsConnectionService(repo)
+    assert await svc.server_targets("sp") is None
+    svc, _ = await _targets_svc(env, servers=None)
+    assert await svc.server_targets("sp") is None
+
+
+async def test_server_targets_own_connection_and_listing_targets(env):
+    own = _make_conn("c-a", public_key=_GFS_KP.public_key.hex())
+    svc, _ = await _targets_svc(
+        env,
+        servers=(_listed("inst-c-a", kp=_GFS_KP), _listed("gfs-b")),
+        own=(own,),
+    )
+    targets = await svc.server_targets("sp")
+    assert [(t.id, t.registered) for t in targets] == [
+        ("c-a", True),
+        ("listing:gfs-b", False),
+    ]
+
+
+def test_require_registered_refuses_a_listing_target():
+    GfsConnectionService.require_registered(_make_conn())
+    with pytest.raises(GfsConnectionError):
+        GfsConnectionService.require_registered(listing_target(_listed("gfs-b")))
+
+
+async def test_a_listing_target_info_rides_its_own_pinned_session(env):
+    """Capability verification for a listed server uses the key from the
+    owner's signed list, over the cookie-less pinned session — never the
+    household's shared (cookie-carrying) session — and the session closes."""
+    session = _ListingSession("gfs-b")
+    factory = _Factory(session)
+    svc, shared = await _targets_svc(env, servers=(_listed("gfs-b"),), factory=factory)
+    [target] = await svc.server_targets("sp")
+    assert await svc.member_publish_strict_supported(target)
+    assert factory.urls == ["https://gfs-b.example"]
+    assert session.gets == ["https://gfs-b.example/gfs/info"]
+    assert session.closed
+    assert shared.gets == []
+
+
+async def test_a_listing_target_under_another_key_proves_nothing(env):
+    session = _ListingSession("gfs-b", kp=generate_identity_keypair())
+    svc, _ = await _targets_svc(
+        env, servers=(_listed("gfs-b"),), factory=_Factory(session)
+    )
+    [target] = await svc.server_targets("sp")
+    assert not await svc.member_publish_strict_supported(target)
+
+
+async def test_a_new_key_for_a_listing_target_forgets_what_it_proved(env):
+    session = _ListingSession("gfs-b")
+    servers: list = [(_listed("gfs-b"),)]
+    svc, _ = await _targets_svc(env, servers=None, factory=_Factory(session))
+
+    async def _servers(space_id):
+        return servers[0]
+
+    svc.attach_member_servers(_servers)
+    [target] = await svc.server_targets("sp")
+    assert await svc.member_publish_strict_supported(target)
+    servers[0] = (_listed("gfs-b", kp=generate_identity_keypair()),)
+    [moved] = await svc.server_targets("sp")
+    assert not await svc.member_publish_strict_supported(moved)
+
+
+async def test_a_refused_listing_address_proves_nothing(env):
+    svc, _ = await _targets_svc(
+        env, servers=(_listed("gfs-b"),), factory=_Factory(refuse="private_address")
+    )
+    [target] = await svc.server_targets("sp")
+    assert not await svc.member_publish_strict_supported(target)
+
+
+async def test_relay_reaches_every_listed_server_identity_free(env):
+    """A delegated admin relaying while the owner is offline: the
+    identity-free body goes to the listed server it never connected to, over
+    that server's pinned session."""
+    session = _ListingSession("gfs-b")
+    svc, shared = await _targets_svc(
+        env, servers=(_listed("gfs-b"),), factory=_Factory(session)
+    )
+    n = await svc.publish_space_event(
+        space_id="sp", event_type="space_post_public", payload={"x": 1}
+    )
+    assert n == 1
+    [(url, body, kw)] = session.posts
+    assert url == "https://gfs-b.example/gfs/publish"
+    assert body == {
+        "space_id": "sp",
+        "event_type": "space_post_public",
+        "payload": {"x": 1},
+    }
+    assert kw.get("allow_redirects") is False
+    assert shared.posts == []
+
+
+async def test_a_relay_retry_for_a_delisted_server_is_dropped(env):
+    session = _ListingSession("gfs-b")
+    servers: list = [(_listed("gfs-b"),)]
+    svc, _ = await _targets_svc(env, servers=None, factory=_Factory(session))
+
+    async def _servers(space_id):
+        return servers[0]
+
+    svc.attach_member_servers(_servers)
+    item = GfsPublish(space_id="sp", event_type="space_post_public", payload={})
+    assert (await svc._retry_publish("listing:gfs-b", item)).kind == "delivered"
+    servers[0] = ()
+    assert (await svc._retry_publish("listing:gfs-b", item)).kind == "permanent"
+    assert len(session.posts) == 1
+
+
+async def test_a_relay_to_a_refused_listing_address_sends_nothing(env):
+    svc, _ = await _targets_svc(
+        env, servers=(_listed("gfs-b"),), factory=_Factory(refuse="dns")
+    )
+    target = (await svc.server_targets("sp"))[0]
+    outcome = await svc._post_publish(target, {"space_id": "sp"}, space_id="sp")
+    assert outcome.kind == "transient"

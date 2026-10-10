@@ -39,10 +39,10 @@ byte-identical to what the owner signed so it can be relayed):
   unless THIS household has an active connection to the same
   ``gfs_instance_id`` at the same ``inbox_url`` (``own_routes``) — a list from
   another household must never aim our requests at our own network. A DNS
-  name is not resolved here: whoever sends to these servers (federation v_56,
-  a later change) must go through the SSRF-guarded
-  :class:`socialhome.outbound_fetch.OutboundFetcher` path (resolve, pin,
-  refuse private addresses);
+  name is not resolved here: a server this household is not registered on is
+  reached (federation v_57) only through
+  :func:`socialhome.outbound_fetch.open_pinned_session` (resolve, refuse
+  private addresses, pin);
 * at most :data:`MAX_GFS_SERVERS` entries are looked at; duplicates by
   ``gfs_instance_id``, ``inbox_url`` or ``public_key`` keep the first.
 

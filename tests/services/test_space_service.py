@@ -10609,6 +10609,37 @@ async def test_an_upgrade_to_v50_delivers_the_writer_key(stack):
     assert "writer_key" in kw["payload"]
 
 
+async def test_an_upgrade_to_v57_delivers_the_writer_key_in_a_trusted_space(stack):
+    """v_57: a trusted, publicly readable space hands its writers the key
+    too — re-sent at the upgrade, so the member publishes to every listed GFS
+    without waiting for the next rotation."""
+    space, fed, remote, _pks = await _cert_space(stack, version=57)
+    await stack.db.enqueue(
+        "UPDATE spaces SET space_type='global', allow_subscribers=1 WHERE id=?",
+        (space.id,),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a")
+    await stack.space_repo.add_space_instance(space.id, "peer-a")
+    await stack.space_svc.on_peer_proto_version_raised(
+        PeerProtoVersionRaised(instance_id="peer-a", old_version=56, new_version=57)
+    )
+    kw = fed.send_with_mesh_fallback.await_args.kwargs
+    assert kw["to_instance_id"] == "peer-a"
+    assert "writer_key" in kw["payload"]
+
+
+async def test_a_trusted_space_sends_no_writer_key_below_v57(stack):
+    space, fed, remote, _pks = await _cert_space(stack, version=56)
+    await stack.db.enqueue(
+        "UPDATE spaces SET space_type='global', allow_subscribers=1 WHERE id=?",
+        (space.id,),
+    )
+    await _seat(remote, space.id, "peer-a", "u-a")
+    assert await stack.space_svc.send_roster_snapshot(space.id, to_instance_id="peer-a")
+    payload = fed.send_with_mesh_fallback.await_args.kwargs["payload"]
+    assert "writer_cert" in payload and "writer_key" not in payload
+
+
 # ── v_51: the roster snapshot carries the private-space channel grant ────
 
 

@@ -28,6 +28,7 @@ from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
 )
 from socialhome.config import Config
+from socialhome.outbound_fetch import open_pinned_session
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     GfsConnection,
@@ -525,6 +526,24 @@ async def test_gfs_publishes_ride_a_cookie_less_session(tmp_dir):
         assert isinstance(publish.cookie_jar, aiohttp.DummyCookieJar)
         assert publish.closed is False
     assert publish.closed is True
+
+
+async def test_gfs_sends_reach_every_server_on_the_owners_list(tmp_dir):
+    """v_57: the connection service resolves send targets from the owner's
+    signed GFS list (the selection service's member read side), and a server
+    on it we never joined is reached through the address-pinned session."""
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    svc = app[gfs_connection_service_key]
+    assert svc._member_servers is not None  # noqa: SLF001
+    assert svc._member_servers.__name__ == "member_servers"  # noqa: SLF001
+    assert svc._listing_sessions is open_pinned_session  # noqa: SLF001
 
 
 # ─── GFS relay tier wiring ───────────────────────────────────────────────

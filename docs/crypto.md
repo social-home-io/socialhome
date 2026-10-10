@@ -627,9 +627,10 @@ delegated admin's: a space-authority signature (`authority_sig.py`, suite
 lifted onto the other path; it raises the epoch by +1 at most. No new key
 or suite.
 
-**Writer group key + strict-mode member publish** (`writer_key.py`,
-`domain/writer_key.py`, `domain/gfs_member_publish.py`, v_50) — in a space
-whose owner set `gfs_publish_mode = "strict"`, a member household publishes
+**Writer group key + anonymous member publish** (`writer_key.py`,
+`domain/writer_key.py`, `domain/gfs_member_publish.py`, v_50; trusted spaces
+v_57) — in a space whose owner set `gfs_publish_mode = "strict"` (and, since
+v_57, in every trusted publicly readable space), a member household publishes
 WITHOUT identifying itself to the connection server, authorized by the
 space's per-epoch **writer group key**: one Ed25519 key per (space, content
 epoch), shared by every household allowed to publish anything there (both
@@ -653,8 +654,12 @@ epoch), shared by every household allowed to publish anything there (both
   writer_seed, writer_key_cert}` — SECRET, so it rides only inside the
   per-peer encrypted payload of the four channels that carry the writer
   cert (rekey `per_peer`, roster snapshot, redeem ACK `space_meta`, v_44
-  rotation bundle), only to a v_50 household holding a publishing scope in a
-  strict space. The receiver verifies the cert against its pinned space key
+  rotation bundle), only to a household holding a publishing scope: in a
+  strict space at v_50, and — since v_57, so a member can publish
+  anonymously to every GFS on the owner's list — in a TRUSTED publicly
+  readable space at v_57 (`writer_key_min_version`). The key, its pin and
+  its wire shape are the same in every mode; the owner's epoch notice pins
+  `writer_key_cert` in both. The receiver verifies the cert against its pinned space key
   and that the seed's public half is `writer_pk`, then stores the grant
   KEK-wrapped (AES-GCM, AAD `socialhome-writer-key:<space_id>:<epoch>`) on
   that epoch's `space_keys.writer_key`. Rotates with every content epoch, so

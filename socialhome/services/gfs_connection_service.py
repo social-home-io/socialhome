@@ -67,8 +67,9 @@ import json
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Literal
 
@@ -85,6 +86,7 @@ from ..gfs_proof import (
 )
 from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.federation import GfsConnection, GfsSpacePublication
+from ..domain.gfs_server import GfsServer
 from ..domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_PREFIX,
     SPACE_IMAGE_EMBED_MAX_BYTES,
@@ -96,10 +98,12 @@ from ..domain.space import (
     normalize_join_mode,
 )
 from ..federation.keywrap_seal import KEM_SUITE_X25519
+from ..outbound_fetch import OutboundFetchRefused, open_pinned_session
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_http import gfs_server_address
+from .gfs_server_targets import refusal_outcome, resolve_server_targets
 from .gfs_publish_retry import (
     GfsPublish,
     GfsPublishRetryQueue,
@@ -358,6 +362,10 @@ class GfsConnectionService:
         "_proof_offered",
         "_proven_at",
         "_change_lock",
+        "_member_servers",
+        "_listing_sessions",
+        "_listing_keys",
+        "_target_warned",
     )
 
     def __init__(
@@ -366,6 +374,9 @@ class GfsConnectionService:
         *,
         http_client: aiohttp.ClientSession | None = None,
         publish_client: aiohttp.ClientSession | None = None,
+        listing_sessions: Callable[[str], Awaitable[aiohttp.ClientSession]] = (
+            open_pinned_session
+        ),
     ) -> None:
         self._repo = repo
         self._http_client = http_client
@@ -490,6 +501,121 @@ class GfsConnectionService:
         # ``time.monotonic()`` of each connection's latest successful proof —
         # the reconnect gate's reuse window (:data:`PROOF_REUSE_S`).
         self._proven_at: dict[str, float] = {}
+        #: v_57 — the owner's signed GFS list as THIS household may use it
+        #: (:meth:`GfsServerSelectionService.member_servers`); ``None`` until
+        #: wired, and then every caller falls back to its own connections.
+        self._member_servers: (
+            Callable[[str], Awaitable[tuple[GfsServer, ...] | None]] | None
+        ) = None
+        #: Opens the cookie-less, address-pinned session a LISTING target (a
+        #: listed server we are not registered on) is reached through —
+        #: :func:`socialhome.outbound_fetch.open_pinned_session`; a seam for
+        #: tests, which cannot reach a loopback server through it.
+        self._listing_sessions = listing_sessions
+        #: Listing target id → the key its capability caches were learned
+        #: under; a different key in a newer list drops them.
+        self._listing_keys: dict[str, str] = {}
+        #: Key-mismatch warnings already logged (connection id, listed id).
+        self._target_warned: set[tuple[str, str]] = set()
+
+    def attach_member_servers(
+        self, getter: Callable[[str], Awaitable[tuple[GfsServer, ...] | None]]
+    ) -> None:
+        """Wire the read side of the owner's signed GFS list (v_57)."""
+        self._member_servers = getter
+
+    async def server_targets(self, space_id: str) -> list[GfsConnection] | None:
+        """Every GFS the space's owner listed *space_id* on, as send targets
+        (:func:`~socialhome.services.gfs_server_targets
+        .resolve_server_targets`): our own active connection where we hold
+        one, else an unregistered in-memory listing target. ``None`` when no
+        list is known (an older owner, a space never listed, nothing wired)
+        — the caller then keeps its pre-v_57 behaviour (its own
+        connections). Never raises."""
+        if self._member_servers is None:
+            return None
+        try:
+            servers = await self._member_servers(space_id)
+            if servers is None:
+                return None
+            conns = await self._repo.list_active()
+        except Exception:
+            log.exception("GFS list for space %s unreadable", space_id)
+            return None
+        targets = resolve_server_targets(
+            servers,
+            conns,
+            known_ids=self.known_instance_ids,
+            warned=self._target_warned,
+        )
+        for t in targets:
+            if not t.registered:
+                self._note_listing_key(t)
+        return targets
+
+    def _note_listing_key(self, conn: GfsConnection) -> None:
+        """A listing target's capability caches hold only under the key they
+        were verified with: a list naming a new key for the same server
+        starts it from "unknown" again."""
+        key = conn.public_key.lower()
+        if self._listing_keys.get(conn.id, key) != key:
+            for cache in (
+                self._anon_publish,
+                self._envelope_relay,
+                self._invite_links,
+                self._member_publish_trusted,
+                self._member_publish_strict,
+                self._private_channels,
+                self._addressee_key,
+                self._authority_rotation,
+            ):
+                cache.pop(conn.id, None)
+            self._info_failed_at.pop(conn.id, None)
+            self._replaces.pop(conn.id, None)
+        self._listing_keys[conn.id] = key
+
+    @staticmethod
+    def require_registered(conn: GfsConnection) -> None:
+        """Refuse an IDENTIFIED request to a server this household is not
+        registered on (a v_57 listing target): nothing that names this
+        household — its instance id, its signature, its cookie — may ever
+        reach a server it never connected to."""
+        if not conn.registered:
+            raise GfsConnectionError(
+                f"GFS {conn.gfs_instance_id!r} is not a connection of this "
+                "household — no identified request goes there"
+            )
+
+    @asynccontextmanager
+    async def anon_session(
+        self, conn: GfsConnection
+    ) -> AsyncIterator[aiohttp.ClientSession | None]:
+        """The session an ANONYMOUS request to *conn* rides: the shared
+        cookie-less publish session for a server we are registered on; for a
+        listing target a fresh cookie-less session pinned to the vetted public
+        address its listed URL resolves to (closed on exit).
+
+        Yields ``None`` when there is no session (publish session not wired).
+        Raises :class:`~socialhome.outbound_fetch.OutboundFetchRefused` when a
+        listing target's address is refused (logged at WARNING)."""
+        if conn.registered:
+            yield self._publish_client
+            return
+        try:
+            session = await self._listing_sessions(conn.inbox_url)
+        except OutboundFetchRefused as exc:
+            log.warning(
+                "GFS %r (%s) on a space owner's list refused as a send target "
+                "(%s) — nothing is sent to it",
+                conn.display_name,
+                conn.inbox_url,
+                exc.reason,
+            )
+            raise
+        try:
+            yield session
+        finally:
+            await session.close()
 
     def attach_on_disconnect(
         self, hook: Callable[[GfsConnection], Awaitable[object]]
@@ -1214,15 +1340,46 @@ class GfsConnectionService:
         a short retry suppression (:data:`GFS_INFO_NEGATIVE_TTL_S`), never a
         capability answer, so one blip can't downgrade this household's
         privacy for the rest of the process.
+
+        v_57 — a LISTING target (``registered=False``) is read over its own
+        cookie-less, address-pinned session (:meth:`anon_session`), its block
+        is verified against the key the owner's signed list names, and it is
+        never rebound (there is no row to move).
         """
+        if not conn.registered:
+            try:
+                async with self.anon_session(conn) as session:
+                    info = await self._get_info(session, conn)
+            except OutboundFetchRefused:
+                self._info_failed_at[conn.id] = time.monotonic()
+                return None
+            if info is None:
+                return None
+            self._note_replaces(conn, conn.gfs_instance_id, info)
+            self._record_capabilities(conn, info)
+            return info
         try:
             client = self._client()
         except RuntimeError:
             return None
-        info_url = f"{conn.inbox_url}/gfs/info"
+        info = await self._get_info(client, conn)
+        if info is None:
+            return None
+        current = await self._rebind_to_served_id(conn, info)
+        self._note_replaces(conn, current, info)
+        self._record_capabilities(conn, info)
+        return info
+
+    async def _get_info(
+        self, client: aiohttp.ClientSession | None, conn: GfsConnection
+    ) -> dict | None:
+        """One ``GET {conn}/gfs/info`` over *client*; ``None`` (and the
+        negative TTL) on any failure."""
+        if client is None:
+            return None
         try:
             async with client.get(
-                info_url,
+                f"{conn.inbox_url}/gfs/info",
                 allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -1235,7 +1392,7 @@ class GfsConnectionService:
                     self._info_failed_at[conn.id] = time.monotonic()
                     return None
                 info = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             log.debug(
                 "GFS %s unreachable during /gfs/info fetch: %s",
                 conn.id,
@@ -1247,9 +1404,6 @@ class GfsConnectionService:
             self._info_failed_at[conn.id] = time.monotonic()
             return None
         self._info_failed_at.pop(conn.id, None)
-        current = await self._rebind_to_served_id(conn, info)
-        self._note_replaces(conn, current, info)
-        self._record_capabilities(conn, info)
         return info
 
     def _note_replaces(self, conn: GfsConnection, current: str, info: dict) -> None:
@@ -1941,6 +2095,11 @@ class GfsConnectionService:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
         await self._require_publishable(space_id)
 
+        # v_57 — whether this is the space's first listing there (then the
+        # epoch is announced below, before members hear of the server).
+        listed_before = any(
+            p.space_id == space_id for p in await self._repo.list_publications(gfs_id)
+        )
         body = await self._build_publish_body(space_id)
         if "authority_cert" in body and not await self._signed_capability_supported(
             conn, "authority_rotation", self._authority_rotation
@@ -1976,11 +2135,16 @@ class GfsConnectionService:
 
         status = data.get("status") or "active"
         publication = await self._repo.publish_space(space_id, gfs_id, status=status)
-        if "authority_cert" in body and self._on_repinned is not None:
+        if self._on_repinned is not None and (
+            "authority_cert" in body or not listed_before
+        ):
             # v_49: a publish carrying the owner's cert re-pins the space key
             # at the GFS, which clears its epoch state — re-announce the
             # current epoch right away, whichever path (rotation, a later
-            # retry, the reconnect heal) made the re-pin land.
+            # retry, the reconnect heal) made the re-pin land. v_57: also on
+            # a FIRST listing — a server that just listed the space must hold
+            # its epoch and writer-key pin BEFORE members are told about it
+            # below, or their first anonymous publishes there are refused.
             try:
                 await self._on_repinned(space_id, gfs_id)
             except Exception:
@@ -2596,7 +2760,11 @@ class GfsConnectionService:
     ) -> int:
         """Relay a single space-content event to a space's GFS subscribers.
 
-        POSTs to ``POST /gfs/publish`` on every GFS the space is published to.
+        POSTs to ``POST /gfs/publish`` on every GFS on the owner's signed list
+        (v_57, including servers this household is not registered on — the
+        body names nobody, and a listing target is reached over its own
+        pinned cookie-less session), or without a list on every GFS this
+        household published the space to.
         The ``payload`` is the caller-built wire envelope — for the Phase-5a2
         public-post relay it is the already-encrypted + authority-signed
         ``{space_id, epoch, encrypted_payload, authority_sig, ...}`` dict, so
@@ -2645,7 +2813,7 @@ class GfsConnectionService:
             return 0
         if not await self._relayable(space_id):
             return 0
-        conns = await self._repo.list_active_listings_for_space(space_id)
+        conns = await self._relay_targets(space_id)
         if not conns:
             return 0
         item = GfsPublish(space_id=space_id, event_type=event_type, payload=payload)
@@ -2672,6 +2840,16 @@ class GfsConnectionService:
                 self._queue_publish_retry(conn, item, outcome.retry_after_s)
         return delivered
 
+    async def _relay_targets(self, space_id: str) -> list[GfsConnection]:
+        """Where a relay of *space_id* goes: every server on the owner's
+        signed list (v_57 — a delegated admin relaying while the owner is
+        offline reaches the servers it never connected to, anonymously), or,
+        without a list, the servers THIS household published it to."""
+        targets = await self.server_targets(space_id)
+        if targets is not None:
+            return targets
+        return await self._repo.list_active_listings_for_space(space_id)
+
     async def _publish_capability(
         self, conn: GfsConnection
     ) -> Literal["anonymous", "unsupported", "unknown"]:
@@ -2694,11 +2872,30 @@ class GfsConnectionService:
     async def _post_publish(
         self, conn: GfsConnection, body: dict, *, space_id: str
     ) -> PublishOutcome:
-        """One ``POST /gfs/publish`` of ``body`` to ``conn``, classified."""
-        assert self._publish_client is not None
+        """One ``POST /gfs/publish`` of ``body`` to ``conn``, classified —
+        over the cookie-less session (a listing target's own pinned one)."""
         url = f"{conn.inbox_url}/gfs/publish"
         try:
-            async with self._publish_client.post(
+            async with self.anon_session(conn) as session:
+                if session is None:
+                    return PublishOutcome.permanent()
+                return await self._post_publish_once(
+                    session, url, body, conn=conn, space_id=space_id
+                )
+        except OutboundFetchRefused as exc:
+            return refusal_outcome(exc)
+
+    async def _post_publish_once(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        body: dict,
+        *,
+        conn: GfsConnection,
+        space_id: str,
+    ) -> PublishOutcome:
+        try:
+            async with session.post(
                 url,
                 allow_redirects=False,
                 json=body,
@@ -2744,9 +2941,10 @@ class GfsConnectionService:
     async def _retry_publish(self, conn_id: str, item: GfsPublish) -> PublishOutcome:
         """One retry of ``item`` to ``conn_id`` — the retry queue's sender.
 
-        Re-reads before every attempt: the space must still be published
-        to that connection and the connection active, or the item is
-        dropped (the owner withdrew it). The body is the identity-free
+        Re-reads before every attempt: the server must still be on the
+        owner's list (without one: the space still published to that
+        connection) and active, or the item is dropped (the owner withdrew
+        it). The body is the identity-free
         ``{space_id, event_type, payload}`` and goes only to a GFS that has
         proved ``anonymous_publish`` (:meth:`_publish_capability`): while
         ``/gfs/info`` is unreachable the item waits; a GFS that answers
@@ -2754,13 +2952,13 @@ class GfsConnectionService:
         """
         if self._http_client is None or self._publish_client is None:
             return PublishOutcome.permanent()
+        # Re-resolved now: a server the owner has since delisted (or, without
+        # a list, one whose listing we withdrew) gets nothing more.
         conn = (
             next(
                 (
                     c
-                    for c in await self._repo.list_active_listings_for_space(
-                        item.space_id
-                    )
+                    for c in await self._relay_targets(item.space_id)
                     if c.id == conn_id
                 ),
                 None,

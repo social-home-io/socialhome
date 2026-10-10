@@ -272,6 +272,9 @@ class _HouseholdGfs:
     async def refresh_if_stale(self, conn):
         return conn
 
+    async def server_targets(self, space_id):
+        return None
+
 
 class _TrustedSpaces:
     """A space repo holding the one (trusted-mode) public space."""

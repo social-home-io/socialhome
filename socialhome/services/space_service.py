@@ -1787,11 +1787,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
 
         # v_32 — the first snapshot it can take. v_49 — the snapshot now
         # carries its writer cert, which it could not hold before. v_50 — and,
-        # in a strict space, its writer group key.
+        # in a strict space, its writer group key. v_57 — and in a trusted,
+        # publicly readable space too (so it publishes to every listed GFS
+        # without waiting for the next rotation).
         if not (
             _crossed(FederationCapability.MIN_FOR_ROSTER_SNAPSHOT)
             or _crossed(FederationCapability.MIN_FOR_MEMBER_GFS_PUBLISH)
             or _crossed(FederationCapability.MIN_FOR_STRICT_MEMBER_PUBLISH)
+            or _crossed(FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH)
         ):
             return
         own = self._own_instance_id

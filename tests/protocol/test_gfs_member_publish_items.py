@@ -497,3 +497,114 @@ async def test_an_edit_before_its_create_and_out_of_order_edits(env):
     await _send(env, "post_edit", older, cert)
     await _send(env, "post", _post_inner(BOB, pid, "post", content="v1"), cert)
     assert (await env["posts"].get(pid))[1].content == "v3"
+
+
+# ── v_57: the same item from every listed GFS ─────────────────────────────
+#
+# A household subscribed on several of a space's GFSs receives each item
+# once per server (members publish to every listed one). Every type must
+# dedupe by id: the second copy changes nothing and publishes nothing.
+
+
+class _CountingBus(EventBus):
+    def __init__(self) -> None:
+        super().__init__()
+        self.published: list[str] = []
+
+    async def publish(self, event) -> None:  # type: ignore[override]
+        self.published.append(type(event).__name__)
+        await super().publish(event)
+
+
+async def _frame(env, item_type: str, inner: dict, cert: dict) -> dict:
+    inner = {**inner, "writer_cert": cert}
+    sealed_epoch, ct = await env["crypto"].encrypt(
+        SPACE, json.dumps({"item_type": item_type, "inner": inner}).encode()
+    )
+    # The anonymous (v_50 / v_57) frame: no plaintext cert.
+    return {
+        "type": "relay",
+        "space_id": SPACE,
+        "event_type": "space_item",
+        "epoch": sealed_epoch,
+        "payload": ct,
+    }
+
+
+async def _snapshot(env) -> tuple:
+    posts = env["posts"]
+    rows = []
+    for pid in {env["post_id"], env.get("new_post_id", env["post_id"])}:
+        got = await posts.get(pid)
+        if got is None:
+            rows.append((pid, None))
+            continue
+        post = got[1]
+        comments = await posts.list_comments(pid)
+        rows.append(
+            (
+                pid,
+                post.content,
+                post.deleted,
+                sorted((k, sorted(v)) for k, v in post.reactions.items()),
+                sorted((c.id, c.content, c.deleted) for c in comments),
+            )
+        )
+    return tuple(sorted(rows, key=lambda r: r[0]))
+
+
+def _counting(env) -> _CountingBus:
+    bus = _CountingBus()
+    env["inbound"]._bus = bus
+    env["inbound"]._items._bus = bus
+    return bus
+
+
+@pytest.mark.parametrize("item_type", ("post", *TYPES, "reaction_remove"))
+async def test_the_same_item_from_two_gfss_lands_once(env, item_type):
+    bus = _counting(env)
+    scope = "comment" if item_type.startswith("comment") else "write"
+    cert = await _cert(env, BOB, scope)
+    if item_type == "post":
+        pid = mint_owner_bound_id(
+            SPACE_POST_KIND, space_id=SPACE, owner_user_id=BOB.user_id
+        )
+        env["new_post_id"] = pid
+        inner = _post_inner(BOB, pid, "post", content="fresh")
+    elif item_type == "reaction_remove":
+        await _send(env, "reaction_add", _build(env, "reaction_add", BOB), cert)
+        inner = _generic(
+            BOB, "reaction_remove", env["post_id"], env["post_id"], emoji="👍"
+        )
+    else:
+        inner = _build(env, item_type, BOB)
+    frame = await _frame(env, item_type, inner, cert)
+    await env["inbound"].handle(dict(frame))  # via GFS A
+    first, events = await _snapshot(env), len(bus.published)
+    assert events >= 1, "the first copy did not land"
+    await env["inbound"].handle(dict(frame))  # the same item via GFS B
+    assert await _snapshot(env) == first
+    assert len(bus.published) == events
+
+
+async def test_a_late_copy_of_a_reaction_never_undoes_its_removal(env):
+    """GFS A delivers add + remove; GFS B's copy of the add arrives last."""
+    cert = await _cert(env, BOB, "write")
+    add = await _frame(env, "reaction_add", _build(env, "reaction_add", BOB), cert)
+    remove = await _frame(
+        env,
+        "reaction_remove",
+        _generic(
+            BOB,
+            "reaction_remove",
+            env["post_id"],
+            env["post_id"],
+            emoji="👍",
+            ts=_now(),
+        ),
+        cert,
+    )
+    await env["inbound"].handle(dict(add))
+    await env["inbound"].handle(dict(remove))
+    await env["inbound"].handle(dict(add))
+    assert not await _landed(env, "reaction_add")

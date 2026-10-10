@@ -21,10 +21,15 @@ functions with no demo-runtime dependencies."""
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import sys
 from pathlib import Path
 
 import pytest
+
+import socialhome.domain.gfs_server as gfs_server
+import socialhome.outbound_fetch as outbound_fetch
+import socialhome.peer_url as peer_url
 
 # Load the harness module by path — it lives outside the ``socialhome``
 # package and pytest's import machinery doesn't pick it up via normal
@@ -199,3 +204,30 @@ def test_dtls_block_is_correctly_classified_as_benign(harness):
     # Header is interesting (ERROR:) and body matches a benign needle.
     assert any(m in dtls[0] for m in harness._LOG_INTERESTING)
     assert any(n in dtls[1] for n in harness._LOG_BENIGN)
+
+
+# ── v_57 gfs-multi-listing ────────────────────────────────────────────
+
+
+def test_gfs_b_port_is_free_of_the_other_demo_servers(harness):
+    assert harness.GFS_B_PORT not in (harness.GFS_PORT, *harness.GFS_CLUSTER_PORTS)
+
+
+def test_loopback_shim_treats_only_loopback_as_public(harness, monkeypatch):
+    """The harness-only prelude d runs under: 127.0.0.1 counts as public
+    for the owner's-list filter and the pinned session, nothing else moves,
+    and ``validate_peer_url`` (which keeps B's plain-http URL valid) is left
+    alone. Executed without its final ``runpy`` line."""
+    monkeypatch.setattr(
+        outbound_fetch, "is_public_address", outbound_fetch.is_public_address
+    )
+    monkeypatch.setattr(gfs_server, "is_private_host", gfs_server.is_private_host)
+    prelude, _, tail = harness._LOOPBACK_IS_PUBLIC_PRELUDE.rpartition("import runpy")
+    assert "run_module('socialhome'" in tail
+    exec(compile(prelude, "<prelude>", "exec"), {})  # noqa: S102
+    assert outbound_fetch.is_public_address(ipaddress.ip_address("127.0.0.1"))
+    assert not outbound_fetch.is_public_address(ipaddress.ip_address("10.0.0.1"))
+    assert not gfs_server.is_private_host("127.0.0.1")
+    assert gfs_server.is_private_host("192.168.1.1")
+    assert peer_url.is_private_host("127.0.0.1")
+    assert "validate_peer_url" not in harness._LOOPBACK_IS_PUBLIC_PRELUDE

@@ -5642,6 +5642,509 @@ def cmd_gfs_down() -> None:
     print("gfs-down: ok")
 
 
+# ─── Steps: gfs-b-up / gfs-b-down / gfs-multi-listing (v_57) ──────────────
+
+#: A second, independent GFS (own data dir, own identity key) next to the
+#: main one on 18765 — the cluster steps use 18770-18772.
+GFS_B_PORT = 18767
+GFS_B_DIR = ROOT / "gfs-b"
+
+#: Harness-only prelude for household d in ``gfs-multi-listing``. A member
+#: drops an owner-listed server on a private / loopback address it never
+#: connected to, and the pinned session refuses any non-public address —
+#: both on purpose (an owner's list must never aim a member at its own
+#: network). The demo's GFS B lives on 127.0.0.1, so d runs with loopback
+#: treated as public, exactly like ``loopback_is_public`` in
+#: ``tests/test_outbound_fetch.py``. Never a production knob: it only exists
+#: in this ``-c`` string. ``validate_peer_url`` is NOT patched (it still sees
+#: loopback as private, so B's plain-http URL stays valid).
+_LOOPBACK_IS_PUBLIC_PRELUDE = (
+    "import socialhome.domain.gfs_server as _g, socialhome.outbound_fetch as _o; "
+    "_pub = _o.is_public_address; "
+    "_o.is_public_address = lambda ip: str(ip) == '127.0.0.1' or _pub(ip); "
+    "_priv = _g.is_private_host; "
+    "_g.is_private_host = lambda h: False if h == '127.0.0.1' else _priv(h); "
+    "import runpy; runpy.run_module('socialhome', run_name='__main__', "
+    "alter_sys=True)"
+)
+
+
+def _spawn_loopback_public(label: str, port: int) -> int:
+    """:func:`_spawn` with :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`."""
+    d = _instance_dir(label)
+    log = open(d / "log.txt", "ab")
+    env = {
+        **os.environ,
+        "SH_MODE": "standalone",
+        "SH_CONFIG": str(d / "socialhome.toml"),
+        "SH_LOG_LEVEL": "INFO",
+    }
+    p = subprocess.Popen(
+        [sys.executable, "-u", "-c", _LOOPBACK_IS_PUBLIC_PRELUDE],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        env=env,
+        cwd=str(REPO_ROOT),
+        start_new_session=True,
+    )
+    return p.pid
+
+
+def _gfs_b_alive(state: dict) -> bool:
+    pid = (state.get("gfs_b") or {}).get("pid")
+    return bool(pid and _alive(pid))
+
+
+def _gfs_b_rows(sql: str, params: tuple = ()) -> list[tuple]:
+    """Read-only query against GFS B's own SQLite DB."""
+    conn = sqlite3.connect(GFS_B_DIR / "gfs.db")
+    try:
+        return list(conn.execute(sql, params))
+    finally:
+        conn.close()
+
+
+def _gfs_b_log_size() -> int:
+    try:
+        return (GFS_B_DIR / "log.txt").stat().st_size
+    except OSError:
+        return 0
+
+
+def _gfs_b_log_text(offset: int = 0) -> str:
+    try:
+        return (
+            (GFS_B_DIR / "log.txt")
+            .read_bytes()[offset:]
+            .decode("utf-8", errors="replace")
+        )
+    except OSError:
+        return ""
+
+
+def cmd_gfs_b_up() -> None:
+    """Start a SECOND GFS on ``127.0.0.1:18767`` with its own data dir and
+    identity — another operator's server, for the v_57 multi-listing step.
+    Same boot as :func:`cmd_gfs_up` (DEBUG logs, example TOML patched)."""
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    from socialhome.global_server.admin import hash_password
+    from socialhome.global_server.config import (
+        set_password_in_toml,
+        write_example_config,
+    )
+
+    GFS_B_DIR.mkdir(parents=True, exist_ok=True)
+    config_path = GFS_B_DIR / "global_server.toml"
+    if not config_path.exists():
+        write_example_config(config_path)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace('host     = "0.0.0.0"', 'host     = "127.0.0.1"')
+    text = text.replace("port     = 8765", f"port     = {GFS_B_PORT}")
+    text = text.replace(
+        'base_url = "https://gfs.example.com"',
+        f'base_url = "http://127.0.0.1:{GFS_B_PORT}"',
+    )
+    text = text.replace('data_dir = "/var/lib/sh-gfs"', f'data_dir = "{GFS_B_DIR}"')
+    # Its own public id: the owner's list dedupes servers by id, so B must
+    # not share A's default ``gfs-node-0``.
+    text = text.replace('instance_id = "gfs-node-0"', 'instance_id = "gfs-b"', 1)
+    config_path.write_text(text, encoding="utf-8")
+    set_password_in_toml(config_path, hash_password("gfs-admin-pw"))
+    log = open(GFS_B_DIR / "log.txt", "wb")
+    p = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import logging; logging.basicConfig(level=logging.DEBUG, "
+            'format="%(asctime)s %(levelname)-8s %(name)s: %(message)s"); '
+            "from socialhome.global_server.server import main; main()",
+            "--config",
+            str(config_path),
+        ],
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        cwd=str(REPO_ROOT),
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 30.0
+    last_err: Any = None
+    while time.monotonic() < deadline:
+        try:
+            s, _ = _request(f"http://127.0.0.1:{GFS_B_PORT}/healthz", timeout=2.0)
+            if s == 200:
+                break
+        except Exception as exc:
+            last_err = exc
+        time.sleep(0.5)
+    else:
+        raise SystemExit(f"GFS B not ready after 30 s (last error: {last_err!r})")
+    s, info = _request(f"http://127.0.0.1:{GFS_B_PORT}/gfs/info")
+    _must("GFS B /gfs/info", s, info)
+    if (state.get("gfs") or {}).get("port"):
+        s, info_a = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/info")
+        if s == 200 and info_a.get("public_key") == info.get("public_key"):
+            raise SystemExit("gfs-b-up: GFS B shares GFS A's identity key")
+    state["gfs_b"] = {
+        "pid": p.pid,
+        "port": GFS_B_PORT,
+        "base_url": f"http://127.0.0.1:{GFS_B_PORT}",
+        "gfs_instance_id": info.get("gfs_instance_id"),
+    }
+    _save(state)
+    print(f"  gfs-b: pid={p.pid} port={GFS_B_PORT} id={info.get('gfs_instance_id')!r}")
+    print("gfs-b-up: ok")
+
+
+def cmd_gfs_b_down() -> None:
+    """Stop GFS B (idempotent)."""
+    state = _load()
+    gfs_b = state.get("gfs_b")
+    if not gfs_b:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(gfs_b["pid"], sig)
+        except ProcessLookupError, PermissionError:
+            pass
+        time.sleep(1)
+    state.pop("gfs_b", None)
+    _save(state)
+    print("gfs-b-down: ok")
+
+
+def _as(state: dict, label: str, method: str, path: str, body=None):
+    """One REST call as ``label``'s user, backing off on 429."""
+    inst = state["instances"][label]
+    st, resp = 0, None
+    for _attempt in range(4):
+        st, resp = _request(
+            f"http://127.0.0.1:{inst['port']}{path}",
+            token=inst["token"],
+            method=method,
+            body=body,
+        )
+        if st != 429:
+            break
+        time.sleep(15.0)
+    return st, resp
+
+
+def _pair_with(state: dict, label: str, base_url: str) -> dict:
+    """Connect ``label`` to the GFS at ``base_url`` (fresh landing token)."""
+    st, resp = _as(
+        state,
+        label,
+        "POST",
+        "/api/gfs/connections",
+        {"gfs_url": base_url, "token": _gfs_landing_token(base_url)},
+    )
+    return _must(f"{label} connects to {base_url}", st, resp, ok=(201,))
+
+
+def cmd_gfs_multi_listing() -> None:
+    """v_57: every GFS on the owner's list gets every item — a follower on
+    GFS B alone sees what a member registered only on GFS A published while
+    the host is offline, and B never learns who that member is.
+
+    Prereqs: ``up`` → ``pair`` → ``gfs-up`` → ``gfs-pair`` (a, d, e on A) →
+    ``gfs-b-up``. Runs after the rest of the gfs chain (it moves e off A for
+    a while and restarts a and d), before ``verify``.
+
+    1. a and e connect to B. a creates a TRUSTED global space, publicly
+       readable, and lists it on A and on B (``POST /api/spaces/{id}/publish/
+       {gfs_id}`` — PR 2's selection API is not on main yet). Both servers
+       list it and pin the epoch's writer key (the first-listing notice).
+    2. a invites d (paired, registered on A only); d accepts. d holds the
+       owner's signed list naming A and B, and the writer key (trusted
+       space, v_57).
+    3. d restarts with loopback treated as public (the demo's B is on
+       127.0.0.1 — see :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`).
+    4. e leaves A, discovers the space on B and follows it there only.
+    5. a goes offline. d posts, comments and reacts.
+    6. e receives all three — B is the only server it follows on. B holds no
+       ``client_instances`` row for d, never got an identified member
+       publish, and its log names neither d nor the content.
+    7. Clean-up: a and d restart normally; e reconnects to A.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    if not _gfs_b_alive(state):
+        raise SystemExit("run 'gfs-b-up' first")
+    a, d, e = (state["instances"][x] for x in ("a", "d", "e"))
+    b_url = state["gfs_b"]["base_url"]
+    a_url = f"http://127.0.0.1:{GFS_PORT}"
+    d_iid = d["instance_id"]
+    d_pk = _rows("d", "SELECT identity_public_key FROM instance_identity")[0][0]
+    d_leaks = (
+        d_iid,
+        d_pk,
+        base64.urlsafe_b64encode(bytes.fromhex(d_pk)).decode().rstrip("="),
+    )
+
+    # 1. a and e connect to B; a lists a new trusted global space on A and B.
+    a_b = _pair_with(state, "a", b_url)
+    e_b = _pair_with(state, "e", b_url)
+    print(f"  a and e connected to GFS B ({b_url}) ✓")
+    st, space = _as(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {
+            "name": "Two servers",
+            "description": "v_57 multi-GFS listing",
+            "space_type": "global",
+            "join_mode": "invite_only",
+        },
+    )
+    space_id = _must("a creates the global space", st, space, ok=(201,))["id"]
+    st, body = _as(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"allow_subscribers": True}},
+    )
+    _must("a makes it publicly readable", st, body)
+    a_a_id = state["gfs"]["pairings"]["a"]["id"]
+    for gfs_id, name in ((a_a_id, "A"), (a_b["id"], "B")):
+        st, body = _as(state, "a", "POST", f"/api/spaces/{space_id}/publish/{gfs_id}")
+        _must(f"a lists the space on GFS {name}", st, body, ok=(200, 201))
+    for name, rows_of in (("A", _gfs_rows), ("B", _gfs_b_rows)):
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            rows = rows_of(
+                "SELECT writer_key_epoch FROM global_spaces WHERE space_id=?",
+                (space_id,),
+            )
+            if rows and rows[0][0] is not None:
+                break
+            time.sleep(2.0)
+        else:
+            raise SystemExit(
+                f"gfs-multi-listing: GFS {name} lists no space {space_id} with a "
+                f"pinned writer key within 60 s (rows {rows!r}) — check "
+                f"{_instance_dir('a') / 'log.txt'} for 'epoch notice'"
+            )
+    print("  the space is listed on A and B, writer key pinned on both ✓")
+
+    # 2. d joins as a member; it holds the owner's list and the writer key.
+    #    The key goes only to a household a KNOWS runs v_57, so a and d
+    #    must be paired (the canonical gfs chain leaves them mesh-only;
+    #    ``relay-pair`` would pair them too) and have exchanged versions.
+    if d_iid not in _peer_ids(a):
+        # :func:`_pair_two`, but each call waits out a 429 on its own: the
+        # ``/api/pairing/*`` bucket is 5 calls / 60 s, and restarting the
+        # whole handshake after a refused confirm would accept twice.
+        st, qr = _as(state, "a", "POST", "/api/pairing/initiate")
+        qr = _must("initiate(a→d)", st, qr, ok=(201,))
+        st, ack = _as(state, "d", "POST", "/api/pairing/accept", qr)
+        ack = _must("accept(d)", st, ack)
+        st, conf = _as(
+            state,
+            "a",
+            "POST",
+            "/api/pairing/confirm",
+            {"token": ack["token"], "verification_code": ack["verification_code"]},
+        )
+        _must("confirm(a→d)", st, conf)
+        print("  paired a ↔ d")
+    _poll_rows(
+        "a",
+        "SELECT proto_version FROM remote_instances WHERE id=?",
+        (d_iid,),
+        lambda rows: bool(rows) and int(rows[0][0] or 0) >= 57,
+        what="a never learned that d runs v_57",
+        timeout=120.0,
+    )
+    st, inv = _as(
+        state,
+        "a",
+        "POST",
+        f"/api/spaces/{space_id}/remote-invites",
+        {"invitee_instance_id": d_iid, "invitee_user_id": d["user_id"]},
+    )
+    _must("a invites d", st, inv, ok=(201,))
+    time.sleep(4)
+    _accept_remote_invite(state, "d", space_id)
+    _poll_rows(
+        "d",
+        "SELECT gfs_servers FROM spaces WHERE id=?",
+        (space_id,),
+        lambda rows: bool(rows) and rows[0][0] and rows[0][0].count("inbox_url") == 2,
+        what="d never stored the owner's two-server list",
+        timeout=90.0,
+    )
+    _poll_rows(
+        "d",
+        "SELECT 1 FROM space_keys WHERE space_id=? AND writer_key IS NOT NULL",
+        (space_id,),
+        bool,
+        what="d never got the writer key of the trusted space (v_57)",
+        timeout=90.0,
+    )
+    print("  d joined: holds the owner's list (A + B) and the writer key ✓")
+
+    # 3. d restarts treating loopback as public (B is on 127.0.0.1).
+    _kill_household("d", d)
+    state["instances"]["d"]["pid"] = _spawn_loopback_public("d", d["port"])
+    _save(state)
+    _wait_ready(d["port"])
+    print("  d restarted (loopback treated as public — harness-only shim) ✓")
+
+    # 4. e follows on B only.
+    e_a_id = state["gfs"]["pairings"]["e"]["id"]
+    st, body = _as(state, "e", "DELETE", f"/api/gfs/connections/{e_a_id}")
+    _must("e leaves GFS A", st, body, ok=(200, 204))
+    _as(state, "e", "POST", "/api/public_spaces/refresh")
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        st, listing = _as(state, "e", "GET", "/api/public_spaces")
+        if st == 200 and isinstance(listing, list):
+            if any(row.get("space_id") == space_id for row in listing):
+                break
+        _as(state, "e", "POST", "/api/public_spaces/refresh")
+        time.sleep(3.0)
+    else:
+        raise SystemExit(
+            f"gfs-multi-listing: e (on GFS B only) never discovered {space_id}"
+        )
+    st, sub = _as(state, "e", "POST", f"/api/spaces/{space_id}/subscribe")
+    _must("e follows the space (via B)", st, sub)
+    _poll_rows(
+        "e",
+        "SELECT 1 FROM space_keys WHERE space_id=?",
+        (space_id,),
+        bool,
+        what="e never got the space's content key over B",
+        timeout=90.0,
+    )
+    if _gfs_rows(
+        "SELECT 1 FROM space_subscribers WHERE space_id=? AND instance_id=?",
+        (space_id, e["instance_id"]),
+    ):
+        raise SystemExit("gfs-multi-listing: e holds a follower seat on GFS A")
+    print("  e follows the space on GFS B only, content key in hand ✓")
+
+    # 5. a offline; d posts, comments and reacts.
+    _kill_household("a", a)
+    b_off = _gfs_b_log_size()
+    content = f"Posted through every listed GFS — {time.time_ns()}"
+    st, post = _as(
+        state,
+        "d",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": content},
+    )
+    post_id = _must("d posts with the host offline", st, post, ok=(201,))["id"]
+    comment_text = f"And a comment — {time.time_ns()}"
+    st, comment = _as(
+        state,
+        "d",
+        "POST",
+        f"/api/spaces/{space_id}/posts/{post_id}/comments",
+        {"content": comment_text},
+    )
+    comment_id = _must("d comments", st, comment, ok=(200, 201))["id"]
+    st, body = _as(
+        state,
+        "d",
+        "POST",
+        f"/api/spaces/{space_id}/posts/{post_id}/reactions",
+        {"emoji": "🛰"},
+    )
+    _must("d reacts", st, body, ok=(200, 201))
+
+    # 6. e receives everything via B.
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id=?",
+        (post_id,),
+        lambda rows: bool(rows) and rows[0][0] == content,
+        what=f"e never received d's post {post_id} over GFS B",
+        timeout=90.0,
+    )
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_post_comments WHERE id=? AND deleted=0",
+        (comment_id,),
+        lambda rows: bool(rows) and rows[0][0] == comment_text,
+        what="e never received d's comment over GFS B",
+        timeout=90.0,
+    )
+    _poll_rows(
+        "e",
+        "SELECT reactions FROM space_posts WHERE id=?",
+        (post_id,),
+        lambda rows: bool(rows) and "🛰" in (rows[0][0] or ""),
+        what="e never received d's reaction over GFS B",
+        timeout=90.0,
+    )
+    print("  e (on B only) received d's post, comment and reaction ✓")
+    if _gfs_b_rows("SELECT 1 FROM client_instances WHERE instance_id=?", (d_iid,)):
+        raise SystemExit("gfs-multi-listing: GFS B holds a client row for d")
+    b_log = _gfs_b_log_text(b_off)
+    if "POST /gfs/member-publish-anon" not in b_log:
+        raise SystemExit("gfs-multi-listing: no anonymous member publish reached GFS B")
+    if "POST /gfs/member-publish HTTP" in b_log:
+        raise SystemExit(
+            "gfs-multi-listing: an IDENTIFIED member publish reached GFS B"
+        )
+    for leak in (*d_leaks, content, comment_text):
+        if leak in b_log:
+            raise SystemExit(
+                f"gfs-multi-listing: GFS B's log names d or the content ({leak[:16]!r})"
+            )
+    print(
+        "  GFS B: no client row for d, only anonymous publishes, and its log "
+        "names neither d nor the content ✓"
+    )
+
+    # 7. Clean-up for the rest of the chain.
+    _kill_household("d", d)
+    state["instances"]["d"]["pid"] = _spawn("d", d["port"])
+    state["instances"]["a"]["pid"] = _spawn("a", a["port"])
+    _save(state)
+    _wait_ready(d["port"])
+    _wait_ready(a["port"])
+    again = _pair_with(state, "e", a_url)
+    state["gfs"]["pairings"]["e"] = {
+        "id": again["id"],
+        "gfs_instance_id": again["gfs_instance_id"],
+        "status": again["status"],
+    }
+    state["gfs_multi_listing"] = {
+        "space_id": space_id,
+        "post_id": post_id,
+        "e_b_connection": e_b["id"],
+    }
+    _save(state)
+    print("gfs-multi-listing: ok (a member reached every listed GFS anonymously)")
+
+
+def _check_multi_listing(state: dict, failures: list[str]) -> None:
+    """v_57 tripwire for ``verify``: d still holds the trusted space's writer
+    key and the owner's two-server list; e still holds d's post."""
+    info = state["gfs_multi_listing"]
+    space_id = info["space_id"]
+    if not _rows(
+        "d",
+        "SELECT 1 FROM space_keys WHERE space_id=? AND writer_key IS NOT NULL",
+        (space_id,),
+    ):
+        failures.append("d: no writer key for the trusted multi-GFS space (v_57)")
+    rows = _rows("d", "SELECT gfs_servers FROM spaces WHERE id=?", (space_id,))
+    if not rows or not rows[0][0] or rows[0][0].count("inbox_url") != 2:
+        failures.append("d: the owner's GFS list does not name both servers")
+    if not _rows("e", "SELECT 1 FROM space_posts WHERE id=?", (info["post_id"],)):
+        failures.append("e: lost d's post from the multi-GFS step")
+
+
 # ─── Step: pair ────────────────────────────────────────────────────────────
 
 
@@ -6531,6 +7034,26 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_56 space-sync series rows gate in place ✓")
+    # v_57 — members publish to every GFS on the owner's list (writer key in
+    # trusted spaces, anonymous to servers they never joined). The OURS
+    # round-trip above proves every pair advertises >= v_57. Pin it, and when
+    # ``gfs-multi-listing`` ran, check what it left behind.
+    if int(_Cap.MIN_FOR_MULTI_GFS_PUBLISH) != 57 or _OURS < 57:
+        failures.append(
+            "MIN_FOR_MULTI_GFS_PUBLISH moved off v_57 (or OURS fell below it) — "
+            "members would get no writer key in a trusted space"
+        )
+    else:
+        print("  v_57 multi-GFS member publish gate in place ✓")
+    if state.get("gfs_multi_listing"):
+        before = len(failures)
+        _check_multi_listing(state, failures)
+        if len(failures) == before:
+            print(
+                "  v_57 multi-GFS listing round-tripped (d keyed, e holds d's post) ✓"
+            )
+    else:
+        print("  (v_57 multi-listing check skipped — run 'gfs-multi-listing')")
 
     # 0c. v_29 round-trip on the §D2b BOOTSTRAP wire. The capability
     #     integer normally travels in INSTANCE_CAPABILITIES_UPDATED, over a
@@ -11586,6 +12109,9 @@ def cmd_space_chat() -> None:
 
 def cmd_down() -> None:
     state = _load()
+    if state.get("gfs_b"):
+        cmd_gfs_b_down()
+        state = _load()
     gfs = state.get("gfs")
     if gfs:
         try:
