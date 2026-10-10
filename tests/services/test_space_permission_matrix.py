@@ -150,6 +150,10 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # sender, so a peer cannot use it to tear down a live seat.
         "revoke_space_session_if_orphaned",
         "apply_space_session_cleanup",
+        # The GFS mirror's post-grace re-check — no actor; the teardown it
+        # runs is driven by the ABSENCE of any local member (re-read from
+        # our own rows) and refuses owned / seed-held / unproven spaces.
+        "release_gfs_mirror_if_unused",
         # Federation inbound hook — the actor's role is validated inside
         # the method itself by looking up ``space_remote_members.role``;
         # there is no actor-username to thread through ``_require_admin``.

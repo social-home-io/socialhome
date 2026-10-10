@@ -142,6 +142,7 @@ from .repositories import (
 from .repositories.call_repo import SqliteCallRepo
 from .repositories.cp_repo import SqliteCpRepo
 from .repositories.federation_repo import AbstractFederationRepo
+from .repositories.gfs_space_seat_repo import SqliteGfsSpaceSeatRepo
 from .repositories.gfs_connection_repo import (
     AbstractGfsConnectionRepo,
     SqliteGfsConnectionRepo,
@@ -371,6 +372,7 @@ from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_relay_inbound import GfsRelayInbound
 from .services.gfs_route_discovery_service import GfsRouteDiscoveryService
+from .services.gfs_directory import GfsDirectoryCache
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
 from .services.link_preview_service import LinkPreviewService
 from .services.map_tile_service import MapTileService
@@ -1118,6 +1120,7 @@ def _build_repos(db: AsyncDatabase):
         poll=SqlitePollRepo(db),
         space_poll=SqliteSpacePollRepo(db),
         gfs_connection=SqliteGfsConnectionRepo(db),
+        gfs_space_seat=SqliteGfsSpaceSeatRepo(db),
         call=SqliteCallRepo(db),
         profile_picture=SqliteProfilePictureRepo(db),
         space_cover=SqliteSpaceCoverRepo(db),
@@ -2465,16 +2468,29 @@ def create_app(config: Config | None = None) -> web.Application:
     # ``subscribe_to_space`` can seat a subscriber for it (and register this
     # household on the GFS relay). Optional in the same sense as the GFS
     # connection service — inert when no GFS is paired.
+    # Every paired server's WHOLE directory (``GET /gfs/spaces``), read over
+    # the cookie-less publish session and shared by the mirror and member
+    # publish: each gates its space-specific requests on it.
+    gfs_directories = GfsDirectoryCache(lambda: gfs_connection_service.publish_client())
     gfs_space_mirror = GfsSpaceMirrorService(
         space_repo=repos.space,
         gfs_connection_repo=repos.gfs_connection,
         gfs_connection_service=gfs_connection_service,
+        # The servers seating us, per space — the only ones an
+        # identity-bound (un)subscribe may reach.
+        seat_repo=repos.gfs_space_seat,
         # The GFS directory cache is the evidence that a given space really
         # came off a GFS listing — the teardown path refuses to unsubscribe
         # or purge without it (see ``was_gfs_listed``).
         public_space_repo=repos.public_space,
+        directories=gfs_directories,
     )
     space_service.attach_gfs_space_mirror(gfs_space_mirror)
+    # A space's seats go when its last local member leaves (or is banned).
+    gfs_space_mirror.wire(bus)
+    # An unpair keeps the seats (detached) and unsubscribes in the
+    # background — never inside the unpair request.
+    gfs_connection_service.attach_on_disconnect(gfs_space_mirror.on_disconnect)
 
     # ── Public space discovery (GFS poll) ────────────────────────────────
     public_space_discovery = PublicSpaceDiscoveryService(
@@ -3121,6 +3137,12 @@ def create_app(config: Config | None = None) -> web.Application:
             )
         )
         gfs_space_mirror.attach_session(http_session)
+        # Seats on a server never re-paired are dropped after 90 days of
+        # matching no connection (local only, no request).
+        try:
+            await gfs_space_mirror.sweep_orphan_seats()
+        except Exception:
+            log.exception("gfs: seat sweep failed at startup")
         public_space_discovery.attach_session(http_session)
         map_tile_service.attach_session(http_session)
 
@@ -3273,6 +3295,11 @@ def create_app(config: Config | None = None) -> web.Application:
         real_space_service.attach_bazaar_repo(bazaar_repo)
         real_space_service.attach_gfs_connection_service(gfs_connection_service)
         real_space_service.attach_gfs_space_mirror(gfs_space_mirror)
+        # A quick subscribe → unsubscribe inside the seat grace window leaves
+        # seat + stub; the mirror re-checks once the window has passed.
+        gfs_space_mirror.attach_teardown(
+            real_space_service.release_gfs_mirror_if_unused
+        )
         # Invite codes carry this household's published key-wrap triple
         # (the §D2b bootstrap block) so a stranger can seal a redeem to
         # us. Same key /gfs/info serves — never a fresh one.
@@ -3341,7 +3368,11 @@ def create_app(config: Config | None = None) -> web.Application:
             writer_certs=writer_certs,
             own_instance_id=real_instance_id,
             own_identity_seed=identity_seed,
+            directories=gfs_directories,
         )
+        # Auto-subscribes are seats like any other: recorded, so a leave
+        # tears them down on every server that took one.
+        gfs_member_publish.attach_seats(gfs_space_mirror)
         real_space_service.attach_member_gfs(gfs_member_publish)
         _member = gfs_member_publish
 
@@ -4081,6 +4112,9 @@ def create_app(config: Config | None = None) -> web.Application:
             signing_key=identity_seed,
             session_factory=lambda: http_session,
             on_relay=_on_gfs_relay,
+            # A relay for a space no local user is seated in proves that
+            # server still seats us — unsubscribe there (and only there).
+            on_relay_seen=gfs_space_mirror.on_relay_frame,
             on_highlight_signal=highlight_signaling_handler.handle_signal,
             on_moment_signal=moment_public_signaling_handler.handle_signal,
             on_moment_public=moment_public_inbound.handle,
@@ -4437,6 +4471,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await gfs_ws_supervisor.stop()
         # Before the publish session closes: a retry rides it.
         await gfs_connection_service.stop()
+        # Background seat releases ride the HTTP session too.
+        await gfs_space_mirror.stop()
         if gfs_member_publish is not None:
             await gfs_member_publish.stop()
         if gfs_channels is not None:

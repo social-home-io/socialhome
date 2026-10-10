@@ -3981,3 +3981,29 @@ async def test_unpublish_from_listed_only_contacts_listing_gfs(env):
     assert len(session.calls) == 1
     assert "gfs.example.com" in session.calls[0][1]
     assert all("other.example.com" not in c[1] for c in session.calls)
+
+
+async def test_disconnect_sends_nothing(env):
+    """H1 (round 3): unpairing is local only — the household's GFS seats
+    stay (a re-pair of the same server re-takes them), and the DELETE
+    route never waits on the network."""
+    _, repo = env
+    session = _StubSession()
+    await repo.save(_make_conn("rm-2"))
+    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    await svc.disconnect("rm-2")
+    assert await repo.get("rm-2") is None
+    assert session.calls == []
+
+
+async def test_the_same_server_at_a_differently_spelled_url_is_not_paired_twice(env):
+    """L2: duplicate detection uses the seat binding's address
+    normalization (case, default port, trailing slash)."""
+    _, repo = env
+    await repo.save(_make_conn("dup-1"))
+    existing = (await repo.get("dup-1")).inbox_url
+    svc = GfsConnectionService(repo, http_client=_StubSession())  # type: ignore[arg-type]
+    spelled = existing.upper().replace("HTTPS://", "https://") + ":443/"
+    with pytest.raises(GfsSignupError) as exc:
+        await svc._require_new_gfs_url(spelled)
+    assert exc.value.reason == "already_connected"

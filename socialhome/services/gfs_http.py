@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -42,14 +43,12 @@ MAX_GFS_DIRECTORY_BODY_BYTES: int = 32 * 1024 * 1024
 MAX_GFS_DIRECTORY_ITEMS: int = 2000
 
 
-async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
-    """Parse *resp*'s JSON body, or return ``None`` when it is unusable.
+async def read_body_capped(resp: Any, *, url: str, limit: int) -> bytes | None:
+    """*resp*'s body as bytes, or ``None`` when it is larger than *limit*
+    bytes (by the declared ``Content-Length`` or by what actually arrived).
 
-    ``None`` means "treat this as a failed fetch": the body was larger than
-    *limit* bytes (by the declared ``Content-Length`` or by what actually
-    arrived), or it was not valid JSON. Callers decide whether that is
-    fail-soft (skip this GFS, retry next tick) or fail-closed (seat
-    nothing).
+    For a body big enough that parsing it belongs off the event loop — the
+    caller parses the returned bytes in a thread.
     """
     declared = getattr(resp, "content_length", None)
     if declared is not None and declared > limit:
@@ -70,16 +69,53 @@ async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
         if not chunk:
             break
         buf += chunk
-    raw = bytes(buf)
-    if len(raw) > limit:
+    if len(buf) > limit:
         log.warning(
             "gfs_http: %s returned more than %d bytes — refusing to parse it",
             url,
             limit,
         )
         return None
+    return bytes(buf)
+
+
+async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
+    """Parse *resp*'s JSON body, or return ``None`` when it is unusable.
+
+    ``None`` means "treat this as a failed fetch": the body was larger than
+    *limit* bytes (by the declared ``Content-Length`` or by what actually
+    arrived), or it was not valid JSON. Callers decide whether that is
+    fail-soft (skip this GFS, retry next tick) or fail-closed (seat
+    nothing).
+    """
+    raw = await read_body_capped(resp, url=url, limit=limit)
+    if raw is None:
+        return None
     try:
         return json.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         log.warning("gfs_http: %s returned an unparsable body: %s", url, exc)
         return None
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def gfs_server_address(url: str) -> str:
+    """A GFS's comparable address: scheme + host (+ port unless it is the
+    scheme's default), lower-cased; path, trailing slash, user info and
+    query ignored. ``https://GFS.example:443/`` == ``https://gfs.example``.
+    The one normalization for "is this the same server" — the seat binding
+    and the duplicate-pairing guard both use it."""
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if not scheme or not host:
+        return url.strip().rstrip("/").lower()
+    try:
+        port = parts.port
+    except ValueError:
+        return url.strip().rstrip("/").lower()
+    if port is None or port == _DEFAULT_PORTS.get(scheme):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"

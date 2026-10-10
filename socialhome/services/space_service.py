@@ -40,6 +40,7 @@ import binascii
 import logging
 import unicodedata
 import uuid
+import weakref
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -341,6 +342,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     """Orchestrates space lifecycle + member + post flows."""
 
     __slots__ = (
+        "_mirror_locks",
         "_spaces",
         "_posts",
         "_users",
@@ -401,6 +403,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._icons = None
         self._gfs = None
         self._gfs_mirror = None
+        #: Per-space lock shared by a GFS-mirror subscribe and the mirror
+        #: teardown, so a teardown never purges a subscribe in progress.
+        #: Weak values: an idle space's lock goes with its last holder.
+        self._mirror_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._subscriber_keys = None
         #: v_49 — announces each rotated epoch to the GFS (member publish).
         self._member_gfs = None
@@ -7127,7 +7135,18 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     # * Subscribe respects bans + the §CP.F1 age gate, same as
     #   ``add_member``.
 
+    def _mirror_lock(self, space_id: str) -> asyncio.Lock:
+        lock = self._mirror_locks.get(space_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._mirror_locks[space_id] = lock
+        return lock
+
     async def subscribe_to_space(self, user_id: str, space_id: str) -> None:
+        async with self._mirror_lock(space_id):
+            await self._subscribe_to_space(user_id, space_id)
+
+    async def _subscribe_to_space(self, user_id: str, space_id: str) -> None:
         # GFS on-ramp: a space discovered through a paired GFS has no local
         # ``spaces`` row yet, so ``_require_space`` below would 404 it. Mirror
         # the GFS listing onto a local stub FIRST (see
@@ -7219,36 +7238,51 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
         await self._maybe_purge_gfs_mirror(space_id)
 
+    async def release_gfs_mirror_if_unused(self, space_id: str) -> None:
+        """The mirror's post-grace re-check: the same proven-mirror teardown
+        an unsubscribe runs, for a subscribe that was undone while its GFS
+        seat was still in its grace window."""
+        await self._maybe_purge_gfs_mirror(space_id)
+
     async def _maybe_purge_gfs_mirror(self, space_id: str) -> None:
         """Drop a GFS-mirrored stub once its last local subscriber leaves.
 
-        Both of the things this does — telling every paired GFS we are gone,
-        and deleting the row with its posts / gallery / bazaar / media — are
-        irreversible and visible to third parties, so they run only on
-        *positive* evidence that the row is a GFS mirror:
+        Both of the things this does — unsubscribing from the GFS server(s)
+        that seat this household for the space, and deleting the row with
+        its posts / gallery / bazaar / media — are irreversible and visible
+        to third parties, so they run only on *positive* evidence that the
+        row is a GFS mirror:
 
         * the space is ``GLOBAL`` (what the mirror seats), owned by another
           instance, and we hold no space seed for it (we are not its
           authority); **and**
-        * a ``public_space_cache`` row exists for the id — i.e. some paired
-          GFS directory actually advertised this space
-          (``GfsSpaceMirrorService.was_gfs_listed``).
+        * some evidence that a GFS listed it
+          (``GfsSpaceMirrorService.was_gfs_listed``: mirror provenance, a
+          recorded GFS seat, a ``public_space_cache`` row, or a cached
+          directory listing).
 
         Without that evidence the row may be a public/global stub learned
-        from a direct peer, which has nothing to do with any GFS: fanning a
-        signed, identity-bound unsubscribe at every GFS operator would
-        disclose a relationship with a space they never knew about, and the
-        purge would destroy a space we were never asked to forget. In that
-        case the local member removal (already done by the caller) is all
-        that happens — losing a stub row is worse than keeping an inert one.
+        from a direct peer, which has nothing to do with any GFS: an
+        identity-bound unsubscribe would disclose to a GFS operator a
+        relationship with a space they never knew about, and the purge would
+        destroy a space we were never asked to forget. In that case the local
+        member removal (already done by the caller) is all that happens —
+        losing a stub row is worse than keeping an inert one.
 
-        The GFS-side unsubscribe is best-effort (a down GFS must not block the
+        Runs under the space's subscribe lock: a subscribe of the same space
+        in progress finishes first (and is then seen as a member). The
+        GFS-side unsubscribe is best-effort (a down GFS must not block the
         local leave); the local purge then cascades from ``spaces``, which is
         what drops the space's ``space_keys`` row — the content key goes with
         the mirror rather than lingering for a space we can no longer read.
         """
         if self._gfs_mirror is None:
             return
+        async with self._mirror_lock(space_id):
+            await self._purge_gfs_mirror_if_unused(space_id)
+
+    async def _purge_gfs_mirror_if_unused(self, space_id: str) -> None:
+        assert self._gfs_mirror is not None
         space = await self._spaces.get(space_id)
         if space is None or space.owner_instance_id == self._own_instance_id:
             return
@@ -7268,13 +7302,21 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if await self._spaces.list_members(space_id):
             # Another local user still subscribes — keep the mirror.
             return
+        if await self._gfs_mirror.seat_in_grace(space_id):
+            # A subscribe is in flight: its GFS seat was just taken and its
+            # member row is not written yet. Tearing down now would pull the
+            # seat (and the row) out from under it.
+            log.debug(
+                "space %s: a subscribe is in flight — keeping the mirror", space_id
+            )
+            return
         proven_mirror = space.space_type is SpaceType.GLOBAL and (
             await self._gfs_mirror.was_gfs_listed(space_id)
         )
         if not proven_mirror:
             log.debug(
-                "space %s: not provably a GFS mirror (type=%s, gfs-listed=no)"
-                " — leaving the row alone and sending no GFS unsubscribe",
+                "space %s: no evidence it is a GFS mirror (type=%s) — leaving "
+                "the row alone and sending no GFS unsubscribe",
                 space_id,
                 space.space_type,
             )

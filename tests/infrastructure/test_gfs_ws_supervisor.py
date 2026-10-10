@@ -10,7 +10,10 @@ import aiohttp
 import pytest
 
 from socialhome.domain.federation import GfsConnection
-from socialhome.infrastructure.gfs_ws_supervisor import GfsWebSocketSupervisor
+from socialhome.infrastructure.gfs_ws_supervisor import (
+    GfsWebSocketSupervisor,
+    _relay_for,
+)
 
 
 # ── Fakes ──────────────────────────────────────────────────────────────────────
@@ -529,3 +532,46 @@ async def test_supervisor_binds_envelope_handler_per_connection(http_session):
             assert late == [("three", "http://gfs2.test")]
         finally:
             await supervisor.stop()
+
+
+# ── relay observer (seat self-heal) ──────────────────────────────────────
+
+
+async def test_relay_observer_is_told_the_server_after_the_consumer():
+    order: list[tuple] = []
+
+    async def _consume(frame):
+        order.append(("consume", frame["space_id"]))
+
+    async def _seen(frame, *, gfs_id):
+        order.append(("seen", frame["space_id"], gfs_id))
+
+    await _relay_for(_consume, _seen, "gfs-1")({"space_id": "sp"})
+    assert order == [("consume", "sp"), ("seen", "sp", "gfs-1")]
+
+
+async def test_without_an_observer_the_consumer_is_used_as_is():
+    consume = AsyncMock()
+    assert _relay_for(consume, None, "gfs-1") is consume
+
+
+async def test_a_failing_observer_never_costs_the_frame(caplog):
+    consume = AsyncMock()
+
+    async def _boom(frame, *, gfs_id):
+        raise RuntimeError("bug")
+
+    await _relay_for(consume, _boom, "gfs-1")({"space_id": "sp"})
+    consume.assert_awaited_once()
+    assert "relay observer failed" in caplog.text
+
+
+async def test_a_frame_the_consumer_rejected_never_reaches_the_observer():
+    seen = AsyncMock()
+
+    async def _reject(frame):
+        raise ValueError("bad frame")
+
+    with pytest.raises(ValueError):
+        await _relay_for(_reject, seen, "gfs-1")({"space_id": "sp"})
+    seen.assert_not_awaited()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import io
@@ -5939,6 +5940,8 @@ class _FakeGfsMirror:
         self.ensure_calls: list[str] = []
         self.subscribes: list[tuple[str, str]] = []
         self.unsubscribes: list[str] = []
+        # ``seat_in_grace``: a subscribe of this space is in flight.
+        self.in_grace = False
 
     async def ensure_mirror(self, space_id):
         from socialhome.services.space_service import stub_space_from_metadata
@@ -5964,6 +5967,11 @@ class _FakeGfsMirror:
             },
         )
         await self._spaces.save(space)
+        # Like the real ``ensure_mirror``: remember which GFS seated it (the
+        # teardown unsubscribe targets that server only).
+        await self._spaces.set_mirror_provenance(
+            space_id, gfs_id=self._gfs_id, rotation_seq=0
+        )
         if self._ban_user_id is not None:
             await self._spaces.ban_member(
                 space_id, self._ban_user_id, banned_by="remote", reason="t"
@@ -5975,6 +5983,9 @@ class _FakeGfsMirror:
 
     async def was_gfs_listed(self, space_id):
         return self._gfs_listed
+
+    async def seat_in_grace(self, space_id):
+        return self.in_grace
 
     async def unsubscribe(self, space_id):
         self.unsubscribes.append(space_id)
@@ -6090,6 +6101,68 @@ async def test_unsubscribe_last_subscriber_purges_the_mirror(stack):
     assert await stack.space_repo.get("remote-sp") is None
     keys = SqliteSpaceKeyRepo(stack.db)
     assert await keys.get_latest("remote-sp") is None
+
+
+async def test_unsubscribe_keeps_mirror_while_a_subscribe_is_in_flight(stack):
+    """L5: another user's subscribe just took the GFS seat and has not
+    written its member row yet — no teardown pulls it out from under it."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    mirror.in_grace = True
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get("remote-sp") is not None
+
+
+async def test_the_mirrors_post_grace_recheck_runs_the_same_teardown(stack):
+    """L3: once the seat grace has passed, the mirror asks the service to
+    tear down an unused mirror — the proven-mirror path an unsubscribe
+    takes."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await stack.space_repo.delete_member("remote-sp", fan.user_id)
+
+    await stack.space_svc.release_gfs_mirror_if_unused("remote-sp")
+
+    assert mirror.unsubscribes == ["remote-sp"]
+    assert await stack.space_repo.get("remote-sp") is None
+
+
+async def test_the_mirror_teardown_waits_for_a_subscribe_in_progress(stack):
+    """L2: the teardown takes the space's subscribe lock and re-reads the
+    members inside it — a subscribe that was in progress is seen, nothing
+    is purged out from under it."""
+    fan = await stack.provision_user("fan")
+    other = await stack.provision_user("other")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+
+    lock = stack.space_svc._mirror_lock("remote-sp")
+    await lock.acquire()  # a subscribe of `other` is in progress
+    leave = asyncio.create_task(
+        stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+    )
+    await asyncio.sleep(0.3)  # ample time to finish, were it not waiting
+    assert not leave.done()
+    await stack.space_repo.save_member(
+        SpaceMember(
+            space_id="remote-sp",
+            user_id=other.user_id,
+            role=SpaceRole.SUBSCRIBER,
+            joined_at="2026-10-10T00:00:00+00:00",
+        )
+    )
+    lock.release()
+    await leave
+    assert mirror.unsubscribes == []
+    assert await stack.space_repo.get("remote-sp") is not None
 
 
 async def test_unsubscribe_keeps_mirror_while_another_member_remains(stack):
@@ -6268,16 +6341,33 @@ async def test_unsubscribe_succeeds_when_the_gfs_is_unreachable(stack):
         )
     )
     down = _DownGfs()
+    from socialhome.repositories.gfs_space_seat_repo import (
+        GfsSpaceSeat,
+        SqliteGfsSpaceSeatRepo,
+    )
+
+    seats = SqliteGfsSpaceSeatRepo(stack.db)
     real_mirror = GfsSpaceMirrorService(
         space_repo=stack.space_repo,
         gfs_connection_repo=conn_repo,
         gfs_connection_service=down,
+        seat_repo=seats,
         public_space_repo=public_repo,
     )
     # Seat the stub the way ensure_mirror would, then subscribe locally.
     seeder = _FakeGfsMirror(stack.space_repo)
     stack.space_svc.attach_gfs_space_mirror(seeder)
     await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    # What ``take_seat`` records for the GFS subscribe the fake stood in for.
+    await seats.record(
+        GfsSpaceSeat(
+            space_id="remote-sp",
+            gfs_instance_id="inst-1",
+            gfs_connection_id="gfs-1",
+            gfs_public_key="pk",
+            gfs_inbox_url="https://gfs.test",
+        )
+    )
     stack.space_svc.attach_gfs_space_mirror(real_mirror)
 
     await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")

@@ -73,18 +73,31 @@ import logging
 import re
 import secrets
 import time
-from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from typing import Any
 
 import aiohttp
 
+from ..domain.events import (
+    RemoteSpaceMemberBanned,
+    RemoteSpaceMemberRemoved,
+    SpaceConfigChanged,
+    SpaceMemberLeft,
+)
+from ..domain.gfs_space_seat import GfsSpaceSeat
+from ..domain.federation import GfsConnection
 from ..domain.space import Space, normalize_join_mode
+from ..infrastructure.event_bus import EventBus
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
+from ..repositories.gfs_space_seat_repo import AbstractGfsSpaceSeatRepo
 from ..repositories.public_space_repo import AbstractPublicSpaceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
-from .gfs_http import MAX_GFS_BODY_BYTES, read_json_capped
+from .gfs_directory import GfsDirectoryCache
+from .gfs_http import MAX_GFS_BODY_BYTES, gfs_server_address, read_json_capped
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole
+from ..domain.space import PUBLIC_SPACE_TIERS, SpaceConfigEventType, SpaceRole
 from .space_service import can_seat_remote_stub, stub_space_from_metadata
 
 log = logging.getLogger(__name__)
@@ -102,15 +115,60 @@ _SAFE_SPACE_ID = re.compile(r"\A[A-Za-z0-9_.-]{1,128}\Z")
 _PIN_HEX_LEN = 64
 
 #: Per-GFS timeout for the metadata fetch. Deliberately short: this is a
-#: small metadata GET, never a bulk transfer, and ``ensure_mirror`` walks
-#: every active GFS connection **serially** (first hit wins, which keeps the
-#: ordering deterministic and the code simple). The worst case therefore
-#: bounds a single ``POST /api/spaces/{id}/subscribe`` at
-#: ``_MIRROR_FETCH_TIMEOUT_S × len(active GFS connections)`` of held request
-#: slot — and any authenticated local user can drive that against an
-#: arbitrary unknown id, so the per-connection budget stays small rather
-#: than the 15 s used for the interactive GFS calls.
+#: small metadata GET, never a bulk transfer, and ``ensure_mirror`` asks the
+#: servers whose directory lists the id **serially** (first hit wins, which
+#: keeps the ordering deterministic and the code simple; the directories
+#: themselves are read concurrently). The worst case therefore bounds a
+#: single ``POST /api/spaces/{id}/subscribe`` at one directory read plus
+#: ``_MIRROR_FETCH_TIMEOUT_S × len(listing servers)`` of held request slot —
+#: and any authenticated local user can drive that against an arbitrary
+#: unknown id, so the per-connection budget stays small rather than the
+#: 15 s used for the interactive GFS calls.
 _MIRROR_FETCH_TIMEOUT_S = 5.0
+
+#: A seat taken this recently is never torn down as "unwanted": the
+#: follower's local member row is written only AFTER the GFS subscribe
+#: succeeds, so a relay frame (or a reconnect self-heal) landing in between
+#: must not unsubscribe the seat being taken.
+SEAT_GRACE_S = 120.0
+
+#: Minimum seconds between two reactive unsubscribes of one (server, space)
+#: — a server that keeps relaying a space we hold no seat in gets one
+#: unsubscribe per interval, not one per frame.
+UNWANTED_RELAY_RETRY_S = 600.0
+
+#: Most (server, space) keys remembered by each of the two maps above.
+_MAX_TRACKED_SEATS = 1024
+
+#: Background seat releases in flight at once; past it one is skipped
+#: (logged) — the next reconnect self-heal reconciles it.
+MAX_PENDING_SEAT_TASKS = 64
+
+#: Deferred post-grace re-checks (one per first subscribe) in flight at
+#: once — a separate budget, so subscribes never crowd out releases.
+MAX_PENDING_RECHECKS = 256
+
+#: A detached seat (its server was unpaired) whose unsubscribe the server
+#: confirmed is dropped this long after the unpair — locally, no request.
+#: An unconfirmed one stays as an unsubscribe-only tombstone.
+ORPHAN_SEAT_DAYS = 90
+
+#: The sweep only trusts the wall clock past this instant (a device that
+#: booted without a real-time clock reads 1970) — before it nothing is
+#: stamped or aged.
+CLOCK_SANE_AFTER = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+#: A row past its age is dropped only by a sweep at least this long after
+#: the one that first saw it expired — one clock jump never drops anything.
+EXPIRY_CONFIRM_S = 24 * 3600.0
+
+#: How long ``stop()`` lets a purge already running finish.
+STOP_PURGE_GRACE_S = 5.0
+
+#: How long a "a local user still wants this seat" answer is reused by the
+#: relay-frame path, so a busy followed space costs one check per window
+#: rather than one per frame.
+WANTED_CACHE_S = 60.0
 
 #: Minimum seconds between two lazy pin refreshes of one space (v_44). A
 #: relayed frame that fails the authority check triggers a refresh; a burst
@@ -166,6 +224,16 @@ class GfsSpaceMirrorService:
         "_http_client",
         "_own_instance_id",
         "_last_pin_refresh",
+        "_directories",
+        "_seats",
+        "_seated_at",
+        "_unwanted_at",
+        "_tasks",
+        "_stopping",
+        "_rechecks",
+        "_wanted_at",
+        "_purging",
+        "_teardown",
     )
 
     def __init__(
@@ -174,7 +242,9 @@ class GfsSpaceMirrorService:
         space_repo: AbstractSpaceRepo,
         gfs_connection_repo: AbstractGfsConnectionRepo,
         gfs_connection_service: GfsConnectionService,
+        seat_repo: AbstractGfsSpaceSeatRepo,
         public_space_repo: AbstractPublicSpaceRepo | None = None,
+        directories: GfsDirectoryCache | None = None,
     ) -> None:
         self._spaces = space_repo
         self._gfs_conn_repo = gfs_connection_repo
@@ -188,6 +258,28 @@ class GfsSpaceMirrorService:
         self._http_client: aiohttp.ClientSession | None = None
         self._own_instance_id = ""
         self._last_pin_refresh: dict[str, float] = {}
+        # Each server's whole public directory. ``app`` shares one cache
+        # with member publish (over the cookie-less publish session);
+        # standalone wiring reads it over the mirror's own session.
+        self._directories = directories or GfsDirectoryCache(lambda: self._http_client)
+        # The servers holding a subscriber seat of ours, per space (0092) —
+        # the only servers an identity-bound (un)subscribe may go to.
+        self._seats = seat_repo
+        # (gfs_instance_id, space_id) → monotonic time of the last seat taken
+        # / the last reactive teardown sent; both bounded.
+        self._seated_at: dict[tuple[str, str], float] = {}
+        self._unwanted_at: dict[tuple[str, str], float] = {}
+        # Background seat releases (strong refs) and the stop flag.
+        self._tasks: set[asyncio.Task[object]] = set()
+        self._stopping = False
+        # Post-grace re-checks (a separate, larger budget).
+        self._rechecks: set[asyncio.Task[object]] = set()
+        # (server, space) → when a relay-frame check last found it wanted.
+        self._wanted_at: dict[tuple[str, str], float] = {}
+        # Teardowns started by a re-check: ``stop()`` lets them finish.
+        self._purging: set[asyncio.Task[object]] = set()
+        # ``SpaceService`` teardown of an unused GFS mirror (stub purge).
+        self._teardown: Callable[[str], Awaitable[object]] | None = None
 
     def attach_identity(self, *, own_instance_id: str) -> None:
         """Our instance id — an owner never re-pins its own space (v_44)."""
@@ -204,7 +296,9 @@ class GfsSpaceMirrorService:
 
     async def ensure_mirror(self, space_id: str) -> tuple[Space, str] | None:
         """Mirror *space_id*'s metadata from the first paired GFS that serves
-        it, returning ``(seated_space, gfs_connection_id)``.
+        it, returning ``(seated_space, gfs_connection_id)``. A GFS is asked
+        for the space's detail only when its whole directory lists the id
+        (:class:`GfsDirectoryCache`) — never a per-space probe of the others.
 
         Returns ``None`` when no active GFS knows the space, when every
         candidate listing fails validation (fail-closed — see the module
@@ -224,7 +318,23 @@ class GfsSpaceMirrorService:
                 space_id,
             )
             return None
-        for conn in await self._gfs_conn_repo.list_active():
+        # The detail GET names the space: sent to a GFS that doesn't list it,
+        # it would tell that operator (and give it our address) which space
+        # this household is after. Ask only a server whose WHOLE directory
+        # lists the id; an unreadable directory proves nothing. The
+        # directories are read concurrently (each is cached and coalesced);
+        # a cached copy lacking the id is re-read when it is a few seconds
+        # old, so a space published a moment ago is followable at once.
+        conns = await self._gfs_conn_repo.list_active()
+        listing_flags = await asyncio.gather(
+            *(
+                self._directories.lists(conn, space_id, refresh_on_miss=True)
+                for conn in conns
+            )
+        )
+        for conn, lists_it in zip(conns, listing_flags):
+            if not lists_it:
+                continue
             url = f"{conn.inbox_url.rstrip('/')}/gfs/spaces/{space_id}"
             try:
                 async with client.get(
@@ -398,6 +508,7 @@ class GfsSpaceMirrorService:
         conn = await self._gfs_conn_repo.get(gfs_id)
         if conn is None:
             return 0
+        await self.rebind_mirrors(conn)
         moved = 0
         for space_id in await self._spaces.list_subscribed_space_ids():
             if not await self.was_gfs_listed(space_id):
@@ -560,34 +671,456 @@ class GfsSpaceMirrorService:
     async def was_gfs_listed(self, space_id: str) -> bool:
         """Whether a paired GFS directory actually advertised *space_id*.
 
-        The household caches every directory poll into
-        ``public_space_cache`` (:class:`PublicSpaceDiscoveryService`), and
-        that table has exactly one writer — the GFS poll — so a row there is
-        positive evidence that the space came off a GFS directory rather
-        than, say, a peer-discovered public/global stub.
+        Positive evidence only, cheapest first:
+
+        * mirror provenance (v_44) — :meth:`ensure_mirror` seats a stub only
+          off a GFS listing, and records which connection served it;
+        * a recorded GFS seat of the space — we subscribed through a GFS;
+        * a ``public_space_cache`` row — that table's one writer is the GFS
+          directory poll (which truncates what it imports per tick, so a
+          missing row proves nothing);
+        * a paired server's WHOLE directory listing it (never truncated),
+          read from the cache only — this runs on the unsubscribe request
+          path, which never waits on a download — and not for an owner the
+          admin blocked from discovery (the poll's own filter).
 
         Used as the teardown guard: destructive or GFS-visible work on a
         space we cannot prove is a mirror is skipped. Answers ``False``
-        whenever the evidence is absent *or* unavailable (no directory repo
-        wired), which is the fail-safe direction.
+        whenever the evidence is absent *or* unavailable, which is the
+        fail-safe direction (a peer-discovered public/global stub has none).
         """
-        if self._public_spaces is None:
-            return False
-        return await self._public_spaces.get(space_id) is not None
+        mirror_gfs, _ = await self._spaces.get_mirror_provenance(space_id)
+        if mirror_gfs is not None:
+            return True
+        if await self._seats.list_for_space(space_id):
+            return True
+        if self._public_spaces is not None and (
+            await self._public_spaces.get(space_id) is not None
+        ):
+            return True
+        for conn in await self._gfs_conn_repo.list_active():
+            owner = self._directories.peek_owner(conn, space_id)
+            if owner is not None and not await self._owner_blocked(owner):
+                return True
+        return False
+
+    async def _owner_blocked(self, owner: str) -> bool:
+        """The admin blocked this owner from discovery — its listings are
+        no evidence (the directory poll skips them the same way)."""
+        return (
+            bool(owner)
+            and self._public_spaces is not None
+            and (await self._public_spaces.is_instance_blocked(owner))
+        )
 
     async def subscribe_to_gfs(self, space_id: str, gfs_id: str) -> None:
         """Register this household on *gfs_id*'s subscriber set for *space_id*.
 
-        A thin seam over :meth:`GfsConnectionService.subscribe_to_gfs_space`
-        so ``SpaceService.subscribe_to_space`` can sequence
-        mirror → local refusals → GFS subscribe, and a locally-refused user
-        (banned / under-age) never reaches the GFS.
+        A thin seam over :meth:`take_seat` so ``SpaceService.subscribe_to_space``
+        can sequence mirror → local refusals → GFS subscribe, and a
+        locally-refused user (banned / under-age) never reaches the GFS.
+        Raises :class:`GfsConnectionError` (unknown connection, refusal).
         """
-        await self._gfs.subscribe_to_gfs_space(space_id, gfs_id)
+        conn = await self._gfs_conn_repo.get(gfs_id)
+        if conn is None:
+            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+        # A FIRST subscribe: its member row is written only after this
+        # returns, so the seat is spared by every teardown for a moment —
+        # and re-checked once that moment has passed (a subscribe → quick
+        # unsubscribe inside it would otherwise leave seat and stub).
+        key = (conn.gfs_instance_id, space_id)
+        _remember(self._seated_at, key)
+        await self.take_seat(space_id, conn)
+        self._schedule_recheck(space_id, key)
+
+    def attach_teardown(self, teardown: Callable[[str], Awaitable[object]]) -> None:
+        """Wire ``SpaceService``'s unused-mirror teardown (unsubscribe +
+        stub purge) for the post-grace re-check."""
+        self._teardown = teardown
+
+    def _schedule_recheck(self, space_id: str, key: tuple[str, str]) -> None:
+        if self._stopping or len(self._rechecks) >= MAX_PENDING_RECHECKS:
+            log.debug("gfs_space_mirror: post-grace re-check of %s skipped", space_id)
+            return
+        marked = self._seated_at.get(key)
+        task = asyncio.create_task(
+            self._recheck_after_grace(space_id, key, marked),
+            name=f"gfs-seat-recheck-{space_id}",
+        )
+        self._rechecks.add(task)
+        task.add_done_callback(self._recheck_done)
+
+    def _recheck_done(self, task: asyncio.Task[object]) -> None:
+        self._rechecks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log.error(
+                "gfs_space_mirror: post-grace re-check failed",
+                exc_info=task.exception(),
+            )
+
+    async def _recheck_after_grace(
+        self, space_id: str, key: tuple[str, str], marked: float | None
+    ) -> None:
+        await asyncio.sleep(SEAT_GRACE_S)
+        # This subscribe's grace is over (a newer one keeps its own).
+        if marked is not None and self._seated_at.get(key) == marked:
+            del self._seated_at[key]
+        if await self._wants_seat(space_id):
+            return
+        # The teardown runs as its own task: a ``stop()`` that cancels this
+        # (sleeping) re-check lets a teardown already under way finish
+        # rather than cutting it between the unsubscribe and the purge.
+        purge = asyncio.create_task(self._teardown_unused(space_id))
+        self._purging.add(purge)
+        purge.add_done_callback(self._purging.discard)
+        await asyncio.shield(purge)
+
+    async def _teardown_unused(self, space_id: str) -> None:
+        if self._teardown is not None:
+            # ``SpaceService`` re-checks the members under the space's
+            # subscribe lock, so a concurrent subscribe can't be purged away.
+            await self._teardown(space_id)
+        await self.release_unused_seats(space_id)
+
+    async def wait_rechecks(self) -> None:
+        """Wait for the post-grace re-checks in flight (tests)."""
+        while self._rechecks:
+            await asyncio.gather(*list(self._rechecks), return_exceptions=True)
+
+    async def take_seat(self, space_id: str, conn: GfsConnection) -> None:
+        """Subscribe on *conn* and record the seat under the server's own id
+        (``gfs_instance_id`` — stable across a re-pair, unlike ``conn.id``),
+        bound to the key and URL it was taken over (:func:`_belongs`).
+
+        Every subscribe this household sends goes through here — the
+        follower's, the reconnect self-heal's and member publish's
+        auto-subscribe — so the seat table names every server that seats us,
+        and a teardown can reach exactly those. Raises
+        :class:`GfsConnectionError`; nothing is recorded then.
+        """
+        await self._gfs.subscribe_to_gfs_space(space_id, conn.id)
+        await self._seats.record(_seat_on(space_id, conn))
+
+    # ── Seat lifecycle hooks ─────────────────────────────────────────────
+
+    def wire(self, bus: EventBus) -> None:
+        """Release a space's seats once no local user is seated there: on a
+        leave / removal, and on the bans that drop a local seat without one
+        (a local ban, a host's federated ban, the §25.6 sync's bans)."""
+        bus.subscribe(SpaceMemberLeft, self._on_seat_maybe_gone)
+        bus.subscribe(RemoteSpaceMemberBanned, self._on_seat_maybe_gone)
+        bus.subscribe(RemoteSpaceMemberRemoved, self._on_seat_maybe_gone)
+        bus.subscribe(SpaceConfigChanged, self._on_config_changed)
+
+    async def _on_seat_maybe_gone(
+        self,
+        event: SpaceMemberLeft | RemoteSpaceMemberBanned | RemoteSpaceMemberRemoved,
+    ) -> None:
+        # Never block the leave / ban on a GFS round-trip: cheap check
+        # first, the signed unsubscribes in the background.
+        if await self._seats.list_for_space(event.space_id):
+            self._spawn(self.release_unused_seats(event.space_id), "release")
+
+    async def _on_config_changed(self, event: SpaceConfigChanged) -> None:
+        if event.event_type == SpaceConfigEventType.MEMBER_BANNED.value:
+            if await self._seats.list_for_space(event.space_id):
+                self._spawn(self.release_unused_seats(event.space_id), "release")
+
+    def _spawn(
+        self, coro: Coroutine[Any, Any, object], name: str, *, quiet: bool = False
+    ) -> None:
+        if self._stopping or len(self._tasks) >= MAX_PENDING_SEAT_TASKS:
+            coro.close()
+            # The relay-frame path is hot: never a WARNING per frame there.
+            (log.debug if quiet else log.warning)(
+                "gfs_space_mirror: background %s skipped (busy / stopping)", name
+            )
+            return
+        task = asyncio.create_task(coro, name=f"gfs-seat-{name}")
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+
+    def _task_done(self, task: asyncio.Task[object]) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log.error(
+                "gfs_space_mirror: background seat task failed",
+                exc_info=task.exception(),
+            )
+
+    async def wait_idle(self) -> None:
+        """Wait for the background seat tasks in flight (tests, shutdown)."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    async def stop(self) -> None:
+        """Cancel the background seat tasks (app ``on_cleanup``)."""
+        self._stopping = True
+        tasks = [*self._tasks, *self._rechecks]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self._purging:
+            await asyncio.wait(list(self._purging), timeout=STOP_PURGE_GRACE_S)
+
+    # ── Wanting / releasing seats ────────────────────────────────────────
+
+    async def _wants_seat(self, space_id: str) -> bool:
+        """A seat is wanted while the space is not dissolved and any local
+        user — follower or member — is still seated there."""
+        space = await self._spaces.get(space_id)
+        if space is None or space.dissolved:
+            return False
+        return bool(await self._spaces.list_local_member_user_ids(space_id))
+
+    def _in_grace(self, gfs_instance_id: str, space_id: str) -> bool:
+        at = self._seated_at.get((gfs_instance_id, space_id))
+        return at is not None and time.monotonic() - at < SEAT_GRACE_S
+
+    async def _releasable(self, space_id: str, gfs_instance_id: str) -> bool:
+        """Checked right before each release: nobody local wants the seat
+        and it was not just taken (its member row may not be written yet)."""
+        if self._in_grace(gfs_instance_id, space_id):
+            return False
+        return not await self._wants_seat(space_id)
+
+    async def seat_in_grace(self, space_id: str) -> bool:
+        """Whether a seat of *space_id* was taken moments ago — a subscribe
+        in progress whose member row is not written yet."""
+        return any(
+            self._in_grace(seat.gfs_instance_id, space_id)
+            for seat in await self._seats.list_for_space(space_id)
+        )
+
+    async def release_unused_seats(self, space_id: str) -> int:
+        """Tear down every recorded seat of *space_id* nobody local wants
+        any more (see :meth:`_releasable`). Returns how many went."""
+        return await self.release_seats(space_id, only_unwanted=True)
+
+    async def release_seats(self, space_id: str, *, only_unwanted: bool = False) -> int:
+        """Unsubscribe from every server recorded as seating us for
+        *space_id*, and forget each seat the server confirmed. Only an
+        active connection whose id, key and URL match the seat is
+        contacted (:func:`_belongs`); a server not connected right now keeps
+        its row for the reconnect self-heal of a genuine re-pair. A seat
+        taken in the last :data:`SEAT_GRACE_S` is never released. Returns
+        how many were released."""
+        seats = await self._seats.list_for_space(space_id)
+        if not seats:
+            return 0
+        active = await self._gfs_conn_repo.list_active()
+        released = 0
+        for seat in seats:
+            if self._in_grace(seat.gfs_instance_id, space_id):
+                continue
+            # Re-checked per seat, before anything is sent OR forgotten: a
+            # row a local follower still wants is what a re-pair re-takes
+            # (and what carries the pin anchor) — never drop it.
+            if only_unwanted and await self._wants_seat(space_id):
+                return released
+            conn = next((c for c in active if _belongs(seat, c)), None)
+            if conn is None and seat.detached and seat.released:
+                # Unpaired, and the server confirmed the unsubscribe then.
+                await self._seats.forget(space_id, seat.gfs_instance_id)
+                continue
+            if conn is None:
+                log.info(
+                    "gfs_space_mirror: seat of %s on server %s kept until it "
+                    "reconnects (no matching active connection)",
+                    space_id,
+                    seat.gfs_instance_id,
+                )
+                continue
+            if await self._release(space_id, conn):
+                released += 1
+        return released
+
+    async def _release(self, space_id: str, conn: GfsConnection) -> bool:
+        """Unsubscribe on *conn* (a server that seats us) and forget the
+        seat. Fail-soft: a failure keeps the row for the next self-heal."""
+        try:
+            await self._gfs.unsubscribe_from_gfs_space(space_id, conn.id)
+        except GfsConnectionError as exc:
+            log.warning(
+                "gfs_space_mirror: unsubscribe of %s from GFS %s failed: %s",
+                space_id,
+                conn.id,
+                exc,
+            )
+            return False
+        await self._seats.forget(space_id, conn.gfs_instance_id)
+        return True
+
+    async def on_disconnect(self, conn: GfsConnection) -> int:
+        """An unpair of *conn*: its seats are kept but marked detached
+        (local, inline — the unpair request waits on nothing else), and
+        their unsubscribes go out in the background over a snapshot of the
+        connection. A confirmed one marks the row released; a failed one
+        leaves an unsubscribe-only tombstone that any later matching
+        connection retries. A re-pair of the same server (same id, key and
+        address) re-takes what a local user still wants. Returns how many
+        seats were detached."""
+        others = [c for c in await self._gfs_conn_repo.list_all() if c.id != conn.id]
+        seats = [
+            s
+            for s in await self._seats.list_for_gfs(conn.gfs_instance_id)
+            if _belongs(s, conn) and not any(_belongs(s, o) for o in others)
+        ]
+        now = _utcnow()
+        at = _stamp(now) if now >= CLOCK_SANE_AFTER else None
+        for seat in seats:
+            await self._seats.mark_detached(seat.space_id, seat.gfs_instance_id, at=at)
+        if seats:
+            self._spawn(
+                self._unsubscribe_detached(conn, [s.space_id for s in seats]),
+                "unpair",
+            )
+        return len(seats)
+
+    async def _unsubscribe_detached(
+        self, conn: GfsConnection, space_ids: list[str]
+    ) -> None:
+        for space_id in space_ids:
+            # Right before sending: a quick re-pair may have re-taken the
+            # seat meanwhile (the row is live again) — then leave it be.
+            seat = await self._seats.get(space_id, conn.gfs_instance_id)
+            if seat is None or not seat.detached or seat.released:
+                continue
+            if seat.gfs_connection_id != conn.id:
+                continue
+            try:
+                await self._gfs.unsubscribe_via(conn, space_id)
+            except GfsConnectionError as exc:
+                log.info(
+                    "gfs_space_mirror: unpair — unsubscribe of %s from %s failed "
+                    "(kept as a tombstone): %s",
+                    space_id,
+                    conn.id,
+                    exc,
+                )
+                continue
+            await self._seats.mark_released(space_id, conn.gfs_instance_id)
+
+    async def sweep_orphan_seats(self) -> int:
+        """Local housekeeping, no request.
+
+        * A seat matching a paired connection is left to the reconnect
+          self-heal (which re-takes or releases it).
+        * One matching none that is not yet detached (a connection row gone
+          without an unpair) is detached now — kept, unreleased.
+        * A detached row is dropped only when its server confirmed the
+          unsubscribe (``released``) and it is :data:`ORPHAN_SEAT_DAYS` old —
+          and only on a sweep at least :data:`EXPIRY_CONFIRM_S` after the one
+          that first saw it expired. Nothing is stamped or aged while the
+          clock reads before :data:`CLOCK_SANE_AFTER`, and a stamp in the
+          future (the clock went back) is reset. An unreleased row stays as
+          an unsubscribe-only tombstone.
+        * A seat whose server id and key reappear at a DIFFERENT address is
+          not re-bound (a proof of possession, planned in a follow-up, can
+          tell a move from an impostor): it is logged once per seat as
+          needing a re-follow.
+
+        Returns how many rows were dropped.
+        """
+        now = _utcnow()
+        sane = now >= CLOCK_SANE_AFTER
+        conns = await self._gfs_conn_repo.list_all()
+        dropped = 0
+        for seat in await self._seats.list_all():
+            key = (seat.space_id, seat.gfs_instance_id)
+            matching = next((c for c in conns if _belongs(seat, c)), None)
+            if matching is not None:
+                # An unsubscribe-only tombstone whose server is reachable
+                # again (an unpair unsubscribe that failed or was dropped):
+                # send it now. Wanted / live seats are the reconnect
+                # self-heal's to re-take.
+                if (
+                    seat.detached
+                    and not seat.released
+                    and matching.status == "active"
+                    and await self._releasable(*key)
+                ):
+                    await self._release(seat.space_id, matching)
+                continue
+            await self._warn_refollow(seat, conns)
+            if not seat.detached:
+                await self._seats.mark_detached(*key, at=_stamp(now) if sane else None)
+                continue
+            if not sane:
+                continue
+            detached_at = _parse_stamp(seat.detached_at)
+            if detached_at is None or detached_at > now + timedelta(days=1):
+                await self._seats.set_detached_at(*key, _stamp(now))
+                continue
+            if not seat.released:
+                continue  # an unsubscribe-only tombstone
+            if await self._wants_seat(seat.space_id):
+                # A local user still follows it: it is what a re-pair
+                # re-takes — never aged out.
+                if seat.expiry_seen_at is not None:
+                    await self._seats.set_expiry_seen(*key, None)
+                continue
+            if now - detached_at < timedelta(days=ORPHAN_SEAT_DAYS):
+                if seat.expiry_seen_at is not None:
+                    await self._seats.set_expiry_seen(*key, None)
+                continue
+            seen = _parse_stamp(seat.expiry_seen_at)
+            if seen is None or seen > now:
+                await self._seats.set_expiry_seen(*key, _stamp(now))
+                continue
+            if (now - seen).total_seconds() >= EXPIRY_CONFIRM_S:
+                await self._seats.forget(*key)
+                dropped += 1
+        return dropped
+
+    async def _warn_refollow(
+        self, seat: GfsSpaceSeat, conns: list[GfsConnection]
+    ) -> None:
+        """One WARNING per seat (flag on the row) when its server's id
+        reappears at another address, or under another key at the same
+        address: neither is re-bound without the proof of possession planned
+        in a follow-up, so the user has to re-follow."""
+        if seat.refollow_warned:
+            return
+        moved = next((c for c in conns if _moved(seat, c)), None)
+        rekeyed = next((c for c in conns if _rekeyed(seat, c)), None)
+        if moved is None and rekeyed is None:
+            return
+        await self._seats.mark_refollow_warned(seat.space_id, seat.gfs_instance_id)
+        if moved is not None:
+            log.warning(
+                "gfs_space_mirror: follow of %s on %s needs re-follow: "
+                "server address changed (%s → %s)",
+                seat.space_id,
+                moved.display_name or seat.gfs_instance_id,
+                _address(seat.gfs_inbox_url or ""),
+                _address(moved.inbox_url),
+            )
+        else:
+            assert rekeyed is not None
+            log.warning(
+                "gfs_space_mirror: follow of %s on %s needs re-follow: "
+                "server key changed at %s",
+                seat.space_id,
+                rekeyed.display_name or seat.gfs_instance_id,
+                _address(rekeyed.inbox_url),
+            )
+
+    async def _seats_on(self, conn: GfsConnection) -> list[GfsSpaceSeat]:
+        """The recorded seats that belong to *conn*: same server id, key and
+        URL. A seat recorded under the id but bound to another key / URL is
+        not this server's — an impostor claiming the id gets nothing."""
+        return [
+            seat
+            for seat in await self._seats.list_for_gfs(conn.gfs_instance_id)
+            if _belongs(seat, conn)
+        ]
+
+    # ── Reconnect self-heal ──────────────────────────────────────────────
 
     async def resubscribe_all(self, gfs_id: str, *, also: Iterable[str] = ()) -> int:
-        """Re-register every local subscription on *gfs_id*. Returns the count
-        the GFS accepted.
+        """Reconcile this household's seats on *gfs_id*. Returns the count the
+        GFS accepted.
 
         ``SpaceService.subscribe_to_space`` POSTs ``/gfs/subscribe`` only on
         the FIRST-ever mirror (it returns early once a local member row
@@ -599,67 +1132,133 @@ class GfsSpaceMirrorService:
         GFS's ``add_subscriber`` is an upsert, so a seat we already hold is a
         no-op.
 
-        Scoped by mirror provenance (:meth:`was_gfs_listed`) for the same
-        reason :meth:`SpaceService._maybe_purge_gfs_mirror` is: a public/global
-        stub learned from a direct peer is nobody's mirror, and a signed,
-        identity-bound subscribe would disclose our interest in a space to a
-        GFS operator who never knew it existed.
+        Only seats this server holds are re-taken: those recorded under its
+        ``gfs_instance_id`` AND bound to its key and URL (so a genuine
+        re-pair, which mints a new local connection id, keeps them, and an
+        id-claiming impostor gets none), plus a pre-v44 follower mirror with
+        no recorded seat anywhere that this server's whole directory lists
+        (:meth:`_legacy_seated_on`). A signed, identity-bound subscribe sent
+        anywhere else would disclose our interest in a space to an operator
+        who never seated us. A recorded seat no local user wants any more
+        (a leave that happened while this server was unreachable) is torn
+        down here instead — re-checked right before each release.
 
         Fail-soft per space: this is a background self-heal, so one space's
         failure must never skip the rest or break the caller's reconnect
         sequence.
 
         ``also`` (v_50): further space ids to subscribe in the SAME batch —
-        the spaces this household writes in (member auto-subscribe). The
-        merged batch is de-duplicated and SHUFFLED, so the order and timing
-        of the identical signed subscribes never tell the server which seats
-        are writers' and which are followers'.
+        the spaces this household writes in (member auto-subscribe, already
+        scoped to servers listing them). The merged batch is de-duplicated
+        and SHUFFLED, so the order and timing of the identical signed
+        subscribes never tell the server which seats are writers' and which
+        are followers'.
         """
-        batch: list[str] = []
+        also_ids = list(also)
+        conn = await self._gfs_conn_repo.get(gfs_id)
+        if conn is None:
+            # Nothing is recorded or reconciled without the server's id —
+            # but the member seats the caller asked for are still attempted.
+            batch = list(dict.fromkeys(also_ids))
+            secrets.SystemRandom().shuffle(batch)
+            restored = 0
+            for space_id in batch:
+                if await self._subscribe_logged(space_id, gfs_id):
+                    restored += 1
+            return restored
+        # First: carry the pin-heal anchor over a genuine re-pair — before
+        # the re-take below rebinds the seats to this connection — and run
+        # the local orphan-seat housekeeping.
+        await self.rebind_mirrors(conn)
+        await self.sweep_orphan_seats()
+        keep: list[str] = []
+        stale: list[str] = []
+        recorded = await self._seats_on(conn)
+        for seat in recorded:
+            if await self._releasable(seat.space_id, conn.gfs_instance_id):
+                stale.append(seat.space_id)
+            else:
+                keep.append(seat.space_id)
+        legacy: list[str] = []
         for space_id in await self._spaces.list_subscribed_space_ids():
-            if await self.was_gfs_listed(space_id):
-                batch.append(space_id)
-        batch = list(dict.fromkeys([*batch, *also]))
+            if not await self.was_gfs_listed(space_id):
+                continue
+            if await self._legacy_seated_on(space_id, conn):
+                legacy.append(space_id)
+        batch = list(dict.fromkeys([*keep, *legacy, *also_ids]))
         secrets.SystemRandom().shuffle(batch)
         restored = 0
         for space_id in batch:
-            try:
-                await self._gfs.subscribe_to_gfs_space(space_id, gfs_id)
-            except GfsConnectionError as exc:
-                # A 403 is an EXPECTED outcome, not an incident: the space may
-                # not live on this GFS at all, or its owner may have withdrawn
-                # readability for good. Either way there is nothing to fix and
-                # nothing an operator should act on — keep it out of the
-                # warning log, which would otherwise fill up once per reconnect
-                # per space. ``GfsConnectionError`` carries no status field, so
-                # match the message ``subscribe_to_gfs_space`` formats.
-                if "HTTP 403" in str(exc):
-                    log.debug(
-                        "gfs_space_mirror: GFS %s refused re-subscribe of %s: %s",
-                        gfs_id,
-                        space_id,
-                        exc,
-                    )
-                else:
-                    log.warning(
-                        "gfs_space_mirror: re-subscribe of %s on GFS %s failed: %s",
-                        space_id,
-                        gfs_id,
-                        exc,
-                    )
-                continue
-            restored += 1
+            if await self._subscribe_logged(space_id, gfs_id, conn=conn):
+                restored += 1
+        for space_id in stale:
+            # Re-checked now: a subscribe may have landed meanwhile.
+            if await self._releasable(space_id, conn.gfs_instance_id):
+                await self._release(space_id, conn)
         return restored
 
-    async def unsubscribe(self, space_id: str) -> None:
-        """Best-effort removal from every paired GFS's subscriber set.
+    async def _subscribe_logged(
+        self, space_id: str, gfs_id: str, *, conn: GfsConnection | None = None
+    ) -> bool:
+        try:
+            if conn is not None:
+                await self.take_seat(space_id, conn)
+            else:
+                await self._gfs.subscribe_to_gfs_space(space_id, gfs_id)
+        except GfsConnectionError as exc:
+            # A 403 is an EXPECTED outcome, not an incident: the space may
+            # not live on this GFS at all, or its owner may have withdrawn
+            # readability for good. Either way there is nothing to fix and
+            # nothing an operator should act on — keep it out of the
+            # warning log, which would otherwise fill up once per reconnect
+            # per space. ``GfsConnectionError`` carries no status field, so
+            # match the message ``subscribe_to_gfs_space`` formats.
+            if "HTTP 403" in str(exc):
+                log.debug(
+                    "gfs_space_mirror: GFS %s refused re-subscribe of %s: %s",
+                    gfs_id,
+                    space_id,
+                    exc,
+                )
+            else:
+                log.warning(
+                    "gfs_space_mirror: re-subscribe of %s on GFS %s failed: %s",
+                    space_id,
+                    gfs_id,
+                    exc,
+                )
+            return False
+        return True
 
-        We don't record which GFS a subscription came from, and the GFS treats
-        an unknown unsubscribe as success (404 → idempotent), so this fans out
-        to every active connection. A :class:`GfsConnectionError` is logged and
-        swallowed — a GFS that is down must never block a local unsubscribe.
+    async def unsubscribe(self, space_id: str) -> None:
+        """Best-effort removal from every server that seats us for
+        *space_id* — the proven-mirror teardown of
+        ``SpaceService._maybe_purge_gfs_mirror``.
+
+        The (un)subscribe is signed and identity-bound, so sending it to a
+        GFS that never seated us would tell that operator this household
+        follows the space: the recorded seats are released
+        (:meth:`release_seats`); with none recorded, only a pre-v44 mirror's
+        directory fallback (:meth:`_legacy_seated_on`) is tried. The GFS
+        treats an unknown unsubscribe as success (404 → idempotent). Errors
+        are logged and swallowed — a GFS that is down must never block a
+        local unsubscribe.
         """
+        if await self._seats.list_for_space(space_id):
+            await self.release_seats(space_id)
+            return
+        mirror_gfs, _ = await self._spaces.get_mirror_provenance(space_id)
+        if mirror_gfs is not None:
+            return  # v_44+: its seat was recorded; none left means none held
+        # A pre-v44 mirror: finding its server means reading directories —
+        # never on the unsubscribe request path. Read before the caller
+        # purges the stub, so the background task needs no row.
+        self._spawn(self._legacy_unsubscribe(space_id), "legacy-unsubscribe")
+
+    async def _legacy_unsubscribe(self, space_id: str) -> None:
         for conn in await self._gfs_conn_repo.list_active():
+            if not await self._legacy_listed(conn, space_id):
+                continue
             try:
                 await self._gfs.unsubscribe_from_gfs_space(space_id, conn.id)
             except GfsConnectionError as exc:
@@ -669,3 +1268,211 @@ class GfsSpaceMirrorService:
                     conn.id,
                     exc,
                 )
+
+    async def _legacy_seated_on(self, space_id: str, conn: GfsConnection) -> bool:
+        """Whether *conn* is where a pre-v44 follower mirror of *space_id*
+        subscribed — only for a space with NO recorded seat on ANY server.
+
+        A recorded seat anywhere means the household knows exactly where it
+        is seated (the fallback must not add seats on further servers). A
+        mirror carrying provenance (v_44, ``spaces.mirror_gfs_id``) had its
+        seat recorded — by :meth:`take_seat`, or by the 0092 backfill when
+        its connection still existed — so no recorded seat means it is gone
+        or its connection was re-paired away; neither is knowable. Only a
+        mirror with NO provenance falls back to *conn*'s WHOLE public
+        directory (``GET /gfs/spaces`` — never a space-specific probe): a
+        server that lists the space already knows it, and is where the
+        subscribe went. Its first successful re-subscribe records the seat,
+        so the fallback runs once per legacy mirror. Fail closed on an
+        unreadable directory.
+        """
+        if await self._seats.list_for_space(space_id):
+            return False
+        mirror_gfs, _ = await self._spaces.get_mirror_provenance(space_id)
+        if mirror_gfs is not None:
+            return False
+        return await self._legacy_listed(conn, space_id)
+
+    async def _legacy_listed(self, conn: GfsConnection, space_id: str) -> bool:
+        """*conn*'s whole directory lists *space_id* under an owner the
+        admin did not block (downloads the directory when needed)."""
+        owner = await self._directories.owner(conn, space_id)
+        return owner is not None and not await self._owner_blocked(owner)
+
+    async def rebind_mirrors(self, conn: GfsConnection) -> int:
+        """Move the v_44 pin-heal anchor of every mirror seated from an
+        earlier pairing of *conn*'s server onto *conn* (a disconnect +
+        re-pair mints a new local connection id). Returns how many moved.
+
+        No trust widening: only a mirror whose ``mirror_gfs_id`` is the
+        connection its seat on this server was taken over, and only when
+        *conn* has the same server id, pins the SAME key and answers at the
+        SAME URL (:func:`_belongs`). Pairing reads id and key off an
+        unauthenticated ``/gfs/info``, so the URL is what an impostor cannot
+        copy. A re-pair under a different key or URL — or a mirror seated
+        from another server, or one with no recorded seat — keeps its old
+        anchor, and so never heals from this connection.
+        """
+        moved = 0
+        for seat in await self._seats_on(conn):
+            if seat.gfs_connection_id is None or seat.gfs_connection_id == conn.id:
+                continue
+            mirror_gfs, _ = await self._spaces.get_mirror_provenance(seat.space_id)
+            if (
+                mirror_gfs == seat.gfs_connection_id
+                and await self._spaces.rebind_mirror_provenance(
+                    seat.space_id,
+                    from_gfs_id=seat.gfs_connection_id,
+                    to_gfs_id=conn.id,
+                )
+            ):
+                moved += 1
+                log.info(
+                    "gfs_space_mirror: mirror %s re-anchored to re-paired GFS %s",
+                    seat.space_id,
+                    conn.id,
+                )
+            # The seat now lives on this pairing (same server, key and URL).
+            await self._seats.record(_seat_on(seat.space_id, conn))
+        return moved
+
+    # ── Reactive teardown ────────────────────────────────────────────────
+
+    async def on_relay_frame(self, frame: dict, *, gfs_id: str) -> None:
+        """Reactive teardown of a seat this household recorded on THIS
+        server but no longer wants (a leave missed while it was reachable
+        only through its relay): unsubscribe there, at most once per
+        :data:`UNWANTED_RELAY_RETRY_S` per (server, space), in the
+        background — never inline in the socket's read loop.
+
+        Uniform and silent otherwise: a frame for a space this server holds
+        no recorded seat of ours in (wanted or not, whatever other servers
+        hold) does nothing, so a server cannot use made-up frames to ask
+        "do you follow X". The supervisor calls this only for frames its
+        consumer accepted without raising.
+        """
+        space_id = frame.get("space_id")
+        if "channel_id" in frame or not isinstance(space_id, str):
+            return
+        if not _SAFE_SPACE_ID.fullmatch(space_id):
+            return
+        conn = await self._gfs_conn_repo.get(gfs_id)
+        if conn is None or conn.status != "active":
+            return
+        key = (conn.gfs_instance_id, space_id)
+        now = time.monotonic()
+        last = self._unwanted_at.get(key)
+        if last is not None and now - last < UNWANTED_RELAY_RETRY_S:
+            return
+        wanted_at = self._wanted_at.get(key)
+        if wanted_at is not None and now - wanted_at < WANTED_CACHE_S:
+            return  # a followed space's frames: one check per window
+        seat = await self._seats.get(space_id, conn.gfs_instance_id)
+        if seat is None or not _belongs(seat, conn):
+            return
+        # Cheap check inline; only a release goes to the background, so a
+        # busy followed space never fills the task budget.
+        if not await self._releasable(space_id, conn.gfs_instance_id):
+            _remember(self._wanted_at, key)
+            return
+        _remember(self._unwanted_at, key)
+        self._spawn(self._release_unwanted(space_id, conn), "reactive", quiet=True)
+
+    async def _release_unwanted(self, space_id: str, conn: GfsConnection) -> None:
+        if not await self._releasable(space_id, conn.gfs_instance_id):
+            return
+        log.info(
+            "gfs_space_mirror: GFS %s relays space %s that no local user is "
+            "seated in — unsubscribing there",
+            conn.id,
+            space_id,
+        )
+        await self._release(space_id, conn)
+
+
+def _seat_on(space_id: str, conn: GfsConnection) -> GfsSpaceSeat:
+    return GfsSpaceSeat(
+        space_id=space_id,
+        gfs_instance_id=conn.gfs_instance_id,
+        gfs_connection_id=conn.id,
+        gfs_public_key=conn.public_key,
+        gfs_inbox_url=conn.inbox_url,
+    )
+
+
+def _utcnow() -> datetime:
+    """The sweep's wall clock (a seam for tests)."""
+    return datetime.now(timezone.utc)
+
+
+def _stamp(at: datetime) -> str:
+    """UTC in SQLite's ``datetime('now')`` form."""
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_stamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+_address = gfs_server_address
+
+
+def _belongs(seat: GfsSpaceSeat, conn: GfsConnection) -> bool:
+    """Whether *conn* is the server *seat* was taken on: same server id,
+    same pinned key, same address (:func:`_address`). Missing binding → no."""
+    return (
+        seat.gfs_instance_id == conn.gfs_instance_id
+        and seat.gfs_public_key is not None
+        and seat.gfs_public_key == conn.public_key
+        and seat.gfs_inbox_url is not None
+        and _address(seat.gfs_inbox_url) == _address(conn.inbox_url)
+    )
+
+
+def _rekeyed(seat: GfsSpaceSeat, conn: GfsConnection) -> bool:
+    """Same server id and address as the seat, under another key — a
+    re-pair after a key change (or an impostor at that address)."""
+    return (
+        seat.gfs_instance_id == conn.gfs_instance_id
+        and seat.gfs_inbox_url is not None
+        and _address(seat.gfs_inbox_url) == _address(conn.inbox_url)
+        and seat.gfs_public_key != conn.public_key
+    )
+
+
+def _moved(seat: GfsSpaceSeat, conn: GfsConnection) -> bool:
+    """Same server id and key as the seat, at another address — a genuine
+    move or an impostor; only a proof of possession (planned) can tell."""
+    return (
+        seat.gfs_instance_id == conn.gfs_instance_id
+        and seat.gfs_public_key is not None
+        and seat.gfs_public_key == conn.public_key
+        and not _belongs(seat, conn)
+    )
+
+
+def _remember(
+    store: dict[tuple[str, str], float],
+    key: tuple[str, str],
+    now: float | None = None,
+) -> None:
+    """Record *key* at *now* (default: the monotonic clock) in a map bounded
+    at :data:`_MAX_TRACKED_SEATS`; entries past the longest window are
+    pruned first, then the oldest."""
+    if now is None:
+        now = time.monotonic()
+    if len(store) >= _MAX_TRACKED_SEATS:
+        horizon = max(SEAT_GRACE_S, UNWANTED_RELAY_RETRY_S, WANTED_CACHE_S)
+        for k, at in list(store.items()):
+            if now - at >= horizon:
+                del store[k]
+        while len(store) >= _MAX_TRACKED_SEATS:
+            del store[min(store, key=store.__getitem__)]
+    store[key] = now
