@@ -160,6 +160,9 @@ def test_a_listing_target_id_covers_id_key_and_url():
         ("HTTPS://GFS.Example/", "https://gfs.example"),
         ("https://gfs.example:8443/base/", "https://gfs.example:8443/base"),
         ("http://[::1]:18767", "http://[::1]:18767"),
+        # As the proof binds it: default port dropped, IDNA host.
+        ("https://gfs.example:443", "https://gfs.example"),
+        ("https://bücher.example", "https://xn--bcher-kva.example"),
     ],
 )
 def test_normalized_url(url, want):

@@ -1359,6 +1359,23 @@ def cmd_gfs_open_signup() -> None:
     print("gfs-open-signup: ok (c paired via open sign-up, then disconnected)")
 
 
+def _active_gfs_ids(state: dict, label: str) -> list[str]:
+    """``label``'s ACTIVE GFS connection ids (``GET /api/gfs/connections``) —
+    what a new global space is listed on. Since #874 a global space needs
+    the owner's choice while any GFS is active (422
+    ``GFS_SELECTION_REQUIRED``); the harness picks all of them."""
+    inst = state["instances"][label]
+    s, conns = _request(
+        f"http://127.0.0.1:{inst['port']}/api/gfs/connections",
+        token=inst["token"],
+    )
+    conns = _must(f"{label}: list GFS connections", s, conns)
+    ids = [c["id"] for c in conns if c.get("status") == "active"]
+    if not ids:
+        raise SystemExit(f"{label} has no active GFS connection to list on")
+    return ids
+
+
 def cmd_gfs_traffic() -> None:
     """Exercise the global-space publish path against the running GFS.
 
@@ -1389,6 +1406,8 @@ def cmd_gfs_traffic() -> None:
             "name": space_name,
             "description": "harness end-to-end probe for GFS publish",
             "space_type": "global",
+            # #874: the owner picks the GFSs a global space is listed on.
+            "gfs_ids": _active_gfs_ids(state, "a"),
             # Open to JOIN. Says nothing about readability any more — that is
             # the separate ``allow_subscribers`` opt-in, PATCHed in below.
             "join_mode": "open",
@@ -2420,6 +2439,8 @@ def cmd_gfs_space_no_subscribers() -> None:
             "name": space_name,
             "description": "harness probe: listed for discovery, never relayed",
             "space_type": "global",
+            # #874: the owner picks the GFSs a global space is listed on.
+            "gfs_ids": _active_gfs_ids(state, "a"),
             # Open to join — and STILL unreadable, because the readability
             # opt-in below is off. That pairing is the point of this step.
             "join_mode": "open",
@@ -3267,6 +3288,8 @@ def cmd_gfs_invite_link() -> None:
             "name": admin_space_name,
             "description": "second space — the admin-link seat",
             "space_type": "global",
+            # #874: the owner picks the GFSs a global space is listed on.
+            "gfs_ids": _active_gfs_ids(state, "a"),
             "join_mode": "invite_only",
         },
     )
@@ -3527,6 +3550,8 @@ def cmd_gfs_invite_link() -> None:
             "name": fan_space_name,
             "description": "third space — the follower-link seat",
             "space_type": "global",
+            # #874: the owner picks the GFSs a global space is listed on.
+            "gfs_ids": _active_gfs_ids(state, "a"),
             "join_mode": "invite_only",
         },
     )
@@ -3644,6 +3669,8 @@ def cmd_gfs_invite_link() -> None:
             "name": mod_space_name,
             "description": "fourth space — the moderator-link seats",
             "space_type": "global",
+            # #874: the owner picks the GFSs a global space is listed on.
+            "gfs_ids": _active_gfs_ids(state, "a"),
             "join_mode": "invite_only",
         },
     )
@@ -5898,6 +5925,8 @@ def cmd_gfs_multi_listing() -> None:
             "name": "Two servers",
             "description": "v_57 multi-GFS listing",
             "space_type": "global",
+            # Listed on A at creation (#874); the owner's selection below adds B.
+            "gfs_ids": [state["gfs"]["pairings"]["a"]["id"]],
             "join_mode": "invite_only",
         },
     )

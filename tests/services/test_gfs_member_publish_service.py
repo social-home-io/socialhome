@@ -237,6 +237,12 @@ class _Gfs:
     async def server_targets(self, space_id):
         return self.targets
 
+    #: What ``capability_unknown`` answers (the server did not answer).
+    unknown: bool = False
+
+    def capability_unknown(self, conn):
+        return self.unknown
+
     @asynccontextmanager
     async def anon_session(self, conn):
         if conn.registered:
@@ -1070,6 +1076,9 @@ async def test_strict_retry_needs_the_strict_capability(world):
         payload={"epoch": 3, "payload": "x"},
     )
     assert (await svc._retry_send("conn-1", item)).kind == "permanent"
+    # Merely unknown (the server did not answer): the retry waits.
+    world["gfs"].unknown = True
+    assert (await svc._retry_send("conn-1", item)).kind == "transient"
 
 
 async def test_strict_without_a_cookie_less_session_sends_nothing(world):

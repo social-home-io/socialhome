@@ -374,6 +374,7 @@ class GfsConnectionService:
         "_listing_sessions",
         "_listing_seen",
         "_listing_proven_at",
+        "_listing_failed_at",
         "_target_warned",
     )
 
@@ -530,6 +531,10 @@ class GfsConnectionService:
         #: server offers the proof is trusted only for
         #: :data:`LISTING_PROOF_TTL_S` after one.
         self._listing_proven_at: dict[str, float] = {}
+        #: Listing target id → ``time.monotonic()`` it FAILED its proof (a
+        #: verdict, not a blip): unsupported everywhere — the relay too —
+        #: until :data:`LISTING_PROOF_TTL_S` passed or the target is evicted.
+        self._listing_failed_at: dict[str, float] = {}
         #: Key-mismatch warnings already logged (connection id, listed id).
         self._target_warned: set[tuple[str, str]] = set()
 
@@ -563,18 +568,77 @@ class GfsConnectionService:
             known_ids=self.known_instance_ids,
             warned=self._target_warned,
         )
+        targets = await self._owner_live_only(space_id, targets)
         now = time.monotonic()
         for t in targets:
-            if t.registered:
-                continue
-            self._listing_seen[t.id] = now
-            proven = self._listing_proven_at.get(t.id)
-            if proven is not None and now - proven >= LISTING_PROOF_TTL_S:
-                # The proof aged out: forget what it vouched for, so the next
-                # capability question re-reads /gfs/info and proves again.
-                self._forget_listing(t.id)
+            if not t.registered:
+                self._listing_seen[t.id] = now
         self._evict_idle(now)
         return targets
+
+    async def _owner_live_only(
+        self, space_id: str, targets: list[GfsConnection]
+    ) -> list[GfsConnection]:
+        """On the OWNER household the signed list trails its listing rows by
+        one snapshot: a server it just withdrew from is still on the list
+        until ``sync_snapshot`` re-signs it. Its own sends follow the rows —
+        a target must still hold an active listing (never a just-withdrawn
+        one, never a pending one)."""
+        if self._space_repo is None or not self._own_instance_id:
+            return targets
+        try:
+            space = await self._space_repo.get(space_id)
+            if space is None or space.owner_instance_id != self._own_instance_id:
+                return targets
+            live = {
+                c.id for c in await self._repo.list_active_listings_for_space(space_id)
+            }
+        except Exception:
+            log.exception("GFS listings for space %s unreadable", space_id)
+            return []
+        return [t for t in targets if t.id in live]
+
+    def capability_unknown(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s capabilities are merely UNKNOWN right now — its
+        ``/gfs/info`` (or a listing target's proof) did not answer within the
+        negative TTL and no verdict says otherwise. A retry then waits
+        (transient) instead of dropping the item."""
+        if self._listing_failed(conn):
+            return False
+        failed_at = self._info_failed_at.get(conn.id)
+        return (
+            failed_at is not None
+            and time.monotonic() - failed_at < GFS_INFO_NEGATIVE_TTL_S
+        )
+
+    def _listing_failed(self, conn: GfsConnection) -> bool:
+        """The sticky "failed its proof" verdict of a listing target."""
+        if conn.registered:
+            return False
+        failed = self._listing_failed_at.get(conn.id)
+        if failed is None:
+            return False
+        if time.monotonic() - failed < LISTING_PROOF_TTL_S:
+            return True
+        del self._listing_failed_at[conn.id]
+        return False
+
+    async def _listing_recheck(self, conn: GfsConnection) -> None:
+        """Before a listing target's cached capabilities are used: once its
+        proof is older than :data:`LISTING_PROOF_TTL_S`, prove again. A
+        failed proof forgets everything (and is sticky); a busy / unreachable
+        server keeps the previous verified answers until a verdict comes."""
+        if conn.registered:
+            return
+        proven = self._listing_proven_at.get(conn.id)
+        if proven is None or time.monotonic() - proven < LISTING_PROOF_TTL_S:
+            return
+        failed_at = self._info_failed_at.get(conn.id)
+        if failed_at is not None and (
+            time.monotonic() - failed_at < GFS_INFO_NEGATIVE_TTL_S
+        ):
+            return
+        await self._fetch_gfs_info(conn)
 
     def _forget_listing(self, target_id: str) -> None:
         """Drop every RAM cache of one listing target."""
@@ -592,6 +656,7 @@ class GfsConnectionService:
             self._replaces,
             self._refreshed_at,
             self._listing_proven_at,
+            self._listing_failed_at,
         ):
             cache.pop(target_id, None)
 
@@ -1410,14 +1475,31 @@ class GfsConnectionService:
         one) and suppresses the target for the negative TTL. A server that
         does not offer the proof (an older build) is trusted on the signed
         block alone, as a registered connection's is. Nothing here touches
-        ``proof_required_at`` — a listing target is never stored."""
+        ``proof_required_at`` — a listing target is never stored, but a key
+        another connection of ours already ratcheted (``_key_requires_proof``)
+        must prove here too: a block that no longer offers the proof is a
+        replayed descriptor, a FAILED verdict.
+
+        A failed proof is a sticky verdict (:meth:`_listing_failed`): every
+        cache is forgotten and the target is unsupported, the relay included.
+        A busy / unreachable proof is no verdict: the previous verified
+        answers stay (the negative TTL throttles the next try)."""
+        if self._listing_failed(conn):
+            return None
         try:
             async with self.anon_session(conn) as session:
                 info = await self._get_info(session, conn)
                 if info is None or session is None:
                     return None
                 caps = self._verified_capabilities(conn, info)
-                if caps is not None and caps.get(PROOF_CAPABILITY) is True:
+                offered = caps is not None and caps.get(PROOF_CAPABILITY) is True
+                ratcheted = await self._key_requires_proof(conn.public_key)
+                if caps is not None and ratcheted and not offered:
+                    self._fail_listing(
+                        conn, "no longer offers the proof its key is known for"
+                    )
+                    return None
+                if offered:
                     proven = self._listing_proven_at.get(conn.id)
                     fresh = (
                         proven is not None
@@ -1427,16 +1509,13 @@ class GfsConnectionService:
                         outcome = await self._prove(
                             conn.inbox_url, conn.public_key, client=session
                         )
+                        if outcome == "failed":
+                            self._fail_listing(
+                                conn, "failed proof of possession of the listed key"
+                            )
+                            return None
                         if outcome != "proven":
                             self._info_failed_at[conn.id] = time.monotonic()
-                            if outcome == "failed":
-                                log.warning(
-                                    "GFS %r (%s) on a space owner's list failed "
-                                    "proof of possession of the listed key — "
-                                    "nothing is sent to it",
-                                    conn.display_name,
-                                    conn.inbox_url,
-                                )
                             return None
                         self._listing_proven_at[conn.id] = time.monotonic()
         except OutboundFetchRefused:
@@ -1445,6 +1524,17 @@ class GfsConnectionService:
         self._note_replaces(conn, conn.gfs_instance_id, info)
         self._record_capabilities(conn, info)
         return info
+
+    def _fail_listing(self, conn: GfsConnection, why: str) -> None:
+        """Record the sticky FAILED verdict of a listing target."""
+        log.warning(
+            "GFS %r (%s) on a space owner's list %s — nothing is sent to it",
+            conn.display_name,
+            conn.inbox_url,
+            why,
+        )
+        self._forget_listing(conn.id)
+        self._listing_failed_at[conn.id] = time.monotonic()
 
     async def _get_info(
         self, client: aiohttp.ClientSession | None, conn: GfsConnection
@@ -1853,6 +1943,11 @@ class GfsConnectionService:
         suppressed for :data:`GFS_INFO_NEGATIVE_TTL_S` so a burst of publishes
         doesn't pay the connect timeout each time.
         """
+        if self._listing_failed(conn):
+            return False
+        await self._listing_recheck(conn)
+        if self._listing_failed(conn):
+            return False
         cached = self._anon_publish.get(conn.id)
         if cached is not None:
             return cached
@@ -1952,6 +2047,11 @@ class GfsConnectionService:
         implementation for every per-capability gate so a new one cannot
         accidentally trust the unsigned top-level flag.
         """
+        if self._listing_failed(conn):
+            return False
+        await self._listing_recheck(conn)
+        if self._listing_failed(conn):
+            return False
         if cache.get(conn.id):
             return True
         failed_at = self._info_failed_at.get(conn.id)
@@ -2938,6 +3038,8 @@ class GfsConnectionService:
         """
         if await self._anonymous_publish_supported(conn):
             return "anonymous"
+        if self._listing_failed(conn):
+            return "unsupported"
         # "unknown" only while there is no answer at all: a GFS already seen
         # without the proof stays "unsupported" even if a later refresh
         # blipped, or its publishes would wait in the queue forever.

@@ -41,10 +41,10 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Callable, Iterable
-from urllib.parse import urlsplit, urlunsplit
 
 from ..domain.federation import GfsConnection
 from ..domain.gfs_server import GfsServer
+from ..gfs_proof import normalize_gfs_base_url
 from ..outbound_fetch import OutboundFetchRefused
 from .gfs_publish_retry import PublishOutcome
 
@@ -56,16 +56,12 @@ LISTING_TARGET_PREFIX: str = "listing:"
 
 
 def normalized_url(url: str) -> str:
-    """*url* with a lower-case scheme and host and no trailing slash — two
-    spellings of one address name one listing target."""
-    parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
-    netloc = f"[{host}]" if ":" in host else host
-    if parts.port is not None:
-        netloc = f"{netloc}:{parts.port}"
-    return urlunsplit(
-        (parts.scheme.lower(), netloc, parts.path.rstrip("/"), parts.query, "")
-    )
+    """*url* normalized exactly as a proof of possession binds it
+    (:func:`socialhome.gfs_proof.normalize_gfs_base_url`: lower case, IDNA,
+    default port and trailing slash dropped) — two spellings of one address
+    name one listing target. Falls back to the raw URL for one the proof
+    normalization refuses (it is then never proven either)."""
+    return normalize_gfs_base_url(url) or url
 
 
 def listing_target_id(server: GfsServer) -> str:

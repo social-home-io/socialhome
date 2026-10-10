@@ -2441,8 +2441,20 @@ address is private, no redirects, no cookie jar, no proxy, `User-Agent:
 SocialHome`). Its `/gfs/info` capability block is verified against the key
 on the owner's list, and when the block offers `proof_of_possession` the
 server must first sign a fresh nonce bound to the LISTED URL (`POST
-/gfs/proof`, same session; reused for an hour; a failure skips it). Nothing
-about a listing target touches `proof_required_at`. Every identified sender
+/gfs/proof`, same session; reused for an hour, then proven again before the
+next answer). A failed proof is a sticky verdict for that target (it is
+unsupported, the relay included, until the hour passes); a busy or
+unreachable proof is no verdict — the previous answers stay and retries
+wait instead of dropping. A key one of our own connections already
+ratcheted must prove here too: a block that stopped offering the proof is
+refused. Nothing about a listing target touches `proof_required_at`. The
+URL in the target id is normalized as the proof binds it (lower case, IDNA,
+default port dropped), so one server is one target. Accepted cost of the
+isolation: when the owner moves a server to a new URL or key, items still
+queued for the old entry are dropped (its target is no longer on the list);
+the new entry gets everything published after the list change. On the
+OWNER household sends also follow its live listing rows, so a server it
+just withdrew from gets nothing in the moment before the re-signed list. Every identified sender
 refuses it (`GfsConnectionService.require_registered`). Without a list (an
 older owner), every path keeps its pre-v_57 targets: our own connections.
 

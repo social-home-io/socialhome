@@ -982,9 +982,14 @@ class GfsMemberPublishService:
         if conn is None or conn.status != "active":
             return PublishOutcome.permanent()
         if item.event_type == _KIND_ANON:
-            if not await self._gfs.member_publish_strict_supported(conn):
-                return PublishOutcome.permanent()
-        elif not await self._gfs.member_publish_trusted_supported(conn):
+            capable = await self._gfs.member_publish_strict_supported(conn)
+        else:
+            capable = await self._gfs.member_publish_trusted_supported(conn)
+        if not capable:
+            # Unknown (the server did not answer within the negative TTL) is
+            # not "no": wait for a verdict instead of dropping the item.
+            if self._gfs.capability_unknown(conn):
+                return PublishOutcome.transient()
             return PublishOutcome.permanent()
         return await self._send(conn, item)
 
