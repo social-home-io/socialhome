@@ -266,11 +266,10 @@ class SpaceSyncService:
                     sync_id=sync_id,
                     sig_suite=self._sig_suite,
                     since=session.since_seq,
-                    index_from=chunk_count if indexed else None,
+                    next_index=_allocator(session) if indexed else None,
                 ):
                     sent = await self._send_chunk(session, envelope, waits)
                     chunk_count += 1
-                    session.next_chunk_index = chunk_count
                     if sent:
                         # Progress: the stale reaper measures idleness, so
                         # a long stream survives while chunks flow.
@@ -300,7 +299,14 @@ class SpaceSyncService:
                 space_id=space_id,
                 sync_id=sync_id,
                 sig_suite=self._sig_suite,
-                chunk_count=chunk_count,
+                # Numbered (v_56): every index the session handed out —
+                # a REQUEST_MORE slice that ran alongside included, whose
+                # chunks the requester counts too.
+                chunk_count=(
+                    int(getattr(session, "next_chunk_index", 0))
+                    if indexed
+                    else chunk_count
+                ),
                 snapshot_seq=session.snapshot_seq,
             )
             # Marked before the sentinel ships: the requester's
@@ -693,15 +699,11 @@ class SpaceSyncService:
                 space_id=session.space_id,
                 sync_id=session.sync_id,
                 sig_suite=self._sig_suite,
-                # v_56: numbered on from the session's last chunk, so a slice
-                # never reuses an index of the stream it follows.
-                index_from=getattr(session, "next_chunk_index", 0) if indexed else None,
+                # v_56: from the session's one counter, so a slice never
+                # reuses an index of the stream it runs next to.
+                next_index=_allocator(session) if indexed else None,
             ):
                 await self._send(session, envelope)
-                if indexed:
-                    session.next_chunk_index = (
-                        getattr(session, "next_chunk_index", 0) + 1
-                    )
         except Exception:  # pragma: no cover
             log.exception(
                 "stream_request_more failed for sync_id=%s resource=%s",
@@ -808,3 +810,16 @@ def _series_rows(version: int) -> bool:
     numbered chunks? One we cannot ask (``0``) gets the older shape — never a
     series row an older receiver would flatten."""
     return version >= FederationCapability.MIN_FOR_SYNC_SERIES_ROWS
+
+
+def _allocator(session: "SyncSessionRecord") -> Callable[[], int]:
+    """The session's one ``chunk_index`` counter (v_56): every chunk of the
+    session — the stream's and any REQUEST_MORE slice's — takes the next
+    value, never a reassigned one."""
+
+    def _next() -> int:
+        index = int(getattr(session, "next_chunk_index", 0))
+        session.next_chunk_index = index + 1
+        return index
+
+    return _next

@@ -774,6 +774,10 @@ def test_an_edit_releases_cap_is_reviewed_content():
     cleared = _edit({"clear_capacity": True})
     assert item_matches_event(cleared, updated, {**wire, "capacity": None}, held=held)
     assert not item_matches_event(cleared, updated, {**wire, "capacity": 4}, held=held)
+    # Both sent: the clear wins, as ``update_event`` applies it.
+    both = _edit({"capacity": 12, "clear_capacity": True})
+    assert item_matches_event(both, updated, {**wire, "capacity": None}, held=held)
+    assert not item_matches_event(both, updated, {**wire, "capacity": 12}, held=held)
     renamed = _edit({"summary": "Workshop"})
     assert item_matches_event(renamed, updated, {**wire, "capacity": 4}, held=held)
     assert not item_matches_event(renamed, updated, {**wire, "capacity": 9}, held=held)

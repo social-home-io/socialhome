@@ -3170,3 +3170,48 @@ async def test_space_event_with_legacy_external_cover_stays_editable(
             space_id=ev.calendar_id,
             cover_url="//other.example/x.jpg",
         )
+
+
+@pytest.mark.parametrize("bad", [True, False, 1.5, "3", -1])
+async def test_a_capacity_must_be_a_non_negative_integer(space_cal_env, bad):
+    """``capacity: true`` (a bool is an int to Python) or a string would
+    reach the database and the wire as something the moderation rule and
+    the receiving households read differently — refused at the service."""
+    env = space_cal_env
+    with pytest.raises(ValueError):
+        await env.space_cal_svc.create_event(
+            space_id="sp-cal",
+            summary="X",
+            start=_SEED.isoformat(),
+            end=(_SEED + timedelta(hours=1)).isoformat(),
+            created_by="uid-alice",
+            capacity=bad,
+        )
+
+
+def test_a_reviewed_edits_capacity_is_normalised_like_update_event():
+    """The queue keeps an edit as the host will apply it: ``clear_capacity``
+    wins over a cap (as ``update_event``), a ``null`` cap is no change, and a
+    cap that is not a non-negative integer is refused."""
+    handler = CalendarModerationHandler(None)  # type: ignore[arg-type]
+
+    def _patch(raw: dict) -> dict:
+        return handler.validate(
+            None,  # type: ignore[arg-type]
+            {"entity": "event", "target_id": "ev-1", "patch": raw},
+        )["patch"]
+
+    assert _patch({"capacity": 5, "clear_capacity": True}) == {"clear_capacity": True}
+    assert _patch({"capacity": None, "summary": "S"}) == {"summary": "S"}
+    assert _patch({"capacity": 0}) == {"capacity": 0}
+    assert _patch({"clear_capacity": False, "summary": "S"}) == {"summary": "S"}
+    for bad in ({"capacity": True}, {"capacity": "4"}, {"capacity": -2}):
+        with pytest.raises(ValueError):
+            _patch(bad)
+    with pytest.raises(ValueError):
+        _patch({"capacity": None})  # nothing left to change
+    with pytest.raises(ValueError):
+        handler.validate(
+            None,  # type: ignore[arg-type]
+            {"entity": "event", "target_id": "ev-1", "summary": "S", "capacity": True},
+        )

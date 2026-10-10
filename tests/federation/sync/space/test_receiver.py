@@ -26,6 +26,7 @@ from socialhome.federation.sync.space.exporter import (
 )
 from socialhome.federation.sync.space.receiver import (
     HELD_BACK_LIMIT,
+    PERSIST_FAILURE_LIMIT,
     HeldBack,
     SpaceSyncReceiver,
     _sticky_from_record,
@@ -1143,6 +1144,51 @@ async def test_a_duplicated_chunk_cannot_stand_in_for_a_lost_one(
     assert (await _completion(bus, r, kp, "s-ok2", 2)).clean is True
 
 
+async def test_an_unknown_resource_we_cannot_open_still_counts(bus, peer_setup):
+    """Forward compatibility: a newer provider's resource that this
+    household cannot decrypt is dropped by rule and counted as one chunk —
+    it does not make every stream from that provider unclean."""
+    peer, kp = peer_setup
+
+    class _NoOpenCrypto(_FakeCrypto):
+        async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
+            if ciphertext == "opaque":
+                raise ValueError("unknown scheme")
+            return await super().decrypt_chunk(
+                space_id=space_id, epoch=epoch, sync_id=sync_id, ciphertext=ciphertext
+            )
+
+    r = SpaceSyncReceiver(
+        bus=bus,
+        encoder=FederationEncoder(generate_identity_keypair().private_key),
+        crypto=_NoOpenCrypto(),
+        federation_repo=_FakeFedRepo(peer),
+        space_repo=_FakeSpaceRepo(),
+        space_post_repo=_FakeSpacePostRepo(),
+        space_task_repo=_Stub(),
+        page_repo=_Stub(),
+        sticky_repo=_Stub(),
+        space_calendar_repo=_Stub(),
+        gallery_repo=_Stub(),
+    )
+    await r.on_chunk(await _members_chunk(kp, "s-opq", index=0), from_instance="peer-a")
+    frame = orjson.loads(await _members_chunk(kp, "s-opq", index=1))
+    frame.update(resource="from_the_future", encrypted_payload="opaque")
+    del frame["signatures"]
+    await r.on_chunk(
+        serialise_chunk(await _sign_as_peer(kp, frame)), from_instance="peer-a"
+    )
+    assert (await _completion(bus, r, kp, "s-opq", 2)).clean is True
+    # A KNOWN resource that fails to decrypt is a failure, as ever.
+    bad = orjson.loads(await _members_chunk(kp, "s-bad2", index=0))
+    bad["encrypted_payload"] = "opaque"
+    del bad["signatures"]
+    await r.on_chunk(
+        serialise_chunk(await _sign_as_peer(kp, bad)), from_instance="peer-a"
+    )
+    assert (await _completion(bus, r, kp, "s-bad2", 1)).clean is False
+
+
 async def test_held_back_streams_are_bounded(
     bus, receiver, peer_setup, caplog, monkeypatch
 ):
@@ -1175,11 +1221,11 @@ async def test_held_back_streams_are_bounded(
     assert [await _held_stream(f"s-again-{n}") for n in range(2)] == [False, False]
 
 
-async def test_a_failed_persist_is_never_forgiven(
-    bus, receiver, peer_setup, monkeypatch
+async def test_a_failed_persist_is_bounded_apart_from_held_back(
+    bus, receiver, peer_setup, monkeypatch, caplog
 ):
-    """A persist that failed (logged, not raised) is unclean outright — it
-    never counts toward the held-back bound, however many streams fail."""
+    """A persist that failed (logged, not raised) is unclean — it never
+    counts toward the held-back bound, but has its own, higher one."""
     r, _, _ = receiver
     _, kp = peer_setup
 
@@ -1189,10 +1235,18 @@ async def test_a_failed_persist_is_never_forgiven(
         return outcome
 
     monkeypatch.setattr(SpaceSyncReceiver, "_apply", _failed_apply)
-    for n in range(HELD_BACK_LIMIT + 2):
-        sid = f"s-fail-{n}"
-        await r.on_chunk(await _members_chunk(kp, sid), from_instance="peer-a")
-        assert (await _completion(bus, r, kp, sid, 1)).clean is False
+    verdicts = []
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        for n in range(PERSIST_FAILURE_LIMIT + 1):
+            sid = f"s-fail-{n}"
+            await r.on_chunk(await _members_chunk(kp, sid), from_instance="peer-a")
+            verdicts.append((await _completion(bus, r, kp, sid, 1)).clean)
+    # Not forgiven as "held" (3) — only after its own, higher bound, so a
+    # row the database refuses for good cannot force full re-streams for
+    # ever.
+    assert verdicts == [False] * (PERSIST_FAILURE_LIMIT - 1) + [True, False]
+    assert PERSIST_FAILURE_LIMIT > HELD_BACK_LIMIT
+    assert sum("failed to store" in rec.message for rec in caplog.records) == 1
 
 
 async def test_in_a_numbered_stream_only_indices_count(bus, receiver, peer_setup):

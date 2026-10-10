@@ -153,9 +153,12 @@ what the space's retention keeps (`federation/sync/space/window.py`):
     tombstones never stream: they mirror posts, every household rebuilds
     its own from the posts — a post a sync stores included
     (`SpacePostSynced`, which only the system-album bridge follows: no
-    notification, no fan-out) — and each household's system album has its
-    own id (a receiver refuses an item naming another household's system
-    album by rule — an older provider's stream);
+    notification, no fan-out, no live gallery frame per photo; a deleted
+    or moderated post mirrors nothing) — and each household's system album
+    has its own id (a receiver refuses an item naming another household's
+    system album by rule — an older provider's stream). A post mirrored by
+    the live event and by a sync at once stores each file once (migration
+    0091's unique index);
   - **calendar** events — every live event **as its stored row**, whatever
     its date: a recurring event once, carrying its `rrule` (the receiver
     expands its occurrences on read, as the host does), never one record
@@ -172,10 +175,11 @@ what the space's retention keeps (`federation/sync/space/window.py`):
     from a record and its upsert would turn each series it holds into a
     one-off event, so it is still streamed the old record set
     (`ExpandedCalendarExporter`: `<id>@<start>` occurrences, ±10 years) —
-    minus the one record the expansion yields under the series' own id
-    (its first occurrence, the stored row), which such a receiver would
-    upsert without its rule. It stores the occurrences as one-off events,
-    as it always did; its series row (delivered live) keeps its rule. Its
+    the first occurrence too, which the expansion yields as the stored
+    series row: it goes out under `<id>@<start>` like the others, never
+    under the series' own id (such a receiver would upsert the series
+    without its rule). It stores the occurrences as one-off events, as it
+    always did; its series row (delivered live) keeps its rule. Its
     version is part of the session shape, so an upgrade brings one full
     stream;
   - the **post and comment tombstones** — only the host runs the post
@@ -337,8 +341,12 @@ counts **distinct** indices against `chunk_count`: a chunk delivered twice
 (a relay retry) cannot stand in for one that was lost. Once a stream
 carries an index, only indices count (an unnumbered chunk in it cannot make
 up the count), and a chunk of a resource the requester does not know is
-decrypted too, so its index counts like any other. A REQUEST_MORE slice is
-numbered on from the stream it follows. An older provider sends no index
+decrypted too, so its index counts like any other — one it cannot even
+open (a newer provider's scheme) is dropped by rule and counted as one
+chunk with no index, filling no slot but its own. Every chunk of a session
+takes its index from the session's one counter — a REQUEST_MORE slice that
+runs alongside the stream included, and the sentinel's `chunk_count` is
+every index the session handed out — so no index is ever reused. An older provider sends no index
 and its chunks are counted as before; an older requester is sent none. The
 provider reads the requester's version once per session; the record sets,
 the shape and the numbering all follow that one reading.
@@ -368,9 +376,12 @@ per (space, provider), consecutive streams that were unclean **only**
 because of held-back records (`HeldBackStreaks`, in memory); the
 `HELD_BACK_LIMIT`-th (3) is reported clean, with one WARNING, and the
 count starts over; any other unclean stream breaks the run (the count
-starts over too). A lost, failed or still-stashed chunk — or a persist that
-failed, even one its caller logged rather than raised — is never
-forgiven: only a refusal "for now" counts toward the bound. Both fields are additive and plain routing metadata (a count
+starts over too). A lost, failed or still-stashed chunk is never
+forgiven. A row that fails to persist where its caller logs rather than
+raises (a gallery album or item write) is not a hold: it has its own,
+higher bound (`PERSIST_FAILURE_LIMIT`, 10 streams in a row, WARNING once),
+so a passing lock is retried but a row the database refuses for good
+cannot force a full re-stream on every session forever. Both fields are additive and plain routing metadata (a count
 and a boolean, no content): an older receiver ignores `chunk_count`, an
 older provider ignores `clean`.
 
@@ -477,9 +488,10 @@ Fail-safe toward more data, never less:
   and a record refused only for now (see `clean` above) re-stream on the
   next periodic session, and an archive lifted here forces a full one.
   What does wait for it: a record still held back after
-  `HELD_BACK_LIMIT` streams in a row (taken as refused then), whose
-  parent or author turns up later — the daily full stream offers it
-  again. (A requester whose database was rolled back to an older file
+  `HELD_BACK_LIMIT` streams in a row (or a row still failing to persist
+  after `PERSIST_FAILURE_LIMIT`), taken as refused then, whose parent or
+  author turns up (or which stores) later — the daily full stream offers
+  it again. (A requester whose database was rolled back to an older file
   snapshot under the same identity does not wait for it: its `have_seq`
   rolled back too. A restore from the app's backup re-pairs under a new
   identity, which has no watermark, so it syncs in full anyway.)

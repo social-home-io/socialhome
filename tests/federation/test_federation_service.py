@@ -130,6 +130,11 @@ class InMemoryFederationRepo:
         """Test helper — not part of AbstractFederationRepo."""
         self._space_members.add((space_id, instance_id))
 
+    async def get_space_member_version(self, instance_id: str):
+        """A mesh-only member's claimed version (test helper store)."""
+        claim = getattr(self, "mesh_claims", {}).get(instance_id)
+        return (claim, None) if claim is not None else None
+
     async def get_instance(
         self,
         instance_id: str,
@@ -3266,6 +3271,41 @@ async def test_broadcast_to_space_members_sends_the_legacy_payload_below_a_versi
         new.id: {"role": "moderator"},
         old.id: {"role": "member"},
         "mesh-only-unknown": {"role": "member"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_mesh_only_member_is_judged_by_its_claim_for_the_legacy_variant(
+    monkeypatch,
+):
+    """A space broadcast picks the variant by the member's space version —
+    a mesh-only member (no ``remote_instances`` row) by the version it
+    claimed over the mesh — not by the paired-peer row alone, which would
+    send every mesh-only member the legacy shape."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    fed_repo.mesh_claims = {"mesh-new": 56, "mesh-old": 55}
+    for iid in ("mesh-new", "mesh-old", "mesh-unknown"):
+        fed_repo.add_space_member("sp", iid)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    sent: dict[str, dict] = {}
+
+    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
+        sent[to_instance_id] = payload
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+    await svc.broadcast_to_space_members(
+        "sp",
+        FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+        {"v": "new"},
+        legacy_payload={"v": "old"},
+        legacy_below=56,
+    )
+    assert sent == {
+        "mesh-new": {"v": "new"},
+        "mesh-old": {"v": "old"},
+        "mesh-unknown": {"v": "old"},
     }
 
 

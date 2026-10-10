@@ -1098,9 +1098,10 @@ async def test_an_older_requester_gets_the_expanded_calendar_and_no_index(houses
     wire_frames: list[dict] = []
     old = await _h_to_c(h, c, reorder=lambda f: wire_frames.extend(f) or f)
     ids = _ids(old, "calendar")
-    # The occurrences only — never a record carrying the series' own id,
-    # which an older receiver would upsert without its rule.
-    assert len(ids) == 2 and all(i.startswith(f"{eid}@") for i in ids)
+    # Every occurrence, the first one included, as an occurrence record —
+    # never a record carrying the series' own id, which an older receiver
+    # would upsert without its rule.
+    assert len(ids) == 3 and all(i.startswith(f"{eid}@") for i in ids)
     # The old record set never lands as rows of their own here (migration
     # 0089's guard / the receiver's skip), whatever an older provider sends.
     assert await _event_rows(c) == {}

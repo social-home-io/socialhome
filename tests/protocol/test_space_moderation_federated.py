@@ -149,6 +149,8 @@ async def mesh(aiohttp_client, tmp_dir, monkeypatch):
     every feature."""
     monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _fake_send)
     monkeypatch.setattr(FederationService, "peer_supports", _fake_supports)
+    # Space broadcasts pick their variant by the member's space version.
+    monkeypatch.setattr(FederationService, "space_member_supports", _fake_supports)
     OUTBOX.clear()
     VERSIONS.clear()
     houses: dict[str, House] = {}

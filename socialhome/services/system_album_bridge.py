@@ -114,9 +114,16 @@ class SystemAlbumBridge:
     async def _on_space_post_synced(self, event: SpacePostSynced) -> None:
         # A post a §25.6 sync stored: its media belongs in this household's
         # own system album too (the provider's mirror rows never stream).
-        # ``mirror_post`` is idempotent, so a re-applied post churns nothing.
+        # ``mirror_post`` is idempotent, so a re-applied post churns nothing,
+        # and quiet: a catch-up sends no live frame per photo. A deleted or
+        # moderated post (a tombstone) mirrors nothing.
         try:
-            await self._gallery.mirror_post(event.post, space_id=event.space_id)
+            if event.post.deleted or event.post.moderated:
+                await self._gallery.unmirror_post(event.post.id)
+            else:
+                await self._gallery.mirror_post(
+                    event.post, space_id=event.space_id, quiet=True
+                )
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(
                 "system-album: mirror SpacePostSynced failed for %s: %s",

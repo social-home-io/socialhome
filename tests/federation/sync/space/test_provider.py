@@ -1435,3 +1435,42 @@ async def test_the_requesters_version_is_read_once_per_session(encoder):
         == 1
     )
     assert federation.space_member_version.await_count == 1
+
+
+async def test_a_request_more_slice_mid_stream_takes_fresh_indices(encoder):
+    """A REQUEST_MORE slice streamed while the stream runs draws from the
+    session's one index counter: no index is reused, and the sentinel counts
+    every index the session handed out."""
+    from unittest.mock import AsyncMock
+
+    svc = _chat_provider(encoder)
+    federation = AsyncMock()
+    federation.space_member_version = AsyncMock(return_value=56)
+    svc.attach_federation(federation)
+
+    async def _gate(space_id: str, instance_id: str) -> bool:
+        return True
+
+    svc.attach_chat_gate(_gate)
+    session = _FakeSession()
+
+    class _Rtc(_FakeRtc):
+        fired = False
+
+        async def send_chunk(self, data):
+            await super().send_chunk(data)
+            if not self.fired:
+                self.fired = True
+                await svc.stream_request_more(session, {"resource": "chat_messages"})
+
+    session.rtc = _Rtc()
+    await svc.stream_initial(session)
+    frames = [orjson.loads(raw) for raw in session.rtc.sent]
+    content = [f for f in frames if f["resource"] != SENTINEL_RESOURCE]
+    indices = [
+        orjson.loads(base64.urlsafe_b64decode(f["encrypted_payload"]))["chunk_index"]
+        for f in content
+    ]
+    assert sorted(indices) == list(range(len(content))) and len(content) == 2
+    (sentinel,) = [f for f in frames if f["resource"] == SENTINEL_RESOURCE]
+    assert sentinel["chunk_count"] == len(content)

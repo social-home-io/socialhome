@@ -13,11 +13,11 @@ disagree as rows drift across its edge. Deletes ride ``calendar_deleted``.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
-from .....domain.calendar import is_occurrence_id
+from .....domain.calendar import OCCURRENCE_ID_SEPARATOR, is_occurrence_id
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, iter_pages
 
@@ -75,9 +75,10 @@ class ExpandedCalendarExporter:
     without one, so a record carrying a stored series row's own id would turn
     the series it holds into a one-off event. The expansion yields exactly
     such a record for a series' first occurrence (the stored row itself), so
-    it is left out: an older receiver gets only ``<id>@<start>`` occurrence
-    records — which it stores as one-off events, as it always did — and its
-    series row (delivered live, with its rule) is never overwritten. Same
+    that one goes out under ``<id>@<start>`` too: an older receiver gets only
+    occurrence records — which it stores as one-off events, as it always
+    did, the first occurrence included — and its series row (delivered live,
+    with its rule) is never overwritten. Same
     resource, so a requester that upgrades gets one full stream in the new
     shape (its version is part of the session shape)."""
 
@@ -104,13 +105,19 @@ class ExpandedCalendarExporter:
             end=now + _EXPANDED_WINDOW,
             since=since,
         )
-        return [
-            _event_to_dict(e)
-            for e in events
-            # The stored series row itself (its first occurrence): an older
-            # receiver would upsert it without its rule.
-            if not (e.rrule and not is_occurrence_id(e.id, e.start.isoformat()))
-        ]
+        return [_event_to_dict(_as_occurrence(e)) for e in events]
+
+
+def _as_occurrence(event: "CalendarEvent") -> "CalendarEvent":
+    """The expansion yields a series' first occurrence as the stored series
+    row itself; an older receiver would upsert it without its rule. It goes
+    out as an occurrence like the others, under ``<id>@<start>``."""
+    if event.rrule and not is_occurrence_id(event.id, event.start.isoformat()):
+        return replace(
+            event,
+            id=f"{event.id}{OCCURRENCE_ID_SEPARATOR}{event.start.isoformat()}",
+        )
+    return event
 
 
 def _event_to_dict(event: "CalendarEvent") -> dict[str, Any]:

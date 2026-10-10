@@ -29,6 +29,19 @@ def coerce_capacity(value: object) -> int | None:
     return value
 
 
+def validate_capacity(value: object) -> int | None:
+    """A per-occurrence ``capacity`` a user (or a queue item) asked for:
+    ``None`` (no cap / no change) or a non-negative integer — never a bool
+    (an ``int`` to Python), a float or a string, which the moderation rule
+    and the receiving households would read differently. Raises
+    :class:`ValueError`."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("capacity must be a non-negative integer")
+    return value
+
+
 def is_occurrence_id(event_id: str, start_iso: str) -> bool:
     """Is ``event_id`` a virtual occurrence's id — ``<series id>@<start>``
     where ``<start>`` is the occurrence's own start (``start_iso``)? The

@@ -671,10 +671,12 @@ def _event_edit(p: Mapping, by: str, w: Mapping, h: Mapping) -> tuple[dict, dict
     # it (v_56): the item's new cap, cleared, or else the held row's.
     if "capacity" in w:
         proposed = _patch(p)
-        if "capacity" in proposed:
-            expected["capacity"] = coerce_capacity(proposed.get("capacity"))
-        elif proposed.get("clear_capacity"):
+        # As ``update_event`` applies it: the clear wins over a cap, a null
+        # cap is no change.
+        if proposed.get("clear_capacity"):
             expected["capacity"] = None
+        elif proposed.get("capacity") is not None:
+            expected["capacity"] = coerce_capacity(proposed.get("capacity"))
         else:
             if "capacity" not in h:
                 raise KeyError("capacity")

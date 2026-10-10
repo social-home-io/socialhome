@@ -11,6 +11,7 @@ mirror diffed; posts deleted → mirror cleared. Uses real
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import uuid
 from datetime import datetime, timezone
 
@@ -23,6 +24,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    GalleryItemUploaded,
     PostCreated,
     PostDeleted,
     PostEdited,
@@ -157,6 +159,59 @@ async def test_a_synced_space_post_is_mirrored_too(env):
     await env["bus"].publish(SpacePostSynced(post=p, space_id="sp-1"))
     again = await env["repo"].list_items_by_source_post(p.id)
     assert [i.id for i in again] == [i.id for i in first] and len(first) == 1
+
+
+async def test_two_mirrors_of_one_post_at_once_store_each_file_once(env):
+    """The live create and the synced copy (or two overlapping sessions)
+    mirror the same post at the same time: each file lands once — the
+    unique index (migration 0091) turns the loser's insert into a no-op."""
+    p = _post(image_urls=("/api/media/one.webp", "/api/media/two.webp"))
+    await asyncio.gather(
+        env["svc"].mirror_post(p, space_id="sp-1"),
+        env["svc"].mirror_post(p, space_id="sp-1"),
+    )
+    items = await env["repo"].list_items_by_source_post(p.id)
+    assert sorted(i.url for i in items) == [
+        "api/media/one.webp",
+        "api/media/two.webp",
+    ]
+    album = await env["repo"].get_system_album(space_id="sp-1")
+    assert album.item_count == 2
+
+
+async def test_a_synced_post_mirrors_quietly(env):
+    """A catch-up stream of photo posts must not send one live
+    ``GalleryItemUploaded`` frame per photo: a synced mirror is quiet."""
+    seen: list = []
+
+    async def _uploaded(event: GalleryItemUploaded) -> None:
+        seen.append(event)
+
+    env["bus"].subscribe(GalleryItemUploaded, _uploaded)
+    p = _post(image_urls=("/api/media/quiet.webp",))
+    await env["bus"].publish(SpacePostSynced(post=p, space_id="sp-1"))
+    assert len(await env["repo"].list_items_by_source_post(p.id)) == 1
+    assert seen == []
+    live = _post(image_urls=("/api/media/live.webp",))
+    await env["bus"].publish(SpacePostCreated(post=live, space_id="sp-1"))
+    assert len(seen) == 1
+
+
+async def test_a_synced_deleted_post_is_not_mirrored(env):
+    """A deleted or moderated post a sync stored (its tombstone) mirrors
+    nothing — and drops a mirror held from before."""
+    p = _post(image_urls=("/api/media/gone.webp",))
+    await env["bus"].publish(SpacePostSynced(post=p, space_id="sp-1"))
+    assert len(await env["repo"].list_items_by_source_post(p.id)) == 1
+    await env["bus"].publish(
+        SpacePostSynced(post=replace(p, deleted=True), space_id="sp-1")
+    )
+    assert await env["repo"].list_items_by_source_post(p.id) == []
+    q = _post(image_urls=("/api/media/mod.webp",))
+    await env["bus"].publish(
+        SpacePostSynced(post=replace(q, moderated=True), space_id="sp-1")
+    )
+    assert await env["repo"].list_items_by_source_post(q.id) == []
 
 
 # ─── Edit paths ──────────────────────────────────────────────────────────

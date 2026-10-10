@@ -189,6 +189,12 @@ class HeldBack:
 #: full-pass interval every 30-minute session would be a full stream.
 HELD_BACK_LIMIT: int = 3
 
+#: The same bound for a row that fails to persist on every stream (a gallery
+#: row the database refuses for good): higher, since a failure may be a
+#: passing lock — but a permanently broken row must not force a full
+#: re-stream on every session forever either. Logged at WARNING.
+PERSIST_FAILURE_LIMIT: int = 10
+
 
 class StreamVerdict(StrEnum):
     """How a §25.6 stream ended here."""
@@ -198,23 +204,40 @@ class StreamVerdict(StrEnum):
     #: a retry (:class:`HeldBack`) — unclean, bounded by
     #: :data:`HELD_BACK_LIMIT`.
     HELD_BACK = "held_back"
+    #: Every chunk arrived, but a row failed to persist where its caller
+    #: logs rather than raises (a gallery album / item write) — unclean,
+    #: bounded by :data:`PERSIST_FAILURE_LIMIT`.
+    PERSIST_FAILED = "persist_failed"
     UNCLEAN = "unclean"
 
 
 class _Stream:
     """One stream's tally (module-local)."""
 
-    __slots__ = ("plain", "indices", "failed", "held", "pending", "archived")
+    __slots__ = (
+        "plain",
+        "opaque",
+        "indices",
+        "failed",
+        "held",
+        "persist_failed",
+        "pending",
+        "archived",
+    )
 
     def __init__(self) -> None:
         #: Chunks stored that carry no index (an older provider).
         self.plain = 0
+        #: Chunks of a resource we do not know and could not even open (a
+        #: newer provider's): dropped by rule, counted with no index.
+        self.opaque = 0
         #: Distinct ``chunk_index`` values of the chunks stored (v_56): a
         #: chunk delivered twice counts once, so a duplicate cannot stand
         #: in for a chunk that was lost.
         self.indices: set[int] = set()
         self.failed = False
         self.held = False
+        self.persist_failed = False
         self.pending = 0
         #: The space's archive flag when the stream's first chunk landed —
         #: ``None`` until then (see :meth:`StreamHealth.archive_changed`).
@@ -293,6 +316,22 @@ class StreamHealth:
         else:
             entry.plain += 1
 
+    def opaque(self, sync_id: str) -> None:
+        """A chunk of an unknown resource that could not be opened: dropped
+        by rule (forward compatibility), its index unknowable — counted
+        apart, so it fills no slot but its own."""
+        entry = self._entry(sync_id)
+        if entry is not None:
+            entry.opaque += 1
+
+    def persist_failed(self, sync_id: str, index: object = None) -> None:
+        """A chunk arrived but a row of it failed to persist (logged by its
+        caller rather than raised)."""
+        self.applied(sync_id, index)
+        entry = self._entry(sync_id)
+        if entry is not None:
+            entry.persist_failed = True
+
     def held(self, sync_id: str, index: object = None) -> None:
         """A chunk stored all but records held back for a retry."""
         self.applied(sync_id, index)
@@ -325,35 +364,45 @@ class StreamHealth:
             return StreamVerdict.UNCLEAN
         # A numbered stream (v_56) counts its distinct indices only: an
         # unnumbered chunk in it (none should be) cannot stand in for one.
-        stored = len(entry.indices) if entry.indices else entry.plain
+        stored = (len(entry.indices) if entry.indices else entry.plain) + entry.opaque
         if entry.failed or entry.pending or stored != chunk_count:
             return StreamVerdict.UNCLEAN
+        if entry.persist_failed:
+            return StreamVerdict.PERSIST_FAILED
         return StreamVerdict.HELD_BACK if entry.held else StreamVerdict.CLEAN
 
 
 class HeldBackStreaks:
     """Consecutive held-back-only verdicts per (space, provider), bounded by
-    :data:`HELD_BACK_LIMIT` (see there). In memory: a restart starts the
-    count over — at worst :data:`HELD_BACK_LIMIT` more unclean sessions."""
+    :data:`HELD_BACK_LIMIT`, and consecutive persist-failure verdicts,
+    bounded by :data:`PERSIST_FAILURE_LIMIT` (see there). Any other verdict
+    breaks a run. In memory: a restart starts the count over — at worst
+    that many more unclean sessions."""
 
     __slots__ = ("_streaks", "_warned")
 
     def __init__(self) -> None:
-        self._streaks: OrderedDict[tuple[str, str], int] = OrderedDict()
-        self._warned: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._streaks: OrderedDict[tuple[str, str, str], int] = OrderedDict()
+        self._warned: OrderedDict[tuple[str, str, str], None] = OrderedDict()
 
     def clean(self, verdict: StreamVerdict, space_id: str, provider: str) -> bool:
         """Whether to report the stream clean."""
-        key = (space_id, provider)
+        kinds = {
+            StreamVerdict.HELD_BACK: HELD_BACK_LIMIT,
+            StreamVerdict.PERSIST_FAILED: PERSIST_FAILURE_LIMIT,
+        }
+        # "In a row": any verdict breaks the other kinds' runs.
+        for kind in kinds:
+            if kind is not verdict:
+                self._streaks.pop((space_id, provider, kind.value), None)
         if verdict is StreamVerdict.CLEAN:
-            self._streaks.pop(key, None)
             return True
-        if verdict is StreamVerdict.UNCLEAN:
-            # "In a row": an unclean stream breaks the run.
-            self._streaks.pop(key, None)
+        limit = kinds.get(verdict)
+        if limit is None:
             return False
+        key = (space_id, provider, verdict.value)
         streak = self._streaks.pop(key, 0) + 1
-        if streak < HELD_BACK_LIMIT:
+        if streak < limit:
             self._streaks[key] = streak
             while len(self._streaks) > MAX_TRACKED_STREAMS:
                 self._streaks.popitem(last=False)
@@ -363,12 +412,14 @@ class HeldBackStreaks:
             while len(self._warned) > MAX_TRACKED_STREAMS:
                 self._warned.popitem(last=False)
             log.warning(
-                "sync: %d streams in a row from %s for space %s held records "
-                "back that never landed — taking them as refused and "
-                "reporting this stream clean",
+                "sync: %d streams in a row from %s for space %s %s — taking "
+                "them as refused and reporting this stream clean",
                 streak,
                 provider,
                 space_id,
+                "held records back that never landed"
+                if verdict is StreamVerdict.HELD_BACK
+                else "failed to store the same rows",
             )
         return True
 
@@ -750,6 +801,13 @@ class SpaceSyncReceiver:
                 self._health.stashed(sync_id)
                 self._pending_decrypts.stash(space_id, epoch, _redeliver)
                 return
+            if resource not in ALLOWED_RESOURCES:
+                # A newer provider's resource we cannot even open (a scheme
+                # of its own): dropped by rule, as before v_56 — counted as
+                # one chunk with no index (it cannot claim another's slot).
+                self._health.opaque(sync_id)
+                log.debug("unknown resource %r in sync chunk (opaque)", resource)
+                return
             self._health.failed(sync_id)
             log.warning(
                 "sync chunk decrypt failed (sync_id=%s resource=%s): %s",
@@ -766,6 +824,10 @@ class SpaceSyncReceiver:
             # encrypted payload; an older provider sends none.
             index = body.get("chunk_index")
         except Exception as exc:
+            if resource not in ALLOWED_RESOURCES:
+                self._health.opaque(sync_id)
+                log.debug("unknown resource %r in sync chunk (opaque)", resource)
+                return
             self._health.failed(sync_id)
             log.warning("sync chunk plaintext parse failed: %s", exc)
             return
@@ -790,8 +852,11 @@ class SpaceSyncReceiver:
             return
         if outcome.failed:
             # A persist that failed where the caller logged rather than
-            # raised: a failure like any other — never forgiven as "held".
-            self._health.failed(sync_id)
+            # raised: unclean — never forgiven as "held", but bounded by its
+            # own, higher limit (PERSIST_FAILURE_LIMIT), so a row the
+            # database refuses for good cannot force a full re-stream on
+            # every session forever.
+            self._health.persist_failed(sync_id, index)
             return
         if not outcome.count:
             self._health.applied(sync_id, index)
