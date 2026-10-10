@@ -693,3 +693,87 @@ def test_a_merged_resolution_keeps_the_held_title():
         "seq": 3,
     }
     _sweep(item, FET.SPACE_PAGE_UPDATED, wire, held=held)
+
+
+# ── v_56: the per-occurrence cap on a calendar release ───────────────────
+
+
+_CAP_CREATE = {
+    "entity": "event",
+    "target_id": "ev-1",
+    "summary": "Workshop",
+    "start": "2026-06-10T18:00:00+00:00",
+    "end": "2026-06-10T19:00:00+00:00",
+    "description": None,
+    "all_day": False,
+    "attendees": [],
+    "rrule": None,
+    "capacity": 10,
+    "cover_url": None,
+    "location": None,
+    "tz": "UTC",
+    "announce_in_feed": False,
+}
+_CAP_WIRE = {
+    "event_id": "ev-1",
+    "calendar_id": "sp",
+    "summary": "Workshop",
+    "start": "2026-06-10T18:00:00+00:00",
+    "end": "2026-06-10T19:00:00+00:00",
+    "description": None,
+    "all_day": False,
+    "attendees": [],
+    "rrule": None,
+    "cover_url": None,
+    "location": None,
+    "tz": "UTC",
+    "created_by": "u-a",
+}
+
+
+def test_a_create_release_carries_the_items_cap_or_none_at_all():
+    """A v_56 release carries the cap and must carry the item's; an older
+    sender's release omits the field and still matches."""
+    item = _item("calendar", "create", _CAP_CREATE)
+    created = FET.SPACE_CALENDAR_EVENT_CREATED
+    assert item_matches_event(item, created, _CAP_WIRE)
+    assert item_matches_event(item, created, {**_CAP_WIRE, "capacity": 10})
+    assert not item_matches_event(item, created, {**_CAP_WIRE, "capacity": 99})
+    assert not item_matches_event(item, created, {**_CAP_WIRE, "capacity": None})
+
+
+def test_an_edit_releases_cap_is_reviewed_content():
+    """The cap on an edit's release is what the item set, cleared, or the
+    held row's — never just whatever the wire says."""
+    held = {
+        "summary": "Workshop",
+        "start": "2026-06-10T18:00:00+00:00",
+        "end": "2026-06-10T19:00:00+00:00",
+        "description": None,
+        "all_day": False,
+        "attendees": [],
+        "rrule": None,
+        "capacity": 4,
+        "cover_url": None,
+        "location": None,
+        "tz": "UTC",
+        "created_by": "u-h",
+        "calendar_id": "sp",
+    }
+    wire = {**_CAP_WIRE, "created_by": "u-h"}
+    updated = FET.SPACE_CALENDAR_EVENT_UPDATED
+
+    def _edit(patch: dict):
+        return _item(
+            "calendar", "edit", {"entity": "event", "target_id": "ev-1", "patch": patch}
+        )
+
+    raised = _edit({"capacity": 12})
+    assert item_matches_event(raised, updated, {**wire, "capacity": 12}, held=held)
+    assert not item_matches_event(raised, updated, {**wire, "capacity": 50}, held=held)
+    cleared = _edit({"clear_capacity": True})
+    assert item_matches_event(cleared, updated, {**wire, "capacity": None}, held=held)
+    assert not item_matches_event(cleared, updated, {**wire, "capacity": 4}, held=held)
+    renamed = _edit({"summary": "Workshop"})
+    assert item_matches_event(renamed, updated, {**wire, "capacity": 4}, held=held)
+    assert not item_matches_event(renamed, updated, {**wire, "capacity": 9}, held=held)

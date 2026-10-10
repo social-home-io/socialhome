@@ -151,9 +151,11 @@ what the space's retention keeps (`federation/sync/space/window.py`):
     posts and chat only), so a window would hide from a joiner photos the
     host still shows. The system ("Posts") album's items and their
     tombstones never stream: they mirror posts, every household rebuilds
-    its own from the posts, and each household's system album has its own
-    id (a receiver refuses an item naming another household's system album
-    by rule — an older provider's stream);
+    its own from the posts — a post a sync stores included
+    (`SpacePostSynced`, which only the system-album bridge follows: no
+    notification, no fan-out) — and each household's system album has its
+    own id (a receiver refuses an item naming another household's system
+    album by rule — an older provider's stream);
   - **calendar** events — every live event **as its stored row**, whatever
     its date: a recurring event once, carrying its `rrule` (the receiver
     expands its occurrences on read, as the host does), never one record
@@ -169,8 +171,13 @@ what the space's retention keeps (`federation/sync/space/window.py`):
     at insert.) **v_56-gated**: a requester below v_56 reads no `rrule`
     from a record and its upsert would turn each series it holds into a
     one-off event, so it is still streamed the old record set
-    (`ExpandedCalendarExporter`: occurrences, ±10 years). Its version is
-    part of the session shape, so an upgrade brings one full stream;
+    (`ExpandedCalendarExporter`: `<id>@<start>` occurrences, ±10 years) —
+    minus the one record the expansion yields under the series' own id
+    (its first occurrence, the stored row), which such a receiver would
+    upsert without its rule. It stores the occurrences as one-off events,
+    as it always did; its series row (delivered live) keeps its rule. Its
+    version is part of the session shape, so an upgrade brings one full
+    stream;
   - the **post and comment tombstones** — only the host runs the post
     sweep, which soft-deletes expired posts without telling anyone; a
     member household never sweeps, so these tombstones are how a
@@ -327,9 +334,14 @@ sentinel changes nothing (the verdict was given). From a v_56 provider to
 a v_56 requester each chunk carries `chunk_index` — its position in the
 stream, inside the encrypted (so signed) payload — and the requester
 counts **distinct** indices against `chunk_count`: a chunk delivered twice
-(a relay retry) cannot stand in for one that was lost. An older provider
-sends no index and its chunks are counted as before; an older requester
-is sent none.
+(a relay retry) cannot stand in for one that was lost. Once a stream
+carries an index, only indices count (an unnumbered chunk in it cannot make
+up the count), and a chunk of a resource the requester does not know is
+decrypted too, so its index counts like any other. A REQUEST_MORE slice is
+numbered on from the stream it follows. An older provider sends no index
+and its chunks are counted as before; an older requester is sent none. The
+provider reads the requester's version once per session; the record sets,
+the shape and the numbering all follow that one reading.
 
 A record the receiver *refuses* by rule (held already, deleted here, an
 author known but not seated on the provider, another space's id) is not a
@@ -355,8 +367,10 @@ every 30-minute session would be a full stream. So the requester counts,
 per (space, provider), consecutive streams that were unclean **only**
 because of held-back records (`HeldBackStreaks`, in memory); the
 `HELD_BACK_LIMIT`-th (3) is reported clean, with one WARNING, and the
-count starts over — a lost, failed or still-stashed chunk is never
-forgiven. Both fields are additive and plain routing metadata (a count
+count starts over; any other unclean stream breaks the run (the count
+starts over too). A lost, failed or still-stashed chunk — or a persist that
+failed, even one its caller logged rather than raised — is never
+forgiven: only a refusal "for now" counts toward the bound. Both fields are additive and plain routing metadata (a count
 and a boolean, no content): an older receiver ignores `chunk_count`, an
 older provider ignores `clean`.
 

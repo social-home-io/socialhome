@@ -11,12 +11,13 @@ The split keeps responsibilities tidy: the gallery service owns the
 domain rules (race-safe ensure, idempotent mirror, scope-agnostic
 unmirror); the bridge owns *when* to call them.
 
-Five subscriptions cover every code path that creates or removes feed
+Six subscriptions cover every code path that creates or removes feed
 media:
 
 * ``PostCreated`` — household feed post (image / video).
 * ``PostEdited`` — household feed image edit (add or remove).
 * ``SpacePostCreated`` — space feed post; carries ``space_id``.
+* ``SpacePostSynced`` — a space post a §25.6 sync stored.
 * ``PostDeleted`` — author-delete on either feed; ``space_service``
   publishes this on both author and moderation paths.
 * ``SpacePostModerated`` — admin removal of a space post; the post
@@ -36,6 +37,7 @@ from ..domain.events import (
     PostEdited,
     SpacePostCreated,
     SpacePostModerated,
+    SpacePostSynced,
 )
 from ..infrastructure.event_bus import EventBus
 from .gallery_service import GalleryService
@@ -59,6 +61,7 @@ class SystemAlbumBridge:
         self._bus.subscribe(PostDeleted, self._on_post_deleted)
         self._bus.subscribe(SpacePostCreated, self._on_space_post_created)
         self._bus.subscribe(SpacePostModerated, self._on_space_post_moderated)
+        self._bus.subscribe(SpacePostSynced, self._on_space_post_synced)
 
     # ─── Household feed ───────────────────────────────────────────────────
 
@@ -104,6 +107,19 @@ class SystemAlbumBridge:
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(
                 "system-album: mirror SpacePostCreated failed for %s: %s",
+                event.post.id,
+                exc,
+            )
+
+    async def _on_space_post_synced(self, event: SpacePostSynced) -> None:
+        # A post a §25.6 sync stored: its media belongs in this household's
+        # own system album too (the provider's mirror rows never stream).
+        # ``mirror_post`` is idempotent, so a re-applied post churns nothing.
+        try:
+            await self._gallery.mirror_post(event.post, space_id=event.space_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "system-album: mirror SpacePostSynced failed for %s: %s",
                 event.post.id,
                 exc,
             )

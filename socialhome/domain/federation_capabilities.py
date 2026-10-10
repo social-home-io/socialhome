@@ -846,8 +846,11 @@ from __future__ import annotations
 #:   older receiver drops ``rrule`` from a ``calendar`` record and its upsert
 #:   would turn every series into a one-off event, so **gated with a
 #:   fallback**: a requester below v_56 gets the old record set — each
-#:   series expanded into its occurrences in a ±10-year window — and no
-#:   ``chunk_index`` (it counts chunks as before).
+#:   series expanded into its occurrences in a ±10-year window, never the
+#:   record under the series' own id — and no ``chunk_index`` (it counts
+#:   chunks as before). A moderation release of a calendar event carries
+#:   ``capacity`` only to a v_56 household: an older one's fail-closed
+#:   release check refuses a key it does not classify.
 OURS: int = 56
 
 

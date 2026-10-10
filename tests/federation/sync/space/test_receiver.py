@@ -659,8 +659,8 @@ async def test_persist_album_failure_is_logged_not_swallowed(receiver, caplog):
         )
 
     assert "gallery album al-1" in caplog.text
-    # Nor does it count as stored: the stream is reported unclean.
-    assert held_back.count == 1
+    # Nor does it count as stored: a failure, never a forgivable hold.
+    assert held_back.failed and held_back.count == 0
 
 
 async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, caplog):
@@ -686,7 +686,7 @@ async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, ca
         )
 
     assert "gallery item it-1" in caplog.text
-    assert held_back.count == 1
+    assert held_back.failed and held_back.count == 0
 
 
 async def test_on_chunk_refuses_a_chunk_for_another_space(receiver, peer_setup):
@@ -1152,22 +1152,67 @@ async def test_held_back_streams_are_bounded(
     r, _, _ = receiver
     _, kp = peer_setup
 
-    async def _held_dispatch(*_a, **_kw):
-        return False
+    async def _held_apply(*_a, **_kw):
+        outcome = HeldBack()
+        outcome.add()
+        return outcome
 
-    monkeypatch.setattr(SpaceSyncReceiver, "_dispatch", _held_dispatch)
+    async def _held_stream(sid: str) -> bool:
+        await r.on_chunk(await _members_chunk(kp, sid), from_instance="peer-a")
+        return (await _completion(bus, r, kp, sid, 1)).clean
+
+    monkeypatch.setattr(SpaceSyncReceiver, "_apply", _held_apply)
     verdicts = []
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         for n in range(HELD_BACK_LIMIT + 1):
-            sid = f"s-held-{n}"
-            await r.on_chunk(await _members_chunk(kp, sid), from_instance="peer-a")
-            verdicts.append((await _completion(bus, r, kp, sid, 1)).clean)
+            verdicts.append(await _held_stream(f"s-held-{n}"))
     assert verdicts == [False] * (HELD_BACK_LIMIT - 1) + [True, False]
     assert sum("never landed" in rec.message for rec in caplog.records) == 1
-    # A failure is never forgiven, however long the streak.
-    monkeypatch.undo()
+    # "In a row": an unclean stream (a lost chunk) breaks the run, so the
+    # count starts over after it.
     await r.on_chunk(await _members_chunk(kp, "s-gap3"), from_instance="peer-a")
     assert (await _completion(bus, r, kp, "s-gap3", 2)).clean is False
+    assert [await _held_stream(f"s-again-{n}") for n in range(2)] == [False, False]
+
+
+async def test_a_failed_persist_is_never_forgiven(
+    bus, receiver, peer_setup, monkeypatch
+):
+    """A persist that failed (logged, not raised) is unclean outright — it
+    never counts toward the held-back bound, however many streams fail."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+
+    async def _failed_apply(*_a, **_kw):
+        outcome = HeldBack()
+        outcome.fail()
+        return outcome
+
+    monkeypatch.setattr(SpaceSyncReceiver, "_apply", _failed_apply)
+    for n in range(HELD_BACK_LIMIT + 2):
+        sid = f"s-fail-{n}"
+        await r.on_chunk(await _members_chunk(kp, sid), from_instance="peer-a")
+        assert (await _completion(bus, r, kp, sid, 1)).clean is False
+
+
+async def test_in_a_numbered_stream_only_indices_count(bus, receiver, peer_setup):
+    """Once a stream numbers its chunks (v_56), an unnumbered chunk in it
+    cannot make up the count; an unknown resource is decrypted, so its
+    index counts like any other."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+    await r.on_chunk(await _members_chunk(kp, "s-mix", index=0), from_instance="peer-a")
+    await r.on_chunk(await _members_chunk(kp, "s-mix"), from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-mix", 2)).clean is False
+
+    await r.on_chunk(await _members_chunk(kp, "s-new", index=0), from_instance="peer-a")
+    frame = orjson.loads(await _members_chunk(kp, "s-new", index=1))
+    frame["resource"] = "some_future_resource"
+    del frame["signatures"]
+    await r.on_chunk(
+        serialise_chunk(await _sign_as_peer(kp, frame)), from_instance="peer-a"
+    )
+    assert (await _completion(bus, r, kp, "s-new", 2)).clean is True
 
 
 async def test_an_archive_lifted_mid_stream_records_no_echo(bus, peer_setup):

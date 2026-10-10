@@ -1098,14 +1098,12 @@ async def test_an_older_requester_gets_the_expanded_calendar_and_no_index(houses
     wire_frames: list[dict] = []
     old = await _h_to_c(h, c, reorder=lambda f: wire_frames.extend(f) or f)
     ids = _ids(old, "calendar")
-    assert (
-        eid in ids
-        and len(ids) == 3
-        and all(i == eid or i.startswith(f"{eid}@") for i in ids)
-    )
+    # The occurrences only — never a record carrying the series' own id,
+    # which an older receiver would upsert without its rule.
+    assert len(ids) == 2 and all(i.startswith(f"{eid}@") for i in ids)
     # The old record set never lands as rows of their own here (migration
     # 0089's guard / the receiver's skip), whatever an older provider sends.
-    assert set(await _event_rows(c)) == {eid}
+    assert await _event_rows(c) == {}
     assert all(
         _index(f) is None for f in wire_frames if f["resource"] != SENTINEL_RESOURCE
     )
@@ -1209,3 +1207,31 @@ async def test_a_held_album_by_an_unknown_owner_is_refused_not_held(houses):
     }
     receiver = h[space_sync_receiver_key]
     assert await receiver._dispatch("gallery", SPACE, [record], provider=MEMBER)
+
+
+async def test_a_synced_photo_post_shows_in_the_members_posts_album(houses):
+    """The system ("Posts") album mirrors every photo shared in the feed —
+    a post that reached this household by sync too, not only one that came
+    live: each household rebuilds its own from the posts (the provider's
+    mirror rows never stream)."""
+    h, c = houses
+    pid = _pid(AUTHOR)
+    post = Post(
+        id=pid,
+        author=AUTHOR,
+        type=PostType.IMAGE,
+        created_at=_NOW - timedelta(hours=1),
+        content="look",
+        image_urls=("api/media/pic.webp",),
+    )
+    assert await _posts(h).save(SPACE, post) is not None
+    await _h_to_c(h, c)
+    mirrored = await _gallery(c).list_items_by_source_post(pid)
+    assert [i.url for i in mirrored] == ["api/media/pic.webp"]
+    album = await _gallery(c).get_album(mirrored[0].album_id)
+    assert album is not None and album.is_system and album.space_id == SPACE
+    # Re-applying the post on the next full stream changes nothing.
+    await _h_to_c(h, c, mode="initial")
+    assert [i.id for i in await _gallery(c).list_items_by_source_post(pid)] == [
+        mirrored[0].id
+    ]

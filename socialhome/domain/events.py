@@ -193,6 +193,21 @@ class SpacePostCreated(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpacePostSynced(DomainEvent):
+    """A space post was stored (or updated) by a §25.6 sync stream.
+
+    Not :class:`SpacePostCreated`: a catch-up row is history — nothing
+    notifies, broadcasts or fans it back out. Only derived local state
+    follows it: the space's system ("Posts") album mirrors its media
+    (:class:`~socialhome.services.system_album_bridge.SystemAlbumBridge`),
+    as every household rebuilds its own from the posts."""
+
+    post: "Post"
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpacePostModerated(DomainEvent):
     """An admin removed a post as a moderation action.
 

@@ -28,6 +28,7 @@ from socialhome.domain.events import (
     PostEdited,
     SpacePostCreated,
     SpacePostModerated,
+    SpacePostSynced,
 )
 from socialhome.domain.post import Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
@@ -143,6 +144,19 @@ async def test_space_post_creates_space_scoped_system_album(env):
     assert space_album is not None
     # Household album is untouched by space-scoped posts.
     assert household_album is None
+
+
+async def test_a_synced_space_post_is_mirrored_too(env):
+    """A post a §25.6 sync stored lands in the space's system album, and a
+    re-applied post churns nothing."""
+    p = _post(image_urls=("/api/media/synced.webp",))
+    await env["bus"].publish(SpacePostSynced(post=p, space_id="sp-1"))
+    album = await env["repo"].get_system_album(space_id="sp-1")
+    assert album is not None
+    first = await env["repo"].list_items_by_source_post(p.id)
+    await env["bus"].publish(SpacePostSynced(post=p, space_id="sp-1"))
+    again = await env["repo"].list_items_by_source_post(p.id)
+    assert [i.id for i in again] == [i.id for i in first] and len(first) == 1
 
 
 # ─── Edit paths ──────────────────────────────────────────────────────────

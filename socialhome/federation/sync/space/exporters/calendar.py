@@ -17,6 +17,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
+from .....domain.calendar import is_occurrence_id
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, iter_pages
 
@@ -71,10 +72,14 @@ class ExpandedCalendarExporter:
     ±10-year window around the provider's clock — the pre-v_56 shape.
 
     An older receiver reads no ``rrule`` from a record and upserts the row
-    without one, so streaming it the series row would turn every recurring
-    event it holds into a one-off event; the expanded set at least shows the
-    occurrences. Same resource, so a requester that upgrades gets one full
-    stream in the new shape (its version is part of the session shape)."""
+    without one, so a record carrying a stored series row's own id would turn
+    the series it holds into a one-off event. The expansion yields exactly
+    such a record for a series' first occurrence (the stored row itself), so
+    it is left out: an older receiver gets only ``<id>@<start>`` occurrence
+    records — which it stores as one-off events, as it always did — and its
+    series row (delivered live, with its rule) is never overwritten. Same
+    resource, so a requester that upgrades gets one full stream in the new
+    shape (its version is part of the session shape)."""
 
     resource = "calendar"
 
@@ -99,7 +104,13 @@ class ExpandedCalendarExporter:
             end=now + _EXPANDED_WINDOW,
             since=since,
         )
-        return [_event_to_dict(e) for e in events]
+        return [
+            _event_to_dict(e)
+            for e in events
+            # The stored series row itself (its first occurrence): an older
+            # receiver would upsert it without its rule.
+            if not (e.rrule and not is_occurrence_id(e.id, e.start.isoformat()))
+        ]
 
 
 def _event_to_dict(event: "CalendarEvent") -> dict[str, Any]:

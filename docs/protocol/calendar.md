@@ -27,9 +27,12 @@ Personal-calendar (cross-household invites — §23.60):
 `capacity` (a non-negative integer, `null` for no cap) so member
 households enforce the same cap on RSVPs — additive: an older receiver
 ignores it, and a receiver keeps the cap it holds when the field is
-absent (an older sender, or a moderation release, which omits it so an
-older author household's fail-closed release check does not refuse an
-unclassified key). The §25.6 `calendar` sync record carries it too.
+absent (an older sender). A moderation release carries it only to a v_56
+household, whose release check compares it with the reviewed item (a
+create's cap, an edit's new or cleared cap, else the held row's); an
+older household gets the release without it (`legacy_payload`), since its
+fail-closed release check refuses a key it does not classify. The §25.6
+`calendar` sync record carries it too.
 
 `SPACE_SCHEDULE_RESPONSE_UPDATED` is unrelated — it's for schedule-poll
 votes (Doodle-style availability), not calendar event RSVPs.

@@ -31,6 +31,7 @@ from ..domain.calendar import (
     RSVPStatus,
 )
 from ..domain.child_protection import ProtectedCapability
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     HostTooOldError,
@@ -2474,19 +2475,26 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             # space's ``calendar`` access level. Older peers ignore it.
             "actor_user_id": actor_user_id,
         }
+        # The per-occurrence cap (Phase C) — members enforce it on RSVPs.
+        # Additive: an older receiver ignores it, and a receiver keeps its
+        # held value when it is absent.
+        payload["capacity"] = event.capacity
+        # A write released from the moderation queue names it (v_43).
         payload = with_release(payload)
         if MODERATION_BLOCK_KEY not in payload:
-            # The per-occurrence cap (Phase C) — members enforce it on RSVPs.
-            # Additive: an older receiver ignores it, and a receiver keeps
-            # its held value when it is absent. Not on a moderation release:
-            # an older author household's fail-closed release check refuses
-            # a payload key it does not classify.
-            payload["capacity"] = event.capacity
+            await self._federation.broadcast_to_space_members(
+                space_id, evt_type, payload
+            )
+            return
+        # A release is checked field by field and fails closed on a key it
+        # does not classify: a household below v_56 (which never knew the
+        # cap travelled) gets the release without it.
         await self._federation.broadcast_to_space_members(
             space_id,
             evt_type,
-            # A write released from the moderation queue names it (v_43).
             payload,
+            legacy_payload={k: v for k, v in payload.items() if k != "capacity"},
+            legacy_below=FederationCapability.MIN_FOR_SYNC_SERIES_ROWS,
         )
 
     async def _publish_federation_event_deleted(

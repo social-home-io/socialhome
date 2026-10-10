@@ -66,6 +66,7 @@ from ....domain.events import (
     GalleryItemDeleted,
     PageDeleted,
     PostDeleted,
+    SpacePostSynced,
     TaskDeleted,
     TaskListDeleted,
     TimetableSaved,
@@ -158,19 +159,26 @@ class HeldBack:
     record naming a user this space has no record of at all yet (the
     roster gossip seating them trails the stream — the same race the live
     path holds a write for), a tombstone / item whose parent is not held
-    here at all yet, or a persist that failed where the caller logs rather
-    than raises (the gallery album / item writes). A refusal by rule (held already, deleted here, a user
+    here at all yet. (A persist that failed where the caller logs rather
+    than raises — the gallery album / item writes — is :meth:`fail`: an
+    unclean chunk, never a hold.) A refusal by rule (held already, deleted here, a user
     known but not seated on the provider, another space's id) would be
     refused again and is not counted — it must not keep every stream
     unclean."""
 
-    __slots__ = ("count",)
+    __slots__ = ("count", "failed")
 
     def __init__(self) -> None:
         self.count = 0
+        #: A persist failed (logged by its caller rather than raised): the
+        #: chunk is unclean outright, never a forgivable hold.
+        self.failed = False
 
     def add(self, n: int = 1) -> None:
         self.count += n
+
+    def fail(self) -> None:
+        self.failed = True
 
 
 #: Consecutive streams from one provider for one space that may be unclean
@@ -315,7 +323,9 @@ class StreamHealth:
             self._finished.popitem(last=False)
         if not isinstance(chunk_count, int) or isinstance(chunk_count, bool):
             return StreamVerdict.UNCLEAN
-        stored = entry.plain + len(entry.indices)
+        # A numbered stream (v_56) counts its distinct indices only: an
+        # unnumbered chunk in it (none should be) cannot stand in for one.
+        stored = len(entry.indices) if entry.indices else entry.plain
         if entry.failed or entry.pending or stored != chunk_count:
             return StreamVerdict.UNCLEAN
         return StreamVerdict.HELD_BACK if entry.held else StreamVerdict.CLEAN
@@ -339,6 +349,8 @@ class HeldBackStreaks:
             self._streaks.pop(key, None)
             return True
         if verdict is StreamVerdict.UNCLEAN:
+            # "In a row": an unclean stream breaks the run.
+            self._streaks.pop(key, None)
             return False
         streak = self._streaks.pop(key, 0) + 1
         if streak < HELD_BACK_LIMIT:
@@ -692,13 +704,8 @@ class SpaceSyncReceiver:
                 archived=bool(space_then is not None and space_then.archived),
             )
 
-        if resource not in ALLOWED_RESOURCES:
-            # A newer provider's resource: dropped by rule, never retried.
-            self._health.applied(sync_id)
-            log.debug("unknown resource %r in sync chunk", resource)
-            return
-
-        # Decrypt.
+        # Decrypt — an unknown resource too: its ``chunk_index`` (v_56) is
+        # inside the payload, and in a numbered stream only indices count.
         epoch = int(envelope.get("epoch") or 0)
         ciphertext = str(envelope.get("encrypted_payload") or "")
         try:
@@ -763,8 +770,14 @@ class SpaceSyncReceiver:
             log.warning("sync chunk plaintext parse failed: %s", exc)
             return
 
+        if resource not in ALLOWED_RESOURCES:
+            # A newer provider's resource: dropped by rule, never retried.
+            self._health.applied(sync_id, index)
+            log.debug("unknown resource %r in sync chunk", resource)
+            return
+
         try:
-            settled = await self._dispatch(
+            outcome = await self._apply(
                 resource, space_id, records, provider=from_instance
             )
         except Exception:
@@ -775,7 +788,12 @@ class SpaceSyncReceiver:
                 space_id,
             )
             return
-        if settled:
+        if outcome.failed:
+            # A persist that failed where the caller logged rather than
+            # raised: a failure like any other — never forgiven as "held".
+            self._health.failed(sync_id)
+            return
+        if not outcome.count:
             self._health.applied(sync_id, index)
             return
         # A record refused only for now (its author's seat or its parent has
@@ -802,7 +820,20 @@ class SpaceSyncReceiver:
     ) -> bool:
         """Admit and persist one chunk's records. ``False`` when a record
         was held back for a retry (refused only for now — see
-        :class:`HeldBack`), so the stream must not count as clean."""
+        :class:`HeldBack`) or a persist failed, so the stream must not count
+        as clean."""
+        outcome = await self._apply(resource, space_id, records, provider=provider)
+        return not outcome.count and not outcome.failed
+
+    async def _apply(
+        self,
+        resource: str,
+        space_id: str,
+        records: list[dict[str, Any]],
+        *,
+        provider: str,
+    ) -> "HeldBack":
+        """:meth:`_dispatch`, with what was held back or failed."""
         if not isinstance(records, list):
             records = []
         shaped = [r for r in records if isinstance(r, dict)]
@@ -829,7 +860,7 @@ class SpaceSyncReceiver:
             await self._persist(
                 resource, space_id, records, provider=provider, held_back=held_back
             )
-        return not held_back.count
+        return held_back
 
     async def _persist(
         self,
@@ -945,6 +976,10 @@ class SpaceSyncReceiver:
                         post.id,
                         space_id,
                     )
+                    continue
+                # Derived local state only (the system album's mirror of its
+                # media) — no notification, no fan-out.
+                await self._bus.publish(SpacePostSynced(post=post, space_id=space_id))
         elif resource == "posts_deleted":
             await self._persist_post_tombstones(records, space_id, provider=provider)
         elif resource == "comments_deleted":
@@ -2779,7 +2814,7 @@ class SpaceSyncReceiver:
                 album.space_id,
                 exc_info=True,
             )
-            held_back.add()  # a failed persist: the stream is not clean
+            held_back.fail()  # a failed persist: the stream is not clean
             return False
         return True
 
@@ -2849,7 +2884,7 @@ class SpaceSyncReceiver:
                 item.album_id,
                 exc_info=True,
             )
-            held_back.add()
+            held_back.fail()
         return False
 
 

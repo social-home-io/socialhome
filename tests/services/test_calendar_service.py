@@ -2911,9 +2911,45 @@ async def test_moderated_event_create_landed_then_federation_failed_stays_approv
 class _RecordingFed:
     def __init__(self):
         self.calls: list[tuple] = []
+        #: ``(legacy_payload, legacy_below)`` per call.
+        self.legacy: list[tuple] = []
 
-    async def broadcast_to_space_members(self, space_id, event_type, payload):
+    async def broadcast_to_space_members(
+        self, space_id, event_type, payload, *, legacy_payload=None, legacy_below=None
+    ):
         self.calls.append((space_id, event_type, payload))
+        self.legacy.append((legacy_payload, legacy_below))
+
+
+async def test_a_released_event_sends_its_cap_only_to_v56(space_cal_env):
+    """A release is checked field by field and fails closed: the cap goes to
+    a v_56 household, an older one gets the release without the field."""
+    env = space_cal_env
+    fed = _RecordingFed()
+    env.space_cal_svc.attach_federation(fed)
+    with release_scope(item_id="item-cap", approved_by="uid-mod"):
+        await env.space_cal_svc.create_event(
+            space_id="sp-cal",
+            summary="Workshop",
+            start=_SEED.isoformat(),
+            end=(_SEED + timedelta(hours=1)).isoformat(),
+            created_by="uid-alice",
+            capacity=10,
+        )
+    (_sp, _type, payload), (legacy, below) = fed.calls[0], fed.legacy[0]
+    assert payload["capacity"] == 10 and "moderation" in payload
+    assert "capacity" not in legacy and legacy["moderation"] == payload["moderation"]
+    assert below == 56
+    # Outside a release: one payload for everybody, cap included.
+    await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Open",
+        start=_SEED.isoformat(),
+        end=(_SEED + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+        capacity=3,
+    )
+    assert fed.calls[-1][2]["capacity"] == 3 and fed.legacy[-1] == (None, None)
 
 
 async def test_a_released_event_carries_the_approval_block(space_cal_env):
