@@ -10631,8 +10631,11 @@ def cmd_space_sync_catchup_media() -> None:
         )
     print(f"  d.space_posts has pre-invite post {post_id} ✓ (catch-up)")
 
-    # The system ("Posts") album MUST arrive — it carries the host's own id
-    # and is what mirrored post images live in on the joiner's side.
+    # The pre-invite post's image MUST show in d's own system ("Posts")
+    # album. Every household keeps its own system album (one per space,
+    # its own id), so the host's album is never stored here; since #868
+    # a synced post is mirrored into the joiner's album through
+    # ``SpacePostSynced`` → ``SystemAlbumBridge``, exactly like a live one.
     d_albums = {
         r[0]
         for r in _rows(
@@ -10641,20 +10644,27 @@ def cmd_space_sync_catchup_media() -> None:
             (space_id,),
         )
     }
-    c_system = {
-        r[0]
-        for r in _rows(
-            "c",
-            "SELECT id FROM gallery_albums WHERE space_id = ? AND is_system = 1",
-            (space_id,),
-        )
-    }
-    if not c_system <= d_albums:
+    d_system = _rows(
+        "d",
+        "SELECT id FROM gallery_albums WHERE space_id = ? AND is_system = 1",
+        (space_id,),
+    )
+    if len(d_system) != 1:
         raise SystemExit(
-            f"space-sync-catchup-media: d is missing the host's system gallery "
-            f"album {sorted(c_system - d_albums)} (has {sorted(d_albums)})",
+            f"space-sync-catchup-media: d should hold exactly one system "
+            f"album for the space, has {[r[0] for r in d_system]}",
         )
-    print("  d.gallery_albums has the host's system album ✓ (catch-up)")
+    mirrored = _rows(
+        "d",
+        "SELECT id FROM gallery_items WHERE album_id = ? AND source_post_id = ?",
+        (d_system[0][0], post_id),
+    )
+    if not mirrored:
+        raise SystemExit(
+            f"space-sync-catchup-media: d's Posts album {d_system[0][0]} has "
+            f"no mirror of the pre-invite post {post_id}",
+        )
+    print("  d's own Posts album mirrors the pre-invite post ✓ (catch-up)")
 
     # The USER-created album and its item must arrive too (#650). These
     # used to be impossible: ``gallery_albums.owner_user_id`` and
