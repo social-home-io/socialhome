@@ -23,6 +23,7 @@ from ...domain.space import (
     SpaceFeatures,
     SpaceType,
 )
+from ...federation.host_equivalence import acts_as_host
 from ...infrastructure.event_bus import EventBus
 from ..child_protection_service import _VALID_MIN_AGES
 from ..space_authority_pin import owner_authority_cert_via
@@ -31,6 +32,9 @@ from ..space_service import space_metadata_for_federation, can_seat_remote_stub
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...federation.federation_service import FederationService
+    from ...repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
     from ...repositories.space_repo import AbstractSpaceRepo
     from ..space_service import SpaceService
 
@@ -43,6 +47,7 @@ class SpaceMembershipInboundHandlers:
     __slots__ = (
         "_bus",
         "_space_repo",
+        "_seat_repo",
         "_federation",
         "_space_service",
     )
@@ -52,9 +57,15 @@ class SpaceMembershipInboundHandlers:
         *,
         bus: EventBus,
         space_repo: "AbstractSpaceRepo",
+        seat_repo: "AbstractSpaceRemoteMemberRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
+        #: The roster mirror, so a ban from the delegated admin household
+        #: that invited us counts like the host's while delegation is on
+        #: (:mod:`socialhome.federation.host_equivalence`). ``None``: only
+        #: the owner's bans apply.
+        self._seat_repo = seat_repo
         self._federation: "FederationService | None" = None
         #: v_49 — the host side of a member household's leave. Built after
         #: these handlers, so wired late; absent → the old row-only drop.
@@ -241,9 +252,12 @@ class SpaceMembershipInboundHandlers:
         A ban is a statement about somebody else's standing in a space,
         and ``ban_member`` both inserts the ban row and deletes the
         member — so an unauthenticated one is a household evicting the
-        space's own owner. Only the host decides that; an unknown space
-        is refused too, because there is no owner to compare against and
-        the sender picked the id.
+        space's own owner. Only the host decides that — or, on a household
+        a delegated admin invited, that admin household while delegation is
+        on and its admin seat lives (:mod:`socialhome.federation
+        .host_equivalence`, the same rule as the bans in its catch-up
+        stream). An unknown space is refused too, because there is no owner
+        to compare against and the sender picked the id.
 
         Mirrors the ``SPACE_AGE_GATE_UPDATED`` / ``SPACE_MEMBER_ROLE_CHANGED``
         host-authority guards. The roster-gossip family
@@ -262,7 +276,9 @@ class SpaceMembershipInboundHandlers:
                 event.from_instance,
             )
             return False
-        if space.owner_instance_id != event.from_instance:
+        if not await acts_as_host(
+            self._space_repo, self._seat_repo, space, event.from_instance
+        ):
             log.warning(
                 "%s for %s from non-host %s (host=%s) — dropping",
                 event.event_type,

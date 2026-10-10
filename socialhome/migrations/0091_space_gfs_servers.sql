@@ -83,7 +83,7 @@ ALTER TABLE spaces ADD COLUMN gfs_servers TEXT
 -- inviting admin for sync"): while the space's ``delegated_admin_authority``
 -- is ON and that household still holds a live ``admin`` seat, it is
 -- host-equivalent here for CONTENT and admin actions (its full §25.6
--- catch-up stream incl. roster and bans, role changes, remote-member
+-- catch-up stream incl. roster and bans, live bans, role changes, remote-member
 -- removals, proposal mirrors, the signing-seed share, the host writer
 -- exemption) — never for owner-only settings (the signed GFS list,
 -- ``private_gfs``, ``gfs_publish_mode``, the authority cert /

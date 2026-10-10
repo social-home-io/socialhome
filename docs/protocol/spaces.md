@@ -1965,15 +1965,16 @@ be the invitee's only way into the space:
 - its §25.6 catch-up stream is taken whole, like the host's (roster and bans
   included); its chunks verify against its own identity key, kept on its
   `space_instances` row for that space — never as `host_identity_pk`;
-- its `SPACE_MEMBER_ROLE_CHANGED`, `SPACE_REMOTE_MEMBER_REMOVED`,
+- its `SPACE_MEMBER_ROLE_CHANGED`, `SPACE_MEMBER_BANNED` /
+  `SPACE_MEMBER_UNBANNED`, `SPACE_REMOTE_MEMBER_REMOVED`,
   `SPACE_ADMIN_PROPOSAL_UPDATED` mirrors and `SPACE_ADMIN_KEY_SHARE` (the
   seed must still be the private half of the pinned key) apply, and the host
   exemption of the space-writer gate covers it.
 
 **Owner-only stays owner-only**: the owner-signed GFS list, `private_gfs`,
 `gfs_publish_mode`, the authority cert / `host_identity_pk`, the config
-last-writer-wins owner path, dissolve, sync-rejected, the age gate and bans
-sent as live events compare against `owner_instance_id` alone. Any other
+last-writer-wins owner path, dissolve, sync-rejected and the age gate
+compare against `owner_instance_id` alone. Any other
 admin household gets the member-provider rules. Turning delegation off — or
 demoting / removing that household's admin seat — ends the trust at once
 (checked on every use). Nothing changes for the owner.

@@ -47,6 +47,7 @@ from socialhome.repositories import (
 from socialhome.repositories.space_remote_member_repo import (
     SqliteSpaceRemoteMemberRepo,
 )
+from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
 from socialhome.services.federation_inbound_service import FederationInboundService
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
@@ -364,3 +365,36 @@ async def test_an_owner_invite_records_no_inviting_admin(db):
     )
     assert (await spaces.get(SPACE)).owner_instance_id == OWNER
     assert await spaces.get_invited_by(SPACE) is None
+
+
+def _ban(event_type, sender: str) -> FederationEvent:
+    return _event(
+        event_type,
+        sender,
+        {"space_id": SPACE, "user_id": "u-o2", "banned_by": "u-admin"},
+    )
+
+
+@pytest.mark.parametrize(
+    "sender, delegation, applied",
+    [
+        (ADMIN, True, True),
+        (OTHER_ADMIN, True, False),
+        (ADMIN, False, False),
+    ],
+)
+async def test_live_bans_from_the_inviting_admin(joiner, sender, delegation, applied):
+    """Live ``SPACE_MEMBER_BANNED`` / ``_UNBANNED`` follow the same rule as
+    the bans in the inviting admin's catch-up stream."""
+    if not delegation:
+        space = await joiner.spaces.get(SPACE)
+        await joiner.spaces.save(replace(space, features=SpaceFeatures()))
+    handlers = SpaceMembershipInboundHandlers(
+        bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
+    )
+    await handlers._on_banned(_ban(FederationEventType.SPACE_MEMBER_BANNED, sender))
+    assert await joiner.spaces.is_banned(SPACE, "u-o2") is applied
+    # The owner's ban always applies; the unban follows the same rule.
+    await handlers._on_banned(_ban(FederationEventType.SPACE_MEMBER_BANNED, OWNER))
+    await handlers._on_unbanned(_ban(FederationEventType.SPACE_MEMBER_UNBANNED, sender))
+    assert await joiner.spaces.is_banned(SPACE, "u-o2") is (not applied)

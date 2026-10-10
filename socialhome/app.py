@@ -1476,6 +1476,7 @@ def _wire_federation_stack(
     space_membership_handlers = SpaceMembershipInboundHandlers(
         bus=bus,
         space_repo=space_repo,
+        seat_repo=space_remote_member_repo,
     )
     space_membership_handlers.attach_to(federation_service)
     app[K.space_membership_handlers_key] = space_membership_handlers

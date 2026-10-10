@@ -18,7 +18,8 @@ The trust is narrow:
 * only while that household still holds a live ``admin`` seat here.
 
 It covers CONTENT and admin actions — the full §25.6 stream (roster and bans
-included), role changes, remote-member removals, proposal mirrors, the
+included), role changes, live bans / unbans, remote-member removals,
+proposal mirrors, the
 signing-seed share, the host writer exemption. It never covers owner-only
 settings: the owner-signed GFS list, ``private_gfs``, ``gfs_publish_mode``,
 the authority cert / ``host_identity_pk``, the config, dissolve and the age
