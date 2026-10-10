@@ -74,6 +74,7 @@ MAX_CONCURRENT_VIEWERS_PER_USER: int = 10
 class _Session:
     session_id: str
     user_id: str
+    #: The LOCAL ``gfs_connections`` row id the answer goes back through.
     gfs_id: str
     peer: _AnswererPeer
     task: asyncio.Task[None] | None = None
@@ -149,24 +150,42 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
 
     # ── Frame entry point ───────────────────────────────────────────────
 
-    async def handle_signal(self, frame: dict) -> None:
-        """Dispatch a single ``moment_signal`` frame from the WS."""
+    async def handle_signal(self, frame: dict, *, gfs_id: str | None = None) -> None:
+        """Dispatch a single ``moment_signal`` frame from the WS.
+
+        *gfs_id* is the LOCAL connection row id the frame arrived on — bound
+        per WS client by the supervisor — and is where every answer goes.
+        The frame's own ``gfs_id`` is the server's PUBLIC id (whatever it
+        currently serves, or an alias), never a row id; it is only resolved,
+        against the active connections, when no connection is bound.
+        """
         kind = str(frame.get("kind") or "")
-        if kind == "offer":
-            await self._on_offer(frame)
-        elif kind == "ice":
+        if kind == "ice":
             await self._on_ice(frame)
-        elif kind == "relay_offer":
-            await self._on_relay_offer(frame)
-        else:
+            return
+        if kind not in ("offer", "relay_offer"):
             log.debug("moment_signal: unknown kind %r — dropped", kind)
+            return
+        conn_id = gfs_id or await self._conn_for_server(str(frame.get("gfs_id") or ""))
+        if kind == "offer":
+            await self._on_offer(frame, conn_id)
+        else:
+            await self._on_relay_offer(frame, conn_id)
+
+    async def _conn_for_server(self, server_id: str) -> str:
+        """The active connection pinned to public id *server_id*, or ``""``."""
+        if not server_id:
+            return ""
+        for conn in await self._gfs_repo.list_active():
+            if conn.gfs_instance_id == server_id:
+                return conn.id
+        return ""
 
     # ── Offer path ──────────────────────────────────────────────────────
 
-    async def _on_offer(self, frame: dict) -> None:
+    async def _on_offer(self, frame: dict, gfs_id: str) -> None:
         session_id = str(frame.get("session_id") or "")
         user_id = str(frame.get("user_id") or "")
-        gfs_id = str(frame.get("gfs_id") or "")
         sdp_offer = str(frame.get("sdp") or "")
         if not (session_id and user_id and gfs_id and sdp_offer):
             log.debug("moment_signal offer: missing fields — dropped")
@@ -325,7 +344,7 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
 
     # ── GFS-relay fallback ──────────────────────────────────────────────
 
-    async def _on_relay_offer(self, frame: dict) -> None:
+    async def _on_relay_offer(self, frame: dict, gfs_id: str) -> None:
         """Stream the author's public moments to the GFS for proxy delivery.
 
         The guest couldn't reach us over WebRTC; the GFS pushed this
@@ -335,7 +354,6 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
         """
         relay_id = str(frame.get("relay_id") or "")
         user_id = str(frame.get("user_id") or "")
-        gfs_id = str(frame.get("gfs_id") or "")
         if not (relay_id and user_id and gfs_id):
             log.debug("moment_signal relay_offer: missing fields — dropped")
             return
@@ -465,10 +483,9 @@ class MomentPublicSignalingHandler(ProtectionGateMixin):
     async def _gfs_url(self, path: str, gfs_id: str) -> str | None:
         """Resolve the inbox URL of the GFS that pushed us this frame.
 
-        The signalling frame carries ``gfs_id`` directly (the GFS's own
-        instance id, which equals its ``gfs_connections`` row id), so we
-        always reply to the same GFS — important when the SH is paired
-        with multiple GFSes.
+        *gfs_id* is the LOCAL connection row id (see :meth:`handle_signal`),
+        so we always reply to the same GFS — important when the SH is
+        paired with multiple GFSes.
         """
         if self._http_client is None:
             return None

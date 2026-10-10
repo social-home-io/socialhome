@@ -575,3 +575,53 @@ async def test_a_frame_the_consumer_rejected_never_reaches_the_observer():
     with pytest.raises(ValueError):
         await _relay_for(_reject, seen, "gfs-1")({"space_id": "sp"})
     seen.assert_not_awaited()
+
+
+async def test_supervisor_binds_moment_signal_handler_per_connection(http_session):
+    """Regression: each client's ``moment_signal`` handler is told the LOCAL
+    connection it arrived on — the frame's ``gfs_id`` is the server's public
+    id (or an alias), never a connection row id, so the answer must not be
+    routed by it."""
+    repo = _FakeRepo(
+        [_make_conn("g1", "http://gfs1.test"), _make_conn("g2", "http://gfs2.test")]
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def on_moment_signal(frame: dict, *, gfs_id: str | None = None) -> None:
+        seen.append((frame["session_id"], gfs_id or ""))
+
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        def __init__(self, *, gfs_url, on_moment_signal=None, **_kwargs):
+            captured[gfs_url] = on_moment_signal
+
+        def is_alive(self) -> bool:
+            return True
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    with patch(
+        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
+        _StubClient,
+    ):
+        supervisor = GfsWebSocketSupervisor(
+            repo=repo,
+            instance_id="sh-1",
+            signing_key=b"\x00" * 32,
+            session_factory=lambda: http_session,
+            on_relay=AsyncMock(),
+            on_moment_signal=on_moment_signal,
+            reconcile_interval_seconds=0.05,
+        )
+        await supervisor.start()
+        try:
+            await captured["http://gfs1.test"]({"session_id": "a", "gfs_id": "pub"})
+            await captured["http://gfs2.test"]({"session_id": "b", "gfs_id": "pub"})
+            assert seen == [("a", "g1"), ("b", "g2")]
+        finally:
+            await supervisor.stop()

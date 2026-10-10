@@ -901,3 +901,100 @@ async def test_protected_accounts_public_moments_are_never_streamed(
         framing.KIND_STREAM_END,
     ]
     assert decoded[0].header["moments"] == []
+
+
+# ─── Which GFS to answer: the connection the frame arrived on ────────────
+
+
+async def _second_gfs(repos, *, conn_id: str, server_id: str, url: str) -> None:
+    """A connection whose local row id (a uuid in production) differs from
+    the server's public id — the shape every real pairing has."""
+    await repos["gfs"]._db.enqueue(
+        "INSERT INTO gfs_connections(id, gfs_instance_id, display_name,"
+        " public_key, inbox_url, status, paired_at)"
+        " VALUES(?, ?, 'GFS', 'ee', ?, 'active', datetime('now'))",
+        (conn_id, server_id, url),
+    )
+
+
+async def test_the_answer_goes_to_the_connection_the_frame_arrived_on(
+    repos, public_moments
+):
+    """Regression: the GFS stamps its PUBLIC id into ``gfs_id``, which is
+    not the household's connection row id — the old lookup by row id found
+    nothing and the answer was never sent. The supervisor binds the
+    connection the frame arrived on; that is where the answer goes, whatever
+    id (an alias, a pre-rebind id) the frame names."""
+    await _second_gfs(
+        repos, conn_id="conn-uuid", server_id="gfs-social-home", url="https://g2.test"
+    )
+    handler, _peers = _make_handler(repos)
+    sess = _StubSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    await handler.handle_signal(
+        {
+            "kind": "offer",
+            "session_id": "s-bound",
+            "user_id": "u1",
+            "gfs_id": "gfs-1",  # an alias the server still answers to
+            "sdp": "v=0",
+        },
+        gfs_id="conn-uuid",
+    )
+    await _drain(handler)
+    assert [url for url, _ in sess.posts] == ["https://g2.test/gfs/moment_rtc/answer"]
+
+
+async def test_an_unbound_frame_resolves_the_servers_public_id(repos, public_moments):
+    await _second_gfs(
+        repos, conn_id="conn-uuid", server_id="gfs-social-home", url="https://g2.test"
+    )
+    handler, _peers = _make_handler(repos)
+    sess = _StubSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    await handler.handle_signal(
+        {
+            "kind": "offer",
+            "session_id": "s-unbound",
+            "user_id": "u1",
+            "gfs_id": "gfs-social-home",
+            "sdp": "v=0",
+        }
+    )
+    await _drain(handler)
+    assert [url for url, _ in sess.posts] == ["https://g2.test/gfs/moment_rtc/answer"]
+
+
+async def test_a_relay_offer_streams_to_the_bound_connection(repos, public_moments):
+    await _second_gfs(
+        repos, conn_id="conn-uuid", server_id="gfs-social-home", url="https://g2.test"
+    )
+    handler, _ = _make_handler(repos)
+    sess = _RecordingSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    await handler.handle_signal(
+        {"kind": "relay_offer", "relay_id": "r-9", "user_id": "u1", "gfs_id": "x"},
+        gfs_id="conn-uuid",
+    )
+    await _drain_relay(handler)
+    assert [c[0] for c in sess.relay_calls] == [
+        "https://g2.test/gfs/moment_rtc/relay-stream/r-9"
+    ]
+
+
+async def test_a_frame_naming_no_known_server_is_dropped(repos, public_moments):
+    handler, _ = _make_handler(repos)
+    sess = _StubSession()
+    handler._http_client = sess  # type: ignore[assignment]
+    await handler.handle_signal(
+        {
+            "kind": "offer",
+            "session_id": "s-x",
+            "user_id": "u1",
+            "gfs_id": "gfs-unknown",
+            "sdp": "v=0",
+        }
+    )
+    await _drain(handler)
+    assert sess.posts == []
+    assert "s-x" not in handler._sessions

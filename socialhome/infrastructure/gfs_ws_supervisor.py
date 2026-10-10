@@ -67,7 +67,7 @@ class GfsWebSocketSupervisor:
         on_relay: Callable[[dict], Awaitable[None]],
         on_relay_seen: Callable[..., Awaitable[None]] | None = None,
         on_highlight_signal: Callable[[dict], Awaitable[None]] | None = None,
-        on_moment_signal: Callable[[dict], Awaitable[None]] | None = None,
+        on_moment_signal: Callable[..., Awaitable[None]] | None = None,
         on_moment_public: Callable[..., Awaitable[None]] | None = None,
         on_follow_changed: Callable[[dict], Awaitable[None]] | None = None,
         on_new_subscriber: Callable[[dict], Awaitable[None]] | None = None,
@@ -277,7 +277,14 @@ class GfsWebSocketSupervisor:
             session_factory=self._session_factory,
             on_relay=_relay_for(self._on_relay, self._on_relay_seen, conn.id),
             on_highlight_signal=self._on_highlight_signal,
-            on_moment_signal=self._on_moment_signal,
+            # The answer goes back through THIS connection: the frame's own
+            # ``gfs_id`` is the server's public id (or an alias it still
+            # answers to), never our connection row id.
+            on_moment_signal=(
+                _bind_gfs_id(self._on_moment_signal, conn.id)
+                if self._on_moment_signal is not None
+                else None
+            ),
             on_moment_public=wrapped_moment_public,
             on_follow_changed=self._on_follow_changed,
             on_new_subscriber=self._on_new_subscriber,

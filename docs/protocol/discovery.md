@@ -377,7 +377,23 @@ The Social Home ↔ GFS link is split by direction:
     The owner of a private space then re-registers its channel and
     re-issues grants naming the new id; until they arrive, a grant naming
     the id this connection held before the rebind still matches it (in
-    memory, for the life of the process).
+    memory, for the life of the process). The household's follow seats
+    (`gfs_space_seats`, bound to server id + pinned key + address) move to
+    the new id in the same step — only seats bound to the connection's
+    pinned key AND address — and the reconnect reconcile repeats the move
+    before reading seats, so a crash in between heals. Moment signalling
+    (`moment_signal` frames) is answered through the connection the frame
+    arrived on, never by matching the frame's `gfs_id` (the server's public
+    id) against local connection ids.
+  - **Upgrade note (owner decision).** Older household builds verify the
+    capability block under the id they pinned and never rebind. Once a
+    cluster switches to one shared id, such a household keeps working while
+    its process holds a capability it already verified (its requests name
+    an old id, which the aliases accept); after a restart it cannot verify
+    the block any more and stops relaying through that GFS until it
+    upgrades. Accepted: before the switch those households succeeded only
+    when the load balancer happened to hit the node they pinned. The
+    `/healthz` guard stays.
 
 ```mermaid
 sequenceDiagram
