@@ -1470,6 +1470,6 @@ async def test_on_chunk_verifies_an_unpaired_member_provider_by_its_recorded_key
             generate_identity_keypair().public_key.hex()
         )
     await r.on_chunk(await _empty_members_chunk(admin), from_instance=admin_id)
-    assert r._health._streams.get("sync-adm", [0, 0, 0])[1] == (
-        0 if recorded == "own" else 1
-    )
+    stream = r._health._streams.get("sync-adm")
+    failed = bool(stream is not None and stream.failed)
+    assert failed is (recorded != "own")
