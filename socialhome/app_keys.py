@@ -128,6 +128,8 @@ setup_service_key: AppKey = AppKey("setup_service")
 
 gfs_connection_service_key: AppKey = AppKey("gfs_connection_service")
 gfs_connection_repo_key: AppKey = AppKey("gfs_connection_repo")
+#: The owner's choice of GFSs for a global space + the members' signed list.
+gfs_server_selection_service_key: AppKey = AppKey("gfs_server_selection_service")
 gfs_ws_supervisor_key: AppKey = AppKey("gfs_ws_supervisor")
 #: v_53 shared-GFS route discovery — ``probe_peer`` after a pairing confirm.
 gfs_route_discovery_key: AppKey = AppKey("gfs_route_discovery")

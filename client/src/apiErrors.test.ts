@@ -18,6 +18,38 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('Only households you paired with directly can use the GFS fallback.')
   })
 
+  it('explains that publishing a public space to a GFS is a tier change', () => {
+    // The space settings' Publish button on a public space answers this
+    // since public stopped meaning "may be on a GFS".
+    expect(apiErrorMessage(409, '/api/spaces/s1/publish/g1', {
+      code: 'TIER_CHANGE_REQUIRED',
+      detail: 'A public space is only visible to connected households.',
+    })).toBe(
+      "A public space is only visible to households you're connected with. "
+      + 'Make it global to list it on a GFS.',
+    )
+  })
+
+  it('translates the GFS choice refusals by reason', () => {
+    expect(apiErrorMessage(422, '/api/spaces', {
+      code: 'GFS_SELECTION_REQUIRED', detail: 'x',
+    })).toBe('Choose at least one GFS to list this global space on.')
+    expect(apiErrorMessage(422, '/api/spaces/s1/gfs-servers', {
+      code: 'GFS_SELECTION_INVALID', detail: 'x', params: { reason: 'too_many', max: 8 },
+    })).toBe('A space can be listed on at most 8 GFSs.')
+    expect(apiErrorMessage(422, '/api/spaces/s1/gfs-servers', {
+      code: 'GFS_SELECTION_INVALID', detail: 'x', params: { reason: 'unknown' },
+    })).toBe("That GFS isn't connected anymore. Choose one of your active GFS connections.")
+    expect(apiErrorMessage(422, '/api/spaces', {
+      code: 'GFS_SELECTION_INVALID', detail: 'x', params: { reason: 'not_global' },
+    })).toBe('Only a global space is listed on GFSs.')
+    // A malformed body keeps the server's detail.
+    expect(apiErrorMessage(422, '/api/spaces/s1/gfs-servers', {
+      code: 'GFS_SELECTION_INVALID', detail: "That GFS choice can't be used.",
+      params: { reason: 'malformed' },
+    })).toBe("That GFS choice can't be used.")
+  })
+
   it('fills params into the translated message', () => {
     expect(apiErrorMessage(422, '/x', {
       code: 'DM_TOO_LONG', detail: 'message content exceeds 1000 chars', params: { max: 1000 },

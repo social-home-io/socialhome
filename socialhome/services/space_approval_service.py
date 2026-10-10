@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..domain.child_protection import (
@@ -73,6 +74,17 @@ MAX_PENDING_OWNER_APPROVALS_PER_HOUSEHOLD = 20
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+#: ``set_public_tier`` param naming the GFSs (the owner household's
+#: connection ids) a space moving into the global tier is listed on. Only
+#: honoured from a proposer ON the owner household — the ids are that
+#: household's own connections, and choosing servers is the owner's call.
+GFS_IDS_PARAM = "gfs_ids"
+
+
+def _goes_global(params: dict) -> bool:
+    return str(params.get("space_type") or "") == SpaceType.GLOBAL.value
 
 
 def _publishes(action: ProposalAction, params: dict) -> bool:
@@ -151,6 +163,29 @@ class SpaceApprovalService(ProtectionGateMixin):
         space = await self._require_space(space_id)
         actor = await self._require_local_admin(space_id, actor_username)
         params = params or {}
+        if GFS_IDS_PARAM in params:
+            # Servers are chosen only for a move into the global tier, only
+            # by a proposer on the owner household (checked here, before a
+            # proposal opens — a forwarded proposal never carries them).
+            hosted_here = (
+                not space.owner_instance_id
+                or space.owner_instance_id == self._own_instance_id
+            )
+            if (
+                action is not ProposalAction.SET_PUBLIC_TIER
+                or not _goes_global(params)
+                or not hosted_here
+            ):
+                params = {k: v for k, v in params.items() if k != GFS_IDS_PARAM}
+            elif self._space_service is not None:
+                params = {
+                    **params,
+                    GFS_IDS_PARAM: list(
+                        await self._space_service.check_gfs_selection(
+                            params[GFS_IDS_PARAM]
+                        )
+                    ),
+                }
         if action is ProposalAction.SET_PUBLIC_TIER:
             # §CP.R: a protected account can't publish a space — neither by
             # asking for it nor by joining an open proposal that does
@@ -409,6 +444,10 @@ class SpaceApprovalService(ProtectionGateMixin):
         proposer_instance: str,
         proposer_user: str,
     ) -> dict:
+        if GFS_IDS_PARAM in params and proposer_instance != self._own_instance_id:
+            # Choosing GFSs is the owner household's call: a remote admin's
+            # proposal to go global passes as "global, not listed".
+            params = {k: v for k, v in params.items() if k != GFS_IDS_PARAM}
         existing = await self._proposals.find_open(space_id, action)
         # §CP.R: a space a protected account owns never goes public — not by
         # its adult admins, not by a remote admin, not by a quorum.
@@ -423,6 +462,19 @@ class SpaceApprovalService(ProtectionGateMixin):
             raise SpacePermissionError(PROTECTED_OWNER_PUBLISH_DETAIL)
         if existing is not None and existing.expires_at > _now():
             proposal = existing
+            if (
+                params.get(GFS_IDS_PARAM)
+                and existing.params.get("space_type") == params.get("space_type")
+                and existing.params.get(GFS_IDS_PARAM) != params[GFS_IDS_PARAM]
+            ):
+                # The owner household joins an open proposal to go global
+                # (perhaps a remote admin's, which carries no servers) and
+                # names the servers: its choice is the one that executes.
+                proposal = replace(
+                    existing,
+                    params={**existing.params, GFS_IDS_PARAM: params[GFS_IDS_PARAM]},
+                )
+                await self._proposals.upsert(proposal)
         else:
             if existing is not None:
                 await self._proposals.set_status(existing.id, ProposalStatus.EXPIRED)
@@ -557,9 +609,18 @@ class SpaceApprovalService(ProtectionGateMixin):
                 )
             elif proposal.action == ProposalAction.SET_PUBLIC_TIER:
                 st = proposal.params.get("space_type")
+                raw_ids = proposal.params.get(GFS_IDS_PARAM)
+                gfs_ids = (
+                    tuple(g for g in raw_ids if isinstance(g, str))
+                    if isinstance(raw_ids, list)
+                    else ()
+                )
                 if st:
                     await self._space_service.update_config(
-                        proposal.space_id, actor_username=owner, space_type=st
+                        proposal.space_id,
+                        actor_username=owner,
+                        space_type=st,
+                        gfs_ids=gfs_ids,
                     )
             elif proposal.action == ProposalAction.REMOTE_ADMIN_ACTION:
                 p = proposal.params

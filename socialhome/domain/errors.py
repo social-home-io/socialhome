@@ -25,11 +25,14 @@ from collections.abc import Mapping
 
 __all__ = [
     "CodedError",
+    "GfsSelectionInvalidError",
+    "GfsSelectionRequiredError",
     "ImageTooLargeError",
     "ImageUnreadableError",
     "InvalidMediaRefError",
     "PayloadTooLargeError",
     "SpaceNotPublishableError",
+    "TierChangeRequiredError",
 ]
 
 ParamValue = str | int | float | bool
@@ -124,7 +127,7 @@ class InvalidMediaRefError(CodedError, ValueError):
 
 
 class SpaceNotPublishableError(CodedError):
-    """Only a public or global space may be listed on a GFS.
+    """Only a global space may be listed on a GFS.
 
     A private or household space never leaves its member households, so
     publishing one would put its name, description and cover in a GFS
@@ -133,4 +136,52 @@ class SpaceNotPublishableError(CodedError):
 
     status = 409
     code = "SPACE_NOT_PUBLIC"
-    detail = "Only public and global spaces can be published to a GFS."
+    detail = "Only global spaces can be listed on a GFS."
+
+
+class TierChangeRequiredError(SpaceNotPublishableError):
+    """A PUBLIC space is never listed on a GFS.
+
+    Public means "discoverable by the households we are connected with";
+    listing it on a GFS *is* making it global, which is a tier change the
+    space's admins approve (the quorum proposal), never a side effect of a
+    publish. Raised before anything is sent to the GFS. A subclass of
+    :class:`SpaceNotPublishableError` so every caller that skips an
+    unpublishable space skips this one too.
+    """
+
+    status = 409
+    code = "TIER_CHANGE_REQUIRED"
+    detail = (
+        "A public space is only visible to connected households. "
+        "Make it global to list it on a GFS."
+    )
+
+
+class GfsSelectionRequiredError(CodedError, ValueError):
+    """A new global space must name at least one GFS to be listed on, as
+    long as the household has an active GFS connection to choose from."""
+
+    status = 422
+    code = "GFS_SELECTION_REQUIRED"
+    detail = "Choose at least one GFS to list this global space on."
+
+
+class GfsSelectionInvalidError(CodedError, ValueError):
+    """A GFS choice that can't be used. ``params.reason``:
+
+    * ``unknown`` — not one of this household's ACTIVE GFS connections;
+    * ``too_many`` — more than ``params.max`` servers;
+    * ``not_global`` — servers were chosen for a space that isn't global;
+    * ``malformed`` — ``gfs_ids`` is not a list of connection ids.
+    """
+
+    status = 422
+    code = "GFS_SELECTION_INVALID"
+    detail = "That GFS choice can't be used."
+
+    def __init__(self, reason: str, *, max_servers: int | None = None) -> None:
+        params: dict[str, ParamValue] = {"reason": reason}
+        if max_servers is not None:
+            params["max"] = max_servers
+        super().__init__(params=params)

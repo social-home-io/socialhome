@@ -126,6 +126,7 @@ from .gfs import (
     GfsPublicationsView,
     GfsSpacePublicationsView,
     GfsSpacePublishView,
+    GfsSpaceServersView,
 )
 from .gallery import (
     AlbumDetailView,
@@ -1192,6 +1193,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
         GfsSpacePublishView,
     )
     app.router.add_view("/api/spaces/{id}/publications", GfsSpacePublicationsView)
+    app.router.add_view("/api/spaces/{id}/gfs-servers", GfsSpaceServersView)
 
     # ── Calls / WebRTC ──────────────────────────────────────────────────
     app.router.add_view("/api/calls", CallCollectionView)

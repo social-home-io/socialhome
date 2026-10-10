@@ -11,6 +11,7 @@ from dataclasses import asdict
 from aiohttp import web
 
 from .. import app_keys as K
+from ..domain.errors import GfsSelectionInvalidError
 from ..security import error_response
 from ..services.gfs_connection_service import GfsConnectionError, GfsSignupError
 from .base import BaseView
@@ -327,39 +328,82 @@ class GfsConnectionDetailView(BaseView):
 
 
 class GfsSpacePublishView(BaseView):
-    """``POST /api/spaces/{id}/publish/{gfs_id}`` — publish.
-    ``DELETE /api/spaces/{id}/publish/{gfs_id}`` — unpublish.
+    """``POST /api/spaces/{id}/publish/{gfs_id}`` — list a GLOBAL space on
+    one more GFS. ``DELETE /api/spaces/{id}/publish/{gfs_id}`` — withdraw it
+    from one.
+
+    Both edit the owner's choice of servers
+    (:class:`GfsServerSelectionService`): POST is the space OWNER's alone,
+    on the owner household. A public space answers 409
+    ``TIER_CHANGE_REQUIRED`` — public is visible only to connected
+    households, and listing it on a GFS is making it global (a quorum-gated
+    tier change); private / household answer 409 ``SPACE_NOT_PUBLIC``.
+    DELETE is also open to a household admin: a withdrawal only narrows what
+    a GFS learns (the admin Spaces tab lists every publication).
     """
 
     async def post(self) -> web.Response:
         ctx = self.user
-        if ctx is None or ctx.user_id is None:
-            return error_response(401, "UNAUTHENTICATED", "Authentication required.")
-        if not ctx.is_admin:
-            return error_response(403, "FORBIDDEN", "Admin only.")
-        space_id = self.match("id")
-        gfs_id = self.match("gfs_id")
-        svc = self.svc(K.gfs_connection_service_key)
+        selection = self.svc(K.gfs_server_selection_service_key)
         try:
-            pub = await svc.publish_space(space_id, gfs_id)
+            pub = await selection.add_server(
+                self.match("id"),
+                actor_username=ctx.username,
+                gfs_id=self.match("gfs_id"),
+            )
         except GfsConnectionError as exc:
             return error_response(422, "GFS_PUBLISH_FAILED", str(exc))
         return web.json_response(_pub_dict(pub))
 
     async def delete(self) -> web.Response:
         ctx = self.user
-        if ctx is None or ctx.user_id is None:
-            return error_response(401, "UNAUTHENTICATED", "Authentication required.")
-        if not ctx.is_admin:
-            return error_response(403, "FORBIDDEN", "Admin only.")
-        space_id = self.match("id")
-        gfs_id = self.match("gfs_id")
-        svc = self.svc(K.gfs_connection_service_key)
+        selection = self.svc(K.gfs_server_selection_service_key)
         try:
-            await svc.unpublish_space(space_id, gfs_id)
+            await selection.remove_server(
+                self.match("id"),
+                actor_username=ctx.username,
+                gfs_id=self.match("gfs_id"),
+                household_admin=ctx.is_admin,
+            )
         except GfsConnectionError as exc:
             return error_response(422, "GFS_UNPUBLISH_FAILED", str(exc))
         return web.Response(status=204)
+
+
+class GfsSpaceServersView(BaseView):
+    """``GET`` / ``PUT /api/spaces/{id}/gfs-servers`` — the GFSs a GLOBAL
+    space is listed on. Space OWNER only, on the owner household.
+
+    * ``GET`` → ``{space_type, gfs_ids, max, unlisted, servers, available}``:
+      the connection ids listing it, the cap (8), whether it is "global, not
+      listed", the members' signed list and every active connection to
+      choose from.
+    * ``PUT {gfs_ids}`` replaces the set: publishes to the added servers,
+      withdraws from the removed ones, tells members once. Answers
+      ``{listed, failed}`` — one unreachable GFS never aborts the rest.
+      Choosing servers for a public space is 409 ``TIER_CHANGE_REQUIRED``.
+    """
+
+    async def get(self) -> web.Response:
+        selection = self.svc(K.gfs_server_selection_service_key)
+        view = await selection.owner_view(
+            self.match("id"), actor_username=self.user.username
+        )
+        return web.json_response(view)
+
+    async def put(self) -> web.Response:
+        selection = self.svc(K.gfs_server_selection_service_key)
+        body = await self.body()
+        if not isinstance(body, dict) or "gfs_ids" not in body:
+            # Never read a missing list as "none": that would unlist the
+            # space everywhere.
+            raise GfsSelectionInvalidError("malformed")
+        outcome = await selection.set_servers(
+            self.match("id"),
+            actor_username=self.user.username,
+            gfs_ids=body["gfs_ids"],
+        )
+        return web.json_response(outcome.to_dict())
 
 
 class GfsSpacePublicationsView(BaseView):

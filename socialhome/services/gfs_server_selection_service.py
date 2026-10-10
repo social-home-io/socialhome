@@ -1,4 +1,21 @@
-"""The owner's signed GFS list for a space it hosts (``spaces.gfs_servers``).
+"""The GFSs a global space is listed on: the owner's choice, and the signed
+list (``spaces.gfs_servers``) members receive.
+
+Tiers (owner model, 2026-10-10): a PUBLIC space is discoverable only by the
+households we are connected with and never touches a GFS; a GLOBAL space is
+listed on the GFSs its OWNER picks (at most :data:`MAX_GFS_SERVERS`).
+Nothing is ever published to "every active GFS".
+
+Choosing (:meth:`GfsServerSelectionService.set_servers`, ``add_server``,
+``remove_server``): the space OWNER, on the owner household, of a GLOBAL
+space, among this household's ACTIVE connections. The tier change itself
+stays quorum-gated (``SpaceApprovalService``); picking servers for an
+already-global space is the owner's alone. Each change publishes to the added
+servers, withdraws from the removed ones, and re-signs the members' list ONCE
+at the end (``apply``). ``reconcile_on_startup`` brings an upgraded
+household in line: an owned PUBLIC space that was hand-published to a GFS
+becomes GLOBAL (its existing listings are recorded, not re-decided), and an
+owned GLOBAL space with no list yet gets one, keeping its listings.
 
 A global space is listed on GFSs its owner chose. Members must reach every one
 of them — including GFSs their own household never connected to — so the
@@ -39,22 +56,39 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from dataclasses import replace
+
+from ..domain.errors import (
+    GfsSelectionInvalidError,
+    GfsSelectionRequiredError,
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+)
 from ..domain.events import SpaceConfigChanged
-from ..domain.federation import GfsConnection
+from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.gfs_server import (
     GFS_KEY_SUITE_ED25519,
     MAX_GFS_SERVERS,
+    GfsSelectionOutcome,
     GfsServer,
     canonical_json,
     gfs_servers_from_wire,
     gfs_servers_to_wire,
 )
-from ..domain.space import PUBLIC_SPACE_TIERS, SpaceConfigEventType
+from ..domain.space import (
+    Space,
+    SpaceConfigEventType,
+    SpacePermissionError,
+    SpaceRole,
+    SpaceType,
+)
 from ..gfs_server_list_sig import sign_gfs_server_list
 from ..infrastructure.event_bus import EventBus
 from ..space_owner_statement import MAX_STATEMENT_FUTURE_SKEW_MS
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from ..repositories.user_repo import AbstractUserRepo
+from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +100,8 @@ class GfsServerSelectionService:
         "_spaces",
         "_gfs",
         "_bus",
+        "_users",
+        "_publisher",
         "_own_instance_id",
         "_own_signing_key",
         "_locks",
@@ -77,10 +113,16 @@ class GfsServerSelectionService:
         space_repo: AbstractSpaceRepo,
         gfs_repo: AbstractGfsConnectionRepo,
         bus: EventBus,
+        user_repo: AbstractUserRepo | None = None,
+        gfs_connection_service: GfsConnectionService | None = None,
     ) -> None:
         self._spaces = space_repo
         self._gfs = gfs_repo
         self._bus = bus
+        # Who may choose (the space OWNER) and how a listing is made / taken
+        # down. Optional so the snapshot side works on its own.
+        self._users = user_repo
+        self._publisher = gfs_connection_service
         # The household identity, attached once it is loaded at startup
         # (:meth:`attach_identity`). Until then nothing is derived.
         self._own_instance_id = ""
@@ -133,14 +175,15 @@ class GfsServerSelectionService:
         ):
             return False
         current = space.gfs_servers
-        if space.space_type in PUBLIC_SPACE_TIERS:
+        if space.space_type is SpaceType.GLOBAL:
             servers = await self._derive(space_id)
         elif current is None or current.servers_json == "[]":
             # Never listed, or already signed empty: nothing to say.
             return False
         else:
-            # Left the public tiers: members must stop using every server
-            # now, even if a withdrawal could not reach one of them.
+            # Not global (a public space is never on a GFS): members must
+            # stop using every server now, even if a withdrawal could not
+            # reach one of them.
             servers = ()
         servers_json = canonical_json(gfs_servers_to_wire(servers))
         if current is not None and current.servers_json == servers_json:
@@ -238,3 +281,309 @@ class GfsServerSelectionService:
                 dropped,
             )
         return servers
+
+    # ── The owner's choice ────────────────────────────────────────────────
+
+    async def check_selection(
+        self, gfs_ids: object, *, required: bool = False
+    ) -> tuple[str, ...]:
+        """Validate an owner's choice of GFSs; returns the connection ids,
+        de-duplicated, in the order given.
+
+        Raises :class:`GfsSelectionInvalidError` for a malformed value, more
+        than :data:`MAX_GFS_SERVERS` servers or an id that is not one of
+        this household's ACTIVE connections; with ``required``, raises
+        :class:`GfsSelectionRequiredError` for an empty choice while there is
+        an active connection to choose (with none, a global space is simply
+        "global, not listed" until the owner connects one)."""
+        if gfs_ids is None:
+            ids: tuple[str, ...] = ()
+        elif isinstance(gfs_ids, (list, tuple)) and all(
+            isinstance(g, str) and g for g in gfs_ids
+        ):
+            ids = tuple(dict.fromkeys(gfs_ids))
+        else:
+            raise GfsSelectionInvalidError("malformed")
+        if len(ids) > MAX_GFS_SERVERS:
+            raise GfsSelectionInvalidError("too_many", max_servers=MAX_GFS_SERVERS)
+        active = {c.id for c in await self._gfs.list_active()}
+        if any(g not in active for g in ids):
+            raise GfsSelectionInvalidError("unknown")
+        if required and not ids and active:
+            raise GfsSelectionRequiredError()
+        return ids
+
+    async def still_active(self, gfs_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """*gfs_ids* minus any no longer an ACTIVE connection, capped at
+        :data:`MAX_GFS_SERVERS` — for a choice made earlier (a tier proposal
+        approved days later)."""
+        active = {c.id for c in await self._gfs.list_active()}
+        return tuple(g for g in dict.fromkeys(gfs_ids) if g in active)[:MAX_GFS_SERVERS]
+
+    async def set_servers(
+        self, space_id: str, *, actor_username: str, gfs_ids: object
+    ) -> GfsSelectionOutcome:
+        """The OWNER replaces the set of GFSs a global space is listed on.
+
+        Publishes to every added server, withdraws from every removed one,
+        then re-signs the members' list once. An empty set on a space that
+        is no longer global is allowed (it only withdraws)."""
+        space = await self._require_owner(space_id, actor_username)
+        if not isinstance(gfs_ids, (list, tuple)):
+            # ``None`` here would read as "no servers" and unlist the space
+            # everywhere: a replacement set must be spelled out.
+            raise GfsSelectionInvalidError("malformed")
+        ids = await self.check_selection(gfs_ids)
+        if ids:
+            _require_global(space)
+        return await self.apply(space_id, ids)
+
+    async def add_server(
+        self, space_id: str, *, actor_username: str, gfs_id: str
+    ) -> GfsSpacePublication:
+        """The OWNER lists a global space on one more GFS (or refreshes a
+        listing it already has). Raises :class:`GfsConnectionError` when the
+        GFS refuses or can't be reached — nothing is listed then."""
+        space = await self._require_owner(space_id, actor_username)
+        _require_global(space)
+        current = {c.id for c in await self._gfs.list_gfs_for_space(space_id)}
+        if gfs_id not in current and len(current) >= MAX_GFS_SERVERS:
+            raise GfsSelectionInvalidError("too_many", max_servers=MAX_GFS_SERVERS)
+        conn = await self._gfs.get(gfs_id)
+        if conn is None or conn.status != "active":
+            raise GfsConnectionError(f"GFS connection {gfs_id} not found")
+        publisher = self._require_publisher()
+        try:
+            return await publisher.publish_space(space_id, gfs_id, announce=False)
+        finally:
+            await self.sync_snapshot(space_id)
+
+    async def remove_server(
+        self,
+        space_id: str,
+        *,
+        actor_username: str,
+        gfs_id: str,
+        household_admin: bool = False,
+    ) -> None:
+        """Withdraw a space's listing from one GFS. The OWNER may; so may a
+        household admin (``household_admin``) — withdrawing only narrows
+        what a GFS learns, like disconnecting the GFS (also admin-only)
+        does for every space at once."""
+        if household_admin:
+            await self._require_owned(space_id)
+        else:
+            await self._require_owner(space_id, actor_username)
+        publisher = self._require_publisher()
+        try:
+            await publisher.unpublish_space(space_id, gfs_id, announce=False)
+        finally:
+            await self.sync_snapshot(space_id)
+
+    async def apply(
+        self, space_id: str, gfs_ids: tuple[str, ...]
+    ) -> GfsSelectionOutcome:
+        """Make *gfs_ids* the servers listing *space_id* — no actor check;
+        the caller authorised the change (:meth:`set_servers`, or
+        ``SpaceService.on_tier_change`` after the owner / a quorum moved the
+        space into the global tier).
+
+        Fail-soft per server: one GFS that can't be reached is reported in
+        ``failed`` and never aborts the rest. Members are told once, after
+        every publish landed (:meth:`sync_snapshot`), so a server is never
+        in their list before it holds the space's pin."""
+        publisher = self._require_publisher()
+        current = [c.id for c in await self._gfs.list_gfs_for_space(space_id)]
+        failed: list[tuple[str, str]] = []
+        try:
+            for gfs_id in gfs_ids:
+                if gfs_id in current:
+                    continue
+                try:
+                    await publisher.publish_space(space_id, gfs_id, announce=False)
+                except (GfsConnectionError, SpaceNotPublishableError) as exc:
+                    log.warning(
+                        "space %s: listing on gfs %s failed: %s",
+                        space_id,
+                        gfs_id,
+                        exc,
+                    )
+                    failed.append((gfs_id, "publish_failed"))
+            for gfs_id in current:
+                if gfs_id in gfs_ids:
+                    continue
+                try:
+                    await publisher.unpublish_space(space_id, gfs_id, announce=False)
+                except GfsConnectionError as exc:
+                    log.warning(
+                        "space %s: withdrawing the listing on gfs %s failed: %s",
+                        space_id,
+                        gfs_id,
+                        exc,
+                    )
+                    failed.append((gfs_id, "unpublish_failed"))
+        finally:
+            await self.sync_snapshot(space_id)
+        listed = tuple(c.id for c in await self._gfs.list_gfs_for_space(space_id))
+        return GfsSelectionOutcome(listed=listed, failed=tuple(failed))
+
+    async def describe(self, space: Space) -> tuple[list[dict] | None, bool]:
+        """Read-only view of where *space* is listed, for any member:
+        ``(servers, unlisted)``.
+
+        ``servers`` — ``[{display_name, inbox_url, connected}]`` from the
+        owner's signed list (``connected``: this household holds an active
+        connection to that GFS), ``None`` when the space isn't global or no
+        list is known yet. ``unlisted`` — the space is global but listed on
+        no GFS ("global, not listed": a remote admin's approved proposal, or
+        every chosen server refused), so the SPA can say so."""
+        if space.space_type is not SpaceType.GLOBAL:
+            return None, False
+        active = await self._gfs.list_active()
+        own = {(c.gfs_instance_id, c.inbox_url) for c in active}
+        if space.gfs_servers is None:
+            if space.owner_instance_id != self._own_instance_id:
+                return None, False
+            # Owned, list not signed yet (startup reconcile pending): the
+            # listings are the truth.
+            listings = await self._gfs.list_active_listings_for_space(space.id)
+            return (
+                [
+                    {
+                        "display_name": c.display_name,
+                        "inbox_url": c.inbox_url,
+                        "connected": True,
+                    }
+                    for c in listings
+                ],
+                not listings,
+            )
+        servers, _ = space.gfs_servers.servers(own_routes=own)
+        view = [
+            {
+                "display_name": s.display_name,
+                "inbox_url": s.inbox_url,
+                "connected": s.route in own,
+            }
+            for s in servers or ()
+        ]
+        return view, not view
+
+    async def owner_view(self, space_id: str, *, actor_username: str) -> dict:
+        """``GET /api/spaces/{id}/gfs-servers`` — the owner's picker: which
+        of this household's active connections list the space, and the
+        cap."""
+        space = await self._require_owner(space_id, actor_username)
+        listed = {
+            p.gfs_connection_id: p.status
+            for p in await self._gfs.list_publications_for_space(space_id)
+        }
+        servers, unlisted = await self.describe(space)
+        return {
+            "space_type": space.space_type.value,
+            "gfs_ids": sorted(listed),
+            "max": MAX_GFS_SERVERS,
+            "unlisted": unlisted,
+            "servers": servers,
+            "available": [
+                {
+                    "gfs_id": c.id,
+                    "display_name": c.display_name,
+                    "inbox_url": c.inbox_url,
+                    "listed": c.id in listed,
+                    "listing_status": listed.get(c.id),
+                }
+                for c in await self._gfs.list_active()
+            ],
+        }
+
+    async def reconcile_on_startup(self) -> int:
+        """Bring the spaces this household owns in line with the owner model;
+        idempotent, returns how many spaces it changed.
+
+        * an owned PUBLIC space with a GFS listing (hand-published before
+          public stopped meaning "may be on a GFS") becomes GLOBAL. This
+          records the state the owner already created — it is listed there
+          today — so it skips the quorum, and keeps every listing;
+        * an owned GLOBAL space with no signed list yet gets one, derived
+          from the listings it keeps (:meth:`sync_snapshot`)."""
+        if not self._own_instance_id or not self._own_signing_key:
+            return 0
+        changed = 0
+        for space in await self._spaces.list_by_type(SpaceType.PUBLIC):
+            if space.owner_instance_id != self._own_instance_id:
+                continue
+            if not await self._gfs.list_publications_for_space(space.id):
+                continue
+            await self._promote_to_global(space)
+            changed += 1
+        for space in await self._spaces.list_by_type(SpaceType.GLOBAL):
+            if (
+                space.owner_instance_id == self._own_instance_id
+                and space.gfs_servers is None
+                and await self.sync_snapshot(space.id)
+            ):
+                changed += 1
+        return changed
+
+    async def _promote_to_global(self, space: Space) -> None:
+        log.info(
+            "space %s: public space listed on a GFS — it is global now "
+            "(public spaces are never on a GFS)",
+            space.id,
+        )
+        await self._spaces.save(replace(space, space_type=SpaceType.GLOBAL))
+        sequence = await self._spaces.increment_config_sequence(space.id)
+        # Same LWW bookkeeping as a local ``update_config``.
+        await self._spaces.set_config_author(space.id, self._own_instance_id)
+        await self._bus.publish(
+            SpaceConfigChanged(
+                space_id=space.id,
+                event_type=SpaceConfigEventType.PUBLIC_MODE_CHANGED.value,
+                payload={"space_type": SpaceType.GLOBAL.value},
+                sequence=sequence,
+            )
+        )
+        await self.sync_snapshot(space.id)
+
+    # ── Guards ────────────────────────────────────────────────────────────
+
+    def _require_publisher(self) -> GfsConnectionService:
+        if self._publisher is None:
+            raise RuntimeError("gfs connection service not attached")
+        return self._publisher
+
+    async def _require_owned(self, space_id: str) -> Space:
+        space = await self._spaces.get(space_id)
+        if space is None or space.dissolved:
+            raise KeyError(f"space {space_id!r} not found")
+        if (
+            not self._own_instance_id
+            or space.owner_instance_id != self._own_instance_id
+        ):
+            raise SpacePermissionError(
+                "only the space's owner household chooses its GFSs"
+            )
+        return space
+
+    async def _require_owner(self, space_id: str, actor_username: str) -> Space:
+        space = await self._require_owned(space_id)
+        user = await self._users.get(actor_username) if self._users else None
+        member = (
+            await self._spaces.get_member(space_id, user.user_id)
+            if user is not None
+            else None
+        )
+        if member is None or member.role != SpaceRole.OWNER:
+            raise SpacePermissionError("only the space's owner chooses its GFSs")
+        return space
+
+
+def _require_global(space: Space) -> None:
+    """Only a global space is listed; listing a public one would make it
+    global, which is a tier change (409 ``TIER_CHANGE_REQUIRED``)."""
+    if space.space_type is SpaceType.GLOBAL:
+        return
+    if space.space_type is SpaceType.PUBLIC:
+        raise TierChangeRequiredError()
+    raise SpaceNotPublishableError()
