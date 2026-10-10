@@ -21,6 +21,9 @@ import { Button } from '@/components/Button'
 import { MarkdownView } from '@/components/MarkdownView'
 import { Spinner } from '@/components/Spinner'
 import { SpaceSettings } from '@/components/SpaceSettings'
+import {
+  SpaceGfsServersReadOnly, hasGfsServersToShow,
+} from '@/components/SpaceGfsListing'
 import { SpaceThemeStudio } from '@/components/SpaceThemeStudio'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
@@ -179,6 +182,18 @@ export default function SpaceSettingsPage() {
           ← {t('space.settings_page.back')}
         </Button>
       </div>
+
+      {/* A plain member never sees the General tab, so where a global space
+       *  is listed (and whether their household can reach it while the
+       *  host is offline) is shown here, read-only — above the tabs, so it never reads as part
+       *  of the Bots tab. */}
+      {!canAdmin && hasGfsServersToShow(space) && (
+        <section class="sh-gfs-listing-section sh-gfs-listing-section--member"
+                 data-testid="member-gfs-servers">
+          <h3>{t('space.federation')}</h3>
+          <SpaceGfsServersReadOnly space={space} />
+        </section>
+      )}
 
       <nav class="sh-space-tabs" role="tablist">
         {visibleTabs.map(tab => (

@@ -15,6 +15,7 @@ vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 import { SpaceSettings } from './SpaceSettings'
 import { api } from '@/api'
 import { showToast } from './Toast'
+import { currentUser } from '@/store/auth'
 
 const apiMock = api as unknown as {
   get: ReturnType<typeof vi.fn>
@@ -503,186 +504,6 @@ describe('SpaceSettings', () => {
     await new Promise(r => setTimeout(r, 0))
     const [, body] = apiMock.patch.mock.calls[0]
     expect(body.name).toBe('New name')
-  })
-
-  it('renders a pending publication with a muted "Pending review" label, no public link', async () => {
-    // /api/gfs/connections then /api/spaces/{id}/publications.
-    apiMock.get.mockReset()
-    apiMock.get.mockImplementation((url: string) => {
-      if (url.includes('/connections')) {
-        return Promise.resolve([
-          { id: 'gfs-1', gfs_instance_id: 'i1', display_name: 'Town GFS',
-            inbox_url: 'https://gfs.example.com', status: 'active',
-            paired_at: '', published_space_count: 0 },
-        ])
-      }
-      return Promise.resolve([
-        { space_id: 's-1', gfs_connection_id: 'gfs-1',
-          published_at: '2026-06-06T00:00:00+00:00', status: 'pending' },
-      ])
-    })
-    const space = makeSpace()
-    const { container, queryByText } = render(
-      <SpaceSettings space={space} onUpdate={() => {}} />,
-    )
-    await new Promise(r => setTimeout(r, 0))
-    // Pending label shown, not the green "published" label.
-    expect(queryByText('space.publish_pending')).toBeTruthy()
-    expect(queryByText('space.published')).toBeNull()
-    // No live public link in pending state; the pending hint shows instead.
-    expect(container.querySelector('.sh-federation-public-url')).toBeNull()
-    expect(queryByText('space.publish_pending_hint')).toBeTruthy()
-  })
-
-  it('renders the live public link only for an active publication', async () => {
-    apiMock.get.mockReset()
-    apiMock.get.mockImplementation((url: string) => {
-      if (url.includes('/connections')) {
-        return Promise.resolve([
-          { id: 'gfs-1', gfs_instance_id: 'i1', display_name: 'Town GFS',
-            inbox_url: 'https://gfs.example.com', status: 'active',
-            paired_at: '', published_space_count: 1 },
-        ])
-      }
-      return Promise.resolve([
-        { space_id: 's-1', gfs_connection_id: 'gfs-1',
-          published_at: '2026-06-06T00:00:00+00:00', status: 'active' },
-      ])
-    })
-    const space = makeSpace()
-    const { container, queryByText } = render(
-      <SpaceSettings space={space} onUpdate={() => {}} />,
-    )
-    await new Promise(r => setTimeout(r, 0))
-    expect(queryByText('space.published')).toBeTruthy()
-    const link = container.querySelector(
-      '.sh-federation-public-url__link',
-    ) as HTMLAnchorElement | null
-    expect(link).toBeTruthy()
-    expect(link!.getAttribute('href')).toBe(
-      'https://gfs.example.com/spaces/s-1',
-    )
-  })
-
-  function gfsWith(published: boolean) {
-    apiMock.get.mockReset()
-    apiMock.get.mockImplementation((url: string) => {
-      if (url.includes('/connections')) {
-        return Promise.resolve([
-          { id: 'gfs-1', gfs_instance_id: 'i1', display_name: 'Town GFS',
-            inbox_url: 'https://gfs.example.com', status: 'active',
-            paired_at: '', published_space_count: published ? 1 : 0 },
-        ])
-      }
-      return Promise.resolve(published
-        ? [{ space_id: 's-1', gfs_connection_id: 'gfs-1',
-             published_at: '2026-06-06T00:00:00+00:00', status: 'active' }]
-        : [])
-    })
-  }
-
-  it.each(['private', 'household'] as const)(
-    'a %s space offers no Publish button and says why', async (tier) => {
-      gfsWith(false)
-      const { container, queryByTestId } = render(
-        <SpaceSettings space={makeSpace({ space_type: tier })} onUpdate={() => {}} />,
-      )
-      await new Promise(r => setTimeout(r, 0))
-      const publishBtns = Array.from(container.querySelectorAll('button'))
-        .filter(b => b.textContent === 'gfs.publish')
-      expect(publishBtns).toHaveLength(0)
-      expect(queryByTestId('gfs-publish-tier-note')).toBeTruthy()
-    })
-
-  it('a private space that is still listed can be unpublished', async () => {
-    gfsWith(true)
-    const { container } = render(
-      <SpaceSettings space={makeSpace({ space_type: 'private' })} onUpdate={() => {}} />,
-    )
-    await new Promise(r => setTimeout(r, 0))
-    const unpublish = Array.from(container.querySelectorAll('button'))
-      .filter(b => b.textContent === 'gfs.unpublish')
-    expect(unpublish).toHaveLength(1)
-  })
-
-  it.each(['public', 'global'] as const)(
-    'a %s space keeps its Publish button and shows no tier note', async (tier) => {
-      gfsWith(false)
-      const { container, queryByTestId } = render(
-        <SpaceSettings space={makeSpace({ space_type: tier })} onUpdate={() => {}} />,
-      )
-      await new Promise(r => setTimeout(r, 0))
-      const publishBtns = Array.from(container.querySelectorAll('button'))
-        .filter(b => b.textContent === 'gfs.publish')
-      expect(publishBtns).toHaveLength(1)
-      expect(queryByTestId('gfs-publish-tier-note')).toBeNull()
-    })
-
-  it('does NOT render a Publish button for a non-active (pending) GFS', async () => {
-    apiMock.get.mockReset()
-    apiMock.get.mockImplementation((url: string) => {
-      if (url.includes('/connections')) {
-        return Promise.resolve([
-          { id: 'gfs-active', gfs_instance_id: 'i1', display_name: 'Active GFS',
-            inbox_url: 'https://active.example.com', status: 'active',
-            paired_at: '', published_space_count: 0 },
-          { id: 'gfs-pending', gfs_instance_id: 'i2', display_name: 'Pending GFS',
-            inbox_url: 'https://pending.example.com', status: 'pending',
-            paired_at: '', published_space_count: 0 },
-        ])
-      }
-      return Promise.resolve([]) // nothing published
-    })
-    const space = makeSpace({ space_type: 'public' })
-    const { container, queryByText } = render(
-      <SpaceSettings space={space} onUpdate={() => {}} />,
-    )
-    await new Promise(r => setTimeout(r, 0))
-    // Active GFS row renders with a Publish button.
-    expect(container.querySelector('[data-testid="gfs-row-gfs-active"]')).toBeTruthy()
-    // Pending GFS gets NO publish row at all.
-    expect(container.querySelector('[data-testid="gfs-row-gfs-pending"]')).toBeNull()
-    // Exactly one Publish button (the active one).
-    const publishBtns = Array.from(container.querySelectorAll('button'))
-      .filter(b => b.textContent === 'gfs.publish')
-    expect(publishBtns).toHaveLength(1)
-    // A muted note explains the held connection.
-    expect(queryByText('space.gfs_pending_note')).toBeTruthy()
-  })
-
-  it('confirms before publishing, then POSTs and shows the returned status', async () => {
-    apiMock.get.mockReset()
-    apiMock.get.mockImplementation((url: string) => {
-      if (url.includes('/connections')) {
-        return Promise.resolve([
-          { id: 'gfs-1', gfs_instance_id: 'i1', display_name: 'Town GFS',
-            inbox_url: 'https://gfs.example.com', status: 'active',
-            paired_at: '', published_space_count: 0 },
-        ])
-      }
-      return Promise.resolve([]) // not published yet
-    })
-    apiMock.post = vi.fn().mockResolvedValue({
-      space_id: 's-1', gfs_connection_id: 'gfs-1',
-      published_at: '2026-06-06T00:00:00+00:00', status: 'pending',
-    })
-    const space = makeSpace({ space_type: 'public' })
-    const { container, getByText, queryByText } = render(
-      <SpaceSettings space={space} onUpdate={() => {}} />,
-    )
-    await new Promise(r => setTimeout(r, 0))
-    // Clicking Publish opens the confirm dialog — it does NOT post yet.
-    fireEvent.click(getByText('gfs.publish'))
-    expect(apiMock.post).not.toHaveBeenCalled()
-    const dialog = container.querySelector('[role="dialog"]') as HTMLElement | null
-    expect(dialog).toBeTruthy()
-    expect(dialog!.textContent).toContain('space.gfs.publish_confirm_title')
-    // Confirm → POST fires, and the row reflects the pending status.
-    const confirmBtn = dialog!.querySelector('.sh-btn--primary') as HTMLButtonElement
-    fireEvent.click(confirmBtn)
-    await new Promise(r => setTimeout(r, 0))
-    expect(apiMock.post).toHaveBeenCalledWith('/api/spaces/s-1/publish/gfs-1')
-    expect(queryByText('space.publish_pending')).toBeTruthy()
   })
 
   it('shows the Unarchive button for a plain admin-archived space', () => {
@@ -1604,5 +1425,204 @@ describe('SpaceSettings — links under the HA ingress prefix', () => {
     const link = [...container.querySelectorAll('a')]
       .find(a => a.textContent?.includes('space.location.manage_zones'))
     expect(link?.getAttribute('href')).toBe('/api/hassio_ingress/tok/spaces/s-1/zones')
+  })
+})
+
+// Proposing the move into the global tier: the owner household names the
+// GFSs it is listed on (at least one); a remote admin can't — the owner
+// picks them later.
+describe('SpaceSettings — proposing Global names the GFSs', () => {
+  const conns = [
+    { id: 'g-a', gfs_instance_id: 'i1', display_name: 'Town GFS',
+      inbox_url: 'https://town.example', status: 'active', paired_at: '',
+      published_space_count: 0 },
+    { id: 'g-b', gfs_instance_id: 'i2', display_name: 'Club GFS',
+      inbox_url: 'https://club.example', status: 'active', paired_at: '',
+      published_space_count: 0 },
+    { id: 'g-h', gfs_instance_id: 'i3', display_name: 'Held GFS',
+      inbox_url: 'https://held.example', status: 'pending', paired_at: '',
+      published_space_count: 0 },
+  ]
+  const tierSelect = (c: Element) => [...c.querySelectorAll('select')].find(s =>
+    [...s.options].some(o => o.value === 'global')) as HTMLSelectElement
+  const boxes = (c: Element) =>
+    [...c.querySelectorAll<HTMLInputElement>('input[name="space-tier-gfs"]')]
+
+  function withConnections(rows: typeof conns) {
+    apiMock.get.mockReset()
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(url === '/api/gfs/connections' ? rows : []))
+  }
+
+  beforeEach(() => {
+    apiMock.post = vi.fn().mockResolvedValue({ proposal: { status: 'executed' } })
+    vi.mocked(showToast).mockReset()
+  })
+
+  it('offers the active GFSs, requires one, and sends the choice', async () => {
+    withConnections(conns)
+    const onUpdate = vi.fn()
+    const { container, getByText } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={onUpdate} isOwner />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    // No checklist until Global is picked.
+    expect(boxes(container)).toHaveLength(0)
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(boxes(container).map(b => b.value)).toEqual(['g-a', 'g-b'])
+    expect(boxes(container).every(b => !b.checked)).toBe(true)
+    // Nothing ticked → the reason, no request.
+    fireEvent.click(getByText('space.tier.propose'))
+    expect(apiMock.post).not.toHaveBeenCalled()
+    expect(container.querySelector('#space-tier-error')!.textContent)
+      .toBe('error.gfs_selection_required')
+    fireEvent.click(boxes(container)[1])
+    expect(container.querySelector('#space-tier-error')).toBeNull()
+    fireEvent.click(getByText('space.tier.propose'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiMock.post).toHaveBeenCalledWith('/api/spaces/s-1/proposals', {
+      action: 'set_public_tier', space_type: 'global', gfs_ids: ['g-b'],
+    })
+    expect(onUpdate).toHaveBeenCalled()
+  })
+
+  it('pre-ticks the only active GFS', async () => {
+    withConnections([conns[0], conns[2]])
+    const { container } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'private' })} onUpdate={() => {}} />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(boxes(container).map(b => [b.value, b.checked])).toEqual([['g-a', true]])
+  })
+
+  it('with no active GFS, says how to connect one and holds the proposal', async () => {
+    withConnections([conns[2]])
+    currentUser.value = {
+      user_id: 'u1', username: 'u', display_name: 'U', is_admin: true,
+    } as typeof currentUser.value
+    const { container, getByText, getByTestId } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(getByTestId('tier-gfs-none').querySelector('a')!.getAttribute('href'))
+      .toBe('/connections')
+    expect((getByText('space.tier.propose').closest('button') as HTMLButtonElement).disabled)
+      .toBe(true)
+  })
+
+  it('a remote admin sees that the owner chooses, and sends no gfs_ids', async () => {
+    withConnections(conns)
+    apiMock.post = vi.fn().mockResolvedValue({ proposal: { status: 'pending' } })
+    const { container, getByText, getByTestId } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} isRemoteSpace />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    // A remote stub never loads this household's connections.
+    expect(apiMock.get).not.toHaveBeenCalledWith('/api/gfs/connections')
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(getByTestId('tier-gfs-owner-chooses').textContent).toBe('space.tier.owner_chooses_gfs')
+    expect(boxes(container)).toHaveLength(0)
+    fireEvent.click(getByText('space.tier.propose'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiMock.post).toHaveBeenCalledWith('/api/spaces/s-1/proposals', {
+      action: 'set_public_tier', space_type: 'global',
+    })
+  })
+
+  it('leaving Global warns that every GFS drops it', async () => {
+    withConnections(conns)
+    const { container, queryByTestId } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'global' })} onUpdate={() => {}} />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    expect(queryByTestId('tier-leaving-global')).toBeNull()
+    fireEvent.change(tierSelect(container), { target: { value: 'public' } })
+    expect(queryByTestId('tier-leaving-global')).toBeTruthy()
+  })
+
+  it('the owner of a global space gets the GFS editor; a public one the note', async () => {
+    apiMock.get.mockReset()
+    apiMock.get.mockImplementation((url: string) => Promise.resolve(
+      url.endsWith('/gfs-servers')
+        ? { space_type: 'global', gfs_ids: [], max: 8, unlisted: true, servers: [], listings: [], available: [] }
+        : [],
+    ))
+    const owner = render(
+      <SpaceSettings space={makeSpace({ space_type: 'global' })} onUpdate={() => {}} isOwner />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    expect(owner.getByTestId('gfs-listing-owner')).toBeTruthy()
+    expect(owner.getByTestId('gfs-unlisted-banner')).toBeTruthy()
+    owner.unmount()
+    const pub = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} isOwner />,
+    )
+    expect(pub.getByTestId('gfs-public-note')).toBeTruthy()
+    expect(pub.queryByTestId('gfs-listing-owner')).toBeNull()
+  })
+})
+
+describe('SpaceSettings — the Global checklist, edge states', () => {
+  const town = { id: 'g-a', gfs_instance_id: 'i1', display_name: 'Town GFS',
+    inbox_url: 'https://town.example', status: 'active', paired_at: '',
+    published_space_count: 0 }
+  const club = { ...town, id: 'g-b', gfs_instance_id: 'i2', display_name: 'Club GFS',
+    inbox_url: 'https://club.example' }
+  const tierSelect = (c: Element) => [...c.querySelectorAll('select')].find(s =>
+    [...s.options].some(o => o.value === 'global')) as HTMLSelectElement
+
+  beforeEach(() => {
+    apiMock.post = vi.fn().mockResolvedValue({ proposal: { status: 'pending' } })
+  })
+
+  it('a failed connections load offers Retry, not "connect a GFS first"', async () => {
+    apiMock.get.mockReset()
+    apiMock.get.mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue([town])
+    const { container, getByTestId, queryByTestId, getByText } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(getByTestId('tier-gfs-load-failed').textContent).toContain('space.gfs_listing.load_failed')
+    expect(queryByTestId('tier-gfs-none')).toBeNull()
+    fireEvent.click(getByText('common.retry'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(queryByTestId('tier-gfs-load-failed')).toBeNull()
+    expect(container.querySelector('input[name="space-tier-gfs"]')).toBeTruthy()
+  })
+
+  it('a new tier choice clears the "choose at least one" error', async () => {
+    apiMock.get.mockReset()
+    apiMock.get.mockResolvedValue([town, club])
+    const { container, getByText } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    fireEvent.click(getByText('space.tier.propose'))
+    expect(container.querySelector('#space-tier-error')).toBeTruthy()
+    // The error focuses the list's first box.
+    await vi.waitFor(() => expect(document.activeElement)
+      .toBe(container.querySelector('input[name="space-tier-gfs"]')))
+    fireEvent.change(tierSelect(container), { target: { value: 'household' } })
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(container.querySelector('#space-tier-error')).toBeNull()
+  })
+
+  it('hides the public-space note while the Global checklist is open', async () => {
+    apiMock.get.mockReset()
+    apiMock.get.mockResolvedValue([town])
+    const { container, queryByTestId } = render(
+      <SpaceSettings space={makeSpace({ space_type: 'public' })} onUpdate={() => {}} isOwner />,
+    )
+    await new Promise(r => setTimeout(r, 0))
+    expect(queryByTestId('gfs-public-note')).toBeTruthy()
+    fireEvent.change(tierSelect(container), { target: { value: 'global' } })
+    expect(queryByTestId('gfs-public-note')).toBeNull()
+    fireEvent.change(tierSelect(container), { target: { value: 'public' } })
+    expect(queryByTestId('gfs-public-note')).toBeTruthy()
   })
 })

@@ -361,6 +361,51 @@ export interface Space {
    *  opaque connection-server channel — its owner turned
    *  ``features.private_gfs`` on and the channel is registered. */
   gfs_private_channel?: boolean
+  /** ``GET /api/spaces/{id}`` only: where a GLOBAL space is listed — the
+   *  owner's signed list, read-only. ``null`` for any other tier or while
+   *  no list is known yet. */
+  gfs_servers?: SpaceGfsServer[] | null
+  /** ``GET /api/spaces/{id}`` only: global but listed on no GFS ("global,
+   *  not listed") — the SPA shows a banner until the owner picks one. */
+  gfs_unlisted?: boolean
+}
+
+/** One GFS a global space is listed on, as every member sees it. */
+export interface SpaceGfsServer {
+  display_name: string
+  inbox_url: string
+  /** This household holds an active connection to that GFS. */
+  connected: boolean
+}
+
+/** ``GET /api/spaces/{id}/gfs-servers`` — the owner's picker. */
+export interface SpaceGfsServersView {
+  space_type: Space['space_type']
+  /** Connection ids that list the space. */
+  gfs_ids: string[]
+  /** The server's cap on GFSs per space. */
+  max: number
+  /** Global, but listed on no GFS. */
+  unlisted: boolean
+  servers: SpaceGfsServer[] | null
+  /** Every connection holding a listing of the space, whatever the
+   *  connection's state (a pending / suspended one included, so its
+   *  listing can still be withdrawn). */
+  listings: {
+    gfs_id: string
+    display_name: string
+    inbox_url: string
+    connection_status: GfsConnection['status']
+    listing_status: GfsSpacePublication['status']
+  }[]
+  /** Every active connection of this household — what can be added. */
+  available: {
+    gfs_id: string
+    display_name: string
+    inbox_url: string
+    listed: boolean
+    listing_status: GfsSpacePublication['status'] | null
+  }[]
 }
 
 /** A space feature's access level (``SpaceFeatureAccess`` server-side). */

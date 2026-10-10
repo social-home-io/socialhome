@@ -4,7 +4,7 @@ import { render, fireEvent, act, waitFor, cleanup } from '@testing-library/preac
 const post = vi.fn()
 // The dialog loads GFS connections on open to decide whether the Global tier
 // is selectable. Tests set ``gfsConns`` per-case before opening.
-let gfsConns: { status: string }[] = []
+let gfsConns: { status: string; id?: string; display_name?: string; inbox_url?: string }[] = []
 const get = vi.fn(async (u: string) =>
   u === '/api/gfs/connections' ? gfsConns : [],
 )
@@ -272,5 +272,99 @@ describe('SpaceCreateDialog — protected account', () => {
     await waitFor(() => expect(visibility(container, 'global').disabled).toBe(false))
     expect(visibility(container, 'public').disabled).toBe(false)
     expect(container.querySelector('[data-capability="public_spaces"]')).toBeNull()
+  })
+})
+
+// A global space is listed only on the GFSs the creator ticks — never on
+// every connected one — and at least one is required.
+describe('SpaceCreateDialog — choosing the GFSs of a global space', () => {
+  const gfsA = { id: 'g-a', display_name: 'Town GFS', inbox_url: 'https://town.example', status: 'active' }
+  const gfsB = { id: 'g-b', display_name: 'Club GFS', inbox_url: 'https://club.example/', status: 'active' }
+  const gfsHeld = { id: 'g-h', display_name: 'Held GFS', inbox_url: 'https://held.example', status: 'pending' }
+  const checklist = (c: Element) =>
+    c.querySelector('[data-testid="space-create-checklist"]') as HTMLElement | null
+  const boxes = (c: Element) =>
+    [...c.querySelectorAll<HTMLInputElement>('input[name="space-create-gfs"]')]
+
+  beforeEach(() => { post.mockReset(); get.mockClear(); gfsConns = []; cleanup() })
+
+  async function openGlobal() {
+    const r = await open()
+    await waitFor(() => expect(visibility(r.container, 'global').disabled).toBe(false))
+    await act(async () => { fireEvent.input(nameInput(r.container), { target: { value: 'World' } }) })
+    await act(async () => { fireEvent.click(pickVisibility(r.container, 'global')) })
+    return r
+  }
+
+  it('shows no checklist until Global is chosen', async () => {
+    gfsConns = [gfsA]
+    const { container } = await open()
+    await waitFor(() => expect(visibility(container, 'global').disabled).toBe(false))
+    expect(checklist(container)).toBeNull()
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    expect(checklist(container)).toBeNull()
+  })
+
+  it('pre-ticks the only active GFS and sends it as gfs_ids', async () => {
+    gfsConns = [gfsA, gfsHeld]
+    post.mockResolvedValue({ id: 's1' })
+    const { container } = await openGlobal()
+    // The held (pending) connection is not offered.
+    expect(boxes(container).map(b => b.value)).toEqual(['g-a'])
+    expect(boxes(container)[0].checked).toBe(true)
+    // Each row names the server and its host.
+    expect(checklist(container)!.textContent).toContain('Town GFS')
+    expect(checklist(container)!.textContent).toContain('town.example')
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect(post.mock.calls[0][1]).toMatchObject({ space_type: 'global', gfs_ids: ['g-a'] })
+  })
+
+  it('ticks nothing with several GFSs and requires at least one', async () => {
+    gfsConns = [gfsA, gfsB]
+    post.mockResolvedValue({ id: 's1' })
+    const { container } = await openGlobal()
+    expect(boxes(container).map(b => b.checked)).toEqual([false, false])
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    // Nothing is sent; the reason sits under the list, announced.
+    expect(post).not.toHaveBeenCalled()
+    const err = container.querySelector('#space-create-error') as HTMLElement
+    expect(err.textContent).toBe('error.gfs_selection_required')
+    expect(err.getAttribute('role')).toBe('alert')
+    expect(checklist(container)!.getAttribute('aria-describedby')).toBe('space-create-error')
+    // The error may be below the fold on a phone: the list is brought into
+    // view and its first box takes focus.
+    await waitFor(() => expect(document.activeElement).toBe(boxes(container)[0]))
+    // Ticking one clears the error and the create goes through with it.
+    await act(async () => { fireEvent.click(boxes(container)[1]) })
+    expect(container.querySelector('#space-create-error')).toBeNull()
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect(post.mock.calls[0][1]).toMatchObject({ gfs_ids: ['g-b'] })
+  })
+
+  it('sends every ticked GFS, and none for a non-global space', async () => {
+    gfsConns = [gfsA, gfsB]
+    post.mockResolvedValue({ id: 's1' })
+    const { container } = await openGlobal()
+    await act(async () => { fireEvent.click(boxes(container)[0]) })
+    await act(async () => { fireEvent.click(boxes(container)[1]) })
+    // Switching tiers keeps the choice for a switch back, but a public
+    // space never carries one.
+    await act(async () => { fireEvent.click(pickVisibility(container, 'public')) })
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect('gfs_ids' in (post.mock.calls[0][1] as object)).toBe(false)
+  })
+
+  it('shows the server refusal when the create fails', async () => {
+    const { showToast } = await import('./Toast')
+    gfsConns = [gfsA]
+    post.mockRejectedValue(new Error('Choose at least one GFS to list this global space on.'))
+    const { container } = await openGlobal()
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      'Choose at least one GFS to list this global space on.', 'error',
+    ))
   })
 })
