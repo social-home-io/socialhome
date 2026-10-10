@@ -4,13 +4,14 @@ import { render, fireEvent, waitFor, cleanup } from '@testing-library/preact'
 vi.mock('@/i18n/i18n', () => ({
   t: (k: string, p?: Record<string, string>) => (p ? `${k}:${JSON.stringify(p)}` : k),
 }))
-vi.mock('@/api', () => ({
+vi.mock('@/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api')>()),
   api: { get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn() },
 }))
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 
 import { SpaceGfsListing, hasGfsServersToShow, publicSpaceUrl } from './SpaceGfsListing'
-import { api } from '@/api'
+import { api, ApiError as RealApiError } from '@/api'
 import { showToast } from './Toast'
 import { currentUser } from '@/store/auth'
 import type { Space, SpaceGfsServersView } from '@/types'
@@ -33,18 +34,29 @@ function space(over: Partial<Space> = {}): Space {
 const TOWN = { gfs_id: 'g-town', display_name: 'Town GFS', inbox_url: 'https://town.example' }
 const CLUB = { gfs_id: 'g-club', display_name: 'Club GFS', inbox_url: 'https://club.example/' }
 
+/** The owner's view as the server builds it: unless a test spells out
+ *  ``listings``, they are the listed ``available`` rows (active
+ *  connections). */
 function ownerView(over: Partial<SpaceGfsServersView> = {}): SpaceGfsServersView {
+  const available = over.available ?? [
+    { ...TOWN, listed: true, listing_status: 'active' },
+    { ...CLUB, listed: false, listing_status: null },
+  ]
   return {
     space_type: 'global',
     gfs_ids: ['g-town'],
     max: 8,
     unlisted: false,
     servers: [{ display_name: 'Town GFS', inbox_url: 'https://town.example', connected: true }],
-    available: [
-      { ...TOWN, listed: true, listing_status: 'active' },
-      { ...CLUB, listed: false, listing_status: null },
-    ],
+    listings: available.filter(a => a.listed).map(a => ({
+      gfs_id: a.gfs_id,
+      display_name: a.display_name,
+      inbox_url: a.inbox_url,
+      connection_status: 'active' as const,
+      listing_status: a.listing_status ?? 'active',
+    })),
     ...over,
+    available,
   }
 }
 
@@ -205,6 +217,65 @@ describe('SpaceGfsListing — the owner edits the list', () => {
     expect(apiMock.delete).toHaveBeenCalledTimes(1)
     release(ownerView())
     await flush()
+  })
+
+  it('lists a listing held over an inactive connection, and Remove still works', async () => {
+    // A suspended connection is absent from ``available`` but its listing
+    // is in ``listings``: the owner can see and withdraw it.
+    const HELD = { gfs_id: 'g-held', display_name: 'Held GFS', inbox_url: 'https://held.example' }
+    apiMock.get.mockResolvedValue(ownerView({
+      gfs_ids: ['g-held', 'g-town'],
+      listings: [
+        { ...HELD, connection_status: 'suspended', listing_status: 'active' },
+        { ...TOWN, connection_status: 'active', listing_status: 'active' },
+      ],
+    }))
+    apiMock.delete.mockResolvedValue(undefined)
+    const { getByTestId, queryByTestId } = renderOwner()
+    await flush()
+    const row = getByTestId('gfs-row-g-held')
+    expect(row.textContent).toContain('space.gfs_listing.connection_inactive')
+    expect(getByTestId('gfs-row-inactive-g-held').textContent)
+      .toBe('space.gfs_listing.connection_inactive_hint')
+    // No public link for a listing nobody keeps up to date.
+    expect(row.querySelector('.sh-federation-public-url')).toBeNull()
+    expect(queryByTestId('gfs-row-inactive-g-town')).toBeNull()
+    fireEvent.click(row.querySelector('button[aria-label]')!)
+    await waitFor(() => expect(apiMock.delete).toHaveBeenCalledWith('/api/spaces/s-1/publish/g-held'))
+  })
+
+  it('a listing on an inactive connection counts toward the last-one confirm', async () => {
+    apiMock.get.mockResolvedValue(ownerView({
+      gfs_ids: ['g-held'],
+      listings: [{ gfs_id: 'g-held', display_name: 'Held GFS', inbox_url: 'https://held.example',
+        connection_status: 'pending', listing_status: 'active' }],
+      available: [{ ...TOWN, listed: false, listing_status: null }],
+    }))
+    const { getByTestId, container } = renderOwner()
+    await flush()
+    // The active connection is offered for adding; the held one is a row.
+    expect([...(getByTestId('gfs-add-select') as HTMLSelectElement).options].map(o => o.value))
+      .toEqual(['g-town'])
+    fireEvent.click(getByTestId('gfs-row-g-held').querySelector('button[aria-label]')!)
+    expect(container.querySelector('[role="dialog"]')).toBeTruthy()
+  })
+
+  it('a 404 on Remove means it is already gone — success, not an error', async () => {
+    const two = ownerView({
+      available: [
+        { ...TOWN, listed: true, listing_status: 'active' },
+        { ...CLUB, listed: true, listing_status: 'active' },
+      ],
+    })
+    apiMock.get.mockResolvedValue(two)
+    apiMock.delete.mockRejectedValue(new RealApiError(404, '/api/spaces/s-1/publish/g-club', null))
+    const { getByTestId } = renderOwner()
+    await flush()
+    fireEvent.click(getByTestId('gfs-row-g-club').querySelector('button[aria-label]')!)
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      'space.gfs_listing.removed:{"name":"Club GFS"}', 'success',
+    ))
+    expect(showToast).not.toHaveBeenCalledWith(expect.anything(), 'error')
   })
 
   it('removing the last GFS asks first, and Cancel keeps it', async () => {

@@ -490,6 +490,8 @@
   "space.gfs_listing.load_failed": "Shown with a Retry button when the GFS list can't load.",
   "space.gfs_listing.connected": "Status on a GFS row: this household is connected to that GFS.",
   "space.gfs_listing.listed": "Status on a GFS row in the owner's list: the GFS lists the space and it is live there.",
+  "space.gfs_listing.connection_inactive": "Status on a GFS row in the owner's list when this household's connection to that GFS is pending or suspended.",
+  "space.gfs_listing.connection_inactive_hint": "Shown under such a row: the listing can't be refreshed, but Remove still works.",
   "space.gfs_listing.connect_hint": "Shown on a GFS row this household isn't connected to; {name} is the GFS name. Followed by a link 'Open connections'.",
   "space.gfs_listing.connect_link": "Link to the household's Connections page.",
   "space.gfs_listing.connect_hint_member": "Like connect_hint, for a non-admin (only admins can connect a GFS)."

@@ -1644,6 +1644,8 @@
   "space.gfs_listing.load_failed": "Impossible de charger la liste des GFS.",
   "space.gfs_listing.connected": "Connecté",
   "space.gfs_listing.listed": "Référencé",
+  "space.gfs_listing.connection_inactive": "Connexion inactive",
+  "space.gfs_listing.connection_inactive_hint": "La connexion de ce foyer à ce GFS n'est pas active : le référencement n'est donc plus mis à jour. Vous pouvez quand même le retirer.",
   "space.gfs_listing.connect_hint": "Connectez-vous à {name} pour rester à jour quand l'hôte est hors ligne.",
   "space.gfs_listing.connect_link": "Ouvrir les connexions",
   "space.gfs_listing.connect_hint_member": "Demandez à un administrateur de votre foyer de se connecter à {name} pour rester à jour quand l'hôte est hors ligne.",

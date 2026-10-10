@@ -1649,6 +1649,8 @@
   "space.gfs_listing.load_failed": "Die GFS-Liste konnte nicht geladen werden.",
   "space.gfs_listing.connected": "Verbunden",
   "space.gfs_listing.listed": "Gelistet",
+  "space.gfs_listing.connection_inactive": "Verbindung nicht aktiv",
+  "space.gfs_listing.connection_inactive_hint": "Die Verbindung dieses Haushalts zu diesem GFS ist nicht aktiv, daher wird die Listung nicht aktualisiert. Du kannst sie trotzdem entfernen.",
   "space.gfs_listing.connect_hint": "Verbinde dich mit {name}, um auf dem Laufenden zu bleiben, während der Gastgeber offline ist.",
   "space.gfs_listing.connect_link": "Verbindungen öffnen",
   "space.gfs_listing.connect_hint_member": "Bitte einen Admin deines Haushalts, sich mit {name} zu verbinden, damit du auf dem Laufenden bleibst, während der Gastgeber offline ist.",

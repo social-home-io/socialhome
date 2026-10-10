@@ -1644,6 +1644,8 @@
   "space.gfs_listing.load_failed": "De GFS-lijst kon niet worden geladen.",
   "space.gfs_listing.connected": "Verbonden",
   "space.gfs_listing.listed": "Vermeld",
+  "space.gfs_listing.connection_inactive": "Verbinding niet actief",
+  "space.gfs_listing.connection_inactive_hint": "De verbinding van dit huishouden met deze GFS is niet actief, dus de vermelding wordt niet bijgewerkt. Je kunt hem nog steeds verwijderen.",
   "space.gfs_listing.connect_hint": "Verbind met {name} om bij te blijven terwijl de host offline is.",
   "space.gfs_listing.connect_link": "Verbindingen openen",
   "space.gfs_listing.connect_hint_member": "Vraag een beheerder van je huishouden om met {name} te verbinden, zodat je bijblijft terwijl de host offline is.",

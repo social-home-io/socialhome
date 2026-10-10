@@ -1546,7 +1546,7 @@ describe('SpaceSettings — proposing Global names the GFSs', () => {
     apiMock.get.mockReset()
     apiMock.get.mockImplementation((url: string) => Promise.resolve(
       url.endsWith('/gfs-servers')
-        ? { space_type: 'global', gfs_ids: [], max: 8, unlisted: true, servers: [], available: [] }
+        ? { space_type: 'global', gfs_ids: [], max: 8, unlisted: true, servers: [], listings: [], available: [] }
         : [],
     ))
     const owner = render(

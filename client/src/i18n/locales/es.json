@@ -1671,6 +1671,8 @@
   "space.gfs_listing.load_failed": "No se pudo cargar la lista de GFS.",
   "space.gfs_listing.connected": "Conectado",
   "space.gfs_listing.listed": "Listado",
+  "space.gfs_listing.connection_inactive": "Conexión no activa",
+  "space.gfs_listing.connection_inactive_hint": "La conexión de este hogar con este GFS no está activa, así que el listado no se mantiene al día. Aun así puedes quitarlo.",
   "space.gfs_listing.connect_hint": "Conéctate a {name} para estar al día mientras el anfitrión está desconectado.",
   "space.gfs_listing.connect_link": "Abrir conexiones",
   "space.gfs_listing.connect_hint_member": "Pide a un administrador de tu hogar que se conecte a {name} para estar al día mientras el anfitrión está desconectado.",

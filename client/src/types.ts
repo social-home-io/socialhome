@@ -388,7 +388,17 @@ export interface SpaceGfsServersView {
   /** Global, but listed on no GFS. */
   unlisted: boolean
   servers: SpaceGfsServer[] | null
-  /** Every active connection of this household. */
+  /** Every connection holding a listing of the space, whatever the
+   *  connection's state (a pending / suspended one included, so its
+   *  listing can still be withdrawn). */
+  listings: {
+    gfs_id: string
+    display_name: string
+    inbox_url: string
+    connection_status: GfsConnection['status']
+    listing_status: GfsSpacePublication['status']
+  }[]
+  /** Every active connection of this household — what can be added. */
   available: {
     gfs_id: string
     display_name: string
