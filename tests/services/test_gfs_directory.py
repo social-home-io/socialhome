@@ -251,3 +251,42 @@ async def test_forget_drops_everything(clock):
     await cache.directory(_conn())
     cache.forget("ignored", "args")
     assert len(cache) == 0
+
+
+async def test_forget_invalidates_a_download_in_flight(clock):
+    """L2: a directory read started before ``forget`` never stores its
+    (possibly stale) result; the next caller downloads afresh."""
+    s = _Session(body=_dir("old"))
+    s.gate = asyncio.Event()
+    cache = GfsDirectoryCache(lambda: s)
+    stale = asyncio.create_task(cache.directory(_conn()))
+    await asyncio.sleep(0)
+    cache.forget()
+    s.gate.set()
+    assert await stale == {"old": "trusted"}  # that caller still gets it …
+    assert len(cache) == 0  # … but it is not cached
+    s.raw = json.dumps(_dir("new")).encode()
+    assert await cache.directory(_conn()) == {"new": "trusted"}
+    assert len(s.calls) == 2
+
+
+async def test_the_directory_is_parsed_off_the_event_loop(clock, monkeypatch):
+    """L1: up to 64 MiB of JSON is parsed in a worker thread."""
+    seen: list = []
+    real = mod.asyncio.to_thread
+
+    async def _spy(fn, *args):
+        seen.append(fn)
+        return await real(fn, *args)
+
+    monkeypatch.setattr(mod.asyncio, "to_thread", _spy)
+    s = _Session(body=_dir("a"))
+    assert await GfsDirectoryCache(lambda: s).directory(_conn()) == {"a": "trusted"}
+    assert seen == [mod._parse_directory]
+    assert mod.MAX_DIRECTORY_BODY_BYTES == 64 * 1024 * 1024
+
+
+async def test_an_over_cap_body_is_refused(clock, monkeypatch):
+    monkeypatch.setattr(mod, "MAX_DIRECTORY_BODY_BYTES", 10)
+    s = _Session(body=_dir("a", "b"))
+    assert await GfsDirectoryCache(lambda: s).directory(_conn()) is None

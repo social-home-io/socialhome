@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -25,7 +26,7 @@ import aiohttp
 
 from ..domain.federation import GfsConnection
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODE_STRICT
-from .gfs_http import read_json_capped
+from .gfs_http import read_body_capped
 
 log = logging.getLogger(__name__)
 
@@ -50,10 +51,10 @@ MISS_REFRESH_S: float = 5.0
 #: unfollowable, and never answered by falling back to per-space probes,
 #: which is the leak this cache exists to prevent. Sized with headroom far
 #: past any realistic connection server (member publish read the directory
-#: uncapped before; ~500 bytes per listing puts 500 000 ids near 256 MiB).
-#: Only the ids (and their publish mode) are kept after parsing.
+#: uncapped before). The body is parsed in a worker thread (CPU-bound), and
+#: only the ids (and their publish mode) are kept after parsing.
 MAX_DIRECTORY_IDS: int = 500_000
-MAX_DIRECTORY_BODY_BYTES: int = 256 * 1024 * 1024
+MAX_DIRECTORY_BODY_BYTES: int = 64 * 1024 * 1024
 
 #: The directory is a bigger body than a single listing; still bounded.
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=10)
@@ -74,7 +75,7 @@ class GfsDirectoryCache:
     does not linger.
     """
 
-    __slots__ = ("_client", "_entries", "_inflight")
+    __slots__ = ("_client", "_entries", "_inflight", "_generation")
 
     def __init__(self, client: Callable[[], aiohttp.ClientSession | None]) -> None:
         # A getter, not a session: the cookie-less publish session is
@@ -82,13 +83,20 @@ class GfsDirectoryCache:
         self._client = client
         self._entries: dict[str, tuple[dict[str, str] | None, float]] = {}
         self._inflight: dict[str, asyncio.Task[dict[str, str] | None]] = {}
+        # Bumped by :meth:`forget`: a download started before it never
+        # stores its (possibly stale) result.
+        self._generation = 0
 
     def __len__(self) -> int:
         return len(self._entries)
 
     def forget(self, *_: object) -> None:
-        """Drop every cached directory (key import, config change)."""
+        """Drop every cached directory (key import, config change) and
+        invalidate the downloads in flight: their results are not stored,
+        and the next caller starts a fresh one."""
+        self._generation += 1
         self._entries.clear()
+        self._inflight.clear()
 
     async def directory(self, conn: GfsConnection) -> dict[str, str] | None:
         """*conn*'s directory, or ``None`` when it can't be read."""
@@ -138,7 +146,8 @@ class GfsDirectoryCache:
         task = self._inflight.get(conn.id)
         if task is None:
             task = asyncio.create_task(
-                self._read_and_store(conn), name=f"gfs-directory-{conn.id}"
+                self._read_and_store(conn, self._generation),
+                name=f"gfs-directory-{conn.id}",
             )
             self._inflight[conn.id] = task
             task.add_done_callback(functools.partial(self._fetched, conn.id))
@@ -152,9 +161,12 @@ class GfsDirectoryCache:
         if not task.cancelled():
             task.exception()
 
-    async def _read_and_store(self, conn: GfsConnection) -> dict[str, str] | None:
+    async def _read_and_store(
+        self, conn: GfsConnection, generation: int
+    ) -> dict[str, str] | None:
         listed = await self._read(conn)
-        self._store(conn.id, listed)
+        if generation == self._generation:
+            self._store(conn.id, listed)
         return listed
 
     def _store(self, conn_id: str, listed: dict[str, str] | None) -> None:
@@ -176,34 +188,48 @@ class GfsDirectoryCache:
                 if resp.status != 200:
                     log.warning("gfs_directory: %s returned HTTP %d", url, resp.status)
                     return None
-                body = await read_json_capped(
+                raw = await read_body_capped(
                     resp, url=url, limit=MAX_DIRECTORY_BODY_BYTES
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             log.warning("gfs_directory: fetch from %s failed: %s", url, exc)
             return None
-        spaces = body.get("spaces") if isinstance(body, dict) else None
-        if not isinstance(spaces, list):
-            if body is not None:
-                log.warning("gfs_directory: %s returned no spaces list", url)
+        if raw is None:
             return None
-        if len(spaces) > MAX_DIRECTORY_IDS:
-            log.warning(
-                "gfs_directory: %s lists %d spaces (cap %d) — refusing the "
-                "directory rather than truncating it",
-                url,
-                len(spaces),
-                MAX_DIRECTORY_IDS,
-            )
-            return None
-        # ``member_publish_mode`` (v_50) is absent on an older server, which
-        # reads as ``trusted``.
-        return {
-            sp["space_id"]: (
-                GFS_PUBLISH_MODE_STRICT
-                if sp.get("member_publish_mode") == GFS_PUBLISH_MODE_STRICT
-                else _TRUSTED
-            )
-            for sp in spaces
-            if isinstance(sp, dict) and isinstance(sp.get("space_id"), str)
-        }
+        # Up to 64 MiB of JSON: parse off the event loop.
+        return await asyncio.to_thread(_parse_directory, raw, url)
+
+
+def _parse_directory(raw: bytes, url: str) -> dict[str, str] | None:
+    """``{space id: publish mode}`` of a directory body, or ``None`` when
+    it is unparsable, has no ``spaces`` list, or lists more than
+    :data:`MAX_DIRECTORY_IDS` (refused, never truncated)."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        log.warning("gfs_directory: %s returned an unparsable body: %s", url, exc)
+        return None
+    spaces = body.get("spaces") if isinstance(body, dict) else None
+    if not isinstance(spaces, list):
+        log.warning("gfs_directory: %s returned no spaces list", url)
+        return None
+    if len(spaces) > MAX_DIRECTORY_IDS:
+        log.warning(
+            "gfs_directory: %s lists %d spaces (cap %d) — refusing the "
+            "directory rather than truncating it",
+            url,
+            len(spaces),
+            MAX_DIRECTORY_IDS,
+        )
+        return None
+    # ``member_publish_mode`` (v_50) is absent on an older server, which
+    # reads as ``trusted``.
+    return {
+        sp["space_id"]: (
+            GFS_PUBLISH_MODE_STRICT
+            if sp.get("member_publish_mode") == GFS_PUBLISH_MODE_STRICT
+            else _TRUSTED
+        )
+        for sp in spaces
+        if isinstance(sp, dict) and isinstance(sp.get("space_id"), str)
+    }

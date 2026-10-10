@@ -6117,6 +6117,22 @@ async def test_unsubscribe_keeps_mirror_while_a_subscribe_is_in_flight(stack):
     assert await stack.space_repo.get("remote-sp") is not None
 
 
+async def test_the_mirrors_post_grace_recheck_runs_the_same_teardown(stack):
+    """L3: once the seat grace has passed, the mirror asks the service to
+    tear down an unused mirror — the proven-mirror path an unsubscribe
+    takes."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await stack.space_repo.delete_member("remote-sp", fan.user_id)
+
+    await stack.space_svc.release_gfs_mirror_if_unused("remote-sp")
+
+    assert mirror.unsubscribes == ["remote-sp"]
+    assert await stack.space_repo.get("remote-sp") is None
+
+
 async def test_unsubscribe_keeps_mirror_while_another_member_remains(stack):
     fan = await stack.provision_user("fan")
     other = await stack.provision_user("other")

@@ -20,3 +20,8 @@ class GfsSpaceSeat:
     gfs_connection_id: str | None = None
     gfs_public_key: str | None = None
     gfs_inbox_url: str | None = None
+    #: When the seat was first seen matching no paired connection (UTC,
+    #: SQLite ``datetime('now')`` form), ``None`` while one matches. After
+    #: :data:`~socialhome.services.gfs_space_mirror_service.ORPHAN_SEAT_DAYS`
+    #: the row is dropped — the server was unpaired and never re-paired.
+    unmatched_since: str | None = None

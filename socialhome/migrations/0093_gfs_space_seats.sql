@@ -26,6 +26,15 @@
 -- matching all three) apply that check. They are needed once the old
 -- ``gfs_connections`` row is deleted, which every disconnect does.
 --
+-- An unpair sends nothing and keeps the seats: a re-pair of the same server
+-- re-takes them on reconnect. ``unmatched_since`` (nullable) starts when a
+-- local sweep (startup + every reconnect, no request) finds a seat matching
+-- no paired connection, resets when one matches again; after 90 days the
+-- row is dropped — the server was never re-paired. A server whose id and
+-- key return at another address is NOT re-bound (only a proof of
+-- possession, planned, could tell a move from an impostor): its seats are
+-- logged once as needing a re-follow and age out the same way.
+--
 -- Backfill: a v_44+ mirror recorded the seating connection in
 -- ``spaces.mirror_gfs_id``; where that connection still exists and a local
 -- ``subscriber`` seat is held, the seat is recorded under its server id.
@@ -76,6 +85,7 @@ CREATE TABLE IF NOT EXISTS gfs_space_seats (
     gfs_connection_id TEXT,
     gfs_public_key    TEXT,
     gfs_inbox_url     TEXT,
+    unmatched_since   TEXT,
     PRIMARY KEY (space_id, gfs_instance_id)
 );
 

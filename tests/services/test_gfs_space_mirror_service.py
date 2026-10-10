@@ -26,7 +26,10 @@ from socialhome.domain.events import (
 from socialhome.domain.space import SpaceConfigEventType
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_repo import SqliteSpaceRepo
-from socialhome.services.gfs_connection_service import GfsConnectionError
+from socialhome.services.gfs_connection_service import (
+    GfsConnectionError,
+    GfsConnectionService,
+)
 from socialhome.domain.public_space import PublicSpaceListing
 from socialhome.repositories.public_space_repo import SqlitePublicSpaceRepo
 from socialhome.services.gfs_http import MAX_GFS_BODY_BYTES
@@ -776,6 +779,21 @@ async def test_was_gfs_listed_is_false_without_a_directory_repo(env):
     assert await _mirror(env, _StubSession()).was_gfs_listed("sp-1") is False
 
 
+async def test_was_gfs_listed_takes_any_positive_evidence(env):
+    """L4: provenance, a recorded seat, or a paired server's WHOLE
+    directory (never truncated) prove a GFS listed the space — the
+    truncated discovery cache is not the only source."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    session = _StubSession({"https://a.test/gfs/spaces": _directory("sp-dir")})
+    svc = _mirror(env, session)
+    await _seat_subscription(env, "sp-prov", listed=False)
+    await env.spaces.set_mirror_provenance("sp-prov", gfs_id="gfs-1", rotation_seq=0)
+    await _seat(env, "sp-seat", "gfs-1")
+    for sid in ("sp-prov", "sp-seat", "sp-dir"):
+        assert await svc.was_gfs_listed(sid) is True
+    assert await svc.was_gfs_listed("sp-none") is False
+
+
 async def test_was_gfs_listed_follows_the_public_space_cache(env):
     repo = SqlitePublicSpaceRepo(env.db)
     await repo.upsert(
@@ -1224,12 +1242,30 @@ async def _repair(
 @pytest.mark.security
 async def test_a_re_paired_server_keeps_its_seats(env):
     """H1: the seat is the server's, not the local connection row's — a
-    re-pair (new ``conn.id``, same id / key / URL) re-takes it on reconnect
-    and tears it down on leave, and no other server is contacted."""
+    re-pair through the REAL unpair (``GfsConnectionService.disconnect``,
+    which sends nothing and keeps the seats) and a new pairing (new
+    ``conn.id``, same id / key / address) re-takes it on reconnect and
+    tears it down on leave, and no other server is contacted."""
     await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
     await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
     repo = await _mirrored(env, "sp-1", gfs="gfs-1")
-    await _repair(env, "gfs-1", "gfs-1b", "https://A.test/")
+    unpair_session = _StubSession()
+    await GfsConnectionService(env.conns, http_client=unpair_session).disconnect(
+        "gfs-1"
+    )
+    assert unpair_session.calls == []
+    assert await _seat_ids(env, "sp-1") == ["inst-gfs-1"]
+    await env.conns.save(
+        GfsConnection(
+            id="gfs-1b",
+            gfs_instance_id="inst-gfs-1",
+            display_name="G",
+            public_key="pk",
+            inbox_url="https://A.test:443/",
+            status="active",
+            paired_at="2025-02-01T00:00:00+00:00",
+        )
+    )
     gfs = _StubGfs()
     session = _StubSession()
     svc = _mirror(env, session, gfs, public_space_repo=repo)
@@ -1476,28 +1512,74 @@ async def test_resubscribe_without_the_connection_still_takes_member_seats(env):
     assert gfs.subscribes == [("sp-w", "gfs-x")]
 
 
-async def test_unpair_unsubscribes_and_drops_that_servers_seats(env):
-    """L12: an explicit unpair tells the server (best-effort) and forgets
-    its seats either way; other servers' seats are untouched."""
+async def test_seats_of_a_server_never_re_paired_are_dropped_after_90_days(env):
+    """H1: an unpair keeps the seats (so a re-pair re-takes them); the
+    local sweep clocks a seat that matches no paired connection, resets the
+    clock when one matches again, and drops it after 90 days — no request."""
     await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
-    await env.conns.save(_conn("gfs-2", inbox_url="https://b.test"))
-    for sid in ("sp-a", "sp-b"):
-        await _seat(env, sid, "gfs-1")
-    await _seat(env, "sp-a", "gfs-2")
+    await _seat(env, "sp-a", "gfs-1")
+    await _seat(env, "sp-gone", "gfs-gone", url="https://gone.test")
+    gfs = _StubGfs()
+    session = _StubSession()
+    svc = _mirror(env, session, gfs)
 
-    class _Flaky(_StubGfs):
-        async def unsubscribe_from_gfs_space(self, space_id, gfs_id):
-            self.unsubscribes.append((space_id, gfs_id))
-            if space_id == "sp-b":
-                raise GfsConnectionError("down")
-            return "ok"
+    assert await svc.sweep_orphan_seats() == 0
+    gone = await env.seats.get("sp-gone", "inst-gfs-gone")
+    assert gone.unmatched_since is not None
+    assert (await env.seats.get("sp-a", "inst-gfs-1")).unmatched_since is None
+    first = gone.unmatched_since
+    assert await svc.sweep_orphan_seats() == 0  # the clock keeps its start
+    assert (await env.seats.get("sp-gone", "inst-gfs-gone")).unmatched_since == first
 
-    gfs = _Flaky()
+    # The server comes back (same id, key, address): the clock resets.
+    await env.conns.save(_conn("gfs-gone", inbox_url="https://gone.test"))
+    await svc.sweep_orphan_seats()
+    assert (await env.seats.get("sp-gone", "inst-gfs-gone")).unmatched_since is None
+    await env.conns.delete("gfs-gone")
+    await svc.sweep_orphan_seats()
+    await env.db.enqueue(
+        "UPDATE gfs_space_seats SET unmatched_since=datetime('now', '-91 days')"
+        " WHERE space_id='sp-gone'"
+    )
+    assert await svc.sweep_orphan_seats() == 1
+    assert await _seat_ids(env, "sp-gone") == []
+    assert await _seat_ids(env, "sp-a") == ["inst-gfs-1"]
+    assert gfs.unsubscribes == [] and session.calls == []
+
+
+async def test_a_moved_server_address_is_logged_once_and_not_rebound(env, caplog):
+    """M1: same id + key at another address is a genuine move or an
+    impostor — not re-bound until the proof-of-possession follow-up; one
+    WARNING per seat asks for a re-follow."""
+    import logging
+
+    await env.conns.save(_conn("gfs-1", inbox_url="https://old.test"))
+    await _seat(env, "sp-1", "gfs-1")
+    await _repair(env, "gfs-1", "gfs-1b", "https://new.test")
+    gfs = _StubGfs()
     svc = _mirror(env, _StubSession(), gfs)
-    assert await svc.forget_server(await env.conns.get("gfs-1")) == 1
-    assert gfs.unsubscribes == [("sp-a", "gfs-1"), ("sp-b", "gfs-1")]
-    assert await env.seats.list_for_gfs("inst-gfs-1") == []
-    assert await _seat_ids(env, "sp-a") == ["inst-gfs-2"]
+    with caplog.at_level(logging.WARNING):
+        await svc.sweep_orphan_seats()
+        await svc.sweep_orphan_seats()
+        assert await svc.resubscribe_all("gfs-1b") == 0
+    assert caplog.text.count("needs re-follow: server address changed") == 1
+    assert gfs.subscribes == []
+
+
+@pytest.mark.parametrize(
+    "a, b, same",
+    [
+        ("https://gfs.example", "https://GFS.example:443/", True),
+        ("http://gfs.example/", "http://gfs.example:80", True),
+        ("https://gfs.example/inbox", "https://gfs.example", True),
+        ("https://gfs.example", "https://gfs.example:8443", False),
+        ("http://gfs.example", "https://gfs.example", False),
+        ("https://gfs.example", "https://other.example", False),
+        ("https://gfs.example:notaport", "https://gfs.example", False),
+    ],
+)
+def test_server_addresses_compare_normalized(a, b, same):
+    assert (mirror_mod._address(a) == mirror_mod._address(b)) is same
 
 
 @pytest.mark.security
@@ -1655,3 +1737,102 @@ async def test_rebind_leaves_a_mirror_seated_from_another_server(env):
     assert await svc.rebind_mirrors(await env.conns.get("gfs-2b")) == 0
     assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1", 0)
     assert await _binding(env, "sp-1", "inst-gfs-2") == ("gfs-2b", "pk")
+
+
+# ─── relay-frame cost (M2) and post-grace re-check (L3) ──────────────────
+
+
+async def test_a_followed_spaces_frames_cost_one_check_per_window(env, monkeypatch):
+    """M2: frames of a space a local user still wants spawn nothing and are
+    checked once per ``WANTED_CACHE_S``, not once per frame."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _seat_subscription(env, "sp-hot")
+    await _seat(env, "sp-hot", "gfs-1")
+    svc = _mirror(env, _StubSession())
+    checks = {"n": 0}
+    real = GfsSpaceMirrorService._releasable
+
+    async def _count(self, space_id, gfs_instance_id):
+        checks["n"] += 1
+        return await real(self, space_id, gfs_instance_id)
+
+    monkeypatch.setattr(GfsSpaceMirrorService, "_releasable", _count)
+    for _ in range(20):
+        await svc.on_relay_frame({"space_id": "sp-hot"}, gfs_id="gfs-1")
+    assert checks["n"] == 1
+    assert svc._tasks == set()
+
+
+async def test_a_full_task_budget_is_skipped_quietly_on_the_frame_path(
+    env, monkeypatch, caplog
+):
+    import logging
+
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _seat(env, "sp-x", "gfs-1")
+    monkeypatch.setattr(mirror_mod, "MAX_PENDING_SEAT_TASKS", 0)
+    svc = _mirror(env, _StubSession())
+    with caplog.at_level(logging.WARNING):
+        await svc.on_relay_frame({"space_id": "sp-x"}, gfs_id="gfs-1")
+    assert caplog.text == ""
+
+
+@pytest.mark.security
+async def test_a_subscribe_undone_inside_the_grace_window_is_rechecked(
+    env, monkeypatch
+):
+    """L3: subscribe → quick unsubscribe leaves seat (+ stub) behind while
+    the grace window protects it; the re-check after the window releases
+    the seat and runs the stub teardown."""
+    monkeypatch.setattr(mirror_mod, "SEAT_GRACE_S", 0.05)
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    gfs = _StubGfs()
+    svc = _mirror(env, _StubSession(), gfs)
+    torn: list[str] = []
+
+    async def _teardown(space_id):
+        torn.append(space_id)
+
+    svc.attach_teardown(_teardown)
+    await svc.subscribe_to_gfs("sp-q", "gfs-1")
+    assert await svc.release_unused_seats("sp-q") == 0  # in grace
+    await svc.wait_rechecks()
+    assert torn == ["sp-q"]
+    assert gfs.unsubscribes == [("sp-q", "gfs-1")]
+    assert await _seat_ids(env, "sp-q") == []
+
+
+async def test_the_recheck_leaves_a_wanted_seat_alone(env, monkeypatch):
+    monkeypatch.setattr(mirror_mod, "SEAT_GRACE_S", 0.01)
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _seat_subscription(env, "sp-kept")
+    gfs = _StubGfs()
+    svc = _mirror(env, _StubSession(), gfs)
+    await svc.subscribe_to_gfs("sp-kept", "gfs-1")
+    await svc.wait_rechecks()
+    assert gfs.unsubscribes == []
+
+
+async def test_rechecks_are_bounded_and_cancelled_on_stop(env, monkeypatch):
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    svc = _mirror(env, _StubSession())
+    monkeypatch.setattr(mirror_mod, "MAX_PENDING_RECHECKS", 1)
+    await svc.subscribe_to_gfs("sp-1", "gfs-1")
+    await svc.subscribe_to_gfs("sp-2", "gfs-1")  # over budget: no re-check
+    assert len(svc._rechecks) == 1
+    await svc.stop()
+    assert svc._rechecks == set()
+
+
+async def test_a_failing_recheck_is_logged(env, monkeypatch, caplog):
+    monkeypatch.setattr(mirror_mod, "SEAT_GRACE_S", 0.0)
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    svc = _mirror(env, _StubSession())
+
+    async def _boom(space_id):
+        raise RuntimeError("bug")
+
+    svc.attach_teardown(_boom)
+    await svc.subscribe_to_gfs("sp-1", "gfs-1")
+    await svc.wait_rechecks()
+    assert "post-grace re-check failed" in caplog.text

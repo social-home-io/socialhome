@@ -2488,9 +2488,6 @@ def create_app(config: Config | None = None) -> web.Application:
     space_service.attach_gfs_space_mirror(gfs_space_mirror)
     # A space's seats go when its last local member leaves (or is banned).
     gfs_space_mirror.wire(bus)
-    # An explicit unpair drops that server's seats (best-effort unsubscribe
-    # first) — never left behind for a later impostor to have replayed.
-    gfs_connection_service.attach_before_disconnect(gfs_space_mirror.forget_server)
 
     # ── Public space discovery (GFS poll) ────────────────────────────────
     public_space_discovery = PublicSpaceDiscoveryService(
@@ -3137,6 +3134,12 @@ def create_app(config: Config | None = None) -> web.Application:
             )
         )
         gfs_space_mirror.attach_session(http_session)
+        # Seats on a server never re-paired are dropped after 90 days of
+        # matching no connection (local only, no request).
+        try:
+            await gfs_space_mirror.sweep_orphan_seats()
+        except Exception:
+            log.exception("gfs: seat sweep failed at startup")
         public_space_discovery.attach_session(http_session)
         map_tile_service.attach_session(http_session)
 
@@ -3289,6 +3292,11 @@ def create_app(config: Config | None = None) -> web.Application:
         real_space_service.attach_bazaar_repo(bazaar_repo)
         real_space_service.attach_gfs_connection_service(gfs_connection_service)
         real_space_service.attach_gfs_space_mirror(gfs_space_mirror)
+        # A quick subscribe → unsubscribe inside the seat grace window leaves
+        # seat + stub; the mirror re-checks once the window has passed.
+        gfs_space_mirror.attach_teardown(
+            real_space_service.release_gfs_mirror_if_unused
+        )
         # Invite codes carry this household's published key-wrap triple
         # (the §D2b bootstrap block) so a stranger can seal a redeem to
         # us. Same key /gfs/info serves — never a fresh one.

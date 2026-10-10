@@ -42,14 +42,12 @@ MAX_GFS_DIRECTORY_BODY_BYTES: int = 32 * 1024 * 1024
 MAX_GFS_DIRECTORY_ITEMS: int = 2000
 
 
-async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
-    """Parse *resp*'s JSON body, or return ``None`` when it is unusable.
+async def read_body_capped(resp: Any, *, url: str, limit: int) -> bytes | None:
+    """*resp*'s body as bytes, or ``None`` when it is larger than *limit*
+    bytes (by the declared ``Content-Length`` or by what actually arrived).
 
-    ``None`` means "treat this as a failed fetch": the body was larger than
-    *limit* bytes (by the declared ``Content-Length`` or by what actually
-    arrived), or it was not valid JSON. Callers decide whether that is
-    fail-soft (skip this GFS, retry next tick) or fail-closed (seat
-    nothing).
+    For a body big enough that parsing it belongs off the event loop — the
+    caller parses the returned bytes in a thread.
     """
     declared = getattr(resp, "content_length", None)
     if declared is not None and declared > limit:
@@ -70,13 +68,27 @@ async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
         if not chunk:
             break
         buf += chunk
-    raw = bytes(buf)
-    if len(raw) > limit:
+    if len(buf) > limit:
         log.warning(
             "gfs_http: %s returned more than %d bytes — refusing to parse it",
             url,
             limit,
         )
+        return None
+    return bytes(buf)
+
+
+async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
+    """Parse *resp*'s JSON body, or return ``None`` when it is unusable.
+
+    ``None`` means "treat this as a failed fetch": the body was larger than
+    *limit* bytes (by the declared ``Content-Length`` or by what actually
+    arrived), or it was not valid JSON. Callers decide whether that is
+    fail-soft (skip this GFS, retry next tick) or fail-closed (seat
+    nothing).
+    """
+    raw = await read_body_capped(resp, url=url, limit=limit)
+    if raw is None:
         return None
     try:
         return json.loads(raw)

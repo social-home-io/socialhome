@@ -10,6 +10,7 @@ from socialhome.services.gfs_http import (
     MAX_GFS_BODY_BYTES,
     MAX_GFS_DIRECTORY_BODY_BYTES,
     MAX_GFS_DIRECTORY_ITEMS,
+    read_body_capped,
     read_json_capped,
 )
 
@@ -112,3 +113,11 @@ def test_directory_cap_is_larger_than_the_single_space_cap():
     """A directory carries the same per-space payload many times over —
     including base64 icons — so it needs the more generous budget."""
     assert MAX_GFS_DIRECTORY_BODY_BYTES > MAX_GFS_BODY_BYTES
+
+
+async def test_read_body_capped_returns_bytes_or_refuses():
+    assert await read_body_capped(_Resp(b"abc", chunk=1), url="u", limit=3) == b"abc"
+    assert await read_body_capped(_Resp(b"abcd"), url="u", limit=3) is None
+    resp = _Resp(b"abcd", content_length=None, chunk=1)
+    resp.content_length = None
+    assert await read_body_capped(resp, url="u", limit=3) is None

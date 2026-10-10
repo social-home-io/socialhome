@@ -3983,20 +3983,14 @@ async def test_unpublish_from_listed_only_contacts_listing_gfs(env):
     assert all("other.example.com" not in c[1] for c in session.calls)
 
 
-async def test_disconnect_runs_the_seat_cleanup_first_and_never_fails_on_it(env):
-    """L12: the pre-disconnect hook sees the connection row (it needs it to
-    reach the server); a failing hook never blocks the unpair."""
-    _, conn_repo = env
-    svc = GfsConnectionService(conn_repo, http_client=_StubSession())  # type: ignore[arg-type]
-    await conn_repo.save(_make_conn("gfs-1"))
-    seen: list[str] = []
-
-    async def _hook(conn):
-        seen.append(conn.id)
-        assert await conn_repo.get(conn.id) is not None
-        raise RuntimeError("server down")
-
-    svc.attach_before_disconnect(_hook)
-    await svc.disconnect("gfs-1")
-    assert seen == ["gfs-1"]
-    assert await conn_repo.get("gfs-1") is None
+async def test_disconnect_sends_nothing(env):
+    """H1 (round 3): unpairing is local only — the household's GFS seats
+    stay (a re-pair of the same server re-takes them), and the DELETE
+    route never waits on the network."""
+    _, repo = env
+    session = _StubSession()
+    await repo.save(_make_conn("rm-2"))
+    svc = GfsConnectionService(repo, http_client=session)  # type: ignore[arg-type]
+    await svc.disconnect("rm-2")
+    assert await repo.get("rm-2") is None
+    assert session.calls == []

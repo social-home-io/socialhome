@@ -60,3 +60,27 @@ async def test_forget_drops_only_that_seat(repo):
     await repo.forget("sp-1", "gfs-a")
     await repo.forget("sp-1", "gfs-zzz")  # absent → no-op
     assert [s.gfs_instance_id for s in await repo.list_for_space("sp-1")] == ["gfs-b"]
+
+
+async def test_the_unmatched_clock_starts_once_resets_and_purges(repo, db):
+    await repo.record(_s("sp-1", "gfs-a"))
+    await repo.record(_s("sp-2", "gfs-b"))
+    await repo.set_unmatched("sp-1", "gfs-a", unmatched=True)
+    first = (await repo.get("sp-1", "gfs-a")).unmatched_since
+    assert first is not None
+    await repo.set_unmatched("sp-1", "gfs-a", unmatched=True)
+    assert (await repo.get("sp-1", "gfs-a")).unmatched_since == first
+    assert await repo.purge_unmatched(older_than_days=90) == 0
+    await db.enqueue(
+        "UPDATE gfs_space_seats SET unmatched_since=datetime('now', '-91 days')"
+        " WHERE space_id='sp-1'"
+    )
+    assert await repo.purge_unmatched(older_than_days=90) == 1
+    assert [s.space_id for s in await repo.list_all()] == ["sp-2"]
+    # Re-taking a seat stops its clock; so does an explicit clear.
+    await repo.set_unmatched("sp-2", "gfs-b", unmatched=True)
+    await repo.record(_s("sp-2", "gfs-b"))
+    assert (await repo.get("sp-2", "gfs-b")).unmatched_since is None
+    await repo.set_unmatched("sp-2", "gfs-b", unmatched=True)
+    await repo.set_unmatched("sp-2", "gfs-b", unmatched=False)
+    assert (await repo.get("sp-2", "gfs-b")).unmatched_since is None

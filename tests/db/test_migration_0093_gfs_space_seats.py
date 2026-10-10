@@ -106,3 +106,12 @@ def test_one_row_per_space_and_server(conn):
     # No FK to spaces / gfs_connections: a seat outlives both.
     row = conn.execute("SELECT seated_at FROM gfs_space_seats").fetchone()
     assert row["seated_at"]
+
+
+def test_the_unmatched_clock_column_defaults_to_null(conn):
+    _apply_through(conn, _VERSION)
+    conn.execute(
+        "INSERT INTO gfs_space_seats(space_id, gfs_instance_id) VALUES('sp-y','g')"
+    )
+    row = conn.execute("SELECT unmatched_since FROM gfs_space_seats").fetchone()
+    assert row["unmatched_since"] is None

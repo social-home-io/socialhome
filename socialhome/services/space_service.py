@@ -7219,6 +7219,12 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             )
         await self._maybe_purge_gfs_mirror(space_id)
 
+    async def release_gfs_mirror_if_unused(self, space_id: str) -> None:
+        """The mirror's post-grace re-check: the same proven-mirror teardown
+        an unsubscribe runs, for a subscribe that was undone while its GFS
+        seat was still in its grace window."""
+        await self._maybe_purge_gfs_mirror(space_id)
+
     async def _maybe_purge_gfs_mirror(self, space_id: str) -> None:
         """Drop a GFS-mirrored stub once its last local subscriber leaves.
 

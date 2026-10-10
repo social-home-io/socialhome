@@ -26,6 +26,11 @@ class AbstractGfsSpaceSeatRepo(Protocol):
     async def get(self, space_id: str, gfs_instance_id: str) -> GfsSpaceSeat | None: ...
     async def list_for_space(self, space_id: str) -> list[GfsSpaceSeat]: ...
     async def list_for_gfs(self, gfs_instance_id: str) -> list[GfsSpaceSeat]: ...
+    async def list_all(self) -> list[GfsSpaceSeat]: ...
+    async def set_unmatched(
+        self, space_id: str, gfs_instance_id: str, *, unmatched: bool
+    ) -> None: ...
+    async def purge_unmatched(self, *, older_than_days: int) -> int: ...
 
 
 class SqliteGfsSpaceSeatRepo:
@@ -47,7 +52,8 @@ class SqliteGfsSpaceSeatRepo:
             " ON CONFLICT(space_id, gfs_instance_id) DO UPDATE SET"
             " gfs_connection_id=excluded.gfs_connection_id,"
             " gfs_public_key=excluded.gfs_public_key,"
-            " gfs_inbox_url=excluded.gfs_inbox_url",
+            " gfs_inbox_url=excluded.gfs_inbox_url,"
+            " unmatched_since=NULL",
             (
                 seat.space_id,
                 seat.gfs_instance_id,
@@ -87,6 +93,32 @@ class SqliteGfsSpaceSeatRepo:
         )
         return [_seat(r) for r in rows]
 
+    async def list_all(self) -> list[GfsSpaceSeat]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM gfs_space_seats ORDER BY space_id, gfs_instance_id"
+        )
+        return [_seat(r) for r in rows]
+
+    async def set_unmatched(
+        self, space_id: str, gfs_instance_id: str, *, unmatched: bool
+    ) -> None:
+        """Start (keeping an earlier start) or clear the "matches no
+        paired connection" clock of one seat."""
+        await self._db.enqueue(
+            "UPDATE gfs_space_seats SET unmatched_since="
+            + ("COALESCE(unmatched_since, datetime('now'))" if unmatched else "NULL")
+            + " WHERE space_id=? AND gfs_instance_id=?",
+            (space_id, gfs_instance_id),
+        )
+
+    async def purge_unmatched(self, *, older_than_days: int) -> int:
+        """Drop seats that have matched no connection for that long."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_space_seats WHERE unmatched_since IS NOT NULL"
+            " AND unmatched_since < datetime('now', ?)",
+            (f"-{int(older_than_days)} days",),
+        )
+
 
 def _seat(row: Any) -> GfsSpaceSeat:
     return GfsSpaceSeat(
@@ -95,4 +127,5 @@ def _seat(row: Any) -> GfsSpaceSeat:
         gfs_connection_id=row["gfs_connection_id"],
         gfs_public_key=row["gfs_public_key"],
         gfs_inbox_url=row["gfs_inbox_url"],
+        unmatched_since=row["unmatched_since"],
     )

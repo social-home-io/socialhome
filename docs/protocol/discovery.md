@@ -458,10 +458,11 @@ cannot widen access through a missing field or Python truthiness.
   (`services/gfs_directory.py`, over the cookie-less publish session): the
   servers' directories are read concurrently, each kept 10 min (an empty one
   1 min, an unreadable one 5 s), concurrent misses share one download (run
-  as its own task, so a cancelled caller never cancels the others), and a
-  directory over 500 000 ids or 256 MiB is refused (logged) — never
-  truncated, and never answered with per-space probes. Only the ids and
-  their publish mode are kept. A
+  as its own task, so a cancelled caller never cancels the others; a
+  config change or key import invalidates a download in flight), and a
+  directory over 500 000 ids or 64 MiB is refused (logged) — never
+  truncated, and never answered with per-space probes. The body is parsed
+  in a worker thread and only the ids and their publish mode are kept. A
   cached copy lacking the id is re-read once it is 5 s old, so a space
   published a moment ago is followable at once. An unreadable directory
   proves no listing: that server gets no detail GET.
@@ -532,8 +533,11 @@ cannot widen access through a missing field or Python truthiness.
   leave) and purges the stub; the `spaces` cascade takes `space_keys` with it, so the content key
   doesn't outlive the mirror. Both steps run **only** when the row is
   provably a GFS mirror: `space_type=global`, owned by another instance, no
-  space seed held, no local member left, *and* a `public_space_cache` row for
-  the id (the directory poll is that table's only writer). A public/global
+  space seed held, no local member left, *and* positive evidence that a GFS
+  listed it — mirror provenance, a recorded GFS seat, a `public_space_cache`
+  row (the directory poll is that table's only writer, but it imports a
+  bounded slice per tick, so a missing row proves nothing), or a paired
+  server's whole directory listing it now. A public/global
   stub learned from a direct peer matches the first four and must not be
   touched — the signed, identity-bound unsubscribe would disclose to every
   GFS operator a relationship with a space they never knew about, and the
@@ -564,11 +568,23 @@ cannot widen access through a missing field or Python truthiness.
   - each GFS-WS **reconnect** re-takes that server's recorded seats still
     wanted and releases those nobody wants any more (re-checked right before
     each release);
-  - an explicit **unpair** sends a best-effort unsubscribe for every seat
-    that server holds and drops those rows either way;
+  - an explicit **unpair** is local only: it sends nothing and keeps the
+    server's seats, so a re-pair of the same server (same id, key and
+    address) re-takes them on its first reconnect. A local sweep (startup
+    and every reconnect, no request) clocks seats that match no paired
+    connection and drops them after 90 days — the server was never
+    re-paired. A server whose id and key come back at a DIFFERENT address
+    (a domain change, http → https) is not re-bound: that could be an
+    impostor, and only the planned proof of possession can tell. Each such
+    seat is logged once at WARNING ("needs re-follow: server address
+    changed"); the user re-follows. Addresses compare as scheme + host
+    (+ non-default port), so case, a trailing slash or an explicit `:443`
+    don't count as a move;
   - a seat taken by a first subscribe in the last 2 min is spared by every
     teardown (its member row is written after the subscribe succeeds), and
-    the mirror purge waits too;
+    the mirror purge waits too; once the window has passed, a tracked
+    re-check releases the seat and purges the stub if nobody wants them (a
+    subscribe undone within the window);
   - a pre-v44 mirror with no recorded seat on ANY server falls back to the
     servers whose **whole** directory lists the space (its first successful
     re-subscribe records the seat), and contacts none when the directory
@@ -576,7 +592,9 @@ cannot widen access through a missing field or Python truthiness.
   - **reactive teardown**: a relay frame (one its consumer accepted) from a
     server holding a recorded seat of ours that no local user wants triggers
     an unsubscribe there, in the background, at most once per 10 min per
-    (server, space). A frame for a space THIS server holds no recorded seat
+    (server, space). The "still wanted" check runs inline and its answer is
+    reused for a minute, so a busy followed space costs one check per
+    minute, never a task or a log line per frame. A frame for a space THIS server holds no recorded seat
     of ours in does nothing, whatever other servers hold — so made-up frames
     can't ask "do you follow X".
 
