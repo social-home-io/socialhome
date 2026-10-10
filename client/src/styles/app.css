@@ -23283,3 +23283,48 @@ button.sh-page-editor-status {
   font-size: var(--sh-font-size-xs);
   white-space: nowrap;
 }
+
+/* Space settings / create — the GFSs a global space is listed on. */
+.sh-gfs-checklist__item {
+  min-height: 44px;
+  overflow-wrap: anywhere;
+}
+.sh-gfs-checklist .sh-form-error { margin-bottom: 0; }
+.sh-gfs-listing { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-gfs-listing__list { list-style: none; margin: 0; padding: 0; }
+.sh-gfs-listing__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sh-gfs-listing__state { flex: 0 0 auto; }
+/* Status label and Remove sit on one line, centred on each other. */
+.sh-gfs-listing .sh-federation-actions { align-items: center; gap: var(--sh-space-sm); }
+.sh-gfs-listing__hint { flex: 1 1 100%; margin: 0; }
+.sh-gfs-listing__hint a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  font-weight: 600;
+}
+.sh-gfs-listing__add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sh-space-sm);
+}
+.sh-gfs-listing__add label { flex: 1 1 14rem; min-width: 0; }
+.sh-gfs-listing__add select { width: 100%; }
+/* "Global, but not listed on any GFS yet" — a warning tint, not an error. */
+.sh-gfs-banner {
+  margin: 0;
+  padding: var(--sh-space-sm);
+  border: 1px solid color-mix(in srgb, var(--sh-warning) 55%, transparent);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-warning) 14%, transparent);
+  color: var(--sh-text);
+  overflow-wrap: anywhere;
+}
