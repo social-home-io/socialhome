@@ -27,7 +27,7 @@ import type {
   Space, SpaceGfsServer, SpaceGfsServersView,
 } from '@/types'
 
-type Available = SpaceGfsServersView['available'][number]
+type Listing = SpaceGfsServersView['listings'][number]
 
 /**
  * The GFS-side public page of a space. ``inbox_url`` is the GFS root, so
@@ -76,7 +76,12 @@ function NoConnections(): JSX.Element {
   )
 }
 
-function statusOf(row: Available): { label: string; cls: string } {
+function statusOf(row: Listing): { label: string; cls: string } {
+  // A listing held over a connection that isn't active can't be refreshed
+  // or used — say that before what the GFS last said about it.
+  if (row.connection_status !== 'active') {
+    return { label: t('space.gfs_listing.connection_inactive'), cls: 'sh-text-warning' }
+  }
   switch (row.listing_status) {
     case 'pending': return { label: t('space.publish_pending'), cls: 'sh-text-warning' }
     case 'banned': return { label: t('space.publish_rejected'), cls: 'sh-muted' }
@@ -92,7 +97,7 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
   const [addChoice, setAddChoice] = useState('')
   // The last listed GFS awaiting a confirm (removing it leaves the space
   // "global, not listed").
-  const [confirmLast, setConfirmLast] = useState<Available | null>(null)
+  const [confirmLast, setConfirmLast] = useState<Listing | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
 
   const load = async () => {
@@ -118,8 +123,12 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
   }
   if (view === null) return <p class="sh-muted">{t('common.loading')}</p>
 
-  const listed = view.available.filter(a => a.listed)
-  const others = view.available.filter(a => !a.listed)
+  // Every listing, whatever its connection's state (so a listing on a
+  // suspended / pending connection can still be withdrawn); the Add
+  // picker offers the active connections that don't list it yet.
+  const listed = view.listings
+  const listedIds = new Set(listed.map(l => l.gfs_id))
+  const others = view.available.filter(a => !a.listed && !listedIds.has(a.gfs_id))
   const atMax = listed.length >= view.max
   // The picker's value: the chosen one while it's still on offer, else
   // the first offered GFS (so "Add" always means something visible).
@@ -138,23 +147,29 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
     }, 0)
   }
 
-  const remove = async (row: Available) => {
+  const remove = async (row: Listing) => {
     if (busy) return
     setBusy(row.gfs_id)
     let removed = false
     try {
       await api.delete(`/api/spaces/${spaceId}/publish/${row.gfs_id}`)
       removed = true
-      showToast(t('space.gfs_listing.removed', { name: row.display_name }), 'success')
     } catch (e: any) {
-      showToast(e.message || t('common.error'), 'error')
+      // 404: this household holds no such listing any more (another tab
+      // or a reconnect already withdrew it) — the outcome the owner asked
+      // for, so not an error.
+      if ((e as { status?: number } | null)?.status === 404) removed = true
+      else showToast(e.message || t('common.error'), 'error')
     } finally {
       // Stay busy until the fresh list is in, so a second click can't
       // fire another DELETE for a row that's already gone.
       await load()
       setBusy(null)
     }
-    if (removed) refocusAfterRemove()
+    if (removed) {
+      showToast(t('space.gfs_listing.removed', { name: row.display_name }), 'success')
+      refocusAfterRemove()
+    }
   }
 
   // One GFS at a time (POST /publish/{gfs_id}): an atomic add on the
@@ -186,7 +201,8 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
         <ul class="sh-federation-list sh-gfs-listing__list">
           {listed.map(row => {
             const { label, cls } = statusOf(row)
-            const isLive = row.listing_status === 'active'
+            const active = row.connection_status === 'active'
+            const isLive = active && row.listing_status === 'active'
             const publicUrl = publicSpaceUrl(row.inbox_url, spaceId)
             return (
               <li key={row.gfs_id} class="sh-federation-row"
@@ -233,7 +249,13 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
                     </button>
                   </div>
                 )}
-                {row.listing_status === 'pending' && (
+                {!active && (
+                  <p class="sh-muted sh-federation-pending-hint"
+                     data-testid={`gfs-row-inactive-${row.gfs_id}`}>
+                    {t('space.gfs_listing.connection_inactive_hint')}
+                  </p>
+                )}
+                {active && row.listing_status === 'pending' && (
                   <p class="sh-muted sh-federation-pending-hint">
                     {t('space.publish_pending_hint')}
                   </p>

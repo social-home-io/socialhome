@@ -1961,6 +1961,8 @@
   "space.gfs_listing.load_failed": "Couldn't load the GFS list.",
   "space.gfs_listing.connected": "Connected",
   "space.gfs_listing.listed": "Listed",
+  "space.gfs_listing.connection_inactive": "Connection not active",
+  "space.gfs_listing.connection_inactive_hint": "This household's connection to this GFS isn't active, so the listing isn't kept up to date. You can still remove it.",
   "space.gfs_listing.connect_hint": "Connect to {name} to keep up while the host is offline.",
   "space.gfs_listing.connect_link": "Open connections",
   "space.gfs_listing.connect_hint_member": "Ask a household admin to connect to {name} so you keep up while the host is offline.",
