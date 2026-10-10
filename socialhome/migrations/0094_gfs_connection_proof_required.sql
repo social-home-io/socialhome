@@ -1,8 +1,5 @@
 -- 0094 — ``gfs_connections.proof_required_at``: the proof-of-possession
--- ratchet. NOTE: numbered 0094 deliberately — 0093 is taken by another
--- branch in flight (space GFS servers); renumber at merge if the order moves.
--- Requires 0093 to be merged first: migrations apply only versions above the
--- current maximum, so landing 0094 before 0093 would skip 0093 forever.
+-- ratchet. Follows 0093 (space GFS servers).
 --
 -- A household pins a GFS's id + key from the unauthenticated ``/gfs/info``.
 -- A GFS that advertises ``proof_of_possession`` signs a fresh nonce bound to

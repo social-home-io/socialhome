@@ -3,7 +3,6 @@
 Additive: one NULL-default column; existing rows stay unproven (NULL) until
 their server first proves possession of its key.
 
-Numbered 0094 on purpose: 0093 is taken by another branch in flight.
 """
 
 from __future__ import annotations
