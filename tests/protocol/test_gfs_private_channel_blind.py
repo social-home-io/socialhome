@@ -103,6 +103,9 @@ class _Gfs:
     def known_instance_ids(self, conn):
         return frozenset({conn.gfs_instance_id})
 
+    def addressee_key_for(self, conn):
+        return None
+
     async def member_publish_trusted_supported(self, conn):
         return True
 

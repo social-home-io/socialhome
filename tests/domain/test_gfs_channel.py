@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -195,3 +196,22 @@ def test_grant_codec_bounds() -> None:
         with pytest.raises(InvalidChannelWire):
             GfsChannelGrant.from_wire({**base, "epoch_offset": bad})
     assert grant.channel_epoch == 10
+
+
+# ── L2: optional, signed ``gfs_key`` ─────────────────────────────────────
+
+
+def test_channel_requests_carry_an_optional_signed_gfs_key():
+    req = ChannelUnsubscribeRequest(
+        instance_id="i",
+        gfs_instance_id="g",
+        channel_id=new_channel_id(),
+        ts="t",
+        signature="s",
+    )
+    assert "gfs_key" not in req.to_wire()
+    bound = replace(req, gfs_key="ab" * 32)
+    assert bound.signing_payload()["gfs_key"] == "ab" * 32
+    assert ChannelUnsubscribeRequest.from_wire(bound.to_wire()) == bound
+    with pytest.raises(InvalidChannelWire):
+        ChannelUnsubscribeRequest.from_wire({**req.to_wire(), "gfs_key": "zz"})

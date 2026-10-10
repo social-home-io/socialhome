@@ -514,6 +514,7 @@ class GfsChannelService:
                 channel_seed=channel_seed,
                 channel_id=channel_id,
                 gfs_instance_id=conn.gfs_instance_id,
+                gfs_key=self._gfs.addressee_key_for(conn),
                 ts=_anon_ts(),
             ).to_wire()
             status = await self._post_status(
@@ -578,6 +579,7 @@ class GfsChannelService:
                     channel_seed=channel_seed,
                     channel_id=channel_id,
                     gfs_instance_id=conn.gfs_instance_id,
+                    gfs_key=self._gfs.addressee_key_for(conn),
                     ts=_anon_ts(),
                 ).to_wire()
                 await self._post(
@@ -893,6 +895,7 @@ class GfsChannelService:
             channel_seed=channel_seed,
             channel_id=channel_id,
             gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
             # Exact, not jittered: the server orders the mode by it (after
             # the epoch), and only seed holders send notices.
             ts=datetime.now(timezone.utc).isoformat(),
@@ -1298,6 +1301,7 @@ class GfsChannelService:
             req = ChannelSubscribeRequest(
                 instance_id=self._own_instance_id,
                 gfs_instance_id=conn.gfs_instance_id,
+                gfs_key=self._gfs.addressee_key_for(conn),
                 channel_id=grant.channel_id,
                 ts=datetime.now(timezone.utc).isoformat(),
                 signature="",
@@ -1320,6 +1324,7 @@ class GfsChannelService:
             req = ChannelUnsubscribeRequest(
                 instance_id=self._own_instance_id,
                 gfs_instance_id=conn.gfs_instance_id,
+                gfs_key=self._gfs.addressee_key_for(conn),
                 channel_id=channel_id,
                 ts=datetime.now(timezone.utc).isoformat(),
                 signature="",
@@ -1411,6 +1416,7 @@ class GfsChannelService:
             req = sign_publish_anon(
                 ChannelPublishAnonRequest(
                     gfs_instance_id=conn.gfs_instance_id,
+                    gfs_key=self._gfs.addressee_key_for(conn),
                     channel_id=grant.channel_id,
                     ts=_anon_ts(),
                     nonce=b64url_encode(secrets.token_bytes(16)),
@@ -1436,6 +1442,7 @@ class GfsChannelService:
         pub = ChannelPublishRequest(
             instance_id=self._own_instance_id,
             gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
             channel_id=grant.channel_id,
             ts=datetime.now(timezone.utc).isoformat(),
             signature="",

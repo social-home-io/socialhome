@@ -43,3 +43,17 @@ def test_alias_use_is_logged_at_info_rate_limited_with_a_count(caplog):
     assert lines[0].startswith("gfs: 1 request(s) addressed to the alias 'gfs-0'")
     # The four suppressed hits plus the one that logged.
     assert lines[1].startswith("gfs: 5 request(s) addressed to the alias 'gfs-0'")
+
+
+def test_a_bound_server_key_must_be_ours():
+    """L2: an alias may be another operator's real id — a request bound to
+    another server's key is refused even when its id is accepted."""
+    a = GfsAddressee("gfs-shared", ("gfs-0",), public_key_hex="AB" * 32)
+    assert a.accepts("gfs-0", "ab" * 32)
+    assert a.accepts("gfs-shared", "ab" * 32)
+    assert not a.accepts("gfs-0", "cd" * 32)
+    assert not a.accepts("gfs-shared", "cd" * 32)
+    # Unbound (an older household): judged by the id alone.
+    assert a.accepts("gfs-0")
+    # No key wired: a bound request can never match.
+    assert not GfsAddressee("gfs-shared").accepts("gfs-shared", "ab" * 32)

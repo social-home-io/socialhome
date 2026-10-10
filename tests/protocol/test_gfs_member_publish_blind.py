@@ -263,6 +263,9 @@ class _HouseholdGfs:
     def publish_client(self):
         return self.session
 
+    def addressee_key_for(self, conn):
+        return None
+
 
 class _TrustedSpaces:
     """A space repo holding the one (trusted-mode) public space."""

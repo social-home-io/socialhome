@@ -390,7 +390,11 @@ class GfsApp:
         # What households pin from ``/gfs/info`` and sign into each request
         # as the addressee — plus the transitional aliases (accepted, never
         # served). One instance, so alias use is counted in one place.
-        addressee = GfsAddressee(config.instance_id, config.instance_id_aliases)
+        addressee = GfsAddressee(
+            config.instance_id,
+            config.instance_id_aliases,
+            public_key_hex=own_pk_hex,
+        )
         member_publish = GfsMemberPublishService(
             federation=federation,
             fed_repo=repos.federation,

@@ -30,16 +30,20 @@ ALIAS_LOG_INTERVAL_S: float = 600.0
 class GfsAddressee:
     """This server's public id plus the transitional aliases it answers to."""
 
-    __slots__ = ("_primary", "_aliases", "_hits", "_logged_at", "_clock")
+    __slots__ = ("_primary", "_aliases", "_key", "_hits", "_logged_at", "_clock")
 
     def __init__(
         self,
         instance_id: str,
         aliases: Iterable[str] = (),
         *,
+        public_key_hex: str = "",
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._primary = instance_id
+        #: This server's identity key (hex) — a request that names the key it
+        #: is addressed to (``gfs_key``) must name exactly this one.
+        self._key = public_key_hex.lower()
         self._aliases = frozenset(a for a in aliases if a and a != instance_id)
         #: Alias hits since the last INFO line, per alias.
         self._hits: dict[str, int] = {}
@@ -55,8 +59,17 @@ class GfsAddressee:
     def aliases(self) -> frozenset[str]:
         return self._aliases
 
-    def accepts(self, gfs_instance_id: str) -> bool:
-        """Whether a request signed for *gfs_instance_id* is addressed here."""
+    def accepts(self, gfs_instance_id: str, gfs_key: str | None = None) -> bool:
+        """Whether a request signed for *gfs_instance_id* — and, when the
+        household bound it, for the server key *gfs_key* — is addressed here.
+
+        ``gfs_key`` closes the gap aliases open: a generic old id such as
+        ``gfs-0`` may be another operator's real id, so a request captured
+        there could otherwise be replayed here. A request carrying the field
+        must name THIS server's key; one without it (an older household) is
+        judged by the id alone, as before."""
+        if gfs_key is not None and (not self._key or gfs_key.lower() != self._key):
+            return False
         if gfs_instance_id == self._primary:
             return True
         if gfs_instance_id not in self._aliases:

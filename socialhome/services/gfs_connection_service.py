@@ -280,6 +280,7 @@ class GfsConnectionService:
         "_invite_links",
         "_member_publish_strict",
         "_private_channels",
+        "_addressee_key",
         "_member_publish_trusted",
         "_authority_rotation",
         "_rotation_warned",
@@ -362,6 +363,11 @@ class GfsConnectionService:
         # server would refuse an owner notice carrying them).
         self._member_publish_strict: dict[str, bool] = {}
         self._private_channels: dict[str, bool] = {}
+        # Same discipline for ``addressee_key``: whether the server takes the
+        # signed ``gfs_key`` field (its own key) on member publish, epoch
+        # notices and channel requests. An older server refuses unknown
+        # fields, so the key is bound only where proven (True only).
+        self._addressee_key: dict[str, bool] = {}
         # Same again for ``authority_rotation`` (v_44): whether the GFS
         # re-pins a space's authority key from an owner cert. A GFS without
         # it keeps the OLD key — and so keeps honouring a revoked admin's
@@ -1104,6 +1110,18 @@ class GfsConnectionService:
         )
         if caps is not None and caps.get("envelope_relay") is True:
             self._envelope_relay[conn.id] = True
+        if caps is not None and caps.get("addressee_key") is True:
+            self._addressee_key[conn.id] = True
+
+    def addressee_key_for(self, conn: GfsConnection) -> str | None:
+        """The server key to bind into a request to *conn* (``gfs_key``,
+        signed): *conn*'s PINNED key, once its server proved under a valid
+        signature that it takes the field; ``None`` otherwise (the field is
+        omitted, exactly as an older household sends it). RAM cache only,
+        warmed by every ``/gfs/info`` fetch."""
+        if not self._addressee_key.get(conn.id) or not conn.public_key:
+            return None
+        return conn.public_key.lower()
 
     async def warm_capabilities(
         self,

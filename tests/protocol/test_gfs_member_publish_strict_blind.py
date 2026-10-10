@@ -90,6 +90,9 @@ class _Gfs:
     def publish_client(self):
         return self._anon
 
+    def addressee_key_for(self, conn):
+        return None
+
     async def member_publish_trusted_supported(self, conn):
         return True
 

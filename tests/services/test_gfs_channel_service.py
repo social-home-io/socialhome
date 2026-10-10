@@ -188,6 +188,9 @@ class _Gfs:
     def known_instance_ids(self, conn):
         return frozenset({conn.gfs_instance_id, *self.previous.get(conn.id, ())})
 
+    def addressee_key_for(self, conn):
+        return None
+
     def client(self):
         return self.session
 

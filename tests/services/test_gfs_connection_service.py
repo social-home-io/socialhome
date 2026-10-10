@@ -4275,3 +4275,23 @@ async def test_refresh_all_metadata_visits_every_active_connection(env):
     assert await svc.refresh_all_metadata() == 1
     assert rebound == ["g1"]
     assert await svc.refresh_all_metadata(should_stop=lambda: True) == 0
+
+
+async def test_the_addressee_key_is_bound_only_once_the_server_proves_it(env):
+    """L2: ``addressee_key_for`` answers the PINNED key only after a verified
+    block says the server takes ``gfs_key`` — an older server would refuse
+    the unknown field."""
+    _, repo = env
+    await repo.save(_pinned_conn(instance_id="gfs-shared"))
+    conn = await repo.get("g1")
+    svc, _rebound = _rebind_svc(repo, _served())
+    await svc.refresh_connection_metadata("g1")
+    assert svc.addressee_key_for(conn) is None
+    info = _signed_info(
+        gfs_instance_id="gfs-shared",
+        capabilities={"anonymous_publish": True, "addressee_key": True},
+    )
+    info.update(gfs_instance_id="gfs-shared", public_key=_GFS_KP.public_key.hex())
+    svc._http_client.info = info  # type: ignore[union-attr]
+    await svc.refresh_connection_metadata("g1")
+    assert svc.addressee_key_for(conn) == _GFS_KP.public_key.hex()

@@ -131,6 +131,10 @@ class GfsInfoView(GfsBaseView):
             "member_publish_strict": True,
             "private_channels": True,
             "open_signup": bool(cfg.open_signup),
+            # Takes the signed, optional ``gfs_key`` (the addressed server's
+            # key) on member publish, epoch notices and channel requests, and
+            # refuses one that is not its own key.
+            "addressee_key": True,
         }
         if cfg.instance_id_aliases:
             # The former ids this server answers to (``instance_id_aliases``),

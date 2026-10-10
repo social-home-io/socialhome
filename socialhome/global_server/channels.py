@@ -219,8 +219,8 @@ class GfsChannelService:
     def _now(self) -> int:
         return int(self._clock())
 
-    def _addressed(self, gfs_instance_id: str) -> None:
-        if not self._addressee.accepts(gfs_instance_id):
+    def _addressed(self, gfs_instance_id: str, gfs_key: str | None = None) -> None:
+        if not self._addressee.accepts(gfs_instance_id, gfs_key):
             raise PermissionError("request is addressed to another server")
 
     def _fresh(self, ts: str) -> int:
@@ -255,7 +255,7 @@ class GfsChannelService:
         ``"refreshed"``. Raises :class:`PermissionError`,
         :class:`ChannelPinned`, :class:`MemberPublishRateLimited` or
         :class:`MemberPublishBusy` (the server-wide cap)."""
-        self._addressed(req.gfs_instance_id)
+        self._addressed(req.gfs_instance_id, req.gfs_key)
         self._fresh(req.ts)
         if not self._register_limiter.allow(client_ip):
             raise MemberPublishRateLimited()
@@ -290,7 +290,7 @@ class GfsChannelService:
     async def unregister(self, req: ChannelUnregisterRequest) -> None:
         """Drop the channel (and its seats) on a channel-key-signed request.
         An unknown channel is a no-op success (idempotent)."""
-        self._addressed(req.gfs_instance_id)
+        self._addressed(req.gfs_instance_id, req.gfs_key)
         self._fresh(req.ts)
         ch = await self._channels.get(req.channel_id)
         if ch is None:
@@ -310,7 +310,7 @@ class GfsChannelService:
         the notice's epoch) — so the channel key holder can tell when
         another key holder moved the channel past it. Raises
         :class:`PermissionError` or :class:`ChannelEpochTooSoon`."""
-        self._addressed(notice.gfs_instance_id)
+        self._addressed(notice.gfs_instance_id, notice.gfs_key)
         at = self._fresh(notice.ts)
         ch = await self._channel(notice.channel_id)
         pinned = self._pinned(ch)
@@ -376,7 +376,7 @@ class GfsChannelService:
         )
         if inst.status != "active":
             raise PermissionError("instance is not active")
-        self._addressed(req.gfs_instance_id)
+        self._addressed(req.gfs_instance_id, req.gfs_key)
         ch = await self._channel(req.channel_id)
         try:
             verify_channel_pass(
@@ -407,7 +407,7 @@ class GfsChannelService:
         await self._federation.verify_signed_request(
             req.instance_id, req.signing_payload(), signature=req.signature
         )
-        self._addressed(req.gfs_instance_id)
+        self._addressed(req.gfs_instance_id, req.gfs_key)
         await self._channels.remove_subscriber(req.channel_id, req.instance_id)
 
     # ── Publish ──────────────────────────────────────────────────────────
@@ -442,7 +442,7 @@ class GfsChannelService:
         )
         if inst.status != "active":
             raise PermissionError("instance is not active")
-        self._addressed(req.gfs_instance_id)
+        self._addressed(req.gfs_instance_id, req.gfs_key)
         if not self._limiter.allow(f"{inst.instance_id}\x00{req.channel_id}"):
             raise MemberPublishRateLimited()
         if not self._channel_limiter.allow(req.channel_id):
@@ -476,7 +476,7 @@ class GfsChannelService:
         self, req: ChannelPublishAnonRequest, *, client_ip: str
     ) -> None:
         """Strict (anonymous) publish."""
-        self._addressed(req.gfs_instance_id)
+        self._addressed(req.gfs_instance_id, req.gfs_key)
         self._fresh(req.ts)
         ch = await self._channel(req.channel_id)
         pinned = ch.writer_pk_for(req.epoch)

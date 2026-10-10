@@ -218,6 +218,31 @@ def _exact_optional(
     return raw
 
 
+#: The optional, signed addressee-key field every household request may
+#: carry (see ``_with_gfs_key``).
+GFS_KEY_FIELD: frozenset[str] = frozenset({"gfs_key"})
+_GFS_KEY_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _with_gfs_key(gfs_key: str | None, body: dict) -> dict:
+    """*body* plus ``gfs_key`` when set — inside the signed bytes, so the
+    request is bound to the addressed server's KEY, not only its id (an id
+    may be another operator's alias). Omitted when ``None``: the exact bytes
+    an older household signs."""
+    if gfs_key is not None:
+        body["gfs_key"] = gfs_key
+    return body
+
+
+def _gfs_key(raw: dict) -> str | None:
+    value = raw.get("gfs_key")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _GFS_KEY_RE.fullmatch(value):
+        raise InvalidChannelWire("invalid field: gfs_key")
+    return value
+
+
 def _nonce(raw: dict) -> str:
     value = raw.get("nonce")
     if (
@@ -573,24 +598,32 @@ class ChannelRegisterRequest:
     ts: str
     nonce: str
     channel_sig: str
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
 
     def signing_body(self) -> dict:
-        return {
-            "channel_suite": self.channel_suite,
-            "channel_id": self.channel_id,
-            "channel_pk": self.channel_pk,
-            "gfs_instance_id": self.gfs_instance_id,
-            "ts": self.ts,
-            "nonce": self.nonce,
-        }
+        return _with_gfs_key(
+            self.gfs_key,
+            {
+                "channel_suite": self.channel_suite,
+                "channel_id": self.channel_id,
+                "channel_pk": self.channel_pk,
+                "gfs_instance_id": self.gfs_instance_id,
+                "ts": self.ts,
+                "nonce": self.nonce,
+            },
+        )
 
     def to_wire(self) -> dict:
         return {**self.signing_body(), "channel_sig": self.channel_sig}
 
     @classmethod
     def from_wire(cls, raw: object) -> "ChannelRegisterRequest":
-        body = _exact(raw, REGISTER_REQUIRED_KEYS, "register")
+        body = _exact_optional(raw, REGISTER_REQUIRED_KEYS, GFS_KEY_FIELD, "register")
         return cls(
+            gfs_key=_gfs_key(body),
             channel_suite=_str(body, "channel_suite", _MAX_ID_CHARS),
             channel_id=valid_channel_id(body.get("channel_id")),
             channel_pk=_b64(body, "channel_pk"),
@@ -631,6 +664,10 @@ class ChannelEpochNotice:
     publish_mode: str
     channel_sig: str
     writer_key_cert: ChannelWriterKeyCert | None = None
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
 
     def signing_body(self) -> dict:
         body: dict = {
@@ -644,7 +681,7 @@ class ChannelEpochNotice:
         }
         if self.writer_key_cert is not None:
             body["writer_key_cert"] = self.writer_key_cert.to_wire()
-        return body
+        return _with_gfs_key(self.gfs_key, body)
 
     def to_wire(self) -> dict:
         return {**self.signing_body(), "channel_sig": self.channel_sig}
@@ -652,13 +689,17 @@ class ChannelEpochNotice:
     @classmethod
     def from_wire(cls, raw: object) -> "ChannelEpochNotice":
         body = _exact_optional(
-            raw, NOTICE_REQUIRED_KEYS, frozenset({"writer_key_cert"}), "notice"
+            raw,
+            NOTICE_REQUIRED_KEYS,
+            frozenset({"writer_key_cert"}) | GFS_KEY_FIELD,
+            "notice",
         )
         mode = body.get("publish_mode")
         if mode not in GFS_PUBLISH_MODES:
             raise InvalidChannelWire("invalid field: publish_mode")
         wkc = body.get("writer_key_cert")
         return cls(
+            gfs_key=_gfs_key(body),
             channel_suite=_str(body, "channel_suite", _MAX_ID_CHARS),
             channel_id=valid_channel_id(body.get("channel_id")),
             gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
@@ -689,23 +730,31 @@ class ChannelUnregisterRequest:
     ts: str
     nonce: str
     channel_sig: str
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
 
     def signing_body(self) -> dict:
-        return {
-            "channel_suite": self.channel_suite,
-            "channel_id": self.channel_id,
-            "gfs_instance_id": self.gfs_instance_id,
-            "ts": self.ts,
-            "nonce": self.nonce,
-        }
+        return _with_gfs_key(
+            self.gfs_key,
+            {
+                "channel_suite": self.channel_suite,
+                "channel_id": self.channel_id,
+                "gfs_instance_id": self.gfs_instance_id,
+                "ts": self.ts,
+                "nonce": self.nonce,
+            },
+        )
 
     def to_wire(self) -> dict:
         return {**self.signing_body(), "channel_sig": self.channel_sig}
 
     @classmethod
     def from_wire(cls, raw: object) -> "ChannelUnregisterRequest":
-        body = _exact(raw, UNREGISTER_KEYS, "unregister")
+        body = _exact_optional(raw, UNREGISTER_KEYS, GFS_KEY_FIELD, "unregister")
         return cls(
+            gfs_key=_gfs_key(body),
             channel_suite=_str(body, "channel_suite", _MAX_ID_CHARS),
             channel_id=valid_channel_id(body.get("channel_id")),
             gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
@@ -734,16 +783,23 @@ class ChannelSubscribeRequest:
     ts: str
     signature: str
     channel_pass: ChannelPass
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
 
     def signing_payload(self) -> dict:
-        return {
-            "action": CHANNEL_SUBSCRIBE_ACTION,
-            "instance_id": self.instance_id,
-            "gfs_instance_id": self.gfs_instance_id,
-            "channel_id": self.channel_id,
-            "ts": self.ts,
-            "channel_pass": self.channel_pass.to_wire(),
-        }
+        return _with_gfs_key(
+            self.gfs_key,
+            {
+                "action": CHANNEL_SUBSCRIBE_ACTION,
+                "instance_id": self.instance_id,
+                "gfs_instance_id": self.gfs_instance_id,
+                "channel_id": self.channel_id,
+                "ts": self.ts,
+                "channel_pass": self.channel_pass.to_wire(),
+            },
+        )
 
     def to_wire(self) -> dict:
         body = self.signing_payload()
@@ -753,8 +809,9 @@ class ChannelSubscribeRequest:
 
     @classmethod
     def from_wire(cls, raw: object) -> "ChannelSubscribeRequest":
-        body = _exact(raw, SUBSCRIBE_KEYS, "subscribe")
+        body = _exact_optional(raw, SUBSCRIBE_KEYS, GFS_KEY_FIELD, "subscribe")
         return cls(
+            gfs_key=_gfs_key(body),
             instance_id=_str(body, "instance_id", _MAX_ID_CHARS),
             gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
             channel_id=valid_channel_id(body.get("channel_id")),
@@ -778,15 +835,22 @@ class ChannelUnsubscribeRequest:
     channel_id: str
     ts: str
     signature: str
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
 
     def signing_payload(self) -> dict:
-        return {
-            "action": CHANNEL_UNSUBSCRIBE_ACTION,
-            "instance_id": self.instance_id,
-            "gfs_instance_id": self.gfs_instance_id,
-            "channel_id": self.channel_id,
-            "ts": self.ts,
-        }
+        return _with_gfs_key(
+            self.gfs_key,
+            {
+                "action": CHANNEL_UNSUBSCRIBE_ACTION,
+                "instance_id": self.instance_id,
+                "gfs_instance_id": self.gfs_instance_id,
+                "channel_id": self.channel_id,
+                "ts": self.ts,
+            },
+        )
 
     def to_wire(self) -> dict:
         body = self.signing_payload()
@@ -796,8 +860,9 @@ class ChannelUnsubscribeRequest:
 
     @classmethod
     def from_wire(cls, raw: object) -> "ChannelUnsubscribeRequest":
-        body = _exact(raw, UNSUBSCRIBE_KEYS, "unsubscribe")
+        body = _exact_optional(raw, UNSUBSCRIBE_KEYS, GFS_KEY_FIELD, "unsubscribe")
         return cls(
+            gfs_key=_gfs_key(body),
             instance_id=_str(body, "instance_id", _MAX_ID_CHARS),
             gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
             channel_id=valid_channel_id(body.get("channel_id")),
@@ -835,19 +900,26 @@ class ChannelPublishRequest:
     epoch: int
     channel_cert: ChannelCert
     payload: str
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
 
     def signing_payload(self) -> dict:
-        return {
-            "action": CHANNEL_PUBLISH_ACTION,
-            "instance_id": self.instance_id,
-            "gfs_instance_id": self.gfs_instance_id,
-            "channel_id": self.channel_id,
-            "ts": self.ts,
-            "event_type": SPACE_ITEM_EVENT_TYPE,
-            "epoch": self.epoch,
-            "channel_cert": self.channel_cert.to_wire(),
-            "payload": self.payload,
-        }
+        return _with_gfs_key(
+            self.gfs_key,
+            {
+                "action": CHANNEL_PUBLISH_ACTION,
+                "instance_id": self.instance_id,
+                "gfs_instance_id": self.gfs_instance_id,
+                "channel_id": self.channel_id,
+                "ts": self.ts,
+                "event_type": SPACE_ITEM_EVENT_TYPE,
+                "epoch": self.epoch,
+                "channel_cert": self.channel_cert.to_wire(),
+                "payload": self.payload,
+            },
+        )
 
     def signing_bytes(self) -> bytes:
         return canonical(self.signing_payload())
@@ -863,9 +935,10 @@ class ChannelPublishRequest:
 
     @classmethod
     def from_wire(cls, raw: object) -> "ChannelPublishRequest":
-        body = _exact(raw, PUBLISH_KEYS, "publish")
+        body = _exact_optional(raw, PUBLISH_KEYS, GFS_KEY_FIELD, "publish")
         _event_type(body)
         return cls(
+            gfs_key=_gfs_key(body),
             instance_id=_str(body, "instance_id", _MAX_ID_CHARS),
             gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
             channel_id=valid_channel_id(body.get("channel_id")),
@@ -905,18 +978,25 @@ class ChannelPublishAnonRequest:
     payload: str
     writer_sig: str
     writer_sig_suite: str
+    #: The PINNED key of the addressed server (hex), signed — an
+    #: additive bind beyond the id (``None`` = omitted, older
+    #: households). The server refuses a mismatch.
+    gfs_key: str | None = None
 
     def signing_body(self) -> dict:
-        return {
-            "gfs_instance_id": self.gfs_instance_id,
-            "channel_id": self.channel_id,
-            "ts": self.ts,
-            "nonce": self.nonce,
-            "event_type": SPACE_ITEM_EVENT_TYPE,
-            "epoch": self.epoch,
-            "payload": self.payload,
-            "writer_sig_suite": self.writer_sig_suite,
-        }
+        return _with_gfs_key(
+            self.gfs_key,
+            {
+                "gfs_instance_id": self.gfs_instance_id,
+                "channel_id": self.channel_id,
+                "ts": self.ts,
+                "nonce": self.nonce,
+                "event_type": SPACE_ITEM_EVENT_TYPE,
+                "epoch": self.epoch,
+                "payload": self.payload,
+                "writer_sig_suite": self.writer_sig_suite,
+            },
+        )
 
     def to_wire(self) -> dict:
         return {**self.signing_body(), "writer_sig": self.writer_sig}
@@ -926,9 +1006,10 @@ class ChannelPublishAnonRequest:
 
     @classmethod
     def from_wire(cls, raw: object) -> "ChannelPublishAnonRequest":
-        body = _exact(raw, PUBLISH_ANON_KEYS, "publish-anon")
+        body = _exact_optional(raw, PUBLISH_ANON_KEYS, GFS_KEY_FIELD, "publish-anon")
         _event_type(body)
         return cls(
+            gfs_key=_gfs_key(body),
             gfs_instance_id=_str(body, "gfs_instance_id", _MAX_ID_CHARS),
             channel_id=valid_channel_id(body.get("channel_id")),
             ts=_str(body, "ts"),

@@ -194,6 +194,12 @@ class _Gfs:
     def publish_client(self):
         return self.session
 
+    #: What ``addressee_key_for`` answers (``None`` = server not proven).
+    addressee_key: str | None = None
+
+    def addressee_key_for(self, conn):
+        return self.addressee_key
+
     async def member_publish_trusted_supported(self, conn):
         return self.capable
 
@@ -1300,3 +1306,26 @@ async def test_a_public_space_never_touches_the_channel(world):
     await world["svc"].reconcile_channel(SPACE_ID)
     await world["svc"].enable_channel(SPACE_ID)
     assert channels.rotations == []
+
+
+@pytest.mark.security
+async def test_the_request_binds_the_pinned_server_key_when_the_server_takes_it(
+    world,
+):
+    """L2: with the server's ``addressee_key`` proven, the signed body names
+    its pinned key — the server accepts its own key and refuses another."""
+    svc = world["svc"]
+    data = {
+        "epoch": 3,
+        "writer_cert": (await svc._writer_certs.own_cert(SPACE_ID, 3)).to_wire(),
+        "payload": "Y3Q",
+    }
+    info = await (await world["tc"].get("/gfs/info")).json()
+    world["gfs"].addressee_key = info["public_key"]
+    body = svc._signed_item_body(world["conn"], SPACE_ID, data)
+    assert body["gfs_key"] == info["public_key"]
+    assert (await svc._post_item(world["conn"], SPACE_ID, data)).kind == "delivered"
+    world["gfs"].addressee_key = "ab" * 32
+    assert (await svc._post_item(world["conn"], SPACE_ID, data)).kind == "permanent"
+    world["gfs"].addressee_key = None
+    assert "gfs_key" not in svc._signed_item_body(world["conn"], SPACE_ID, data)

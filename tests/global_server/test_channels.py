@@ -752,3 +752,18 @@ async def test_the_server_stores_nothing_that_names_the_space(gfs, tmp_dir) -> N
     for needle in (SPACE_ID, SPACE_PK.hex(), b64url_encode(SPACE_PK)):
         assert needle.encode() not in dump
     assert gfs.ch.id.encode() in dump
+
+
+# ── L2: the signed ``gfs_key`` binds a channel request to this server ────
+
+
+@pytest.mark.security
+async def test_a_channel_request_bound_to_another_key_is_refused(gfs) -> None:
+    own = (await (await gfs.get("/gfs/info")).json())["public_key"]
+    await _refused(
+        await gfs.post(
+            "/gfs/channels/register", json=gfs.ch.register(gfs_key="cd" * 32)
+        )
+    )
+    resp = await gfs.post("/gfs/channels/register", json=gfs.ch.register(gfs_key=own))
+    assert resp.status == 201, await resp.text()

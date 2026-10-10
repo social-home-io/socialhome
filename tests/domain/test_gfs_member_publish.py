@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -369,3 +370,39 @@ def test_parse_writer_key_cert():
     assert parse_writer_key_cert(cert.to_wire()) == cert
     with pytest.raises(InvalidMemberPublish):
         parse_writer_key_cert({"bad": 1})
+
+
+# ── L2: optional, signed ``gfs_key`` ─────────────────────────────────────
+
+
+def _l2_req(**kw) -> MemberPublishRequest:
+    base = MemberPublishRequest.from_wire(_l2_wire())
+    return replace(base, **kw)
+
+
+def _l2_wire() -> dict:
+    return _wire()
+
+
+def test_gfs_key_is_signed_when_present_and_absent_otherwise():
+    plain = _l2_req()
+    assert "gfs_key" not in plain.signing_payload()
+    bound = _l2_req(gfs_key="ab" * 32)
+    assert bound.signing_payload()["gfs_key"] == "ab" * 32
+    assert bound.signing_bytes() != plain.signing_bytes()
+    assert MemberPublishRequest.from_wire(bound.to_wire()) == bound
+
+
+@pytest.mark.parametrize("bad", ["", "AB" * 32, "ab" * 31, 7])
+def test_a_malformed_gfs_key_is_refused(bad):
+    wire = {**_l2_wire(), "gfs_key": bad}
+    with pytest.raises(InvalidMemberPublish):
+        MemberPublishRequest.from_wire(wire)
+
+
+def test_the_owner_notice_payload_signs_the_gfs_key_only_when_present():
+    kw = dict(owning_instance="o", gfs_instance_id="g", space_id="s", epoch=1, ts="t")
+    assert "gfs_key" not in owner_epoch_notice_signing_payload(**kw)
+    assert owner_epoch_notice_signing_payload(**kw, gfs_key="ab" * 32)["gfs_key"] == (
+        "ab" * 32
+    )

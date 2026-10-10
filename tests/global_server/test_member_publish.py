@@ -130,6 +130,7 @@ def _body(
     ts: str | None = None,
     signer: _Household | None = None,
     gfs_instance_id: str = GFS_ID,
+    gfs_key: str | None = None,
 ) -> dict:
     req = MemberPublishRequest(
         instance_id=publisher.instance_id,
@@ -140,6 +141,7 @@ def _body(
         epoch=epoch,
         writer_cert=cert if cert is not None else _cert(publisher, epoch=epoch),
         payload=payload,
+        gfs_key=gfs_key,
     )
     sig = sign_ed25519((signer or publisher).seed, req.signing_bytes())
     return replace(req, signature=b64url_encode(sig)).to_wire()
@@ -747,6 +749,7 @@ def _owner_notice(
     signer: _Household | None = None,
     owning: _Household | None = None,
     gfs_instance_id: str = GFS_ID,
+    gfs_key: str | None = None,
 ) -> dict:
     owner = owning or gfs.owner
     ts = ts or _now_iso()
@@ -756,18 +759,22 @@ def _owner_notice(
         space_id=SPACE_ID,
         epoch=epoch,
         ts=ts,
+        gfs_key=gfs_key,
     )
     sig = sign_ed25519(
         (signer or owner).seed,
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
     )
-    return {
+    body = {
         "owning_instance": owner.instance_id,
         "gfs_instance_id": gfs_instance_id,
         "epoch": epoch,
         "ts": ts,
         "signature": b64url_encode(sig),
     }
+    if gfs_key is not None:
+        body["gfs_key"] = gfs_key
+    return body
 
 
 async def _confirm(gfs, epoch) -> None:
@@ -1657,3 +1664,59 @@ async def test_the_public_listing_carries_the_publish_mode(gfs):
     assert detail["member_publish_mode"] == "strict"
     # The writer keys never reach the public directory.
     assert "writer_key" not in json.dumps(listing)
+
+
+# ── L2: the signed ``gfs_key`` binds a request to this server's KEY ──────
+
+
+async def _own_key(gfs) -> str:
+    return (await (await gfs.get("/gfs/info")).json())["public_key"]
+
+
+async def test_info_advertises_the_addressee_key_capability(gfs):
+    info = await (await gfs.get("/gfs/info")).json()
+    assert info["capabilities"]["addressee_key"] is True
+
+
+async def test_a_publish_bound_to_this_servers_key_is_accepted(gfs):
+    resp = await gfs.post(
+        "/gfs/member-publish",
+        json=_body(gfs.publisher, gfs_key=await _own_key(gfs)),
+    )
+    assert resp.status == 200
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("gfs", [_ALIASED], indirect=True)
+async def test_an_alias_request_bound_to_another_servers_key_is_refused(gfs):
+    """``gfs-node-a`` is an alias here — and may be ANOTHER operator's real
+    id. A request a household bound to that other server's key (captured
+    there, replayed here) is refused, although its id is accepted."""
+    other = "ab" * 32
+    await _assert_refused(
+        await gfs.post(
+            "/gfs/member-publish",
+            json=_body(gfs.publisher, gfs_instance_id=GFS_ID, gfs_key=other),
+        )
+    )
+    resp = await gfs.post(
+        f"/gfs/spaces/{SPACE_ID}/epoch",
+        json=_owner_notice(gfs, 3, gfs_instance_id=GFS_ID, gfs_key=other),
+    )
+    assert resp.status == 403
+
+
+async def test_an_owner_notice_bound_to_this_servers_key_is_accepted(gfs):
+    resp = await gfs.post(
+        f"/gfs/spaces/{SPACE_ID}/epoch",
+        json=_owner_notice(gfs, 3, gfs_key=await _own_key(gfs)),
+    )
+    assert resp.status == 200
+
+
+@pytest.mark.security
+async def test_the_gfs_key_is_inside_the_household_signature(gfs):
+    """Stripping or swapping the bound key breaks the signature."""
+    body = _body(gfs.publisher, gfs_key=await _own_key(gfs))
+    del body["gfs_key"]
+    await _assert_refused(await gfs.post("/gfs/member-publish", json=body))

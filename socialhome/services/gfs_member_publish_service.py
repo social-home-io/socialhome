@@ -620,6 +620,7 @@ class GfsMemberPublishService:
         req = MemberPublishRequest(
             instance_id=self._own_instance_id,
             gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
             ts=datetime.now(timezone.utc).isoformat(),
             signature="",
             target=space_id,
@@ -670,6 +671,7 @@ class GfsMemberPublishService:
             return PublishOutcome.permanent()
         req = MemberPublishAnonRequest(
             gfs_instance_id=conn.gfs_instance_id,
+            gfs_key=self._gfs.addressee_key_for(conn),
             ts=_anon_ts(),
             nonce=b64url_encode(secrets.token_bytes(16)),
             target=space_id,
@@ -763,6 +765,7 @@ class GfsMemberPublishService:
             payload = owner_epoch_notice_signing_payload(
                 owning_instance=self._own_instance_id,
                 gfs_instance_id=conn.gfs_instance_id,
+                gfs_key=self._gfs.addressee_key_for(conn),
                 space_id=space_id,
                 epoch=int(data["epoch"]),
                 ts=ts,
@@ -785,6 +788,8 @@ class GfsMemberPublishService:
                 body["publish_mode"] = mode
             if wkc is not None:
                 body["writer_key_cert"] = wkc
+            if payload.get("gfs_key") is not None:
+                body["gfs_key"] = payload["gfs_key"]
             return await self._post(self._gfs.client(), url, body, conn)
         # Seed-only form: anonymous — authorized by the authority signature
         # alone, so it rides the cookie-less publish session.

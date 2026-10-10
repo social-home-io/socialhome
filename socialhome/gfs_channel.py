@@ -392,6 +392,7 @@ def sign_register(
     channel_id: str,
     gfs_instance_id: str,
     ts: str,
+    gfs_key: str | None = None,
 ) -> ChannelRegisterRequest:
     unsigned = ChannelRegisterRequest(
         channel_suite=CHANNEL_SUITE_ED25519,
@@ -401,6 +402,7 @@ def sign_register(
         ts=ts,
         nonce=b64url_encode(secrets.token_bytes(16)),
         channel_sig="",
+        gfs_key=gfs_key,
     )
     return replace(
         unsigned,
@@ -431,6 +433,7 @@ def sign_notice(
     epoch: int,
     publish_mode: str,
     writer_key_cert: ChannelWriterKeyCert | None = None,
+    gfs_key: str | None = None,
 ) -> ChannelEpochNotice:
     unsigned = ChannelEpochNotice(
         channel_suite=CHANNEL_SUITE_ED25519,
@@ -442,6 +445,7 @@ def sign_notice(
         publish_mode=publish_mode,
         channel_sig="",
         writer_key_cert=writer_key_cert,
+        gfs_key=gfs_key,
     )
     return replace(
         unsigned,
@@ -460,7 +464,12 @@ def verify_notice(notice: ChannelEpochNotice, *, channel_pk: bytes) -> None:
 
 
 def sign_unregister(
-    *, channel_seed: bytes, channel_id: str, gfs_instance_id: str, ts: str
+    *,
+    channel_seed: bytes,
+    channel_id: str,
+    gfs_instance_id: str,
+    ts: str,
+    gfs_key: str | None = None,
 ) -> ChannelUnregisterRequest:
     unsigned = ChannelUnregisterRequest(
         channel_suite=CHANNEL_SUITE_ED25519,
@@ -469,6 +478,7 @@ def sign_unregister(
         ts=ts,
         nonce=b64url_encode(secrets.token_bytes(16)),
         channel_sig="",
+        gfs_key=gfs_key,
     )
     return replace(
         unsigned,
