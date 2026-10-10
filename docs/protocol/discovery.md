@@ -2256,22 +2256,27 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   instance id is refused outright. The owner signs a fresh statement into
   every snapshot and config it sends; members keep the latest verified one
   (`spaces.owner_statement`) and relay it.
-- **A pending invitation is never displaced.** A stub seated by an
-  invitation still waiting for an answer (status `pending`) stays, whoever
-  claims otherwise and whatever the statements' ages (first seated wins, as
-  before); only its own owner's newer statement updates it. The invitation's
-  status decides, not its `expires_at` — an invitee-side invitation past its
-  ttl is still listed and acceptable, so it still protects the stub. Only a
-  declined or expired-by-status invitation is dead.
-- **A proven owner beats unproven dust.** Otherwise, a stub held under
-  another owner is replaced only when the newcomer's owner is PROVEN
-  (its signed statement verified), the existing stub is NOT backed by a
-  current statement of its own, and nobody here ever accepted an invitation
-  into it (no local member, no accepted invitation). The earlier inviter's
-  seats, household rows, pinned key, media and pending invitations are then
-  dropped (logged at WARNING). An issuer that merely names itself owner
-  never replaces anything. A stub's owner or trusted inviting admin may
-  re-invite into it.
+- **An invitation seats nothing until the user accepts it.** Receipt of a
+  §D1b private invite stores only the invitation row, with the issuer's
+  snapshot (`space_invitations.join_snapshot`, its content key KEK-wrapped
+  for that invitation) — no space row, household rows, seats, pinned key,
+  cover or icon. The accept seats the stub from THAT invitation's snapshot,
+  checking the owner statement, inviter proof and epoch then. So several
+  pending invitations for one space id from different households coexist,
+  each listed for the user, and none can block or alter another's: a
+  stranger's invitation naming the real owner's space plants nothing. After
+  an accept (or an invite-link redeem, which is the user's accept and seats
+  directly), the pending invitations for that space from any household but
+  its owner and the issuer are expired. Declining only answers the issuer.
+  Invitations do not expire for the user: the invitee-side `expires_at` is
+  informational (the listing, the accept and the issuer's answer check all
+  ignore it). An invitation received before 0093 was pre-seated on receipt
+  and is accepted as before.
+- **The first accepted join stays.** Once this household joined a space, a
+  later join snapshot (an invite, an accept, a link redeem) is taken only
+  from its owner or its trusted inviting admin; one naming another owner is
+  refused (trust on first use), and an invitation that could only ever be
+  refused is dropped on receipt.
 - **Statements expire and follow the key.** A statement is taken only while
   younger than 30 days and only for the key AND epoch the snapshot pins; the
   inviter proof binds the epoch too. The owner signs a fresh statement into

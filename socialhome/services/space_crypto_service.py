@@ -178,6 +178,21 @@ class SpaceContentEncryption(BusPublisherMixin):
         latest = await self._repo.get_latest(space_id)
         return latest.epoch if latest is not None else None
 
+    # ─── Pending-invitation keys at rest (migration 0093) ─────────────────
+
+    def seal_at_rest(self, raw_key: bytes, *, context: str) -> str:
+        """KEK-wrap a received content key that is not imported yet — the
+        key a pending invitation's snapshot carries until the user accepts.
+        *context* (the invitation's identity) is bound as associated data,
+        so a sealed key cannot be moved onto another invitation."""
+        if len(raw_key) != _AES_KEY_BYTES:
+            raise ValueError("space content key must be 32 bytes")
+        return self._kek.encrypt(raw_key, associated_data=context.encode("utf-8"))
+
+    def open_at_rest(self, sealed: str, *, context: str) -> bytes:
+        """Inverse of :meth:`seal_at_rest` (raises on a wrong *context*)."""
+        return self._kek.decrypt(sealed, associated_data=context.encode("utf-8"))
+
     # ─── Cross-instance handoff (#117) ────────────────────────────────────
 
     async def export_current_key(self, space_id: str) -> tuple[int, bytes] | None:

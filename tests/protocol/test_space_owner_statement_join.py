@@ -1,17 +1,20 @@
 """Release-blocker protocol tests: who a §D1b join stub names as its owner
 (migration 0093, ``socialhome/space_owner_statement.py``).
 
-A household invited by somebody other than the owner seats the stub under
-the claimed owner ONLY with the owner's signed statement binding this space
-to the authority key the snapshot pins, plus the inviter's proof that it
-holds that key's seed. Anything less gets the pre-0093 result: the stub
-names the inviter itself, with no inviting-admin trust. A stub nobody here
-accepted yet gives way to the real owner's invite, dropping everything the
-earlier inviter brought; an accepted one stays (trust on first use).
+An invitation seats nothing until the user accepts it; the accept seats
+the stub from THAT invitation's snapshot. A household invited by somebody
+other than the owner seats the stub under the claimed owner ONLY with the
+owner's signed statement binding this space to the authority key the
+snapshot pins, plus the inviter's proof that it holds that key's seed.
+Anything less gets the pre-0093 result: the stub names the inviter itself,
+with no inviting-admin trust. Once a join is accepted it stays (trust on
+first use).
 
-The attack these pin down: a paired non-member MAL pre-seats a stub for
-owner R's real space claiming "R owns it, I am its delegated admin", hoping
-to become host-equivalent there once R invites us for real.
+The attack these pin down: a paired non-member MAL invites us into owner R's
+real space id claiming "R owns it, I am its delegated admin", hoping to
+become host-equivalent there — or at least to block or alter R's real
+invitation. Pending invitations from different households coexist and
+never touch each other.
 """
 
 from __future__ import annotations
@@ -32,13 +35,15 @@ from socialhome.crypto import (
     ed25519_public_key,
     generate_space_keypair,
 )
-from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.federation import (
+    FederationEvent,
+    FederationEventType,
+)
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceFeatures,
-    SpaceMember,
     SpaceRole,
     SpaceType,
 )
@@ -68,6 +73,7 @@ from socialhome.services.space_authority_pin import (
     owner_statement_via,
 )
 from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
+from socialhome.domain.space import InviteExpiredError
 from socialhome.services.space_service import (
     build_space_snapshot_for_federation,
     store_owner_statement,
@@ -77,6 +83,8 @@ from socialhome.space_owner_statement import (
     sign_inviter_proof,
     sign_owner_statement,
 )
+
+from tests.invite_accept import accept_invite, accepting_service
 
 pytestmark = pytest.mark.security
 
@@ -144,11 +152,28 @@ def _invite(sender: str, meta: dict, *, token: str, user: str = "u-joe"):
 def joiner(db):
     spaces = SqliteSpaceRepo(db)
     seats = SqliteSpaceRemoteMemberRepo(db)
+    bus = EventBus()
     handler = PrivateSpaceInviteHandler(
-        bus=EventBus(), space_repo=spaces, remote_member_repo=seats
+        bus=bus, space_repo=spaces, remote_member_repo=seats
     )
     handler._own_instance_id = JOINER
-    return SimpleNamespace(db=db, spaces=spaces, seats=seats, handler=handler)
+    # The real accept (``SpaceService.accept_remote_invite``) with the
+    # federation send stubbed: the stub is seated there, never on receipt.
+    svc = accepting_service(db, spaces, seats, own_instance_id=JOINER, bus=bus)
+    return SimpleNamespace(db=db, spaces=spaces, seats=seats, handler=handler, svc=svc)
+
+
+async def _accept(j, token: str, user: str = "u-joe") -> None:
+    await accept_invite(j.svc, token, user)
+
+
+async def _join(j, event: FederationEvent) -> None:
+    """Receive the invite, then the user accepts it (when it was kept)."""
+    await j.handler._on_invite(event)
+    token = event.payload["invite_token"]
+    row = await j.spaces.get_invitation_by_token(token)
+    if row is not None and row["status"] == "pending":
+        await _accept(j, token, event.payload["invitee_user_id"])
 
 
 _MAL_ROSTER = [
@@ -156,15 +181,28 @@ _MAL_ROSTER = [
 ]
 
 
-async def _mal_preseats(j, mal_kp, **extra) -> None:
+def _mal_invite(mal_kp, **extra) -> FederationEvent:
     """MAL claims R owns the space and MAL is its delegated admin."""
-    await j.handler._on_invite(
-        _invite(
-            MAL,
-            _meta(mal_kp.public_key.hex(), R, roster=_MAL_ROSTER, **extra),
-            token="t-mal",
-        )
+    return _invite(
+        MAL,
+        _meta(mal_kp.public_key.hex(), R, roster=_MAL_ROSTER, **extra),
+        token="t-mal",
     )
+
+
+def _r_invite(real_kp, **extra) -> FederationEvent:
+    return _invite(
+        R,
+        _meta(
+            real_kp.public_key.hex(), R, owner_statement=_statement(real_kp), **extra
+        ),
+        token="t-r",
+    )
+
+
+async def _mal_joins(j, mal_kp, **extra) -> None:
+    """MAL's invite, accepted."""
+    await _join(j, _mal_invite(mal_kp, **extra))
 
 
 async def _seated(j):
@@ -178,7 +216,7 @@ async def _seated(j):
 
 async def test_mal_without_the_owners_statement_seats_only_itself(joiner):
     mal_kp = generate_space_keypair()
-    await _mal_preseats(joiner, mal_kp)
+    await _mal_joins(joiner, mal_kp)
     # The pre-0093 result: the stub names MAL itself — nothing gained.
     assert await _seated(joiner) == (MAL, None, mal_kp.public_key.hex())
 
@@ -223,7 +261,7 @@ async def test_mal_cannot_claim_the_real_owner(joiner, case):
             owner_statement=_statement(real_kp),
             inviter_proof=_proof(mal_kp, inviter=MAL),
         )
-    await joiner.handler._on_invite(_invite(MAL, meta, token="t-mal"))
+    await _join(joiner, _invite(MAL, meta, token="t-mal"))
     owner, invited_by, _key = await _seated(joiner)
     assert (owner, invited_by) == (MAL, None)
 
@@ -232,86 +270,146 @@ async def test_mal_cannot_claim_the_real_owner(joiner, case):
 async def test_impossible_owner_claims_fall_back(joiner, claimed):
     kp = generate_space_keypair()
     owner = JOINER if claimed == "JOINER" else claimed
-    await joiner.handler._on_invite(
-        _invite(MAL, _meta(kp.public_key.hex(), owner), token="t-x")
-    )
+    await _join(joiner, _invite(MAL, _meta(kp.public_key.hex(), owner), token="t-x"))
     assert (await _seated(joiner))[:2] == (MAL, None)
 
 
-async def test_a_pending_preseat_is_never_displaced(joiner):
-    """First seated wins while its invitation is pending (as before 0093) —
-    even against the proven owner, whatever the statements' ages."""
+async def test_an_invitation_seats_nothing_before_its_accept(joiner):
+    """Receipt stores only the invitation: no space row, no seats, no
+    household rows, no pin — whoever sent it."""
     mal_kp = generate_space_keypair()
-    await _mal_preseats(joiner, mal_kp)
+    await joiner.handler._on_invite(_mal_invite(mal_kp))
+    assert await joiner.spaces.get(SPACE) is None
+    assert await joiner.seats.get_including_tombstones(SPACE, MAL, "u-mal") is None
+    assert await joiner.spaces.list_member_instances(SPACE) == []
+    row = await joiner.spaces.get_invitation_by_token("t-mal")
+    assert row["status"] == "pending" and row["join_snapshot"]
+
+
+async def test_two_pending_invitations_coexist_and_r_leaves_no_trace_of_mal(
+    joiner,
+):
+    """MAL's invitation (claiming R's space) and R's real one wait side by
+    side; accepting R's seats R's stub with nothing of MAL's, and MAL's
+    invitation can no longer be joined."""
+    mal_kp = generate_space_keypair()
     real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(_mal_invite(mal_kp))
     await joiner.handler._on_invite(
-        _invite(
-            R,
-            _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
-            token="t-r",
+        _r_invite(
+            real_kp, roster=[{"user_id": "u-r", "instance_id": R, "role": "owner"}]
         )
     )
-    assert await _seated(joiner) == (MAL, None, mal_kp.public_key.hex())
-    assert (await joiner.spaces.get_invitation_by_token("t-mal"))["status"] == (
-        "pending"
-    )
-    assert await joiner.spaces.get_invitation_by_token("t-r") is None
-
-
-async def test_the_real_owners_invite_replaces_a_dead_unproven_preseat(joiner):
-    """Once MAL's invitation is no longer pending (declined / expired) and
-    nobody accepted it, R's proven invite replaces the dust: MAL loses
-    everything it brought — owner, key, its seats and household rows."""
-    mal_kp = generate_space_keypair()
-    await _mal_preseats(joiner, mal_kp)
-    assert await joiner.seats.get(SPACE, MAL, "u-mal") is not None
-    await joiner.spaces.update_invitation_status(
-        (await joiner.spaces.get_invitation_by_token("t-mal"))["id"], "declined"
-    )
-
-    real_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
-        _invite(
-            R,
-            _meta(
-                real_kp.public_key.hex(),
-                R,
-                owner_statement=_statement(real_kp),
-                roster=[{"user_id": "u-r", "instance_id": R, "role": "owner"}],
-            ),
-            token="t-r",
-        )
-    )
+    listed = await joiner.spaces.list_pending_remote_invites_for("u-joe")
+    assert sorted(r["invite_token"] for r in listed) == ["t-mal", "t-r"]
+    await _accept(joiner, "t-r")
     assert await _seated(joiner) == (R, None, real_kp.public_key.hex())
-    assert await joiner.seats.get(SPACE, MAL, "u-mal") is None
+    assert await joiner.seats.get_including_tombstones(SPACE, MAL, "u-mal") is None
     assert MAL not in await joiner.spaces.list_member_instances(SPACE)
+    assert await joiner.seats.get(SPACE, R, "u-r") is not None
+    assert (await joiner.spaces.get_invitation_by_token("t-r"))["status"] == (
+        "accepted"
+    )
     assert (await joiner.spaces.get_invitation_by_token("t-mal"))["status"] == (
+        "expired"
+    )
+    with pytest.raises(InviteExpiredError):
+        await _accept(joiner, "t-mal")
+    assert await _seated(joiner) == (R, None, real_kp.public_key.hex())
+
+
+async def test_accepting_mals_invitation_seats_under_mal_as_before(joiner):
+    """The user picks MAL's: without R's statement and a seed proof the
+    stub names MAL itself (the pre-0093 result), and R's pending invitation
+    for that id is expired — the first accepted join stays."""
+    mal_kp = generate_space_keypair()
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(_r_invite(real_kp))
+    await joiner.handler._on_invite(_mal_invite(mal_kp))
+    await _accept(joiner, "t-mal")
+    assert await _seated(joiner) == (MAL, None, mal_kp.public_key.hex())
+    assert (await joiner.spaces.get_invitation_by_token("t-r"))["status"] == ("expired")
+
+
+async def test_mals_invitation_never_blocks_or_alters_rs(joiner):
+    """Whatever MAL sends, before or after R's invitation, R's accept
+    seats exactly R's snapshot."""
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(_r_invite(real_kp))
+    for i, mal_kp in enumerate(generate_space_keypair() for _ in range(2)):
+        await joiner.handler._on_invite(
+            _invite(
+                MAL,
+                _meta(
+                    mal_kp.public_key.hex(),
+                    R,
+                    owner_statement=_statement(real_kp),
+                    inviter_proof=_proof(mal_kp, inviter=MAL),
+                    roster=_MAL_ROSTER,
+                ),
+                token=f"t-mal-{i}",
+            )
+        )
+    await _accept(joiner, "t-r")
+    space = await joiner.spaces.get(SPACE)
+    assert (space.owner_instance_id, space.identity_public_key) == (
+        R,
+        real_kp.public_key.hex(),
+    )
+    assert await joiner.spaces.get_invited_by(SPACE) is None
+    assert await joiner.seats.get_including_tombstones(SPACE, MAL, "u-mal") is None
+
+
+async def test_an_invitation_past_its_expires_at_is_still_accepted(joiner, db):
+    """Invitations do not expire for the user: the invitee-side
+    ``expires_at`` is informational, as the listing already treats it."""
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(_r_invite(real_kp))
+    await db.enqueue(
+        "UPDATE space_invitations SET expires_at='2020-01-01T00:00:00+00:00'"
+        " WHERE invite_token='t-r'"
+    )
+    assert [
+        r["invite_token"]
+        for r in await joiner.spaces.list_pending_remote_invites_for("u-joe")
+    ] == ["t-r"]
+    await _accept(joiner, "t-r")
+    assert (await _seated(joiner))[0] == R
+
+
+async def test_a_declined_invitation_seats_nothing(joiner):
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(_r_invite(real_kp))
+    await joiner.svc.decline_remote_invite(token="t-r", user_id="u-joe")
+    assert await joiner.spaces.get(SPACE) is None
+    assert (await joiner.spaces.get_invitation_by_token("t-r"))["status"] == (
         "declined"
     )
-    assert (await joiner.spaces.get_invitation_by_token("t-r"))["status"] == ("pending")
-    space = await joiner.spaces.get(SPACE)
-    assert space.owner_statement is not None  # R's, kept for relaying
+
+
+async def test_another_users_invitation_cannot_be_accepted(joiner):
+    real_kp = generate_space_keypair()
+    await joiner.handler._on_invite(_r_invite(real_kp))
+    with pytest.raises(InviteExpiredError):
+        await _accept(joiner, "t-r", user="u-ann")
+    assert await joiner.spaces.get(SPACE) is None
 
 
 async def test_an_accepted_stub_is_never_taken_over(joiner, db):
     """Trust on first use: once a member here joined, a later invite naming
     another owner is refused, whoever sends it."""
     real_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             R,
             _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
             token="t-r",
-        )
-    )
-    await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name) VALUES('joe','u-joe','Joe')"
-    )
-    await joiner.spaces.save_member(
-        SpaceMember(space_id=SPACE, user_id="u-joe", role="member", joined_at="t")
+        ),
     )
     mal_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             MAL,
             _meta(
@@ -321,7 +419,7 @@ async def test_an_accepted_stub_is_never_taken_over(joiner, db):
             ),
             token="t-mal",
             user="u-ann",
-        )
+        ),
     )
     assert await _seated(joiner) == (R, None, real_kp.public_key.hex())
     assert await joiner.spaces.get_invitation_by_token("t-mal") is None
@@ -329,7 +427,8 @@ async def test_an_accepted_stub_is_never_taken_over(joiner, db):
 
 async def test_an_honest_admin_with_the_owners_statement_is_trusted(joiner):
     kp = generate_space_keypair()
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             ADMIN,
             _meta(
@@ -340,14 +439,15 @@ async def test_an_honest_admin_with_the_owners_statement_is_trusted(joiner):
                 roster=[{"user_id": "u-admin", "instance_id": ADMIN, "role": "admin"}],
             ),
             token="t-1",
-        )
+        ),
     )
     assert await _seated(joiner) == (R, ADMIN, kp.public_key.hex())
     space = await joiner.spaces.get(SPACE)
     assert await acts_as_host(joiner.spaces, joiner.seats, space, ADMIN)
 
     # MEDIUM-1: the same admin can invite another of our users later.
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             ADMIN,
             _meta(
@@ -359,13 +459,14 @@ async def test_an_honest_admin_with_the_owners_statement_is_trusted(joiner):
             ),
             token="t-2",
             user="u-ann",
-        )
+        ),
     )
     assert await joiner.spaces.get_invitation_by_token("t-2") is not None
     assert await _seated(joiner) == (R, ADMIN, kp.public_key.hex())
 
     # Another household — even with a valid proof of its own — may not.
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             MAL,
             _meta(
@@ -376,7 +477,7 @@ async def test_an_honest_admin_with_the_owners_statement_is_trusted(joiner):
             ),
             token="t-3",
             user="u-bob",
-        )
+        ),
     )
     assert await joiner.spaces.get_invitation_by_token("t-3") is None
 
@@ -465,31 +566,26 @@ async def test_an_honest_admins_real_snapshot_carries_what_the_joiner_needs(
     assert "inviter_proof" in meta and "owner_statement" in meta
     # The admin's own seat, as the admin household's roster would carry it.
     meta["roster"].append({"user_id": "u-admin", "instance_id": ADMIN, "role": "admin"})
-    await joiner.handler._on_invite(_invite(ADMIN, meta, token="t-e2e"))
+    await _join(joiner, _invite(ADMIN, meta, token="t-e2e"))
     assert await _seated(joiner) == (R, ADMIN, kp.public_key.hex())
 
 
 # ── Round 3: an unproven claim never replaces; an ex-admin's old key lapses ─
 
 
-async def test_an_unproven_claimant_never_replaces_the_owners_pending_stub(joiner):
-    """MAL naming ITSELF owner (no statement) must not purge R's genuine,
-    still-unaccepted invitation, nor expire it."""
+async def test_an_unproven_claimant_cannot_expire_the_owners_invitation(joiner):
+    """MAL naming ITSELF owner (no statement) after R's invitation arrived:
+    both wait; R's stays pending and acceptable."""
     real_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
-        _invite(
-            R,
-            _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
-            token="t-r",
-        )
-    )
+    await joiner.handler._on_invite(_r_invite(real_kp))
     mal_kp = generate_space_keypair()
     await joiner.handler._on_invite(
         _invite(MAL, _meta(mal_kp.public_key.hex(), MAL), token="t-mal")
     )
-    assert await _seated(joiner) == (R, None, real_kp.public_key.hex())
+    assert await joiner.spaces.get(SPACE) is None
     assert (await joiner.spaces.get_invitation_by_token("t-r"))["status"] == "pending"
-    assert await joiner.spaces.get_invitation_by_token("t-mal") is None
+    await _accept(joiner, "t-r")
+    assert await _seated(joiner) == (R, None, real_kp.public_key.hex())
 
 
 async def test_a_self_proven_claimant_never_replaces_a_statement_backed_stub(joiner):
@@ -497,15 +593,17 @@ async def test_a_self_proven_claimant_never_replaces_a_statement_backed_stub(joi
     replace a pending stub the real owner's statement backs: two proven
     claims → the first stays."""
     real_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             R,
             _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
             token="t-r",
-        )
+        ),
     )
     mal_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             MAL,
             _meta(
@@ -514,25 +612,24 @@ async def test_a_self_proven_claimant_never_replaces_a_statement_backed_stub(joi
                 owner_statement=_statement(mal_kp, seed=MAL_SEED),
             ),
             token="t-mal",
-        )
+        ),
     )
     assert await _seated(joiner) == (R, None, real_kp.public_key.hex())
 
 
 async def test_a_stub_somebody_once_accepted_is_never_replaced(joiner, db):
-    """Accepted, then everybody left: still not an unaccepted invitation."""
+    """Accepted (here: MAL's), then a proven owner's invite for the id: the
+    first accepted join stays; the later invitation is dropped."""
     mal_kp = generate_space_keypair()
-    await _mal_preseats(joiner, mal_kp)
-    await joiner.spaces.update_invitation_status(
-        (await joiner.spaces.get_invitation_by_token("t-mal"))["id"], "accepted"
-    )
+    await _mal_joins(joiner, mal_kp)
     real_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             R,
             _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
             token="t-r",
-        )
+        ),
     )
     assert (await _seated(joiner))[0] == MAL
 
@@ -554,7 +651,8 @@ async def _x_invites_on_the_old_key(joiner, old_kp, *, statement_age_ms: int = 0
         authority_key_epoch=0,
         issued_at_ms=now - statement_age_ms,
     )
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             X,
             _meta(
@@ -565,7 +663,7 @@ async def _x_invites_on_the_old_key(joiner, old_kp, *, statement_age_ms: int = 0
                 roster=[{"user_id": "u-x", "instance_id": X, "role": "admin"}],
             ),
             token="t-x",
-        )
+        ),
     )
 
 
@@ -714,12 +812,13 @@ async def test_a_held_statement_for_the_pinned_key_is_only_replaced_by_a_newer(
     joiner,
 ):
     kp = generate_space_keypair()
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             R,
             _meta(kp.public_key.hex(), R, owner_statement=_statement(kp)),
             token="t-r",
-        )
+        ),
     )
     held = (await joiner.spaces.get(SPACE)).owner_statement
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -758,7 +857,8 @@ async def test_an_admin_invite_into_a_rotated_space_is_trusted(joiner):
     """Epoch >= 1: the relayed cert is applied BEFORE the inviter is
     recorded, and statement + proof name that epoch."""
     kp = generate_space_keypair()
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             ADMIN,
             _meta(
@@ -782,7 +882,7 @@ async def test_an_admin_invite_into_a_rotated_space_is_trusted(joiner):
                 roster=[{"user_id": "u-admin", "instance_id": ADMIN, "role": "admin"}],
             ),
             token="t-ep",
-        )
+        ),
     )
     space = await joiner.spaces.get(SPACE)
     assert (space.owner_instance_id, space.authority_key_epoch) == (R, 3)
@@ -834,7 +934,8 @@ async def _sentinel(receiver, *, sender: str, seed: bytes, **extra) -> None:
 
 
 async def _admin_seated_at_epoch_0(joiner, kp, *, inviter=ADMIN) -> None:
-    await joiner.handler._on_invite(
+    await _join(
+        joiner,
         _invite(
             inviter,
             _meta(
@@ -845,7 +946,7 @@ async def _admin_seated_at_epoch_0(joiner, kp, *, inviter=ADMIN) -> None:
                 roster=[{"user_id": "u-inv", "instance_id": inviter, "role": "admin"}],
             ),
             token="t-1",
-        )
+        ),
     )
 
 
@@ -996,21 +1097,9 @@ async def test_removed_older_than_our_current_join_does_not_archive(
     the owner says ``removed`` — but our current join is newer, so we keep
     the copy. A removal newer than our join still archives."""
     kp = generate_space_keypair()
-    await joiner.handler._on_invite(
-        _invite(R, _meta(kp.public_key.hex(), R), token="t-r")
-    )
-    await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name) VALUES('joe','u-joe','Joe')"
-    )
-    await joiner.spaces.save_member(
-        SpaceMember(
-            space_id=SPACE,
-            user_id="u-joe",
-            role="member",
-            joined_at="2026-10-10T12:00:00+00:00",
-        )
-    )
-    removed_at = "2026-10-10 11:00:00" if joined_after else "2026-10-10 13:00:00"
+    await _join(joiner, _invite(R, _meta(kp.public_key.hex(), R), token="t-r"))
+    # The accept just seated u-joe (joined now).
+    removed_at = "2000-01-01 00:00:00" if joined_after else "2999-01-01 00:00:00"
     handlers = SpaceMembershipInboundHandlers(
         bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
     )
@@ -1022,58 +1111,12 @@ async def test_removed_older_than_our_current_join_does_not_archive(
 async def test_a_removed_without_a_time_still_archives(joiner, db):
     """Pre-0093 tombstones carry no time: ``removed`` is honoured as before."""
     kp = generate_space_keypair()
-    await joiner.handler._on_invite(
-        _invite(R, _meta(kp.public_key.hex(), R), token="t-r")
-    )
+    await _join(joiner, _invite(R, _meta(kp.public_key.hex(), R), token="t-r"))
     handlers = SpaceMembershipInboundHandlers(
         bus=EventBus(), space_repo=joiner.spaces, seat_repo=joiner.seats
     )
     await handlers._on_sync_rejected(_rejected("removed"))
     assert (await joiner.spaces.get(SPACE)).archived is True
-
-
-async def test_a_pending_invitation_past_its_ttl_still_protects_the_stub(joiner, db):
-    """The invitee-side row's short ttl does not end it: it stays listed and
-    acceptable, so it still protects its stub — status decides, never
-    ``expires_at`` (else the user's real invitation would be displaced)."""
-    mal_kp = generate_space_keypair()
-    await _mal_preseats(joiner, mal_kp)
-    await db.enqueue(
-        "UPDATE space_invitations SET expires_at='2020-01-01T00:00:00+00:00'"
-        " WHERE invite_token='t-mal'"
-    )
-    assert await joiner.spaces.has_pending_remote_invitation(SPACE) is True
-    real_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
-        _invite(
-            R,
-            _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
-            token="t-r",
-        )
-    )
-    assert (await _seated(joiner))[0] != R
-    row = await db.fetchone(
-        "SELECT status FROM space_invitations WHERE invite_token='t-mal'"
-    )
-    assert row["status"] == "pending"
-
-
-async def test_an_expired_by_status_invitation_protects_nothing(joiner, db):
-    mal_kp = generate_space_keypair()
-    await _mal_preseats(joiner, mal_kp)
-    await db.enqueue(
-        "UPDATE space_invitations SET status='expired' WHERE invite_token='t-mal'"
-    )
-    assert await joiner.spaces.has_pending_remote_invitation(SPACE) is False
-    real_kp = generate_space_keypair()
-    await joiner.handler._on_invite(
-        _invite(
-            R,
-            _meta(real_kp.public_key.hex(), R, owner_statement=_statement(real_kp)),
-            token="t-r",
-        )
-    )
-    assert (await _seated(joiner))[0] == R
 
 
 async def test_the_stream_that_carried_a_reproof_is_not_recorded_clean(joiner):

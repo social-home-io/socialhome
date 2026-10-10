@@ -117,3 +117,23 @@ def test_clearing_the_inviter_must_clear_its_epoch(conn) -> None:
 
 def test_an_inviter_with_no_epoch_yet_is_accepted(conn) -> None:
     conn.execute("UPDATE spaces SET invited_by_instance='admin-hh' WHERE id='old'")
+
+
+def _invitation(conn, snapshot) -> None:
+    conn.execute(
+        "INSERT INTO space_invitations(id, space_id, invited_user_id, invited_by,"
+        " remote_instance_id, remote_user_id, invite_token, expires_at,"
+        " join_snapshot) VALUES('i1','sp','u','x','inst','u','t','2030-01-01',?)",
+        (snapshot,),
+    )
+
+
+def test_join_snapshot_accepts_null_and_objects(conn) -> None:
+    _invitation(conn, None)
+    conn.execute("UPDATE space_invitations SET join_snapshot='{\"meta\":{}}'")
+
+
+@pytest.mark.parametrize("value", ["[]", "x", "3"])
+def test_join_snapshot_rejects_non_objects(conn, value) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        _invitation(conn, value)

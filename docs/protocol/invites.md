@@ -1350,10 +1350,12 @@ sequenceDiagram
     participant A as HFS A (admin)
     participant B as HFS B (invitee)
     A->>A: mint invite token
-    A->>B: SPACE_PRIVATE_INVITE<br/>(encrypted: space_id,<br/>token, display hint)
+    A->>B: SPACE_PRIVATE_INVITE<br/>(encrypted: space_id,<br/>token, display hint, space_meta)
+    Note over B: store the invitation + its snapshot<br/>(content key KEK-wrapped) — no stub
     Note over B: user sees invitation<br/>in UI
     alt user accepts
         B->>A: SPACE_PRIVATE_INVITE_ACCEPT
+        B->>B: seat stub + key + roster<br/>from THIS invitation's snapshot,<br/>expire other households' invitations
         A->>A: add SpaceRemoteMember
         A->>B: SPACE_MEMBER_JOINED + SPACE_KEY_EXCHANGE
     else user declines
@@ -1361,14 +1363,28 @@ sequenceDiagram
     end
 ```
 
+**Nothing is seated before the accept** (migration 0093). The invitee
+household stores the invitation row with the issuer's `space_meta`
+(`space_invitations.join_snapshot`; the content key in it KEK-wrapped and
+bound to that invitation) and writes no space row, household rows, seats,
+pinned key, cover or icon. Accepting seats the stub from that invitation's
+own snapshot — owner statement, inviter proof and epoch are checked then
+(see [discovery.md](./discovery.md), "An invitation seats nothing until the
+user accepts it") — and the §CP.F1 age gate reads the snapshot's `min_age`.
+Pending invitations for one space id from different households coexist and
+are each listed; after an accept the ones from any household but the
+space's owner and the issuer are expired. A space this household already
+joined under another owner refuses the accept (`403`); an invitation that
+could only be refused is dropped on receipt.
+
 ### Private invite over the federation mesh (v_6+)
 
 The sealed `SPACE_PRIVATE_INVITE` payload carries `host_identity_pk` —
 the inviting household's Ed25519 identity public key. A mesh invitee never
 pairs with the host, so this is the only way it can later verify the
-host's signatures on the §25.6 catch-up stream; it is persisted on the
-space stub only when `derive_instance_id(pk)` matches the authenticated
-sender. Absent on an older sender (the field is additive, no capability
+host's signatures on the §25.6 catch-up stream; it is kept with the
+invitation and persisted on the space stub at the user's accept, only when
+`derive_instance_id(pk)` matches the authenticated sender. Absent on an older sender (the field is additive, no capability
 bump — a receiver that finds it missing keeps the previous behaviour). See
 [`sync.md` → "Authenticating a chunk from an unpaired
 host"](sync.md#authenticating-a-chunk-from-an-unpaired-host).

@@ -79,6 +79,8 @@ from socialhome.services.space_crypto_service import (
 from socialhome.services.space_service import SpaceService
 from socialhome.services.user_service import UserService
 
+from tests.invite_accept import accept_invite, accepting_service
+
 pytestmark = pytest.mark.security
 
 SPACE = "sp-g"
@@ -294,6 +296,18 @@ def _invite_handler(db) -> PrivateSpaceInviteHandler:
     )
 
 
+async def _invite_and_accept(db, event: FederationEvent) -> None:
+    """Receipt seats nothing (migration 0093); the user's accept does."""
+    spaces, seats = SqliteSpaceRepo(db), SqliteSpaceRemoteMemberRepo(db)
+    await _invite_handler(db)._on_invite(event)
+    assert await spaces.get(SPACE) is None
+    await accept_invite(
+        accepting_service(db, spaces, seats, own_instance_id=JOINER),
+        event.payload["invite_token"],
+        event.payload["invitee_user_id"],
+    )
+
+
 @pytest.mark.parametrize(
     "gfs, expected",
     [
@@ -305,8 +319,8 @@ async def test_an_admin_invite_seats_the_real_owner_and_only_the_owners_list(
     db, gfs, expected
 ):
     kp = generate_space_keypair()
-    await _invite_handler(db)._on_invite(
-        _invite(_proven(kp, _meta(kp.public_key.hex(), gfs=gfs)))
+    await _invite_and_accept(
+        db, _invite(_proven(kp, _meta(kp.public_key.hex(), gfs=gfs)))
     )
     space = await SqliteSpaceRepo(db).get(SPACE)
     assert space is not None
@@ -324,9 +338,7 @@ async def test_the_owners_later_config_reaches_a_household_an_admin_invited(db):
     list, and the admin's does not."""
     kp = generate_space_keypair()
     space_pk = kp.public_key.hex()
-    await _invite_handler(db)._on_invite(
-        _invite(_proven(kp, _meta(space_pk, gfs=None)))
-    )
+    await _invite_and_accept(db, _invite(_proven(kp, _meta(space_pk, gfs=None))))
     inbound = _inbound(db, JOINER)
     repo = SqliteSpaceRepo(db)
 
@@ -599,7 +611,7 @@ async def test_an_admin_invited_household_applies_the_admins_catch_up_stream(
     and its members' content applies. A chunk signed by anyone else is
     dropped."""
     kp = generate_space_keypair()
-    await _invite_handler(db)._on_invite(_admin_invite(kp))
+    await _invite_and_accept(db, _admin_invite(kp))
     repo = SqliteSpaceRepo(db)
     space = await repo.get(SPACE)
     assert space is not None and space.owner_instance_id == OWNER
@@ -625,7 +637,7 @@ async def test_an_unrecorded_household_cannot_stream_into_the_space(db):
     """No paired row and no recorded key: an unpaired household that merely
     names the space id is not verified at all."""
     kp = generate_space_keypair()
-    await _invite_handler(db)._on_invite(_admin_invite(kp))
+    await _invite_and_accept(db, _admin_invite(kp))
     stranger_seed = b"\x34" * 32
     stranger = derive_instance_id(ed25519_public_key(stranger_seed))
     await _sync_receiver(db).on_chunk(

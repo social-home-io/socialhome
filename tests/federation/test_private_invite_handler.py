@@ -7,6 +7,8 @@ member removed, plus the missing-field skip branches.
 
 from __future__ import annotations
 
+import json
+
 import io
 
 from datetime import datetime, timedelta, timezone
@@ -27,6 +29,13 @@ from socialhome.domain.events import (
 from socialhome.domain.space import RemoteAdminOutcome, SpaceRole
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.services.space_crypto_service import SpaceContentEncryption
+from socialhome.services.space_service import (
+    open_join_snapshot,
+    resolve_join_owner,
+    seat_join_stub,
+)
 import base64
 
 
@@ -119,6 +128,43 @@ def handler():
         remote_members=remote_members,
         cover_repo=cover_repo,
         icon_repo=icon_repo,
+    )
+
+
+async def _accept_seat(handler, ev) -> None:
+    """Receipt seats nothing (migration 0093); seat the stub the way the
+    user's accept does — from the snapshot the handler stored."""
+    handler.space_repo.save.assert_not_awaited()
+    handler.remote_members.add.assert_not_awaited()
+    handler.cover_repo.set.assert_not_awaited()
+    handler.icon_repo.set.assert_not_awaited()
+    handler.space_repo.set_host_identity_pk.assert_not_awaited()
+    kw = handler.space_repo.save_remote_invitation.await_args.kwargs
+    opened = open_join_snapshot(
+        {
+            "join_snapshot": kw["join_snapshot"],
+            "space_id": kw["space_id"],
+            "invite_token": kw["invite_token"],
+        },
+        space_crypto_service=None,
+    )
+    assert opened is not None
+    meta, inviter_pk = opened
+    await seat_join_stub(
+        space_repo=handler.space_repo,
+        remote_member_repo=handler.remote_members,
+        bus=handler.bus,
+        space_id=kw["space_id"],
+        meta=meta,
+        join=resolve_join_owner(
+            kw["space_id"], meta, ev.from_instance, own_instance_id=None
+        ),
+        issuer_instance_id=ev.from_instance,
+        joining_user_id=kw["remote_user_id"],
+        own_instance_id=None,
+        cover_repo=handler.cover_repo,
+        icon_repo=handler.icon_repo,
+        inviter_identity_pk=inviter_pk,
     )
 
 
@@ -470,6 +516,7 @@ async def test_invite_with_roster_seats_remote_members_for_each_peer(handler):
         },
     )
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
     # Two roster entries (Pascal + Anna) get seated as remote
     # members; the invitee's own row is skipped.
     assert handler.remote_members.add.await_count == 2
@@ -528,6 +575,7 @@ async def test_invite_roster_mirrors_a_follower_as_a_follower(handler):
         },
     )
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
     roles = {
         call.kwargs["user_id"]: call.kwargs["role"]
         for call in handler.remote_members.add.await_args_list
@@ -563,6 +611,7 @@ async def test_invite_with_cover_bytes_writes_to_cover_repo(handler):
         },
     )
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
     handler.cover_repo.set.assert_awaited_once()
     call = handler.cover_repo.set.call_args
     assert call.args[0] == "sp-cover"
@@ -595,6 +644,7 @@ async def test_invite_with_icon_bytes_writes_to_icon_repo(handler):
         },
     )
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
     handler.icon_repo.set.assert_awaited_once()
     call = handler.icon_repo.set.call_args
     assert call.args[0] == "sp-icon"
@@ -624,6 +674,7 @@ async def test_invite_skips_cover_write_when_no_bytes(handler):
         },
     )
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
     handler.cover_repo.set.assert_not_awaited()
 
 
@@ -654,6 +705,7 @@ async def test_invite_with_space_meta_seats_local_stub(handler):
         },
     )
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
     handler.space_repo.save.assert_awaited_once()
     saved = handler.space_repo.save.call_args.args[0]
     assert saved.id == "sp-remote"
@@ -1473,6 +1525,7 @@ async def test_invite_records_host_identity_pk_when_it_derives_to_sender(handler
     ev = _event("SPACE_PRIVATE_INVITE", _invite_with(host_pk), from_instance=host_id)
 
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
 
     handler.space_repo.set_host_identity_pk.assert_awaited_once_with("sp-mesh", host_pk)
 
@@ -1493,6 +1546,7 @@ async def test_invite_refuses_host_identity_pk_that_derives_elsewhere(handler):
     )
 
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
 
     handler.space_repo.set_host_identity_pk.assert_not_awaited()
 
@@ -1505,6 +1559,7 @@ async def test_invite_without_host_identity_pk_is_unchanged(handler):
     ev = _event("SPACE_PRIVATE_INVITE", payload, from_instance=host_id)
 
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
 
     handler.space_repo.set_host_identity_pk.assert_not_awaited()
 
@@ -1527,6 +1582,7 @@ async def test_invite_refuses_malformed_host_identity_pk(handler, bad):
     )
 
     await handler.h._on_invite(ev)
+    await _accept_seat(handler, ev)
 
     handler.space_repo.set_host_identity_pk.assert_not_awaited()
 
@@ -2128,3 +2184,63 @@ async def test_roster_snapshot_channel_grant_from_a_non_host_is_ignored():
         )
     )
     certs.accept_channel_grant.assert_not_awaited()
+
+
+# ── Migration 0093: the snapshot waits, sealed, until the accept ──────────
+
+
+def _keyed_invite(key_payload: dict):
+    return _event(
+        "SPACE_PRIVATE_INVITE",
+        {
+            "space_id": "sp-key",
+            "invite_token": "tkn-key",
+            "invitee_user_id": "u-self",
+            "inviter_user_id": "u-pascal",
+            "space_meta": {
+                "name": "Family",
+                "owner_instance_id": "peer-1",
+                "owner_username": "pascal",
+                "identity_public_key": "abc",
+                "space_content_key": key_payload,
+            },
+        },
+    )
+
+
+async def test_invite_keeps_the_content_key_kek_wrapped_until_the_accept(handler):
+    raw = b"\x42" * 32
+    crypto = SpaceContentEncryption(AsyncMock(), KeyManager(b"\x0c" * 32))
+    handler.h._space_crypto = crypto
+    b64 = base64.b64encode(raw).decode("ascii")
+    await handler.h._on_invite(_keyed_invite({"epoch": 2, "key_base64": b64}))
+    kw = handler.space_repo.save_remote_invitation.await_args.kwargs
+    assert b64 not in kw["join_snapshot"] and raw.hex() not in kw["join_snapshot"]
+    invite = {
+        "join_snapshot": kw["join_snapshot"],
+        "space_id": "sp-key",
+        "invite_token": "tkn-key",
+    }
+    meta, _pk = open_join_snapshot(invite, space_crypto_service=crypto)
+    assert meta["space_content_key"]["key_base64"] == b64
+    assert meta["space_content_key"]["epoch"] == 2
+    # Bound to its invitation: under another token it does not open.
+    meta, _pk = open_join_snapshot(
+        {**invite, "invite_token": "other"}, space_crypto_service=crypto
+    )
+    assert "space_content_key" not in meta
+
+
+async def test_invite_without_a_key_store_drops_the_key(handler):
+    b64 = base64.b64encode(b"\x42" * 32).decode("ascii")
+    await handler.h._on_invite(_keyed_invite({"epoch": 2, "key_base64": b64}))
+    kw = handler.space_repo.save_remote_invitation.await_args.kwargs
+    assert b64 not in kw["join_snapshot"]
+    assert "space_content_key" not in json.loads(kw["join_snapshot"])["meta"]
+
+
+async def test_invite_with_an_unknown_key_suite_is_refused(handler):
+    await handler.h._on_invite(
+        _keyed_invite({"epoch": 2, "key_base64": "AA==", "key_suite": "rot13"})
+    )
+    handler.space_repo.save_remote_invitation.assert_not_awaited()

@@ -177,3 +177,37 @@ ALTER TABLE spaces ADD COLUMN owner_statement TEXT
     CHECK (owner_statement IS NULL
            OR (json_valid(owner_statement)
                AND json_type(owner_statement) = 'object'));
+
+-- ``space_invitations.join_snapshot`` (same migration): on the INVITEE
+-- household, the issuer's ``space_meta`` for a pending §D1b private invite,
+-- as a JSON object ``{meta, host_identity_pk}`` — the space content key in
+-- it KEK-wrapped (never plaintext at rest). Owner decision 2026-10-10: an
+-- invitation never seats a stub until the user accepts it. Receipt stores
+-- only this row; the accept seats the stub from THIS invitation's snapshot
+-- (owner statement + inviter proof + cert checked then), so several pending
+-- invitations for one space id from different households coexist and none
+-- can block or alter another's. NULL on host-side rows, local invites, and
+-- invitations received before 0093 (those were pre-seated as before, and
+-- accept keeps that path).
+--
+-- Audit for this column:
+--   (1) Paths that touch the data: ``PrivateSpaceInviteHandler._on_invite``
+--       writes the row (``save_remote_invitation``);
+--       ``SpaceService.accept_remote_invite`` reads it; decline only flips
+--       the status. Before 0093 the snapshot went straight into
+--       ``spaces`` / ``space_instances`` / ``space_remote_members`` /
+--       ``space_keys`` / covers / icons at receipt — the pre-seated stub that
+--       a stranger's invitation could plant ahead of the real owner's.
+--   (2) Rejected: keeping the pre-seated stub and arbitrating between
+--       claimants (the displacement rules this replaces — every rule left a
+--       race between two pending invitations); a separate table (the
+--       invitation row already is one-per-invitation, the snapshot's grain);
+--       re-asking the issuer for the snapshot at accept time (the issuer may
+--       be offline, and the accept would gain a round trip it does not have
+--       today); memory only (an invitation waits for days and across
+--       restarts).
+--   (3) One NULL-default TEXT column with a JSON-object CHECK, no backfill.
+ALTER TABLE space_invitations ADD COLUMN join_snapshot TEXT
+    CHECK (join_snapshot IS NULL
+           OR (json_valid(join_snapshot)
+               AND json_type(join_snapshot) = 'object'));

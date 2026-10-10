@@ -129,6 +129,8 @@ class _FakeSpaceRepo:
         self.tokens: dict[str, dict] = {}
         self.space_instances: list[tuple[str, str]] = []
         self.bans: set[tuple[str, str]] = set()
+        # Which pending invitations a seated redeem expired (migration 0093).
+        self.expired_except: tuple[str, frozenset[str]] | None = None
         # Allow tests to force an exception out of consume_invite_token.
         self.consume_should_raise: Exception | None = None
         # §D1b stub bookkeeping — the coordinator now seats a local
@@ -246,14 +248,8 @@ class _FakeSpaceRepo:
             p for p in self.space_instances if p != (space_id, instance_id)
         ]
 
-    async def expire_remote_invitations_except(self, space_id, keep_instance_id):
-        pass
-
-    async def has_pending_remote_invitation(self, space_id):
-        return False
-
-    async def any_invitation_accepted(self, space_id):
-        return False
+    async def expire_remote_invitations_except(self, space_id, keep_instance_ids):
+        self.expired_except = (space_id, keep_instance_ids)
 
     async def purge(self, space_id):
         self.spaces.pop(space_id, None)
@@ -622,6 +618,9 @@ async def test_redeem_seats_local_stub_and_membership_from_ack_meta():
         m.space_id == "sp-meta" and m.user_id == "u-local" for m in sender_repo.members
     )
     assert ("sp-meta", "issuer-1") in sender_repo.space_instances
+    # A redeem is the user's accept: pending private invitations from any
+    # other household for this space can no longer be joined (0093).
+    assert sender_repo.expired_except == ("sp-meta", frozenset({"issuer-1"}))
 
 
 async def test_redeem_blocks_underage_minor_and_seats_nothing():
@@ -712,10 +711,9 @@ async def test_redeem_refuses_when_space_owned_by_another_host():
 
 
 async def test_an_unproven_claim_never_replaces_another_stub():
-    """Migration 0093 — a stub seated by an earlier, never-accepted
-    invitation under another household gives way only to an owner PROVEN by
-    its signed statement; an issuer that merely names itself (no statement)
-    is refused and the earlier stub stays."""
+    """Migration 0093 — a space this household already joined under another
+    owner is never taken over by a later join: the redeem is refused and the
+    earlier row stays (first accepted join wins)."""
     sender, _issuer, *_rest, issuer_repo, _im = _wire_pair(
         {"space_id": "sp-own", "created_by": "owner", "uses_remaining": 1},
     )

@@ -126,13 +126,11 @@ class AbstractSpaceRepo(Protocol):
     ) -> None: ...
     async def set_invited_by_epoch(self, space_id: str, epoch: int) -> None: ...
     async def get_invited_by_epoch(self, space_id: str) -> int | None: ...
-    async def any_invitation_accepted(self, space_id: str) -> bool: ...
-    async def has_pending_remote_invitation(self, space_id: str) -> bool: ...
     async def set_owner_statement(
         self, space_id: str, statement_json: str | None
     ) -> None: ...
     async def expire_remote_invitations_except(
-        self, space_id: str, keep_instance_id: str
+        self, space_id: str, keep_instance_ids: frozenset[str]
     ) -> None: ...
     async def get_invited_by(self, space_id: str) -> str | None: ...
     async def set_cover_hash(
@@ -329,6 +327,7 @@ class AbstractSpaceRepo(Protocol):
         invite_token: str,
         space_display_hint: str | None = None,
         ttl_minutes: int = 15,
+        join_snapshot: str | None = None,
     ) -> str: ...
     async def get_invitation(self, invitation_id: str) -> dict | None: ...
     async def get_invitation_by_token(self, token: str) -> dict | None: ...
@@ -1103,43 +1102,21 @@ class SqliteSpaceRepo:
         )
 
     async def expire_remote_invitations_except(
-        self, space_id: str, keep_instance_id: str
+        self, space_id: str, keep_instance_ids: frozenset[str]
     ) -> None:
         """Expire this household's pending cross-household invitations into
-        *space_id* from any household but *keep_instance_id* — a stub
-        re-seated under its real owner must not be joined through another
-        household's earlier invitation."""
-        await self._db.enqueue(
+        *space_id* from any household outside *keep_instance_ids* — after an
+        accept seated the space under its owner, an invitation from another
+        household can no longer be joined (migration 0093)."""
+        keep = sorted(keep_instance_ids)
+        sql = (
             "UPDATE space_invitations SET status='expired'"
             " WHERE space_id=? AND status='pending'"
-            " AND remote_instance_id IS NOT NULL AND remote_instance_id != ?",
-            (space_id, keep_instance_id),
+            " AND remote_instance_id IS NOT NULL"
         )
-
-    async def has_pending_remote_invitation(self, space_id: str) -> bool:
-        """Whether a cross-household invitation into *space_id* still waits
-        for an answer here (it seated the stub; it is not displaced).
-
-        Decided by ``status`` alone, never by ``expires_at``: an invitee-side
-        row keeps a short ttl yet stays listed and acceptable, so a pending
-        row past its ``expires_at`` still protects the stub. Only a row whose
-        status left ``pending`` (declined, accepted, expired) is dead."""
-        row = await self._db.fetchone(
-            "SELECT 1 FROM space_invitations WHERE space_id=?"
-            " AND status='pending' AND remote_instance_id IS NOT NULL LIMIT 1",
-            (space_id,),
-        )
-        return row is not None
-
-    async def any_invitation_accepted(self, space_id: str) -> bool:
-        """Whether any invitation into *space_id* was ever accepted here —
-        a stub somebody here joined, even if they all left since."""
-        row = await self._db.fetchone(
-            "SELECT 1 FROM space_invitations WHERE space_id=?"
-            " AND status='accepted' LIMIT 1",
-            (space_id,),
-        )
-        return row is not None
+        if keep:
+            sql += f" AND remote_instance_id NOT IN ({','.join('?' * len(keep))})"
+        await self._db.enqueue(sql, (space_id, *keep))
 
     async def get_invited_by(self, space_id: str) -> str | None:
         row = await self._db.fetchone(
@@ -2443,6 +2420,7 @@ class SqliteSpaceRepo:
         invite_token: str,
         space_display_hint: str | None = None,
         ttl_minutes: int = 15,
+        join_snapshot: str | None = None,
     ) -> str:
         """§D1b — persist a cross-household private-space invitation.
 
@@ -2451,6 +2429,11 @@ class SqliteSpaceRepo:
         is stored on the host (=invitee's identity) or on the invitee's
         household (=inviter's identity). Rows on both sides share the
         same ``invite_token`` so the accept envelope can round-trip.
+
+        ``join_snapshot`` (invitee side, migration 0093) is the issuer's
+        sealed ``space_meta`` the accept seats the stub from. ``expires_at``
+        is informational on the invitee side: nothing enforces it (the
+        listing, the accept and the issuer's answer check all ignore it).
         """
         invitation_id = uuid.uuid4().hex
         expires = (
@@ -2461,8 +2444,8 @@ class SqliteSpaceRepo:
             INSERT INTO space_invitations(
                 id, space_id, invited_user_id, invited_by,
                 remote_instance_id, remote_user_id, invite_token,
-                space_display_hint, expires_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                space_display_hint, expires_at, join_snapshot
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 invitation_id,
@@ -2474,6 +2457,7 @@ class SqliteSpaceRepo:
                 invite_token,
                 space_display_hint,
                 expires,
+                join_snapshot,
             ),
         )
         return invitation_id

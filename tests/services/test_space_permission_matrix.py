@@ -211,10 +211,6 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # owner's own ``update_config`` as the owner. No actor to authorize —
         # the token (minted by an admin before 0079) is the authorization.
         "enable_private_gfs_for_legacy_link",
-        # Join-path hook (migration 0093): removes a never-accepted, unproven
-        # invitation stub that a PROVEN owner's invite replaces —
-        # ``admit_join_stub`` decides; no route reaches it, no actor.
-        "purge_replaced_stub",
         # Owner-side seed share (v_22, public since v_44 so the rotation
         # service re-shares after a rotation). Self-gates on owning the
         # space, the delegation flag's caller and the peer's version; no

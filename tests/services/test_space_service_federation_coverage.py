@@ -24,7 +24,9 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.space import (
+    AgeRestrictedError,
     HostUnreachableError,
+    InviteExpiredError,
     JoinMode,
     RemoteAdminOutcome,
     SpaceFeatures,
@@ -44,7 +46,7 @@ from socialhome.repositories.space_remote_member_repo import (
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_approval_service import SpaceApprovalService
-from socialhome.services.space_service import SpaceService
+from socialhome.services.space_service import SpaceService, seal_join_snapshot
 from socialhome.services.user_service import UserService
 
 
@@ -1671,3 +1673,79 @@ async def test_a_queued_forward_still_counts_as_sent(stack):
         )
     )
     await stack.svc.archive_space(stub.id, actor_username="localadmin")
+
+
+# ── Migration 0093: the accept seats the stub from the invitation ─────────
+
+
+async def _snapshot_invite(stack, user_id: str, *, token: str, issuer: str, **meta):
+    await stack.space_repo.save_remote_invitation(
+        space_id="sp-snap",
+        invited_by="u-inviter",
+        remote_instance_id=issuer,
+        remote_user_id=user_id,
+        invite_token=token,
+        join_snapshot=seal_join_snapshot(
+            {
+                "name": "Snap",
+                "owner_instance_id": issuer,
+                "owner_username": "o",
+                "identity_public_key": "ab" * 32,
+                **meta,
+            },
+            space_id="sp-snap",
+            invite_token=token,
+            host_identity_pk=None,
+            space_crypto_service=None,
+        ),
+    )
+
+
+async def test_accept_seats_the_stub_from_the_snapshot_and_expires_the_rest(stack):
+    bob = await _user(stack, "bobsnap")
+    await _snapshot_invite(stack, bob.user_id, token="t-peer", issuer="peer")
+    await _snapshot_invite(stack, bob.user_id, token="t-other", issuer="other")
+    assert await stack.space_repo.get("sp-snap") is None
+    await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+    space = await stack.space_repo.get("sp-snap")
+    assert space is not None and space.owner_instance_id == "peer"
+    assert await stack.space_repo.get_member("sp-snap", bob.user_id) is not None
+    assert (await stack.space_repo.get_invitation_by_token("t-other"))[
+        "status"
+    ] == "expired"
+
+
+async def test_accept_refuses_a_space_held_under_another_owner(stack):
+    bob = await _user(stack, "bobclash")
+    await _snapshot_invite(stack, bob.user_id, token="t-peer", issuer="peer")
+    await _snapshot_invite(stack, bob.user_id, token="t-other", issuer="other")
+    await stack.svc.accept_remote_invite(token="t-other", user_id=bob.user_id)
+    stack.fed_svc.send_with_mesh_fallback.reset_mock()
+    with pytest.raises(InviteExpiredError):
+        # Expired by the first accept.
+        await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+    await stack.space_repo.update_invitation_status(
+        (await stack.space_repo.get_invitation_by_token("t-peer"))["id"], "pending"
+    )
+    with pytest.raises(SpacePermissionError, match="conflicts"):
+        await stack.svc.accept_remote_invite(token="t-peer", user_id=bob.user_id)
+    stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
+    assert (await stack.space_repo.get("sp-snap")).owner_instance_id == "other"
+
+
+async def test_accept_age_gate_reads_the_snapshots_min_age(stack):
+    """No stub exists before the accept, so §CP.F1 reads ``min_age`` from
+    the invitation's snapshot — a minor is refused before anything is sent
+    or seated."""
+    bob = await _user(stack, "bobminor")
+    await _snapshot_invite(stack, bob.user_id, token="t-18", issuer="peer", min_age=18)
+    gate = MagicMock()
+    gate.is_age_allowed = AsyncMock(return_value=False)
+    gate.check_space_age_gate = AsyncMock()
+    stack.svc._child_protection = gate
+    with pytest.raises(AgeRestrictedError):
+        await stack.svc.accept_remote_invite(token="t-18", user_id=bob.user_id)
+    gate.is_age_allowed.assert_awaited_once_with(bob.user_id, 18)
+    gate.check_space_age_gate.assert_not_awaited()
+    stack.fed_svc.send_with_mesh_fallback.assert_not_awaited()
+    assert await stack.space_repo.get("sp-snap") is None

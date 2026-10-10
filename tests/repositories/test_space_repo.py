@@ -2005,3 +2005,45 @@ async def test_invited_by_carries_its_proven_epoch(env):
     # No inviter → a re-proof has nothing to move.
     await env.repo.set_invited_by_epoch("sp-e", 4)
     assert await env.repo.get_invited_by_epoch("sp-e") is None
+
+
+# ── Migration 0093: pending invitations carry their own snapshot ──────────
+
+
+async def _remote_invite(repo, token: str, issuer: str, *, snapshot=None) -> None:
+    await repo.save_remote_invitation(
+        space_id="sp-x",
+        invited_by="u-inviter",
+        remote_instance_id=issuer,
+        remote_user_id="uid-alice",
+        invite_token=token,
+        join_snapshot=snapshot,
+    )
+
+
+async def test_a_remote_invitation_keeps_its_join_snapshot(env):
+    """No ``spaces`` row is needed: the invitation stands on its own."""
+    await _remote_invite(env.repo, "t-1", "inst-a", snapshot='{"meta":{"name":"A"}}')
+    await _remote_invite(env.repo, "t-2", "inst-b")
+    assert await env.repo.get("sp-x") is None
+    rows = {
+        r["invite_token"]: r
+        for r in await env.repo.list_pending_remote_invites_for("uid-alice")
+    }
+    assert rows["t-1"]["join_snapshot"] == '{"meta":{"name":"A"}}'
+    assert rows["t-2"]["join_snapshot"] is None
+
+
+async def test_expire_remote_invitations_except_keeps_the_named_households(env):
+    for token, issuer in (("t-a", "inst-a"), ("t-b", "inst-b"), ("t-c", "inst-c")):
+        await _remote_invite(env.repo, token, issuer)
+    await env.repo.expire_remote_invitations_except(
+        "sp-x", frozenset({"inst-a", "inst-b"})
+    )
+    status = {
+        t: (await env.repo.get_invitation_by_token(t))["status"]
+        for t in ("t-a", "t-b", "t-c")
+    }
+    assert status == {"t-a": "pending", "t-b": "pending", "t-c": "expired"}
+    await env.repo.expire_remote_invitations_except("sp-x", frozenset())
+    assert (await env.repo.get_invitation_by_token("t-a"))["status"] == "expired"

@@ -58,6 +58,8 @@ from socialhome.services.space_crypto_service import (
     strip_authority_sig_fields,
 )
 
+from tests.invite_accept import accept_invite, accepting_service
+
 pytestmark = pytest.mark.security
 
 SPACE = "sp-trust"
@@ -143,12 +145,19 @@ async def joiner(db):
             {
                 "space_id": SPACE,
                 "invite_token": "tkn",
-                "invitee_user_id": "u-joiner",
+                # Another local user than the roster under test (u-joiner):
+                # the accept seats the invitee's own membership.
+                "invitee_user_id": "u-invitee",
                 "inviter_user_id": "u-admin",
                 "host_identity_pk": ed25519_public_key(ADMIN_SEED).hex(),
                 "space_meta": _proven(space_kp, _meta(space_kp.public_key.hex())),
             },
         )
+    )
+    # Nothing is seated before the user accepts (migration 0093).
+    assert await spaces.get(SPACE) is None
+    await accept_invite(
+        accepting_service(db, spaces, seats, own_instance_id=JOINER), "tkn", "u-invitee"
     )
     # The other admin household is known by key too (e.g. a mesh claim).
     await spaces.add_space_instance(SPACE, OTHER_ADMIN)
@@ -374,10 +383,11 @@ async def test_owner_only_settings_from_the_inviting_admin_stay_ignored(joiner):
 
 async def test_an_owner_invite_records_no_inviting_admin(db):
     spaces = SqliteSpaceRepo(db)
+    seats = SqliteSpaceRemoteMemberRepo(db)
     handler = PrivateSpaceInviteHandler(
         bus=EventBus(),
         space_repo=spaces,
-        remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+        remote_member_repo=seats,
     )
     await handler._on_invite(
         _event(
@@ -391,6 +401,9 @@ async def test_an_owner_invite_records_no_inviting_admin(db):
                 "space_meta": _meta(generate_space_keypair().public_key.hex()),
             },
         )
+    )
+    await accept_invite(
+        accepting_service(db, spaces, seats, own_instance_id=JOINER), "tkn", "u-joiner"
     )
     assert (await spaces.get(SPACE)).owner_instance_id == OWNER
     assert await spaces.get_invited_by(SPACE) is None

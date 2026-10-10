@@ -1346,7 +1346,7 @@ sequenceDiagram
     participant H as HFS (host)
     participant N as HFS (new member)
     H->>N: SPACE_PRIVATE_INVITE (carries space_content_key)
-    Note over N: applying key to space_keys...
+    Note over N: user accepts — applying key to space_keys...
     H->>N: §25.6 sync chunk for epoch=N
     Note over N: decrypt_chunk raises<br/>"missing epoch" — stash
     Note over N: SpaceContentKeyImported(epoch=N) fires
@@ -1969,7 +1969,8 @@ never landed) the roster gossip is skipped gracefully but logged at
 WARNING — an anomaly, not a silent drop.
 
 **The invitee's view of the inviting admin** (owner decision 2026-10-10,
-migration 0093, `socialhome/federation/host_equivalence.py`). The invitee
+migration 0093, `socialhome/federation/host_equivalence.py`). When the
+user accepts (an invitation seats nothing before that), the invitee
 seats its stub under the space's REAL owner (`space_meta.owner_instance_id`),
 not under the admin that invited it, ONLY when the snapshot carries the
 owner's signed owner statement for the pinned authority key and the admin's
