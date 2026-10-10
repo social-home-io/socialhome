@@ -445,6 +445,12 @@ class SyncSessionRecord:
     #: of the last stream it applied cleanly. ``None`` (absent / malformed):
     #: a full stream. The session streams since ``min(watermark, have_seq)``.
     have_seq: int | None = None
+    #: … the requester's protocol version, read once when the session is
+    #: planned (``None``: not yet) — the exporter choice, the shape and the
+    #: chunk numbering all follow it …
+    peer_version: int | None = None
+    #: … the ``chunk_index`` the next chunk carries (v_56) …
+    next_chunk_index: int = 0
     #: … and whether every chunk and the sentinel shipped. Only a clean
     #: stream the requester confirms (``SPACE_SYNC_COMPLETE``) advances the
     #: requester's watermark — to ``snapshot_seq``, never further.

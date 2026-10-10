@@ -6506,6 +6506,17 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_55 space chat gate in place ✓")
+    # v_56 — §25.6 space sync streams calendar series as stored rows (rule
+    # kept) and numbers its chunks; a requester below it gets the expanded
+    # occurrences. The OURS round-trip above proves every pair advertises
+    # >= v_56, so every demo household takes series rows. Pin the threshold.
+    if int(_Cap.MIN_FOR_SYNC_SERIES_ROWS) != 56 or _OURS < 56:
+        failures.append(
+            "MIN_FOR_SYNC_SERIES_ROWS moved off v_56 (or OURS fell below it) — "
+            "space sync would stream every household the expanded calendar"
+        )
+    else:
+        print("  v_56 space-sync series rows gate in place ✓")
 
     # 0c. v_29 round-trip on the §D2b BOOTSTRAP wire. The capability
     #     integer normally travels in INSTANCE_CAPABILITIES_UPDATED, over a

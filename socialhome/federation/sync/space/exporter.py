@@ -24,7 +24,7 @@ resource. A small resource (bans, members, zones …) keeps the single
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol, runtime_checkable
 from typing import TYPE_CHECKING
 
@@ -277,12 +277,19 @@ class ChunkBuilder:
         sync_id: str,
         sig_suite: str,
         since: int | None = None,
+        next_index: Callable[[], int] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield encrypted + signed chunk envelopes for ``exporter``.
 
         Each yielded dict can be serialised with :func:`serialise_chunk`
         and sent via ``SyncRtcSession.send_chunk``. ``since``: an
         incremental session's watermark (see :func:`record_batches`).
+        ``next_index`` (v_56): hands out each chunk's ``chunk_index`` — its
+        stream-wide position, inside the encrypted (and so signed) payload,
+        so the requester counts distinct chunks and a duplicate cannot stand
+        in for a lost one. One allocator per session (the provider's session
+        counter), so a REQUEST_MORE slice streamed while the stream runs
+        never reuses an index. ``None``: no index (an older requester).
         """
         cursor = 0
         async for batch in record_batches(exporter, space_id, since=since):
@@ -293,6 +300,7 @@ class ChunkBuilder:
                 sync_id=sync_id,
                 sig_suite=sig_suite,
                 cursor=cursor,
+                next_index=next_index,
             ):
                 yield envelope
             cursor += len(batch)
@@ -306,11 +314,14 @@ class ChunkBuilder:
         sync_id: str,
         sig_suite: str,
         cursor: int,
+        next_index: Callable[[], int] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Chunk one page of records: start with the whole page, halve
-        until it fits the size budget (or is a single record)."""
+        until it fits the size budget (or is a single record). Each chunk
+        takes one ``chunk_index`` from ``next_index`` (``None``: none)."""
         pending = list(records)
         while pending:
+            index = next_index() if next_index is not None else None
             chunk_records = pending
             envelope = await self._build_one(
                 resource,
@@ -321,6 +332,7 @@ class ChunkBuilder:
                 seq_start=cursor,
                 seq_end=cursor + len(chunk_records),
                 is_last=False,
+                chunk_index=index,
             )
             encoded = _orjson.dumps(envelope)
             while len(encoded) > CHUNK_SIZE_BUDGET_BYTES and len(chunk_records) > 1:
@@ -334,6 +346,7 @@ class ChunkBuilder:
                     seq_start=cursor,
                     seq_end=cursor + len(chunk_records),
                     is_last=False,
+                    chunk_index=index,
                 )
                 encoded = _orjson.dumps(envelope)
             yield envelope
@@ -390,10 +403,14 @@ class ChunkBuilder:
         seq_start: int,
         seq_end: int,
         is_last: bool,
+        chunk_index: int | None = None,
     ) -> dict[str, Any]:
         if resource not in ALLOWED_RESOURCES:
             raise ValueError(f"resource {resource!r} not in ALLOWED_RESOURCES")
-        plaintext = _orjson.dumps({"records": records})
+        body: dict[str, Any] = {"records": records}
+        if chunk_index is not None:
+            body["chunk_index"] = int(chunk_index)
+        plaintext = _orjson.dumps(body)
         epoch, encrypted_payload = await self._crypto.encrypt_chunk(
             space_id=space_id,
             sync_id=sync_id,

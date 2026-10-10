@@ -149,6 +149,8 @@ async def mesh(aiohttp_client, tmp_dir, monkeypatch):
     every feature."""
     monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _fake_send)
     monkeypatch.setattr(FederationService, "peer_supports", _fake_supports)
+    # Space broadcasts pick their variant by the member's space version.
+    monkeypatch.setattr(FederationService, "space_member_supports", _fake_supports)
     OUTBOX.clear()
     VERSIONS.clear()
     houses: dict[str, House] = {}
@@ -445,6 +447,50 @@ async def test_every_feature_round_trips_and_the_author_household_accepts_it(
             feature,
             house.name,
         )
+
+
+async def test_a_reviewed_event_with_a_capacity_is_released_everywhere(mesh):
+    """A reviewed create with a cap: the release carries it to v_56
+    households, whose release check compares it with the item; an older
+    household (v_55) is sent the release without the field (its fail-closed
+    check would refuse an unclassified key) and still takes the event."""
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    for house in (a, h, c):
+        VERSIONS[house.iid] = 56
+    VERSIONS[d.iid] = 55
+    start = datetime.now(timezone.utc) + timedelta(days=2)
+    r = await a.tc.post(
+        f"/api/spaces/{SID}/calendar/events",
+        json={
+            "summary": "Workshop",
+            "start": start.isoformat(),
+            "end": (start + timedelta(hours=1)).isoformat(),
+            "capacity": 10,
+        },
+        headers=a.headers,
+    )
+    assert r.status == 202, await r.text()
+    item_id = (await r.json())["item_id"]
+    await _pump(mesh)
+    await _approve(c, item_id)
+    await _pump(mesh, only={FET.SPACE_MODERATION_DECIDED}, once=True)
+    # The host applied it and published the release as anna's.
+    released = _sends(h, FET.SPACE_CALENDAR_EVENT_CREATED)
+    assert {to: p.get("capacity") for to, p in released} == {
+        a.iid: 10,
+        c.iid: 10,
+        d.iid: None,
+    }
+    assert all("moderation" in p for _to, p in released)
+    assert "capacity" not in dict(released)[d.iid]
+    await _pump(mesh)
+    for house in (a, h, c):
+        rows = await house.db.fetchall(
+            "SELECT summary, capacity FROM space_calendar_events", ()
+        )
+        assert [tuple(x) for x in rows] == [("Workshop", 10)], house.name
+    rows = await d.db.fetchall("SELECT summary FROM space_calendar_events", ())
+    assert [x["summary"] for x in rows] == ["Workshop"]
 
 
 async def test_a_member_edit_of_someone_elses_sticky_is_released_everywhere(mesh):

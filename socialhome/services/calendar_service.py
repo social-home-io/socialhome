@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from ..domain.calendar import (
+    validate_capacity,
     Calendar,
     CalendarEvent,
     CalendarEventCopy,
@@ -31,7 +32,9 @@ from ..domain.calendar import (
     RSVPStatus,
 )
 from ..domain.child_protection import ProtectedCapability
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import (
+    MODERATION_BLOCK_KEY,
     HostTooOldError,
     AccessDecision,
     ContentAction,
@@ -1408,8 +1411,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         summary = (summary or "").strip()
         if not summary:
             raise ValueError("summary must not be empty")
-        if capacity is not None and capacity < 0:
-            raise ValueError("capacity must be >= 0")
+        capacity = validate_capacity(capacity)
         try:
             start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
             end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
@@ -1821,8 +1823,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         if new_end < new_start:
             raise ValueError("event end must not be before start")
 
-        if capacity is not None and capacity < 0:
-            raise ValueError("capacity must be >= 0")
+        capacity = validate_capacity(capacity)
         new_capacity = (
             None
             if clear_capacity
@@ -2473,11 +2474,26 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             # space's ``calendar`` access level. Older peers ignore it.
             "actor_user_id": actor_user_id,
         }
+        # The per-occurrence cap (Phase C) — members enforce it on RSVPs.
+        # Additive: an older receiver ignores it, and a receiver keeps its
+        # held value when it is absent.
+        payload["capacity"] = event.capacity
+        # A write released from the moderation queue names it (v_43).
+        payload = with_release(payload)
+        if MODERATION_BLOCK_KEY not in payload:
+            await self._federation.broadcast_to_space_members(
+                space_id, evt_type, payload
+            )
+            return
+        # A release is checked field by field and fails closed on a key it
+        # does not classify: a household below v_56 (which never knew the
+        # cap travelled) gets the release without it.
         await self._federation.broadcast_to_space_members(
             space_id,
             evt_type,
-            # A write released from the moderation queue names it (v_43).
-            with_release(payload),
+            payload,
+            legacy_payload={k: v for k, v in payload.items() if k != "capacity"},
+            legacy_below=FederationCapability.MIN_FOR_SYNC_SERIES_ROWS,
         )
 
     async def _publish_federation_event_deleted(
@@ -2630,6 +2646,23 @@ _EVENT_PATCH_FIELDS = frozenset(
 )
 
 
+def _normalised_capacity_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    """An edit's cap fields as :meth:`SpaceCalendarService.update_event`
+    applies them — so the queue item (and the release rule that checks
+    against it) says what the host will do: ``clear_capacity`` wins over a
+    cap, a ``null`` cap is no change, a cap must be a non-negative integer.
+    Raises :class:`ValueError`."""
+    clear = patch.pop("clear_capacity", False)
+    if not isinstance(clear, bool):
+        raise ValueError("clear_capacity must be a boolean")
+    capacity = validate_capacity(patch.pop("capacity", None))
+    if clear:
+        patch["clear_capacity"] = True
+    elif capacity is not None:
+        patch["capacity"] = capacity
+    return patch
+
+
 class CalendarModerationHandler:
     """Queue items of a space calendar (``calendar`` create / edit /
     delete). Applies through :class:`SpaceCalendarService` gated as the
@@ -2650,11 +2683,15 @@ class CalendarModerationHandler:
             raw = payload["patch"]
             if not isinstance(raw, dict) or not raw or set(raw) - _EVENT_PATCH_FIELDS:
                 raise ValueError("invalid event edit")
-            out["patch"] = dict(raw)
+            patch = _normalised_capacity_patch(dict(raw))
+            if not patch:
+                raise ValueError("invalid event edit")
+            out["patch"] = patch
             proposed = payload.get("proposed")
             out["proposed"] = dict(proposed) if isinstance(proposed, dict) else {}
         elif "summary" in payload:
             out.update({k: payload.get(k) for k in _EVENT_CREATE_FIELDS})
+            out["capacity"] = validate_capacity(out.get("capacity"))
         return out
 
     async def snapshot(self, space_id: str, target_id: str) -> dict | None:

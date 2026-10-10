@@ -840,7 +840,18 @@ from __future__ import annotations
 #:   fallback**: a member household below v_55 is sent no chat event (it
 #:   would drop the unknown types anyway) and gets no chat catch-up; its
 #:   users simply see no chat.
-OURS: int = 55
+#: * **v_56** (2026-10-10) — §25.6 space sync streams every calendar event
+#:   as its stored row (a recurring event once, with its ``rrule``) and
+#:   numbers its chunks (``chunk_index`` inside the encrypted payload). An
+#:   older receiver drops ``rrule`` from a ``calendar`` record and its upsert
+#:   would turn every series into a one-off event, so **gated with a
+#:   fallback**: a requester below v_56 gets the old record set — each
+#:   series expanded into its occurrences in a ±10-year window, each under
+#:   ``<id>@<start>`` (never the series' own id) — and no ``chunk_index`` (it counts
+#:   chunks as before). A moderation release of a calendar event carries
+#:   ``capacity`` only to a v_56 household: an older one's fail-closed
+#:   release check refuses a key it does not classify.
+OURS: int = 56
 
 
 class FederationCapability:
@@ -1298,6 +1309,14 @@ class FederationCapability:
     #: them. Space-scoped: a lagging member household misses the chat.
     MIN_FOR_SPACE_CHAT = 55
 
+    #: v_56 — the §25.6 ``calendar`` resource carries stored rows (a series
+    #: once, with its rule) instead of expanded occurrences, and each sync
+    #: chunk carries its ``chunk_index``. A requester below it gets the
+    #: expanded occurrences and no index (``ExpandedCalendarExporter``).
+    #: Per-requester: not space-scoped (a lagging household degrades only
+    #: its own copy of the calendar).
+    MIN_FOR_SYNC_SERIES_ROWS = 56
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1506,6 +1525,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_CHAT,
         "Chat in spaces",
     ),
+    (
+        FederationCapability.MIN_FOR_SYNC_SERIES_ROWS,
+        "Recurring events in space catch-up",
+    ),
 ]
 
 
@@ -1572,6 +1595,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_GFS_RELAY_ROUTES: "shared_gfs_relay",
     FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE: "gfs_fallback_later",
     FederationCapability.MIN_FOR_SPACE_CHAT: "space_chat",
+    FederationCapability.MIN_FOR_SYNC_SERIES_ROWS: "synced_recurring_events",
 }
 
 

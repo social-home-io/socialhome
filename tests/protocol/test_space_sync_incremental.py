@@ -55,10 +55,15 @@ from socialhome.app_keys import (
 from socialhome.config import Config
 from socialhome.domain.events import SpaceSyncComplete
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.page import Page
 from socialhome.domain.task import Task, TaskList, TaskStatus
 from socialhome.federation.owner_bound_id import (
+    GALLERY_ALBUM_KIND,
+    GALLERY_ITEM_KIND,
+    SPACE_CALENDAR_EVENT_KIND,
     SPACE_COMMENT_KIND,
     SPACE_PAGE_KIND,
     SPACE_POST_KIND,
@@ -103,7 +108,7 @@ def _config(tmp_path, name: str) -> Config:
     )
 
 
-async def _seat(db, instance: str, user: str, *, version: int = 55) -> None:
+async def _seat(db, instance: str, user: str, *, version: int = 56) -> None:
     await db.enqueue(
         "INSERT INTO space_instances(space_id, instance_id) VALUES(?,?)",
         (SPACE, instance),
@@ -244,6 +249,7 @@ async def _stream(
     confirm_from: str | None = None,
     drop: set[str] = frozenset(),  # type: ignore[assignment]
     have_seq: object = "from-requester",
+    reorder=None,
 ) -> dict[str, list[dict]]:
     """One real provider session from ``provider_app`` to ``to_app``: every
     frame goes through ``to_app``'s receiver (signature, decode, persist) in
@@ -254,7 +260,11 @@ async def _stream(
 
     ``have_seq`` — what the requester's BEGIN echoes: by default what its
     scheduler sends (the snapshot of the last stream it applied cleanly),
-    else the given wire value (``None``: the field is absent)."""
+    else the given wire value (``None``: the field is absent).
+
+    ``reorder`` — how the receiver gets the frames, given the wire order
+    (relayed chunks are separate inbound events: nothing promises they are
+    applied in the order they were sent)."""
     sync_id = uuid.uuid4().hex
     wire = _Wire(during)
     if have_seq == "from-requester":
@@ -286,7 +296,8 @@ async def _stream(
 
     to_app[event_bus_key].subscribe(SpaceSyncComplete, _landed)
     try:
-        for frame in wire.frames:
+        frames = reorder(list(wire.frames)) if reorder else wire.frames
+        for frame in frames:
             if frame["resource"] in drop:
                 continue  # lost on the way: the receiver never sees it
             if frame["resource"] != SENTINEL_RESOURCE:
@@ -556,7 +567,7 @@ async def test_an_upgraded_requester_gets_one_full_stream(houses):
     h, c = houses
     pids, _comment = await _baseline(h, c)
     await h[db_key].enqueue(
-        "UPDATE remote_instances SET proto_version=56 WHERE id=?", (MEMBER,)
+        "UPDATE remote_instances SET proto_version=57 WHERE id=?", (MEMBER,)
     )
     assert _ids(await _h_to_c(h, c), "posts") == set(pids)
     assert not any(_content(await _h_to_c(h, c)).values())
@@ -795,3 +806,433 @@ async def test_tasks_and_pages_stream_only_what_changed_and_converge(houses):
     await _c_to_h(h, c)  # C's first stream to H: full (no watermark)
     for _ in range(2):
         assert not any(_content(await _c_to_h(h, c)).values())
+
+
+# ── Calendar: every stored event, as stored ───────────────────────────────
+
+
+def _calendar(app):
+    return app[space_sync_service_key]._exporters["calendar"]._repo
+
+
+async def _save_event(app, *, start: datetime, rrule: str | None = None, **kw):
+    eid = _bound(SPACE_CALENDAR_EVENT_KIND)
+    event = CalendarEvent(
+        id=eid,
+        calendar_id=SPACE,
+        summary=kw.pop("summary", "event"),
+        start=start,
+        end=start + timedelta(hours=1),
+        created_by=AUTHOR,
+        rrule=rrule,
+        **kw,
+    )
+    assert await _calendar(app).save_event(event, space_id=SPACE)
+    return eid
+
+
+async def _event_rows(app) -> dict[str, dict]:
+    rows = await app[db_key].fetchall(
+        "SELECT id, summary, rrule, location, capacity, start_dt"
+        " FROM space_calendar_events"
+        " WHERE space_id=? AND deleted_at IS NULL",
+        (SPACE,),
+    )
+    return {r["id"]: dict(r) for r in rows}
+
+
+async def test_a_recurring_event_streams_as_one_row_with_its_rule(houses):
+    """The stored row, not its occurrences: an expanded series reached the
+    member as one one-off event per occurrence (``<id>@<start>``) and the
+    series itself lost its rule."""
+    h, c = houses
+    eid = await _save_event(
+        h,
+        start=_NOW - timedelta(days=3),
+        rrule="FREQ=WEEKLY;COUNT=5",
+        location="Hall",
+        summary="choir",
+        capacity=20,
+    )
+    first = await _h_to_c(h, c)
+    assert _ids(first, "calendar") == {eid}
+    held = await _event_rows(c)
+    assert set(held) == {eid}
+    assert held[eid]["rrule"] == "FREQ=WEEKLY;COUNT=5"
+    assert held[eid]["location"] == "Hall"
+    assert held[eid]["capacity"] == 20
+
+
+async def test_events_of_any_age_stream_and_so_do_their_edits(houses):
+    """No window around "now": an event further than ten years either side
+    streams on a full session and, once edited, on a periodic one — a full
+    and an incremental session agree on what the calendar holds."""
+    h, c = houses
+    old = await _save_event(h, start=_NOW - timedelta(days=11 * 365), summary="old")
+    far = await _save_event(h, start=_NOW + timedelta(days=11 * 365), summary="far")
+    series = await _save_event(
+        h, start=_NOW - timedelta(days=12 * 365), rrule="FREQ=YEARLY", summary="bday"
+    )
+    first = await _h_to_c(h, c)
+    assert _ids(first, "calendar") == {old, far, series}
+    held = await _event_rows(c)
+    assert set(held) == {old, far, series}
+    assert held[series]["rrule"] == "FREQ=YEARLY"
+
+    _sid, event = await _calendar(h).get_event(old)
+    assert await _calendar(h).save_event(
+        replace(event, summary="old, edited"), space_id=SPACE
+    )
+    changed = await _h_to_c(h, c)
+    assert _ids(changed, "calendar") == {old}
+    assert (await _event_rows(c))[old]["summary"] == "old, edited"
+
+
+async def test_a_virtual_occurrence_from_an_older_provider_is_not_stored(houses):
+    """An older provider still streams a series expanded — the occurrence
+    rows (``<id>@<start>``) are views of the series, never rows of their
+    own: the receiver skips them."""
+    h, c = houses
+    eid = _bound(SPACE_CALENDAR_EVENT_KIND)
+    at = _NOW + timedelta(days=1)
+    occurrence = {
+        "id": f"{eid}@{at.isoformat()}",
+        "calendar_id": SPACE,
+        "summary": "event",
+        "start": at.isoformat(),
+        "end": (at + timedelta(hours=1)).isoformat(),
+        "created_by": AUTHOR,
+        "rrule": "FREQ=DAILY",
+    }
+    receiver = c[space_sync_receiver_key]
+    assert await receiver._dispatch("calendar", SPACE, [occurrence], provider=HOST)
+    assert await _event_rows(c) == {}
+    # An id that merely contains ``@`` (a legacy peer's ``uid@host``) is a
+    # row like any other.
+    legacy = {**occurrence, "id": "meeting-42@calendar.example.org"}
+    assert await receiver._dispatch("calendar", SPACE, [legacy], provider=HOST)
+    assert set(await _event_rows(c)) == {"meeting-42@calendar.example.org"}
+
+
+# ── Gallery: album state, and a tombstone that overtakes its album ────────
+
+
+def _gallery(app):
+    return app[space_sync_service_key]._exporters["gallery"]._repo
+
+
+def _photo(album_id: str, n: int) -> GalleryItem:
+    return GalleryItem(
+        id=_bound(GALLERY_ITEM_KIND),
+        album_id=album_id,
+        uploaded_by=AUTHOR,
+        item_type="photo",
+        url=f"api/media/p{n}.webp",
+        thumbnail_url=f"api/media/t{n}.webp",
+        width=1,
+        height=1,
+    )
+
+
+async def _new_album(app, name: str = "Trip") -> str:
+    aid = _bound(GALLERY_ALBUM_KIND)
+    assert await _gallery(app).create_album_in_space(
+        GalleryAlbum(id=aid, space_id=SPACE, owner_user_id=AUTHOR, name=name),
+        space_id=SPACE,
+    )
+    return aid
+
+
+async def _album_row(app, aid: str) -> dict:
+    row = await app[db_key].fetchone(
+        "SELECT name, description, item_count FROM gallery_albums WHERE id=?",
+        (aid,),
+    )
+    return dict(row)
+
+
+def _tombstones_first(frames: list[dict]) -> list[dict]:
+    """Apply ``gallery_items_deleted`` before ``gallery`` — what a relay that
+    hands the chunks over as separate events may do."""
+    first = [f for f in frames if f["resource"] == "gallery_items_deleted"]
+    return first + [f for f in frames if f["resource"] != "gallery_items_deleted"]
+
+
+async def test_a_held_album_follows_the_hosts_edits_and_item_count(houses):
+    """A member that missed an upload and an album rename gets both from the
+    next periodic session: the item lands AND counts, the album is renamed.
+    The album record was insert-only, so neither ever converged — not even
+    on the daily full pass."""
+    h, c = houses
+    aid = await _new_album(h)
+    for n in range(2):
+        assert await _gallery(h).create_item_in_space(_photo(aid, n), space_id=SPACE)
+    await _h_to_c(h, c)
+    assert (await _album_row(c, aid))["item_count"] == 2
+
+    assert await _gallery(h).create_item_in_space(_photo(aid, 9), space_id=SPACE)
+    assert await _gallery(h).update_album_in_space(
+        aid, {"name": "Trip 2026", "description": "sun"}, space_id=SPACE
+    )
+    await _h_to_c(h, c)
+    assert await _album_row(c, aid) == await _album_row(h, aid)
+    assert (await _album_row(c, aid))["item_count"] == 3
+
+    # An item delete lowers it once, whatever order the album record and the
+    # tombstone are applied in.
+    item = _photo(aid, 10)
+    assert await _gallery(h).create_item_in_space(item, space_id=SPACE)
+    await _h_to_c(h, c)
+    assert await _gallery(h).delete_item_in_space(item.id, space_id=SPACE)
+    await _h_to_c(h, c, reorder=_tombstones_first)
+    assert (await _album_row(c, aid))["item_count"] == 3
+    assert (await _album_row(h, aid))["item_count"] == 3
+    # Quiet afterwards: re-applying the album record stamps nothing.
+    assert not any(_content(await _h_to_c(h, c)).values())
+
+
+async def test_an_item_tombstone_applied_before_its_album_streams_again(houses):
+    """A tombstone for an item C never held needs its album held here (the
+    stub's ``album_id`` is a foreign key). Applied before the album — the
+    chunks taken out of order — it cannot land yet; the stream must not
+    count as clean, or the provider's watermark skips the delete and a
+    household that missed it can stream the photo back to C."""
+    h, c = houses
+    await _baseline(h, c)
+    aid = await _new_album(h, "New")
+    gone = _photo(aid, 1)
+    assert await _gallery(h).create_item_in_space(gone, space_id=SPACE)
+    assert await _gallery(h).delete_item_in_space(gone.id, space_id=SPACE)
+
+    first = await _h_to_c(h, c, reorder=_tombstones_first)
+    assert _ids(first, "gallery_items_deleted") == {gone.id}
+    assert not await _gallery(c).is_item_deleted(gone.id, space_id=SPACE)
+
+    again = await _h_to_c(h, c)
+    assert _ids(again, "gallery_items_deleted") == {gone.id}
+    assert await _gallery(c).is_item_deleted(gone.id, space_id=SPACE)
+    assert not any(_content(await _h_to_c(h, c)).values())
+
+
+# ── A record whose author's seat has not reached us yet ───────────────────
+
+
+async def test_a_record_whose_author_is_not_seated_here_yet_streams_again(houses):
+    """C (a member household) streams a post by its new member Dora to H
+    before the roster gossip seating her reached H. H refuses it — but only
+    for now: the stream is unclean, C keeps its watermark, and the next
+    periodic session (Dora seated by then) delivers it. Counted clean, the
+    post waited for the daily full pass."""
+    h, c = houses
+    await _c_to_h(h, c)  # C's first stream to H (full): sets C's watermark
+    assert not any(_content(await _c_to_h(h, c)).values())
+    dora = "u-dora"
+    pid = mint_owner_bound_id(SPACE_POST_KIND, space_id=SPACE, owner_user_id=dora)
+    await _write_post(c, pid, dora, "hello from Dora")
+
+    first = await _c_to_h(h, c)
+    assert _ids(first, "posts") == {pid}
+    assert await _post_row(h, pid) is None
+
+    await h[db_key].enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?,?,?,'member')",
+        (SPACE, MEMBER, dora),
+    )
+    again = await _c_to_h(h, c)
+    assert _ids(again, "posts") == {pid}
+    assert (await _post_row(h, pid))["content"] == "hello from Dora"
+
+
+async def test_a_record_refused_by_rule_does_not_hold_the_stream(houses):
+    """A user H knows — its own — is a refusal, not a race: the stream stays
+    clean and the record is not streamed again."""
+    h, c = houses
+    await _c_to_h(h, c)
+    pid = _pid(AUTHOR)  # H's own user: C may not author for her
+    await _write_post(c, pid, AUTHOR, "forged")
+    first = await _c_to_h(h, c)
+    assert _ids(first, "posts") == {pid}
+    assert await _post_row(h, pid) is None
+    assert not any(_content(await _c_to_h(h, c)).values())
+
+
+# ── A member household's records refused while the space was archived ─────
+
+
+async def test_records_refused_while_archived_stream_again_after_unarchive(houses):
+    """While the space is archived on H (a read-only snapshot), a member
+    household's records are refused by rule — the stream stays clean, so its
+    watermark advances past them. Lifting the archive drops H's stored echo
+    for the space (migration trigger), so C's next periodic stream to H is
+    full and delivers them — not the next daily full pass."""
+    h, c = houses
+    await _c_to_h(h, c)  # C's first stream to H (full): sets C's watermark
+    pid = _pid(CORA)
+    await _write_post(c, pid, CORA, "written while H was archived")
+    h_spaces = h[space_sync_receiver_key]._space_repo
+    await h_spaces.set_archived(SPACE, True)
+    refused = await _c_to_h(h, c)
+    assert _ids(refused, "posts") == {pid}
+    assert await _post_row(h, pid) is None
+    assert not any(_content(await _c_to_h(h, c)).values())  # clean: skipped
+
+    await h_spaces.set_archived(SPACE, False)
+    after = await _c_to_h(h, c)
+    assert pid in _ids(after, "posts")
+    assert (await _post_row(h, pid))["content"] == "written while H was archived"
+
+
+async def test_an_older_requester_gets_the_expanded_calendar_and_no_index(houses):
+    """v_56 gate: a requester below it drops ``rrule`` from a record and its
+    upsert would flatten a series into a one-off event, so it is streamed
+    the old record set (occurrences, ±10 years) and unnumbered chunks; at
+    v_56 it gets the series row and every chunk carries its index."""
+    h, c = houses
+    eid = await _save_event(
+        h, start=_NOW - timedelta(days=3), rrule="FREQ=DAILY;COUNT=3"
+    )
+    await h[db_key].enqueue(
+        "UPDATE remote_instances SET proto_version=55 WHERE id=?", (MEMBER,)
+    )
+    wire_frames: list[dict] = []
+    old = await _h_to_c(h, c, reorder=lambda f: wire_frames.extend(f) or f)
+    ids = _ids(old, "calendar")
+    # Every occurrence, the first one included, as an occurrence record —
+    # never a record carrying the series' own id, which an older receiver
+    # would upsert without its rule.
+    assert len(ids) == 3 and all(i.startswith(f"{eid}@") for i in ids)
+    # The old record set never lands as rows of their own here (migration
+    # 0089's guard / the receiver's skip), whatever an older provider sends.
+    assert await _event_rows(c) == {}
+    assert all(
+        _index(f) is None for f in wire_frames if f["resource"] != SENTINEL_RESOURCE
+    )
+
+    await h[db_key].enqueue(
+        "UPDATE remote_instances SET proto_version=56 WHERE id=?", (MEMBER,)
+    )
+    new_frames: list[dict] = []
+    new = await _h_to_c(h, c, reorder=lambda f: new_frames.extend(f) or f)
+    assert _ids(new, "calendar") == {eid}
+    content = [f for f in new_frames if f["resource"] != SENTINEL_RESOURCE]
+    assert [_index(f) for f in content] == list(range(len(content)))
+
+
+def _index(frame: dict):
+    return orjson.loads(base64.urlsafe_b64decode(frame["encrypted_payload"])).get(
+        "chunk_index"
+    )
+
+
+# ── Held back only for a retry that can come — never for good ─────────────
+
+
+async def test_the_hosts_system_album_items_are_refused_not_held(houses):
+    """Every household mints its own system ("Posts") album, so the host's
+    is never stored here and an item naming it can never land: a refusal by
+    rule (what the live path does with an item of an album not held), not a
+    hold that would keep every stream unclean. The provider no longer
+    streams them (they are post mirrors each household rebuilds); this is
+    what an older provider's stream gets."""
+    h, c = houses
+    gallery_c = _gallery(c)
+    await gallery_c.create_album(
+        GalleryAlbum(
+            id="sys-c", space_id=SPACE, owner_user_id=None, name="Posts", is_system=True
+        )
+    )
+    host_album = {
+        "kind": "album",
+        "id": "sys-h",
+        "space_id": SPACE,
+        "owner_user_id": None,
+        "name": "Posts",
+        "is_system": True,
+        "item_count": 1,
+    }
+    item = {
+        "kind": "item",
+        "id": _bound(GALLERY_ITEM_KIND),
+        "album_id": "sys-h",
+        "uploaded_by": AUTHOR,
+        "item_type": "photo",
+        "url": "api/media/x.webp",
+        "thumbnail_url": "api/media/tx.webp",
+        "width": 1,
+        "height": 1,
+    }
+    receiver = c[space_sync_receiver_key]
+    assert await receiver._dispatch("gallery", SPACE, [host_album], provider=HOST)
+    assert await receiver._dispatch("gallery", SPACE, [item], provider=HOST)
+    tomb = {"id": _bound(GALLERY_ITEM_KIND), "album_id": "sys-h", "uploaded_by": AUTHOR}
+    assert await receiver._dispatch(
+        "gallery_items_deleted", SPACE, [tomb], provider=HOST
+    )
+    assert await gallery_c.get_item(item["id"]) is None
+
+    # The provider streams neither the system album's items nor their
+    # tombstones.
+    gallery_h = _gallery(h)
+    await gallery_h.create_album(
+        GalleryAlbum(
+            id="sys-h", space_id=SPACE, owner_user_id=None, name="Posts", is_system=True
+        )
+    )
+    mirror = replace(_photo("sys-h", 3), id=_bound(GALLERY_ITEM_KIND))
+    assert await gallery_h.create_item_in_space(mirror, space_id=SPACE)
+    streamed = await _h_to_c(h, c)
+    assert mirror.id not in _ids(streamed, "gallery")
+    assert await gallery_h.delete_item_in_space(mirror.id, space_id=SPACE)
+    assert mirror.id not in _ids(await _h_to_c(h, c), "gallery_items_deleted")
+
+
+async def test_a_held_album_by_an_unknown_owner_is_refused_not_held(houses):
+    """A member household streaming an album this household already holds
+    is refused by rule (it only ever adds) — before the owner check, so an
+    owner this space no longer knows (they left) cannot hold the stream."""
+    h, c = houses
+    aid = mint_owner_bound_id(
+        GALLERY_ALBUM_KIND, space_id=SPACE, owner_user_id="u-gone"
+    )
+    assert await _gallery(h).create_album_in_space(
+        GalleryAlbum(id=aid, space_id=SPACE, owner_user_id="u-gone", name="Old"),
+        space_id=SPACE,
+    )
+    record = {
+        "kind": "album",
+        "id": aid,
+        "space_id": SPACE,
+        "owner_user_id": "u-gone",
+        "name": "Old",
+    }
+    receiver = h[space_sync_receiver_key]
+    assert await receiver._dispatch("gallery", SPACE, [record], provider=MEMBER)
+
+
+async def test_a_synced_photo_post_shows_in_the_members_posts_album(houses):
+    """The system ("Posts") album mirrors every photo shared in the feed —
+    a post that reached this household by sync too, not only one that came
+    live: each household rebuilds its own from the posts (the provider's
+    mirror rows never stream)."""
+    h, c = houses
+    pid = _pid(AUTHOR)
+    post = Post(
+        id=pid,
+        author=AUTHOR,
+        type=PostType.IMAGE,
+        created_at=_NOW - timedelta(hours=1),
+        content="look",
+        image_urls=("api/media/pic.webp",),
+    )
+    assert await _posts(h).save(SPACE, post) is not None
+    await _h_to_c(h, c)
+    mirrored = await _gallery(c).list_items_by_source_post(pid)
+    assert [i.url for i in mirrored] == ["api/media/pic.webp"]
+    album = await _gallery(c).get_album(mirrored[0].album_id)
+    assert album is not None and album.is_system and album.space_id == SPACE
+    # Re-applying the post on the next full stream changes nothing.
+    await _h_to_c(h, c, mode="initial")
+    assert [i.id for i in await _gallery(c).list_items_by_source_post(pid)] == [
+        mirrored[0].id
+    ]

@@ -42,7 +42,12 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ...domain.calendar import CalendarEvent, CalendarRSVP, RSVPStatus
+from ...domain.calendar import (
+    CalendarEvent,
+    CalendarRSVP,
+    RSVPStatus,
+    coerce_capacity,
+)
 from ...domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
@@ -1400,6 +1405,10 @@ class SpaceContentInboundHandlers:
             attendees=tuple(str(a) for a in (p.get("attendees") or ())),
             mirrored_from=p.get("mirrored_from"),
             rrule=p.get("rrule"),
+            # The per-occurrence cap members enforce on RSVPs; anything but
+            # a non-negative integer (or an older sender's absent field) is
+            # no cap.
+            capacity=coerce_capacity(p.get("capacity")),
             cover_url=cover,
             location=location if isinstance(location, str) and location else None,
             # IANA wall-clock anchor. Old peers omit; default ``"UTC"``.
@@ -1427,6 +1436,10 @@ class SpaceContentInboundHandlers:
             return
         existing = await self._calendar_repo.get_event(event_id)
         is_new = existing is None
+        if "capacity" not in p and existing is not None and existing[0] == space_id:
+            # An older sender (or a moderation release) carries no cap: keep
+            # the one held rather than clearing it.
+            ev = replace(ev, capacity=existing[1].capacity)
         if existing is not None and existing[0] != space_id:
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id

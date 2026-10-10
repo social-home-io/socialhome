@@ -67,7 +67,13 @@ FULL_RESYNC_INTERVAL_S: float = 24 * 3600.0
 #: * 2 — migration 0088: task lists, tasks (active, archived), pages,
 #:   timetables, their tombstones, and the live stickies / zones. A row of
 #:   these changed between a v1 watermark and the upgrade carries no stamp.
-SYNC_SHAPE_VERSION: int = 2
+#: * 3 — ``calendar`` streams every event as its stored row (a series once,
+#:   with its rule — not one record per occurrence, in a ±10-year window
+#:   around the provider's clock), and the receiver keeps the rule; a held
+#:   gallery album takes the host's edits and recounts its items. Copies
+#:   the old shape left wrong heal on one full stream, not on the next row
+#:   change.
+SYNC_SHAPE_VERSION: int = 3
 
 
 def session_shape(

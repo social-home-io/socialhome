@@ -666,7 +666,7 @@ RECORD_KEYS_AT_SHAPE: dict[str, list[str]] = {
 
 async def test_record_shapes_are_pinned_to_the_shape_version(db):
     keys = await _covered_record_keys(db)
-    assert SYNC_SHAPE_VERSION == 2 and keys == RECORD_KEYS_AT_SHAPE, (
+    assert SYNC_SHAPE_VERSION == 3 and keys == RECORD_KEYS_AT_SHAPE, (
         "A covered §25.6 exporter's record shape changed. Bump "
         "SYNC_SHAPE_VERSION (federation/sync/space/watermark.py) so every "
         "household gets one full stream in the new shape, then update "

@@ -12,7 +12,7 @@ import orjson
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
-from socialhome.domain.events import SpaceSyncComplete
+from socialhome.domain.events import SpaceContentKeyImported, SpaceSyncComplete
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.federation import (
     InstanceSource,
@@ -25,6 +25,9 @@ from socialhome.federation.sync.space.exporter import (
     serialise_chunk,
 )
 from socialhome.federation.sync.space.receiver import (
+    HELD_BACK_LIMIT,
+    PERSIST_FAILURE_LIMIT,
+    HeldBack,
     SpaceSyncReceiver,
     _sticky_from_record,
 )
@@ -134,6 +137,15 @@ class _Stub:
     async def create_item_in_space(self, item, *, space_id, bump_count=True):
         self.saved.append(("item", item))
         return True
+
+    async def get_system_album(self, space_id):
+        return None
+
+    async def get_album(self, album_id):
+        return None
+
+    async def recount_items(self, album_id):
+        return 0
 
     async def is_album_deleted(self, album_id, *, space_id):
         return False
@@ -638,19 +650,25 @@ async def test_persist_album_failure_is_logged_not_swallowed(receiver, caplog):
     r, space_repo, _ = receiver
     r._gallery_repo.create_album = AsyncMock(side_effect=RuntimeError("boom"))
 
+    held_back = HeldBack()
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         await r._persist_album(
             {"id": "al-1", "space_id": "sp-1", "name": "Holiday", "is_system": 0},
             "sp-1",
+            from_host=True,
+            held_back=held_back,
         )
 
     assert "gallery album al-1" in caplog.text
+    # Nor does it count as stored: a failure, never a forgivable hold.
+    assert held_back.failed and held_back.count == 0
 
 
 async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, caplog):
     """Same for items — a missing parent album must not be silent."""
     r, _space_repo, _ = receiver
     r._gallery_repo.create_item_in_space = AsyncMock(side_effect=RuntimeError("boom"))
+    held_back = HeldBack()
 
     with caplog.at_level(logging.WARNING, logger="socialhome"):
         await r._persist_gallery_item(
@@ -665,9 +683,11 @@ async def test_persist_gallery_item_failure_is_logged_not_swallowed(receiver, ca
                 "height": 10,
             },
             "sp-1",
+            held_back,
         )
 
     assert "gallery item it-1" in caplog.text
+    assert held_back.failed and held_back.count == 0
 
 
 async def test_on_chunk_refuses_a_chunk_for_another_space(receiver, peer_setup):
@@ -910,10 +930,13 @@ def test_sticky_from_record_invisible_content_is_dropped():
 # ── §25.6 incremental: the sentinel reports whether every chunk applied ──
 
 
-async def _members_chunk(kp, sync_id: str, *, user: str = "u-1") -> bytes:
-    plaintext = orjson.dumps(
-        {"records": [{"user_id": user, "role": "member", "joined_at": "2026"}]}
-    )
+async def _members_chunk(
+    kp, sync_id: str, *, user: str = "u-1", index: int | None = None
+) -> bytes:
+    body: dict = {"records": [{"user_id": user, "role": "member", "joined_at": "2026"}]}
+    if index is not None:
+        body["chunk_index"] = index
+    plaintext = orjson.dumps(body)
     _, ciphertext = await _FakeCrypto().encrypt_chunk(
         space_id="sp-1", sync_id=sync_id, plaintext=plaintext
     )
@@ -1018,6 +1041,262 @@ async def test_a_chunk_still_waiting_for_its_key_makes_the_stream_unclean(
     )
     await r.on_chunk(await _members_chunk(kp, "s-wait"), from_instance="peer-a")
     assert (await _completion(bus, r, kp, "s-wait", 1)).clean is False
+
+
+async def test_a_sentinel_overtaking_a_chunks_persist_is_not_clean(
+    bus, receiver, peer_setup
+):
+    """A chunk counts once its records are stored, not when it arrives:
+    relayed chunks are separate inbound events, so the sentinel can be
+    handled while an earlier chunk is still persisting — and that persist
+    may yet fail. The verdict must not run ahead of the database."""
+    r, space_repo, _ = receiver
+    _, kp = peer_setup
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    stored = space_repo.save_member
+
+    async def _slow_save(member):
+        entered.set()
+        await gate.wait()
+        raise RuntimeError("database is locked")
+
+    space_repo.save_member = _slow_save
+    persisting = asyncio.create_task(
+        r.on_chunk(await _members_chunk(kp, "s-race"), from_instance="peer-a")
+    )
+    await entered.wait()
+    done = await _completion(bus, r, kp, "s-race", 1)
+    gate.set()
+    await persisting
+    space_repo.save_member = stored
+    assert done.clean is False
+
+
+async def test_a_chunk_counts_only_once_stored(bus, receiver, peer_setup):
+    """The same race with a persist that succeeds: still not clean — the
+    sentinel saw the chunk unstored, so the next session re-streams it."""
+    r, space_repo, _ = receiver
+    _, kp = peer_setup
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    stored = space_repo.save_member
+
+    async def _slow_save(member):
+        entered.set()
+        await gate.wait()
+        return await stored(member)
+
+    space_repo.save_member = _slow_save
+    persisting = asyncio.create_task(
+        r.on_chunk(await _members_chunk(kp, "s-slow"), from_instance="peer-a")
+    )
+    await entered.wait()
+    done = await _completion(bus, r, kp, "s-slow", 1)
+    gate.set()
+    await persisting
+    assert done.clean is False
+    # The late chunk leaves nothing behind for a stream already finished.
+    assert "s-slow" not in r._health._streams
+
+
+async def test_a_redelivered_chunk_counts_once_it_applies(bus, peer_setup):
+    """A chunk stashed for its epoch key counts when the replay stores it."""
+    peer, kp = peer_setup
+    crypto = _MissingKeyCrypto()
+    cache = PendingDecryptsCache(bus=bus)
+    r = SpaceSyncReceiver(
+        bus=bus,
+        encoder=FederationEncoder(generate_identity_keypair().private_key),
+        crypto=crypto,
+        federation_repo=_FakeFedRepo(peer),
+        space_repo=_FakeSpaceRepo(),
+        space_post_repo=_FakeSpacePostRepo(),
+        space_task_repo=_Stub(),
+        page_repo=_Stub(),
+        sticky_repo=_Stub(),
+        space_calendar_repo=_Stub(),
+        gallery_repo=_Stub(),
+        pending_decrypts=cache,
+    )
+    await r.on_chunk(await _members_chunk(kp, "s-key"), from_instance="peer-a")
+    await bus.publish(SpaceContentKeyImported(space_id="sp-1", epoch=0))
+    assert (await _completion(bus, r, kp, "s-key", 1)).clean is True
+
+
+async def test_a_duplicated_chunk_cannot_stand_in_for_a_lost_one(
+    bus, receiver, peer_setup
+):
+    """v_56: chunks carry their index inside the signed, encrypted payload;
+    the receiver counts distinct indices, so chunk 0 delivered twice and
+    chunk 1 lost is not two stored chunks."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+    chunk0 = await _members_chunk(kp, "s-dup", index=0)
+    await r.on_chunk(chunk0, from_instance="peer-a")
+    await r.on_chunk(chunk0, from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-dup", 2)).clean is False
+    for i in range(2):
+        await r.on_chunk(
+            await _members_chunk(kp, "s-ok2", user=f"u-{i}", index=i),
+            from_instance="peer-a",
+        )
+    assert (await _completion(bus, r, kp, "s-ok2", 2)).clean is True
+
+
+async def test_an_unknown_resource_we_cannot_open_still_counts(bus, peer_setup):
+    """Forward compatibility: a newer provider's resource that this
+    household cannot decrypt is dropped by rule and counted as one chunk —
+    it does not make every stream from that provider unclean."""
+    peer, kp = peer_setup
+
+    class _NoOpenCrypto(_FakeCrypto):
+        async def decrypt_chunk(self, *, space_id, epoch, sync_id, ciphertext):
+            if ciphertext == "opaque":
+                raise ValueError("unknown scheme")
+            return await super().decrypt_chunk(
+                space_id=space_id, epoch=epoch, sync_id=sync_id, ciphertext=ciphertext
+            )
+
+    r = SpaceSyncReceiver(
+        bus=bus,
+        encoder=FederationEncoder(generate_identity_keypair().private_key),
+        crypto=_NoOpenCrypto(),
+        federation_repo=_FakeFedRepo(peer),
+        space_repo=_FakeSpaceRepo(),
+        space_post_repo=_FakeSpacePostRepo(),
+        space_task_repo=_Stub(),
+        page_repo=_Stub(),
+        sticky_repo=_Stub(),
+        space_calendar_repo=_Stub(),
+        gallery_repo=_Stub(),
+    )
+    await r.on_chunk(await _members_chunk(kp, "s-opq", index=0), from_instance="peer-a")
+    frame = orjson.loads(await _members_chunk(kp, "s-opq", index=1))
+    frame.update(resource="from_the_future", encrypted_payload="opaque")
+    del frame["signatures"]
+    await r.on_chunk(
+        serialise_chunk(await _sign_as_peer(kp, frame)), from_instance="peer-a"
+    )
+    assert (await _completion(bus, r, kp, "s-opq", 2)).clean is True
+    # A KNOWN resource that fails to decrypt is a failure, as ever.
+    bad = orjson.loads(await _members_chunk(kp, "s-bad2", index=0))
+    bad["encrypted_payload"] = "opaque"
+    del bad["signatures"]
+    await r.on_chunk(
+        serialise_chunk(await _sign_as_peer(kp, bad)), from_instance="peer-a"
+    )
+    assert (await _completion(bus, r, kp, "s-bad2", 1)).clean is False
+
+
+async def test_held_back_streams_are_bounded(
+    bus, receiver, peer_setup, caplog, monkeypatch
+):
+    """A record that never lands must not keep every session unclean: the
+    HELD_BACK_LIMIT-th held-back-only stream in a row from one provider is
+    reported clean (WARNING once); a clean stream resets the count."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+
+    async def _held_apply(*_a, **_kw):
+        outcome = HeldBack()
+        outcome.add()
+        return outcome
+
+    async def _held_stream(sid: str) -> bool:
+        await r.on_chunk(await _members_chunk(kp, sid), from_instance="peer-a")
+        return (await _completion(bus, r, kp, sid, 1)).clean
+
+    monkeypatch.setattr(SpaceSyncReceiver, "_apply", _held_apply)
+    verdicts = []
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        for n in range(HELD_BACK_LIMIT + 1):
+            verdicts.append(await _held_stream(f"s-held-{n}"))
+    assert verdicts == [False] * (HELD_BACK_LIMIT - 1) + [True, False]
+    assert sum("never landed" in rec.message for rec in caplog.records) == 1
+    # "In a row": an unclean stream (a lost chunk) breaks the run, so the
+    # count starts over after it.
+    await r.on_chunk(await _members_chunk(kp, "s-gap3"), from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-gap3", 2)).clean is False
+    assert [await _held_stream(f"s-again-{n}") for n in range(2)] == [False, False]
+
+
+async def test_a_failed_persist_is_bounded_apart_from_held_back(
+    bus, receiver, peer_setup, monkeypatch, caplog
+):
+    """A persist that failed (logged, not raised) is unclean — it never
+    counts toward the held-back bound, but has its own, higher one."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+
+    async def _failed_apply(*_a, **_kw):
+        outcome = HeldBack()
+        outcome.fail()
+        return outcome
+
+    monkeypatch.setattr(SpaceSyncReceiver, "_apply", _failed_apply)
+    verdicts = []
+    with caplog.at_level(logging.WARNING, logger="socialhome"):
+        for n in range(PERSIST_FAILURE_LIMIT + 1):
+            sid = f"s-fail-{n}"
+            await r.on_chunk(await _members_chunk(kp, sid), from_instance="peer-a")
+            verdicts.append((await _completion(bus, r, kp, sid, 1)).clean)
+    # Not forgiven as "held" (3) — only after its own, higher bound, so a
+    # row the database refuses for good cannot force full re-streams for
+    # ever.
+    assert verdicts == [False] * (PERSIST_FAILURE_LIMIT - 1) + [True, False]
+    assert PERSIST_FAILURE_LIMIT > HELD_BACK_LIMIT
+    assert sum("failed to store" in rec.message for rec in caplog.records) == 1
+
+
+async def test_in_a_numbered_stream_only_indices_count(bus, receiver, peer_setup):
+    """Once a stream numbers its chunks (v_56), an unnumbered chunk in it
+    cannot make up the count; an unknown resource is decrypted, so its
+    index counts like any other."""
+    r, _, _ = receiver
+    _, kp = peer_setup
+    await r.on_chunk(await _members_chunk(kp, "s-mix", index=0), from_instance="peer-a")
+    await r.on_chunk(await _members_chunk(kp, "s-mix"), from_instance="peer-a")
+    assert (await _completion(bus, r, kp, "s-mix", 2)).clean is False
+
+    await r.on_chunk(await _members_chunk(kp, "s-new", index=0), from_instance="peer-a")
+    frame = orjson.loads(await _members_chunk(kp, "s-new", index=1))
+    frame["resource"] = "some_future_resource"
+    del frame["signatures"]
+    await r.on_chunk(
+        serialise_chunk(await _sign_as_peer(kp, frame)), from_instance="peer-a"
+    )
+    assert (await _completion(bus, r, kp, "s-new", 2)).clean is True
+
+
+async def test_an_archive_lifted_mid_stream_records_no_echo(bus, peer_setup):
+    """The unarchive dropped the echo so the next session is full; the
+    stream that was running must not write its snapshot back."""
+    peer, kp = peer_setup
+    applied = _AppliedSeqs()
+    r = _echo_receiver(bus, peer, applied)
+    spaces = r._space_repo
+    spaces.spaces["sp-1"] = SimpleNamespace(
+        id="sp-1",
+        owner_instance_id="peer-a",
+        archived=True,
+        archived_reason=None,
+        dissolved=False,
+    )
+    await r.on_chunk(await _members_chunk(kp, "s-arch"), from_instance="peer-a")
+    spaces.spaces["sp-1"].archived = False
+    captured: list[SpaceSyncComplete] = []
+    bus.subscribe(SpaceSyncComplete, captured.append)
+    await r.on_chunk(await _sentinel_frame(kp, "s-arch", 1, 41), from_instance="peer-a")
+    assert applied.recorded == []
+    # Still clean toward the provider: what it shipped was stored.
+    assert [e.clean for e in captured] == [True]
+    # A stream that stays archived (or unarchived) throughout records it.
+    await r.on_chunk(await _members_chunk(kp, "s-arch2"), from_instance="peer-a")
+    await r.on_chunk(
+        await _sentinel_frame(kp, "s-arch2", 1, 42), from_instance="peer-a"
+    )
+    assert applied.recorded == [("sp-1", "peer-a", 42)]
 
 
 async def test_a_sentinel_without_a_count_is_never_clean(bus, receiver, peer_setup):

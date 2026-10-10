@@ -710,12 +710,19 @@ class GalleryService:
         self,
         post: Post,
         space_id: str | None,
+        *,
+        quiet: bool = False,
     ) -> None:
         """Mirror a post's media into the system album for the scope.
 
         Called by :class:`SystemAlbumBridge` on PostCreated / PostEdited
-        / SpacePostCreated. Idempotent: an edit that doesn't change the
-        media URLs is a no-op (skips churning rows + events).
+        / SpacePostCreated / SpacePostSynced. Idempotent: an edit that
+        doesn't change the media URLs is a no-op (skips churning rows +
+        events), and two mirrors of the same post at once store each file
+        once (the unique index of migration 0091; ``create_item`` is
+        ``ON CONFLICT DO NOTHING``). ``quiet``: publish no
+        ``GalleryItemUploaded`` per item — a §25.6 catch-up is history, and
+        a large one would send one live frame per photo.
         """
 
         # Only image / video posts contribute media. Text, file, and
@@ -772,6 +779,8 @@ class GalleryService:
                 created_at=now,
             )
             await self._repo.create_item(item)
+            if quiet:
+                continue
             await self._bus.publish(
                 GalleryItemUploaded(
                     item_id=item.id,

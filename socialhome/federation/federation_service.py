@@ -2337,8 +2337,9 @@ class FederationService:
 
         ``legacy_payload`` + ``legacy_below``, when both given, send
         ``legacy_payload`` INSTEAD of ``payload`` to a member household whose
-        advertised ``proto_version`` is below ``legacy_below`` (or that has
-        advertised none — :meth:`peer_supports`' conservative default). For a
+        space version is below ``legacy_below`` (:meth:`space_member_supports`
+        — its paired row, else the version a mesh-only member claimed; none
+        known reads as unsupported, the conservative default). For a
         field an older receiver would mis-handle rather than ignore: the v_41
         ``moderator`` role ships as ``member`` to a v_40 household, which
         drops roles it does not know. Only for payloads that are not signed
@@ -2401,7 +2402,9 @@ class FederationService:
             if (
                 legacy_payload is not None
                 and legacy_below is not None
-                and not await self.peer_supports(iid, min_version=legacy_below)
+                # A space member household, possibly mesh-only: judged by its
+                # space version (its paired row, else its mesh claim).
+                and not await self.space_member_supports(iid, min_version=legacy_below)
             ):
                 peer_payload = legacy_payload
             if relay_payload is not None:

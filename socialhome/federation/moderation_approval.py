@@ -35,6 +35,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..domain.calendar import coerce_capacity
 from ..domain.federation import FederationEventType
 from ..domain.link_preview import link_preview_from_dict, link_preview_to_dict
 from ..domain.page_version import is_version_hash, version_hash
@@ -643,6 +644,11 @@ def _event_create(p: Mapping, by: str, w: Mapping, h: Mapping) -> tuple[dict, di
     # (any value the receiver validates).
     expected["tz"] = p.get("tz") or w.get("tz")
     actual["tz"] = w.get("tz")
+    # The per-occurrence cap, as the item asked for it — when the release
+    # carries one (v_56; an older sender's release omits the field).
+    if "capacity" in w:
+        expected["capacity"] = coerce_capacity(p.get("capacity"))
+        actual["capacity"] = coerce_capacity(w.get("capacity"))
     # An announcement can be dropped by the apply, never added.
     actual["announce_in_feed"] = bool(w.get("announce_in_feed"))
     expected["announce_in_feed"] = bool(w.get("announce_in_feed")) and bool(
@@ -661,6 +667,21 @@ def _event_edit(p: Mapping, by: str, w: Mapping, h: Mapping) -> tuple[dict, dict
         (*_EVENT_CONTENT_KEYS, "tz"), _event_value, p, w, h, proposed=patch
     )
     expected.pop("__capacity_only__", None)
+    # The cap, reviewed like the rest of the edit when the release carries
+    # it (v_56): the item's new cap, cleared, or else the held row's.
+    if "capacity" in w:
+        proposed = _patch(p)
+        # As ``update_event`` applies it: the clear wins over a cap, a null
+        # cap is no change.
+        if proposed.get("clear_capacity"):
+            expected["capacity"] = None
+        elif proposed.get("capacity") is not None:
+            expected["capacity"] = coerce_capacity(proposed.get("capacity"))
+        else:
+            if "capacity" not in h:
+                raise KeyError("capacity")
+            expected["capacity"] = coerce_capacity(h.get("capacity"))
+        actual["capacity"] = coerce_capacity(w.get("capacity"))
     for key in ("created_by", "calendar_id", "mirrored_from", "announce_in_feed"):
         if key in w or key == "created_by":
             expected[key] = h.get(key)

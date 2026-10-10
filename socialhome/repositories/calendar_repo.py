@@ -20,6 +20,7 @@ from dataclasses import replace
 from ..auth import sha256_token_hash
 from ..db import AsyncDatabase
 from ..domain.calendar import (
+    OCCURRENCE_ID_SEPARATOR,
     Calendar,
     CalendarEvent,
     CalendarEventCopy,
@@ -76,7 +77,14 @@ def _expand_window(
             if s == ev.start and e == ev.end:
                 out.append(ev)
             else:
-                out.append(replace(ev, start=s, end=e, id=f"{ev.id}@{s.isoformat()}"))
+                out.append(
+                    replace(
+                        ev,
+                        start=s,
+                        end=e,
+                        id=f"{ev.id}{OCCURRENCE_ID_SEPARATOR}{s.isoformat()}",
+                    )
+                )
     out.sort(key=lambda x: x.start)
     return out
 
@@ -612,7 +620,23 @@ class AbstractSpaceCalendarRepo(Protocol):
     ) -> list[CalendarEvent]:
         """The space's live events overlapping ``[start, end)`` (recurring
         ones expanded). ``since``: only those whose change stamp is above it
-        (the §25.6 incremental session; migration 0086)."""
+        (the record set a §25.6 requester below v_56 is streamed)."""
+        ...
+
+    async def list_events_sync_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+        since: int | None = None,
+    ) -> tuple[list[CalendarEvent], int | None]:
+        """One page of the space's live events **as stored** for a §25.6
+        sync — a recurring event once, with its rule (never expanded into
+        occurrences), whatever its date: nothing prunes calendar events, so
+        a window would hide rows the space still shows. ``since``: only
+        those whose change stamp is above it (migration 0086). ``(rows,
+        next_cursor)`` paging, keyset on the row id."""
         ...
 
     async def list_events_since(
@@ -841,6 +865,26 @@ class SqliteSpaceCalendarRepo:
         )
         events = [_row_to_space_event(d) for d in rows_to_dicts(rows)]
         return _expand_window(events, start=start, end=end)
+
+    async def list_events_sync_page(
+        self,
+        space_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 200,
+        since: int | None = None,
+    ) -> tuple[list[CalendarEvent], int | None]:
+        changed, changed_params = changed_since_sql("sync_seq", since)
+        rows = rows_to_dicts(
+            await self._db.fetchall(
+                "SELECT rowid AS sync_rowid, * FROM space_calendar_events"
+                " WHERE space_id=? AND deleted_at IS NULL"
+                + changed
+                + " AND rowid > ? ORDER BY rowid LIMIT ?",
+                (space_id, *changed_params, cursor or 0, int(limit)),
+            )
+        )
+        return [_row_to_space_event(r) for r in rows], sync_page_cursor(rows, limit)
 
     async def list_events_since(
         self,

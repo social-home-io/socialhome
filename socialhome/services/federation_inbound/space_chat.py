@@ -284,10 +284,16 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
     async def _on_created(
         self, event: FederationEvent, *, from_sync: bool = False
     ) -> None:
+        await self._create(event, from_sync=from_sync)
+
+    async def _create(self, event: FederationEvent, *, from_sync: bool) -> bool:
         """A new message. ``from_sync`` (the §25.6 catch-up): stored
         quietly — no bell, no mention, no WS frame per historical message —
         and a chat it creates seats its readers at *now*, so nobody inherits
-        the backlog as unread."""
+        the backlog as unread. ``True`` when the message waits for its
+        author's seat (a race, not a refusal) rather than stored or refused —
+        held in the live seat buffer, or, from a sync, left for the next
+        stream."""
         p = event.payload if isinstance(event.payload, dict) else {}
         message_id = _str(p, "message_id")
         author = _str(p, "author_user_id")
@@ -296,35 +302,51 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             log_not_applied(
                 event, what="chat message", row_id=message_id, reason="incomplete"
             )
-            return
+            return False
         if len(content) > MAX_DM_LENGTH:
             _refuse(event, "chat message", message_id, "content too long")
-            return
+            return False
         got = await self._chat_for(event, what="chat message", row_id=message_id)
         if got is None:
-            return
+            return False
         space_id, chat, authorship = got
         if not _bound_to(message_id, space_id, author):
             # Bound from its first release: any other id — another
             # author's, another space's, a legacy uuid — is refused.
             _refuse(event, "chat message", message_id, f"id not bound to {author!r}")
-            return
+            return False
+        if await self._convos.get_message(message_id) is not None:
+            # Held already — or deleted before it arrived here (a
+            # tombstone): either way a create never brings it back. Decided
+            # before the author check, so a held message by an author this
+            # space no longer knows is a no-op, never a hold.
+            log_not_applied(
+                event, what="chat message", row_id=message_id, reason="already held"
+            )
+            return False
         if not await authorship.may_author_writer(event, space_id, author):
-            await authorship.hold_or_refuse(
+            if from_sync:
+                # §25.6: an author whose seat has not reached us yet is a
+                # race the NEXT stream wins — reported to the receiver, not
+                # parked in the live seat buffer (whose slots are for live
+                # writes, and whose replay would run without ``from_sync``).
+                if await authorship.trails_seat(space_id, author):
+                    return True
+                authorship.log_refusal(
+                    event,
+                    space_id=space_id,
+                    what="chat message",
+                    row_id=message_id,
+                    user_id=author,
+                )
+                return False
+            return await authorship.hold_or_refuse(
                 event,
                 space_id=space_id,
                 what="chat message",
                 row_id=message_id,
                 user_id=author,
             )
-            return
-        if await self._convos.get_message(message_id) is not None:
-            # Held already — or deleted before it arrived here (a
-            # tombstone): either way a create never brings it back.
-            log_not_applied(
-                event, what="chat message", row_id=message_id, reason="already held"
-            )
-            return
         created_at = parse_iso8601_lenient(p.get("created_at"))
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
@@ -355,7 +377,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
             reply_to_id=reply_to_id,
         )
         if not await self._convos.insert_message_if_absent(msg) or from_sync:
-            return
+            return False
         withheld = await self._guardian_block_counterparts(author)
         await self._bus.publish(
             DmMessageCreated(
@@ -376,12 +398,17 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
                 origin_instance_id=event.from_instance,
             )
         )
+        return False
 
     async def apply_sync_records(
         self, space_id: str, records: list[dict[str, Any]], *, provider: str
-    ) -> None:
+    ) -> int:
         """§25.6 catch-up: each ``chat_messages`` record goes through the
-        live create rule, ``provider`` standing in as the sender."""
+        live create rule, ``provider`` standing in as the sender. Returns
+        how many were held for their author's seat — the stream they came
+        in must not count as clean (the hold is in memory and expires; the
+        next periodic session streams them again)."""
+        held = 0
         for r in records:
             payload = {
                 "space_id": space_id,
@@ -391,7 +418,7 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
                 "reply_to_id": r.get("reply_to_id"),
                 "created_at": r.get("created_at"),
             }
-            await self._on_created(
+            if await self._create(
                 _sync_event(
                     FederationEventType.SPACE_CHAT_MESSAGE_CREATED,
                     space_id,
@@ -399,7 +426,9 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
                     provider=provider,
                 ),
                 from_sync=True,
-            )
+            ):
+                held += 1
+        return held
 
     async def apply_sync_tombstones(
         self, space_id: str, records: list[dict[str, Any]], *, provider: str

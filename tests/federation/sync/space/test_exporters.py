@@ -431,12 +431,36 @@ async def test_calendar_exporter_serialises_datetimes():
     )
 
     class _Repo:
-        async def list_events_in_range(self, space_id, *, start, end, since=None):
-            return [event]
+        async def list_events_sync_page(self, space_id, *, cursor, limit, since):
+            return [event], None
 
     recs = await CalendarExporter(_Repo()).list_records("sp-1")
     assert recs[0]["id"] == "e-1"
     assert recs[0]["start"].startswith("2026-04-18")
+
+
+async def test_calendar_exporter_streams_a_series_once_whatever_its_age(db):
+    """The rows as stored: a recurring event is one record carrying its
+    rule — not one per occurrence — and events decades away stream too."""
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp','S','host','anna','ab')"
+    )
+    for eid, start, rrule in (
+        ("ev-series", "1999-01-04T18:00:00+00:00", "FREQ=WEEKLY"),
+        ("ev-far", "2070-01-01T10:00:00+00:00", None),
+    ):
+        await db.enqueue(
+            "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
+            " end_dt, rrule, created_by) VALUES(?,?,?,?,?,?,'u')",
+            (eid, "sp", eid, start, start, rrule),
+        )
+    recs = await CalendarExporter(SqliteSpaceCalendarRepo(db)).list_records("sp")
+    assert [(r["id"], r["rrule"]) for r in recs] == [
+        ("ev-series", "FREQ=WEEKLY"),
+        ("ev-far", None),
+    ]
+    assert recs[0]["start"].startswith("1999-01-04")
 
 
 async def test_gallery_exporter_emits_albums_then_items():

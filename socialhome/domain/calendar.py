@@ -14,6 +14,43 @@ from datetime import date, datetime, timedelta
 from ..utils.timezones import is_valid_tz, local_date
 from .errors import CodedError
 
+#: Joins a recurring event's id and an occurrence's start in the id of a
+#: virtual occurrence (``<event id>@<start iso>``) — what reading a range
+#: expands a series into. Never a stored row's id: the §25.6 sync streams
+#: and stores the series row, and refuses an occurrence id.
+OCCURRENCE_ID_SEPARATOR: str = "@"
+
+
+def coerce_capacity(value: object) -> int | None:
+    """A peer-supplied per-occurrence ``capacity``: a non-negative integer,
+    else ``None`` (no cap)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def validate_capacity(value: object) -> int | None:
+    """A per-occurrence ``capacity`` a user (or a queue item) asked for:
+    ``None`` (no cap / no change) or a non-negative integer — never a bool
+    (an ``int`` to Python), a float or a string, which the moderation rule
+    and the receiving households would read differently. Raises
+    :class:`ValueError`."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("capacity must be a non-negative integer")
+    return value
+
+
+def is_occurrence_id(event_id: str, start_iso: str) -> bool:
+    """Is ``event_id`` a virtual occurrence's id — ``<series id>@<start>``
+    where ``<start>`` is the occurrence's own start (``start_iso``)? The
+    exact shape the expansion mints, so an id that merely contains ``@``
+    (an ICS-style ``uid@host`` a legacy peer might use) is not one. The
+    database refuses the same shape (migration 0089)."""
+    suffix = f"{OCCURRENCE_ID_SEPARATOR}{start_iso}"
+    return bool(start_iso) and len(event_id) > len(suffix) and event_id.endswith(suffix)
+
 
 @dataclass(slots=True, frozen=True)
 class Calendar:

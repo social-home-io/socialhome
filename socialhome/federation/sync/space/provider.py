@@ -34,6 +34,7 @@ from .exporter import (
     RESOURCE_ORDER,
     serialise_chunk,
 )
+from .exporters.calendar import CalendarExporter
 from .exporters.members import PreModeratorMembersExporter
 from .exporters.posts import iter_post_pages
 from .watermark import session_shape
@@ -186,6 +187,11 @@ class SpaceSyncService:
         one we cannot ask gets no exporter at all.
         """
         exporter = self._exporters.get(resource)
+        version = await self._session_version(session)
+        if exporter is not None and resource == "calendar":
+            if isinstance(exporter, CalendarExporter) and not _series_rows(version):
+                return exporter.expanded()
+            return exporter
         if exporter is not None and resource in (
             "chat_messages",
             "chat_messages_deleted",
@@ -193,10 +199,7 @@ class SpaceSyncService:
             allowed = (
                 self._chat_gate is not None
                 and self._federation is not None
-                and await self._federation.space_member_supports(
-                    session.requester_instance_id,
-                    min_version=FederationCapability.MIN_FOR_SPACE_CHAT,
-                )
+                and version >= FederationCapability.MIN_FOR_SPACE_CHAT
                 and await self._chat_gate(
                     session.space_id, session.requester_instance_id
                 )
@@ -212,6 +215,17 @@ class SpaceSyncService:
             )
         )
         return exporter if supports else PreModeratorMembersExporter(exporter)
+
+    async def _session_version(self, session: "SyncSessionRecord") -> int:
+        """The requester's protocol version (a space member household, which
+        may be mesh-only), read once per session and kept on it: every
+        version gate of the session — the exporters, the shape, the chunk
+        numbering — follows the same reading. ``0`` when we cannot ask."""
+        cached = getattr(session, "peer_version", None)
+        if cached is None:
+            cached = await self._peer_version(session.requester_instance_id)
+            session.peer_version = cached
+        return int(cached)
 
     def attach_federation(self, federation_service) -> None:
         """Wire the federation service so HTTPS-mode sessions can
@@ -242,6 +256,9 @@ class SpaceSyncService:
         chunk_count = 0
         try:
             plan = await self._plan(session)
+            # v_56: number the chunks (inside the encrypted payload) so the
+            # requester counts distinct ones; an older one counts as before.
+            indexed = _series_rows(await self._session_version(session))
             for exporter in plan:
                 async for envelope in self._builder.build_chunks(
                     exporter=exporter,
@@ -249,6 +266,7 @@ class SpaceSyncService:
                     sync_id=sync_id,
                     sig_suite=self._sig_suite,
                     since=session.since_seq,
+                    next_index=_allocator(session) if indexed else None,
                 ):
                     sent = await self._send_chunk(session, envelope, waits)
                     chunk_count += 1
@@ -281,7 +299,14 @@ class SpaceSyncService:
                 space_id=space_id,
                 sync_id=sync_id,
                 sig_suite=self._sig_suite,
-                chunk_count=chunk_count,
+                # Numbered (v_56): every index the session handed out —
+                # a REQUEST_MORE slice that ran alongside included, whose
+                # chunks the requester counts too.
+                chunk_count=(
+                    int(getattr(session, "next_chunk_index", 0))
+                    if indexed
+                    else chunk_count
+                ),
                 snapshot_seq=session.snapshot_seq,
             )
             # Marked before the sentinel ships: the requester's
@@ -348,7 +373,7 @@ class SpaceSyncService:
             return exporters
         session.snapshot_seq = await self._watermarks.snapshot()
         session.shape = session_shape(
-            peer_version=await self._peer_version(session.requester_instance_id),
+            peer_version=await self._session_version(session),
             retention=(
                 await self._windows.retention_key(session.space_id)
                 if self._windows is not None
@@ -667,12 +692,16 @@ class SpaceSyncService:
                 resource,
             )
             return
+        indexed = _series_rows(await self._session_version(session))
         try:
             async for envelope in self._builder.build_chunks(
                 exporter=exporter,
                 space_id=session.space_id,
                 sync_id=session.sync_id,
                 sig_suite=self._sig_suite,
+                # v_56: from the session's one counter, so a slice never
+                # reuses an index of the stream it runs next to.
+                next_index=_allocator(session) if indexed else None,
             ):
                 await self._send(session, envelope)
         except Exception:  # pragma: no cover
@@ -774,3 +803,23 @@ class SpaceSyncService:
         raise ValueError(
             f"Unknown transport_mode {mode!r} on session {session.sync_id}",
         )
+
+
+def _series_rows(version: int) -> bool:
+    """v_56: does a requester at ``version`` take calendar series rows and
+    numbered chunks? One we cannot ask (``0``) gets the older shape — never a
+    series row an older receiver would flatten."""
+    return version >= FederationCapability.MIN_FOR_SYNC_SERIES_ROWS
+
+
+def _allocator(session: "SyncSessionRecord") -> Callable[[], int]:
+    """The session's one ``chunk_index`` counter (v_56): every chunk of the
+    session — the stream's and any REQUEST_MORE slice's — takes the next
+    value, never a reassigned one."""
+
+    def _next() -> int:
+        index = int(getattr(session, "next_chunk_index", 0))
+        session.next_chunk_index = index + 1
+        return index
+
+    return _next
