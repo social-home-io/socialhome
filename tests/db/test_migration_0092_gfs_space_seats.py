@@ -106,3 +106,16 @@ def test_one_row_per_space_and_server(conn):
     # No FK to spaces / gfs_connections: a seat outlives both.
     row = conn.execute("SELECT seated_at FROM gfs_space_seats").fetchone()
     assert row["seated_at"]
+
+
+def test_a_pending_legacy_release_row_fits(conn):
+    _apply_through(conn, _VERSION)
+    conn.execute(
+        "INSERT INTO gfs_space_seats(space_id, gfs_instance_id, space_authority_pk)"
+        " VALUES('sp-x','*','ab')"
+    )
+    row = conn.execute(
+        "SELECT gfs_connection_id, gfs_public_key, gfs_inbox_url, space_authority_pk"
+        " FROM gfs_space_seats"
+    ).fetchone()
+    assert tuple(row) == (None, None, None, "ab")

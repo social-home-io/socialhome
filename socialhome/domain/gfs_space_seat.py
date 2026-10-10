@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: The ``gfs_instance_id`` of a pending legacy release: a pre-v44 follower
+#: seat held at a server this household cannot name (never a real server
+#: id — those are derived from keys). Excluded from every seat read.
+UNKNOWN_GFS_SERVER = "*"
+
 
 @dataclass(slots=True, frozen=True)
 class GfsSpaceSeat:
