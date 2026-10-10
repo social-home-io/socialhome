@@ -1,4 +1,4 @@
-"""Direct SQLite tests for ``SqliteGfsSpaceSeatRepo`` (migration 0093)."""
+"""Direct SQLite tests for ``SqliteGfsSpaceSeatRepo`` (migration 0092)."""
 
 from __future__ import annotations
 
@@ -72,16 +72,16 @@ async def test_detach_release_and_the_sweep_markers(repo):
     assert seat.detached and seat.detached_at == "2026-10-10 00:00:00"
     await repo.mark_released("sp-1", "gfs-a")
     await repo.set_expiry_seen("sp-1", "gfs-a", "2027-01-01 00:00:00")
-    await repo.mark_address_warned("sp-1", "gfs-a")
+    await repo.mark_refollow_warned("sp-1", "gfs-a")
     seat = await repo.get("sp-1", "gfs-a")
-    assert seat.released and seat.expiry_seen_at and seat.address_warned
+    assert seat.released and seat.expiry_seen_at and seat.refollow_warned
     await repo.set_detached_at("sp-1", "gfs-a", "2026-12-12 00:00:00")
     seat = await repo.get("sp-1", "gfs-a")
     assert seat.detached_at == "2026-12-12 00:00:00" and seat.expiry_seen_at is None
     # Re-taking the seat makes it a live seat again.
     await repo.record(_s("sp-1", "gfs-a"))
     seat = await repo.get("sp-1", "gfs-a")
-    assert (seat.detached, seat.detached_at, seat.released, seat.address_warned) == (
+    assert (seat.detached, seat.detached_at, seat.released, seat.refollow_warned) == (
         False,
         None,
         False,

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -95,3 +96,26 @@ async def read_json_capped(resp: Any, *, url: str, limit: int) -> Any | None:
     except (ValueError, UnicodeDecodeError) as exc:
         log.warning("gfs_http: %s returned an unparsable body: %s", url, exc)
         return None
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def gfs_server_address(url: str) -> str:
+    """A GFS's comparable address: scheme + host (+ port unless it is the
+    scheme's default), lower-cased; path, trailing slash, user info and
+    query ignored. ``https://GFS.example:443/`` == ``https://gfs.example``.
+    The one normalization for "is this the same server" — the seat binding
+    and the duplicate-pairing guard both use it."""
+    parts = urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if not scheme or not host:
+        return url.strip().rstrip("/").lower()
+    try:
+        port = parts.port
+    except ValueError:
+        return url.strip().rstrip("/").lower()
+    if port is None or port == _DEFAULT_PORTS.get(scheme):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"

@@ -554,7 +554,7 @@ cannot widen access through a missing field or Python truthiness.
   so sending it to a GFS that never seated the subscription would tell that
   operator the household follows the space. Every subscribe — a follower's,
   the reconnect self-heal's, a member's auto-subscribe — therefore records
-  the seat in `gfs_space_seats` (0093) under the server's own
+  the seat in `gfs_space_seats` (0092) under the server's own
   `gfs_instance_id`, which survives a disconnect + re-pair (the local
   connection id does not), bound to the server key and URL it was taken
   over. A connection is a seat's server only when id, key AND (normalized)
@@ -582,21 +582,31 @@ cannot widen access through a missing field or Python truthiness.
     connection retries. A re-pair of the same server (same id, key and
     address) re-takes the detached seats a local user still wants, releases
     the rest, and carries the v_44 pin anchor over through the same rows;
-  - a local sweep (startup and every reconnect, no request) drops a
-    detached row only once it is released and 90 days old, confirmed by a
-    second sweep at least a day after the first that saw it expired;
-    nothing is stamped or aged while the wall clock reads before 2026 (a
-    device without a real-time clock), and a stamp in the future (the
-    clock went back) is reset. An unreleased row is never dropped;
+  - a local sweep (startup and every reconnect) drops a detached row only
+    once it is released, no local user still wants it (a wanted row is what
+    a re-pair re-takes, and what carries the pin anchor — release events
+    never drop it either), and it is 90 days old, confirmed by a second
+    sweep at least a day after the first that saw it expired; nothing is
+    stamped or aged while the wall clock reads before 2026 (a device
+    without a real-time clock), and a stamp in the future (the clock went
+    back) is reset. An unreleased row is never dropped: the sweep sends its
+    unsubscribe as soon as a matching connection is active (an unpair
+    unsubscribe that failed, or was never sent because the task budget was
+    full or the app was stopping) — and sends nothing otherwise. The unpair
+    task re-reads each row right before sending, so a seat a quick re-pair
+    already re-took is left alone, and an unpair never detaches a seat
+    another remaining pairing still matches;
   - a server whose id and key come back at a DIFFERENT address (a domain
     change, http → https) is not re-bound: that could be an impostor, and
     only the proof of possession planned in a follow-up can tell. Each such
     seat is logged once at WARNING ("needs re-follow: server address
     changed", remembered on the row); the user re-follows, and an
     unfollow while it is unreleased keeps the row as an unsubscribe-only
-    tombstone for that follow-up to release. Addresses compare as scheme +
-    host (+ non-default port), so case, a trailing slash or an explicit
-    `:443` don't count as a move;
+    tombstone for that follow-up to release. The same id and address under
+    a DIFFERENT key is treated alike ("needs re-follow: server key
+    changed"). Addresses compare as scheme + host (+ non-default port), so
+    case, a trailing slash or an explicit `:443` don't count as a move —
+    the same normalization refuses pairing one server twice;
   - a seat taken by a first subscribe in the last 2 min is spared by every
     teardown (its member row is written after the subscribe succeeds), and
     the mirror purge waits too; once the window has passed, a tracked

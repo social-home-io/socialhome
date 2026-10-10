@@ -1,4 +1,4 @@
-"""GFS subscriber-seat repository — wraps ``gfs_space_seats`` (0093).
+"""GFS subscriber-seat repository — wraps ``gfs_space_seats`` (0092).
 
 A row says "the connection server ``gfs_instance_id`` holds a subscriber
 seat of this household for ``space_id``": the only servers an
@@ -37,7 +37,7 @@ class AbstractGfsSpaceSeatRepo(Protocol):
     async def set_expiry_seen(
         self, space_id: str, gfs_instance_id: str, at: str | None
     ) -> None: ...
-    async def mark_address_warned(
+    async def mark_refollow_warned(
         self, space_id: str, gfs_instance_id: str
     ) -> None: ...
 
@@ -63,7 +63,7 @@ class SqliteGfsSpaceSeatRepo:
             " gfs_public_key=excluded.gfs_public_key,"
             " gfs_inbox_url=excluded.gfs_inbox_url,"
             " detached=0, detached_at=NULL, released=0, expiry_seen_at=NULL,"
-            " address_warned=0",
+            " refollow_warned=0",
             (
                 seat.space_id,
                 seat.gfs_instance_id,
@@ -146,9 +146,9 @@ class SqliteGfsSpaceSeatRepo:
             (at, space_id, gfs_instance_id),
         )
 
-    async def mark_address_warned(self, space_id: str, gfs_instance_id: str) -> None:
+    async def mark_refollow_warned(self, space_id: str, gfs_instance_id: str) -> None:
         await self._db.enqueue(
-            "UPDATE gfs_space_seats SET address_warned=1"
+            "UPDATE gfs_space_seats SET refollow_warned=1"
             " WHERE space_id=? AND gfs_instance_id=?",
             (space_id, gfs_instance_id),
         )
@@ -165,5 +165,5 @@ def _seat(row: Any) -> GfsSpaceSeat:
         detached_at=row["detached_at"],
         released=bool(row["released"]),
         expiry_seen_at=row["expiry_seen_at"],
-        address_warned=bool(row["address_warned"]),
+        refollow_warned=bool(row["refollow_warned"]),
     )

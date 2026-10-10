@@ -1,4 +1,4 @@
-"""Migration 0093 — ``gfs_space_seats``.
+"""Migration 0092 — ``gfs_space_seats``.
 
 Additive: one table keyed by the server's own id (survives a re-pair), and a
 backfill from the v_44 mirror provenance where the seating connection still
@@ -13,7 +13,7 @@ import pytest
 
 from socialhome.db.migrations import discover_migrations
 
-_VERSION = 93
+_VERSION = 92
 
 
 def _apply_through(conn: sqlite3.Connection, last: int) -> None:
@@ -114,9 +114,26 @@ def test_the_detach_columns_default_to_a_live_seat(conn):
         "INSERT INTO gfs_space_seats(space_id, gfs_instance_id) VALUES('sp-y','g')"
     )
     row = conn.execute(
-        "SELECT detached, detached_at, released, expiry_seen_at, address_warned"
+        "SELECT detached, detached_at, released, expiry_seen_at, refollow_warned"
         " FROM gfs_space_seats"
     ).fetchone()
     assert tuple(row) == (0, None, 0, None, 0)
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE gfs_space_seats SET detached=2")
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        "released=1",  # released but never detached
+        "detached_at='2026-10-10 00:00:00'",  # stamped but not detached
+        "detached=1, expiry_seen_at='2026-10-10 00:00:00'",  # aging unreleased
+    ],
+)
+def test_the_seat_state_invariants_hold_in_the_schema(conn, columns):
+    _apply_through(conn, _VERSION)
+    conn.execute(
+        "INSERT INTO gfs_space_seats(space_id, gfs_instance_id) VALUES('sp-z','g')"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(f"UPDATE gfs_space_seats SET {columns}")

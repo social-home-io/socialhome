@@ -75,7 +75,6 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
-from urllib.parse import urlsplit
 from typing import Any
 
 import aiohttp
@@ -96,7 +95,7 @@ from ..repositories.public_space_repo import AbstractPublicSpaceRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from .gfs_connection_service import GfsConnectionError, GfsConnectionService
 from .gfs_directory import GfsDirectoryCache
-from .gfs_http import MAX_GFS_BODY_BYTES, read_json_capped
+from .gfs_http import MAX_GFS_BODY_BYTES, gfs_server_address, read_json_capped
 from ..authority_cert import MAX_AUTHORITY_KEY_EPOCH
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceConfigEventType, SpaceRole
 from .space_service import can_seat_remote_stub, stub_space_from_metadata
@@ -263,7 +262,7 @@ class GfsSpaceMirrorService:
         # with member publish (over the cookie-less publish session);
         # standalone wiring reads it over the mirror's own session.
         self._directories = directories or GfsDirectoryCache(lambda: self._http_client)
-        # The servers holding a subscriber seat of ours, per space (0093) —
+        # The servers holding a subscriber seat of ours, per space (0092) —
         # the only servers an identity-bound (un)subscribe may go to.
         self._seats = seat_repo
         # (gfs_instance_id, space_id) → monotonic time of the last seat taken
@@ -912,6 +911,13 @@ class GfsSpaceMirrorService:
         active = await self._gfs_conn_repo.list_active()
         released = 0
         for seat in seats:
+            if self._in_grace(seat.gfs_instance_id, space_id):
+                continue
+            # Re-checked per seat, before anything is sent OR forgotten: a
+            # row a local follower still wants is what a re-pair re-takes
+            # (and what carries the pin anchor) — never drop it.
+            if only_unwanted and await self._wants_seat(space_id):
+                return released
             conn = next((c for c in active if _belongs(seat, c)), None)
             if conn is None and seat.detached and seat.released:
                 # Unpaired, and the server confirmed the unsubscribe then.
@@ -925,10 +931,6 @@ class GfsSpaceMirrorService:
                     seat.gfs_instance_id,
                 )
                 continue
-            if self._in_grace(seat.gfs_instance_id, space_id):
-                continue
-            if only_unwanted and await self._wants_seat(space_id):
-                return released
             if await self._release(space_id, conn):
                 released += 1
         return released
@@ -958,12 +960,14 @@ class GfsSpaceMirrorService:
         connection retries. A re-pair of the same server (same id, key and
         address) re-takes what a local user still wants. Returns how many
         seats were detached."""
+        others = [c for c in await self._gfs_conn_repo.list_all() if c.id != conn.id]
         seats = [
             s
             for s in await self._seats.list_for_gfs(conn.gfs_instance_id)
-            if _belongs(s, conn)
+            if _belongs(s, conn) and not any(_belongs(s, o) for o in others)
         ]
-        at = _stamp(_utcnow())
+        now = _utcnow()
+        at = _stamp(now) if now >= CLOCK_SANE_AFTER else None
         for seat in seats:
             await self._seats.mark_detached(seat.space_id, seat.gfs_instance_id, at=at)
         if seats:
@@ -977,6 +981,13 @@ class GfsSpaceMirrorService:
         self, conn: GfsConnection, space_ids: list[str]
     ) -> None:
         for space_id in space_ids:
+            # Right before sending: a quick re-pair may have re-taken the
+            # seat meanwhile (the row is live again) — then leave it be.
+            seat = await self._seats.get(space_id, conn.gfs_instance_id)
+            if seat is None or not seat.detached or seat.released:
+                continue
+            if seat.gfs_connection_id != conn.id:
+                continue
             try:
                 await self._gfs.unsubscribe_via(conn, space_id)
             except GfsConnectionError as exc:
@@ -1017,19 +1028,21 @@ class GfsSpaceMirrorService:
         dropped = 0
         for seat in await self._seats.list_all():
             key = (seat.space_id, seat.gfs_instance_id)
-            if any(_belongs(seat, c) for c in conns):
+            matching = next((c for c in conns if _belongs(seat, c)), None)
+            if matching is not None:
+                # An unsubscribe-only tombstone whose server is reachable
+                # again (an unpair unsubscribe that failed or was dropped):
+                # send it now. Wanted / live seats are the reconnect
+                # self-heal's to re-take.
+                if (
+                    seat.detached
+                    and not seat.released
+                    and matching.status == "active"
+                    and await self._releasable(*key)
+                ):
+                    await self._release(seat.space_id, matching)
                 continue
-            moved = next((c for c in conns if _moved(seat, c)), None)
-            if moved is not None and not seat.address_warned:
-                await self._seats.mark_address_warned(*key)
-                log.warning(
-                    "gfs_space_mirror: follow of %s on %s needs re-follow: "
-                    "server address changed (%s → %s)",
-                    seat.space_id,
-                    moved.display_name or seat.gfs_instance_id,
-                    _address(seat.gfs_inbox_url or ""),
-                    _address(moved.inbox_url),
-                )
+            await self._warn_refollow(seat, conns)
             if not seat.detached:
                 await self._seats.mark_detached(*key, at=_stamp(now) if sane else None)
                 continue
@@ -1041,6 +1054,12 @@ class GfsSpaceMirrorService:
                 continue
             if not seat.released:
                 continue  # an unsubscribe-only tombstone
+            if await self._wants_seat(seat.space_id):
+                # A local user still follows it: it is what a re-pair
+                # re-takes — never aged out.
+                if seat.expiry_seen_at is not None:
+                    await self._seats.set_expiry_seen(*key, None)
+                continue
             if now - detached_at < timedelta(days=ORPHAN_SEAT_DAYS):
                 if seat.expiry_seen_at is not None:
                     await self._seats.set_expiry_seen(*key, None)
@@ -1053,6 +1072,39 @@ class GfsSpaceMirrorService:
                 await self._seats.forget(*key)
                 dropped += 1
         return dropped
+
+    async def _warn_refollow(
+        self, seat: GfsSpaceSeat, conns: list[GfsConnection]
+    ) -> None:
+        """One WARNING per seat (flag on the row) when its server's id
+        reappears at another address, or under another key at the same
+        address: neither is re-bound without the proof of possession planned
+        in a follow-up, so the user has to re-follow."""
+        if seat.refollow_warned:
+            return
+        moved = next((c for c in conns if _moved(seat, c)), None)
+        rekeyed = next((c for c in conns if _rekeyed(seat, c)), None)
+        if moved is None and rekeyed is None:
+            return
+        await self._seats.mark_refollow_warned(seat.space_id, seat.gfs_instance_id)
+        if moved is not None:
+            log.warning(
+                "gfs_space_mirror: follow of %s on %s needs re-follow: "
+                "server address changed (%s → %s)",
+                seat.space_id,
+                moved.display_name or seat.gfs_instance_id,
+                _address(seat.gfs_inbox_url or ""),
+                _address(moved.inbox_url),
+            )
+        else:
+            assert rekeyed is not None
+            log.warning(
+                "gfs_space_mirror: follow of %s on %s needs re-follow: "
+                "server key changed at %s",
+                seat.space_id,
+                rekeyed.display_name or seat.gfs_instance_id,
+                _address(rekeyed.inbox_url),
+            )
 
     async def _seats_on(self, conn: GfsConnection) -> list[GfsSpaceSeat]:
         """The recorded seats that belong to *conn*: same server id, key and
@@ -1224,7 +1276,7 @@ class GfsSpaceMirrorService:
         A recorded seat anywhere means the household knows exactly where it
         is seated (the fallback must not add seats on further servers). A
         mirror carrying provenance (v_44, ``spaces.mirror_gfs_id``) had its
-        seat recorded — by :meth:`take_seat`, or by the 0093 backfill when
+        seat recorded — by :meth:`take_seat`, or by the 0092 backfill when
         its connection still existed — so no recorded seat means it is gone
         or its connection was re-paired away; neither is knowable. Only a
         mirror with NO provenance falls back to *conn*'s WHOLE public
@@ -1369,25 +1421,7 @@ def _parse_stamp(value: str | None) -> datetime | None:
         return None
 
 
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
-def _address(url: str) -> str:
-    """A server's comparable address: scheme + host (+ port unless it is
-    the scheme's default), lower-cased; path, trailing slash, user info and
-    query ignored. ``https://GFS.example:443/`` == ``https://gfs.example``."""
-    parts = urlsplit(url.strip())
-    scheme = parts.scheme.lower()
-    host = (parts.hostname or "").lower()
-    if not scheme or not host:
-        return url.strip().rstrip("/").lower()
-    try:
-        port = parts.port
-    except ValueError:
-        return url.strip().rstrip("/").lower()
-    if port is None or port == _DEFAULT_PORTS.get(scheme):
-        return f"{scheme}://{host}"
-    return f"{scheme}://{host}:{port}"
+_address = gfs_server_address
 
 
 def _belongs(seat: GfsSpaceSeat, conn: GfsConnection) -> bool:
@@ -1399,6 +1433,17 @@ def _belongs(seat: GfsSpaceSeat, conn: GfsConnection) -> bool:
         and seat.gfs_public_key == conn.public_key
         and seat.gfs_inbox_url is not None
         and _address(seat.gfs_inbox_url) == _address(conn.inbox_url)
+    )
+
+
+def _rekeyed(seat: GfsSpaceSeat, conn: GfsConnection) -> bool:
+    """Same server id and address as the seat, under another key — a
+    re-pair after a key change (or an impostor at that address)."""
+    return (
+        seat.gfs_instance_id == conn.gfs_instance_id
+        and seat.gfs_inbox_url is not None
+        and _address(seat.gfs_inbox_url) == _address(conn.inbox_url)
+        and seat.gfs_public_key != conn.public_key
     )
 
 

@@ -10,6 +10,7 @@ from socialhome.services.gfs_http import (
     MAX_GFS_BODY_BYTES,
     MAX_GFS_DIRECTORY_BODY_BYTES,
     MAX_GFS_DIRECTORY_ITEMS,
+    gfs_server_address,
     read_body_capped,
     read_json_capped,
 )
@@ -121,3 +122,18 @@ async def test_read_body_capped_returns_bytes_or_refuses():
     resp = _Resp(b"abcd", content_length=None, chunk=1)
     resp.content_length = None
     assert await read_body_capped(resp, url="u", limit=3) is None
+
+
+@pytest.mark.parametrize(
+    "a, b, same",
+    [
+        ("https://gfs.example", "https://GFS.example:443/", True),
+        ("http://gfs.example/", "http://gfs.example:80", True),
+        ("https://gfs.example/inbox", "https://gfs.example", True),
+        ("https://gfs.example", "https://gfs.example:8443", False),
+        ("http://gfs.example", "https://gfs.example", False),
+        ("not a url", "NOT A URL/", True),
+    ],
+)
+def test_gfs_server_address_normalizes(a, b, same):
+    assert (gfs_server_address(a) == gfs_server_address(b)) is same

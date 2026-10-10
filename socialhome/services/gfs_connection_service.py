@@ -78,6 +78,7 @@ from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from .gfs_http import gfs_server_address
 from .gfs_publish_retry import (
     GfsPublish,
     GfsPublishRetryQueue,
@@ -520,8 +521,9 @@ class GfsConnectionService:
             _require_secure_url(gfs_url, field="gfs_url")
         except GfsConnectionError as exc:
             raise GfsSignupError(str(exc), reason="invalid_url") from exc
+        wanted = gfs_server_address(gfs_url)
         for existing in await self._repo.list_all():
-            if existing.inbox_url.rstrip("/") == gfs_url:
+            if gfs_server_address(existing.inbox_url) == wanted:
                 raise GfsSignupError(
                     "This household is already connected to that GFS",
                     reason="already_connected",

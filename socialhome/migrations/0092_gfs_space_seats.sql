@@ -1,4 +1,4 @@
--- 0093 — which connection servers hold a subscriber seat of THIS household,
+-- 0092 — which connection servers hold a subscriber seat of THIS household,
 -- per space. A seat is taken by a signed ``POST /gfs/subscribe`` — by a
 -- follower subscribing to a GFS-mirrored space
 -- (``GfsSpaceMirrorService.subscribe_to_gfs``) or by a member's auto-subscribe
@@ -40,7 +40,11 @@
 -- id and key return at another address is NOT re-bound (only a proof of
 -- possession, planned in a follow-up, can tell a move from an impostor):
 -- such seats keep their rows as tombstones and are logged once
--- (``address_warned``) as needing a re-follow.
+-- (``refollow_warned``) as needing a re-follow — as are seats whose server
+-- id and address return under a different key. A row a local user still
+-- wants is never aged out (it is what a re-pair re-takes), and a pending
+-- tombstone is retried by the sweep whenever a matching connection is
+-- active.
 --
 -- Backfill: a v_44+ mirror recorded the seating connection in
 -- ``spaces.mirror_gfs_id``; where that connection still exists and a local
@@ -96,8 +100,13 @@ CREATE TABLE IF NOT EXISTS gfs_space_seats (
     detached_at       TEXT,
     released          INTEGER NOT NULL DEFAULT 0 CHECK (released IN (0, 1)),
     expiry_seen_at    TEXT,
-    address_warned    INTEGER NOT NULL DEFAULT 0 CHECK (address_warned IN (0, 1)),
-    PRIMARY KEY (space_id, gfs_instance_id)
+    refollow_warned   INTEGER NOT NULL DEFAULT 0 CHECK (refollow_warned IN (0, 1)),
+    PRIMARY KEY (space_id, gfs_instance_id),
+    -- Only an unpaired (detached) seat can have been released / stamped,
+    -- and only a released one is ever on its way out.
+    CHECK (released = 0 OR detached = 1),
+    CHECK (detached_at IS NULL OR detached = 1),
+    CHECK (expiry_seen_at IS NULL OR released = 1)
 );
 
 -- The reconnect self-heal reads every seat on ONE server.

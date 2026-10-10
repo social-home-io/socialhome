@@ -33,4 +33,4 @@ class GfsSpaceSeat:
     #: a second sweep a day later drops it.
     expiry_seen_at: str | None = None
     #: The "server address changed — re-follow" warning was logged.
-    address_warned: bool = False
+    refollow_warned: bool = False

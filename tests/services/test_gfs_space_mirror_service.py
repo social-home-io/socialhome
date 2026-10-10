@@ -2050,3 +2050,125 @@ async def test_stop_lets_a_teardown_already_running_finish(env, monkeypatch):
     gate.set()
     await asyncio.wait_for(stopping, timeout=2)
     assert done == ["sp-1"]
+
+
+# ─── round 5 ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.security
+async def test_a_wanted_detached_seat_survives_release_events_and_the_sweep(
+    env, monkeypatch
+):
+    """M1: an unpaired server's seat that a local follower still wants is
+    what the re-pair re-takes (and what carries the pin anchor) — another
+    member leaving, a ban, or 100 days of sweeps never drop it."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _mirrored(env, "sp-1", gfs="gfs-1")
+    gfs = _StubGfs()
+    mirror = _mirror(env, _StubSession(), gfs)
+    bus = EventBus()
+    mirror.wire(bus)
+    await _unpairer(env, mirror).disconnect("gfs-1")
+    await mirror.wait_idle()
+    assert (await env.seats.get("sp-1", "inst-gfs-1")).released
+
+    await bus.publish(SpaceMemberLeft(space_id="sp-1", user_id="someone-else"))
+    await mirror.wait_idle()
+    assert await mirror.release_unused_seats("sp-1") == 0
+    assert await _seat_ids(env, "sp-1") == ["inst-gfs-1"]
+
+    later = datetime.now(timezone.utc) + timedelta(days=100)
+    monkeypatch.setattr(mirror_mod, "_utcnow", lambda: later)
+    for _ in range(3):
+        later += timedelta(days=2)
+        assert await mirror.sweep_orphan_seats() == 0
+    assert await _seat_ids(env, "sp-1") == ["inst-gfs-1"]
+
+    await _re_pair(env, "gfs-1", "gfs-1b", "https://a.test")
+    assert await mirror.resubscribe_all("gfs-1b") == 1
+    assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1b", 0)
+
+
+async def test_the_unpair_unsubscribe_skips_a_seat_re_taken_meanwhile(env):
+    """L1: a quick re-pair re-took the seat before the background
+    unsubscribe ran — it must not unsubscribe the live seat."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _seat(env, "sp-1", "gfs-1")
+    gfs = _StubGfs()
+    mirror = _mirror(env, _StubSession(), gfs)
+    conn = await env.conns.get("gfs-1")
+    await env.seats.mark_detached("sp-1", "inst-gfs-1", at=None)
+    await env.conns.delete("gfs-1")
+    await _re_pair(env, "gfs-1", "gfs-1b", "https://a.test")
+    await mirror.take_seat("sp-1", await env.conns.get("gfs-1b"))
+    gfs.subscribes.clear()
+    await mirror._unsubscribe_detached(conn, ["sp-1", "sp-gone"])
+    assert gfs.unsubscribes == []
+    assert not (await env.seats.get("sp-1", "inst-gfs-1")).detached
+
+
+async def test_unpair_keeps_seats_another_pairing_still_serves(env, monkeypatch):
+    """L2: a seat a remaining connection still matches is not detached by
+    unpairing a duplicate (``gfs_instance_id`` is UNIQUE, so this is the
+    belt to that brace)."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _seat(env, "sp-1", "gfs-1")
+    twin = GfsConnection(
+        id="gfs-twin",
+        gfs_instance_id="inst-gfs-1",
+        display_name="G",
+        public_key="pk",
+        inbox_url="https://A.test:443/",
+        status="active",
+        paired_at="2025-02-01T00:00:00+00:00",
+    )
+    real = SqliteGfsConnectionRepo.list_all
+
+    async def _with_twin(self):
+        return [*await real(self), twin]
+
+    monkeypatch.setattr(SqliteGfsConnectionRepo, "list_all", _with_twin)
+    gfs = _StubGfs()
+    mirror = _mirror(env, _StubSession(), gfs)
+    assert await mirror.on_disconnect(await env.conns.get("gfs-1")) == 0
+    await mirror.wait_idle()
+    assert not (await env.seats.get("sp-1", "inst-gfs-1")).detached
+    assert gfs.unsubscribes == []
+
+
+async def test_a_re_pair_under_another_key_warns_once_per_seat(env, caplog):
+    """L3: same id and address, different key — not re-bound, and the user
+    is told once per seat to re-follow."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _seat(env, "sp-1", "gfs-1")
+    await _repair(env, "gfs-1", "gfs-1b", "https://a.test", key="new-key")
+    gfs = _StubGfs()
+    mirror = _mirror(env, _StubSession(), gfs)
+    with caplog.at_level(logging.WARNING):
+        await mirror.sweep_orphan_seats()
+        await mirror.sweep_orphan_seats()
+        assert await mirror.resubscribe_all("gfs-1b") == 0
+    assert caplog.text.count("needs re-follow: server key changed") == 1
+    assert (await env.seats.get("sp-1", "inst-gfs-1")).refollow_warned
+    assert gfs.subscribes == []
+
+
+async def test_the_sweep_retries_a_tombstone_once_its_server_is_back(env):
+    """L4: an unpair unsubscribe that failed (or was never sent — budget
+    full, shutting down) is sent by the sweep as soon as a matching
+    connection is active; with none, the sweep sends nothing."""
+    await env.conns.save(_conn("gfs-1", inbox_url="https://a.test"))
+    await _seat(env, "sp-x", "gfs-1")
+    gfs = _StubGfs(raise_on_unsubscribe=True)
+    mirror = _mirror(env, _StubSession(), gfs)
+    await _unpairer(env, mirror).disconnect("gfs-1")
+    await mirror.wait_idle()
+    gfs.unsubscribes.clear()
+    gfs.raise_on_unsubscribe = False
+
+    await mirror.sweep_orphan_seats()
+    assert gfs.unsubscribes == []  # no matching connection: no request
+    await _re_pair(env, "gfs-1", "gfs-1b", "https://a.test")
+    await mirror.sweep_orphan_seats()
+    assert gfs.unsubscribes == [("sp-x", "gfs-1b")]
+    assert await _seat_ids(env, "sp-x") == []
