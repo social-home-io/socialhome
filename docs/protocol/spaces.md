@@ -627,13 +627,18 @@ there once that household upgrades.
   GFS list for each owned global space that has none, keeping its listings
   (`GfsServerSelectionService.reconcile_on_startup`). It is one-shot by
   construction: every space that has been global since carries a signed list
-  (an empty one once it leaves the tier), so a quorum-approved move from
-  global back to public is never reverted.
+  (an empty one once it leaves the tier — and a stored list this build can't
+  read still counts as one), so a quorum-approved move from global back to
+  public is never reverted.
 - **Withdrawal retry.** A withdrawal that could not reach a GFS leaves the
   local publication row. At every start and on every reconnect to that GFS
   the owner household withdraws again each row whose space is gone,
   dissolved, or owned here and no longer global
-  (`GfsServerSelectionService.retry_withdrawals`). Until then such a row gets
+  (`GfsServerSelectionService.retry_withdrawals`) — except a promotion
+  candidate above, so a GFS reconnect that beats the startup reconcile can't
+  withdraw it. Every change to a space's listings — the owner's choice, the
+  retry, and the reconnect heal / settings refresh re-publish — runs under
+  one per-space lock and re-checks the stored row under it. Until then such a row gets
   no relayed content and no epoch notice (both require a global space and an
   accepted listing), and the reconnect heal never re-publishes it — nor a
   row for a space hosted elsewhere (only the owner lists a space).
@@ -2677,7 +2682,11 @@ same rule, so no single person can unilaterally delete or publish the group.
 
 A `set_public_tier` proposal into `global` may carry `gfs_ids` — the GFSs
 (owner-household connection ids) it is listed on when it executes. They are
-kept only when the proposer is the space's **owner**; a co-admin's or a
+kept only when the proposer is the space's **owner** — the user holding
+`role=owner` on the owner household, the same test the server picker uses
+(never `owner_username`, which can lag a transfer; if ownership ever moves to
+a user on another household there is no local owner seat and nobody names
+servers — it fails closed); a co-admin's or a
 forwarded remote admin's are dropped, and if such a proposal passes the space
 is "global, not listed" until the owner picks servers. The owner joining an
 open proposal with `gfs_ids` names the servers it executes with; nobody else

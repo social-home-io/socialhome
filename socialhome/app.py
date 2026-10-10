@@ -948,6 +948,7 @@ def _build_gfs_server_selection(
         gfs_connection_service=gfs_connection_service,
     )
     gfs_connection_service.attach_on_listings_changed(selection.sync_snapshot)
+    gfs_connection_service.attach_change_lock(selection.changing)
     selection.wire()
     return selection
 

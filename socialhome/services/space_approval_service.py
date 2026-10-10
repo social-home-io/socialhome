@@ -171,8 +171,9 @@ class SpaceApprovalService(ProtectionGateMixin):
                 not space.owner_instance_id
                 or space.owner_instance_id == self._own_instance_id
             )
-            member = await self._spaces.get_member(space_id, actor.user_id)
-            is_owner = member is not None and member.role == SpaceRole.OWNER
+            is_owner = await self._is_space_owner(
+                space_id, self._own_instance_id or "", actor.user_id
+            )
             if (
                 action is not ProposalAction.SET_PUBLIC_TIER
                 or not _goes_global(params)
@@ -447,10 +448,9 @@ class SpaceApprovalService(ProtectionGateMixin):
         proposer_instance: str,
         proposer_user: str,
     ) -> dict:
-        if GFS_IDS_PARAM in params and (
-            proposer_instance,
-            proposer_user,
-        ) != await self._owner_key(space_id):
+        if GFS_IDS_PARAM in params and not await self._is_space_owner(
+            space_id, proposer_instance, proposer_user
+        ):
             # Choosing GFSs is the space OWNER's call: a remote admin's — or
             # an owner-household co-admin's — proposal to go global names no
             # servers (it passes as "global, not listed"), and can't replace
@@ -734,6 +734,20 @@ class SpaceApprovalService(ProtectionGateMixin):
         if owner is None:
             return None
         return (self._own_instance_id or "", owner.user_id)
+
+    async def _is_space_owner(
+        self, space_id: str, instance_id: str, user_id: str
+    ) -> bool:
+        """The space's OWNER: a user holding ``role=owner`` on this — the
+        owner — household. The one test for who names a space's GFSs (the
+        same rule as :class:`GfsServerSelectionService`). Never by
+        ``owner_username``, which can lag a transfer; a space whose ownership
+        moved to a user on another household has no local OWNER seat, so
+        nobody here names servers for it (fails closed)."""
+        if not self._own_instance_id or instance_id != self._own_instance_id:
+            return False
+        member = await self._spaces.get_member(space_id, user_id)
+        return member is not None and member.role == SpaceRole.OWNER
 
     async def _owner_is_protected(self, space_id: str) -> bool:
         """Whether the space's (local) owner is a protected account."""

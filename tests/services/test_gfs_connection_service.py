@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import inspect
 import json
@@ -4545,4 +4546,32 @@ async def test_relay_needs_a_global_space_and_an_accepted_listing(env):
         )
         == 0
     )
+    assert session.posts == []
+
+
+@pytest.mark.security
+async def test_heal_and_refresh_relist_under_the_change_lock(env):
+    """A heal / refresh re-publish takes the owner's per-space change lock
+    and re-checks the row under it, so it never re-lists on a GFS the owner
+    removed meanwhile."""
+    session = _AnonSession()
+    repo = _FakeSpaceRepo({"sp-a": _fake_space("sp-a")}, {"sp-a": b"\x01" * 32})
+    svc = await _heal_svc(env, session, gfs_id="g1", spaces=["sp-a"], space_repo=repo)
+    _db, conn_repo = env
+    locked: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def _lock(space_id):
+        locked.append(space_id)
+        # The owner withdrew the listing while the heal waited for the lock.
+        await conn_repo.unpublish_space(space_id, "g1")
+        yield
+
+    svc.attach_change_lock(_lock)
+    assert await svc.heal_space_pins("g1") == 0
+    assert locked == ["sp-a"]
+    assert session.posts == []
+    await conn_repo.publish_space("sp-a", "g1")
+    assert await svc.republish_space("sp-a") == 0
+    assert locked == ["sp-a", "sp-a"]
     assert session.posts == []

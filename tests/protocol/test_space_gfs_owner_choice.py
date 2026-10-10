@@ -136,6 +136,7 @@ async def household(tmp_dir):
             gfs_connection_service=gfs,
         )
         gfs.attach_on_listings_changed(selection.sync_snapshot)
+        gfs.attach_change_lock(selection.changing)
         selection.wire()
         selection.attach_identity(own_instance_id=iid, own_signing_key=kp.private_key)
         svc = SpaceService(

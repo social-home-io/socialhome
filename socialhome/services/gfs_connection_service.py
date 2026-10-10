@@ -69,6 +69,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Literal
 
 import aiohttp
@@ -356,6 +357,7 @@ class GfsConnectionService:
         "_possession",
         "_proof_offered",
         "_proven_at",
+        "_change_lock",
     )
 
     def __init__(
@@ -453,6 +455,11 @@ class GfsConnectionService:
         #: listing GFS was renamed — re-derives the owner's
         #: ``spaces.gfs_servers`` snapshot.
         self._on_listings_changed: Callable[[str], Awaitable[object]] | None = None
+        #: Per-space lock factory shared with the owner's GFS choice
+        #: (:meth:`attach_change_lock`); a no-op until attached.
+        self._change_lock: Callable[[str], AbstractAsyncContextManager[object]] = (
+            lambda _space_id: nullcontext()
+        )
         self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
         #: Called in order with the connection id after it adopted the
         #: server's new public id (:meth:`_rebind_to_served_id`): the seat
@@ -512,6 +519,29 @@ class GfsConnectionService:
         """Wire the owner's GFS-list snapshot, run after a space's listings
         changed (:meth:`GfsServerSelectionService.sync_snapshot`)."""
         self._on_listings_changed = hook
+
+    def attach_change_lock(
+        self, factory: Callable[[str], AbstractAsyncContextManager[object]]
+    ) -> None:
+        """Share the selection service's per-space lock
+        (:meth:`GfsServerSelectionService.changing`), so a heal / refresh
+        re-publish never re-lists on a GFS the owner is removing."""
+        self._change_lock = factory
+
+    async def _relist(self, space_id: str, gfs_id: str) -> bool:
+        """Re-publish *space_id* to *gfs_id* under the space's change lock,
+        and only while this household still holds that listing — a refresh
+        that raced a withdrawal must not undo it. ``False`` when the row is
+        gone."""
+        async with self._change_lock(space_id):
+            listed = {
+                p.gfs_connection_id
+                for p in await self._repo.list_publications_for_space(space_id)
+            }
+            if gfs_id not in listed:
+                return False
+            await self.publish_space(space_id, gfs_id)
+            return True
 
     async def _listings_changed(self, space_id: str) -> None:
         """Run the listing hook, fail-soft: the GFS round-trip already
@@ -2547,8 +2577,8 @@ class GfsConnectionService:
             if conn.status != "active":
                 continue
             try:
-                await self.publish_space(space_id, conn.id)
-                done += 1
+                if await self._relist(space_id, conn.id):
+                    done += 1
             except (GfsConnectionError, SpaceNotPublishableError) as exc:
                 log.warning(
                     "republish_space: failed for gfs %s: %s",
@@ -2814,8 +2844,8 @@ class GfsConnectionService:
             if not await self._holds_space_seed(pub.space_id):
                 continue
             try:
-                await self.publish_space(pub.space_id, gfs_id)
-                healed += 1
+                if await self._relist(pub.space_id, gfs_id):
+                    healed += 1
             except SpaceNotPublishableError as exc:
                 # A listing left over from before the space left the global
                 # tier (or a hand-published public space the startup

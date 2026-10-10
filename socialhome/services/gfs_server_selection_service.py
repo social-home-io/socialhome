@@ -162,8 +162,11 @@ class GfsServerSelectionService:
         async with _space_lock(self._locks, space_id):
             return await self._sync_locked(space_id)
 
-    def _changing(self, space_id: str):
-        """Serialise changes of one space's listings."""
+    def changing(self, space_id: str):
+        """Serialise changes of one space's listings — the owner's choice,
+        the withdrawal retry, and (through
+        :meth:`GfsConnectionService.attach_change_lock`) the heal / refresh
+        re-publishes, so none re-lists on a GFS another just removed."""
         return _space_lock(self._change_locks, space_id)
 
     async def _sync_locked(self, space_id: str) -> bool:
@@ -336,7 +339,7 @@ class GfsServerSelectionService:
             # everywhere: a replacement set must be spelled out.
             raise GfsSelectionInvalidError("malformed")
         ids = await self.check_selection(gfs_ids)
-        async with self._changing(space_id):
+        async with self.changing(space_id):
             if ids:
                 # Re-read under the lock: a tier change may have landed.
                 _require_global(await self._require_owned(space_id))
@@ -350,7 +353,7 @@ class GfsServerSelectionService:
         GFS refuses or can't be reached — nothing is listed then."""
         await self._require_owner(space_id, actor_username)
         publisher = self._require_publisher()
-        async with self._changing(space_id):
+        async with self.changing(space_id):
             _require_global(await self._require_owned(space_id))
             # The cap is checked under the lock, so two concurrent adds
             # can't both pass it.
@@ -387,7 +390,7 @@ class GfsServerSelectionService:
         if not household_admin:
             await self._require_owner(space_id, actor_username)
         publisher = self._require_publisher()
-        async with self._changing(space_id):
+        async with self.changing(space_id):
             rows = {
                 p.gfs_connection_id
                 for p in await self._gfs.list_publications_for_space(space_id)
@@ -411,7 +414,7 @@ class GfsServerSelectionService:
         ``failed`` and never aborts the rest. Members are told once, after
         every publish landed (:meth:`sync_snapshot`), so a server is never
         in their list before it holds the space's pin."""
-        async with self._changing(space_id):
+        async with self.changing(space_id):
             return await self._apply_locked(space_id, gfs_ids)
 
     async def _apply_locked(
@@ -478,13 +481,26 @@ class GfsServerSelectionService:
         )
         done = 0
         for pub in rows:
-            space = await self._spaces.get(pub.space_id)
-            if space is not None and not space.dissolved:
-                if space.owner_instance_id != self._own_instance_id:
+            async with self.changing(pub.space_id):
+                # Decide under the lock, on what is stored now: the space
+                # and its row may have changed since the rows were listed.
+                still = {
+                    p.gfs_connection_id
+                    for p in await self._gfs.list_publications_for_space(pub.space_id)
+                }
+                if pub.gfs_connection_id not in still:
                     continue
-                if space.space_type is SpaceType.GLOBAL:
-                    continue
-            async with self._changing(pub.space_id):
+                space = await self._spaces.get(pub.space_id)
+                if space is not None and not space.dissolved:
+                    if space.owner_instance_id != self._own_instance_id:
+                        continue
+                    if space.space_type is SpaceType.GLOBAL:
+                        continue
+                    if await self._promotion_candidate(space):
+                        # A pre-owner-model hand-published public space: the
+                        # startup reconcile makes it global — a GFS
+                        # reconnect that beats it must not withdraw it.
+                        continue
                 try:
                     await self._publisher.unpublish_space(
                         pub.space_id, pub.gfs_connection_id, announce=False
@@ -615,17 +631,12 @@ class GfsServerSelectionService:
             return 0
         changed = 0
         for space in await self._spaces.list_by_type(SpaceType.PUBLIC):
-            if (
-                space.owner_instance_id != self._own_instance_id
-                or space.gfs_servers is not None
-            ):
+            current = await self._spaces.get(space.id)
+            if current is None or not await self._promotion_candidate(current):
                 continue
-            if not any(
-                p.status == "active"
-                for p in await self._gfs.list_publications_for_space(space.id)
-            ):
-                continue
-            await self._promote_to_global(space)
+            # Not under the change lock: the promotion publishes a config
+            # change, and a bus subscriber may re-publish (which takes it).
+            await self._promote_to_global(current)
             changed += 1
         for space in await self._spaces.list_by_type(SpaceType.GLOBAL):
             if (
@@ -636,6 +647,25 @@ class GfsServerSelectionService:
                 changed += 1
         changed += await self.retry_withdrawals()
         return changed
+
+    async def _promotion_candidate(self, space: Space) -> bool:
+        """An owned, live PUBLIC space with an ACTIVE listing and NO stored
+        GFS list at all — only a household from before the owner model has
+        that. A stored list this build can't read (``Space.gfs_servers`` is
+        ``None`` for it) still counts as a list: a space that was global
+        since is never promoted back."""
+        if (
+            space.dissolved
+            or space.space_type is not SpaceType.PUBLIC
+            or space.owner_instance_id != self._own_instance_id
+            or space.gfs_servers is not None
+            or await self._spaces.has_gfs_servers(space.id)
+        ):
+            return False
+        return any(
+            p.status == "active"
+            for p in await self._gfs.list_publications_for_space(space.id)
+        )
 
     async def _promote_to_global(self, space: Space) -> None:
         log.info(

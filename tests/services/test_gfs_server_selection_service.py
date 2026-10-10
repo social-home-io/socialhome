@@ -1131,3 +1131,88 @@ async def test_owner_view_lists_listings_on_every_connection_state(owner_env):
     # The suspended one can be withdrawn by the owner.
     await env.svc.remove_server("sp-1", actor_username="anna", gfs_id="g-sus")
     assert ("unpublish", "g-sus", False) in env.publisher.calls
+
+
+# ── Round 2: reconnect before reconcile, unreadable lists, transfers ──────
+
+
+async def _pre_owner_model_public(env) -> None:
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+
+
+@pytest.mark.security
+async def test_a_reconnect_before_the_reconcile_keeps_the_promotion_candidate(
+    owner_env,
+):
+    """The GFS socket can come up before startup step 8b: its withdrawal
+    retry must not withdraw the hand-published public space the reconcile
+    is about to make global."""
+    env = owner_env
+    await _pre_owner_model_public(env)
+    assert await env.svc.retry_withdrawals("g1") == 0
+    assert await env.svc.retry_withdrawals() == 0
+    assert env.publisher.calls == []
+    assert await env.svc.reconcile_on_startup() == 1
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.GLOBAL
+    assert len(await env.gfs.list_publications_for_space("sp-1")) == 1
+
+
+@pytest.mark.security
+async def test_an_unreadable_stored_list_still_blocks_the_promotion(owner_env, db):
+    """A list signed under a suite this build doesn't know (a rollback)
+    reads back as ``None`` but is not "never had a list": no promotion — the
+    leftover listing is withdrawn instead."""
+    env = owner_env
+    await _pre_owner_model_public(env)
+    await db.enqueue(
+        "UPDATE spaces SET gfs_servers=? WHERE id='sp-1'",
+        ('{"servers": [], "gfs_servers_sig_suite": "future-suite"}',),
+    )
+    space = await env.spaces.get("sp-1")
+    assert space.gfs_servers is None
+    assert await env.spaces.has_gfs_servers("sp-1") is True
+    await env.svc.reconcile_on_startup()
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+    assert env.publisher.calls == [("unpublish", "g1", False)]
+
+
+async def test_retry_decides_on_the_rows_left_under_the_lock(owner_env, monkeypatch):
+    """A row withdrawn by someone else between the listing and the lock is
+    not withdrawn again."""
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PRIVATE)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    rows = await env.gfs.list_publications("g1")
+    await env.gfs.unpublish_space("sp-1", "g1")
+    real = SqliteGfsConnectionRepo.list_publications
+
+    async def _stale(self, gfs_id):
+        return rows if gfs_id == "g1" else await real(self, gfs_id)
+
+    monkeypatch.setattr(SqliteGfsConnectionRepo, "list_publications", _stale)
+    assert await env.svc.retry_withdrawals("g1") == 0
+    assert env.publisher.calls == []
+
+
+async def test_a_local_ownership_transfer_moves_the_choice(owner_env):
+    """Who chooses is the user holding role OWNER on the owner household —
+    never ``owner_username``, which may lag a transfer."""
+    env = owner_env
+    await _owned_space(env)  # owner_username stays "anna"
+    await _connected(env, "g1")
+    for user_id, role in (("uid-anna", SpaceRole.ADMIN), ("uid-ben", SpaceRole.OWNER)):
+        await env.spaces.save_member(
+            SpaceMember(
+                space_id="sp-1",
+                user_id=user_id,
+                role=role,
+                joined_at="2026-10-01T00:00:00+00:00",
+            )
+        )
+    with pytest.raises(SpacePermissionError):
+        await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    outcome = await env.svc.set_servers("sp-1", actor_username="ben", gfs_ids=["g1"])
+    assert outcome.listed == ("g1",)

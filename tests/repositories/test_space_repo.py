@@ -2090,3 +2090,20 @@ async def test_count_pending_remote_invitations_counts_per_issuer(env):
     row = await env.repo.get_invitation_by_token("t-1")
     await env.repo.update_invitation_status(row["id"], "declined")
     assert await env.repo.count_pending_remote_invitations("inst-a") == 3
+
+
+async def test_has_gfs_servers_sees_an_unreadable_list(env):
+    """``gfs_servers`` stored under a suite this build can't read parses to
+    ``None`` — ``has_gfs_servers`` still reports that a list is present."""
+    await env.repo.save(_space("sp-g"))
+    assert await env.repo.has_gfs_servers("sp-g") is False
+    assert await env.repo.has_gfs_servers("nope") is False
+    await env.repo.set_gfs_servers("sp-g", _signed_list())
+    assert await env.repo.has_gfs_servers("sp-g") is True
+    await env.db.enqueue(
+        "UPDATE spaces SET gfs_servers=? WHERE id='sp-g'",
+        ('{"servers": [], "gfs_servers_sig_suite": "future-suite"}',),
+    )
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers is None
+    assert await env.repo.has_gfs_servers("sp-g") is True
