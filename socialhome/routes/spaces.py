@@ -19,6 +19,8 @@ from ..app_keys import (
     child_protection_service_key,
     event_bus_key,
     federation_repo_key,
+    gfs_server_selection_service_key,
+    instance_id_key,
     media_signer_key,
     media_transcode_repo_key,
     notification_repo_key,
@@ -220,6 +222,10 @@ class SpaceCollectionView(BaseView):
             lon=body.get("lon"),
             radius_km=body.get("radius_km"),
             category=body.get("category"),
+            # A global space is listed on the GFSs its owner picks here
+            # (this household's connection ids); required while any GFS is
+            # connected. Other tiers take none.
+            gfs_ids=body.get("gfs_ids"),
         )
         # Discoverable tiers (public / global) may carry an age gate set at
         # creation time; the gate lives in ChildProtectionService, not on the
@@ -250,6 +256,7 @@ class SpaceDetailView(BaseView):
         svc = self.svc(space_service_key)
         space_id = self.match("id")
         space = await svc._require_space(space_id)
+        gfs_servers, gfs_unlisted = await self._gfs_listing(space)
         cover_url = (
             f"/api/spaces/{space.id}/cover?v={space.cover_hash}"
             if space.cover_hash
@@ -302,12 +309,37 @@ class SpaceDetailView(BaseView):
                 # an opaque connection-server channel, so its owner's
                 # publish-mode choice applies (the SPA shows the toggle).
                 "gfs_private_channel": await svc.uses_gfs_private_channel(space),
+                # Where a GLOBAL space is listed — the owner's signed list,
+                # read-only ({display_name, inbox_url, connected}); null for
+                # any other tier or while no list is known.
+                "gfs_servers": gfs_servers,
+                # Global but listed on no GFS ("global, not listed"): the
+                # SPA shows a banner until the owner picks servers.
+                "gfs_unlisted": gfs_unlisted,
             }
         )
         signer = self.request.app.get(media_signer_key)
         if signer is not None:
             sign_media_urls_in(payload, signer)
         return web.json_response(payload)
+
+    async def _gfs_listing(self, space) -> tuple[list[dict] | None, bool]:
+        """Where a global space is listed — only for its members (not
+        followers) and, on the owner household, the household admins (who
+        manage its GFS connections). Anyone else gets ``(None, False)``:
+        which servers list a space is the members' business."""
+        selection = self.request.app.get(gfs_server_selection_service_key)
+        if selection is None:
+            return None, False
+        ctx = self.user
+        member = await self.svc(space_repo_key).get_member(space.id, ctx.user_id)
+        is_member = member is not None and member.role != SpaceRole.SUBSCRIBER
+        owner_household_admin = bool(ctx.is_admin) and (
+            space.owner_instance_id == self.request.app.get(instance_id_key)
+        )
+        if not (is_member or owner_household_admin):
+            return None, False
+        return await selection.describe(space)
 
     async def _has_remote_households(self, space_id: str) -> bool:
         moderation = self.request.app.get(space_moderation_service_key)
@@ -404,6 +436,10 @@ class SpaceProposalsView(BaseView):
       ``set_public_tier``). Any admin may propose; it executes only once a
       majority of the space's admins approve (the proposer auto-counts, so
       a solo-admin space executes immediately).
+    * ``set_public_tier`` into ``global`` may carry ``gfs_ids`` — the GFSs
+      it is listed on when it executes; kept only for a proposer on the
+      owner household (a forwarded proposal drops them → "global, not
+      listed").
     """
 
     async def get(self) -> web.Response:
@@ -422,6 +458,10 @@ class SpaceProposalsView(BaseView):
         params: dict = {}
         if action is ProposalAction.SET_PUBLIC_TIER:
             params["space_type"] = str(body.get("space_type") or "")
+            if "gfs_ids" in body:
+                # The GFSs a move into the global tier lists the space on.
+                # Kept only for a proposer on the owner household.
+                params["gfs_ids"] = body["gfs_ids"]
         view = await approvals.propose(
             self.match("id"),
             actor_username=ctx.username,

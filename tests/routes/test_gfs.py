@@ -13,6 +13,7 @@ from socialhome.app_keys import (
     db_key,
     gfs_connection_service_key,
     gfs_ws_supervisor_key,
+    instance_id_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.capabilities_sig import sign_capabilities
@@ -124,20 +125,47 @@ async def _seed_gfs(client, gfs_id: str = "gfs-1", *, status: str = "active"):
 
 
 async def _seed_space(
-    client, space_id: str = "sp-1", space_type: str = "public"
+    client,
+    space_id: str = "sp-1",
+    space_type: str = "global",
+    *,
+    owner_instance_id: str | None = None,
 ) -> None:
-    """Create a real local space row so publish can build + sign a body.
+    """Create a real local space row so publish can build + sign a body,
+    owned by this household with the test admin as its OWNER — only the
+    space owner chooses where a global space is listed.
 
     The GFS now mandates a signed publish body, so the HFS refuses to
-    publish a space it doesn't hold locally (``GfsConnectionError`` →
-    422). A publish test therefore needs the space to actually exist.
+    publish a space it doesn't hold locally. A publish test therefore needs
+    the space to actually exist.
     """
+    own = owner_instance_id or client.app[instance_id_key]
     await client._db.enqueue(
         "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
         "identity_public_key, space_type) "
-        "VALUES(?, 'Space One', 'iid', 'admin', ?, ?)",
-        (space_id, "aa" * 32, space_type),
+        "VALUES(?, 'Space One', ?, 'admin', ?, ?)",
+        (space_id, own, "aa" * 32, space_type),
     )
+    await client._db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?,?,'owner')",
+        (space_id, client._uid),
+    )
+
+
+async def _seed_user(client, name: str, *, is_admin: bool = False) -> str:
+    """A second local user with a token; returns the raw token."""
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin)"
+        " VALUES(?, ?, ?, ?)",
+        (name, f"{name}-id", name, int(is_admin)),
+    )
+    raw = f"{name}-tok"
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash)"
+        " VALUES(?, ?, 't', ?)",
+        (f"t-{name}", f"{name}-id", sha256_token_hash(raw)),
+    )
+    return raw
 
 
 # ─── GET /api/gfs/connections ────────────────────────────────────────
@@ -561,31 +589,31 @@ async def test_disconnect_not_found(client):
 # ─── POST /api/spaces/{id}/publish/{gfs_id} ─────────────────────────
 
 
-async def test_publish_requires_admin(client):
-    db = client._db
-    await db.enqueue(
-        "INSERT INTO users(username, user_id, display_name, is_admin)"
-        " VALUES('bob3', 'bob3-id', 'Bob3', 0)",
-    )
-    raw = "bob3-tok"
-    await db.enqueue(
-        "INSERT INTO api_tokens(token_id, user_id, label, token_hash)"
-        " VALUES('tb3', 'bob3-id', 't', ?)",
-        (sha256_token_hash(raw),),
-    )
+@pytest.mark.security
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_publish_requires_the_space_owner(client, is_admin):
+    """Choosing where a global space is listed is its OWNER's call — not a
+    household admin's, not anyone else's."""
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-1")
+    _stub_session(client, status=200)
+    raw = await _seed_user(client, "bob3", is_admin=is_admin)
     r = await client.post(
         "/api/spaces/sp-1/publish/gfs-1",
         headers=_auth(raw),
     )
     assert r.status == 403
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
 
 
 async def test_publish_gfs_not_found(client):
+    await _seed_space(client, "sp-1")
     r = await client.post(
         "/api/spaces/sp-1/publish/nonexistent",
         headers=_auth(client._tok),
     )
     assert r.status == 422
+    assert (await r.json())["error"]["code"] == "GFS_PUBLISH_FAILED"
 
 
 async def test_publish_returns_publication_with_status(client):
@@ -605,10 +633,26 @@ async def test_publish_returns_publication_with_status(client):
 
 
 @pytest.mark.security
+async def test_publish_refuses_a_public_space_with_tier_change_required(client):
+    """Public is visible only to connected households: publishing it to a
+    GFS would make it global — a tier change. 409, nothing sent."""
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-pub", space_type="public")
+    _stub_session(client, status=200, body={"status": "active"})
+    r = await client.post(
+        "/api/spaces/sp-pub/publish/gfs-1",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "TIER_CHANGE_REQUIRED"
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
+
+
+@pytest.mark.security
 @pytest.mark.parametrize("space_type", ["private", "household"])
 async def test_publish_refuses_a_space_outside_the_public_tiers(client, space_type):
-    """Only public and global spaces may be listed on a GFS; anything else
-    is a 409 SPACE_NOT_PUBLIC and nothing is sent to the GFS."""
+    """Only global spaces may be listed on a GFS; private / household is a
+    409 SPACE_NOT_PUBLIC and nothing is sent to the GFS."""
     await _seed_gfs(client, "gfs-1")
     await _seed_space(client, "sp-priv", space_type=space_type)
     _stub_session(client, status=200, body={"status": "active"})
@@ -622,18 +666,29 @@ async def test_publish_refuses_a_space_outside_the_public_tiers(client, space_ty
 
 
 async def test_publish_unknown_space_is_rejected(client):
-    """Fail-closed: the GFS mandates a signed publish body describing a real
-    space, so publishing a space the HFS doesn't hold locally is a 422 — it
-    must NOT fall back to an unsigned, metadata-less ``{space_id}`` body."""
+    """Fail-closed: a space the HFS doesn't hold locally is a 404 — never an
+    unsigned, metadata-less ``{space_id}`` publish."""
     await _seed_gfs(client, "gfs-1")
     _stub_session(client, status=200, body={"status": "active"})
     r = await client.post(
         "/api/spaces/sp-nonexistent/publish/gfs-1",
         headers=_auth(client._tok),
     )
-    assert r.status == 422
-    body = await r.json()
-    assert body["error"]["code"] == "GFS_PUBLISH_FAILED"
+    assert r.status == 404
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
+
+
+@pytest.mark.security
+async def test_publish_refuses_a_space_hosted_elsewhere(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-remote", owner_instance_id="other-household")
+    _stub_session(client, status=200)
+    r = await client.post(
+        "/api/spaces/sp-remote/publish/gfs-1",
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
 
 
 async def test_publish_returns_422_when_gfs_rejects(client):
@@ -709,12 +764,33 @@ async def test_space_publications_empty_array(client):
 # ─── DELETE /api/spaces/{id}/publish/{gfs_id} ────────────────────────
 
 
-async def test_unpublish_gfs_not_found(client):
+@pytest.mark.security
+async def test_unpublish_without_a_listing_contacts_no_gfs(client):
+    """A GFS that holds no listing of the space would learn its id from the
+    withdrawal: 404, nothing sent."""
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-1")
+    _stub_session(client, status=204)
+    for gfs_id in ("gfs-1", "nonexistent"):
+        r = await client.delete(
+            f"/api/spaces/sp-1/publish/{gfs_id}",
+            headers=_auth(client._tok),
+        )
+        assert r.status == 404
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
+
+
+async def test_household_admin_withdraws_a_dissolved_spaces_leftover_listing(client):
+    """Keyed on the publication row, not on a live space."""
+    await _seed_gfs(client, "gfs-1")
+    await SqliteGfsConnectionRepo(client._db).publish_space("sp-gone", "gfs-1")
+    _stub_session(client, status=204)
     r = await client.delete(
-        "/api/spaces/sp-1/publish/nonexistent",
-        headers=_auth(client._tok),
+        "/api/spaces/sp-gone/publish/gfs-1", headers=_auth(client._tok)
     )
-    assert r.status == 422
+    assert r.status == 204
+    repo = SqliteGfsConnectionRepo(client._db)
+    assert await repo.list_publications_for_space("sp-gone") == []
 
 
 # ─── Reconnect reconcile behind the proof-of-possession gate ─────────
@@ -773,3 +849,146 @@ async def test_a_retryable_gate_answer_runs_the_reconcile_after_a_retry(
             break
         await asyncio.sleep(0.01)
     assert healed == ["gfs-1"]
+
+
+async def test_unpublish_by_a_household_admin_who_is_not_the_owner(client):
+    """The admin Spaces tab withdraws any listing: a withdrawal only narrows
+    what a GFS learns (disconnecting a GFS, also admin-only, does it for
+    every space)."""
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-1")
+    await SqliteGfsConnectionRepo(client._db).publish_space("sp-1", "gfs-1")
+    _stub_session(client, status=204)
+    raw = await _seed_user(client, "carol", is_admin=True)
+    r = await client.delete("/api/spaces/sp-1/publish/gfs-1", headers=_auth(raw))
+    assert r.status == 204
+    repo = SqliteGfsConnectionRepo(client._db)
+    assert await repo.list_publications_for_space("sp-1") == []
+
+
+@pytest.mark.security
+async def test_unpublish_by_a_plain_user_is_refused(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-1")
+    await SqliteGfsConnectionRepo(client._db).publish_space("sp-1", "gfs-1")
+    _stub_session(client, status=204)
+    raw = await _seed_user(client, "dave")
+    r = await client.delete("/api/spaces/sp-1/publish/gfs-1", headers=_auth(raw))
+    assert r.status == 403
+    repo = SqliteGfsConnectionRepo(client._db)
+    assert len(await repo.list_publications_for_space("sp-1")) == 1
+
+
+# ─── GET / PUT /api/spaces/{id}/gfs-servers ──────────────────────────
+
+
+async def test_gfs_servers_get_shows_the_owner_picker(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_gfs(client, "gfs-2")
+    await _seed_space(client, "sp-1")
+    await SqliteGfsConnectionRepo(client._db).publish_space("sp-1", "gfs-1")
+    r = await client.get("/api/spaces/sp-1/gfs-servers", headers=_auth(client._tok))
+    assert r.status == 200
+    body = await r.json()
+    assert body["space_type"] == "global"
+    assert body["gfs_ids"] == ["gfs-1"]
+    assert body["max"] == 8
+    assert {a["gfs_id"]: a["listed"] for a in body["available"]} == {
+        "gfs-1": True,
+        "gfs-2": False,
+    }
+
+
+async def test_gfs_servers_put_replaces_the_set(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_gfs(client, "gfs-2")
+    await _seed_space(client, "sp-1")
+    await SqliteGfsConnectionRepo(client._db).publish_space("sp-1", "gfs-1")
+    _stub_session(client, status=200, body={"status": "active"})
+    r = await client.put(
+        "/api/spaces/sp-1/gfs-servers",
+        json={"gfs_ids": ["gfs-2"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert await r.json() == {"listed": ["gfs-2"], "failed": []}
+    pubs = await SqliteGfsConnectionRepo(client._db).list_publications_for_space("sp-1")
+    assert [p.gfs_connection_id for p in pubs] == ["gfs-2"]
+
+
+async def test_gfs_servers_put_reports_a_failing_server(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-1")
+    _stub_session(client, status=500)
+    r = await client.put(
+        "/api/spaces/sp-1/gfs-servers",
+        json={"gfs_ids": ["gfs-1"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert await r.json() == {
+        "listed": [],
+        "failed": [{"gfs_id": "gfs-1", "reason": "publish_failed"}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "code"),
+    [
+        ({}, 422, "GFS_SELECTION_INVALID"),
+        ({"gfs_ids": None}, 422, "GFS_SELECTION_INVALID"),
+        ({"gfs_ids": ["nope"]}, 422, "GFS_SELECTION_INVALID"),
+        ({"gfs_ids": [f"g{i}" for i in range(9)]}, 422, "GFS_SELECTION_INVALID"),
+    ],
+)
+async def test_gfs_servers_put_refuses_a_bad_body(client, body, status, code):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-1")
+    await SqliteGfsConnectionRepo(client._db).publish_space("sp-1", "gfs-1")
+    _stub_session(client, status=200)
+    r = await client.put(
+        "/api/spaces/sp-1/gfs-servers", json=body, headers=_auth(client._tok)
+    )
+    assert r.status == status
+    assert (await r.json())["error"]["code"] == code
+    # Nothing was withdrawn: a missing / null list never means "none".
+    pubs = await SqliteGfsConnectionRepo(client._db).list_publications_for_space("sp-1")
+    assert len(pubs) == 1
+
+
+@pytest.mark.security
+async def test_gfs_servers_put_on_a_public_space_is_a_tier_change(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-pub", space_type="public")
+    _stub_session(client, status=200)
+    r = await client.put(
+        "/api/spaces/sp-pub/gfs-servers",
+        json={"gfs_ids": ["gfs-1"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "TIER_CHANGE_REQUIRED"
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_gfs_servers_are_the_owners_alone(client, is_admin):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_space(client, "sp-1")
+    _stub_session(client, status=200)
+    raw = await _seed_user(client, "erin", is_admin=is_admin)
+    r = await client.get("/api/spaces/sp-1/gfs-servers", headers=_auth(raw))
+    assert r.status == 403
+    r = await client.put(
+        "/api/spaces/sp-1/gfs-servers",
+        json={"gfs_ids": ["gfs-1"]},
+        headers=_auth(raw),
+    )
+    assert r.status == 403
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
+
+
+async def test_gfs_servers_requires_auth(client):
+    r = await client.get("/api/spaces/sp-1/gfs-servers")
+    assert r.status == 401

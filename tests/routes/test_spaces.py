@@ -10,7 +10,9 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
-from socialhome.app_keys import space_service_key
+from socialhome.app_keys import gfs_connection_service_key, space_service_key
+from socialhome.domain.federation import GfsConnection
+from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.csp import MEDIA_CSP
@@ -3719,3 +3721,202 @@ async def test_archived_space_chat_reads_and_deletes_but_refuses_writes(client):
     assert r.status == 200
     r = await client.delete(f"/api/conversations/{cid}/messages/{mid}", headers=admin)
     assert r.status == 200
+
+
+# ── Global spaces: listed on the GFSs the owner picks ─────────────────────
+
+
+class _GfsResp:
+    def __init__(self, status: int = 200) -> None:
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        return {"status": "active"}
+
+
+class _GfsSession:
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    def post(self, url, **kw):
+        self.urls.append(url)
+        return _GfsResp()
+
+    def get(self, url, **kw):
+        self.urls.append(url)
+        return _GfsResp()
+
+
+async def _connect_gfs(client, *gfs_ids: str) -> _GfsSession:
+    repo = SqliteGfsConnectionRepo(client.app[_db_key])
+    for gfs_id in gfs_ids:
+        await repo.save(
+            GfsConnection(
+                id=gfs_id,
+                gfs_instance_id=f"inst-{gfs_id}",
+                display_name=f"GFS {gfs_id}",
+                public_key=(gfs_id.encode().hex() * 32)[:64],
+                inbox_url=f"https://{gfs_id}.example",
+                status="active",
+                paired_at="2026-10-01T00:00:00+00:00",
+            )
+        )
+    session = _GfsSession()
+    client.app[gfs_connection_service_key]._http_client = session
+    return session
+
+
+async def test_create_global_space_lists_on_the_chosen_gfs(client):
+    session = await _connect_gfs(client, "g1", "g2")
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Chess", "space_type": "global", "gfs_ids": ["g1"]},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 201
+    sid = (await r.json())["id"]
+    assert [u for u in session.urls if "/publish" in u] == [
+        f"https://g1.example/gfs/spaces/{sid}/publish"
+    ]
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["gfs_servers"] == [
+        {"display_name": "GFS g1", "inbox_url": "https://g1.example", "connected": True}
+    ]
+    assert body["gfs_unlisted"] is False
+
+
+async def test_create_global_space_needs_a_gfs_choice(client):
+    session = await _connect_gfs(client, "g1")
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Chess", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "GFS_SELECTION_REQUIRED"
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Chess", "space_type": "global", "gfs_ids": ["nope"]},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+    body = await r.json()
+    assert body["error"]["code"] == "GFS_SELECTION_INVALID"
+    assert body["error"]["params"] == {"reason": "unknown"}
+    assert session.urls == []
+    spaces = await (
+        await client.get("/api/spaces", headers=_auth(client._admin_token))
+    ).json()
+    assert spaces == []
+
+
+@pytest.mark.security
+async def test_create_public_space_with_gfs_ids_is_refused(client):
+    session = await _connect_gfs(client, "g1")
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Club", "space_type": "public", "gfs_ids": ["g1"]},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["params"] == {"reason": "not_global"}
+    assert session.urls == []
+
+
+async def test_get_space_flags_global_not_listed(client):
+    """With no GFS connected a global space is created listed nowhere; GET
+    says so. Any other tier carries no list."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Lonely", "space_type": "global"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["gfs_servers"] == []
+    assert body["gfs_unlisted"] is True
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Club", "space_type": "public"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["gfs_servers"] is None
+    assert body["gfs_unlisted"] is False
+
+
+async def test_tier_proposal_into_global_lists_on_the_chosen_gfs(client):
+    session = await _connect_gfs(client, "g1", "g2")
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Club", "space_type": "public"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.post(
+        f"/api/spaces/{sid}/proposals",
+        json={"action": "set_public_tier", "space_type": "global", "gfs_ids": ["g2"]},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 200
+    assert (await r.json())["proposal"]["status"] == "executed"
+    assert [u for u in session.urls if "/publish" in u] == [
+        f"https://g2.example/gfs/spaces/{sid}/publish"
+    ]
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    ).json()
+    assert body["space_type"] == "global"
+    assert [s["inbox_url"] for s in body["gfs_servers"]] == ["https://g2.example"]
+
+
+async def test_tier_proposal_with_an_unknown_gfs_is_refused(client):
+    await _connect_gfs(client, "g1")
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Club", "space_type": "public"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    r = await client.post(
+        f"/api/spaces/{sid}/proposals",
+        json={
+            "action": "set_public_tier",
+            "space_type": "global",
+            "gfs_ids": ["nope"],
+        },
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "GFS_SELECTION_INVALID"
+
+
+@pytest.mark.security
+async def test_get_space_hides_the_gfs_list_from_non_members(client):
+    """Which GFSs list a space is the members' business: a local user who
+    is not a member (the detail route itself is open) sees no list."""
+    await _connect_gfs(client, "g1")
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Chess", "space_type": "global", "gfs_ids": ["g1"]},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    body = await (
+        await client.get(f"/api/spaces/{sid}", headers=_auth(client._bob_token))
+    ).json()
+    assert body["gfs_servers"] is None
+    assert body["gfs_unlisted"] is False

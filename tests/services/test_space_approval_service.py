@@ -23,6 +23,7 @@ from socialhome.domain.space import (
     SpaceType,
 )
 from socialhome.domain.child_protection import AccountProtectedError
+from socialhome.domain.errors import GfsSelectionInvalidError
 from socialhome.domain.events import SpaceProposalUpdated
 from socialhome.domain.space_proposal import ProposalAction, ProposalStatus
 from socialhome.infrastructure.event_bus import EventBus
@@ -977,3 +978,217 @@ async def test_moderators_neither_vote_nor_count_toward_the_majority(stack):
         space.id, actor_username="alice", action=ProposalAction.DISSOLVE
     )
     assert view["status"] == ProposalStatus.EXECUTED.value
+
+
+# ── set_public_tier → global: the owner household names the GFSs ──────
+
+
+def _accept_choice(stack) -> None:
+    async def _check(gfs_ids, *, required=False):
+        if gfs_ids == ["bad"]:
+            raise GfsSelectionInvalidError("unknown")
+        return tuple(gfs_ids)
+
+    stack.exec.check_gfs_selection = AsyncMock(side_effect=_check)
+
+
+async def test_owner_household_proposal_lists_on_the_chosen_gfs(stack):
+    _accept_choice(stack)
+    space = await _space(stack)
+    view = await stack.approvals.propose(
+        space.id,
+        actor_username="alice",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "global", "gfs_ids": ["g1", "g2"]},
+    )
+    assert view["status"] == ProposalStatus.EXECUTED.value
+    kwargs = stack.exec.update_config.call_args.kwargs
+    assert kwargs["space_type"] == "global"
+    assert kwargs["gfs_ids"] == ("g1", "g2")
+
+
+async def test_a_bad_gfs_choice_opens_no_proposal(stack):
+    _accept_choice(stack)
+    space = await _space(stack)
+    with pytest.raises(GfsSelectionInvalidError):
+        await stack.approvals.propose(
+            space.id,
+            actor_username="alice",
+            action=ProposalAction.SET_PUBLIC_TIER,
+            params={"space_type": "global", "gfs_ids": ["bad"]},
+        )
+    assert await stack.approvals.list_for_space(space.id) == []
+    stack.exec.update_config.assert_not_awaited()
+
+
+@pytest.mark.parametrize("space_type", ["public", "private"])
+async def test_gfs_ids_only_ride_a_move_into_global(stack, space_type):
+    """A public space is never on a GFS: servers named for any other tier
+    are dropped, never validated nor executed."""
+    _accept_choice(stack)
+    space = await _space(stack)
+    await stack.approvals.propose(
+        space.id,
+        actor_username="alice",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": space_type, "gfs_ids": ["g1"]},
+    )
+    stack.exec.check_gfs_selection.assert_not_awaited()
+    assert stack.exec.update_config.call_args.kwargs["gfs_ids"] == ()
+
+
+@pytest.mark.security
+async def test_a_forwarded_proposal_never_carries_gfs_ids(stack):
+    """Choosing GFSs is the owner household's call: a member household's
+    admin can't name servers through its forwarded proposal."""
+    _accept_choice(stack)
+    stub = await _remote_stub(stack)
+    await stack.approvals.propose(
+        stub.id,
+        actor_username="localadmin",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "global", "gfs_ids": ["g1"]},
+    )
+    payload = stack.fed.send_with_mesh_fallback.call_args.kwargs["payload"]
+    assert payload["params"]["params"] == {"space_type": "global"}
+    stack.exec.check_gfs_selection.assert_not_awaited()
+
+
+async def _remote_admin(stack, space_id: str) -> None:
+    await stack.remote.add(
+        space_id=space_id,
+        instance_id="host-A",
+        user_id="ada",
+        user_pk=None,
+        display_name=None,
+    )
+    await stack.remote.set_role(space_id, "host-A", "ada", "admin")
+
+
+@pytest.mark.security
+async def test_a_remote_admins_global_proposal_is_global_not_listed(stack):
+    """The host drops servers a remote proposer names: if it passes, the
+    space is global and listed nowhere until the owner picks."""
+    _accept_choice(stack)
+    space = await _space(stack)
+    await _remote_admin(stack, space.id)
+    await stack.approvals.apply_remote_propose(
+        space.id,
+        proposer_instance="host-A",
+        proposer_user="ada",
+        action="set_public_tier",
+        params={"space_type": "global", "gfs_ids": ["g-attacker"]},
+    )
+    (open_prop,) = await stack.approvals.list_for_space(space.id)
+    assert "gfs_ids" not in open_prop["params"]
+    await stack.approvals.vote(
+        space.id, open_prop["id"], actor_username="alice", approve=True
+    )
+    kwargs = stack.exec.update_config.call_args.kwargs
+    assert kwargs["space_type"] == "global"
+    assert kwargs["gfs_ids"] == ()
+
+
+async def test_the_owner_household_names_servers_on_a_remote_proposal(stack):
+    """An owner-household admin joining an open remote proposal to go global
+    with ``gfs_ids`` sets the servers it executes with."""
+    _accept_choice(stack)
+    space = await _space(stack)
+    await _remote_admin(stack, space.id)
+    await stack.approvals.apply_remote_propose(
+        space.id,
+        proposer_instance="host-A",
+        proposer_user="ada",
+        action="set_public_tier",
+        params={"space_type": "global"},
+    )
+    view = await stack.approvals.propose(
+        space.id,
+        actor_username="alice",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "global", "gfs_ids": ["g1"]},
+    )
+    assert view["status"] == ProposalStatus.EXECUTED.value
+    assert stack.exec.update_config.call_args.kwargs["gfs_ids"] == ("g1",)
+
+
+@pytest.mark.security
+async def test_a_co_admin_cannot_replace_the_owners_gfs_choice(stack):
+    """Only the space OWNER names servers: an owner-household co-admin who
+    joins the owner's open proposal with other ``gfs_ids`` doesn't swap them
+    in under the owner's vote."""
+    _accept_choice(stack)
+    space = await _space(stack)
+    await _add_admin(stack, space.id, "bob")
+    view = await stack.approvals.propose(
+        space.id,
+        actor_username="alice",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "global", "gfs_ids": ["g1"]},
+    )
+    assert view["status"] == ProposalStatus.PENDING.value
+    view = await stack.approvals.propose(
+        space.id,
+        actor_username="bob",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "global", "gfs_ids": ["g-other"]},
+    )
+    assert view["status"] == ProposalStatus.EXECUTED.value
+    assert stack.exec.update_config.call_args.kwargs["gfs_ids"] == ("g1",)
+
+
+@pytest.mark.security
+async def test_a_co_admins_own_global_proposal_names_no_servers(stack):
+    _accept_choice(stack)
+    space = await _space(stack)
+    await _add_admin(stack, space.id, "bob")
+    await stack.approvals.propose(
+        space.id,
+        actor_username="bob",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "global", "gfs_ids": ["g1"]},
+    )
+    stack.exec.check_gfs_selection.assert_not_awaited()
+    (open_prop,) = await stack.approvals.list_for_space(space.id)
+    assert "gfs_ids" not in open_prop["params"]
+
+
+@pytest.mark.security
+async def test_gfs_ids_follow_a_local_ownership_transfer(stack):
+    """After the OWNER role moved to another local user, only that user
+    names servers — not the previous owner still in ``owner_username``. (A
+    transfer to a user on another household leaves no local OWNER seat, so
+    nobody here names servers: fails closed.)"""
+    _accept_choice(stack)
+    space = await _space(stack)
+    bob = await _add_admin(stack, space.id, "bob")
+    alice_id = next(
+        m.user_id
+        for m in await stack.space_repo.list_members(space.id)
+        if m.role == SpaceRole.OWNER
+    )
+    for user_id, role in ((alice_id, SpaceRole.ADMIN), (bob.user_id, SpaceRole.OWNER)):
+        await stack.space_repo.save_member(
+            SpaceMember(
+                space_id=space.id,
+                user_id=user_id,
+                role=role,
+                joined_at="2026-06-01T00:00:00+00:00",
+            )
+        )
+    await stack.approvals.propose(
+        space.id,
+        actor_username="alice",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "global", "gfs_ids": ["g-old-owner"]},
+    )
+    (open_prop,) = await stack.approvals.list_for_space(space.id)
+    assert "gfs_ids" not in open_prop["params"]
+    view = await stack.approvals.propose(
+        space.id,
+        actor_username="bob",
+        action=ProposalAction.SET_PUBLIC_TIER,
+        params={"space_type": "global", "gfs_ids": ["g1"]},
+    )
+    assert view["status"] == ProposalStatus.EXECUTED.value
+    assert stack.exec.update_config.call_args.kwargs["gfs_ids"] == ("g1",)

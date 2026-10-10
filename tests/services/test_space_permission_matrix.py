@@ -204,6 +204,14 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # authorized (``_require_space`` + the caller's membership read).
         # Returns a boolean about a space the caller may already see.
         "uses_gfs_private_channel",
+        # The owner-model tier hook: called by ``create_space`` /
+        # ``update_config`` AFTER they authorized the actor. Self-gates on
+        # owning the space; lists it only on the GFSs the caller already
+        # validated, or withdraws it from the ones that list it.
+        "on_tier_change",
+        # Validates a GFS choice against this household's own active
+        # connections — a read, no space state, no actor.
+        "check_gfs_selection",
         # Redeem-coordinator hook (owner decision 2026-10-04): a grandfathered
         # pre-0079 invite link just seated a household over the relay, which
         # opts the private space into ``private_gfs``. Self-gates on hosting

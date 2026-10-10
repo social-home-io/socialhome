@@ -941,9 +941,14 @@ def _build_gfs_server_selection(
     we own, and sent to the members in a config change. Signs nothing until
     the household identity is attached at startup."""
     selection = GfsServerSelectionService(
-        space_repo=repos.space, gfs_repo=repos.gfs_connection, bus=bus
+        space_repo=repos.space,
+        gfs_repo=repos.gfs_connection,
+        bus=bus,
+        user_repo=repos.user,
+        gfs_connection_service=gfs_connection_service,
     )
     gfs_connection_service.attach_on_listings_changed(selection.sync_snapshot)
+    gfs_connection_service.attach_change_lock(selection.changing)
     selection.wire()
     return selection
 
@@ -2513,9 +2518,11 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_server_selection = _build_gfs_server_selection(
         repos=repos, bus=bus, gfs_connection_service=gfs_connection_service
     )
-    # Hook space_service so flipping a space's space_type to/from 'global'
-    # auto-publishes / unpublishes to every active GFS (§D1).
+    # Hook space_service so a space entering the global tier is listed on
+    # the GFSs its owner chose, and one leaving it is withdrawn from the
+    # GFSs that list it (§D1). Never "every active GFS".
     space_service.attach_gfs_connection_service(gfs_connection_service)
+    space_service.attach_gfs_server_selection(gfs_server_selection)
 
     # Mirrors a GFS-discovered space onto a local ``spaces`` stub so
     # ``subscribe_to_space`` can seat a subscriber for it (and register this
@@ -3066,6 +3073,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.idempotency_cache_key] = idempotency_cache
     app[K.reconnect_queue_key] = reconnect_queue
     app[K.gfs_connection_service_key] = gfs_connection_service
+    app[K.gfs_server_selection_service_key] = gfs_server_selection
     app[K.gfs_connection_repo_key] = repos.gfs_connection
     app[K.public_space_discovery_key] = public_space_discovery
     app[K.map_tile_service_key] = map_tile_service
@@ -3361,6 +3369,7 @@ def create_app(config: Config | None = None) -> web.Application:
         real_space_service.attach_link_previews(link_preview_service)
         real_space_service.attach_bazaar_repo(bazaar_repo)
         real_space_service.attach_gfs_connection_service(gfs_connection_service)
+        real_space_service.attach_gfs_server_selection(gfs_server_selection)
         real_space_service.attach_gfs_space_mirror(gfs_space_mirror)
         # A quick subscribe → unsubscribe inside the seat grace window leaves
         # seat + stub; the mirror re-checks once the window has passed.
@@ -4112,6 +4121,12 @@ def create_app(config: Config | None = None) -> web.Application:
             # — idempotent (the pin only moves on an owner-certified rotation,
             # v_44) and fail-soft.
             await gfs_connection_service.heal_space_pins(gfs_id)
+            # And withdraw what must no longer be listed there: a space that
+            # left the global tier or was dissolved while this GFS was down.
+            try:
+                await gfs_server_selection.retry_withdrawals(gfs_id)
+            except Exception:  # noqa: BLE001 — best-effort self-heal
+                log.exception("gfs: withdrawal retry failed for %s", gfs_id)
             # Self-heal our SUBSCRIBER seats on the GFS, the mirror image of
             # the pin heal above. ``subscribe_to_space`` POSTs
             # ``/gfs/subscribe`` only on the first-ever mirror, while the GFS
@@ -4550,6 +4565,14 @@ def create_app(config: Config | None = None) -> web.Application:
                 "calendar: seeded %d default calendar(s) for existing users",
                 created,
             )
+
+        # 8b. Owner GFS choice: an owned public space hand-published to a GFS
+        #     becomes global (public is never on a GFS), an owned global
+        #     space without a signed GFS list gets one. Idempotent.
+        try:
+            await gfs_server_selection.reconcile_on_startup()
+        except Exception:
+            log.exception("gfs: owner GFS selection reconcile failed at startup")
 
         # 9. Advertise our protocol_version to every confirmed peer.
         # Fire-and-forget — per-peer failures land in the outbox retry

@@ -348,6 +348,26 @@ def signed_gfs_server_list_from_column(text: str | None) -> SignedGfsServerList 
         return None
 
 
+@dataclass(slots=True, frozen=True)
+class GfsSelectionOutcome:
+    """What an owner's change of a space's GFSs did.
+
+    ``listed`` — the connection ids that list the space afterwards;
+    ``failed`` — ``(gfs_id, reason)`` per server the change could not reach
+    (``publish_failed`` / ``unpublish_failed``). A failed publish leaves the
+    server unlisted, a failed withdrawal leaves it listed: ``listed`` is the
+    truth either way."""
+
+    listed: tuple[str, ...]
+    failed: tuple[tuple[str, str], ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "listed": list(self.listed),
+            "failed": [{"gfs_id": g, "reason": r} for g, r in self.failed],
+        }
+
+
 __all__ = [
     "GFS_KEY_SUITE_ED25519",
     "GFS_SERVERS_SIG_SUITE_ED25519",
@@ -360,6 +380,7 @@ __all__ = [
     "SIGNED_GFS_SERVER_LIST_KEYS",
     "SUPPORTED_GFS_KEY_SUITES",
     "SUPPORTED_GFS_SERVERS_SIG_SUITES",
+    "GfsSelectionOutcome",
     "GfsServer",
     "SignedGfsServerList",
     "UnsupportedGfsKeySuite",

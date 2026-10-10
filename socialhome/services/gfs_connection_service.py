@@ -69,6 +69,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Literal
 
 import aiohttp
@@ -88,9 +89,9 @@ from ..domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_PREFIX,
     SPACE_IMAGE_EMBED_MAX_BYTES,
 )
-from ..domain.errors import SpaceNotPublishableError
+from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
 from ..domain.space import (
-    PUBLIC_SPACE_TIERS,
+    SpaceType,
     normalize_category,
     normalize_join_mode,
 )
@@ -356,6 +357,7 @@ class GfsConnectionService:
         "_possession",
         "_proof_offered",
         "_proven_at",
+        "_change_lock",
     )
 
     def __init__(
@@ -453,6 +455,11 @@ class GfsConnectionService:
         #: listing GFS was renamed — re-derives the owner's
         #: ``spaces.gfs_servers`` snapshot.
         self._on_listings_changed: Callable[[str], Awaitable[object]] | None = None
+        #: Per-space lock factory shared with the owner's GFS choice
+        #: (:meth:`attach_change_lock`); a no-op until attached.
+        self._change_lock: Callable[[str], AbstractAsyncContextManager[object]] = (
+            lambda _space_id: nullcontext()
+        )
         self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
         #: Called in order with the connection id after it adopted the
         #: server's new public id (:meth:`_rebind_to_served_id`): the seat
@@ -512,6 +519,29 @@ class GfsConnectionService:
         """Wire the owner's GFS-list snapshot, run after a space's listings
         changed (:meth:`GfsServerSelectionService.sync_snapshot`)."""
         self._on_listings_changed = hook
+
+    def attach_change_lock(
+        self, factory: Callable[[str], AbstractAsyncContextManager[object]]
+    ) -> None:
+        """Share the selection service's per-space lock
+        (:meth:`GfsServerSelectionService.changing`), so a heal / refresh
+        re-publish never re-lists on a GFS the owner is removing."""
+        self._change_lock = factory
+
+    async def _relist(self, space_id: str, gfs_id: str) -> bool:
+        """Re-publish *space_id* to *gfs_id* under the space's change lock,
+        and only while this household still holds that listing — a refresh
+        that raced a withdrawal must not undo it. ``False`` when the row is
+        gone."""
+        async with self._change_lock(space_id):
+            listed = {
+                p.gfs_connection_id
+                for p in await self._repo.list_publications_for_space(space_id)
+            }
+            if gfs_id not in listed:
+                return False
+            await self.publish_space(space_id, gfs_id)
+            return True
 
     async def _listings_changed(self, space_id: str) -> None:
         """Run the listing hook, fail-soft: the GFS round-trip already
@@ -1878,8 +1908,19 @@ class GfsConnectionService:
         """
         return await self._repo.list_all()
 
-    async def publish_space(self, space_id: str, gfs_id: str) -> GfsSpacePublication:
+    async def publish_space(
+        self, space_id: str, gfs_id: str, *, announce: bool = True
+    ) -> GfsSpacePublication:
         """Publish a space to a GFS.
+
+        Only a GLOBAL space is ever listed (:meth:`_require_publishable`).
+        Callers outside :class:`GfsServerSelectionService` only REFRESH a
+        listing that already exists (:meth:`republish_space`,
+        :meth:`heal_space_pins`); choosing a new server is the owner's
+        call, made through the selection service.
+
+        ``announce=False`` skips the members' GFS-list refresh — a caller
+        that changes several listings refreshes once at the end.
 
         Builds the metadata payload from the local ``Space`` row, signs
         it with the household identity key, and POSTs to
@@ -1951,7 +1992,8 @@ class GfsConnectionService:
                 )
         # Last: members learn about this server only once the publish (and
         # any epoch re-announce above) has landed there.
-        await self._listings_changed(space_id)
+        if announce:
+            await self._listings_changed(space_id)
         return publication
 
     def _warn_no_authority_rotation(self, conn: GfsConnection) -> None:
@@ -2114,8 +2156,13 @@ class GfsConnectionService:
             return ""
         return SPACE_IMAGE_DATA_URI_PREFIX + base64.b64encode(webp).decode("ascii")
 
-    async def unpublish_space(self, space_id: str, gfs_id: str) -> None:
+    async def unpublish_space(
+        self, space_id: str, gfs_id: str, *, announce: bool = True
+    ) -> None:
         """Unpublish a space from a GFS.
+
+        ``announce=False`` skips the members' GFS-list refresh (see
+        :meth:`publish_space`).
 
         The GFS authenticates the withdrawal (it is the owner's retraction of
         a public listing, not an anonymous delete), so this signs the
@@ -2178,7 +2225,8 @@ class GfsConnectionService:
             raise GfsConnectionError(f"Could not reach GFS: {exc}") from exc
 
         await self._repo.unpublish_space(space_id, gfs_id)
-        await self._listings_changed(space_id)
+        if announce:
+            await self._listings_changed(space_id)
 
     async def publish_invite(
         self,
@@ -2487,60 +2535,50 @@ class GfsConnectionService:
         return str(data.get("status") or "unsubscribed")
 
     async def _require_publishable(self, space_id: str) -> None:
-        """Refuse to list a private or household space on a GFS.
+        """Refuse to list anything but a GLOBAL space on a GFS.
 
-        Only :data:`PUBLIC_SPACE_TIERS` (public, global) are ever shown to
-        strangers; anything else would put a private space's name,
-        description and cover in a GFS directory. Checked before any
-        request is built, so nothing reaches the GFS. An unknown space is
-        left to :meth:`_build_publish_body`, which already refuses it.
+        * public → :class:`TierChangeRequiredError` (409
+          ``TIER_CHANGE_REQUIRED``): a public space is discoverable only by
+          the households we are connected with; listing it on a GFS *is*
+          making it global — a quorum-gated tier change, never a side
+          effect of a publish;
+        * private / household → :class:`SpaceNotPublishableError` (409
+          ``SPACE_NOT_PUBLIC``): it would put a private space's name,
+          description and cover in a GFS directory.
+
+        Checked before any request is built, so nothing reaches the GFS. An
+        unknown space is left to :meth:`_build_publish_body`, which already
+        refuses it.
         """
         if self._space_repo is None:
             return
         space = await self._space_repo.get(space_id)
-        if space is not None and space.space_type not in PUBLIC_SPACE_TIERS:
-            raise SpaceNotPublishableError()
-
-    async def publish_space_to_all(self, space_id: str) -> int:
-        """Publish a space to every active GFS connection.
-
-        Used by :class:`SpaceService` when a space flips to
-        ``space_type=global``. The per-GFS :meth:`publish_space` now
-        raises on failure; here a failing GFS is logged and skipped so
-        one unreachable server doesn't abort the auto-publish fan-out.
-        Returns the number of GFS instances the space was successfully
-        published to.
-        """
-        conns = await self._repo.list_active()
-        published = 0
-        for conn in conns:
-            try:
-                await self.publish_space(space_id, conn.id)
-                published += 1
-            except (GfsConnectionError, SpaceNotPublishableError) as exc:
-                log.warning(
-                    "publish_space_to_all: failed for gfs %s: %s",
-                    conn.id,
-                    exc,
-                )
-        return published
+        if space is None or space.space_type is SpaceType.GLOBAL:
+            return
+        if space.space_type is SpaceType.PUBLIC:
+            raise TierChangeRequiredError()
+        raise SpaceNotPublishableError()
 
     async def republish_space(self, space_id: str) -> int:
         """Re-publish ``space_id`` to every GFS it is ALREADY published to.
 
         The v_44 authority rotation calls this so each GFS that lists the
-        space re-pins from the owner's cert. Deliberately not
-        :meth:`publish_space_to_all`: a key rotation must never be how a
-        connection server first learns that a space exists. Fail-soft per
-        GFS; returns how many accepted the publish.
+        space re-pins from the owner's cert, and a directory-setting change
+        (``join_mode``, ``allow_subscribers``) so each one shows the truth.
+        Never a server that doesn't list it: a key rotation or a settings
+        edit must never be how a connection server first learns that a
+        space exists. Fail-soft per GFS; returns how many accepted the
+        publish.
         """
+        if not await self._owns(space_id):
+            return 0
         done = 0
         for conn in await self._repo.list_gfs_for_space(space_id):
             if conn.status != "active":
                 continue
             try:
-                await self.publish_space(space_id, conn.id)
-                done += 1
+                if await self._relist(space_id, conn.id):
+                    done += 1
             except (GfsConnectionError, SpaceNotPublishableError) as exc:
                 log.warning(
                     "republish_space: failed for gfs %s: %s",
@@ -2605,7 +2643,9 @@ class GfsConnectionService:
                 space_id,
             )
             return 0
-        conns = await self._repo.list_gfs_for_space(space_id)
+        if not await self._relayable(space_id):
+            return 0
+        conns = await self._repo.list_active_listings_for_space(space_id)
         if not conns:
             return 0
         item = GfsPublish(space_id=space_id, event_type=event_type, payload=payload)
@@ -2714,13 +2754,19 @@ class GfsConnectionService:
         """
         if self._http_client is None or self._publish_client is None:
             return PublishOutcome.permanent()
-        conn = next(
-            (
-                c
-                for c in await self._repo.list_gfs_for_space(item.space_id)
-                if c.id == conn_id
-            ),
-            None,
+        conn = (
+            next(
+                (
+                    c
+                    for c in await self._repo.list_active_listings_for_space(
+                        item.space_id
+                    )
+                    if c.id == conn_id
+                ),
+                None,
+            )
+            if await self._relayable(item.space_id)
+            else None
         )
         if conn is None or conn.status != "active":
             log.info(
@@ -2790,11 +2836,27 @@ class GfsConnectionService:
             return 0
         healed = 0
         for pub in publications:
+            if not await self._owns(pub.space_id):
+                # Only the owner household lists a space (owner model): a
+                # legacy row for a space hosted elsewhere is never refreshed
+                # (a household admin can withdraw it by hand).
+                continue
             if not await self._holds_space_seed(pub.space_id):
                 continue
             try:
-                await self.publish_space(pub.space_id, gfs_id)
-                healed += 1
+                if await self._relist(pub.space_id, gfs_id):
+                    healed += 1
+            except SpaceNotPublishableError as exc:
+                # A listing left over from before the space left the global
+                # tier (or a hand-published public space the startup
+                # reconcile has not converted yet): never re-advertise it.
+                log.info(
+                    "gfs.heal_space_pins: space %s is not global, not "
+                    "re-publishing it to gfs %s: %s",
+                    pub.space_id,
+                    gfs_id,
+                    exc.code,
+                )
             except GfsConnectionError as exc:
                 log.info(
                     "gfs.heal_space_pins: re-publishing space %s to gfs %s failed: %s",
@@ -2809,6 +2871,27 @@ class GfsConnectionService:
                     gfs_id,
                 )
         return healed
+
+    async def _owns(self, space_id: str) -> bool:
+        """Whether this household hosts *space_id* (a live local row)."""
+        if self._space_repo is None or not self._own_instance_id:
+            return False
+        space = await self._space_repo.get(space_id)
+        return (
+            space is not None
+            and not space.dissolved
+            and space.owner_instance_id == self._own_instance_id
+        )
+
+    async def _relayable(self, space_id: str) -> bool:
+        """Whether content of *space_id* may go to the GFSs listing it: only a
+        GLOBAL space is on a GFS. A leftover row of a space that left the
+        tier (its withdrawal failed) must not keep the relay going — the
+        withdrawal retry removes the row itself."""
+        if self._space_repo is None:
+            return True
+        space = await self._space_repo.get(space_id)
+        return space is not None and space.space_type is SpaceType.GLOBAL
 
     async def _holds_space_seed(self, space_id: str) -> bool:
         """Whether this household can author a metadata publish for *space_id*.
@@ -2858,35 +2941,13 @@ class GfsConnectionService:
             return False
         return True
 
-    async def unpublish_space_from_all(self, space_id: str) -> int:
-        """Unpublish a space from every GFS it was published to.
-
-        Mirrors :meth:`publish_space_to_all`: a failing per-GFS
-        unpublish is logged and skipped. Returns the number of GFS
-        instances the space was successfully unpublished from.
-        """
-        conns = await self._repo.list_active()
-        unpublished = 0
-        for conn in conns:
-            try:
-                await self.unpublish_space(space_id, conn.id)
-                unpublished += 1
-            except GfsConnectionError as exc:
-                log.warning(
-                    "unpublish_space_from_all: failed for gfs %s: %s",
-                    conn.id,
-                    exc,
-                )
-        return unpublished
-
     async def unpublish_space_from_listed(self, space_id: str) -> int:
         """Unpublish a space from every GFS that currently lists it.
 
-        Used when a hand-published PUBLIC space leaves the public tiers.
-        Unlike :meth:`unpublish_space_from_all` it only contacts the GFSes
-        that hold a publication row, so a GFS that never listed the space
-        never learns its id from the withdrawal. Fail-soft per GFS; returns
-        how many withdrawals succeeded.
+        Used when a space leaves the global tier or is dissolved. Only the
+        GFSes that hold a publication row are contacted, so a GFS that never
+        listed the space never learns its id from the withdrawal. Fail-soft
+        per GFS; returns how many withdrawals succeeded.
         """
         done = 0
         for conn in await self._repo.list_gfs_for_space(space_id):

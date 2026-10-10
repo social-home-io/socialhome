@@ -150,6 +150,7 @@ from ..domain.post import (
 )
 from ..domain.mention import Mention
 from ..domain.presence import truncate_coord
+from ..domain.errors import GfsSelectionInvalidError
 from ..domain.gfs_server import SignedGfsServerList
 from ..domain.space import (
     ACCESS_FEATURES,
@@ -387,6 +388,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_invite_forwarder",
         "_space_crypto",
         "_gfs_mirror",
+        "_gfs_selection",
         "_subscriber_keys",
         "_member_gfs",
         "_writer_certs",
@@ -429,6 +431,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._icons = None
         self._gfs = None
         self._gfs_mirror = None
+        self._gfs_selection = None
         #: Per-space lock shared by a GFS-mirror subscribe and the mirror
         #: teardown, so a teardown never purges a subscribe in progress.
         #: Weak values: an idle space's lock goes with its last holder.
@@ -535,11 +538,28 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         self._space_crypto = space_crypto
 
     def attach_gfs_connection_service(self, gfs_service) -> None:
-        """Wire outbound GFS publish so ``space_type=global`` spaces
-        auto-advertise without a separate admin action. Optional: when
-        no GFS is paired, GfsConnectionService may be absent entirely.
+        """Wire outbound GFS calls: a space leaving the global tier (or
+        dissolved) is withdrawn from the GFSs that list it, and a directory
+        setting change refreshes those listings. Optional: when no GFS is
+        paired, GfsConnectionService may be absent entirely.
         """
         self._gfs = gfs_service
+
+    def attach_gfs_server_selection(self, selection) -> None:
+        """Wire the owner's GFS choice (:class:`GfsServerSelectionService`):
+        a space entering the global tier is listed on exactly the GFSs the
+        owner chose (``gfs_ids``), never on every active one."""
+        self._gfs_selection = selection
+
+    async def check_gfs_selection(
+        self, gfs_ids: object, *, required: bool = False
+    ) -> tuple[str, ...]:
+        """Validate an owner's GFS choice (see
+        :meth:`GfsServerSelectionService.check_selection`); ``()`` when no
+        selection service is wired."""
+        if self._gfs_selection is None:
+            return ()
+        return await self._gfs_selection.check_selection(gfs_ids, required=required)
 
     def attach_gfs_space_mirror(self, mirror) -> None:
         """Wire the GFS-discovered-space on-ramp so ``subscribe_to_space``
@@ -696,23 +716,59 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             invite_token=event.invite_token,
         )
 
-    async def _auto_publish_on_type(
+    async def on_tier_change(
         self,
         space_id: str,
         *,
         was_global: bool,
         is_global: bool,
+        gfs_ids: tuple[str, ...] = (),
     ) -> None:
-        """Fan publish/unpublish calls out to every active GFS when a
-        space crosses the global boundary. Failures are logged inside
-        :class:`GfsConnectionService`; never raised.
+        """List or withdraw a space we OWN when it crosses the global
+        boundary.
+
+        * Entering global: listed on exactly *gfs_ids* — the owner's
+          choice, already validated. None chosen (a remote admin's approved
+          proposal, or no GFS connected) leaves it "global, not listed"
+          until the owner picks servers; the SPA says so (``gfs_unlisted``).
+        * Leaving global: withdrawn from the GFSs that list it, and only
+          those — a GFS that never listed the space never hears its id.
+
+        Never touches a GFS for a public space (public is discoverable only
+        by connected households). Failures are logged by the GFS services;
+        never raised.
         """
-        if self._gfs is None or was_global == is_global:
+        if was_global == is_global or not await self._owns(space_id):
             return
         if is_global:
-            await self._gfs.publish_space_to_all(space_id)
-        else:
-            await self._gfs.unpublish_space_from_all(space_id)
+            if not gfs_ids:
+                log.info(
+                    "space %s is global but listed on no GFS until its owner picks one",
+                    space_id,
+                )
+                return
+            if self._gfs_selection is None:
+                return
+            # Only servers still active at execution (a quorum may have
+            # taken days); one disconnected since is skipped, not an error.
+            ids = await self._gfs_selection.still_active(gfs_ids)
+            if len(ids) < len(gfs_ids):
+                log.warning(
+                    "space %s: %d chosen GFS(s) no longer connected — not listed there",
+                    space_id,
+                    len(gfs_ids) - len(ids),
+                )
+            await self._gfs_selection.apply(space_id, ids)
+        elif self._gfs is not None:
+            await self._gfs.unpublish_space_from_listed(space_id)
+
+    async def _owns(self, space_id: str) -> bool:
+        space = await self._spaces.get(space_id)
+        return bool(
+            space is not None
+            and self._own_instance_id
+            and space.owner_instance_id == self._own_instance_id
+        )
 
     async def _ensure_content_key(self, space_id: str) -> None:
         """Mint epoch 0 for a space that sits in a public tier.
@@ -881,8 +937,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         lon: float | None = None,
         radius_km: float | None = None,
         category: str | None = None,
+        gfs_ids: object = None,
     ) -> Space:
-        """Create a new space and seat the creator as owner."""
+        """Create a new space and seat the creator as owner.
+
+        A GLOBAL space is listed on the GFSs in *gfs_ids* (this household's
+        active connections, at most 8) and needs at least one while any is
+        active (422 ``GFS_SELECTION_REQUIRED``). Any other tier takes none:
+        a public space is never on a GFS."""
         owner = await self._users.get(owner_username)
         if owner is None:
             raise KeyError(f"owner {owner_username!r} not found")
@@ -894,6 +956,13 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
+
+        # The owner's GFS choice, checked before anything is stored.
+        chosen_gfs: tuple[str, ...] = ()
+        if stype is SpaceType.GLOBAL:
+            chosen_gfs = await self.check_gfs_selection(gfs_ids, required=True)
+        elif gfs_ids:
+            raise GfsSelectionInvalidError("not_global")
 
         if stype in PUBLIC_SPACE_TIERS:
             # §CP.R: a protected account may create private / household
@@ -956,10 +1025,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         await self._spaces.add_space_instance(space.id, self._own_instance_id)
         if stype in PUBLIC_SPACE_TIERS:
             await self._ensure_content_key(space.id)
-        await self._auto_publish_on_type(
+        await self.on_tier_change(
             space.id,
             was_global=False,
             is_global=stype is SpaceType.GLOBAL,
+            gfs_ids=chosen_gfs,
         )
         return space
 
@@ -1047,11 +1117,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         """
         space = await self._require_space(space_id)
         await self._require_owner(space, actor_username)
-        await self._auto_publish_on_type(
-            space_id,
-            was_global=space.space_type is SpaceType.GLOBAL,
-            is_global=False,
-        )
+        if self._gfs is not None and await self._owns(space_id):
+            # Withdrawn from the GFSs that list it — whatever its tier (a
+            # listing may predate a tier change) — and only those.
+            await self._gfs.unpublish_space_from_listed(space_id)
         if self._federation is not None:
             try:
                 await self._federation.broadcast_to_space_members(
@@ -2079,6 +2148,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         category: str | None = None,
         allow_here_mention: bool | None = None,
         force: bool = False,
+        gfs_ids: tuple[str, ...] = (),
     ) -> Space:
         """Owner or admin may update space metadata. Atomically bumps
         ``config_sequence`` and publishes :class:`SpaceConfigChanged`.
@@ -2088,9 +2158,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         names the actor of its writes — raises :class:`PeersTooOldError`
         (409 ``PEERS_TOO_OLD``) naming those households, unless ``force``.
 
-        Flipping ``space_type`` to/from ``global`` also triggers
-        auto-publish/unpublish against every paired GFS
-        (via :meth:`_auto_publish_on_type`).
+        Flipping ``space_type`` into ``global`` lists the space on the GFSs
+        in *gfs_ids* (the owner's choice — none leaves it "global, not
+        listed"); out of ``global`` withdraws it from the GFSs that list it
+        (:meth:`on_tier_change`). A public space never touches a GFS.
         """
         space = await self._require_space(space_id)
         await self._require_admin_or_owner(space, actor_username)
@@ -2459,10 +2530,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             # so it needs the content key the relay + subscriber-handoff paths
             # encrypt under. No-op when it already has one.
             await self._ensure_content_key(space_id)
-        await self._auto_publish_on_type(
+        await self.on_tier_change(
             space_id,
             was_global=was_global,
             is_global=will_be_global,
+            gfs_ids=gfs_ids,
         )
         new_type = new_fields.get("space_type")
         if (
@@ -2471,9 +2543,10 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             and new_type not in PUBLIC_SPACE_TIERS
             and space.space_type is SpaceType.PUBLIC
         ):
-            # A PUBLIC space may have been published to a GFS by hand; once it
-            # is private or household it must not stay listed. (A GLOBAL space
-            # is withdrawn everywhere by ``_auto_publish_on_type`` above.)
+            # A PUBLIC space hand-published to a GFS before public stopped
+            # meaning "may be on a GFS" (the startup reconcile turns those
+            # global): once private or household it must not stay listed.
+            # (A GLOBAL space is withdrawn by ``on_tier_change`` above.)
             await self._gfs.unpublish_space_from_listed(space_id)
         if (
             directory_state_changed
@@ -2492,9 +2565,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             # subscription that can never deliver. Without this the truth would
             # not reach the GFS until the owner's next WS reconnect
             # (``heal_space_pins``). A type flip is already covered above,
-            # hence the was_global/will_be_global guard. Fail-soft:
+            # hence the was_global/will_be_global guard. Only the GFSs that
+            # already list the space are refreshed — a settings edit is never
+            # how a GFS first learns a space exists. Fail-soft:
             # GfsConnectionService logs and never raises.
-            await self._gfs.publish_space_to_all(space_id)
+            await self._gfs.republish_space(space_id)
         if subscribers_just_disabled:
             # The owner just withdrew public readability, and our local
             # ``role='subscriber'`` rows are EXACTLY the readers withdrawn

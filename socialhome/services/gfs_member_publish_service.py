@@ -382,7 +382,12 @@ class GfsMemberPublishService:
         listing says the space is strict is left out — never for epoch
         notices or subscribes, which must still reach it (the owner's notice
         is how a strict space goes back to trusted)."""
-        own = {c.id for c in await self._conn_repo.list_gfs_for_space(space_id)}
+        # Our own listings count only once the GFS accepted them (not pending
+        # review, not banned); otherwise the server's public directory
+        # decides.
+        own = {
+            c.id for c in await self._conn_repo.list_active_listings_for_space(space_id)
+        }
         out: list[GfsConnection] = []
         for conn in await self._conn_repo.list_active():
             if strict:
@@ -715,6 +720,10 @@ class GfsMemberPublishService:
         if not self._publicly_readable(space):
             return 0
         assert space is not None
+        if space.space_type is not SpaceType.GLOBAL:
+            # Only a global space is on a GFS; a leftover listing of one
+            # that left the tier gets no notice (its withdrawal is retried).
+            return 0
         try:
             seed = await self._spaces.get_space_seed(space_id)
         except RuntimeError:

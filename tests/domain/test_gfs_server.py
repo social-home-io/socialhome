@@ -15,6 +15,7 @@ from socialhome.domain.gfs_server import (
     SIGNED_GFS_SERVER_LIST_KEYS,
     SUPPORTED_GFS_KEY_SUITES,
     SUPPORTED_GFS_SERVERS_SIG_SUITES,
+    GfsSelectionOutcome,
     GfsServer,
     SignedGfsServerList,
     UnsupportedGfsKeySuite,
@@ -290,3 +291,12 @@ def test_signed_column_round_trip() -> None:
 @pytest.mark.parametrize("text", ["not json", "[]", "3", '{"servers": []}'])
 def test_signed_column_garbage_reads_as_unknown(text) -> None:
     assert signed_gfs_server_list_from_column(text) is None
+
+
+def test_selection_outcome_wire_shape():
+    outcome = GfsSelectionOutcome(listed=("g1",), failed=(("g2", "publish_failed"),))
+    assert outcome.to_dict() == {
+        "listed": ["g1"],
+        "failed": [{"gfs_id": "g2", "reason": "publish_failed"}],
+    }
+    assert GfsSelectionOutcome(listed=()).to_dict() == {"listed": [], "failed": []}

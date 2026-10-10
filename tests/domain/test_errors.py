@@ -18,10 +18,14 @@ from socialhome.domain.federation import (
 )
 from socialhome.domain.errors import (
     CodedError,
+    GfsSelectionInvalidError,
+    GfsSelectionRequiredError,
     InvalidMediaRefError,
     ImageTooLargeError,
     ImageUnreadableError,
     PayloadTooLargeError,
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
 )
 from socialhome.domain.space import (
     AgeRestrictedError,
@@ -304,3 +308,30 @@ def test_invalid_media_ref_error_names_the_field():
     assert exc.detail == "cover_url must be a file uploaded via /api/media/upload"
     # The field rides as a param so the SPA can name it; never the value.
     assert exc.params == {"field": "cover_url"}
+
+
+def test_listing_refusals_are_coded():
+    """Only a global space is listed on a GFS: public is a tier change
+    (still a SpaceNotPublishableError so skip-loops skip it)."""
+    assert (SpaceNotPublishableError.status, SpaceNotPublishableError.code) == (
+        409,
+        "SPACE_NOT_PUBLIC",
+    )
+    exc = TierChangeRequiredError()
+    assert isinstance(exc, SpaceNotPublishableError)
+    assert (exc.status, exc.code) == (409, "TIER_CHANGE_REQUIRED")
+    assert exc.params == {}
+
+
+def test_gfs_selection_refusals_are_coded():
+    required = GfsSelectionRequiredError()
+    assert isinstance(required, ValueError)
+    assert (required.status, required.code) == (422, "GFS_SELECTION_REQUIRED")
+    invalid = GfsSelectionInvalidError("unknown")
+    assert isinstance(invalid, ValueError)
+    assert (invalid.status, invalid.code) == (422, "GFS_SELECTION_INVALID")
+    assert invalid.params == {"reason": "unknown"}
+    assert GfsSelectionInvalidError("too_many", max_servers=8).params == {
+        "reason": "too_many",
+        "max": 8,
+    }

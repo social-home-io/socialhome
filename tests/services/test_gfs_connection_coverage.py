@@ -389,53 +389,6 @@ async def test_unpublish_space_404_is_success(env):
     assert await env.list_publications_for_space("sp1") == []
 
 
-# ─── publish_space_to_all / unpublish_space_from_all ────────────────────
-
-
-async def test_publish_space_to_all(env):
-    await env.save(_conn("g1"))
-    await env.save(_conn("g2"))
-    svc = GfsConnectionService(env, http_client=_StubSession(status=200))
-    _wire_publish_ctx(svc, "sp1")
-    n = await svc.publish_space_to_all("sp1")
-    assert n == 2
-
-
-async def test_unpublish_space_from_all(env):
-    await env.save(_conn("g1"))
-    await env.save(_conn("g2"))
-    svc = GfsConnectionService(env, http_client=_StubSession(status=204))
-    _wire_publish_ctx(svc, "sp1")
-    n = await svc.unpublish_space_from_all("sp1")
-    assert n == 2
-
-
-async def test_publish_space_to_all_individual_failure_logs(env):
-    """One failing GFS doesn't abort the fan-out."""
-    await env.save(_conn("g-ok"))
-    await env.save(_conn("g-bad"))
-
-    class _Mixed:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def post(self, url, **kw):
-            self.calls += 1
-            # Second call raises.
-            if self.calls > 1:
-                import aiohttp
-
-                raise aiohttp.ClientError("second fails")
-            return _StubResp(200)
-
-    svc = GfsConnectionService(env, http_client=_Mixed())
-    _wire_publish_ctx(svc, "sp1")
-    n = await svc.publish_space_to_all("sp1")
-    # One GFS succeeded, the other raised + was caught: only the
-    # success is counted, and the fan-out did not abort.
-    assert n == 1
-
-
 # ─── send_appeal ────────────────────────────────────────────────────────
 
 

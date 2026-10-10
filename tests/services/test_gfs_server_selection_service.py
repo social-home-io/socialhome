@@ -26,11 +26,20 @@ from socialhome.domain.federation import (
     GfsConnection,
 )
 from socialhome.domain.gfs_server import MAX_GFS_SERVERS, GfsServer
+from socialhome.domain.errors import (
+    GfsSelectionInvalidError,
+    GfsSelectionRequiredError,
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+)
 from socialhome.domain.space import (
     JoinMode,
     Space,
     SpaceConfigEventType,
     SpaceFeatures,
+    SpaceMember,
+    SpacePermissionError,
+    SpaceRole,
     SpaceType,
 )
 from socialhome.gfs_server_list_sig import (
@@ -49,6 +58,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.federation_inbound_service import FederationInboundService
+from socialhome.services.gfs_connection_service import GfsConnectionError
 from socialhome.services.gfs_server_selection_service import (
     GfsServerSelectionService,
 )
@@ -289,12 +299,6 @@ async def test_nothing_for_spaces_we_do_not_own_or_never_listed(env, owner, spac
     assert env.events == []
 
 
-async def test_public_space_is_snapshotted_too(env):
-    await env.space(space_type=SpaceType.PUBLIC)
-    await env.listed("g1")
-    assert await env.svc.sync_snapshot("sp-1") is True
-
-
 async def test_unknown_space_and_no_identity(env, db):
     assert await env.svc.sync_snapshot("nope") is False
     bare = GfsServerSelectionService(
@@ -472,3 +476,743 @@ async def test_owner_snapshot_reaches_a_member_household(env, tmp_dir):
         assert mirrored.config_sequence == owner_row.config_sequence
     finally:
         await member_db.shutdown()
+
+
+# ── The owner's choice (set / add / remove, reconcile) ────────────────────
+
+
+class _FakePublisher:
+    """Stands in for :class:`GfsConnectionService`: records every call (in
+    one shared ``log`` with the members' list broadcasts) and writes the
+    publication row the real publish writes on success."""
+
+    def __init__(self, env: _Env, *, fail: frozenset[str] = frozenset()) -> None:
+        self._env = env
+        self.fail = set(fail)
+        self.calls: list[tuple[str, str, bool]] = []
+
+    async def publish_space(self, space_id, gfs_id, *, announce=True):
+        self.calls.append(("publish", gfs_id, announce))
+        self._env.log.append(f"publish:{gfs_id}")
+        if gfs_id in self.fail:
+            raise GfsConnectionError("down")
+        return await self._env.gfs.publish_space(space_id, gfs_id)
+
+    async def unpublish_space(self, space_id, gfs_id, *, announce=True):
+        self.calls.append(("unpublish", gfs_id, announce))
+        self._env.log.append(f"unpublish:{gfs_id}")
+        if gfs_id in self.fail:
+            raise GfsConnectionError("down")
+        await self._env.gfs.unpublish_space(space_id, gfs_id)
+
+
+@pytest.fixture
+async def owner_env(db) -> _Env:
+    env = _Env(db)
+    env.log = []
+    env.users = SqliteUserRepo(db)
+    for username, user_id in (("anna", "uid-anna"), ("ben", "uid-ben")):
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (username, user_id, username),
+        )
+    env.publisher = _FakePublisher(env)
+    env.svc = GfsServerSelectionService(
+        space_repo=env.spaces,
+        gfs_repo=env.gfs,
+        bus=env.bus,
+        user_repo=env.users,
+        gfs_connection_service=env.publisher,
+    )
+    env.svc.attach_identity(own_instance_id=OWN, own_signing_key=_KP.private_key)
+
+    async def _log_event(event: SpaceConfigChanged) -> None:
+        env.log.append(f"event:{event.event_type}")
+
+    env.bus.subscribe(SpaceConfigChanged, _log_event)
+    return env
+
+
+async def _owned_space(
+    env: _Env, *, space_type: SpaceType = SpaceType.GLOBAL, owner: str = OWN
+) -> None:
+    await env.space(space_type=space_type, owner=owner)
+    await env.spaces.save_member(
+        SpaceMember(
+            space_id="sp-1",
+            user_id="uid-anna",
+            role=SpaceRole.OWNER,
+            joined_at="2026-10-01T00:00:00+00:00",
+        )
+    )
+    await env.spaces.save_member(
+        SpaceMember(
+            space_id="sp-1",
+            user_id="uid-ben",
+            role=SpaceRole.ADMIN,
+            joined_at="2026-10-01T00:00:00+00:00",
+        )
+    )
+
+
+async def _connected(env: _Env, *gfs_ids: str, status: str = "active") -> None:
+    for gfs_id in gfs_ids:
+        await env.gfs.save(
+            GfsConnection(
+                id=gfs_id,
+                gfs_instance_id=f"inst-{gfs_id}",
+                display_name=f"GFS {gfs_id}",
+                public_key=(gfs_id.encode().hex() * 32)[:64],
+                inbox_url=f"https://{gfs_id}.example",
+                status=status,
+                paired_at="2026-10-01T00:00:00+00:00",
+            )
+        )
+
+
+def _list_events(env: _Env) -> list[SpaceConfigChanged]:
+    return [
+        e
+        for e in env.events
+        if e.event_type == SpaceConfigEventType.GFS_SERVERS_CHANGED.value
+    ]
+
+
+async def test_a_public_space_never_gets_a_list(env):
+    """Public is never on a GFS: even a stray publication row is not handed
+    to members."""
+    await env.space(space_type=SpaceType.PUBLIC)
+    await env.listed("g1")
+    assert await env.svc.sync_snapshot("sp-1") is False
+    space = await env.spaces.get("sp-1")
+    assert space is not None and space.gfs_servers is None
+
+
+async def test_set_servers_diffs_and_tells_members_once(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1", "g2", "g3")
+    await env.gfs.publish_space("sp-1", "g1")
+    await env.gfs.publish_space("sp-1", "g3")
+
+    outcome = await env.svc.set_servers(
+        "sp-1", actor_username="anna", gfs_ids=["g1", "g2"]
+    )
+
+    assert sorted(outcome.listed) == ["g1", "g2"]
+    assert outcome.failed == ()
+    # g1 untouched, g2 published, g3 withdrawn — never a per-call announce.
+    assert env.publisher.calls == [
+        ("publish", "g2", False),
+        ("unpublish", "g3", False),
+    ]
+    # Members are told once, after every listing change landed.
+    assert env.log == [
+        "publish:g2",
+        "unpublish:g3",
+        f"event:{SpaceConfigEventType.GFS_SERVERS_CHANGED.value}",
+    ]
+    assert len(_list_events(env)) == 1
+    assert await env.listed_ids() == ["inst-g1", "inst-g2"]
+
+
+async def test_set_servers_reports_a_failing_gfs_and_keeps_going(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1", "g2")
+    env.publisher.fail = {"g1"}
+    outcome = await env.svc.set_servers(
+        "sp-1", actor_username="anna", gfs_ids=["g1", "g2"]
+    )
+    assert outcome.listed == ("g2",)
+    assert outcome.failed == (("g1", "publish_failed"),)
+    assert outcome.to_dict() == {
+        "listed": ["g2"],
+        "failed": [{"gfs_id": "g1", "reason": "publish_failed"}],
+    }
+    # Only the server that took the listing is in the members' list.
+    assert await env.listed_ids() == ["inst-g2"]
+
+
+async def test_set_servers_reports_a_failed_withdrawal(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    env.publisher.fail = {"g1"}
+    outcome = await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=[])
+    assert outcome.listed == ("g1",)
+    assert outcome.failed == (("g1", "unpublish_failed"),)
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("actor", ["ben", "nobody"])
+async def test_only_the_space_owner_changes_the_servers(owner_env, actor):
+    """An admin (or anyone else) can't aim the space at a server."""
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    with pytest.raises(SpacePermissionError):
+        await env.svc.set_servers("sp-1", actor_username=actor, gfs_ids=["g1"])
+    with pytest.raises(SpacePermissionError):
+        await env.svc.add_server("sp-1", actor_username=actor, gfs_id="g1")
+    with pytest.raises(SpacePermissionError):
+        await env.svc.remove_server("sp-1", actor_username=actor, gfs_id="g1")
+    assert env.publisher.calls == []
+    assert env.events == []
+
+
+@pytest.mark.security
+async def test_a_space_owned_elsewhere_is_never_listed_from_here(owner_env):
+    env = owner_env
+    await _owned_space(env, owner="other-household")
+    await _connected(env, "g1")
+    with pytest.raises(SpacePermissionError):
+        await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    with pytest.raises(SpacePermissionError):
+        await env.svc.add_server("sp-1", actor_username="anna", gfs_id="g1")
+    # A household admin withdraws by ROW; without one nothing is contacted.
+    with pytest.raises(KeyError):
+        await env.svc.remove_server(
+            "sp-1", actor_username="anna", gfs_id="g1", household_admin=True
+        )
+    assert env.publisher.calls == []
+
+
+async def test_an_unknown_space_is_not_found(owner_env):
+    with pytest.raises(KeyError):
+        await owner_env.svc.set_servers("nope", actor_username="anna", gfs_ids=[])
+
+
+@pytest.mark.security
+async def test_servers_for_a_public_space_need_a_tier_change(owner_env):
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    with pytest.raises(TierChangeRequiredError):
+        await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    with pytest.raises(TierChangeRequiredError):
+        await env.svc.add_server("sp-1", actor_username="anna", gfs_id="g1")
+    assert env.publisher.calls == []
+
+
+async def test_servers_for_a_private_space_are_refused(owner_env):
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PRIVATE)
+    await _connected(env, "g1")
+    with pytest.raises(SpaceNotPublishableError) as exc_info:
+        await env.svc.add_server("sp-1", actor_username="anna", gfs_id="g1")
+    assert exc_info.value.code == "SPACE_NOT_PUBLIC"
+
+
+async def test_an_empty_set_only_withdraws_whatever_the_tier(owner_env):
+    """A space that left the global tier may still be withdrawn."""
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    outcome = await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=[])
+    assert outcome.listed == ()
+    assert env.publisher.calls == [("unpublish", "g1", False)]
+
+
+@pytest.mark.parametrize(
+    ("gfs_ids", "reason"),
+    [
+        (None, "malformed"),
+        ("g1", "malformed"),
+        (["g1", 3], "malformed"),
+        ([""], "malformed"),
+        (["g-unknown"], "unknown"),
+        (["g-pending"], "unknown"),
+        ([f"g{i}" for i in range(MAX_GFS_SERVERS + 1)], "too_many"),
+    ],
+)
+async def test_a_bad_choice_is_refused(owner_env, gfs_ids, reason):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, *[f"g{i}" for i in range(MAX_GFS_SERVERS + 1)])
+    await _connected(env, "g-pending", status="pending")
+    with pytest.raises(GfsSelectionInvalidError) as exc_info:
+        await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=gfs_ids)
+    assert exc_info.value.params["reason"] == reason
+    assert env.publisher.calls == []
+
+
+async def test_check_selection_dedupes_and_requires_when_asked(owner_env):
+    env = owner_env
+    assert await env.svc.check_selection(None, required=True) == ()
+    await _connected(env, "g1", "g2")
+    assert await env.svc.check_selection(["g2", "g1", "g2"]) == ("g2", "g1")
+    assert await env.svc.check_selection(None) == ()
+    with pytest.raises(GfsSelectionRequiredError):
+        await env.svc.check_selection([], required=True)
+
+
+async def test_still_active_drops_disconnected_servers(owner_env):
+    env = owner_env
+    await _connected(env, "g1")
+    await _connected(env, "g2", status="suspended")
+    assert await env.svc.still_active(("g1", "g2", "g9", "g1")) == ("g1",)
+
+
+async def test_add_server_lists_and_tells_members(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    pub = await env.svc.add_server("sp-1", actor_username="anna", gfs_id="g1")
+    assert pub.gfs_connection_id == "g1"
+    assert env.publisher.calls == [("publish", "g1", False)]
+    assert env.log[-1] == f"event:{SpaceConfigEventType.GFS_SERVERS_CHANGED.value}"
+    assert await env.listed_ids() == ["inst-g1"]
+
+
+async def test_add_server_refuses_an_inactive_connection(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1", status="pending")
+    with pytest.raises(GfsConnectionError):
+        await env.svc.add_server("sp-1", actor_username="anna", gfs_id="g1")
+    with pytest.raises(GfsConnectionError):
+        await env.svc.add_server("sp-1", actor_username="anna", gfs_id="nope")
+    assert env.publisher.calls == []
+
+
+async def test_add_server_failure_lists_nothing(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    env.publisher.fail = {"g1"}
+    with pytest.raises(GfsConnectionError):
+        await env.svc.add_server("sp-1", actor_username="anna", gfs_id="g1")
+    assert await env.gfs.list_publications_for_space("sp-1") == []
+
+
+async def test_add_server_holds_the_cap(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    ids = [f"g{i}" for i in range(MAX_GFS_SERVERS + 1)]
+    await _connected(env, *ids)
+    for gfs_id in ids[:MAX_GFS_SERVERS]:
+        await env.gfs.publish_space("sp-1", gfs_id)
+    with pytest.raises(GfsSelectionInvalidError) as exc_info:
+        await env.svc.add_server("sp-1", actor_username="anna", gfs_id=ids[-1])
+    assert exc_info.value.params == {"reason": "too_many", "max": MAX_GFS_SERVERS}
+    # Refreshing one it already has is fine at the cap.
+    await env.svc.add_server("sp-1", actor_username="anna", gfs_id=ids[0])
+
+
+async def test_remove_server_by_owner_or_household_admin(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1", "g2")
+    await env.gfs.publish_space("sp-1", "g1")
+    await env.gfs.publish_space("sp-1", "g2")
+    await env.svc.remove_server("sp-1", actor_username="anna", gfs_id="g1")
+    # A household admin (no role in the space) may withdraw too.
+    await env.svc.remove_server(
+        "sp-1", actor_username="nobody", gfs_id="g2", household_admin=True
+    )
+    assert env.publisher.calls == [
+        ("unpublish", "g1", False),
+        ("unpublish", "g2", False),
+    ]
+    assert await env.gfs.list_publications_for_space("sp-1") == []
+
+
+async def test_apply_without_a_publisher_is_a_wiring_error(env):
+    with pytest.raises(RuntimeError):
+        await env.svc.apply("sp-1", ("g1",))
+
+
+async def test_describe(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    space = await env.spaces.get("sp-1")
+    # Owned, nothing signed yet: the listings are the truth.
+    assert await env.svc.describe(space) == ([], True)
+    await env.gfs.publish_space("sp-1", "g1")
+    assert await env.svc.describe(space) == (
+        [
+            {
+                "display_name": "GFS g1",
+                "inbox_url": "https://g1.example",
+                "connected": True,
+            }
+        ],
+        False,
+    )
+    await env.svc.sync_snapshot("sp-1")
+    space = await env.spaces.get("sp-1")
+    servers, unlisted = await env.svc.describe(space)
+    assert servers == [
+        {"display_name": "GFS g1", "inbox_url": "https://g1.example", "connected": True}
+    ]
+    assert unlisted is False
+    # Not a connection of ours (a member's view): connected=False.
+    await env.gfs.delete("g1")
+    servers, _ = await env.svc.describe(space)
+    assert servers == [
+        {
+            "display_name": "GFS g1",
+            "inbox_url": "https://g1.example",
+            "connected": False,
+        }
+    ]
+    # Not global → nothing to show.
+    public = dataclasses.replace(space, space_type=SpaceType.PUBLIC)
+    assert await env.svc.describe(public) == (None, False)
+    # A member's copy with no list known yet.
+    remote = dataclasses.replace(space, owner_instance_id="elsewhere", gfs_servers=None)
+    assert await env.svc.describe(remote) == (None, False)
+
+
+async def test_describe_flags_global_not_listed(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await env.svc.sync_snapshot("sp-1")  # signs the empty list
+    space = await env.spaces.get("sp-1")
+    assert space.gfs_servers is not None
+    assert await env.svc.describe(space) == ([], True)
+
+
+async def test_owner_view(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1", "g2")
+    await env.gfs.publish_space("sp-1", "g1", "pending")
+    view = await env.svc.owner_view("sp-1", actor_username="anna")
+    assert view["space_type"] == "global"
+    assert view["gfs_ids"] == ["g1"]
+    assert view["max"] == MAX_GFS_SERVERS
+    assert {
+        a["gfs_id"]: (a["listed"], a["listing_status"]) for a in view["available"]
+    } == {
+        "g1": (True, "pending"),
+        "g2": (False, None),
+    }
+    with pytest.raises(SpacePermissionError):
+        await env.svc.owner_view("sp-1", actor_username="ben")
+
+
+async def test_reconcile_turns_a_listed_public_space_global(owner_env):
+    """Hand-published public spaces become global (their listings are kept,
+    no quorum); the members hear the tier and the list."""
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+
+    assert await env.svc.reconcile_on_startup() == 1
+
+    space = await env.spaces.get("sp-1")
+    assert space is not None and space.space_type is SpaceType.GLOBAL
+    assert await env.listed_ids() == ["inst-g1"]
+    assert [e.event_type for e in env.events] == [
+        SpaceConfigEventType.PUBLIC_MODE_CHANGED.value,
+        SpaceConfigEventType.GFS_SERVERS_CHANGED.value,
+    ]
+    assert env.events[0].payload == {"space_type": "global"}
+    assert await env.spaces.get_config_author("sp-1") == OWN
+    # Nothing was sent to any GFS: the listing already exists.
+    assert env.publisher.calls == []
+
+
+async def test_reconcile_signs_a_list_for_a_global_space_without_one(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    assert await env.svc.reconcile_on_startup() == 1
+    assert await env.listed_ids() == ["inst-g1"]
+    assert env.publisher.calls == []
+
+
+async def test_reconcile_is_idempotent_and_leaves_others_alone(owner_env):
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    # An unlisted public space and a space owned elsewhere stay as they are.
+    await env.space("sp-plain", space_type=SpaceType.PUBLIC)
+    await env.space("sp-remote", space_type=SpaceType.PUBLIC, owner="elsewhere")
+    await env.gfs.publish_space("sp-remote", "g1")
+    await env.space("sp-remote-g", space_type=SpaceType.GLOBAL, owner="elsewhere")
+
+    assert await env.svc.reconcile_on_startup() == 1
+    events = len(env.events)
+    assert await env.svc.reconcile_on_startup() == 0
+    assert len(env.events) == events
+
+    assert (await env.spaces.get("sp-plain")).space_type is SpaceType.PUBLIC
+    remote = await env.spaces.get("sp-remote")
+    assert remote.space_type is SpaceType.PUBLIC and remote.gfs_servers is None
+    assert (await env.spaces.get("sp-remote-g")).gfs_servers is None
+
+
+async def test_reconcile_without_identity_does_nothing(owner_env):
+    env = owner_env
+    bare = GfsServerSelectionService(
+        space_repo=env.spaces, gfs_repo=env.gfs, bus=env.bus
+    )
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    assert await bare.reconcile_on_startup() == 0
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+
+
+# ── Leftover listings: one-shot promotion, withdrawal retry, locking ──────
+
+
+@pytest.mark.security
+async def test_reconcile_never_reverts_an_approved_move_to_public(owner_env):
+    """A quorum moved the space global → public but the withdrawal could not
+    reach the GFS (the row stays). Restarting must keep it public — the
+    space was signed a list while global — and withdraw the listing again."""
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    await env.svc.sync_snapshot("sp-1")  # global: a list is signed
+    space = await env.spaces.get("sp-1")
+    await env.spaces.save(dataclasses.replace(space, space_type=SpaceType.PUBLIC))
+    await env.svc.sync_snapshot("sp-1")  # left global: an empty list
+    env.publisher.fail = {"g1"}  # the GFS is still down at the restart
+
+    assert await env.svc.reconcile_on_startup() == 0
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+    assert env.publisher.calls == [("unpublish", "g1", False)]
+    assert len(await env.gfs.list_publications_for_space("sp-1")) == 1
+
+    env.publisher.fail = set()  # back up: the next start withdraws it
+    assert await env.svc.reconcile_on_startup() == 1
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+    assert await env.gfs.list_publications_for_space("sp-1") == []
+
+
+async def test_reconcile_promotes_only_on_an_active_listing(owner_env):
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1", "pending")
+    await env.svc.reconcile_on_startup()
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+    # Not promoted, so the pending listing is withdrawn instead.
+    assert env.publisher.calls == [("unpublish", "g1", False)]
+
+
+async def test_retry_withdrawals_scope(owner_env):
+    """Withdrawn: rows of a missing / dissolved space and of an owned space
+    that is no longer global. Kept: owned global, and a space hosted
+    elsewhere (its row is the household admin's to withdraw)."""
+    env = owner_env
+    await _connected(env, "g1", "g2")
+    await env.space("sp-glob")
+    await env.space("sp-priv", space_type=SpaceType.PRIVATE)
+    await env.space("sp-remote", space_type=SpaceType.PUBLIC, owner="elsewhere")
+    await env.space("sp-dis")
+    await env.spaces.save(
+        dataclasses.replace(await env.spaces.get("sp-dis"), dissolved=True)
+    )
+    for space_id in ("sp-glob", "sp-priv", "sp-remote", "sp-gone", "sp-dis"):
+        await env.gfs.publish_space(space_id, "g1")
+    await env.gfs.publish_space("sp-priv", "g2")
+
+    assert await env.svc.retry_withdrawals("g1") == 3
+    withdrawn = {g for _k, g, _a in env.publisher.calls}
+    assert withdrawn == {"g1"}
+    left = {
+        (p.space_id, p.gfs_connection_id)
+        for c in ("g1", "g2")
+        for p in await env.gfs.list_publications(c)
+    }
+    assert left == {("sp-glob", "g1"), ("sp-remote", "g1"), ("sp-priv", "g2")}
+    assert await env.svc.retry_withdrawals() == 1  # every connection
+    assert ("sp-priv", "g2") not in {
+        (p.space_id, p.gfs_connection_id) for p in await env.gfs.list_publications("g2")
+    }
+
+
+async def test_retry_withdrawals_without_identity_does_nothing(env):
+    assert await env.svc.retry_withdrawals() == 0
+
+
+async def test_concurrent_adds_hold_the_cap(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    ids = [f"g{i}" for i in range(MAX_GFS_SERVERS + 1)]
+    await _connected(env, *ids)
+    for gfs_id in ids[: MAX_GFS_SERVERS - 1]:
+        await env.gfs.publish_space("sp-1", gfs_id)
+    real = env.publisher.publish_space
+
+    async def _slow(space_id, gfs_id, *, announce=True):
+        await asyncio.sleep(0.01)
+        return await real(space_id, gfs_id, announce=announce)
+
+    env.publisher.publish_space = _slow
+    results = await asyncio.gather(
+        env.svc.add_server("sp-1", actor_username="anna", gfs_id=ids[-2]),
+        env.svc.add_server("sp-1", actor_username="anna", gfs_id=ids[-1]),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(r, GfsSelectionInvalidError) for r in results) == 1
+    assert len(await env.gfs.list_publications_for_space("sp-1")) == MAX_GFS_SERVERS
+    assert env.svc._change_locks == {}
+
+
+async def test_a_private_network_gfs_we_cant_use_is_still_a_listing(owner_env):
+    """A member not connected to the owner's LAN GFS drops that entry from
+    its view — the space is still listed, so it is not "global, not
+    listed"."""
+    env = owner_env
+    await _owned_space(env)
+    await env.gfs.save(
+        GfsConnection(
+            id="lan",
+            gfs_instance_id="inst-lan",
+            display_name="LAN GFS",
+            public_key="cd" * 32,
+            inbox_url="http://192.168.1.5:8080",
+            status="active",
+            paired_at="2026-10-01T00:00:00+00:00",
+        )
+    )
+    await env.gfs.publish_space("sp-1", "lan")
+    await env.svc.sync_snapshot("sp-1")
+    space = await env.spaces.get("sp-1")
+    servers, unlisted = await env.svc.describe(space)
+    assert [s["inbox_url"] for s in servers] == ["http://192.168.1.5:8080"]
+    assert unlisted is False
+    await env.gfs.delete("lan")  # now we are a household without that route
+    servers, unlisted = await env.svc.describe(space)
+    assert servers == []
+    assert unlisted is False
+
+
+async def test_owner_view_lists_listings_on_every_connection_state(owner_env):
+    """A listing on a suspended / pending connection stays visible (and
+    removable) for the owner; only active connections are offered to add."""
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g-act")
+    await _connected(env, "g-sus", status="suspended")
+    await _connected(env, "g-pen", status="pending")
+    await env.gfs.publish_space("sp-1", "g-act")
+    await env.gfs.publish_space("sp-1", "g-sus")
+    await env.gfs.publish_space("sp-1", "g-pen", "pending")
+    view = await env.svc.owner_view("sp-1", actor_username="anna")
+    assert view["listings"] == [
+        {
+            "gfs_id": "g-act",
+            "display_name": "GFS g-act",
+            "inbox_url": "https://g-act.example",
+            "connection_status": "active",
+            "listing_status": "active",
+        },
+        {
+            "gfs_id": "g-pen",
+            "display_name": "GFS g-pen",
+            "inbox_url": "https://g-pen.example",
+            "connection_status": "pending",
+            "listing_status": "pending",
+        },
+        {
+            "gfs_id": "g-sus",
+            "display_name": "GFS g-sus",
+            "inbox_url": "https://g-sus.example",
+            "connection_status": "suspended",
+            "listing_status": "active",
+        },
+    ]
+    assert [a["gfs_id"] for a in view["available"]] == ["g-act"]
+    # The suspended one can be withdrawn by the owner.
+    await env.svc.remove_server("sp-1", actor_username="anna", gfs_id="g-sus")
+    assert ("unpublish", "g-sus", False) in env.publisher.calls
+
+
+# ── Round 2: reconnect before reconcile, unreadable lists, transfers ──────
+
+
+async def _pre_owner_model_public(env) -> None:
+    await _owned_space(env, space_type=SpaceType.PUBLIC)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+
+
+@pytest.mark.security
+async def test_a_reconnect_before_the_reconcile_keeps_the_promotion_candidate(
+    owner_env,
+):
+    """The GFS socket can come up before startup step 8b: its withdrawal
+    retry must not withdraw the hand-published public space the reconcile
+    is about to make global."""
+    env = owner_env
+    await _pre_owner_model_public(env)
+    assert await env.svc.retry_withdrawals("g1") == 0
+    assert await env.svc.retry_withdrawals() == 0
+    assert env.publisher.calls == []
+    assert await env.svc.reconcile_on_startup() == 1
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.GLOBAL
+    assert len(await env.gfs.list_publications_for_space("sp-1")) == 1
+
+
+@pytest.mark.security
+async def test_an_unreadable_stored_list_still_blocks_the_promotion(owner_env, db):
+    """A list signed under a suite this build doesn't know (a rollback)
+    reads back as ``None`` but is not "never had a list": no promotion — the
+    leftover listing is withdrawn instead."""
+    env = owner_env
+    await _pre_owner_model_public(env)
+    await db.enqueue(
+        "UPDATE spaces SET gfs_servers=? WHERE id='sp-1'",
+        ('{"servers": [], "gfs_servers_sig_suite": "future-suite"}',),
+    )
+    space = await env.spaces.get("sp-1")
+    assert space.gfs_servers is None
+    assert await env.spaces.has_gfs_servers("sp-1") is True
+    await env.svc.reconcile_on_startup()
+    assert (await env.spaces.get("sp-1")).space_type is SpaceType.PUBLIC
+    assert env.publisher.calls == [("unpublish", "g1", False)]
+
+
+async def test_retry_decides_on_the_rows_left_under_the_lock(owner_env, monkeypatch):
+    """A row withdrawn by someone else between the listing and the lock is
+    not withdrawn again."""
+    env = owner_env
+    await _owned_space(env, space_type=SpaceType.PRIVATE)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    rows = await env.gfs.list_publications("g1")
+    await env.gfs.unpublish_space("sp-1", "g1")
+    real = SqliteGfsConnectionRepo.list_publications
+
+    async def _stale(self, gfs_id):
+        return rows if gfs_id == "g1" else await real(self, gfs_id)
+
+    monkeypatch.setattr(SqliteGfsConnectionRepo, "list_publications", _stale)
+    assert await env.svc.retry_withdrawals("g1") == 0
+    assert env.publisher.calls == []
+
+
+async def test_a_local_ownership_transfer_moves_the_choice(owner_env):
+    """Who chooses is the user holding role OWNER on the owner household —
+    never ``owner_username``, which may lag a transfer."""
+    env = owner_env
+    await _owned_space(env)  # owner_username stays "anna"
+    await _connected(env, "g1")
+    for user_id, role in (("uid-anna", SpaceRole.ADMIN), ("uid-ben", SpaceRole.OWNER)):
+        await env.spaces.save_member(
+            SpaceMember(
+                space_id="sp-1",
+                user_id=user_id,
+                role=role,
+                joined_at="2026-10-01T00:00:00+00:00",
+            )
+        )
+    with pytest.raises(SpacePermissionError):
+        await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    outcome = await env.svc.set_servers("sp-1", actor_username="ben", gfs_ids=["g1"])
+    assert outcome.listed == ("g1",)

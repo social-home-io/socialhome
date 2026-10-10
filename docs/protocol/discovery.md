@@ -6,17 +6,22 @@ metadata, not content.
 
 ## Scope
 
-- **HFS**: publishes a space it wants to make public; subscribes to
-  the GFS directory to browse others; relays join requests through
-  GFS to hosts it's not yet paired with.
+- **HFS**: lists a **global** space on the GFSs its owner picks (a
+  **public** space is never on a GFS — paired peers find it through
+  `SPACE_DIRECTORY_SYNC`); subscribes to the GFS directory to browse
+  others; relays join requests through GFS to hosts it's not yet paired
+  with.
 - **GFS**: maintains the global registry of published spaces,
   serves `GET /gfs/spaces`, and forwards opaque `_VIA` envelopes
   between unpaired instances.
 
 ## Event types
 
-`PUBLIC_SPACE_ADVERTISE`, `PUBLIC_SPACE_WITHDRAWN`,
 `SPACE_DIRECTORY_SYNC` (peer-to-peer snapshot, distinct from GFS).
+`PUBLIC_SPACE_ADVERTISE` / `PUBLIC_SPACE_WITHDRAWN` remain in the enum but
+nothing sends them: a GFS listing is the owner's signed HTTPS
+`POST /gfs/spaces/{id}/publish` / `…/unpublish` (below), not a federation
+event.
 
 Join-request events belong to the [invites](./invites.md) flow but
 ride on the same `_VIA` relay pattern.
@@ -881,8 +886,8 @@ INFO; a household merely *mirroring* the space applies the value it is told,
 since it is not the authority for that space).
 
 **Changing the flag re-publishes.** Flipping `allow_subscribers` (or
-`join_mode`) on a global space re-publishes its metadata to every paired GFS
-immediately, rather than waiting for the owner's next WS reconnect — and a
+`join_mode`) on a global space re-publishes its metadata to every GFS that
+lists it (never to one that doesn't) immediately, rather than waiting for the owner's next WS reconnect — and a
 publish that lands the flag as explicitly off is what PURGES the seats taken
 while it was on. The owner's own household drops its **local**
 `role='subscriber'` rows in the same edit, publishing the usual member-left
@@ -2310,8 +2315,10 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
   disconnect / GFS rename and every config change of a space it owns, signs
   it with `issued_at = max(now_ms, stored + 1)`, raises `config_sequence` and
   sends it as a `gfs_servers_changed` config change. A space that leaves the
-  public tiers gets a signed **empty** list at once, even if a GFS could not
-  be reached to withdraw the listing.
+  global tier gets a signed **empty** list at once, even if a GFS could not
+  be reached to withdraw the listing; a public space never has a list. An
+  owner change of several servers (`PUT /api/spaces/{id}/gfs-servers`) is
+  signed and sent **once**, after every publish landed.
 - **Receivers check entries when they use them**: an entry with an unknown or
   missing `gfs_key_suite`, a bad key, or an `inbox_url` that is not https
   (unless private) is dropped; a loopback / RFC 1918 / link-local / ULA host
@@ -2413,25 +2420,56 @@ gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
 
 ## Flow — publish + browse + join
 
+Only a **global** space is listed, and only on the GFSs its **owner** picks
+(at most 8): at create (`POST /api/spaces {space_type: "global", gfs_ids}`),
+on the approved tier proposal that makes it global (`gfs_ids` from the
+space's owner), or later with `PUT /api/spaces/{id}/gfs-servers` /
+`POST|DELETE /api/spaces/{id}/publish/{gfs_id}` (owner only;
+`GfsServerSelectionService`). Each chosen GFS gets the owner-signed metadata
+publish; members get the new signed GFS list once, after every publish
+landed. A **public** space never reaches this flow — a publish of one is
+refused with 409 `TIER_CHANGE_REQUIRED` before anything is sent, because
+listing it on a GFS *is* making it global.
+
+Withdrawal (`POST /gfs/spaces/{id}/unpublish`, owner-signed) goes to the GFSs
+that list the space and to no other: when the owner removes a server, when
+the space leaves the global tier, and when it is dissolved. A directory
+setting change (`join_mode`, `allow_subscribers`) re-publishes to the GFSs
+that list the space — never to one that doesn't, so neither a settings edit
+nor a withdrawal is how a GFS first learns a space exists. A withdrawal that
+could not reach its GFS is retried at every start and every reconnect to that
+GFS; until it lands, the leftover listing gets no relayed content and no
+epoch notice, and the reconnect heal never re-publishes it.
+
 ```mermaid
 sequenceDiagram
     autonumber
+    participant O as Owner (HFS A)
     participant HA as HFS A (host)
-    participant G as GFS
+    participant G1 as GFS 1 (chosen)
+    participant G2 as GFS 2 (not chosen)
+    participant M as Member households
     participant HB as HFS B (browser)
     participant UB as User (HFS B)
-    HA->>G: PUBLIC_SPACE_ADVERTISE<br/>(name, description,<br/>member count, join_mode)
-    G->>G: register in directory
+    O->>HA: POST /api/spaces {space_type: global, gfs_ids: [G1]}<br/>or PUT /api/spaces/{id}/gfs-servers
+    HA->>G1: POST /gfs/spaces/{id}/publish<br/>(owner-signed metadata, authority key pin)
+    G1->>G1: register in directory
+    Note over HA,G2: G2 is never contacted — not on publish,<br/>not on a settings edit, not on withdrawal
+    HA->>M: SPACE_CONFIG_CHANGED<br/>(space_meta.gfs_servers: owner-signed [G1])
+    UB->>HB: GET /api/public_spaces
+    HB->>G1: poll GET /gfs/spaces
+    G1-->>HB: space list
+    HB-->>UB: render list
     UB->>HB: GET /api/public_spaces
     HB->>G: poll GET /gfs/spaces
     G-->>HB: space list
     HB-->>UB: render list
     UB->>HB: POST /api/public_spaces/{id}/join-request
-    HB->>G: SPACE_JOIN_REQUEST_VIA<br/>(opaque envelope)
-    G->>HA: SPACE_JOIN_REQUEST
+    HB->>G1: SPACE_JOIN_REQUEST_VIA<br/>(opaque envelope)
+    G1->>HA: SPACE_JOIN_REQUEST
     Note over HA: admin reviews, approves
-    HA->>G: SPACE_JOIN_REQUEST_REPLY_VIA
-    G->>HB: SPACE_JOIN_REQUEST_APPROVED
+    HA->>G1: SPACE_JOIN_REQUEST_REPLY_VIA
+    G1->>HB: SPACE_JOIN_REQUEST_APPROVED
     Note over HA,HB: direct pairing established<br/>space sync begins
 ```
 
@@ -2447,10 +2485,11 @@ advertised to that specific GFS.
 
 ## Withdrawal
 
-`PUBLIC_SPACE_WITHDRAWN` removes a space from the GFS directory and
-from peer directories on the next `SPACE_DIRECTORY_SYNC`. Members
-already in the space keep their membership — withdrawal only affects
-discoverability, not existing peering.
+The owner's signed `POST /gfs/spaces/{id}/unpublish` removes a space from a
+GFS directory — sent only to the GFSs that list it (see above). A space that
+stops being public or global drops out of peer directories on the next
+`SPACE_DIRECTORY_SYNC`. Members already in the space keep their membership —
+withdrawal only affects discoverability, not existing peering.
 
 ## Blocking
 

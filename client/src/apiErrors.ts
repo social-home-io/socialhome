@@ -64,6 +64,18 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   ALREADY_MEMBER: () => t('error.already_member'),
   GFS_RELAY_NOT_ALLOWED: () => t('error.gfs_relay_not_allowed'),
   SPACE_NOT_PUBLIC: () => t('error.space_not_public'),
+  // Listing a space on a GFS: only a global space, on servers its owner
+  // picks. Publishing a public space would make it global (a tier change).
+  TIER_CHANGE_REQUIRED: () => t('error.tier_change_required'),
+  GFS_SELECTION_REQUIRED: () => t('error.gfs_selection_required'),
+  GFS_SELECTION_INVALID: (_b, p) => {
+    switch (p.reason) {
+      case 'unknown': return t('error.gfs_selection.unknown')
+      case 'too_many': return t('error.gfs_selection.too_many', { max: str(p, 'max') })
+      case 'not_global': return t('error.gfs_selection.not_global')
+      default: return null
+    }
+  },
   USER_ALREADY_MEMBER: () => t('error.user_already_member'),
   BANNED: () => t('error.banned'),
   USER_BANNED: () => t('error.user_banned'),

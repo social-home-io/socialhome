@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
 import inspect
 import json
 import logging
@@ -15,7 +17,11 @@ from types import SimpleNamespace
 import aiohttp
 import pytest
 
-from socialhome.domain.errors import SpaceNotPublishableError
+from socialhome.domain.space import SpaceType
+from socialhome.domain.errors import (
+    SpaceNotPublishableError,
+    TierChangeRequiredError,
+)
 from aiohttp.test_utils import TestClient, TestServer
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
@@ -533,32 +539,6 @@ async def test_unpublish_space_maps_timeout_to_gfs_error(env):
         await svc.unpublish_space("space-uto", "up-to")
     rows = await repo.list_publications_for_space("space-uto")
     assert len(rows) == 1
-
-
-async def test_publish_space_to_all_skips_timed_out_gfs(env):
-    """One GFS that times out must NOT abort the whole fan-out — the bare
-    ``asyncio.TimeoutError`` is caught as ``GfsConnectionError`` and skipped,
-    so the healthy GFS is still published to."""
-
-    class _MixedSession:
-        """``post`` times out for the slow GFS, succeeds for the healthy one."""
-
-        def post(self, url, **kw):
-            if "slow.example" in url:
-                raise asyncio.TimeoutError
-            return _StubResp(200, {"status": "active"})
-
-    svc = await _publishable_svc(env, _MixedSession(), "ok-gfs", space_id="space-fan")
-    _, repo = env
-    # Re-home the first conn's URL + add a second (slow) GFS.
-    await repo.save(_make_conn("ok-gfs", inbox_url="https://ok.example"))
-    await repo.save(_make_conn("slow-gfs", inbox_url="https://slow.example"))
-    published = await svc.publish_space_to_all("space-fan")
-    assert published == 1
-    # Only the healthy GFS got a local publication row.
-    rows = await repo.list_publications_for_space("space-fan")
-    assert len(rows) == 1
-    assert rows[0].gfs_connection_id == "ok-gfs"
 
 
 async def test_publish_space_handles_non_dict_json_body(env):
@@ -3971,26 +3951,93 @@ async def test_publish_refuses_a_space_outside_the_public_tiers(env, space_type)
     assert await repo.list_publications("gfs-1") == []
 
 
-async def test_publish_allows_a_public_space(env):
+@pytest.mark.security
+async def test_publish_refuses_a_public_space_with_tier_change_required(env):
+    """Public is visible only to connected households: listing it on a GFS
+    IS making it global, a tier change — 409 TIER_CHANGE_REQUIRED, and
+    nothing reaches the GFS."""
     session = _StubSession(status=200)
     svc = await _publishable_svc(
         env, session, "gfs-1", space_id="sp-pub", space_type="public"
     )
-    pub = await svc.publish_space("sp-pub", "gfs-1")
-    assert pub.space_id == "sp-pub"
+    with pytest.raises(TierChangeRequiredError) as exc_info:
+        await svc.publish_space("sp-pub", "gfs-1")
+    assert exc_info.value.status == 409
+    assert exc_info.value.code == "TIER_CHANGE_REQUIRED"
+    # Still a SpaceNotPublishableError, so every skip-loop skips it too.
+    assert isinstance(exc_info.value, SpaceNotPublishableError)
+    assert session.calls == []
+    _, repo = env
+    assert await repo.list_publications("gfs-1") == []
+
+
+async def test_publish_allows_a_global_space(env):
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(
+        env, session, "gfs-1", space_id="sp-glob", space_type="global"
+    )
+    pub = await svc.publish_space("sp-glob", "gfs-1")
+    assert pub.space_id == "sp-glob"
     assert len(session.calls) == 1
 
 
-async def test_publish_to_all_and_republish_skip_a_private_space(env):
-    """The fan-out loops log and skip the refusal instead of raising, so a
-    space that turned private can't break an authority-key rotation."""
+async def test_publish_announces_to_members_unless_told_not_to(env):
+    """``announce=False`` lets the selection service batch several listing
+    changes into one members' list refresh."""
     session = _StubSession(status=200)
     svc = await _publishable_svc(
-        env, session, "gfs-1", space_id="sp-priv", space_type="private"
+        env, session, "gfs-1", space_id="sp-glob", space_type="global"
     )
-    assert await svc.publish_space_to_all("sp-priv") == 0
-    assert await svc.republish_space("sp-priv") == 0
-    assert session.calls == []
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.publish_space("sp-glob", "gfs-1", announce=False)
+    assert seen == []
+    await svc.publish_space("sp-glob", "gfs-1")
+    assert seen == ["sp-glob"]
+    session._status = 204
+    await svc.unpublish_space("sp-glob", "gfs-1", announce=False)
+    assert seen == ["sp-glob"]
+
+
+async def test_republish_skips_a_space_that_is_no_longer_global(env):
+    """The refresh loop logs and skips the refusal instead of raising, so a
+    space that turned private (or public) can't break an authority-key
+    rotation — and never re-advertises it."""
+    for space_type in ("private", "public"):
+        session = _StubSession(status=200)
+        svc = await _publishable_svc(
+            env, session, "gfs-1", space_id=f"sp-{space_type}", space_type=space_type
+        )
+        _, repo = env
+        await repo.publish_space(f"sp-{space_type}", "gfs-1")
+        assert await svc.republish_space(f"sp-{space_type}") == 0
+        assert session.calls == []
+
+
+async def test_republish_contacts_only_the_listing_gfs(env):
+    """A settings change refreshes the GFSs that list the space — never one
+    that doesn't (it would learn the space exists)."""
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(
+        env, session, "gfs-1", space_id="sp-glob", space_type="global"
+    )
+    _, repo = env
+    await repo.save(_make_conn("gfs-2", inbox_url="https://other.example.com"))
+    await repo.publish_space("sp-glob", "gfs-1")
+    assert await svc.republish_space("sp-glob") == 1
+    assert len(session.calls) == 1
+    assert all("other.example.com" not in c[1] for c in session.calls)
+
+
+async def test_service_has_no_fan_out_to_every_gfs():
+    """The "publish to / unpublish from every active GFS" helpers are gone:
+    a GFS learns a space only when its owner chooses that GFS."""
+    assert not hasattr(GfsConnectionService, "publish_space_to_all")
+    assert not hasattr(GfsConnectionService, "unpublish_space_from_all")
 
 
 async def test_unpublish_from_listed_only_contacts_listing_gfs(env):
@@ -3998,7 +4045,7 @@ async def test_unpublish_from_listed_only_contacts_listing_gfs(env):
     withdrawal."""
     session = _StubSession(status=200)
     svc = await _publishable_svc(
-        env, session, "gfs-1", space_id="sp-pub", space_type="public"
+        env, session, "gfs-1", space_id="sp-pub", space_type="global"
     )
     _, repo = env
     await repo.save(_make_conn("gfs-2", inbox_url="https://other.example.com"))
@@ -4449,3 +4496,82 @@ async def test_publish_body_never_names_the_other_listing_servers(env):
     body = json.dumps(session._last_body)
     assert "gfs_servers" not in body
     assert "elsewhere" not in body
+
+
+# ── Owner model: only the owner refreshes; only global relays ─────────────
+
+
+@pytest.mark.security
+async def test_heal_and_republish_skip_a_space_hosted_elsewhere(env):
+    """A legacy row for a space another household owns (a delegated admin's
+    old listing) is never refreshed, even though this household holds the
+    seed — only the owner lists a space."""
+    session = _AnonSession()
+    remote = dataclasses.replace(_fake_space("sp-r"), owner_instance_id="elsewhere")
+    repo = _FakeSpaceRepo({"sp-r": remote}, {"sp-r": b"\x01" * 32})
+    svc = await _heal_svc(env, session, gfs_id="g1", spaces=["sp-r"], space_repo=repo)
+    assert await svc.heal_space_pins("g1") == 0
+    assert await svc.republish_space("sp-r") == 0
+    assert session.posts == []
+
+
+@pytest.mark.security
+async def test_relay_needs_a_global_space_and_an_accepted_listing(env):
+    """A leftover row of a space that left the global tier, or a listing the
+    GFS still holds for review, gets no relayed content."""
+    session = _RecordingSession()
+    svc, _kp = await _publish_event_svc(
+        env, session, space_id="sp-relay", gfs_ids=["g1", "g2"]
+    )
+    svc._anon_publish.update({"g1": True, "g2": True})
+    _db, conn_repo = env
+    await conn_repo.publish_space("sp-relay", "g2", "pending")
+    spaces = _FakeSpaceRepo({"sp-relay": _fake_space("sp-relay")}, {})
+    svc._space_repo = spaces
+    envelope = {"space_id": "sp-relay"}
+    assert (
+        await svc.publish_space_event(
+            space_id="sp-relay", event_type="space_post_public", payload=envelope
+        )
+        == 1
+    )
+    assert [u for u, _b in session.posts] == ["https://g1.example/gfs/publish"]
+    session.posts.clear()
+    spaces._spaces["sp-relay"] = dataclasses.replace(
+        spaces._spaces["sp-relay"], space_type=SpaceType.PUBLIC
+    )
+    assert (
+        await svc.publish_space_event(
+            space_id="sp-relay", event_type="space_post_public", payload=envelope
+        )
+        == 0
+    )
+    assert session.posts == []
+
+
+@pytest.mark.security
+async def test_heal_and_refresh_relist_under_the_change_lock(env):
+    """A heal / refresh re-publish takes the owner's per-space change lock
+    and re-checks the row under it, so it never re-lists on a GFS the owner
+    removed meanwhile."""
+    session = _AnonSession()
+    repo = _FakeSpaceRepo({"sp-a": _fake_space("sp-a")}, {"sp-a": b"\x01" * 32})
+    svc = await _heal_svc(env, session, gfs_id="g1", spaces=["sp-a"], space_repo=repo)
+    _db, conn_repo = env
+    locked: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def _lock(space_id):
+        locked.append(space_id)
+        # The owner withdrew the listing while the heal waited for the lock.
+        await conn_repo.unpublish_space(space_id, "g1")
+        yield
+
+    svc.attach_change_lock(_lock)
+    assert await svc.heal_space_pins("g1") == 0
+    assert locked == ["sp-a"]
+    assert session.posts == []
+    await conn_repo.publish_space("sp-a", "g1")
+    assert await svc.republish_space("sp-a") == 0
+    assert locked == ["sp-a", "sp-a"]
+    assert session.posts == []

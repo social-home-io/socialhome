@@ -147,6 +147,7 @@ class AbstractSpaceRepo(Protocol):
     async def set_gfs_servers(
         self, space_id: str, servers: SignedGfsServerList | None
     ) -> None: ...
+    async def has_gfs_servers(self, space_id: str) -> bool: ...
     async def list_by_type(self, space_type: SpaceType) -> list[Space]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
     async def list_location_shared_spaces_for_user(
@@ -731,6 +732,16 @@ class SqliteSpaceRepo:
             "UPDATE spaces SET gfs_servers=? WHERE id=?",
             (signed_gfs_server_list_to_column(servers), space_id),
         )
+
+    async def has_gfs_servers(self, space_id: str) -> bool:
+        """Whether ``spaces.gfs_servers`` holds ANY value — also one this
+        build can't read (a suite from a newer build, after a rollback),
+        which ``Space.gfs_servers`` reports as ``None``."""
+        row = await self._db.fetchone(
+            "SELECT gfs_servers IS NOT NULL AS present FROM spaces WHERE id=?",
+            (space_id,),
+        )
+        return bool(row is not None and row["present"])
 
     async def set_tz(self, space_id: str, tz: str) -> None:
         """Set the space's IANA timezone anchor.

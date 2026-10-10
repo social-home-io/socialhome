@@ -1320,29 +1320,24 @@ async def test_gfs_connection_delete_missing_404(client):
     assert r.status == 404
 
 
-async def test_gfs_space_publish_non_admin_403(client):
+async def test_gfs_space_publish_unknown_space_404(client):
+    """Listing is the space owner's choice: an unknown space is a 404 for
+    anyone, before any GFS is looked at."""
     await _add_second_user(client)
-    r = await client.post(
-        "/api/spaces/x/publish/y",
-        headers={"Authorization": "Bearer bob-tok"},
-    )
-    assert r.status == 403
+    for token in ("bob-tok", client._tok):
+        r = await client.post(
+            "/api/spaces/x/publish/y",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status == 404
 
 
-async def test_gfs_space_publish_bad_422(client):
-    r = await client.post(
-        "/api/spaces/nope/publish/nope",
-        headers=_auth(client._tok),
-    )
-    assert r.status == 422
-
-
-async def test_gfs_space_unpublish_bad_422(client):
+async def test_gfs_space_unpublish_unknown_space_404(client):
     r = await client.delete(
         "/api/spaces/nope/publish/nope",
         headers=_auth(client._tok),
     )
-    assert r.status == 422
+    assert r.status == 404
 
 
 async def test_gfs_publications_list(client):
