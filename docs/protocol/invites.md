@@ -1402,6 +1402,15 @@ dropped with their snapshot-less pending invitations, so the real owner can
 invite again — never a GFS-mirror stub (mirror provenance or a recorded
 GFS seat), whose teardown is the mirror's.
 
+**Validated as of receipt.** An invitation's owner statement, inviter proof
+and authority key are checked as of its RECEIPT time (`received_at_ms` in the
+local, KEK-protected snapshot), not at the accept. An invitation left pending
+for a long time can therefore still be accepted after the owner rotated its
+authority key: the household seats the stub on the key the snapshot names and
+learns the current key through the normal sync / rotation catch-up afterwards.
+If the owner no longer resolves as it did on receipt, the accept is refused
+and the user needs a new invitation.
+
 ### Private invite over the federation mesh (v_6+)
 
 The sealed `SPACE_PRIVATE_INVITE` payload carries `host_identity_pk` —
