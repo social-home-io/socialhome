@@ -94,10 +94,16 @@ from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space import PUBLIC_SPACE_TIERS, SpaceRole, mirrorable_remote_role
 from ..infrastructure.event_bus import EventBus
-from .space_authority_pin import apply_authority_cert, owner_authority_cert
+from .space_authority_pin import (
+    apply_authority_cert,
+    owner_authority_cert,
+    owner_statement_via,
+)
 from .space_crypto_service import KEY_SUITE_AESGCM_256, SUPPORTED_KEY_SUITES
 from .space_service import (
     space_metadata_for_federation,
+    apply_gfs_servers_from_metadata,
+    apply_owner_statement_from_metadata,
     keep_local_space_state,
     stub_space_from_metadata,
 )
@@ -619,7 +625,11 @@ class SpaceAuthorityRotationService:
                     space_seed=seed,
                 ),
             }
-        meta = space_metadata_for_federation(space, authority_cert=cert)
+        meta = space_metadata_for_federation(
+            space,
+            authority_cert=cert,
+            owner_statement=owner_statement_via(fed, space),
+        )
         meta["config_author_instance"] = self._own_instance_id
         meta.update(
             sign_authority_event(
@@ -1445,6 +1455,17 @@ class SpaceAuthorityRotationService:
             older_than=cutoff,
         ):
             return
+        # The owner's signed GFS list rides the bundle's config too; ``save``
+        # never writes it, so apply it on its own (owner signature +
+        # freshness checked there).
+        await apply_gfs_servers_from_metadata(
+            self._spaces, space.id, meta=meta, owner_instance_id=owner
+        )
+        # The owner's statement for the NEW key (migration 0093); the meta
+        # is signed by that key, checked above.
+        await apply_owner_statement_from_metadata(
+            self._spaces, space.id, meta=meta, owner_instance_id=owner
+        )
         if space.features.delegated_admin_authority and not (
             refreshed.features.delegated_admin_authority
         ):

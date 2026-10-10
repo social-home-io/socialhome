@@ -29,6 +29,7 @@ from typing import Literal, TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .errors import CodedError
+from .gfs_server import SignedGfsServerList
 from .presence import truncate_coord
 
 if TYPE_CHECKING:
@@ -1039,6 +1040,9 @@ class SpaceConfigEventType(StrEnum):
     COVER_UPDATED = "cover_updated"
     ICON_UPDATED = "icon_updated"
     ABOUT_UPDATED = "about_updated"
+    #: The owner's GFS list (``Space.gfs_servers``) changed — federates as a
+    #: ``SPACE_CONFIG_CHANGED`` snapshot like any other config edit.
+    GFS_SERVERS_CHANGED = "gfs_servers_changed"
 
 
 def role_change_event_type(
@@ -1508,6 +1512,56 @@ class Space:
     #: ``None`` = unset; normalizes to ``"general"`` on display. Shown only
     #: for public/global tiers. Replaces the legacy ``target_audience`` hint.
     category: str | None = None
+    #: The GFSs the space is listed on, as the OWNER household signed them
+    #: (migration 0093, :mod:`socialhome.domain.gfs_server`). On the owner it
+    #: is derived from its active publications; on a member it is the
+    #: owner's signed copy from ``space_meta``, verified against the owner's
+    #: identity key. Never written by ``save`` — only by ``set_gfs_servers``.
+    #: ``None`` = not known.
+    gfs_servers: SignedGfsServerList | None = None
+    #: The owner household's signed ownership statement as last verified
+    #: here (migration 0093, :mod:`socialhome.space_owner_statement`),
+    #: canonical JSON text — relayed in the snapshots this household sends.
+    #: Never written by ``save`` — only by ``set_owner_statement``.
+    owner_statement: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class JoinOwner:
+    """Who a §D1b join stub is seated under (migration 0093).
+
+    ``owner_instance_id`` — the stub's owner. ``trusted_inviter`` — the
+    delegated admin household that issued the invite, set ONLY when the
+    owner's signed statement and the inviter's seed-holder proof both
+    verified (it then becomes ``spaces.invited_by_instance``).
+    ``statement_json`` — the owner's verified statement to keep and relay.
+    ``proven_epoch`` — the authority-key epoch the inviter proved it holds
+    the seed of (``spaces.invited_by_epoch``).
+    """
+
+    owner_instance_id: str
+    trusted_inviter: str | None = None
+    statement_json: str | None = None
+    proven_epoch: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class InvitationSnapshot:
+    """A pending private invite's stored join snapshot, opened (migration
+    0093, ``space_invitations.join_snapshot``).
+
+    ``meta`` — the issuer's ``space_meta``, its content key back in wire
+    shape. ``inviter_identity_pk`` — the issuer's claimed identity key.
+    ``received_at_ms`` — when the invitation arrived here: the owner
+    statement's freshness is judged at that moment, so an invitation that
+    was fresh on receipt stays acceptable. ``owner_instance_id`` — the owner
+    resolved on receipt; the accept refuses rather than seat under another.
+    """
+
+    meta: dict
+    inviter_identity_pk: str | None = None
+    received_at_ms: int | None = None
+    owner_instance_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

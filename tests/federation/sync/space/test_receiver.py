@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import orjson
 import pytest
 
-from socialhome.crypto import generate_identity_keypair
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.domain.events import SpaceContentKeyImported, SpaceSyncComplete
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.federation import (
@@ -71,9 +71,15 @@ class _FakeSpaceRepo:
         self.host_identity_pks: dict[str, str] = {}
         #: space_id → Space (or a stand-in exposing owner_instance_id).
         self.spaces: dict[str, object] = {}
+        #: (space_id, instance_id) → a member household's recorded identity
+        #: key (``space_instances.identity_pk``).
+        self.instance_pks: dict[tuple[str, str], str] = {}
 
     async def get_host_identity_pk(self, space_id):
         return self.host_identity_pks.get(space_id)
+
+    async def get_space_instance_identity_pk(self, space_id, instance_id):
+        return self.instance_pks.get((space_id, instance_id))
 
     async def set_host_identity_pk(self, space_id, pk_hex):
         self.host_identity_pks[space_id] = pk_hex
@@ -1411,3 +1417,59 @@ async def test_an_out_of_range_snapshot_stores_nothing_and_breaks_no_batch(
         await db.fetchone("SELECT 1 FROM space_instances WHERE instance_id='b'")
         is not None
     )
+
+
+# ── An unpaired non-host provider (the admin that invited us) ─────────────
+
+
+async def _empty_members_chunk(kp, space_id="sp-mesh"):
+    crypto = _FakeCrypto()
+    _, ciphertext = await crypto.encrypt_chunk(
+        space_id=space_id,
+        sync_id="sync-adm",
+        plaintext=orjson.dumps({"records": []}),
+    )
+    return serialise_chunk(
+        await _sign_as_peer(
+            kp,
+            {
+                "sync_id": "sync-adm",
+                "resource": "members",
+                "space_id": space_id,
+                "epoch": 0,
+                "seq_start": 0,
+                "seq_end": 0,
+                "is_last": False,
+                "encrypted_payload": ciphertext,
+            },
+        )
+    )
+
+
+@pytest.mark.parametrize("recorded", ["own", "none", "other"])
+async def test_on_chunk_verifies_an_unpaired_member_provider_by_its_recorded_key(
+    receiver, recorded
+):
+    """A household that is not the host and not paired with us is verified
+    only against the key recorded on its own ``space_instances`` row for
+    this space — and only when that key derives to it."""
+    r, space_repo, _ = receiver
+    admin = generate_identity_keypair()
+    admin_id = derive_instance_id(admin.public_key)
+    space_repo.spaces["sp-mesh"] = SimpleNamespace(
+        owner_instance_id="the-owner",
+        archived=False,
+        archived_reason=None,
+        dissolved=False,
+    )
+    if recorded == "own":
+        space_repo.instance_pks[("sp-mesh", admin_id)] = admin.public_key.hex()
+    elif recorded == "other":
+        # A key that does not derive to the sender is never used.
+        space_repo.instance_pks[("sp-mesh", admin_id)] = (
+            generate_identity_keypair().public_key.hex()
+        )
+    await r.on_chunk(await _empty_members_chunk(admin), from_instance=admin_id)
+    stream = r._health._streams.get("sync-adm")
+    failed = bool(stream is not None and stream.failed)
+    assert failed is (recorded != "own")

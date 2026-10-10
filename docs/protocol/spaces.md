@@ -700,8 +700,23 @@ dropping it:
 - `reason="dissolved"` — the `spaces` row is gone on the host (a dissolve
   purged it; a never-existed space collapses into this case too, so a
   dissolved space is indistinguishable from one that never existed).
-- `reason="removed"` — the space still exists on the host but the requester
-  is no longer in `space_instances`.
+- `reason="removed"` — the space still exists on the host and the requester
+  held a seat there that is gone: only tombstoned seat rows (kicked, banned
+  or left), none live. Terminal — except that the reply carries the newest
+  tombstone's `removed_at` (migration 0093), and a household whose own
+  current join is newer (a delegated admin re-invited it; the host has not
+  heard the re-join yet) keeps its copy. The two times come from different
+  clocks; skew only decides whether the copy is archived — the host still
+  holds no live seat for the household, streams it nothing and refuses its
+  writes.
+- `reason="not_seated"` (migration 0093) — the host has no record of the
+  requester at all, or its join is still in flight (a live seat whose
+  `space_instances` row has not landed yet, or a merely accepted
+  invitation). NOT terminal: the requester keeps its copy. For a space the
+  host owns with delegated admins, the reply carries the owner's current
+  signed `owner_statement` (see "The invitee's view of the inviting admin");
+  otherwise the host drops the request silently, as before. Older receivers
+  drop the unknown reason.
 
 The `dissolved`/`removed` split is an existence signal: a peer that asks
 about an *existing* space it isn't a member of learns the space exists
@@ -718,7 +733,8 @@ space's `owner_instance_id` (a non-owner can't terminate your copy), checks the
 reason is a known terminal value, and — if the copy isn't already terminally
 archived — calls `set_archived(space_id, True, reason=reason)` and publishes
 `RemoteSpaceDissolved`. The notification copy is reason-aware (`removed` →
-"you're no longer a member"). An *admin*-archived copy (`archived_reason`
+"you're no longer a member"). A `not_seated` reply never archives; the
+handler only applies the owner statement it carries. An *admin*-archived copy (`archived_reason`
 NULL) is still upgradable to a terminal reason here.
 
 Guards: the request is rate-limited (S-6, 5/h per peer+space) **before** the
@@ -1330,7 +1346,7 @@ sequenceDiagram
     participant H as HFS (host)
     participant N as HFS (new member)
     H->>N: SPACE_PRIVATE_INVITE (carries space_content_key)
-    Note over N: applying key to space_keys...
+    Note over N: user accepts — applying key to space_keys...
     H->>N: §25.6 sync chunk for epoch=N
     Note over N: decrypt_chunk raises<br/>"missing epoch" — stash
     Note over N: SpaceContentKeyImported(epoch=N) fires
@@ -1951,6 +1967,63 @@ regardless of the flag, minting directly and returning `201 {token}`. If
 a delegation-ON, non-owner space ever lacks a seed (the Phase-1 share
 never landed) the roster gossip is skipped gracefully but logged at
 WARNING — an anomaly, not a silent drop.
+
+**The invitee's view of the inviting admin** (owner decision 2026-10-10,
+migration 0093, `socialhome/federation/host_equivalence.py`). When the
+user accepts (an invitation seats nothing before that), the invitee
+seats its stub under the space's REAL owner (`space_meta.owner_instance_id`),
+not under the admin that invited it, ONLY when the snapshot carries the
+owner's signed owner statement for the pinned authority key and the admin's
+seed-holder proof (`socialhome/space_owner_statement.py`; a delegated
+admin's `build_space_snapshot_for_federation` adds the proof and relays the
+owner's latest statement). It then records that admin household in
+`spaces.invited_by_instance` (both §D1b invites and invite-link redeems);
+without both proofs the stub names the inviter itself and nothing below
+applies. Both bind the authority key epoch, and the statement must be younger
+than 30 days; the trust holds only while the statement held here is current
+for the pinned key and epoch. The owner signs a fresh statement into every
+config, invite, rotation bundle and §25.6 sync sentinel it sends. The trust
+is also bound to the key epoch the admin PROVED (`spaces.invited_by_epoch`):
+after a rotation it resumes only when the admin re-proves with the NEW seed —
+an honest delegated admin's §25.6 sentinel carries its fresh inviter proof
+(`own_inviter_proof`), checked against the sender. A moved pin, the owner's
+fresh statement or the admin's own roster never resume it on their own, so an
+admin revoked by the rotation (no new seed) stays out (see discovery.md,
+"Statements expire and follow the key"). **If the owner stays unreachable for more than 30 days**, the
+statement held here ages out: the inviting admin stops being host-equivalent
+here, and admins can no longer invite NEW households through it (their
+relayed statement is too old, so a joiner seats the stub under the admin
+itself).
+While the space's `delegated_admin_authority` is ON and that household still
+holds a live `admin` seat, the invitee treats it as **host-equivalent for
+content and admin actions** — the owner is often offline, and the admin may
+be the invitee's only way into the space:
+
+- its §25.6 catch-up stream is taken whole, like the host's (roster and bans
+  included); its chunks verify against its own identity key, kept on its
+  `space_instances` row for that space — never as `host_identity_pk`;
+- its `SPACE_MEMBER_ROLE_CHANGED`, `SPACE_MEMBER_BANNED` /
+  `SPACE_MEMBER_UNBANNED`, `SPACE_REMOTE_MEMBER_REMOVED`,
+  `SPACE_ADMIN_PROPOSAL_UPDATED` mirrors and `SPACE_ADMIN_KEY_SHARE` (the
+  seed must still be the private half of the pinned key) apply, and the host
+  exemption of the space-writer gate covers it.
+
+**Owner-only stays owner-only**: the owner-signed GFS list, `private_gfs`,
+`gfs_publish_mode`, the authority cert / `host_identity_pk`, the config
+last-writer-wins owner path, dissolve, sync-rejected and the age gate
+compare against `owner_instance_id` alone. Any other
+admin household gets the member-provider rules. Turning delegation off — or
+demoting / removing that household's admin seat — ends the trust at once
+(checked on every use); the admin seat it holds here came from its own
+snapshot roster, so the trust ends for real only when the owner's role change
+or delegation-off reaches this household. Even while trusted it never
+changes, bans or unbans a user of the OWNER household (the owner seat or any
+seat the owner's household holds). The §25.6 mesh catch-up asks both the
+owner and the trusted inviter (the owner may not know this household yet),
+and an owner answers a household it never seated with the non-terminal
+`SPACE_SYNC_REJECTED` reason `not_seated` (only tombstoned seats earn
+`removed`), so a joining household never archives the space it is joining. Nothing changes for the
+owner.
 
 #### Config edits offline-of-owner (`SPACE_CONFIG_CHANGED`, v_24+)
 

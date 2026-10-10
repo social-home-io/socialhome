@@ -9,6 +9,7 @@ an invite, a redeem ACK, a roster snapshot, a GFS listing) funnels here.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +22,9 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.space_authority_pin import (
     AuthorityCertOutcome,
     apply_authority_cert,
+    owner_statement_via,
 )
+from socialhome.space_owner_statement import verify_owner_statement
 
 SPACE = "sp-pin"
 K1 = "aa" * 32
@@ -251,3 +254,46 @@ async def test_current_cert_backfills_a_pin_adopted_before_v46(env):
     cert = _cert(env, epoch=1, pk=k2)
     assert await _apply(env, cert) is AuthorityCertOutcome.CURRENT
     assert await env.repo.get_authority_cert(SPACE) == cert
+
+
+# ── Migration 0093: the owner statement a snapshot ships ─────────────────
+
+
+def _bare_space(owner: str, *, statement: str | None = None) -> Space:
+    return Space(
+        id="sp-st",
+        name="S",
+        owner_instance_id=owner,
+        owner_username="o",
+        identity_public_key="ab" * 32,
+        config_sequence=1,
+        features=SpaceFeatures(),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+        owner_statement=statement,
+    )
+
+
+def test_owner_statement_via_signs_fresh_on_the_owner() -> None:
+    kp = generate_identity_keypair()
+    own = derive_instance_id(kp.public_key)
+    fed = SimpleNamespace(own_instance_id=own, own_identity_seed=kp.private_key)
+    statement = owner_statement_via(fed, _bare_space(own))
+    assert statement is not None
+    verify_owner_statement(
+        statement, space_id="sp-st", owner_instance_id=own, authority_pk_hex="ab" * 32
+    )
+
+
+def test_owner_statement_via_relays_the_stored_one_elsewhere() -> None:
+    fed = SimpleNamespace(own_instance_id="member", own_identity_seed=b"\x01" * 32)
+    stored = '{"issued_at":1,"space_id":"sp-st"}'
+    assert owner_statement_via(fed, _bare_space("owner", statement=stored)) == {
+        "issued_at": 1,
+        "space_id": "sp-st",
+    }
+    assert owner_statement_via(fed, _bare_space("owner")) is None
+    assert owner_statement_via(fed, _bare_space("owner", statement="nope")) is None
+    # The owner without a usable identity key signs nothing.
+    unwired = SimpleNamespace(own_instance_id="owner", own_identity_seed=None)
+    assert owner_statement_via(unwired, _bare_space("owner")) is None

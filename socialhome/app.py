@@ -51,7 +51,7 @@ from .domain.federation import (
 )
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
-from .federation.sync_manager import SyncSessionManager
+from .federation.sync_manager import SyncSessionManager, make_sync_reject_reason
 from .federation.transport import (
     FederationTransport,
     HttpsInboxTransport,
@@ -178,6 +178,8 @@ from .repositories.space_remote_location_repo import (
 )
 from .repositories.space_remote_member_repo import SqliteSpaceRemoteMemberRepo
 from .repositories.space_proposal_repo import SqliteSpaceProposalRepo
+from .services.space_authority_pin import owner_statement_for_delegated
+from .services.space_service import own_inviter_proof
 from .services.space_approval_service import SpaceApprovalService
 from .repositories.report_repo import SqliteReportRepo
 from .repositories.search_repo import SqliteSearchRepo
@@ -374,6 +376,7 @@ from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_relay_inbound import GfsRelayInbound
 from .services.gfs_route_discovery_service import GfsRouteDiscoveryService
 from .services.gfs_directory import GfsDirectoryCache
+from .services.gfs_server_selection_service import GfsServerSelectionService
 from .services.gfs_space_mirror_service import GfsSpaceMirrorService
 from .services.link_preview_service import LinkPreviewService
 from .services.map_tile_service import MapTileService
@@ -926,6 +929,24 @@ def _build_pairing_gfs_reach(
     )
 
 
+def _build_gfs_server_selection(
+    *,
+    repos: SimpleNamespace,
+    bus: EventBus,
+    gfs_connection_service: GfsConnectionService,
+) -> GfsServerSelectionService:
+    """The owner's signed GFS list (``spaces.gfs_servers``, migration 0093):
+    re-derived after every listing change and every config change of a space
+    we own, and sent to the members in a config change. Signs nothing until
+    the household identity is attached at startup."""
+    selection = GfsServerSelectionService(
+        space_repo=repos.space, gfs_repo=repos.gfs_connection, bus=bus
+    )
+    gfs_connection_service.attach_on_listings_changed(selection.sync_snapshot)
+    selection.wire()
+    return selection
+
+
 def _build_peer_gfs_relay(
     *,
     federation_repo: AbstractFederationRepo,
@@ -1266,18 +1287,37 @@ def _wire_federation_stack(
         )
         return row is not None
 
-    async def _sync_reject_reason(space_id: str) -> str:
-        # SPACE_SYNC_BEGIN from a non-member: "removed" if we still host the
-        # space (requester was dropped from it) or "dissolved" if the space
-        # row is gone (a dissolve purged it). Drives the member's archive copy.
-        row = await db.fetchone("SELECT 1 FROM spaces WHERE id=?", (space_id,))
-        return "removed" if row is not None else "dissolved"
+    async def _owner_statement_for(space_id: str) -> dict | None:
+        # Migration 0093: what a household we never seated is answered with —
+        # only for a space we OWN with delegated admins (the only case an
+        # inviter other than us can exist).
+        space = await space_repo.get(space_id)
+        if space is None:
+            return None
+        return owner_statement_for_delegated(federation_service, space, owned_only=True)
+
+    async def _sync_inviter_proof_for(space_id: str) -> dict | None:
+        # Migration 0093: as a delegated admin, re-prove the seed of the key
+        # we pin to the households we invited (they check who sends it).
+        space = await space_repo.get(space_id)
+        if space is None or not space.features.delegated_admin_authority:
+            return None
+        return await own_inviter_proof(
+            space_repo, space, federation_service.own_instance_id
+        )
+
+    async def _sync_owner_statement_for(space_id: str) -> dict | None:
+        space = await space_repo.get(space_id)
+        if space is None:
+            return None
+        return owner_statement_for_delegated(federation_service, space)
 
     sync_manager = SyncSessionManager(
         federation_repo,
         get_max_seq=_get_max_seq,
         check_member=_check_member,
-        reject_reason=_sync_reject_reason,
+        reject_reason=make_sync_reject_reason(space_repo, space_remote_member_repo),
+        owner_statement_for=_owner_statement_for,
     )
     federation_service.attach_sync_manager(sync_manager)
     federation_service.attach_idempotency_cache(idempotency_cache)
@@ -1457,6 +1497,7 @@ def _wire_federation_stack(
     space_membership_handlers = SpaceMembershipInboundHandlers(
         bus=bus,
         space_repo=space_repo,
+        seat_repo=space_remote_member_repo,
     )
     space_membership_handlers.attach_to(federation_service)
     app[K.space_membership_handlers_key] = space_membership_handlers
@@ -1570,6 +1611,11 @@ def _wire_federation_stack(
         # §25.6 incremental sessions: a periodic sync streams only the rows
         # changed since the household's last confirmed stream (0086).
         watermarks=SyncWatermarks(space_sync_watermark_repo),
+        # Migration 0093: each stream's sentinel carries the owner's
+        # statement (fresh on the owner, relayed by a member) for spaces
+        # with delegated admins — no config edit, no sequence bump.
+        owner_statement_for=_sync_owner_statement_for,
+        inviter_proof_for=_sync_inviter_proof_for,
     )
     space_sync_receiver = SpaceSyncReceiver(
         bus=bus,
@@ -1621,6 +1667,8 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
         # §25.6 echo (0087): a periodic BEGIN carries it as ``have_seq``.
         applied_seqs=space_sync_watermark_repo,
+        # Migration 0093: a trusted inviting admin is a mesh target too.
+        seat_repo=space_remote_member_repo,
     )
     space_sync_scheduler.wire()
     app[K.space_sync_scheduler_key] = space_sync_scheduler
@@ -2461,6 +2509,9 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── GFS connection service (§24) ────────────────────────────────────
     gfs_connection_service = GfsConnectionService(repos.gfs_connection)
+    gfs_server_selection = _build_gfs_server_selection(
+        repos=repos, bus=bus, gfs_connection_service=gfs_connection_service
+    )
     # Hook space_service so flipping a space's space_type to/from 'global'
     # auto-publishes / unpublishes to every active GFS (§D1).
     space_service.attach_gfs_connection_service(gfs_connection_service)
@@ -3204,6 +3255,10 @@ def create_app(config: Config | None = None) -> web.Application:
             cover_repo=repos.space_cover,
             icon_repo=repos.space_icon,
         )
+        # The owner's GFS list is signed with the household identity key.
+        gfs_server_selection.attach_identity(
+            own_instance_id=real_instance_id, own_signing_key=identity_seed
+        )
 
         # Short-lived signed URLs for browser-loaded media — see §23.21
         # ``media_signer.py``. The HMAC key is HKDF-derived from the
@@ -3746,6 +3801,14 @@ def create_app(config: Config | None = None) -> web.Application:
         invite_forwarder.attach_space_service(real_space_service)
         invite_forwarder.attach_to(federation_service)
         real_space_service.attach_invite_forwarder(invite_forwarder)
+        # Migration 0093: an invitation no longer seats a stub before its
+        # accept. Drop the stubs older builds pre-seated for invitations
+        # nobody here ever accepted — they would block the real owner's
+        # invitation for the same id. Idempotent; fail-soft.
+        try:
+            await real_space_service.sweep_unjoined_invitation_stubs()
+        except Exception:
+            log.exception("spaces: unjoined invitation stub sweep failed at startup")
         # §D2b — redeeming an invite link from a household we have never
         # met. The sealed blob goes out through a connection server
         # addressed by instance id only; the key-wrap triple is this

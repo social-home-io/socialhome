@@ -731,6 +731,36 @@ paired peer and a `SPACE_ROUTED` envelope for a mesh-only one. A bare
 `send_event` toward an unpaired household is an un-queued `unknown_instance`
 drop, so no sync helper uses one for a possibly-unpaired counterpart.
 
+**Rejecting a non-member BEGIN** (S-1, `make_sync_reject_reason`).
+`SPACE_SYNC_REJECTED` carries a `reason`: `dissolved` (the space row is gone)
+and `removed` (the requester held a seat that is gone — only tombstoned seat
+rows, none live; carries the newest tombstone's `removed_at`, and a requester
+whose own current join is newer keeps its copy) are terminal and archive the
+requester's copy; `not_seated`
+(migration 0093 — no record at all, e.g. a household a delegated admin invited
+before the host's roster learned of it, a restore from an older backup, or a
+join still in flight: a live seat whose household row has not landed, or a
+merely accepted invitation) is NOT terminal. For a space the host owns with
+delegated admins it carries the owner's current signed `owner_statement`,
+which the requester uses to end a stale inviting-admin trust (see
+discovery.md); otherwise the host drops silently. Each stream's sentinel also
+carries the owner statement for spaces with delegated admins (no config edit).
+Older receivers drop an unknown reason.
+
+A delegated admin's sentinel also carries its `inviter_proof` (migration
+0093): its signature, with the space's authority seed, over `{space_id,
+owner_instance_id, inviter_instance_id, authority_key_epoch, authority_pk}`
+for the key it holds now. A household that admin invited
+(`spaces.invited_by_instance`) whose inviting-admin trust paused at a key
+rotation resumes it only on such a proof — naming the sender, for the pinned
+key and epoch (`apply_inviter_reproof`); an admin the rotation revoked cannot
+make one. A proof that names another household, an older key, or a key
+we do not pin is ignored. The stream whose sentinel resumed the trust was
+applied under the member rules (the trust came back only at its end), so,
+like a held-back stream, it is not reported clean and its snapshot is not
+recorded — the next session re-streams under the restored trust. Owners and
+pre-0093 senders send no `inviter_proof`; receivers ignore its absence.
+
 The HTTPS chunk handler (`_handle_space_sync_chunk`) validates that the
 envelope's `from_instance` matches the session's recorded provider and
 then forwards the inner payload to `SpaceSyncReceiver.on_chunk` — the

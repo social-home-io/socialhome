@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.domain.gfs_server import GfsServer, SignedGfsServerList
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -1895,3 +1897,196 @@ async def test_rebind_mirror_provenance_is_a_compare_and_set(env):
     )
     # The seq is kept: the heal still needs a strictly higher one.
     assert await env.repo.get_mirror_provenance("sp-m") == ("conn-new", 4)
+
+
+# ── GFS server list (migration 0093) ──────────────────────────────────────
+
+
+def _signed_list(issued_at: int = 5) -> SignedGfsServerList:
+    return sign_gfs_server_list(
+        space_id="sp-g",
+        servers=(
+            GfsServer(
+                gfs_instance_id="gfs-a",
+                inbox_url="https://gfs-a.example",
+                public_key="ab" * 32,
+                gfs_key_suite="ed25519",
+                display_name="GFS A",
+            ),
+        ),
+        issued_at=issued_at,
+        owner_seed=b"\x01" * 32,
+    )
+
+
+async def test_gfs_servers_default_none(env):
+    await env.repo.save(_space("sp-g"))
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers is None
+    row = await env.db.fetchone("SELECT gfs_servers FROM spaces WHERE id='sp-g'")
+    assert row["gfs_servers"] is None
+
+
+async def test_set_gfs_servers_round_trips(env):
+    await env.repo.save(_space("sp-g"))
+    await env.repo.set_gfs_servers("sp-g", _signed_list())
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers == _signed_list()
+    assert got.config_sequence == 0  # the caller bumps the sequence
+    await env.repo.set_gfs_servers("sp-g", None)
+    got = await env.repo.get("sp-g")
+    assert got is not None and got.gfs_servers is None
+
+
+async def test_save_never_writes_gfs_servers(env):
+    """The generic upsert (a config snapshot, ``SPACE_CREATED``, a stub
+    re-seat) can neither wipe nor replace the owner's signed list."""
+    await env.repo.save(_space("sp-g"))
+    await env.repo.set_gfs_servers("sp-g", _signed_list())
+    got = await env.repo.get("sp-g")
+    assert got is not None
+    await env.repo.save(replace(got, name="Renamed", gfs_servers=None))
+    await env.repo.save(replace(got, gfs_servers=_signed_list(issued_at=9)))
+    got = await env.repo.get("sp-g")
+    assert got is not None
+    assert got.gfs_servers == _signed_list()
+    # A brand-new row seated with a value does not store it either.
+    await env.repo.save(replace(_space("sp-new"), gfs_servers=_signed_list()))
+    fresh = await env.repo.get("sp-new")
+    assert fresh is not None and fresh.gfs_servers is None
+
+
+async def test_space_instance_identity_pk_is_per_space_and_update_only(env):
+    await env.repo.save(_space("sp-a"))
+    await env.repo.save(_space("sp-b"))
+    # No row → nothing is created.
+    await env.repo.set_space_instance_identity_pk("sp-a", "hh-1", "ab" * 32)
+    assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") is None
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    await env.repo.add_space_instance("sp-b", "hh-1")
+    await env.repo.set_space_instance_identity_pk("sp-a", "hh-1", "ab" * 32)
+    assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") == "ab" * 32
+    assert await env.repo.get_space_instance_identity_pk("sp-b", "hh-1") is None
+    # A later seat refresh keeps it.
+    await env.repo.add_space_instance("sp-a", "hh-1")
+    assert await env.repo.get_space_instance_identity_pk("sp-a", "hh-1") == "ab" * 32
+
+
+async def test_invited_by_round_trips_and_save_never_touches_it(env):
+    await env.repo.save(_space("sp-i"))
+    assert await env.repo.get_invited_by("sp-i") is None
+    await env.repo.set_invited_by("sp-i", "admin-hh")
+    assert await env.repo.get_invited_by("sp-i") == "admin-hh"
+    got = await env.repo.get("sp-i")
+    assert got is not None
+    await env.repo.save(replace(got, name="Renamed"))
+    assert await env.repo.get_invited_by("sp-i") == "admin-hh"
+    assert await env.repo.get_invited_by("nope") is None
+
+
+async def test_a_moved_pin_keeps_the_inviting_admins_mark(env):
+    """Migration 0093: an honest rotation must not end the trust for good —
+    the mark stays; trust is suspended by the owner-statement check until
+    the owner's statement for the NEW key arrives."""
+    await env.repo.save(_space("sp-r"))
+    await env.repo.set_invited_by("sp-r", "admin-hh")
+    assert await env.repo.adopt_authority_key("sp-r", "cd" * 32, 1)
+    assert await env.repo.get_invited_by("sp-r") == "admin-hh"
+
+
+async def test_invited_by_carries_its_proven_epoch(env):
+    await env.repo.save(_space("sp-e"))
+    await env.repo.set_invited_by("sp-e", "admin-hh", 2)
+    assert await env.repo.get_invited_by_epoch("sp-e") == 2
+    await env.repo.set_invited_by_epoch("sp-e", 3)
+    assert await env.repo.get_invited_by_epoch("sp-e") == 3
+    await env.repo.set_invited_by("sp-e", None)
+    assert await env.repo.get_invited_by_epoch("sp-e") is None
+    # No inviter → a re-proof has nothing to move.
+    await env.repo.set_invited_by_epoch("sp-e", 4)
+    assert await env.repo.get_invited_by_epoch("sp-e") is None
+
+
+# ── Migration 0093: pending invitations carry their own snapshot ──────────
+
+
+async def _remote_invite(repo, token: str, issuer: str, *, snapshot=None) -> None:
+    await repo.save_remote_invitation(
+        space_id="sp-x",
+        invited_by="u-inviter",
+        remote_instance_id=issuer,
+        remote_user_id="uid-alice",
+        invite_token=token,
+        join_snapshot=snapshot,
+    )
+
+
+async def test_a_remote_invitation_keeps_its_join_snapshot(env):
+    """No ``spaces`` row is needed: the invitation stands on its own."""
+    await _remote_invite(env.repo, "t-1", "inst-a", snapshot='{"meta":{"name":"A"}}')
+    await _remote_invite(env.repo, "t-2", "inst-b")
+    assert await env.repo.get("sp-x") is None
+    rows = {
+        r["invite_token"]: r
+        for r in await env.repo.list_pending_remote_invites_for("uid-alice")
+    }
+    assert rows["t-1"]["join_snapshot"] == '{"meta":{"name":"A"}}'
+    assert rows["t-2"]["join_snapshot"] is None
+
+
+async def test_expire_remote_invitations_except_keeps_the_named_households(env):
+    for token, issuer in (("t-a", "inst-a"), ("t-b", "inst-b"), ("t-c", "inst-c")):
+        await _remote_invite(env.repo, token, issuer)
+    await env.repo.expire_remote_invitations_except(
+        "sp-x", frozenset({"inst-a", "inst-b"})
+    )
+    status = {
+        t: (await env.repo.get_invitation_by_token(t))["status"]
+        for t in ("t-a", "t-b", "t-c")
+    }
+    assert status == {"t-a": "pending", "t-b": "pending", "t-c": "expired"}
+    await env.repo.expire_remote_invitations_except("sp-x", frozenset())
+    assert (await env.repo.get_invitation_by_token("t-a"))["status"] == "expired"
+
+
+async def test_an_answered_invitation_drops_its_join_snapshot(env):
+    await _remote_invite(env.repo, "t-1", "inst-a", snapshot='{"meta":{}}')
+    row = await env.repo.get_invitation_by_token("t-1")
+    await env.repo.update_invitation_status(row["id"], "pending")
+    assert (await env.repo.get_invitation_by_token("t-1"))["join_snapshot"]
+    await env.repo.update_invitation_status(row["id"], "declined")
+    assert (await env.repo.get_invitation_by_token("t-1"))["join_snapshot"] is None
+    await _remote_invite(env.repo, "t-2", "inst-b", snapshot='{"meta":{}}')
+    await env.repo.expire_remote_invitations_except("sp-x", frozenset({"inst-a"}))
+    assert (await env.repo.get_invitation_by_token("t-2"))["join_snapshot"] is None
+
+
+async def test_count_pending_remote_invitations_counts_per_issuer(env):
+    """Snapshot or not, only invitations to OUR users, only pending ones."""
+    await _remote_invite(env.repo, "t-1", "inst-a", snapshot='{"meta":{}}')
+    await _remote_invite(env.repo, "t-2", "inst-a", snapshot='{"meta":{}}')
+    await _remote_invite(env.repo, "t-3", "inst-a")  # no snapshot: counted too
+    await _remote_invite(env.repo, "t-4", "inst-b", snapshot='{"meta":{}}')
+    await env.repo.save_remote_invitation(
+        space_id="sp-y",
+        invited_by="u",
+        remote_instance_id="inst-a",
+        remote_user_id="uid-alice",
+        invite_token="t-5",
+        join_snapshot='{"meta":{}}',
+    )
+    # A host-side row names a REMOTE invitee: not received, not counted.
+    await env.repo.save_remote_invitation(
+        space_id="sp-x",
+        invited_by="uid-alice",
+        remote_instance_id="inst-a",
+        remote_user_id="their-user",
+        invite_token="t-6",
+    )
+    assert await env.repo.count_pending_remote_invitations("inst-a") == 4
+    assert (
+        await env.repo.count_pending_remote_invitations("inst-a", space_id="sp-x") == 3
+    )
+    row = await env.repo.get_invitation_by_token("t-1")
+    await env.repo.update_invitation_status(row["id"], "declined")
+    assert await env.repo.count_pending_remote_invitations("inst-a") == 3

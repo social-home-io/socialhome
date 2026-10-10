@@ -202,7 +202,8 @@ async def test_invite_accept_loop_e2e(client):
     ).json()
     assert any(row.get("invite_token") == invite_token for row in inbox)
     # Step 3: /api/spaces should NOT include the space yet — the stub
-    # was seated but Anna's ``space_members`` is empty until accept.
+    # is NOT seated before the accept (migration 0093), so Anna's list
+    # cannot show it.
     spaces_pre = await (
         await client.get("/api/spaces", headers=_auth(client._anna_token))
     ).json()
@@ -331,6 +332,14 @@ async def test_invite_carries_space_content_key_for_decrypt(client):
             "space_meta": meta,
         },
     )
+    # Migration 0093: nothing is imported before the user accepts — the
+    # key waits KEK-wrapped on the invitation row.
+    assert await space_crypto.export_current_key(space_id) is None
+    resp = await client.post(
+        f"/api/remote_invites/{invite_token}/accept",
+        headers=_auth(client._anna_token),
+    )
+    assert resp.status == 204
     # The receiver's space_keys row exists now. Verify by exporting
     # it back through the service — round-trip proves persistence
     # without us reaching into the SQLite layer directly.

@@ -9,7 +9,7 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.infrastructure.key_manager import KeyManager, KeyManagerError
 from socialhome.repositories.space_key_repo import (
     SqliteSpaceKeyRepo,
 )
@@ -687,3 +687,17 @@ async def test_reset_to_key_rejects_wrong_length(crypto_env):
         await crypto.reset_to_key(
             "sp-1", 1, b"short", rotated_by="x", authority_epoch=1
         )
+
+
+async def test_seal_at_rest_round_trips_only_under_its_context(crypto_env):
+    """Migration 0093: a pending invitation's content key is KEK-wrapped at
+    rest, bound to that invitation — never plaintext, never movable."""
+    crypto, _ = crypto_env
+    raw = b"\x07" * 32
+    sealed = crypto.seal_at_rest(raw, context="invite:sp-1:t-1")
+    assert raw.hex() not in sealed
+    assert crypto.open_at_rest(sealed, context="invite:sp-1:t-1") == raw
+    with pytest.raises(KeyManagerError):
+        crypto.open_at_rest(sealed, context="invite:sp-1:t-2")
+    with pytest.raises(ValueError):
+        crypto.seal_at_rest(b"short", context="invite:sp-1:t-1")

@@ -52,10 +52,14 @@ from ....domain.federation import FederationEventType, PairingStatus
 from ....domain.space import Space, SpaceRole, SpaceType
 from ....infrastructure.event_bus import EventBus
 from ....infrastructure.reconnect_queue import P1_SECURITY, P4_DM, P6_PRODUCTIVITY
+from ...host_equivalence import acts_as_host
 
 if TYPE_CHECKING:
     from ....infrastructure.reconnect_queue import ReconnectSyncQueue
     from ....repositories.federation_repo import AbstractFederationRepo
+    from ....repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
     from ....repositories.space_repo import AbstractSpaceRepo
     from ....repositories.space_sync_watermark_repo import (
         AbstractSpaceSyncWatermarkRepo,
@@ -123,6 +127,7 @@ class SpaceSyncScheduler:
         "_federation",
         "_federation_repo",
         "_space_repo",
+        "_seat_repo",
         "_queue",
         "_sync_manager",
         "_own_instance_id",
@@ -153,8 +158,12 @@ class SpaceSyncScheduler:
         own_instance_id: str,
         interval_seconds: float = PERIODIC_INTERVAL_SECONDS,
         applied_seqs: "AbstractSpaceSyncWatermarkRepo | None" = None,
+        seat_repo: "AbstractSpaceRemoteMemberRepo | None" = None,
     ) -> None:
         self._bus = bus
+        #: The roster mirror: a trusted inviting admin household is a mesh
+        #: catch-up target too (migration 0093). ``None``: owner only.
+        self._seat_repo = seat_repo
         #: §25.6 echo (migration 0087): the provider snapshot of the last
         #: stream we applied cleanly, per (space, provider) — a periodic
         #: BEGIN carries it as ``have_seq``. ``None``: never sent, so every
@@ -572,8 +581,11 @@ class SpaceSyncScheduler:
         30-minute tick (#648).
         """
         pending = 0
-        for space in await self._list_joined_remote_spaces():
-            host = space.owner_instance_id
+        pairs: list[tuple[Space, str]] = []
+        for joined in await self._list_joined_remote_spaces():
+            for target in await self._mesh_targets(joined):
+                pairs.append((joined, target))
+        for space, host in pairs:
             key = (space.id, host)
             if key in self._mesh_catchup_done:
                 # Sentinel observed — this pair is genuinely caught up.
@@ -592,7 +604,12 @@ class SpaceSyncScheduler:
                 shipped = await self._federation.begin_mesh_catchup_sync(
                     space_id=space.id,
                     host_instance_id=host,
-                    extra_payload=await self._echo_for(space.id, host),
+                    # The authority echo is the owner's business alone.
+                    extra_payload=(
+                        await self._echo_for(space.id, host)
+                        if host == space.owner_instance_id
+                        else None
+                    ),
                 )
             except Exception:  # pragma: no cover — begin_* is fail-soft
                 log.exception(
@@ -615,9 +632,10 @@ class SpaceSyncScheduler:
             return 0
         pending = 0
         try:
-            hosts = sorted(
-                {s.owner_instance_id for s in await self._list_joined_remote_spaces()}
-            )
+            targets: set[str] = set()
+            for joined in await self._list_joined_remote_spaces():
+                targets.update(await self._mesh_targets(joined))
+            hosts = sorted(targets)
         except Exception:  # pragma: no cover — defensive
             log.exception("space-sync-scheduler: listing mesh hosts failed")
             return 0
@@ -636,6 +654,26 @@ class SpaceSyncScheduler:
             else:
                 pending += 1
         return pending
+
+    async def _mesh_targets(self, space: Space) -> list[str]:
+        """Who a mesh catch-up / version announcement for *space* goes to:
+        its owner, and — on a household a delegated admin invited — that
+        inviting admin household while it is host-equivalent here
+        (:mod:`socialhome.federation.host_equivalence`). The owner may not
+        know of us yet, or be offline; the inviter seated us."""
+        targets = [space.owner_instance_id]
+        if self._seat_repo is not None:
+            inviter = await self._space_repo.get_invited_by(space.id)
+            if (
+                inviter
+                and inviter not in targets
+                and inviter != self._own_instance_id
+                and await acts_as_host(
+                    self._space_repo, self._seat_repo, space, inviter
+                )
+            ):
+                targets.append(inviter)
+        return targets
 
     async def _list_joined_remote_spaces(self) -> list[Space]:
         """Spaces hosted elsewhere in which this household holds a local

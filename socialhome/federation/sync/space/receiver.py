@@ -29,6 +29,7 @@ from typing import Any, Protocol, TYPE_CHECKING
 
 import orjson as _orjson
 
+from ....crypto import derive_instance_id
 from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
 from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
@@ -50,6 +51,7 @@ from ....domain.gallery import GalleryAlbum, GalleryItem
 from ....domain.space import (
     ContentAction,
     SpaceMember,
+    SpaceRole,
     SpaceZone,
     parse_have_seq,
     validate_zone_color,
@@ -81,6 +83,7 @@ from ....domain.timetable import (
 from ....infrastructure.event_bus import EventBus
 from ....utils.timezones import coerce_tz
 from ....media.cleanup import unlink_unreferenced
+from ...host_equivalence import touches_owner_household
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
     GALLERY_ITEM_KIND,
@@ -105,6 +108,10 @@ from ....services.inbound_media_store import (
 )
 from ....services.link_preview_service import wire_link_preview
 from ....services.page_conflict_service import PageMode, canonical_from_wire
+from ....services.space_service import (
+    apply_inviter_reproof,
+    apply_owner_statement_from_metadata,
+)
 from ...space_scope import archive_refusal
 from .exporter import (
     ALLOWED_RESOURCES,
@@ -589,6 +596,50 @@ class SpaceSyncReceiver:
                 space_id,
             )
 
+    async def _unpaired_provider_key(
+        self, space_id: str, from_instance: str
+    ) -> bytes | None:
+        """The identity key to verify an UNPAIRED provider's chunk with.
+
+        * The household this stub names as the space's host: the stub's
+          ``host_identity_pk`` (#648).
+        * Any other household of the space — e.g. the delegated admin
+          household that invited us over the mesh and streams our catch-up:
+          the key recorded on its own ``space_instances`` row for THIS space
+          (migration 0078's column), accepted only when it derives to the
+          sender (§4.1.2). That key authenticates the chunk and nothing
+          more; what a non-host provider may write is still decided per
+          record (:meth:`_admit`).
+
+        Without one of these, no unpaired instance that merely names the
+        space id is verified at all."""
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return None
+        if space.owner_instance_id == from_instance:
+            key_hex = await self._space_repo.get_host_identity_pk(space_id)
+        else:
+            key_hex = await self._space_repo.get_space_instance_identity_pk(
+                space_id, from_instance
+            )
+        if not key_hex:
+            return None
+        try:
+            key = bytes.fromhex(key_hex)
+        except ValueError:
+            log.warning(
+                "sync chunk: stored identity key for %s in space %s is not "
+                "valid hex — dropping",
+                from_instance,
+                space_id,
+            )
+            return None
+        if space.owner_instance_id != from_instance and (
+            len(key) != 32 or derive_instance_id(key) != from_instance
+        ):
+            return None
+        return key
+
     async def on_chunk(
         self,
         raw: bytes | str,
@@ -670,33 +721,14 @@ class SpaceSyncReceiver:
             pq_pk_hex = peer.remote_pq_identity_pk
             pq_pk = bytes.fromhex(pq_pk_hex) if pq_pk_hex else None
         else:
-            host_pk_hex = await self._space_repo.get_host_identity_pk(space_id)
-            space = await self._space_repo.get(space_id)
-            # Only the household this stub says hosts the space may sign its
-            # content. Without this, any unpaired instance whose chunks
-            # mentioned the space id would be verified against the host's key
-            # — it would fail the signature check, but the identity binding
-            # belongs here, explicitly, not as a side effect.
-            if (
-                not host_pk_hex
-                or space is None
-                or space.owner_instance_id != from_instance
-            ):
+            ed_public_key = await self._unpaired_provider_key(space_id, from_instance)
+            if ed_public_key is None:
                 self._health.failed(sync_id)
                 log.debug(
                     "sync chunk from unknown instance %s for space %s — "
-                    "no paired-peer row and no matching host key; dropping",
+                    "no paired-peer row and no matching host / provider key; "
+                    "dropping",
                     from_instance,
-                    space_id,
-                )
-                return
-            try:
-                ed_public_key = bytes.fromhex(host_pk_hex)
-            except ValueError:
-                self._health.failed(sync_id)
-                log.warning(
-                    "sync chunk: stored host_identity_pk for space %s is not "
-                    "valid hex — dropping",
                     space_id,
                 )
                 return
@@ -722,6 +754,21 @@ class SpaceSyncReceiver:
 
         # Sentinel path — publish end-of-stream + return.
         if resource == SENTINEL_RESOURCE:
+            # Migration 0093: the owner's statement rides the sentinel —
+            # kept when it is the owner's, for the key and epoch we pin,
+            # and newer than ours. No config edit, no sequence bump.
+            await self._keep_owner_statement(space_id, envelope.get("owner_statement"))
+            # …and our inviting admin's fresh seed proof for the key we pin
+            # resumes its trust after a rotation (never the pin move alone).
+            # This stream's chunks were applied under the member rules (the
+            # trust resumed only now), so like a held-back stream it is not
+            # clean: the next session re-streams under the restored trust.
+            reproved = await apply_inviter_reproof(
+                self._space_repo,
+                space_id,
+                provider=from_instance,
+                proof=envelope.get("inviter_proof"),
+            )
             space_now = await self._space_repo.get(space_id)
             # An archive lifted (or set) while the stream ran: the lift
             # dropped our echo (migration 0090) so the next session is full
@@ -730,10 +777,13 @@ class SpaceSyncReceiver:
             archive_changed = self._health.archive_changed(
                 sync_id, archived=bool(space_now is not None and space_now.archived)
             )
-            clean = self._streaks.clean(
-                self._health.finish(sync_id, envelope.get("chunk_count")),
-                space_id,
-                from_instance,
+            clean = (
+                self._streaks.clean(
+                    self._health.finish(sync_id, envelope.get("chunk_count")),
+                    space_id,
+                    from_instance,
+                )
+                and not reproved
             )
             if clean and not archive_changed:
                 await self._record_applied(
@@ -922,11 +972,75 @@ class SpaceSyncReceiver:
         # v_36: whoever streams it — the host included — a record may not
         # claim an owner-bound id for anybody but the user it commits to.
         records = [r for r in records if not _claims_bound_id(resource, space_id, r)]
+        records = await self._spare_owner_people(resource, space_id, records, provider)
         if records:
             await self._persist(
                 resource, space_id, records, provider=provider, held_back=held_back
             )
         return held_back
+
+    async def _keep_owner_statement(self, space_id: str, statement: object) -> None:
+        if not isinstance(statement, dict):
+            return
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return
+        try:
+            await apply_owner_statement_from_metadata(
+                self._space_repo,
+                space_id,
+                meta={
+                    "owner_statement": statement,
+                    "identity_public_key": space.identity_public_key,
+                },
+                owner_instance_id=space.owner_instance_id,
+                authority_key_epoch=space.authority_key_epoch,
+            )
+        except Exception:  # pragma: no cover — defensive
+            log.exception("sync: keeping the owner statement for %s failed", space_id)
+
+    async def _spare_owner_people(
+        self,
+        resource: str,
+        space_id: str,
+        records: list[dict[str, Any]],
+        provider: str,
+    ) -> list[dict[str, Any]]:
+        """Roster and ban records from a provider that is NOT the owner — a
+        trusted inviting admin, whose stream is otherwise taken like the
+        host's (migration 0093) — never touch the owner household's people
+        (the owner seat or any seat the owner's household holds) and never
+        name anybody ``owner``. Only the owner decides about its own."""
+        if resource not in ("members", "bans") or not records:
+            return records
+        space = await self._space_repo.get(space_id)
+        if space is None or space.owner_instance_id == provider:
+            return records
+        seat_repo = self._authorship.seat_repo if self._authorship else None
+        kept: list[dict[str, Any]] = []
+        for r in records:
+            if resource == "members" and str(r.get("role") or "") == (
+                SpaceRole.OWNER.value
+            ):
+                continue
+            if await touches_owner_household(
+                self._space_repo,
+                seat_repo,
+                space,
+                user_id=str(r.get("user_id") or ""),
+            ):
+                continue
+            kept.append(r)
+        if len(kept) != len(records):
+            log.warning(
+                "space sync: dropped %d %s record(s) from non-owner %s for %s — "
+                "they named the owner household's people",
+                len(records) - len(kept),
+                resource,
+                provider,
+                space_id,
+            )
+        return kept
 
     async def _persist(
         self,
@@ -1418,7 +1532,7 @@ class SpaceSyncReceiver:
         Refusals are summarised once per chunk.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -1503,7 +1617,7 @@ class SpaceSyncReceiver:
         it), so a stale copy streamed later cannot create the comment.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -1588,7 +1702,7 @@ class SpaceSyncReceiver:
         Refusals are summarised once per chunk.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -1675,7 +1789,7 @@ class SpaceSyncReceiver:
         once per chunk.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         cross_space: list[str] = []
         unbound = 0
         for r in records:
@@ -1772,7 +1886,7 @@ class SpaceSyncReceiver:
         Refusals are summarised once per chunk.
         """
         space = await self._space_repo.get(space_id)
-        from_host = space is not None and space.owner_instance_id == provider
+        from_host = await self._acts_as_host(space, provider)
         is_host = (
             space is not None
             and self._page_conflicts is not None
@@ -2226,14 +2340,24 @@ class SpaceSyncReceiver:
         for page_id, seq in highest.items():
             await engine.raise_floor(space_id, page_id, seq, provider=provider)
 
+    async def _acts_as_host(self, space: Any, provider: str) -> bool:
+        """``provider`` hosts the space HERE: its owner, or the delegated
+        admin household that invited us while delegation is on
+        (:mod:`socialhome.federation.host_equivalence`) — whose chunks are
+        then taken whole, like the owner's. Without an authorship binder
+        (no seat repo) only the owner counts."""
+        if space is None or not provider:
+            return False
+        if space.owner_instance_id == provider:
+            return True
+        if self._authorship is None:
+            return False
+        return await self._authorship.acts_as_host(space, provider)
+
     async def _is_host(self, space_id: str, provider: str) -> bool:
         """Is ``provider`` the household hosting ``space_id``?"""
         space = await self._space_repo.get(space_id)
-        return (
-            bool(provider)
-            and space is not None
-            and (space.owner_instance_id == provider)
-        )
+        return await self._acts_as_host(space, provider)
 
     async def _is_host_version(
         self, space_id: str, provider: str, r: dict[str, Any]
@@ -2242,7 +2366,7 @@ class SpaceSyncReceiver:
         if "seq" not in r or not provider:
             return False
         space = await self._space_repo.get(space_id)
-        return space is not None and space.owner_instance_id == provider
+        return await self._acts_as_host(space, provider)
 
     async def _apply_page_version(
         self, page: Page, r: dict[str, Any], space_id: str, provider: str
@@ -2332,7 +2456,7 @@ class SpaceSyncReceiver:
                     reason,
                 )
                 return []
-        if space is not None and provider and space.owner_instance_id == provider:
+        if await self._acts_as_host(space, provider):
             return records
         if self._authorship is None:
             log.warning(

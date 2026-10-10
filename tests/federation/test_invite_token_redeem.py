@@ -46,6 +46,7 @@ from socialhome.domain.space import (
     Space,
     SpaceFeatureAccess,
     SpaceFeatures,
+    SpaceMember,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
@@ -128,6 +129,8 @@ class _FakeSpaceRepo:
         self.tokens: dict[str, dict] = {}
         self.space_instances: list[tuple[str, str]] = []
         self.bans: set[tuple[str, str]] = set()
+        # Which pending invitations a seated redeem expired (migration 0093).
+        self.expired_except: tuple[str, frozenset[str]] | None = None
         # Allow tests to force an exception out of consume_invite_token.
         self.consume_should_raise: Exception | None = None
         # §D1b stub bookkeeping — the coordinator now seats a local
@@ -223,6 +226,34 @@ class _FakeSpaceRepo:
 
     async def list_members(self, space_id):
         return [m for m in self.members if getattr(m, "space_id", None) == space_id]
+
+    # ── Migration 0093 (owner statement / inviting admin) ─────────────
+    async def get_space_seed(self, space_id):
+        return None
+
+    async def get_invited_by(self, space_id):
+        return None
+
+    async def set_invited_by(self, space_id, instance_id):
+        pass
+
+    async def set_owner_statement(self, space_id, statement_json):
+        pass
+
+    async def list_member_instances(self, space_id):
+        return [i for s, i in self.space_instances if s == space_id]
+
+    async def remove_space_instance(self, space_id, instance_id):
+        self.space_instances = [
+            p for p in self.space_instances if p != (space_id, instance_id)
+        ]
+
+    async def expire_remote_invitations_except(self, space_id, keep_instance_ids):
+        self.expired_except = (space_id, keep_instance_ids)
+
+    async def purge(self, space_id):
+        self.spaces.pop(space_id, None)
+        self.space_rows_for_get.pop(space_id, None)
 
 
 class _FakeRemoteMemberRepo:
@@ -587,6 +618,9 @@ async def test_redeem_seats_local_stub_and_membership_from_ack_meta():
         m.space_id == "sp-meta" and m.user_id == "u-local" for m in sender_repo.members
     )
     assert ("sp-meta", "issuer-1") in sender_repo.space_instances
+    # A redeem is the user's accept: pending private invitations from any
+    # other household for this space can no longer be joined (0093).
+    assert sender_repo.expired_except == ("sp-meta", frozenset({"issuer-1"}))
 
 
 async def test_redeem_blocks_underage_minor_and_seats_nothing():
@@ -660,14 +694,41 @@ async def test_redeem_refuses_when_space_owned_by_another_host():
         "sp-own",
         owner_instance_id="the-real-host",
     )
+    # …and a member here already joined it (migration 0093: only a stub
+    # nobody accepted yet gives way to another owner).
+    accepted = SpaceMember(
+        space_id="sp-own", user_id="u-earlier", role="member", joined_at="t"
+    )
+    sender._spaces.members.append(accepted)  # type: ignore[attr-defined]
     with pytest.raises(SpacePermissionError, match="conflicts"):
         await sender.request_redeem(
             "good-token",
             viewer_user_id="u-local",
             issuer_instance_id="issuer-1",
         )
-    assert sender._spaces.members == []  # type: ignore[attr-defined]
+    assert sender._spaces.members == [accepted]  # type: ignore[attr-defined]
     assert sender._spaces.space_instances == []  # type: ignore[attr-defined]
+
+
+async def test_an_unproven_claim_never_replaces_another_stub():
+    """Migration 0093 — a space this household already joined under another
+    owner is never taken over by a later join: the redeem is refused and the
+    earlier row stays (first accepted join wins)."""
+    sender, _issuer, *_rest, issuer_repo, _im = _wire_pair(
+        {"space_id": "sp-own", "created_by": "owner", "uses_remaining": 1},
+    )
+    issuer_repo.space_rows_for_get["sp-own"] = _a_space("sp-own")
+    sender._spaces.space_rows_for_get["sp-own"] = _a_space(  # type: ignore[attr-defined]
+        "sp-own",
+        owner_instance_id="an-earlier-claimant",
+    )
+    with pytest.raises(SpacePermissionError, match="conflicts"):
+        await sender.request_redeem(
+            "good-token",
+            viewer_user_id="u-local",
+            issuer_instance_id="issuer-1",
+        )
+    assert "sp-own" not in sender._spaces.spaces  # type: ignore[attr-defined]
 
 
 async def test_redeem_with_expired_token_sends_deny():
@@ -3277,3 +3338,30 @@ def test_a_claimed_proto_version_fails_closed(raw, expected):
     """A §D2b request's ``proto_version`` that is absent or malformed reads
     as v1, so the moderator gate seats a member rather than raising."""
     assert itr._int_or_one(raw) == expected
+
+
+async def test_a_redeem_seats_under_the_space_services_seating_lock():
+    """M1: a redeem and a private-invite accept for one space id share the
+    space service's per-space lock — the redeem's local seat waits for it."""
+    coord = _make_coordinator()
+    held = asyncio.Lock()
+    coord.attach_space_service(SimpleNamespace(seating_lock=lambda sid: held))
+    assert coord._seating_lock("sp-x") is held
+    await held.acquire()
+    task = asyncio.create_task(
+        coord._seat_local_after_ack(
+            {"space_id": "sp-x"},
+            viewer_user_id="u-local",
+            issuer_instance_id="issuer-1",
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert not task.done()
+    held.release()
+    await task
+
+
+def test_without_a_space_service_the_seating_lock_is_per_space():
+    coord = _make_coordinator()
+    assert coord._seating_lock("a") is coord._seating_lock("a")
+    assert coord._seating_lock("a") is not coord._seating_lock("b")

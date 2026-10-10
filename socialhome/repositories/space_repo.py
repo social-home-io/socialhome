@@ -32,6 +32,11 @@ from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
 from ..infrastructure.hlc import HLC
+from ..domain.gfs_server import (
+    SignedGfsServerList,
+    signed_gfs_server_list_from_column,
+    signed_gfs_server_list_to_column,
+)
 from ..domain.space import (
     INVITE_VIA_GFS,
     INVITE_VIAS,
@@ -116,6 +121,18 @@ class AbstractSpaceRepo(Protocol):
     async def get_owner_user_id(self, space_id: str) -> str | None: ...
     async def record_owner_change(self, space_id: str, owner_username: str) -> None: ...
     async def get_host_identity_pk(self, space_id: str) -> str | None: ...
+    async def set_invited_by(
+        self, space_id: str, instance_id: str | None, epoch: int | None = None
+    ) -> None: ...
+    async def set_invited_by_epoch(self, space_id: str, epoch: int) -> None: ...
+    async def get_invited_by_epoch(self, space_id: str) -> int | None: ...
+    async def set_owner_statement(
+        self, space_id: str, statement_json: str | None
+    ) -> None: ...
+    async def expire_remote_invitations_except(
+        self, space_id: str, keep_instance_ids: frozenset[str]
+    ) -> None: ...
+    async def get_invited_by(self, space_id: str) -> str | None: ...
     async def set_cover_hash(
         self,
         space_id: str,
@@ -127,6 +144,9 @@ class AbstractSpaceRepo(Protocol):
         icon_hash: str | None,
     ) -> None: ...
     async def set_tz(self, space_id: str, tz: str) -> None: ...
+    async def set_gfs_servers(
+        self, space_id: str, servers: SignedGfsServerList | None
+    ) -> None: ...
     async def list_by_type(self, space_type: SpaceType) -> list[Space]: ...
     async def list_for_user(self, user_id: str) -> list[Space]: ...
     async def list_location_shared_spaces_for_user(
@@ -180,6 +200,12 @@ class AbstractSpaceRepo(Protocol):
     async def add_space_instance(self, space_id: str, instance_id: str) -> None: ...
     async def remove_space_instance(self, space_id: str, instance_id: str) -> None: ...
     async def instance_in_any_space(self, instance_id: str) -> bool: ...
+    async def set_space_instance_identity_pk(
+        self, space_id: str, instance_id: str, pk_hex: str
+    ) -> None: ...
+    async def get_space_instance_identity_pk(
+        self, space_id: str, instance_id: str
+    ) -> str | None: ...
     async def list_member_instances(self, space_id: str) -> list[str]: ...
 
     # ── Bans ───────────────────────────────────────────────────────────
@@ -301,6 +327,7 @@ class AbstractSpaceRepo(Protocol):
         invite_token: str,
         space_display_hint: str | None = None,
         ttl_minutes: int = 15,
+        join_snapshot: str | None = None,
     ) -> str: ...
     async def get_invitation(self, invitation_id: str) -> dict | None: ...
     async def get_invitation_by_token(self, token: str) -> dict | None: ...
@@ -316,6 +343,16 @@ class AbstractSpaceRepo(Protocol):
         self,
         invitation_id: str,
         status: str,
+    ) -> None: ...
+    async def count_pending_remote_invitations(
+        self, issuer_instance_id: str, *, space_id: str | None = None
+    ) -> int: ...
+    async def list_unjoined_invitation_stubs(
+        self, own_instance_id: str | None
+    ) -> list[str]: ...
+    async def expire_snapshotless_remote_invitations(self, space_id: str) -> int: ...
+    async def supersede_pending_remote_invitations(
+        self, space_id: str, issuer_instance_id: str, user_id: str
     ) -> None: ...
     async def is_user_remote_member(
         self,
@@ -683,6 +720,18 @@ class SqliteSpaceRepo:
             (icon_hash, space_id),
         )
 
+    async def set_gfs_servers(
+        self, space_id: str, servers: SignedGfsServerList | None
+    ) -> None:
+        """Store the owner's signed GFS list (migration 0093) — the ONLY
+        writer of the column: ``save`` never touches it, so a config
+        snapshot, a ``SPACE_CREATED`` or any other upsert cannot wipe or
+        replace it. The caller verified the signature and its freshness."""
+        await self._db.enqueue(
+            "UPDATE spaces SET gfs_servers=? WHERE id=?",
+            (signed_gfs_server_list_to_column(servers), space_id),
+        )
+
     async def set_tz(self, space_id: str, tz: str) -> None:
         """Set the space's IANA timezone anchor.
 
@@ -1022,6 +1071,71 @@ class SqliteSpaceRepo:
             "UPDATE spaces SET host_identity_pk=? WHERE id=?",
             (pk_hex, space_id),
         )
+
+    async def set_invited_by(
+        self, space_id: str, instance_id: str | None, epoch: int | None = None
+    ) -> None:
+        """Record the delegated admin household that issued THIS household's
+        invite into a space it does not own, with the authority-key epoch it
+        PROVED (migration 0093, :mod:`socialhome.federation.host_equivalence`).
+        Never written by ``save``."""
+        await self._db.enqueue(
+            "UPDATE spaces SET invited_by_instance=?, invited_by_epoch=? WHERE id=?",
+            (instance_id, epoch if instance_id else None, space_id),
+        )
+
+    async def set_invited_by_epoch(self, space_id: str, epoch: int) -> None:
+        """The inviting admin proved the seed of the key at *epoch* again (a
+        re-proof after a rotation). The caller verified the proof."""
+        await self._db.enqueue(
+            "UPDATE spaces SET invited_by_epoch=?"
+            " WHERE id=? AND invited_by_instance IS NOT NULL",
+            (epoch, space_id),
+        )
+
+    async def get_invited_by_epoch(self, space_id: str) -> int | None:
+        row = await self._db.fetchone(
+            "SELECT invited_by_epoch FROM spaces WHERE id=?", (space_id,)
+        )
+        if row is None or row["invited_by_epoch"] is None:
+            return None
+        return int(row["invited_by_epoch"])
+
+    async def set_owner_statement(
+        self, space_id: str, statement_json: str | None
+    ) -> None:
+        """Store the owner's verified ownership statement (migration 0093).
+        The caller verified it and its freshness. Never written by ``save``."""
+        await self._db.enqueue(
+            "UPDATE spaces SET owner_statement=? WHERE id=?",
+            (statement_json, space_id),
+        )
+
+    async def expire_remote_invitations_except(
+        self, space_id: str, keep_instance_ids: frozenset[str]
+    ) -> None:
+        """Expire this household's pending cross-household invitations into
+        *space_id* from any household outside *keep_instance_ids* — after an
+        accept seated the space under its owner, an invitation from another
+        household can no longer be joined (migration 0093)."""
+        keep = sorted(keep_instance_ids)
+        sql = (
+            "UPDATE space_invitations SET status='expired', join_snapshot=NULL"
+            " WHERE space_id=? AND status='pending'"
+            " AND remote_instance_id IS NOT NULL"
+        )
+        if keep:
+            sql += f" AND remote_instance_id NOT IN ({','.join('?' * len(keep))})"
+        await self._db.enqueue(sql, (space_id, *keep))
+
+    async def get_invited_by(self, space_id: str) -> str | None:
+        row = await self._db.fetchone(
+            "SELECT invited_by_instance FROM spaces WHERE id=?",
+            (space_id,),
+        )
+        if row is None or not row["invited_by_instance"]:
+            return None
+        return str(row["invited_by_instance"])
 
     async def get_host_identity_pk(self, space_id: str) -> str | None:
         """Return the host household's identity pubkey (hex), or ``None``.
@@ -1553,6 +1667,33 @@ class SqliteSpaceRepo:
             """,
             (space_id, instance_id),
         )
+
+    async def set_space_instance_identity_pk(
+        self, space_id: str, instance_id: str, pk_hex: str
+    ) -> None:
+        """Record a member household's identity key on its existing
+        ``space_instances`` row for ONE space (migration 0078's column).
+        UPDATE-only: never creates membership. The caller checked
+        ``derive_instance_id(pk) == instance_id``."""
+        await self._db.enqueue(
+            "UPDATE space_instances SET identity_pk=?"
+            " WHERE space_id=? AND instance_id=?",
+            (pk_hex, space_id, instance_id),
+        )
+
+    async def get_space_instance_identity_pk(
+        self, space_id: str, instance_id: str
+    ) -> str | None:
+        """The identity key recorded for *instance_id* on its
+        ``space_instances`` row of *space_id*, or ``None``."""
+        row = await self._db.fetchone(
+            "SELECT identity_pk FROM space_instances"
+            " WHERE space_id=? AND instance_id=?",
+            (space_id, instance_id),
+        )
+        if row is None or not row["identity_pk"]:
+            return None
+        return str(row["identity_pk"])
 
     async def remove_space_instance(
         self,
@@ -2289,6 +2430,7 @@ class SqliteSpaceRepo:
         invite_token: str,
         space_display_hint: str | None = None,
         ttl_minutes: int = 15,
+        join_snapshot: str | None = None,
     ) -> str:
         """§D1b — persist a cross-household private-space invitation.
 
@@ -2297,6 +2439,11 @@ class SqliteSpaceRepo:
         is stored on the host (=invitee's identity) or on the invitee's
         household (=inviter's identity). Rows on both sides share the
         same ``invite_token`` so the accept envelope can round-trip.
+
+        ``join_snapshot`` (invitee side, migration 0093) is the issuer's
+        sealed ``space_meta`` the accept seats the stub from. ``expires_at``
+        is informational on the invitee side: nothing enforces it (the
+        listing, the accept and the issuer's answer check all ignore it).
         """
         invitation_id = uuid.uuid4().hex
         expires = (
@@ -2307,8 +2454,8 @@ class SqliteSpaceRepo:
             INSERT INTO space_invitations(
                 id, space_id, invited_user_id, invited_by,
                 remote_instance_id, remote_user_id, invite_token,
-                space_display_hint, expires_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                space_display_hint, expires_at, join_snapshot
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 invitation_id,
@@ -2320,6 +2467,7 @@ class SqliteSpaceRepo:
                 invite_token,
                 space_display_hint,
                 expires,
+                join_snapshot,
             ),
         )
         return invitation_id
@@ -2410,10 +2558,97 @@ class SqliteSpaceRepo:
     ) -> None:
         if status not in ("pending", "accepted", "declined", "expired"):
             raise ValueError(f"invalid invitation status {status!r}")
+        # An answered invitation's join snapshot (migration 0093) has done
+        # its job — drop it with the pending state.
         await self._db.enqueue(
-            "UPDATE space_invitations SET status=? WHERE id=?",
-            (status, invitation_id),
+            "UPDATE space_invitations SET status=?,"
+            " join_snapshot=CASE WHEN ?='pending' THEN join_snapshot END"
+            " WHERE id=?",
+            (status, status, invitation_id),
         )
+
+    async def count_pending_remote_invitations(
+        self, issuer_instance_id: str, *, space_id: str | None = None
+    ) -> int:
+        """Pending invitations this household received from
+        *issuer_instance_id* (optionally for one *space_id*), with or
+        without a join snapshot — what the receive-side caps bound
+        (migration 0093). Received means addressed to one of OUR users (a
+        host-side row names the remote invitee). A row pending for more than
+        90 days no longer counts, so stale ones never hold a slot forever."""
+        sql = (
+            "SELECT COUNT(*) AS n FROM space_invitations"
+            " WHERE remote_instance_id=? AND status='pending'"
+            " AND EXISTS (SELECT 1 FROM users u"
+            " WHERE u.user_id = space_invitations.remote_user_id)"
+            " AND datetime(created_at) > datetime('now', '-90 days')"
+        )
+        params: tuple = (issuer_instance_id,)
+        if space_id is not None:
+            sql += " AND space_id=?"
+            params = (issuer_instance_id, space_id)
+        row = await self._db.fetchone(sql, params)
+        return int(row["n"]) if row is not None else 0
+
+    async def list_unjoined_invitation_stubs(
+        self, own_instance_id: str | None
+    ) -> list[str]:
+        """Stubs a cross-household invitation seated before migration 0093
+        that nobody here ever joined: a space we do not own, with no local
+        member and at least one received invitation, none of them accepted.
+        Never a GFS-mirror stub (``mirror_gfs_id`` or a recorded
+        ``gfs_space_seats`` row — those are torn down through the mirror's
+        own path, with the GFS unsubscribe); invite-link stubs have no
+        invitation row."""
+        rows = await self._db.fetchall(
+            """
+            SELECT s.id FROM spaces s
+             WHERE s.owner_instance_id != ?
+               AND s.mirror_gfs_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM gfs_space_seats g WHERE g.space_id = s.id)
+               AND NOT EXISTS (SELECT 1 FROM space_members m WHERE m.space_id = s.id)
+               AND EXISTS (
+                   SELECT 1 FROM space_invitations i
+                    WHERE i.space_id = s.id AND i.remote_instance_id IS NOT NULL)
+               AND NOT EXISTS (
+                   SELECT 1 FROM space_invitations i
+                    WHERE i.space_id = s.id AND i.status = 'accepted')
+             ORDER BY s.id
+            """,
+            (own_instance_id or "",),
+        )
+        return [str(r["id"]) for r in rows]
+
+    async def supersede_pending_remote_invitations(
+        self, space_id: str, issuer_instance_id: str, user_id: str
+    ) -> None:
+        """Expire the pending invitations *issuer_instance_id* sent our
+        *user_id* for *space_id* — a newer one from them (or the accept of
+        one) supersedes them, so re-invites never pile up (migration 0093)."""
+        await self._db.enqueue(
+            "UPDATE space_invitations SET status='expired', join_snapshot=NULL"
+            " WHERE space_id=? AND remote_instance_id=? AND remote_user_id=?"
+            " AND status='pending'",
+            (space_id, issuer_instance_id, user_id),
+        )
+
+    async def expire_snapshotless_remote_invitations(self, space_id: str) -> int:
+        """Expire the pending received invitations into *space_id* that
+        carry no join snapshot (pre-0093: they relied on a pre-seated stub).
+        Returns how many."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM space_invitations WHERE space_id=?"
+            " AND status='pending' AND remote_instance_id IS NOT NULL"
+            " AND join_snapshot IS NULL",
+            (space_id,),
+        )
+        await self._db.enqueue(
+            "UPDATE space_invitations SET status='expired' WHERE space_id=?"
+            " AND status='pending' AND remote_instance_id IS NOT NULL"
+            " AND join_snapshot IS NULL",
+            (space_id,),
+        )
+        return int(row["n"]) if row is not None else 0
 
     # ── Join requests ──────────────────────────────────────────────────
 
@@ -2669,6 +2904,8 @@ def _row_to_space(row: dict | None) -> Space | None:
         tz=row.get("tz") or "UTC",
         min_age=int(row.get("min_age") or 0),
         category=row.get("category"),
+        gfs_servers=signed_gfs_server_list_from_column(row.get("gfs_servers")),
+        owner_statement=row.get("owner_statement"),
     )
 
 

@@ -8,7 +8,9 @@ publishes a local domain event so the admin UI sees the change.
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ...domain.events import (
@@ -23,14 +25,27 @@ from ...domain.space import (
     SpaceFeatures,
     SpaceType,
 )
+from ...federation.host_equivalence import (
+    acts_as_host,
+    touches_owner_household,
+)
+from ...federation.sync_manager import SYNC_REJECT_NOT_SEATED
 from ...infrastructure.event_bus import EventBus
+from ...space_owner_statement import verify_owner_statement
 from ..child_protection_service import _VALID_MIN_AGES
-from ..space_authority_pin import owner_authority_cert_via
-from ..space_service import space_metadata_for_federation, can_seat_remote_stub
+from ..space_authority_pin import owner_authority_cert_via, owner_statement_via
+from ..space_service import (
+    can_seat_remote_stub,
+    space_metadata_for_federation,
+    store_owner_statement,
+)
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent
     from ...federation.federation_service import FederationService
+    from ...repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
     from ...repositories.space_repo import AbstractSpaceRepo
     from ..space_service import SpaceService
 
@@ -43,6 +58,7 @@ class SpaceMembershipInboundHandlers:
     __slots__ = (
         "_bus",
         "_space_repo",
+        "_seat_repo",
         "_federation",
         "_space_service",
     )
@@ -52,9 +68,15 @@ class SpaceMembershipInboundHandlers:
         *,
         bus: EventBus,
         space_repo: "AbstractSpaceRepo",
+        seat_repo: "AbstractSpaceRemoteMemberRepo | None" = None,
     ) -> None:
         self._bus = bus
         self._space_repo = space_repo
+        #: The roster mirror, so a ban from the delegated admin household
+        #: that invited us counts like the host's while delegation is on
+        #: (:mod:`socialhome.federation.host_equivalence`). ``None``: only
+        #: the owner's bans apply.
+        self._seat_repo = seat_repo
         self._federation: "FederationService | None" = None
         #: v_49 — the host side of a member household's leave. Built after
         #: these handlers, so wired late; absent → the old row-only drop.
@@ -191,6 +213,11 @@ class SpaceMembershipInboundHandlers:
         if not space_id:
             return
         reason = str(event.payload.get("reason") or "")
+        if reason == SYNC_REJECT_NOT_SEATED:
+            # Not terminal (migration 0093): the host never seated us. Keep
+            # our copy; take the owner's statement it answered with.
+            await self._apply_owner_statement_answer(event, space_id)
+            return
         if reason not in ("dissolved", "removed"):
             log.warning(
                 "SPACE_SYNC_REJECTED for %s with unknown reason %r — dropping",
@@ -201,6 +228,18 @@ class SpaceMembershipInboundHandlers:
         space = await self._space_repo.get(space_id)
         if space is None:
             return  # nothing local to archive
+        if reason == "removed" and await self._joined_after(
+            space_id, event.payload.get("removed_at")
+        ):
+            # Migration 0093: we joined again AFTER the seat the host dropped
+            # (a delegated admin re-invited us; the host has not learned the
+            # re-join yet). Not terminal for us.
+            log.info(
+                "SPACE_SYNC_REJECTED removed for %s predates our current join — "
+                "keeping our copy",
+                space_id,
+            )
+            return
         if space.owner_instance_id != event.from_instance:
             log.warning(
                 "SPACE_SYNC_REJECTED for %s from non-owner %s (owner=%s) — dropping",
@@ -213,6 +252,84 @@ class SpaceMembershipInboundHandlers:
             return  # already terminally archived — idempotent
         await self._space_repo.set_archived(space_id, True, reason=reason)
         await self._bus.publish(RemoteSpaceDissolved(space_id=space_id))
+
+    async def _joined_after(self, space_id: str, removed_at: object) -> bool:
+        """Whether a local member of *space_id* joined after *removed_at*
+        (the host's tombstone time, UTC).
+
+        The two times come from different clocks (the owner's tombstone,
+        our ``joined_at``), so skew can tip a near-simultaneous pair either
+        way. That is benign — neither direction grants access: a removal
+        wrongly taken as older only leaves our copy unarchived, while the
+        owner still holds no live seat for us (it streams us nothing and
+        refuses our writes); a re-join wrongly taken as older archives a
+        copy that a fresh invitation re-seats."""
+        removed = _utc(removed_at)
+        if removed is None:
+            return False
+        joined = [
+            _utc(m.joined_at) for m in await self._space_repo.list_members(space_id)
+        ]
+        return any(j is not None and j > removed for j in joined)
+
+    async def _apply_owner_statement_answer(
+        self, event: "FederationEvent", space_id: str
+    ) -> None:
+        """The OWNER answered our catch-up with its current ownership
+        statement (it never seated us). When it names the key we pin, it is
+        a refresh. When it names another key or epoch than the one we pinned
+        through an inviter, the owner wins (migration 0093): the inviting
+        admin stops being trusted, and a newer epoch is pinned — an admin
+        revoked by a rotation that seated us on the OLD key loses us here."""
+        space = await self._space_repo.get(space_id)
+        if space is None:
+            return
+        if space.owner_instance_id != event.from_instance:
+            log.warning(
+                "owner statement for %s from non-owner %s — dropping",
+                space_id,
+                event.from_instance,
+            )
+            return
+        statement = event.payload.get("owner_statement")
+        if not isinstance(statement, dict):
+            return
+        try:
+            verified = verify_owner_statement(
+                statement,
+                space_id=space_id,
+                owner_instance_id=space.owner_instance_id,
+                authority_pk_hex=str(statement.get("authority_pk") or ""),
+            )
+        except ValueError as exc:
+            log.warning("owner statement for %s refused — %s", space_id, exc)
+            return
+        statement_json = json.dumps(statement, separators=(",", ":"), sort_keys=True)
+        pinned = (
+            str(space.identity_public_key or "").lower(),
+            space.authority_key_epoch,
+        )
+        if (verified.authority_pk_hex, verified.authority_key_epoch) == pinned:
+            await store_owner_statement(self._space_repo, space_id, statement_json)
+            return
+        log.warning(
+            "space %s: the owner names authority key epoch %d, we pinned epoch "
+            "%d through an inviter — the owner wins; ending the inviter's trust",
+            space_id,
+            verified.authority_key_epoch,
+            space.authority_key_epoch,
+        )
+        await self._space_repo.set_invited_by(space_id, None)
+        # The answer carries the owner's statement, not its authority cert:
+        # the statement alone is owner-identity-signed for the new key and
+        # epoch, so the pin moves on it; the cert (and the rest of the
+        # owner's config) arrives with the owner's next config / snapshot.
+        if verified.authority_key_epoch > space.authority_key_epoch and (
+            await self._space_repo.adopt_authority_key(
+                space_id, verified.authority_pk_hex, verified.authority_key_epoch
+            )
+        ):
+            await store_owner_statement(self._space_repo, space_id, statement_json)
 
     async def _on_instance_left(self, event: "FederationEvent") -> None:
         """A member household left (all its seats, or ``user_id``'s).
@@ -241,9 +358,12 @@ class SpaceMembershipInboundHandlers:
         A ban is a statement about somebody else's standing in a space,
         and ``ban_member`` both inserts the ban row and deletes the
         member — so an unauthenticated one is a household evicting the
-        space's own owner. Only the host decides that; an unknown space
-        is refused too, because there is no owner to compare against and
-        the sender picked the id.
+        space's own owner. Only the host decides that — or, on a household
+        a delegated admin invited, that admin household while delegation is
+        on and its admin seat lives (:mod:`socialhome.federation
+        .host_equivalence`, the same rule as the bans in its catch-up
+        stream). An unknown space is refused too, because there is no owner
+        to compare against and the sender picked the id.
 
         Mirrors the ``SPACE_AGE_GATE_UPDATED`` / ``SPACE_MEMBER_ROLE_CHANGED``
         host-authority guards. The roster-gossip family
@@ -262,7 +382,9 @@ class SpaceMembershipInboundHandlers:
                 event.from_instance,
             )
             return False
-        if space.owner_instance_id != event.from_instance:
+        if not await acts_as_host(
+            self._space_repo, self._seat_repo, space, event.from_instance
+        ):
             log.warning(
                 "%s for %s from non-host %s (host=%s) — dropping",
                 event.event_type,
@@ -273,12 +395,35 @@ class SpaceMembershipInboundHandlers:
             return False
         return True
 
+    async def _names_the_owner_household(
+        self, event: "FederationEvent", space_id: str, user_id: str
+    ) -> bool:
+        """A ban / unban from anyone but the owner (a trusted inviting
+        admin) that names a user of the owner household: refused — only the
+        owner decides about its own people."""
+        space = await self._space_repo.get(space_id)
+        if space is None or event.from_instance == space.owner_instance_id:
+            return False
+        if await touches_owner_household(
+            self._space_repo, self._seat_repo, space, user_id=user_id
+        ):
+            log.warning(
+                "%s for %s from %s names the owner household's user — dropping",
+                event.event_type,
+                space_id,
+                event.from_instance,
+            )
+            return True
+        return False
+
     async def _on_banned(self, event: "FederationEvent") -> None:
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         user_id = str(event.payload.get("user_id") or "")
         if not space_id or not user_id:
             return
         if not await self._is_from_the_host(event, space_id):
+            return
+        if await self._names_the_owner_household(event, space_id, user_id):
             return
         banned_by = event.payload.get("banned_by")
         reason = str(event.payload.get("reason") or "")[:500]
@@ -302,6 +447,8 @@ class SpaceMembershipInboundHandlers:
         if not space_id or not user_id:
             return
         if not await self._is_from_the_host(event, space_id):
+            return
+        if await self._names_the_owner_household(event, space_id, user_id):
             return
         await self._space_repo.unban_member(space_id, user_id)
 
@@ -429,6 +576,7 @@ class SpaceMembershipInboundHandlers:
             "space_meta": space_metadata_for_federation(
                 space,
                 authority_cert=owner_authority_cert_via(self._federation, space),
+                owner_statement=owner_statement_via(self._federation, space),
             ),
         }
         try:
@@ -439,3 +587,15 @@ class SpaceMembershipInboundHandlers:
             )
         except Exception as exc:  # pragma: no cover
             log.warning("SPACE_CONFIG_CATCH_UP push failed: %s", exc)
+
+
+def _utc(value: object) -> datetime | None:
+    """An ISO-8601 / SQLite ``datetime('now')`` string as an aware UTC
+    datetime (naive values are UTC); ``None`` when unreadable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

@@ -18,7 +18,9 @@ from socialhome.domain.space import (
     SpaceFeatures,
     SpaceType,
 )
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services.federation_inbound import SpaceMembershipInboundHandlers
 
 
@@ -869,3 +871,28 @@ async def test_instance_left_elsewhere_keeps_the_old_semantics(repo, handlers):
     )
     assert svc.calls == [("sp-1", "peer-a", None)]
     assert repo.instance_removes == [("sp-1", "peer-a")]
+
+
+async def test_space_created_never_wipes_the_owners_gfs_list(db):
+    """A re-sent ``SPACE_CREATED`` rebuilds the row from scratch; the owner's
+    signed GFS list (migration 0093) must survive it — ``save`` never writes
+    the column."""
+    repo = SqliteSpaceRepo(db)
+    handlers = SpaceMembershipInboundHandlers(bus=EventBus(), space_repo=repo)
+    payload = {
+        "name": "Space 1",
+        "owner_username": "owner",
+        "identity_public_key": "aa" * 32,
+        "space_type": SpaceType.GLOBAL.value,
+        "join_mode": JoinMode.INVITE_ONLY.value,
+        "config_sequence": 5,
+    }
+    created = _event(FederationEventType.SPACE_CREATED, payload, space_id="sp-1")
+    await handlers._on_created(created)
+    signed = sign_gfs_server_list(
+        space_id="sp-1", servers=(), issued_at=1, owner_seed=b"\x07" * 32
+    )
+    await repo.set_gfs_servers("sp-1", signed)
+    await handlers._on_created(created)
+    got = await repo.get("sp-1")
+    assert got is not None and got.gfs_servers == signed

@@ -1350,10 +1350,15 @@ sequenceDiagram
     participant A as HFS A (admin)
     participant B as HFS B (invitee)
     A->>A: mint invite token
-    A->>B: SPACE_PRIVATE_INVITE<br/>(encrypted: space_id,<br/>token, display hint)
+    A->>B: SPACE_PRIVATE_INVITE<br/>(encrypted: space_id,<br/>token, display hint, space_meta)
+    Note over B: store the invitation + its snapshot<br/>(content key KEK-wrapped) — no stub
     Note over B: user sees invitation<br/>in UI
     alt user accepts
+        Note over B: per-space seating lock held
+        B->>B: seat stub + key + roster<br/>from THIS invitation's snapshot
         B->>A: SPACE_PRIVATE_INVITE_ACCEPT
+        Note over B: send failed → roll the fresh stub back
+        B->>B: mark accepted, expire other<br/>households' invitations
         A->>A: add SpaceRemoteMember
         A->>B: SPACE_MEMBER_JOINED + SPACE_KEY_EXCHANGE
     else user declines
@@ -1361,14 +1366,59 @@ sequenceDiagram
     end
 ```
 
+**Nothing is seated before the accept** (migration 0093). The invitee
+household stores the invitation row with the issuer's `space_meta`
+(`space_invitations.join_snapshot`; the content key in it KEK-wrapped and
+bound to that invitation) and writes no space row, household rows, seats,
+pinned key, cover or icon. Accepting seats the stub from that invitation's
+own snapshot — owner statement, inviter proof and epoch are checked then,
+the statement's freshness judged at the RECEIPT time stored with it (see
+[discovery.md](./discovery.md), "An invitation seats nothing until the user
+accepts it") — and the §CP.F1 age gate reads the snapshot's `min_age`. The
+accept runs under a per-space seating lock shared with the invite-link
+redeem and the GFS-mirror subscribe, re-reading the invitation and the space
+row inside it, so two joins for one space id never both seat. The stub is
+seated BEFORE the ACCEPT goes out, so the host's `SPACE_ROSTER_SNAPSHOT`
+(writer cert / key, channel grant) always finds it — the host re-sends that
+snapshot on its periodic sync tick too. A failed seat, or a send that
+definitively cannot reach the host (not confirmed, no route, too large),
+rolls a fresh stub back and leaves the invitation pending; an ACCEPT parked
+for redelivery (durable outbox, relay throttle, mesh retry) reaches the
+host later, so the seat and the accept stay. Pending invitations for one
+space id from different households coexist and are each listed; after an
+accept the ones from any household but the space's owner and the issuer are
+expired. A space this household already joined under another owner refuses
+the accept (`403`), and so does an invitation whose owner no longer
+resolves as it did on receipt (never seated under the issuer instead) or
+whose sealed content key does not open here. An invitation that could only
+be refused is dropped on receipt; so is one over the receive-side caps (50
+pending per issuing household, 20 per space id and issuing household, with
+or without a snapshot; rows pending over 90 days stop counting). A new
+invitation from the same household to the same user for the same space
+supersedes the older one, and an accept answers the issuer's other pending
+ones to that user. Answering an invitation drops its snapshot. At startup,
+stubs older builds pre-seated for invitations nobody here accepted are
+dropped with their snapshot-less pending invitations, so the real owner can
+invite again — never a GFS-mirror stub (mirror provenance or a recorded
+GFS seat), whose teardown is the mirror's.
+
+**Validated as of receipt.** An invitation's owner statement, inviter proof
+and authority key are checked as of its RECEIPT time (`received_at_ms` in the
+local, KEK-protected snapshot), not at the accept. An invitation left pending
+for a long time can therefore still be accepted after the owner rotated its
+authority key: the household seats the stub on the key the snapshot names and
+learns the current key through the normal sync / rotation catch-up afterwards.
+If the owner no longer resolves as it did on receipt, the accept is refused
+and the user needs a new invitation.
+
 ### Private invite over the federation mesh (v_6+)
 
 The sealed `SPACE_PRIVATE_INVITE` payload carries `host_identity_pk` —
 the inviting household's Ed25519 identity public key. A mesh invitee never
 pairs with the host, so this is the only way it can later verify the
-host's signatures on the §25.6 catch-up stream; it is persisted on the
-space stub only when `derive_instance_id(pk)` matches the authenticated
-sender. Absent on an older sender (the field is additive, no capability
+host's signatures on the §25.6 catch-up stream; it is kept with the
+invitation and persisted on the space stub at the user's accept, only when
+`derive_instance_id(pk)` matches the authenticated sender. Absent on an older sender (the field is additive, no capability
 bump — a receiver that finds it missing keeps the previous behaviour). See
 [`sync.md` → "Authenticating a chunk from an unpaired
 host"](sync.md#authenticating-a-chunk-from-an-unpaired-host).

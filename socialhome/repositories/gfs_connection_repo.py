@@ -33,6 +33,9 @@ class AbstractGfsConnectionRepo(Protocol):
         self, space_id: str
     ) -> list[GfsSpacePublication]: ...
     async def list_gfs_for_space(self, space_id: str) -> list[GfsConnection]: ...
+    async def list_active_listings_for_space(
+        self, space_id: str
+    ) -> list[GfsConnection]: ...
     async def count_published_spaces(self, gfs_id: str) -> int: ...
     async def list_publications_all(self) -> list[dict]: ...
 
@@ -193,6 +196,24 @@ class SqliteGfsConnectionRepo:
             "   ON gc.id = gsp.gfs_connection_id"
             " WHERE gsp.space_id=?"
             " ORDER BY gc.paired_at DESC",
+            (space_id,),
+        )
+        return [_row_to_conn(r) for r in rows_to_dicts(rows)]
+
+    async def list_active_listings_for_space(
+        self, space_id: str
+    ) -> list[GfsConnection]:
+        """The ACTIVE connections on which *space_id* is ACTIVELY listed
+        (publication ``status='active'`` — not pending review, not banned),
+        ordered by ``gfs_instance_id`` so an unchanged set reads back in the
+        same order. The owner's ``spaces.gfs_servers`` is derived from it."""
+        rows = await self._db.fetchall(
+            "SELECT gc.* FROM gfs_connections gc"
+            " INNER JOIN gfs_space_publications gsp"
+            "   ON gc.id = gsp.gfs_connection_id"
+            " WHERE gsp.space_id=? AND gsp.status='active'"
+            "   AND gc.status='active'"
+            " ORDER BY gc.gfs_instance_id, gc.id",
             (space_id,),
         )
         return [_row_to_conn(r) for r in rows_to_dicts(rows)]

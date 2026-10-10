@@ -15,6 +15,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.sync_manager import (
     ALLOWED_RESOURCES,
+    SYNC_REJECT_NOT_SEATED,
     MAX_ACTIVE_SESSIONS_PER_INSTANCE,
     MAX_PENDING_REQUESTS,
     PENDING_REQUEST_TTL_SECONDS,
@@ -323,7 +324,7 @@ async def test_begin_session_rejects_non_member_dissolved_with_reason():
     async def check_member(space_id, instance_id):
         return False
 
-    async def reject_reason(space_id):
+    async def reject_reason(space_id, requester_instance_id):
         return "dissolved"
 
     mgr = SyncSessionManager(
@@ -353,7 +354,7 @@ async def test_begin_session_rejects_non_member_removed_with_reason():
     async def check_member(space_id, instance_id):
         return False
 
-    async def reject_reason(space_id):
+    async def reject_reason(space_id, requester_instance_id):
         return "removed"
 
     mgr = SyncSessionManager(
@@ -372,6 +373,35 @@ async def test_begin_session_rejects_non_member_removed_with_reason():
     assert d.next_payload["reason"] == "removed"
     assert d.next_payload["sync_id"] == "sid-2"
     assert d.next_payload["space_id"] == "sp-2"
+
+
+async def test_begin_session_never_seated_household_gets_no_terminal_reject():
+    """A household the host has no record of (``reject_reason`` → ``None``)
+    — e.g. one a delegated admin invited before the host's roster learned of
+    it — is dropped silently: a terminal reject would make it archive the
+    space it is joining. The classifier sees who is asking."""
+    asked: list[tuple[str, str]] = []
+
+    async def check_member(space_id, instance_id):
+        return False
+
+    async def reject_reason(space_id, requester_instance_id):
+        asked.append((space_id, requester_instance_id))
+        return None
+
+    mgr = SyncSessionManager(
+        _FakeFedRepo(), check_member=check_member, reject_reason=reject_reason
+    )
+    d = await mgr.begin_session(
+        sync_id="sid-n",
+        space_id="sp-n",
+        requester_instance_id="joining-hh",
+        provider_instance_id="me",
+    )
+    assert d.accepted is False
+    assert d.reason == "not_a_member"
+    assert d.next_event is None
+    assert asked == [("sp-n", "joining-hh")]
 
 
 async def test_begin_session_non_member_silent_without_classifier():
@@ -401,7 +431,7 @@ async def test_begin_session_rate_limit_fires_before_member_check():
     async def check_member(space_id, instance_id):
         return False
 
-    async def reject_reason(space_id):
+    async def reject_reason(space_id, requester_instance_id):
         return "removed"
 
     mgr = SyncSessionManager(
@@ -874,3 +904,70 @@ async def test_a_capacity_refusal_does_not_spend_the_hourly_budget():
         provider_instance_id="me",
     )
     assert late.accepted, late.reason
+
+
+@pytest.mark.parametrize("statement", [{"owner_statement_sig": "x"}, None])
+async def test_begin_session_not_seated_answers_with_the_owner_statement(statement):
+    """Migration 0093: a household never seated here gets a NON-terminal
+    reject carrying the owner's statement — or the silent drop when there is
+    none to give."""
+
+    async def check_member(space_id, instance_id):
+        return False
+
+    async def reject_reason(space_id, requester_instance_id):
+        return SYNC_REJECT_NOT_SEATED
+
+    async def owner_statement_for(space_id):
+        return statement
+
+    mgr = SyncSessionManager(
+        _FakeFedRepo(),
+        check_member=check_member,
+        reject_reason=reject_reason,
+        owner_statement_for=owner_statement_for,
+    )
+    d = await mgr.begin_session(
+        sync_id="sid-ns",
+        space_id="sp-ns",
+        requester_instance_id="joining-hh",
+        provider_instance_id="me",
+    )
+    assert d.accepted is False
+    if statement is None:
+        assert d.next_event is None
+    else:
+        assert d.next_event is FederationEventType.SPACE_SYNC_REJECTED
+        assert d.next_payload == {
+            "sync_id": "sid-ns",
+            "space_id": "sp-ns",
+            "reason": SYNC_REJECT_NOT_SEATED,
+            "owner_statement": statement,
+        }
+
+
+async def test_begin_session_removed_carries_the_tombstone_time():
+    """Migration 0093: a classifier may add fields to the reject — the time
+    of the newest tombstone rides with ``removed``."""
+
+    async def check_member(space_id, instance_id):
+        return False
+
+    async def reject_reason(space_id, requester_instance_id):
+        return ("removed", {"removed_at": "2026-10-10 11:00:00"})
+
+    mgr = SyncSessionManager(
+        _FakeFedRepo(), check_member=check_member, reject_reason=reject_reason
+    )
+    d = await mgr.begin_session(
+        sync_id="sid-r",
+        space_id="sp-r",
+        requester_instance_id="ex",
+        provider_instance_id="me",
+    )
+    assert d.next_payload == {
+        "sync_id": "sid-r",
+        "space_id": "sp-r",
+        "reason": "removed",
+        "removed_at": "2026-10-10 11:00:00",
+    }

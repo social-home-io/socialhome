@@ -479,3 +479,84 @@ async def test_apply_member_event_with_a_stale_verified_epoch_is_dropped(repo):
     assert await repo.get_including_tombstones("sp1", "i-a", "u1") is None
     assert await repo.apply_member_event(**kw, verified_epoch=7)
     assert (await repo.get("sp1", "i-a", "u1")).authority_epoch == 7
+
+
+# ─── removed_at tracks the latest removal ─────────────────────────────────
+
+_OLD = "2000-01-01 00:00:00"
+
+
+async def _backdate(repo, user_id="u1"):
+    await repo._db.enqueue(
+        "UPDATE space_remote_members SET removed_at=? WHERE user_id=?",
+        (_OLD, user_id),
+    )
+
+
+@pytest.mark.parametrize("verified_epoch", [None, 0])
+async def test_removed_at_is_fresh_after_remove_revive_and_gossip_tombstone(
+    repo, verified_epoch
+):
+    """remove → live gossip → tombstone gossip: the seat's removal time is
+    the latest removal, never the first — else ``max(removed_at)`` points at
+    the old removal and a re-invited household ignores a real one."""
+    await repo.add(
+        space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None
+    )
+    await repo.remove("sp1", "i-a", "u1")
+    await _backdate(repo)
+    assert await repo.apply_member_event(
+        **_evt(member_version=5), verified_epoch=verified_epoch
+    )
+    live = await repo.get("sp1", "i-a", "u1")
+    assert live.removed_at is None
+    assert await repo.apply_member_event(
+        **_evt(member_version=6, tombstoned=True), verified_epoch=verified_epoch
+    )
+    gone = await repo.get_including_tombstones("sp1", "i-a", "u1")
+    assert gone.tombstoned and gone.removed_at not in (None, _OLD)
+
+
+async def test_a_repeated_tombstone_keeps_the_first_removal_time(repo):
+    await repo.apply_member_event(**_evt(member_version=1, tombstoned=True))
+    await _backdate(repo)
+    await repo.apply_member_event(**_evt(member_version=2, tombstoned=True))
+    gone = await repo.get_including_tombstones("sp1", "i-a", "u1")
+    assert gone.removed_at == _OLD
+
+
+async def test_a_gossip_tombstone_insert_stamps_removed_at(repo):
+    await repo.apply_member_event(**_evt(member_version=1, tombstoned=True))
+    gone = await repo.get_including_tombstones("sp1", "i-a", "u1")
+    assert gone.removed_at is not None
+
+
+async def test_re_adding_clears_removed_at(repo):
+    kw = dict(
+        space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None
+    )
+    await repo.add(**kw)
+    await repo.remove("sp1", "i-a", "u1")
+    await repo.add(**kw)
+    assert (await repo.get("sp1", "i-a", "u1")).removed_at is None
+
+
+async def test_reset_member_state_maintains_removed_at(repo):
+    kw = dict(
+        space_id="sp1",
+        user_id="u1",
+        instance_id="i-a",
+        display_name=None,
+        user_pk=None,
+        role="member",
+    )
+    await repo.add(
+        space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None
+    )
+    await repo.remove("sp1", "i-a", "u1")
+    await _backdate(repo)
+    await repo.reset_member_state(**kw, member_version=3, tombstoned=False)
+    assert (await repo.get("sp1", "i-a", "u1")).removed_at is None
+    await repo.reset_member_state(**kw, member_version=4, tombstoned=True)
+    gone = await repo.get_including_tombstones("sp1", "i-a", "u1")
+    assert gone.removed_at not in (None, _OLD)

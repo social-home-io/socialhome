@@ -161,3 +161,20 @@ async def test_list_active_still_filters_to_active_only(repo):
     )
     active = await repo.list_active()
     assert [r.id for r in active] == ["g-active"]
+
+
+async def test_list_active_listings_for_space(repo):
+    """Only ACTIVE publications on ACTIVE connections, ordered by the GFS's
+    instance id (a stable order, so an unchanged list compares equal)."""
+    for gid in ("gfs-1", "gfs-2", "gfs-3", "gfs-4"):
+        await repo.save(_conn(gid))
+    await repo.update_status("gfs-4", "suspended")
+    await repo.publish_space("space-1", "gfs-2", "active")
+    await repo.publish_space("space-1", "gfs-1", "active")
+    await repo.publish_space("space-1", "gfs-3", "pending")
+    await repo.publish_space("space-1", "gfs-4", "active")
+    await repo.publish_space("space-2", "gfs-1", "active")
+
+    rows = await repo.list_active_listings_for_space("space-1")
+    assert [c.id for c in rows] == ["gfs-1", "gfs-2"]
+    assert await repo.list_active_listings_for_space("space-9") == []

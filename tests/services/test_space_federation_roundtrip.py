@@ -35,6 +35,8 @@ from __future__ import annotations
 import dataclasses
 import json
 
+from socialhome.domain.gfs_server import GfsServer, SignedGfsServerList
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -98,6 +100,16 @@ FEDERATED_TRANSFORMED: dict[str, str] = {
     # ``meta['owner_instance_id']`` — closes an owner-spoof footgun where a
     # malicious issuer stamps a forged owner on a brand-new stub.
     "owner_instance_id": "set to host_instance_id (authenticated sender)",
+    # The owner's SIGNED GFS list (migration 0093) travels in meta but is
+    # never rebuilt onto the stub (``save`` does not write it): it is
+    # applied on its own, only after the owner signature + freshness check
+    # (``apply_gfs_servers_from_metadata``).
+    "gfs_servers": "shipped signed; applied separately, never via the stub",
+    # The owner household's ownership statement (migration 0093): signed
+    # fresh by the owner, relayed as stored by everyone else; a receiver
+    # keeps it only after verifying it (``apply_owner_statement_from_metadata``
+    # / the §D1b join), never through the stub.
+    "owner_statement": "shipped signed; applied separately, never via the stub",
 }
 
 #: Fields that MUST NOT federate (absent from ``space_meta`` entirely), each
@@ -228,7 +240,24 @@ def _fully_non_default_space() -> Space:
         tz="Europe/Berlin",
         min_age=18,
         category="gaming",
+        gfs_servers=_SIGNED_LIST,
     )
+
+
+_SIGNED_LIST: SignedGfsServerList = sign_gfs_server_list(
+    space_id="space-xyz",
+    servers=(
+        GfsServer(
+            gfs_instance_id="gfs-a",
+            inbox_url="https://gfs-a.example",
+            public_key="ab" * 32,
+            gfs_key_suite="ed25519",
+            display_name="GFS A",
+        ),
+    ),
+    issued_at=7,
+    owner_seed=b"\x05" * 32,
+)
 
 
 def test_federated_roundtrip_fields_survive() -> None:
@@ -275,6 +304,10 @@ def test_federated_transformed_fields() -> None:
         "owner_instance_id must be the authenticated host_instance_id, not "
         "the issuer-controlled meta['owner_instance_id'] (owner-spoof guard)."
     )
+
+    # The signed GFS list ships verbatim and is NOT put on the stub.
+    assert meta["gfs_servers"] == _SIGNED_LIST.to_wire()
+    assert stub.gfs_servers is None
 
 
 def test_intentionally_local_fields_do_not_leak() -> None:
@@ -358,6 +391,13 @@ def test_older_sender_meta_fails_soft() -> None:
     assert stub.features == SpaceFeatures()
     assert stub.retention_days is None
     assert stub.retention_exempt_types == ()
+    assert stub.gfs_servers is None
     # Transform still holds for the older shape.
     assert stub.owner_instance_id == "host.example"
     assert stub.id == "legacy-space"
+
+
+def test_unknown_gfs_servers_is_not_on_the_wire() -> None:
+    """``None`` ("not known") never ships."""
+    space = dataclasses.replace(_fully_non_default_space(), gfs_servers=None)
+    assert "gfs_servers" not in space_metadata_for_federation(space)

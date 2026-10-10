@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from .invite_link_forward import FORWARDED_INVITE_LINK_ACTIONS
@@ -34,7 +35,7 @@ from ..domain.events import (
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
 )
-from ..crypto import derive_instance_id, ed25519_public_key
+from ..crypto import ed25519_public_key
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.space import (
     WRITER_ROLES,
@@ -52,16 +53,16 @@ from ..services.space_authority_pin import (
 )
 from ..services.space_crypto_service import (
     UnsupportedAuthoritySuite,
+    UnsupportedKeySuite,
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from .host_equivalence import acts_as_host
 from ..services.space_service import (
     SUPPORTED_SEED_SUITES,
     apply_space_content_key_from_metadata,
-    apply_space_cover_from_metadata,
-    apply_space_icon_from_metadata,
-    can_seat_remote_stub,
-    stub_space_from_metadata,
+    admit_join,
+    seal_join_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -79,6 +80,17 @@ log = logging.getLogger(__name__)
 #: make us verify — a space roster is far smaller; this only caps the work
 #: a malformed or hostile snapshot can cause.
 _MAX_ROSTER_SNAPSHOT_ENTRIES = 5000
+
+#: Receive-side caps on pending private invitations holding a join snapshot
+#: (migration 0093 stores each one until the user answers): per issuing
+#: household, and per (space id, issuing household) — the latter sized for
+#: one household's users. Counted per issuer, so one household's flood can
+#: never crowd out another household's invitation for the same space id. A
+#: re-invite of the same user supersedes the older one, so duplicates hold
+#: no slot, and a row pending for 90 days stops counting. Over a cap the new
+#: invitation is refused (logged). Snapshot-less invitations count too.
+MAX_PENDING_INVITATIONS_PER_ISSUER = 50
+MAX_PENDING_INVITATIONS_PER_SPACE_AND_ISSUER = 20
 
 #: Why a roster-gossip authority signature was refused (``None`` = verified).
 _SIG_MISSING = "missing"
@@ -346,105 +358,26 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
 
-    async def _record_host_identity_pk(
-        self,
-        *,
-        space_id: str,
-        host_instance_id: str,
-        claimed_pk_hex: object,
-    ) -> None:
-        """Store the host household's identity pubkey on the space stub.
-
-        Why this exists (#648): a member that joined over the mesh is not a
-        paired peer of the host, so it has no ``remote_instances`` row — and
-        the §25.6 sync receiver verifies each chunk's signature against
-        exactly that row. Without a key the receiver dropped every
-        mesh-routed ``SPACE_SYNC_CHUNK`` at "sync chunk from unknown
-        instance" (at DEBUG, hence silently), leaving the joiner with the
-        stub, the content key and the media bytes but no post metadata.
-
-        The claim is only as trustworthy as the check applied to it, so it
-        is stored **only** when ``derive_instance_id(pk)`` equals the
-        envelope's authenticated sender — the same binding v_21 uses to
-        authenticate ``target_eph_pk`` in ``SPACE_ROUTE_FOUND``. An
-        instance id IS the hash of its identity key, so a sender cannot
-        assert any key other than its own real one. Anything malformed or
-        mismatched is dropped with a warning and the stub keeps a NULL
-        column (unchanged behaviour: fine for a directly-paired host).
-        """
-        if not claimed_pk_hex:
-            # Older sender — no key shipped. Directly-paired hosts are
-            # unaffected; a mesh host will still fail to sync until the
-            # host upgrades, which is the pre-existing behaviour.
-            return
-        if not isinstance(claimed_pk_hex, str):
-            log.warning(
-                "§D1b: ignoring non-string host_identity_pk from %s",
-                host_instance_id,
-            )
-            return
-        try:
-            pk = bytes.fromhex(claimed_pk_hex)
-        except ValueError:
-            log.warning(
-                "§D1b: ignoring malformed host_identity_pk hex from %s",
-                host_instance_id,
-            )
-            return
-        if len(pk) != 32:
-            log.warning(
-                "§D1b: ignoring host_identity_pk of %d bytes from %s (want 32)",
-                len(pk),
-                host_instance_id,
-            )
-            return
-        if derive_instance_id(pk) != host_instance_id:
-            # Either a bug or an attempt to bind someone else's identity to
-            # this space. Loud: a legitimate sender can never hit this.
-            log.warning(
-                "§D1b: host_identity_pk from %s does not derive to its "
-                "instance id — refusing to store it for space %s",
-                host_instance_id,
-                space_id,
-            )
-            return
-        await self._space_repo.set_host_identity_pk(space_id, claimed_pk_hex)
-
-    async def _apply_meta_cert(self, space_id: str, meta: dict) -> None:
-        """Apply the owner's authority cert a ``space_meta`` carries (v_44).
-
-        A brand-new stub is seated with the snapshot's pin at epoch 0; the
-        cert then records the epoch, so a replay of an OLDER cert (for a
-        key a revoked admin still holds) can never move the pin back. A
-        re-invited member whose stub still pins a retired key catches up.
-        """
-        cert = meta.get("authority_cert")
-        if cert is None:
-            return
-        space = await self._space_repo.get(space_id)
-        if space is not None:
-            await apply_authority_cert(
-                self._space_repo,
-                space,
-                cert,
-                own_instance_id=self._own_instance_id,
-            )
-
     async def _on_invite(self, event: "FederationEvent") -> None:
-        """A peer invited one of our users to their private space.
+        """A peer invited one of our users to its private space.
 
-        **Only the space's host may send this.** The event means "I run
-        space X and I am inviting your user into it", and the row it
-        writes is a bearer ticket: :meth:`_on_accept` looks the token up
-        and seats whoever presents it. A household that could write an
-        invitation for a space it does not host could therefore write
-        itself a ticket for OUR space — or for a space it holds nothing
-        but a read-only Follower seat in — and redeem it a moment later.
+        Migration 0093 (owner decision 2026-10-10): **an invitation never
+        seats anything until the user accepts it.** Receipt stores only the
+        invitation row, with the issuer's snapshot (``space_meta``, its
+        content key KEK-wrapped for this invitation —
+        :func:`seal_join_snapshot`); the accept seats the stub from THAT
+        snapshot (:meth:`SpaceService.accept_remote_invite`). So several
+        pending invitations for one space id from different households
+        coexist, each shown to the user, and none can block or alter
+        another's — a stranger's invitation naming the real owner's space
+        plants nothing.
 
-        The check is "if we know the space, its owner must be the signer".
-        A space we have never heard of is the normal first-invite case and
-        stays open — that row names a space with no local seats, so it
-        cannot touch one.
+        For a space this household already holds the same rules as at
+        accept apply now (:func:`admit_join`): only its owner, or our
+        trusted inviting admin, may invite into it — the row is a bearer
+        ticket :meth:`_on_accept` would honour on the host, so a household
+        that could write one for a space it does not host could write
+        itself a ticket for OUR space.
         """
         p = event.payload
         # All fields are in the encrypted payload — envelope plaintext
@@ -458,14 +391,77 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        known = await self._space_repo.get(space_id)
-        if known is not None and known.owner_instance_id != event.from_instance:
-            log.warning(
-                "SPACE_PRIVATE_INVITE for %s from %s — only the space's host "
-                "(%s) may invite into it; dropping",
+        meta = p.get("space_meta")
+        snapshot: str | None = None
+        if isinstance(meta, dict):
+            received_at_ms = int(time.time() * 1000)
+            join = await admit_join(
+                self._space_repo,
+                self._remote_members,
                 space_id,
+                meta,
                 event.from_instance,
-                known.owner_instance_id,
+                own_instance_id=self._own_instance_id,
+                now_ms=received_at_ms,
+            )
+            if join is None:
+                log.warning(
+                    "SPACE_PRIVATE_INVITE for %s from %s refused — this "
+                    "household holds that space under another owner (or the "
+                    "sender is neither its owner nor our trusted inviting "
+                    "admin); dropping",
+                    space_id,
+                    event.from_instance,
+                )
+                return
+            try:
+                snapshot = seal_join_snapshot(
+                    meta,
+                    space_id=space_id,
+                    invite_token=invite_token,
+                    host_identity_pk=p.get("host_identity_pk"),
+                    space_crypto_service=self._space_crypto,
+                    received_at_ms=received_at_ms,
+                    owner_instance_id=join.owner_instance_id,
+                )
+            except UnsupportedKeySuite as exc:
+                log.warning(
+                    "SPACE_PRIVATE_INVITE for %s from %s refused — %s",
+                    space_id,
+                    event.from_instance,
+                    exc,
+                )
+                return
+        else:
+            known = await self._space_repo.get(space_id)
+            if known is not None and known.owner_instance_id != event.from_instance:
+                log.warning(
+                    "SPACE_PRIVATE_INVITE for %s from %s — only the space's "
+                    "host (%s) may invite into it; dropping",
+                    space_id,
+                    event.from_instance,
+                    known.owner_instance_id,
+                )
+                return
+        issuer = event.from_instance
+        # A re-invite of the same user supersedes the older invitation (its
+        # slot is freed before the caps are counted).
+        await self._space_repo.supersede_pending_remote_invitations(
+            space_id, issuer, invitee_user_id
+        )
+        if (
+            await self._space_repo.count_pending_remote_invitations(issuer)
+            >= MAX_PENDING_INVITATIONS_PER_ISSUER
+            or await self._space_repo.count_pending_remote_invitations(
+                issuer, space_id=space_id
+            )
+            >= MAX_PENDING_INVITATIONS_PER_SPACE_AND_ISSUER
+        ):
+            log.warning(
+                "SPACE_PRIVATE_INVITE for %s from %s refused — too many "
+                "pending invitations from that household",
+                space_id,
+                issuer,
             )
             return
         inviter_user_id = str(p.get("inviter_user_id") or "")
@@ -477,112 +473,8 @@ class PrivateSpaceInviteHandler:
             remote_user_id=invitee_user_id,
             invite_token=invite_token,
             space_display_hint=(str(display_hint) if display_hint else None),
+            join_snapshot=snapshot,
         )
-        # §D1b — seat a *local stub* of the host's space so accept can
-        # immediately insert a ``space_members`` row pointing at it.
-        # The stub is invisible to the user's /api/spaces list (which
-        # joins on ``space_members``) until they accept; declining
-        # leaves it dust-but-harmless. ``space.save`` is upsert so a
-        # repeat invite, or a refresh after SPACE_CONFIG_CHANGED, is
-        # idempotent. Older senders that don't ship ``space_meta`` get
-        # the legacy behaviour — no stub, joiner sees the invite banner
-        # but can't see the space until upstream upgrades.
-        meta = p.get("space_meta")
-        # §D1b anti-hijack — drop the snapshot (fall back to no-stub legacy
-        # behaviour) if a local space with this id is already owned by a
-        # different host, so a malicious inviter can't clobber its config +
-        # content key. Compared against the authenticated sender, never the
-        # issuer-controlled meta["owner_instance_id"].
-        if isinstance(meta, dict) and not await can_seat_remote_stub(
-            self._space_repo, space_id, event.from_instance
-        ):
-            log.warning(
-                "§D1b: refusing invite stub — space=%s already owned "
-                "locally by another host, inviter=%s",
-                space_id,
-                event.from_instance,
-            )
-            meta = None
-        if isinstance(meta, dict):
-            stub = stub_space_from_metadata(
-                space_id,
-                host_instance_id=event.from_instance,
-                meta=meta,
-            )
-            await self._space_repo.save(stub)
-            await self._record_host_identity_pk(
-                space_id=space_id,
-                host_instance_id=event.from_instance,
-                claimed_pk_hex=p.get("host_identity_pk"),
-            )
-            await self._apply_meta_cert(space_id, meta)
-            # §D1b cover bytes (#116) — when shipped inline, persist
-            # so the stub renders the real cover rather than the
-            # gradient placeholder.
-            await apply_space_cover_from_metadata(
-                space_id,
-                meta=meta,
-                cover_repo=self._cover_repo,
-            )
-            # §D1b icon bytes — same, for the space avatar.
-            await apply_space_icon_from_metadata(
-                space_id,
-                meta=meta,
-                icon_repo=self._icon_repo,
-            )
-            # §D1b space content key (#117) — persist receiver's
-            # local epoch key so this invitee can actually decrypt
-            # space events once she accepts. Without this the stub
-            # is just metadata; SPACE_POST_CREATED inbound would
-            # raise on decrypt and the user would see nothing.
-            await apply_space_content_key_from_metadata(
-                space_id,
-                meta=meta,
-                space_crypto_service=self._space_crypto,
-            )
-            # §D1b member-list mirror (#115) — the meta now carries a
-            # ``roster`` of everyone in the space. Seat each entry as
-            # a ``SpaceRemoteMember`` row so the joiner's local
-            # ``GET /api/spaces/{id}/members`` (which merges
-            # ``space_remote_members`` per PR #424) shows the full
-            # household-spanning member list rather than just her
-            # own row. We skip the invitee's *own* user_id — that
-            # comes in via ``space_members`` when she accepts.
-            roster = meta.get("roster")
-            owner_uid = owner_seat_from_roster(roster, event.from_instance)
-            if owner_uid is not None:
-                await self._space_repo.set_owner_user_id(space_id, owner_uid)
-            if isinstance(roster, list):
-                for entry in roster:
-                    if not isinstance(entry, dict):
-                        continue
-                    user_id = str(entry.get("user_id") or "")
-                    inst_id = str(entry.get("instance_id") or "")
-                    if not user_id or not inst_id or user_id == invitee_user_id:
-                        continue
-                    await self._remote_members.add(
-                        space_id=space_id,
-                        instance_id=inst_id,
-                        user_id=user_id,
-                        user_pk=(
-                            str(entry["user_pk"]) if entry.get("user_pk") else None
-                        ),
-                        display_name=(
-                            str(entry["display_name"])
-                            if entry.get("display_name")
-                            else None
-                        ),
-                        # The snapshot's role, not a blanket ``member``:
-                        # mirroring a Follower as a full member is what made
-                        # every OTHER household in the space accept that
-                        # household's writes.
-                        role=mirrorable_remote_role(entry.get("role")),
-                    )
-                    await self._bus.publish(
-                        SpaceRemoteSeatLive(
-                            space_id=space_id, instance_id=inst_id, user_id=user_id
-                        )
-                    )
         await self._bus.publish(
             RemoteSpaceInviteReceived(
                 space_id=space_id,
@@ -858,8 +750,10 @@ class PrivateSpaceInviteHandler:
         # household's space we merely mirror). Only the household that
         # hosts the space can say who is in it.
         local_space = await self._space_repo.get(space_id)
-        if local_space is None or (
-            local_space.owner_instance_id != event.from_instance
+        # The host — or the delegated admin household that invited us,
+        # while delegation is on (``host_equivalence``).
+        if not await acts_as_host(
+            self._space_repo, self._remote_members, local_space, event.from_instance
         ):
             log.debug(
                 "SPACE_REMOTE_MEMBER_REMOVED for %s from %s — not the host of "
@@ -1186,8 +1080,10 @@ class PrivateSpaceInviteHandler:
         if not space_id or not isinstance(view, dict):
             return
         space = await self._space_repo.get(space_id)
-        if space is None or space.owner_instance_id != event.from_instance:
-            return  # only the host may mirror proposal state
+        if not await acts_as_host(
+            self._space_repo, self._remote_members, space, event.from_instance
+        ):
+            return  # only the host (or our trusted inviter) mirrors proposals
         await self._approval_service.apply_mirror_update(space_id, view)
 
     async def _on_key_exchange_rekey(self, event: "FederationEvent") -> None:
@@ -1403,8 +1299,13 @@ class PrivateSpaceInviteHandler:
                 event.from_instance,
             )
             return
-        # SECURITY: only the authentic owner may distribute the signing seed.
-        if space.owner_instance_id != event.from_instance:
+        # SECURITY: only the authentic owner — or the delegated admin
+        # household that invited us, while delegation is on
+        # (``host_equivalence``) — may distribute the signing seed. The seed
+        # must still be the private half of the key we pin (below).
+        if not await acts_as_host(
+            self._space_repo, self._remote_members, space, event.from_instance
+        ):
             log.warning(
                 "SPACE_ADMIN_KEY_SHARE: %s is not the owner of %s (owner=%s) "
                 "— refusing signing-seed share",

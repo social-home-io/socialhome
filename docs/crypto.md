@@ -439,6 +439,42 @@ is about strengthening the *delivery channel*, not the AEAD primitive.
 Receivers reject unknown `key_suite` values rather than fall back —
 see `apply_space_content_key_from_metadata` for the validator.
 
+**Owner statement and inviter proof** (`space_meta.owner_statement`,
+`space_meta.inviter_proof`, `socialhome/space_owner_statement.py`, migration
+0093). Space ids are random, so "who owns this space" is signed: the OWNER
+HOUSEHOLD's identity key over `{space_id, owner_instance_id, owner_pk,
+authority_pk, authority_key_epoch, issued_at, owner_statement_sig_suite}`
+(`b"space-owner-statement:v1:"` + canonical JSON), checked with
+`derive_instance_id(owner_pk) == owner_instance_id` and against the
+authority key AND epoch the snapshot pins; `issued_at` (unix ms) more than a
+day ahead is refused and never signed, and a statement older than 30 days is
+refused (`MAX_STATEMENT_AGE_MS`; the owner signs a fresh one into every
+config, invite, rotation bundle and §25.6 sync sentinel it sends). The suite tag `owner_statement_sig_suite`
+(`SUPPORTED_OWNER_STATEMENT_SUITES`, `UnsupportedOwnerStatementSuite`) is
+rejected when unknown. The inviter proof is an ordinary space-authority
+signature (`authority_sig_suite`, event type `space_inviter_proof`) over
+`{space_id, owner_instance_id, inviter_instance_id, authority_key_epoch,
+authority_pk}` — only
+seed holders can make one, and the inviter's id is bound in. The v_44
+authority cert was the nearest existing shape but exists only from key epoch
+1 (epoch 0 is TOFU and the GFS verifies certs with that rule).
+
+**The owner's GFS list** (`space_meta.gfs_servers`,
+`domain/gfs_server.py`, `gfs_server_list_sig.py`, migration 0093) — the
+GFSs members will send to, so it is signed by the OWNER HOUSEHOLD's Ed25519
+identity key: `{servers, issued_at, owner_pk, gfs_servers_sig_suite,
+gfs_servers_sig}`, signature over `b"space-gfs-servers:v1:"` + canonical
+JSON of `{space_id, owner_instance_id, servers, issued_at, owner_pk,
+gfs_servers_sig_suite}`. Receivers verify with keys they already have —
+`derive_instance_id(owner_pk) == owner_instance_id` (as for the authority
+cert) — and take only an `issued_at` above the stored one, so a relaying
+delegated admin can carry the owner's list but not forge, change or replay
+it. Two suite tags, each rejected when unknown and never defaulted:
+`gfs_servers_sig_suite` (`SUPPORTED_GFS_SERVERS_SIG_SUITES`,
+`UnsupportedGfsServersSigSuite`) and, per entry, `gfs_key_suite` for the GFS
+identity key a member will pin (`SUPPORTED_GFS_KEY_SUITES`,
+`UnsupportedGfsKeySuite`), both `"ed25519"` today.
+
 **Delegated-admin signing-seed delivery** (`SPACE_ADMIN_KEY_SHARE`,
 `services/space_service.py`, v_22) — when the owner opts into
 `SpaceFeatures.delegated_admin_authority`, the space's Ed25519 signing

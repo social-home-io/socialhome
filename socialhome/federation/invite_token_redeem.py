@@ -64,25 +64,23 @@ from ..domain.media_constraints import (
 from ..domain.space import (
     INVITE_VIA_GFS_LEGACY,
     INVITE_VIA_INTERNAL,
+    JoinOwner,
     SpaceMember,
     SpacePermissionError,
     SpaceRole,
     SpaceType,
-    mirrorable_remote_role,
-    owner_seat_from_roster,
 )
 from ..services.space_authority_pin import (
-    apply_authority_cert,
     owner_authority_cert_via,
+    owner_statement_via,
 )
 from ..services.space_service import (
     _coerce_min_age,
-    apply_space_content_key_from_metadata,
-    apply_space_cover_from_metadata,
-    apply_space_icon_from_metadata,
     build_space_snapshot_for_federation,
+    admit_join,
     can_seat_remote_stub,
-    stub_space_from_metadata,
+    expire_superseded_invitations,
+    seat_join_stub,
 )
 from .invite_bootstrap import (
     KIND_REDEEM,
@@ -288,6 +286,7 @@ class SpaceInviteTokenRedeemCoordinator:
         "_bootstrap_hints",
         "_rate_limiter",
         "_space_service",
+        "_seat_locks",
         "_redeem_locks",
         "_writer_certs",
     )
@@ -370,6 +369,11 @@ class SpaceInviteTokenRedeemCoordinator:
         #: seat the other committed). Weak values: a lock lives only while
         #: a redeem holds or awaits it.
         self._redeem_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
+        #: Per-space seating locks, used only when no space service (which
+        #: owns the shared ones) is attached.
+        self._seat_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
         #: v_49 writer certs: the issuer puts the redeemer's own cert in the
@@ -685,7 +689,38 @@ class SpaceInviteTokenRedeemCoordinator:
             issuer_instance_id=issuer_instance_id,
         )
 
+    def _seating_lock(self, space_id: str) -> asyncio.Lock:
+        """The space service's per-space seating lock (shared with the
+        private-invite accept, migration 0093), or our own when no space
+        service is attached (unit fixtures)."""
+        if self._space_service is not None:
+            return self._space_service.seating_lock(space_id)
+        lock = self._seat_locks.get(space_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._seat_locks[space_id] = lock
+        return lock
+
     async def _seat_local_after_ack(
+        self,
+        result: dict,
+        *,
+        viewer_user_id: str,
+        issuer_instance_id: str,
+        bootstrap: InviteBootstrapHint | None = None,
+    ) -> dict:
+        """:meth:`_seat_local_after_ack_locked` under the space's seating
+        lock, so a redeem and an accept (or two redeems) for one space id
+        from different households never both seat."""
+        async with self._seating_lock(str(result.get("space_id") or "")):
+            return await self._seat_local_after_ack_locked(
+                result,
+                viewer_user_id=viewer_user_id,
+                issuer_instance_id=issuer_instance_id,
+                bootstrap=bootstrap,
+            )
+
+    async def _seat_local_after_ack_locked(
         self,
         result: dict,
         *,
@@ -747,8 +782,25 @@ class SpaceInviteTokenRedeemCoordinator:
             # key. Compared against issuer_instance_id (the authenticated
             # sender), never meta["owner_instance_id"] (issuer-controlled).
             # Checked before any persistence so a conflict seats nothing.
-            if not await can_seat_remote_stub(
-                self._spaces, space_id, issuer_instance_id
+            # With a snapshot, ``admit_join`` decides (migration 0093): the
+            # owner or our trusted inviting admin may refresh a row we hold;
+            # a row under another owner is never taken over. A redeem IS the
+            # user's accept, so it seats directly (no pending stage).
+            join: JoinOwner | None = None
+            if meta_dict is not None:
+                join = await admit_join(
+                    self._spaces,
+                    self._remote_members,
+                    space_id,
+                    meta_dict,
+                    issuer_instance_id,
+                    own_instance_id=self._federation.own_instance_id,
+                )
+            if (meta_dict is not None and join is None) or (
+                meta_dict is None
+                and not await can_seat_remote_stub(
+                    self._spaces, space_id, issuer_instance_id
+                )
             ):
                 log.warning(
                     "§D1b: refusing redeem seat — space=%s already owned "
@@ -787,44 +839,25 @@ class SpaceInviteTokenRedeemCoordinator:
             # don't ship it fall through to today's mapping-only
             # behaviour. SpaceMember is keyed on (space_id, user_id)
             # so a repeat redeem is a no-op via INSERT OR REPLACE.
-            if meta_dict is not None:
+            if meta_dict is not None and join is not None:
                 meta = meta_dict
-                stub = stub_space_from_metadata(
-                    space_id,
-                    host_instance_id=issuer_instance_id,
+                # Seated under the space's OWNER: the issuer, or — for a
+                # delegated admin's link — the owner its signed statement
+                # names, when the admin also proved it holds the seed. The
+                # roster mirror skips the redeemer (its ``space_members`` row
+                # is written below).
+                await seat_join_stub(
+                    space_repo=self._spaces,
+                    remote_member_repo=self._remote_members,
+                    bus=self._bus,
+                    space_id=space_id,
                     meta=meta,
-                )
-                await self._spaces.save(stub)
-                # v_44 — the ACK's cert records the authority-key epoch on
-                # the stub (and re-pins one that still names a retired key),
-                # so a replayed older cert can never move the pin back.
-                if meta.get("authority_cert") is not None:
-                    seated = await self._spaces.get(space_id)
-                    if seated is not None:
-                        await apply_authority_cert(
-                            self._spaces,
-                            seated,
-                            meta.get("authority_cert"),
-                            own_instance_id=self._federation.own_instance_id,
-                        )
-                # §D1b cover bytes (#116) — persist host's WebP
-                # when shipped inline so the stub renders properly.
-                await apply_space_cover_from_metadata(
-                    space_id,
-                    meta=meta,
+                    join=join,
+                    issuer_instance_id=issuer_instance_id,
+                    joining_user_id=viewer_user_id,
+                    own_instance_id=self._federation.own_instance_id,
                     cover_repo=self._cover_repo,
-                )
-                await apply_space_icon_from_metadata(
-                    space_id,
-                    meta=meta,
                     icon_repo=self._icon_repo,
-                )
-                # §D1b space content key (#117) — persist the
-                # receiver's local epoch key from the ACK so
-                # subsequent SPACE_POST_CREATED decrypts succeed.
-                await apply_space_content_key_from_metadata(
-                    space_id,
-                    meta=meta,
                     space_crypto_service=self._space_crypto,
                 )
                 # v_49 — our writer cert for that epoch (needs the key row
@@ -857,50 +890,11 @@ class SpaceInviteTokenRedeemCoordinator:
                         joined_at=datetime.now(timezone.utc).isoformat(),
                     )
                 )
-                # §D1b member-list mirror (#115) — seat every other
-                # member of this space as a ``SpaceRemoteMember`` so
-                # the Members tab on the receiver's stub shows the
-                # full roster (the host, federated peers, …) rather
-                # than just the redeemer. Skipping ``viewer_user_id``
-                # because that lives in the local ``space_members``
-                # row we just inserted.
-                roster = meta.get("roster")
-                owner_uid = owner_seat_from_roster(roster, issuer_instance_id)
-                if owner_uid is not None:
-                    await self._spaces.set_owner_user_id(space_id, owner_uid)
-                if isinstance(roster, list):
-                    for entry in roster:
-                        if not isinstance(entry, dict):
-                            continue
-                        user_id = str(entry.get("user_id") or "")
-                        inst_id = str(entry.get("instance_id") or "")
-                        if not user_id or not inst_id or user_id == viewer_user_id:
-                            continue
-                        await self._remote_members.add(
-                            space_id=space_id,
-                            instance_id=inst_id,
-                            user_id=user_id,
-                            user_pk=(
-                                str(entry["user_pk"]) if entry.get("user_pk") else None
-                            ),
-                            display_name=(
-                                str(entry["display_name"])
-                                if entry.get("display_name")
-                                else None
-                            ),
-                            # The snapshot's role, not a blanket ``member``:
-                            # mirroring a Follower as a full member is what
-                            # made every OTHER household in the space accept
-                            # that household's writes.
-                            role=mirrorable_remote_role(entry.get("role")),
-                        )
-                        await self._bus.publish(
-                            SpaceRemoteSeatLive(
-                                space_id=space_id,
-                                instance_id=inst_id,
-                                user_id=user_id,
-                            )
-                        )
+                # A pending private invitation from another household for
+                # this space can no longer be joined (migration 0093).
+                await expire_superseded_invitations(
+                    self._spaces, space_id, join, issuer_instance_id
+                )
         out: dict = {
             "space_id": space_id,
             "role": role_str,
@@ -1336,6 +1330,7 @@ class SpaceInviteTokenRedeemCoordinator:
                 # v_44 — the owner's cert for the current authority key, so
                 # a redeemer whose old stub pins a retired key re-pins.
                 authority_cert=owner_authority_cert_via(self._federation, space),
+                owner_statement=owner_statement_via(self._federation, space),
             )
         return ack_body
 

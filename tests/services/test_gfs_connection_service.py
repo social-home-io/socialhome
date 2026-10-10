@@ -40,8 +40,11 @@ from socialhome.capabilities_sig import (
     CAPS_SIG_SUITE_ED25519,
     sign_capabilities,
 )
+from socialhome.domain.gfs_server import GfsServer
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.global_server.domain import ClientInstance
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.services import gfs_connection_service
 from socialhome.services.gfs_connection_service import (
     GFS_INFO_NEGATIVE_TTL_S,
@@ -286,6 +289,30 @@ async def test_refresh_connection_metadata_updates_changed_name(env):
     # Hit GET /gfs/info on the connection's inbox URL.
     assert session.calls and session.calls[0][0] == "GET"
     assert session.calls[0][1].endswith("/gfs/info")
+
+
+async def test_a_rename_re_snapshots_every_space_listed_on_that_gfs(env):
+    """The GFS name rides the owner's signed list members hold."""
+    _, repo = env
+    await repo.save(_make_conn("gfs-1", status="active", inbox_url="https://gfs.test"))
+    await repo.save(_make_conn("gfs-2", status="active"))
+    await repo.publish_space("space-a", "gfs-1")
+    await repo.publish_space("space-b", "gfs-1")
+    await repo.publish_space("space-c", "gfs-2")
+    session = _StubSession(status=200, body={"server_name": "New Name"})
+    svc = GfsConnectionService(repo, http_client=session, publish_client=session)  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.refresh_connection_metadata("gfs-1")
+    assert seen == ["space-a", "space-b"]
+    # Unchanged name → nothing to re-sign.
+    seen.clear()
+    await svc.refresh_connection_metadata("gfs-1")
+    assert seen == []
 
 
 async def test_refresh_connection_metadata_noop_when_unchanged(env):
@@ -4328,3 +4355,97 @@ async def test_refresh_if_stale_is_debounced_per_connection(env):
     assert len(svc._http_client.gets) == gets  # type: ignore[union-attr]
     await svc.refresh_if_stale(conn, min_interval_s=0)
     assert len(svc._http_client.gets) == gets + 1  # type: ignore[union-attr]
+
+
+# ── Listing-change hook (the owner's ``spaces.gfs_servers`` snapshot) ──────
+
+
+async def test_publish_space_runs_the_listing_hook_after_success(env):
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(env, session, "hk-1", space_id="space-hk")
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.publish_space("space-hk", "hk-1")
+    assert seen == ["space-hk"]
+
+
+async def test_failed_publish_does_not_run_the_listing_hook(env):
+    session = _StubSession(status=500)
+    svc = await _publishable_svc(env, session, "hk-2", space_id="space-hk2")
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    with pytest.raises(GfsConnectionError):
+        await svc.publish_space("space-hk2", "hk-2")
+    assert seen == []
+
+
+async def test_unpublish_space_runs_the_listing_hook_and_survives_its_failure(
+    env, caplog
+):
+    _, repo = env
+    await repo.save(_make_conn("hk-3"))
+    await repo.publish_space("space-hk3", "hk-3")
+    svc, _pk = _signing_svc(repo, _StubSession(status=200))
+
+    async def _hook(space_id: str) -> None:
+        raise RuntimeError("boom")
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.unpublish_space("space-hk3", "hk-3")  # does not raise
+    assert await repo.list_publications_for_space("space-hk3") == []
+    assert "listing" in caplog.text
+
+
+async def test_disconnect_runs_the_listing_hook_for_each_listed_space(env):
+    _, repo = env
+    await repo.save(_make_conn("hk-4"))
+    await repo.publish_space("space-a", "hk-4")
+    await repo.publish_space("space-b", "hk-4")
+    svc = GfsConnectionService(repo, http_client=_StubSession())  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    async def _hook(space_id: str) -> None:
+        # Runs after the cascade: the rows are gone by now.
+        assert await repo.list_publications_for_space(space_id) == []
+        seen.append(space_id)
+
+    svc.attach_on_listings_changed(_hook)
+    await svc.disconnect("hk-4")
+    assert sorted(seen) == ["space-a", "space-b"]
+
+
+async def test_publish_body_never_names_the_other_listing_servers(env):
+    """The owner's GFS list is for members only: no GFS learns which other
+    servers list the space."""
+    session = _StubSession(status=200)
+    svc = await _publishable_svc(env, session, "hk-5", space_id="space-body")
+    db, _ = env
+    await SqliteSpaceRepo(db).set_gfs_servers(
+        "space-body",
+        sign_gfs_server_list(
+            space_id="space-body",
+            servers=(
+                GfsServer(
+                    gfs_instance_id="gfs-elsewhere",
+                    inbox_url="https://elsewhere.example",
+                    public_key="ab" * 32,
+                    gfs_key_suite="ed25519",
+                    display_name="Elsewhere",
+                ),
+            ),
+            issued_at=1,
+            owner_seed=b"\x03" * 32,
+        ),
+    )
+    await svc.publish_space("space-body", "hk-5")
+    body = json.dumps(session._last_body)
+    assert "gfs_servers" not in body
+    assert "elsewhere" not in body

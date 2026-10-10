@@ -2192,6 +2192,145 @@ under the server-wide cap).
 6. **The owner replaces a channel another key holder moved past it**
    (self-heal above).
 
+### The owner's GFS list in space metadata
+
+A space's config snapshot (`space_meta`, carried by `SPACE_CONFIG_CHANGED`,
+the §D1b invite / redeem-ACK snapshots and the authority-rotation bundle)
+includes `gfs_servers`: the GFSs the owner lists the space on, **signed by
+the owner household's identity key** —
+
+```json
+{"servers": [{"gfs_instance_id": "gfs-node-0",
+              "inbox_url": "https://gfs.example",
+              "public_key": "<GFS ed25519 hex>", "gfs_key_suite": "ed25519",
+              "display_name": "Example GFS"}],
+ "issued_at": 1760000000000,
+ "owner_pk": "<owner household ed25519 hex>",
+ "gfs_servers_sig_suite": "ed25519",
+ "gfs_servers_sig": "<b64url>"}
+```
+
+The signature covers `b"space-gfs-servers:v1:"` + canonical JSON of
+`{space_id, owner_instance_id, servers, issued_at, owner_pk,
+gfs_servers_sig_suite}` (`socialhome/gfs_server_list_sig.py`).
+
+- **Members only, encrypted.** It rides inside the per-peer encrypted
+  `space_meta`; it is never part of a GFS publish body, so no GFS learns
+  which other servers list the space.
+- **Owner-signed, so owner-only on every household.** A receiver takes it
+  only when `derive_instance_id(owner_pk)` is the space's owner and the
+  signature verifies, and only when `issued_at` is above the stored list's —
+  whoever relays it. A delegated admin can therefore carry the owner's list
+  (its join snapshots do) but cannot write, change or replay one; a list it
+  signs itself is ignored. A forwarded config edit cannot carry it, `save`
+  never writes it, and a snapshot without the key leaves the stored list
+  alone.
+- **The owner keeps it current**: `GfsServerSelectionService.sync_snapshot`
+  derives it from its active listings after every publish / unpublish /
+  disconnect / GFS rename and every config change of a space it owns, signs
+  it with `issued_at = max(now_ms, stored + 1)`, raises `config_sequence` and
+  sends it as a `gfs_servers_changed` config change. A space that leaves the
+  public tiers gets a signed **empty** list at once, even if a GFS could not
+  be reached to withdraw the listing.
+- **Receivers check entries when they use them**: an entry with an unknown or
+  missing `gfs_key_suite`, a bad key, or an `inbox_url` that is not https
+  (unless private) is dropped; a loopback / RFC 1918 / link-local / ULA host
+  is dropped unless the receiver holds an active connection to the same
+  `gfs_instance_id` at the same URL; duplicates by id, URL or key and
+  anything past 8 entries are dropped, with one log line. The stored list
+  stays exactly as signed, so it can be relayed. Whoever sends to these
+  servers (v_56, later) must use the SSRF-guarded `OutboundFetcher` path
+  (resolve, pin, refuse private addresses) — a DNS name is not resolved here.
+- **Join stubs are seated under the real owner — only with proof.** Space
+  ids are random, not key-derived, so a snapshot's `owner_instance_id` is
+  just a claim. A §D1b stub issued by a household other than the claimed
+  owner is seated under that owner ONLY when the snapshot carries the
+  owner's signed **owner statement** (`socialhome/space_owner_statement.py`:
+  the owner household's identity key over `{space_id, owner_instance_id,
+  owner_pk, authority_pk, authority_key_epoch, issued_at,
+  owner_statement_sig_suite}`, binding the exact authority key the snapshot
+  pins) AND the issuer's **inviter proof** (its own id signed with the space
+  authority seed — only the owner and delegated admins hold it). Otherwise
+  the stub names the issuer itself, as before 0093, with no inviting-admin
+  trust. A claimed owner that is the receiving household or not a derived
+  instance id is refused outright. The owner signs a fresh statement into
+  every snapshot and config it sends; members keep the latest verified one
+  (`spaces.owner_statement`) and relay it.
+- **An invitation seats nothing until the user accepts it.** Receipt of a
+  §D1b private invite stores only the invitation row, with the issuer's
+  snapshot (`space_invitations.join_snapshot`, its content key KEK-wrapped
+  for that invitation) — no space row, household rows, seats, pinned key,
+  cover or icon. The accept seats the stub from THAT invitation's snapshot,
+  checking the owner statement, inviter proof and epoch then. So several
+  pending invitations for one space id from different households coexist,
+  each listed for the user, and none can block or alter another's: a
+  stranger's invitation naming the real owner's space plants nothing. After
+  an accept (or an invite-link redeem, which is the user's accept and seats
+  directly), the pending invitations for that space from any household but
+  its owner and the issuer are expired. Declining only answers the issuer.
+  Invitations do not expire for the user: the invitee-side `expires_at` is
+  informational (the listing, the accept and the issuer's answer check all
+  ignore it). The accept holds a per-space seating lock (shared with the
+  invite-link redeem and the GFS-mirror subscribe) and seats the stub before
+  the ACCEPT goes out, rolling a fresh stub back only if the send
+  definitively fails (an ACCEPT parked for redelivery keeps the seat). The owner
+  statement's freshness is judged at the invitation's receipt time, and an
+  accept never degrades: when the owner no longer resolves as it did on
+  receipt the accept is refused, never seated under the issuer. Receive-side
+  caps: 50 pending invitations per issuing household, 20 per space id and
+  issuing household (a re-invite of the same user supersedes the older one;
+  rows pending over 90 days stop counting). An invitation received before
+  0093 was pre-seated on receipt; a startup sweep drops such stubs nobody
+  here joined (with their snapshot-less pending invitations, never a
+  GFS-mirror stub) so they cannot block the real owner.
+- **The first accepted join stays.** Once this household joined a space, a
+  later join snapshot (an invite, an accept, a link redeem) is taken only
+  from its owner or its trusted inviting admin; one naming another owner is
+  refused (trust on first use), and an invitation that could only ever be
+  refused is dropped on receipt.
+- **Statements expire and follow the key.** A statement is taken only while
+  younger than 30 days and only for the key AND epoch the snapshot pins; the
+  inviter proof binds the epoch too. The owner signs a fresh statement into
+  every config, invite, rotation bundle and §25.6 stream sentinel it sends
+  (the sentinel carries it with no config edit — no sequence or HLC bump),
+  and members keep and relay the newest. A trusted inviter stays trusted
+  only while the statement held here is current for the pinned key and
+  epoch, and only for the epoch the inviter PROVED: after a rotation it
+  resumes only on the inviter's fresh proof with the new seed (its §25.6
+  sentinel carries one); a moved pin, a fresh statement or the inviter's own
+  roster never resume it. So an
+  admin revoked by a rotation — still holding the old seed and the owner's
+  old statement — loses a household it seated on the old key once the
+  statement ages out, or sooner: the owner answers a catch-up from a
+  household it never seated with a non-terminal `SPACE_SYNC_REJECTED`
+  (`reason: "not_seated"`) carrying its CURRENT statement, and when that
+  names another key / epoch than the inviter pinned, the owner wins
+  (re-pin to the newer epoch, inviter mark cleared; the owner's cert for the
+  new key arrives with its next config). A household with any
+  record of membership on the owner (a seat row or tombstone, an accepted
+  invitation) still gets the terminal `removed`. The inviter's identity key is recorded as the
+  host key only when the inviter is the owner. An inviting admin's key is kept on its own
+  `space_instances` row for that space instead, so the §25.6 catch-up it
+  streams to a joiner it reached over the mesh still verifies. That inviting
+  admin household (`spaces.invited_by_instance`) is host-equivalent for
+  content and admin actions while delegation is on and its admin seat lives
+  — never for owner-only settings such as this list (see
+  [spaces.md](spaces.md#membership-ops-offline-of-owner-delegated-invite--seat)).
+- **Residuals:** (1) a household that invites us claiming to own a space
+  itself (no statement needed for that) gets a stub naming itself — the
+  pre-0093 result; it can never name somebody else without that household's
+  signature, and such an unproven stub can be replaced by the proven owner's
+  invite. (2) Since space ids are not key-derived, two households can both
+  claim one id with statements of their own; then the first one seated
+  stays (unless never accepted and unproven) — at worst a denial of
+  service, as before, never a takeover of an accepted or proven stub.
+  (3) Main-era stubs that already name an admin as owner are not re-seated
+  automatically: a seed-holding admin could sign "I own it" exactly like the
+  owner, so nothing on such a stub can tell them apart.
+- An older receiver ignores the key; no protocol version gates it. Members
+  store it (`spaces.gfs_servers`, migration 0093) but do not yet act on it —
+  publishing to every listed server is a later protocol version.
+
 ## Flow — publish + browse + join
 
 ```mermaid
@@ -2290,6 +2429,14 @@ contest a ban.
   inbound routing); `socialhome/global_server/channels.py`,
   `socialhome/global_server/routes/channels.py` — GFS side (pins, the
   one-tier epoch, seats, relay), GFS migration `0016`.
+- `socialhome/domain/gfs_server.py` — the owner's GFS list shapes
+  (`GfsServer`, `SignedGfsServerList`, both suite tags, list / column codec,
+  the private-host filter); `socialhome/gfs_server_list_sig.py` — the owner
+  household's signature over it;
+  `socialhome/services/gfs_server_selection_service.py` — the owner's
+  `spaces.gfs_servers` snapshot and the member read side
+  (`member_servers`); `space_service.apply_gfs_servers_from_metadata` /
+  `seated_owner_instance` — the receive side.
 - `socialhome/federation/keywrap_seal.py` — `seal_to_keywrap` /
   `open_keywrap` / `verify_keywrap_binding` (static-recipient sealed box).
 - `socialhome/global_server/routes/public.py`,

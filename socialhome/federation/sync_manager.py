@@ -128,6 +128,11 @@ class SyncDecision:
 # ─── Manager ──────────────────────────────────────────────────────────────
 
 
+#: Non-terminal ``SPACE_SYNC_REJECTED`` reason (migration 0093): the host
+#: never seated the requester. Older receivers drop unknown reasons.
+SYNC_REJECT_NOT_SEATED: str = "not_seated"
+
+
 class SyncSessionManager:
     """In-memory registry + protocol logic for direct-sync sessions.
 
@@ -149,6 +154,7 @@ class SyncSessionManager:
         "_get_max_seq",
         "_check_member",
         "_reject_reason",
+        "_owner_statement_for",
         "_on_local_ice",
         "_requests",
     )
@@ -160,6 +166,7 @@ class SyncSessionManager:
         get_max_seq=None,
         check_member=None,
         reject_reason=None,
+        owner_statement_for=None,
         on_local_ice=None,
     ) -> None:
         self._federation_repo = federation_repo
@@ -183,6 +190,10 @@ class SyncSessionManager:
         # if it's gone. Kept generic so the manager has no hard
         # space_repo dependency; when ``None`` the silent drop is kept.
         self._reject_reason = reject_reason
+        #: ``async (space_id) -> dict | None`` — the owner household's
+        #: current ownership statement (public, owner-signed, no secrets),
+        #: answered to a household this host never seated (migration 0093).
+        self._owner_statement_for = owner_statement_for
         # Forwards each session's locally-gathered ICE candidate to the
         # opposite peer via ``SPACE_SYNC_ICE``. Signature:
         # ``async (sync_id, candidate, sdp_mid) -> None``. Injected by
@@ -450,18 +461,45 @@ class SyncSessionManager:
                     # No classifier wired — preserve the S-1 silent drop.
                     return SyncDecision(accepted=False, reason="not_a_member")
                 try:
-                    reason = await self._reject_reason(space_id)
+                    reason = await self._reject_reason(space_id, requester_instance_id)
                 except Exception:
                     reason = "dissolved"
+                if reason is None:
+                    return SyncDecision(accepted=False, reason="not_a_member")
+                extra: dict = {}
+                if isinstance(reason, tuple):
+                    reason, extra = reason
+                payload: dict = {
+                    "sync_id": sync_id,
+                    "space_id": space_id,
+                    "reason": reason,
+                    **extra,
+                }
+                if reason == SYNC_REJECT_NOT_SEATED:
+                    # A household this host never seated (one a delegated
+                    # admin invited before our roster learned of it, or one
+                    # an inviter lied to). NOT terminal — it must not
+                    # archive a space it is joining. It gets the owner's
+                    # current statement instead, so a stub seated on a
+                    # stale or false word learns the owner's (migration
+                    # 0093). Nothing to give → the silent S-1 drop.
+                    statement = None
+                    if self._owner_statement_for is not None:
+                        try:
+                            statement = await self._owner_statement_for(space_id)
+                        except Exception:
+                            log.exception(
+                                "owner statement for %s could not be built",
+                                space_id,
+                            )
+                    if statement is None:
+                        return SyncDecision(accepted=False, reason="not_a_member")
+                    payload["owner_statement"] = statement
                 return SyncDecision(
                     accepted=False,
                     reason="not_a_member",
                     next_event=FederationEventType.SPACE_SYNC_REJECTED,
-                    next_payload={
-                        "sync_id": sync_id,
-                        "space_id": space_id,
-                        "reason": reason,
-                    },
+                    next_payload=payload,
                 )
 
         rtc = SyncRtcSession(
@@ -728,3 +766,39 @@ class SyncSessionManager:
 def new_sync_id() -> str:
     """Return a fresh 128-bit URL-safe sync id (S-2)."""
     return secrets.token_urlsafe(16)
+
+
+def make_sync_reject_reason(space_repo, seat_repo):
+    """The S-1 classifier for a ``SPACE_SYNC_BEGIN`` from a non-member:
+
+    * ``"dissolved"`` — the space row is gone (a dissolve purged it);
+    * ``"removed"`` — the requester held a seat here and lost it: only
+      tombstoned seat rows (kicked, banned or left), none live. A live seat
+      without the household row is a join in flight (the accept writes the
+      seat before ``space_instances``), and an accepted invitation alone
+      proves nothing yet — neither may be told ``removed``;
+    * ``"not_seated"`` — no record at all: it may be joining through a
+      delegated admin before our roster learned of it (or after a restore
+      from a backup older than its join). Not terminal — the requester keeps
+      its copy and gets the owner's statement
+      (:meth:`SyncSessionManager.begin_session`)."""
+
+    async def _reject_reason(
+        space_id: str, requester: str
+    ) -> str | tuple[str, dict] | None:
+        if await space_repo.get(space_id) is None:
+            return "dissolved"
+        seats = await seat_repo.list_for_instance(
+            space_id, requester, include_tombstoned=True
+        )
+        if seats and all(seat.tombstoned for seat in seats):
+            # When the newest seat was dropped (migration 0093): a household
+            # a delegated admin re-invited since — whose BEGIN beat the
+            # re-join gossip here — joined after it and keeps its copy.
+            removed = [s.removed_at for s in seats if s.removed_at]
+            if removed:
+                return ("removed", {"removed_at": max(removed)})
+            return "removed"
+        return SYNC_REJECT_NOT_SEATED
+
+    return _reject_reason
