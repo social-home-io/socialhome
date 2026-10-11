@@ -1405,7 +1405,9 @@ and is then served by a **separate aiohttp application on its own port**
   straight from the network and would be spoofable, so the dashboard
   never looks at them. The only credential is its own cookie.
 - **Stateless signed cookie.** `sh_dash` = `b64url(payload).b64url(HMAC-SHA256)`
-  over `{v, epoch, issued_at, keep, locked}`. The 32-byte HMAC key is stored in
+  over `{v, epoch, issued_at, keep, locked, nonce}` (the random nonce makes
+  every cookie value unique, so revoking or throttling one never touches
+  a twin minted in the same second). The 32-byte HMAC key is stored in
   `instance_config` wrapped under the instance KEK (`KeyManager`, attached
   at startup) and cached unwrapped in memory. 12 h session, 365 d when the
   tablet ticks "keep me signed in" (and for setup links), renewed after a
@@ -1430,17 +1432,34 @@ and is then served by a **separate aiohttp application on its own port**
   state: it is per tablet, survives reloads and browser restarts, and
   needs no table — cookie renewal carries it over. Cookies minted
   before the claim existed (exactly `{v,e,i,k}`) still verify, as
-  unlocked; any other key set is refused. For a locked session the
-  session guard answers every content route itself (lock page /
-  `X-Dashboard-Locked` fragment marker / 423), so no view has to
-  remember to check. PIN guesses use the per-client limit in a bucket of
-  their own (never the global brake): past 5 wrong PINs in 15 min the
-  next try **signs the tablet out** — from then on only the household
-  password helps, and a password sign-in clears the PIN bucket. A
-  stateless cookie can't be revoked one by one, so someone replaying a
-  copied locked cookie stays held to that per-client limit. Deleting the
-  PIN makes locked cookies count as unlocked (nothing could unlock
-  them otherwise).
+  unlocked; only `{v,e,i,k}`, `{v,e,i,k,l}` and `{v,e,i,k,l,n}` are
+  accepted. For a locked session the session guard answers every
+  content route itself (lock page / `X-Dashboard-Locked` fragment
+  marker / 423), so no view has to remember to check. Deleting the PIN
+  makes locked cookies count as unlocked (nothing could unlock them
+  otherwise).
+  - **Races.** Only page loads renew the cookie (never `/fragment/…` or
+    a `POST`), and `POST /lock` revokes the incoming unlocked cookie as
+    *locked*: if a slow response still lands it, it shows the lock
+    screen (not a sign-out). Renewal re-checks revocation just before
+    issuing, so a request in flight across a `/lock` renews into a
+    locked cookie. `dashboard.js` reloads pages restored from the
+    back/forward cache.
+  - **PIN throttle.** Per tablet: client address + a hash prefix of the
+    cookie signature (the signature, not `issued_at`, which two tablets
+    locked in the same second would share; behind a TLS proxy every
+    tablet has one address). Never the global brake. Once this cookie's
+    own 5 wrong PINs / 15 min are spent the next try **signs the tablet
+    out** and revokes the cookie as *signed out*, so a copied cookie
+    can't keep guessing; only the household password helps then. Any
+    other hold-back (a full throttle table) only asks the tablet to
+    wait. `/unlock` answers with redirects only (Post/Redirect/Get).
+  - **Revocation is in memory.** A bounded map of cookie signatures
+    (10k, each entry expiring with its cookie; when full, expired
+    entries go first, then the oldest *locked* one). A restart forgets
+    it: a revoked cookie then counts as what its claims say again.
+    The durable revocation is the session epoch — "Sign out all
+    tablets" or a new password.
 - **Host allow-list (DNS rebinding).** The first middleware answers 421 to
   any `Host` that is not an IP literal, `localhost`, `homeassistant`, the
   machine's own host names, a home-network suffix (`.local`, `.lan`,

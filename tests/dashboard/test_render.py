@@ -151,7 +151,7 @@ def test_lock_screen(renderer):
     assert 'data-label-submit="Unlock"' in html
     assert "Screen locked" in html
     assert 'role="alert"' not in html
-    assert '<noscript><meta http-equiv="refresh" content="60"></noscript>' in html
+    assert '<noscript><meta http-equiv="refresh" content="60;url=/"></noscript>' in html
 
 
 def test_lock_screen_error_opens_the_keypad(renderer):
@@ -218,6 +218,16 @@ def test_lock_script_preloaded(renderer):
     assert js is not None
     assert js.content_type == "text/javascript"
     assert js.body == (STATIC_DIR / "lock.js").read_bytes()
+
+
+def test_dashboard_script_preloaded_and_on_every_page(renderer):
+    js = renderer.static_asset("dashboard.js")
+    assert js is not None and js.content_type == "text/javascript"
+    tag = '<script src="/static/dashboard.js" defer></script>'
+    assert tag in renderer.render("login.html.j2", locale="en", **_login_ctx())
+    assert tag in renderer.render(
+        "placeholder.html.j2", locale="en", household="H", pin_set=False
+    )
 
 
 def test_translator_binds_the_locale(renderer):

@@ -10,16 +10,20 @@ from pathlib import Path
 
 import aiohttp
 import pytest
+from aiohttp import web
 
 import socialhome.i18n as i18n_pkg
 from socialhome.dashboard.app import build_dashboard_app, build_dashboard_csp
 from socialhome.dashboard.auth import (
     COOKIE_NAME,
     RENEW_AFTER_S,
+    REVOKED_LOCKED,
+    REVOKED_SIGNED_OUT,
     THROTTLE_MAX_FAILURES,
     THROTTLE_WINDOW_S,
     DashboardAuth,
 )
+from socialhome.dashboard.keys import AUTH_KEY, CLAIMS_KEY
 from socialhome.dashboard.render import DashboardRenderer
 from socialhome.dashboard.views import _hostname, cookie_secure, safe_next
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
@@ -549,6 +553,8 @@ async def test_enter_confirm_page_explains_itself(client, settings_service):
 PIN = "482913"
 #: A member's name the lock page must never show (a person's page id).
 MEMBER = "Alice-Wonderland"
+WRONG = "/?pin=wrong"
+WAIT = "/?pin=wait"
 
 
 @pytest.fixture
@@ -561,10 +567,22 @@ async def _locked(auth) -> dict[str, str]:
     return await _cookie(auth, locked=True)
 
 
+def _jar(resp) -> dict[str, str]:
+    return {"Cookie": f"{COOKIE_NAME}={resp.cookies[COOKIE_NAME].value}"}
+
+
 async def _unlock(client, headers, pin=PIN):
     return await client.post(
         "/unlock",
         data={"pin": pin},
+        headers={**headers, **_origin(client, "/")},
+        allow_redirects=False,
+    )
+
+
+async def _lock(client, headers):
+    return await client.post(
+        "/lock",
         headers={**headers, **_origin(client, "/")},
         allow_redirects=False,
     )
@@ -604,11 +622,7 @@ async def test_home_has_the_lock_button_with_a_pin(pin_client, auth):
 
 
 async def test_lock_without_a_pin_is_409(client, auth):
-    resp = await client.post(
-        "/lock",
-        headers={**await _cookie(auth), **_origin(client, "/")},
-        allow_redirects=False,
-    )
+    resp = await _lock(client, await _cookie(auth))
     assert resp.status == 409
     assert COOKIE_NAME not in resp.cookies
 
@@ -629,14 +643,21 @@ async def test_lock_from_a_foreign_origin_is_403(pin_client, auth):
     assert resp.status == 403
 
 
+@pytest.mark.parametrize("path", ["/lock", "/unlock"])
+@pytest.mark.parametrize("locked", [False, True])
+async def test_get_lock_paths_go_home(pin_client, auth, path, locked):
+    """Nothing to re-POST: a reload or a typed URL lands on ``/``."""
+    resp = await pin_client.get(
+        path, headers=await _cookie(auth, locked=locked), allow_redirects=False
+    )
+    assert resp.status == 303
+    assert resp.headers["Location"] == "/"
+
+
 @pytest.mark.parametrize("keep", [True, False])
 async def test_lock_reissues_a_locked_cookie(pin_client, auth, keep):
     headers = {"Cookie": f"{COOKIE_NAME}={await auth.issue(keep)}"}
-    resp = await pin_client.post(
-        "/lock",
-        headers={**headers, **_origin(pin_client, "/")},
-        allow_redirects=False,
-    )
+    resp = await _lock(pin_client, headers)
     assert resp.status == 303
     assert resp.headers["Location"] == "/"
     claims = await _claims(auth, resp)
@@ -647,25 +668,16 @@ async def test_lock_reissues_a_locked_cookie(pin_client, auth, keep):
 
 
 async def test_lock_an_already_locked_tablet(pin_client, auth):
-    resp = await pin_client.post(
-        "/lock",
-        headers={**await _locked(auth), **_origin(pin_client, "/")},
-        allow_redirects=False,
-    )
+    resp = await _lock(pin_client, await _locked(auth))
     assert resp.status == 303
     assert (await _claims(auth, resp)).locked is True
 
 
 async def test_lock_then_reload_shows_only_the_lock_screen(pin_client, auth, household):
     household["name"] = "The Smiths"
-    lock = await pin_client.post(
-        "/lock",
-        headers={**await _cookie(auth), **_origin(pin_client, "/")},
-        allow_redirects=False,
-    )
-    headers = {"Cookie": f"{COOKIE_NAME}={lock.cookies[COOKIE_NAME].value}"}
+    lock = await _lock(pin_client, await _cookie(auth))
     for _ in range(2):  # a reload keeps it
-        resp = await pin_client.get("/", headers=headers, allow_redirects=False)
+        resp = await pin_client.get("/", headers=_jar(lock), allow_redirects=False)
         assert resp.status == 200
         html = await resp.text()
         assert "data-lock" in html
@@ -676,6 +688,95 @@ async def test_lock_then_reload_shows_only_the_lock_screen(pin_client, auth, hou
         assert 'action="/lock"' not in html
         _assert_nothing_personal(html)
         _assert_strict_csp(resp, html)
+
+
+# F1 — a stale unlocked cookie can't lift the lock.
+
+
+async def test_pre_lock_cookie_counts_as_locked_after_lock(pin_client, auth):
+    """A late response re-sending the pre-lock cookie lands a revoked
+    ("locked") cookie: it shows the lock screen, it doesn't sign out."""
+    before = await _cookie(auth)
+    assert (await _lock(pin_client, before)).status == 303
+    resp = await pin_client.get("/", headers=before, allow_redirects=False)
+    assert resp.status == 200
+    assert "data-lock" in await resp.text()
+    # …and it can be unlocked with the PIN like any locked cookie.
+    unlock = await _unlock(pin_client, before)
+    assert unlock.headers["Location"] == "/"
+    assert (await _claims(auth, unlock)).locked is False
+
+
+async def test_old_pre_lock_cookie_renews_locked_after_lock(pin_client, auth, clock):
+    before = await _cookie(auth)
+    await _lock(pin_client, before)
+    clock.advance(RENEW_AFTER_S + 1)
+    resp = await pin_client.get("/", headers=before)
+    assert (await _claims(auth, resp)).locked is True
+
+
+async def test_no_renewal_on_a_fragment(pin_client, auth, clock):
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 1)
+    resp = await pin_client.get("/fragment/x", headers=headers)
+    assert COOKIE_NAME not in resp.cookies
+
+
+async def test_no_renewal_on_a_post(client, auth, clock):
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 1)
+    resp = await _lock(client, headers)  # no PIN → 409, handled, no cookie
+    assert resp.status == 409
+    assert COOKIE_NAME not in resp.cookies
+
+
+@pytest.fixture
+async def race_client(aiohttp_client, settings_service, auth):
+    """A dashboard with a page whose handler revokes the very cookie that
+    reached it — what a ``/lock`` racing a slow page load does."""
+    await settings_service.set_password(actor_is_admin=True, password=PASSWORD)
+    await settings_service.set_pin(actor_is_admin=True, pin=PIN)
+
+    async def name() -> str:
+        return "Home"
+
+    async def tz() -> str:
+        return "UTC"
+
+    app = build_dashboard_app(
+        settings_service=settings_service,
+        auth=auth,
+        renderer=RENDERER,
+        household_name=name,
+        household_tz=tz,
+    )
+
+    async def race(request: web.Request) -> web.Response:
+        request.app[AUTH_KEY].revoke(request[CLAIMS_KEY], request.query["why"])
+        return web.Response(text="slow page")
+
+    app.router.add_get("/race", race)
+    return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+
+
+async def test_renewal_after_a_racing_lock_issues_a_locked_cookie(
+    race_client, auth, clock
+):
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 1)
+    resp = await race_client.get(f"/race?why={REVOKED_LOCKED}", headers=headers)
+    assert resp.status == 200
+    assert (await _claims(auth, resp)).locked is True
+
+
+async def test_renewal_after_a_racing_sign_out_issues_nothing(race_client, auth, clock):
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 1)
+    resp = await race_client.get(f"/race?why={REVOKED_SIGNED_OUT}", headers=headers)
+    assert COOKIE_NAME not in resp.cookies
+
+
+# The lock page.
 
 
 async def test_lock_page_form_works_without_js(pin_client, auth):
@@ -693,6 +794,9 @@ async def test_lock_page_form_works_without_js(pin_client, auth):
         assert attr in field
     assert 'type="submit"' in form.group(0)
     assert '<script src="/static/lock.js" defer></script>' in html
+    # The no-JS refresh is a GET of the plain lock screen — never a re-POST
+    # and never the one-off error flag.
+    assert '<meta http-equiv="refresh" content="60;url=/">' in html
 
 
 async def test_lock_page_shows_household_clock_and_date(pin_client, auth):
@@ -781,34 +885,74 @@ async def test_lock_js_is_served_as_javascript(pin_client):
     assert resp.content_type == "text/javascript"
 
 
+# F6 — no stale page from the back/forward cache.
+
+
+async def test_dashboard_js_reloads_bfcache_restores(pin_client):
+    resp = await pin_client.get("/static/dashboard.js")
+    assert resp.status == 200
+    assert resp.content_type == "text/javascript"
+    js = await resp.text()
+    assert "pageshow" in js and "persisted" in js and "reload" in js
+
+
+@pytest.mark.parametrize("locked", [False, True])
+async def test_pages_load_dashboard_js(pin_client, auth, locked):
+    html = await (
+        await pin_client.get("/", headers=await _cookie(auth, locked=locked))
+    ).text()
+    assert '<script src="/static/dashboard.js" defer></script>' in html
+
+
+# Unlocking.
+
+
 async def test_correct_pin_unlocks(pin_client, auth):
     resp = await _unlock(pin_client, await _locked(auth))
     assert resp.status == 303
     assert resp.headers["Location"] == "/"
     claims = await _claims(auth, resp)
     assert claims is not None and claims.locked is False and claims.keep is True
-    home = await pin_client.get(
-        "/", headers={"Cookie": f"{COOKIE_NAME}={resp.cookies[COOKIE_NAME].value}"}
-    )
+    home = await pin_client.get("/", headers=_jar(resp))
     assert "Your dashboard is ready" in await home.text()
 
 
-async def test_wrong_pin_is_401_and_shows_the_lock_screen(pin_client, auth):
-    resp = await _unlock(pin_client, await _locked(auth), pin="000000")
-    assert resp.status == 401
+async def test_wrong_pin_redirects_to_the_lock_screen_with_a_flag(pin_client, auth):
+    headers = await _locked(auth)
+    resp = await _unlock(pin_client, headers, pin="000000")
+    assert resp.status == 303
+    assert resp.headers["Location"] == WRONG
     assert COOKIE_NAME not in resp.cookies
-    html = await resp.text()
+    page = await pin_client.get(WRONG, headers=headers)
+    assert page.status == 200
+    html = await page.text()
     assert "Wrong PIN" in html
     assert 'role="alert"' in html
     assert re.search(r"<details[^>]*\sopen", html) is not None
     _assert_nothing_personal(html)
-    _assert_strict_csp(resp, html)
+    _assert_strict_csp(page, html)
 
 
 async def test_lock_page_keypad_is_closed_until_asked(pin_client, auth):
     html = await (await pin_client.get("/", headers=await _locked(auth))).text()
     assert re.search(r"<details[^>]*\sopen", html) is None
     assert "Wrong PIN" not in html
+
+
+@pytest.mark.parametrize("flag", ["wrong", "wait", "x"])
+async def test_pin_flags_are_ignored_while_unlocked(pin_client, auth, flag):
+    resp = await pin_client.get(f"/?pin={flag}", headers=await _cookie(auth))
+    assert resp.status == 200
+    html = await resp.text()
+    assert "Your dashboard is ready" in html
+    assert "Wrong PIN" not in html and "Too many tries" not in html
+
+
+async def test_unknown_pin_flag_is_the_plain_lock_screen(pin_client, auth):
+    resp = await pin_client.get("/?pin=x", headers=await _locked(auth))
+    assert resp.status == 200
+    html = await resp.text()
+    assert "Wrong PIN" not in html and "Too many tries" not in html
 
 
 @pytest.mark.parametrize("data", [{}, {"pin": ""}, {"pin": "x" * 5000}])
@@ -819,13 +963,15 @@ async def test_malformed_pin_counts_as_wrong(pin_client, auth, data):
         headers={**await _locked(auth), **_origin(pin_client, "/")},
         allow_redirects=False,
     )
-    assert resp.status == 401
+    assert resp.headers["Location"] == WRONG
 
 
 async def test_five_wrong_pins_then_the_tablet_is_signed_out(pin_client, auth):
     headers = await _locked(auth)
     for _ in range(THROTTLE_MAX_FAILURES):
-        assert (await _unlock(pin_client, headers, pin="000000")).status == 401
+        assert (await _unlock(pin_client, headers, pin="000000")).headers[
+            "Location"
+        ] == WRONG
     resp = await _unlock(pin_client, headers)  # even the right PIN now
     assert resp.status == 303
     assert resp.headers["Location"] == "/login?signed_out=1"
@@ -837,46 +983,95 @@ async def test_five_wrong_pins_then_the_tablet_is_signed_out(pin_client, auth):
     assert 'name="password"' in html
 
 
+async def test_signed_out_cookie_is_dead_even_when_replayed(pin_client, auth):
+    """F5: a copied locked cookie can't keep guessing after the sign-out."""
+    headers = await _locked(auth)
+    for _ in range(THROTTLE_MAX_FAILURES + 1):
+        await _unlock(pin_client, headers, pin="000000")
+    assert (await _unlock(pin_client, headers)).status == 401
+    page = await pin_client.get("/", headers=headers, allow_redirects=False)
+    assert page.status == 302
+    assert page.headers["Location"].startswith("/login")
+
+
 async def test_pin_lockout_does_not_block_the_password(pin_client, auth):
     headers = await _locked(auth)
     for _ in range(THROTTLE_MAX_FAILURES + 1):
         await _unlock(pin_client, headers, pin="000000")
-    assert (await _login(pin_client)).status == 303
+    login = await _login(pin_client)
+    assert login.status == 303
+    # The new session has a fresh PIN budget once locked again.
+    lock = await _lock(pin_client, _jar(login))
+    assert (await _unlock(pin_client, _jar(lock))).headers["Location"] == "/"
 
 
-async def test_password_sign_in_clears_the_pin_failures(pin_client, auth):
-    """The household password proves the person at the tablet belongs
-    there: after the sign-out, locking again and the right PIN works."""
-    headers = await _locked(auth)
+async def test_one_tablets_wrong_pins_spare_another_on_the_same_address(
+    pin_client, auth
+):
+    """F3: behind a TLS proxy every tablet has the same client address."""
+    tablet_a = await _locked(auth)
+    tablet_b = await _locked(auth)
     for _ in range(THROTTLE_MAX_FAILURES + 1):
-        await _unlock(pin_client, headers, pin="000000")
-    assert (await _login(pin_client)).status == 303
-    assert (await _unlock(pin_client, headers)).status == 303
+        await _unlock(pin_client, tablet_a, pin="000000")
+    assert (await _unlock(pin_client, tablet_a)).status == 401  # signed out
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        assert (await _unlock(pin_client, tablet_b, pin="000000")).headers[
+            "Location"
+        ] == WRONG
+    assert (await _unlock(pin_client, tablet_b)).headers["Location"] == "/"
 
 
-async def test_setup_link_clears_the_pin_failures(pin_client, auth, settings_service):
-    headers = await _locked(auth)
-    for _ in range(THROTTLE_MAX_FAILURES + 1):
-        await _unlock(pin_client, headers, pin="000000")
-    token = await settings_service.issue_setup_token(actor_is_admin=True)
-    enter = await pin_client.post(
-        "/enter",
-        data={"t": token},
-        headers=_origin(pin_client, "/enter"),
-        allow_redirects=False,
+@pytest.fixture
+async def tiny_client(aiohttp_client, settings_service, clock):
+    """A dashboard whose throttle table holds one client."""
+    await settings_service.set_password(actor_is_admin=True, password=PASSWORD)
+    await settings_service.set_pin(actor_is_admin=True, pin=PIN)
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=1)
+
+    async def name() -> str:
+        return "Home"
+
+    async def tz() -> str:
+        return "UTC"
+
+    app = build_dashboard_app(
+        settings_service=settings_service,
+        auth=auth,
+        renderer=RENDERER,
+        household_name=name,
+        household_tz=tz,
     )
-    assert enter.headers["Location"] == "/"
-    assert (await _unlock(pin_client, headers)).status == 303
+    client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+    return client, auth
 
 
-async def test_replayed_locked_cookie_stays_throttled(pin_client, auth):
-    """Signing out can't revoke a copied cookie — the per-client limit
-    still holds for whoever replays it."""
+async def test_full_throttle_table_holds_back_but_never_signs_out(tiny_client, clock):
+    """F2: only this tablet's own wrong PINs sign it out."""
+    client, auth = tiny_client
+    for _ in range(THROTTLE_MAX_FAILURES):
+        auth.begin_attempt("someone-else", count_global=False)
     headers = await _locked(auth)
-    for _ in range(THROTTLE_MAX_FAILURES + 1):
-        await _unlock(pin_client, headers, pin="000000")
-    resp = await _unlock(pin_client, headers)
-    assert resp.headers["Location"] == "/login?signed_out=1"
+    resp = await _unlock(client, headers)
+    assert resp.status == 303
+    assert resp.headers["Location"] == WAIT
+    assert int(resp.headers["Retry-After"]) > 0
+    assert COOKIE_NAME not in resp.cookies
+    page = await client.get(WAIT, headers=headers)
+    assert page.status == 429
+    assert int(page.headers["Retry-After"]) > 0
+    html = await page.text()
+    assert "data-lock" in html
+    assert "Too many tries" in html
+    _assert_strict_csp(page, html)
+    # The cookie still works once the table has room again.
+    clock.advance(THROTTLE_WINDOW_S)
+    assert (await _unlock(client, headers)).headers["Location"] == "/"
+
+
+async def test_wait_flag_without_a_wait_is_the_plain_lock_screen(pin_client, auth):
+    resp = await pin_client.get(WAIT, headers=await _locked(auth))
+    assert resp.status == 200
+    assert "Too many tries" not in await resp.text()
 
 
 async def test_pin_throttle_expires(pin_client, auth, clock):
@@ -884,17 +1079,19 @@ async def test_pin_throttle_expires(pin_client, auth, clock):
     for _ in range(THROTTLE_MAX_FAILURES):
         await _unlock(pin_client, headers, pin="000000")
     clock.advance(THROTTLE_WINDOW_S)
-    assert (await _unlock(pin_client, headers)).status == 303
+    assert (await _unlock(pin_client, headers)).headers["Location"] == "/"
 
 
 async def test_correct_pin_resets_the_pin_failures(pin_client, auth):
     headers = await _locked(auth)
     for _ in range(THROTTLE_MAX_FAILURES - 1):
         await _unlock(pin_client, headers, pin="000000")
-    assert (await _unlock(pin_client, headers)).status == 303
+    assert (await _unlock(pin_client, headers)).headers["Location"] == "/"
     for _ in range(THROTTLE_MAX_FAILURES - 1):
-        assert (await _unlock(pin_client, headers, pin="000000")).status == 401
-    assert (await _unlock(pin_client, headers)).status == 303
+        assert (await _unlock(pin_client, headers, pin="000000")).headers[
+            "Location"
+        ] == WRONG
+    assert (await _unlock(pin_client, headers)).headers["Location"] == "/"
 
 
 async def test_pin_failures_do_not_trip_the_global_brake(pin_client, auth):
@@ -910,13 +1107,14 @@ async def test_parallel_pin_guesses_cannot_outrun_the_throttle(pin_client, auth)
     results = await asyncio.gather(
         *(_unlock(pin_client, headers, pin="000000") for _ in range(8))
     )
-    statuses = sorted(r.status for r in results)
-    assert statuses == [303] * 3 + [401] * 5
-    assert all(
-        r.headers["Location"] == "/login?signed_out=1"
-        for r in results
-        if r.status == 303
-    )
+    wrong = [r for r in results if r.headers.get("Location") == WRONG]
+    out = [r for r in results if r.headers.get("Location") == "/login?signed_out=1"]
+    # Past the limit: the first sign-out revokes the cookie, so guesses
+    # still in flight behind it find no session at all.
+    dead = [r for r in results if r.status == 401]
+    assert len(wrong) == THROTTLE_MAX_FAILURES
+    assert len(out) >= 1
+    assert len(wrong) + len(out) + len(dead) == 8
 
 
 async def test_unlock_an_unlocked_session_redirects_home(pin_client, auth):
@@ -957,12 +1155,15 @@ async def test_deleted_pin_treats_locked_tablets_as_unlocked(
     pin_client, auth, settings_service
 ):
     headers = await _locked(auth)
+    revoked = await _cookie(auth)
+    await _lock(pin_client, revoked)  # a revoked-at-lock cookie too
     await settings_service.delete_pin(actor_is_admin=True)
-    resp = await pin_client.get("/", headers=headers)
-    assert resp.status == 200
-    html = await resp.text()
-    assert "Your dashboard is ready" in html
-    assert "data-lock" not in html
+    for cookie in (headers, revoked):
+        resp = await pin_client.get("/", headers=cookie)
+        assert resp.status == 200
+        html = await resp.text()
+        assert "Your dashboard is ready" in html
+        assert "data-lock" not in html
     # /unlock has nothing to check: straight home, not a guess.
     unlock = await _unlock(pin_client, headers, pin="000000")
     assert unlock.headers["Location"] == "/"
@@ -981,11 +1182,7 @@ async def test_old_locked_cookie_renews_locked(pin_client, auth, clock):
 async def test_lock_on_an_old_cookie_is_not_undone_by_renewal(pin_client, auth, clock):
     headers = await _cookie(auth)
     clock.advance(RENEW_AFTER_S + 1)
-    resp = await pin_client.post(
-        "/lock",
-        headers={**headers, **_origin(pin_client, "/")},
-        allow_redirects=False,
-    )
+    resp = await _lock(pin_client, headers)
     assert (await _claims(auth, resp)).locked is True
 
 

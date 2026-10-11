@@ -31,7 +31,7 @@ from aiohttp import web
 from ..csp import render_csp, style_hash
 from ..hardening import build_body_size_middleware, install_security_headers
 from ..services.dashboard_settings_service import DashboardSettingsService
-from .auth import COOKIE_NAME, DashboardAuth
+from .auth import COOKIE_NAME, REVOKED_LOCKED, REVOKED_SIGNED_OUT, DashboardAuth
 from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
@@ -267,15 +267,31 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
         response = await _locked_response(request)
     else:
         response = await handler(request)
-    # ``/lock`` and ``/unlock`` set a fresh cookie themselves — keep it.
-    if auth.needs_renewal(claims) and COOKIE_NAME not in response.cookies:
-        await set_session_cookie(
-            response,
-            request,
-            await auth.issue(claims.keep, locked=claims.locked),
-            keep=claims.keep,
-        )
+    if _may_renew(request, response) and auth.needs_renewal(claims):
+        # Re-checked now, not at the top: a ``/lock`` (or a PIN sign-out)
+        # may have revoked this cookie while the request was in flight.
+        reason = auth.revocation(claims)
+        if reason != REVOKED_SIGNED_OUT:
+            await set_session_cookie(
+                response,
+                request,
+                await auth.issue(
+                    claims.keep, locked=claims.locked or reason == REVOKED_LOCKED
+                ),
+                keep=claims.keep,
+            )
     return response
+
+
+def _may_renew(request: web.Request, response: web.StreamResponse) -> bool:
+    """Only page loads renew the cookie: never a ``/fragment/`` fetch or a
+    form ``POST`` — a slow one landing after ``/lock`` must not overwrite
+    the locked cookie — and never over a cookie the view set itself."""
+    return (
+        request.method in ("GET", "HEAD")
+        and not request.path.startswith(_FRAGMENT_PREFIX)
+        and COOKIE_NAME not in response.cookies
+    )
 
 
 async def _locked_response(request: web.Request) -> web.StreamResponse:

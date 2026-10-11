@@ -103,7 +103,14 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
   up. Setting or changing the PIN signs no tablet out.
 - **Five wrong PINs sign the tablet out.** After five wrong tries within
   15 minutes the next one signs that tablet out, and it needs the
-  dashboard password (or a fresh setup link) again.
+  dashboard password (or a fresh setup link) again. This is counted per
+  tablet, so tablets behind one reverse proxy don't use up each other's
+  tries.
+- **That sign-out is remembered in memory only.** The signed-out cookie
+  (and a copy of it) stays refused until Social Home restarts. To be
+  sure a lost or copied tablet cookie is dead for good, use **"Sign out
+  all tablets"** (`DELETE /api/admin/dashboard/sessions`) — that one
+  survives restarts.
 - **Removing the PIN** (`DELETE /api/admin/dashboard/pin`) unlocks every
   locked tablet and hides the 🔒 button.
 - It is a privacy screen, not a safe: anyone who knows the dashboard

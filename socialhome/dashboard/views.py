@@ -17,7 +17,14 @@ from aiohttp import web
 
 from ..rate_limiter import client_bucket
 from ..services.dashboard_settings_service import DashboardSettingsService
-from .auth import COOKIE_NAME, KEEP_TTL_S, DashboardAuth
+from .auth import (
+    COOKIE_NAME,
+    KEEP_TTL_S,
+    REVOKED_LOCKED,
+    REVOKED_SIGNED_OUT,
+    THROTTLE_MAX_FAILURES,
+    DashboardAuth,
+)
 from .clock import household_clock, resolve_zone
 from .keys import (
     AUTH_KEY,
@@ -34,6 +41,8 @@ log = logging.getLogger(__name__)
 __all__ = [
     "LOCKED_FRAGMENT",
     "LOCKED_HEADER",
+    "PIN_WAIT",
+    "PIN_WRONG",
     "SIGNED_OUT_PATH",
     "EnterView",
     "HealthView",
@@ -61,6 +70,10 @@ LOCKED_FRAGMENT = '<div data-dashboard-locked="1"></div>'
 
 #: Where a tablet lands after too many wrong PINs.
 SIGNED_OUT_PATH = "/login?signed_out=1"
+
+#: ``/?pin=…`` flags the lock screen reads after ``POST /unlock``.
+PIN_WRONG = "wrong"
+PIN_WAIT = "wait"
 
 _MAX_NEXT_LEN = 2048
 
@@ -149,26 +162,41 @@ async def clear_session_cookie(
     )
 
 
-async def render_lock_screen(
-    request: web.Request, *, status: int = 200, wrong_pin: bool = False
-) -> web.Response:
+async def render_lock_screen(request: web.Request) -> web.Response:
     """The privacy lock screen: household name, clock, date, PIN form.
 
-    Takes nothing about any person — so nothing about one can leak.
+    Takes nothing about any person — so nothing about one can leak. The
+    outcome of the last ``POST /unlock`` arrives as a flag (Post/Redirect/
+    Get, so a reload never re-sends a PIN): ``?pin=wrong`` shows "Wrong
+    PIN"; ``?pin=wait`` shows "Too many tries" with ``429`` and
+    ``Retry-After`` while this tablet must still wait.
     """
     app = request.app
+    auth = app[AUTH_KEY]
     renderer = app[RENDERER_KEY]
     locale = (await app[SETTINGS_KEY].get()).locale
     zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
     t = renderer.translator(locale)
+    status, headers, error = 200, None, None
+    flag = request.query.get("pin")
+    if flag == PIN_WRONG:
+        error = t("dashboard.lock.wrong_pin")
+    elif flag == PIN_WAIT:
+        key = DashboardAuth.pin_throttle_key(
+            client_bucket(request.remote), request[CLAIMS_KEY]
+        )
+        wait = auth.attempt_wait(key, count_global=False)
+        if wait:
+            status, headers = 429, {"Retry-After": str(wait)}
+            error = t("dashboard.login.too_many_tries", minutes=math.ceil(wait / 60))
     text = renderer.render(
         "lock.html.j2",
         locale=locale,
         household=await app[HOUSEHOLD_NAME_KEY](),
-        clock=household_clock(app[AUTH_KEY].now(), zone, t),
-        error=t("dashboard.lock.wrong_pin") if wrong_pin else None,
+        clock=household_clock(auth.now(), zone, t),
+        error=error,
     )
-    return html_response(text, status=status)
+    return html_response(text, status=status, headers=headers)
 
 
 class _DashboardView(web.View):
@@ -225,13 +253,6 @@ class _DashboardView(web.View):
             error=error,
             notice=notice,
             show_form=show_form,
-        )
-
-    def forget_pin_failures(self, key: str) -> None:
-        """The household password (or an admin's setup link) outranks the
-        PIN: forget this client's PIN guesses."""
-        self.auth.record_success(
-            DashboardAuth.pin_throttle_key(key), count_global=False
         )
 
     async def too_many_tries(
@@ -312,7 +333,6 @@ class LoginView(_DashboardView):
             )
 
         self.auth.record_success(key)
-        self.forget_pin_failures(key)
         response = redirect(next_path)
         await set_session_cookie(
             response, self.request, await self.auth.issue(keep), keep=keep
@@ -350,7 +370,6 @@ class EnterView(_DashboardView):
         if not await self.settings.consume_setup_token(token):
             return redirect("/login")
         self.auth.record_success(key, count_global=False)
-        self.forget_pin_failures(key)
         response = redirect("/")
         await set_session_cookie(
             response, self.request, await self.auth.issue(True), keep=True
@@ -377,12 +396,22 @@ class HomeView(_DashboardView):
         )
 
 
-class LockView(_DashboardView):
+class _GoHomeOnGet(_DashboardView):
+    """``GET`` (a reload, a typed URL) of a form target just goes home —
+    nothing is ever re-POSTed."""
+
+    async def get(self) -> web.Response:
+        return redirect("/")
+
+
+class LockView(_GoHomeOnGet):
     """``POST /lock`` — privacy-lock this tablet (needs a session).
 
     The lock is a claim in this tablet's signed cookie, so it is per
-    tablet and survives reloads and browser restarts. ``409`` when no PIN
-    is set: nothing could unlock it (the button isn't shown then).
+    tablet and survives reloads and browser restarts. The incoming
+    (unlocked) cookie is revoked as ``locked``: a slow response still
+    carrying it can't lift the lock. ``409`` when no PIN is set: nothing
+    could unlock it (the button isn't shown then).
     """
 
     async def post(self) -> web.Response:
@@ -396,17 +425,20 @@ class LockView(_DashboardView):
             await self.auth.issue(claims.keep, locked=True),
             keep=claims.keep,
         )
+        self.auth.revoke(claims, REVOKED_LOCKED)
         return response
 
 
-class UnlockView(_DashboardView):
+class UnlockView(_GoHomeOnGet):
     """``POST /unlock`` (form field ``pin``) — lift this tablet's lock.
 
     Only a valid *and* locked session is checked against the PIN; an
-    unlocked one just goes home. Guesses are throttled per client in
-    their own bucket (:meth:`DashboardAuth.pin_throttle_key`): after five
-    wrong PINs in 15 minutes the next try signs the tablet out — then
-    only the household password brings it back.
+    unlocked one just goes home. Guesses are throttled per tablet
+    (:meth:`DashboardAuth.pin_throttle_key`). When this tablet's own five
+    wrong PINs in 15 minutes are spent, the next try signs it out and
+    revokes the cookie — then only the household password helps. Any
+    other hold-back (a full throttle table) only asks it to wait.
+    Every outcome is a redirect (Post/Redirect/Get).
     """
 
     async def post(self) -> web.Response:
@@ -414,20 +446,26 @@ class UnlockView(_DashboardView):
         if not claims.locked:
             return redirect("/")
         form = await self.request.post()
-        key = DashboardAuth.pin_throttle_key(self.client_key)
+        key = DashboardAuth.pin_throttle_key(self.client_key, claims)
         # Counted before the slow scrypt check — see ``begin_attempt``.
-        if self.auth.begin_attempt(key, count_global=False):
+        wait = self.auth.begin_attempt(key, count_global=False)
+        if wait and self.auth.failure_count(key) >= THROTTLE_MAX_FAILURES:
             log.warning(
                 "household dashboard: too many wrong PINs from %s — tablet signed out",
                 self.client_key,
             )
+            self.auth.revoke(claims, REVOKED_SIGNED_OUT)
             response = redirect(SIGNED_OUT_PATH)
             await clear_session_cookie(response, self.request)
+            return response
+        if wait:
+            response = redirect(f"/?pin={PIN_WAIT}")
+            response.headers["Retry-After"] = str(wait)
             return response
         pin = form.get("pin")
         if not isinstance(pin, str) or not await self.auth.check_pin(pin):
             log.info("household dashboard: wrong PIN from %s", self.client_key)
-            return await render_lock_screen(self.request, status=401, wrong_pin=True)
+            return redirect(f"/?pin={PIN_WRONG}")
         self.auth.record_success(key, count_global=False)
         response = redirect("/")
         await set_session_cookie(

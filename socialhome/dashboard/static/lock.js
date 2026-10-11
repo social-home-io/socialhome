@@ -14,6 +14,12 @@
     return;
   }
 
+  // "?pin=wrong" / "?pin=wait" report the last unlock try once; drop the
+  // flag from the address so a later reload shows the plain lock screen.
+  if (window.location.search && window.history.replaceState) {
+    window.history.replaceState(null, "", window.location.pathname);
+  }
+
   // ── Clock ────────────────────────────────────────────────────────────
   // Ticks from the server's reading (data-now) rather than the tablet's
   // own clock, so a tablet set to the wrong time or zone still shows the
@@ -45,7 +51,7 @@
           parts[p.type] = p.value;
         });
         if (parts.year + "-" + parts.month + "-" + parts.day !== day) {
-          window.location.reload();
+          window.location.replace(window.location.pathname);
           return;
         }
         clock.textContent = parts.hour + ":" + parts.minute;

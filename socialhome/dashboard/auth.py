@@ -7,19 +7,24 @@ Cookie (``sh_dash``) = ``b64url(payload) "." b64url(HMAC-SHA256(key,
 payload))`` where ``payload`` is compact JSON::
 
     {"v": 1, "e": <session epoch>, "i": <issued-at unix int>, "k": <keep>,
-     "l": <locked>}
+     "l": <locked>, "n": <random nonce>}
 
 ``l`` is the privacy lock: a locked tablet shows only the lock screen
 until someone types the PIN. It lives in the cookie so it is per tablet
-and survives reloads and browser restarts. Cookies minted before the
-claim existed carry exactly ``{v,e,i,k}`` and still verify, as unlocked;
-any other key set (or a non-``bool`` ``l``) is refused.
+and survives reloads and browser restarts. ``n`` makes every cookie
+value unique (revocation and the PIN throttle key on it). Accepted
+shapes are exactly ``{v,e,i,k}`` (pre-lock cookies, verified as
+unlocked), ``{v,e,i,k,l}`` and ``{v,e,i,k,l,n}``; anything else (or a
+wrong type) is refused.
 
 The key is the KEK-wrapped dashboard cookie secret
 (:meth:`DashboardSettingsService.cookie_secret`); bumping the session
-epoch signs every tablet out. To add a claim later, add it to
-:data:`_PAYLOAD_TYPES` + :class:`SessionClaims` (and bump ``v`` if old
-cookies must not verify).
+epoch signs every tablet out — durably. On top, single cookies can be
+revoked in memory (:meth:`DashboardAuth.revoke`: replaced by a locked
+one, or signed out after too many wrong PINs); a restart forgets that.
+To add a claim later, add it to :data:`_PAYLOAD_TYPES`, :data:`_SHAPES`
+and :class:`SessionClaims` (and bump ``v`` if old cookies must not
+verify).
 
 The login throttle is in memory and keyed per client address
 (:func:`socialhome.rate_limiter.client_bucket`): five failures within a
@@ -28,9 +33,9 @@ On top, a global brake: more than thirty failures across *all* clients
 in that window holds every client back (a guesser with many addresses),
 and password checks (scrypt) run one at a time so a flood of logins
 can't pin every CPU. A tablet with a valid cookie never logs in, so the
-brakes don't touch it. Privacy-lock PIN guesses use the same per-client
-limit in a bucket of their own (:meth:`DashboardAuth.pin_throttle_key`)
-and never the global brake; the PIN check shares the scrypt slot.
+brakes don't touch it. Privacy-lock PIN guesses use the same limit per
+tablet — client address *and* cookie (:meth:`DashboardAuth.pin_throttle_key`)
+— never the global brake; the PIN check shares the scrypt slot.
 """
 
 from __future__ import annotations
@@ -44,10 +49,11 @@ import logging
 import asyncio
 import math
 import re
+import secrets
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -62,6 +68,9 @@ __all__ = [
     "MAX_CLOCK_SKEW_S",
     "PRUNE_INTERVAL_S",
     "RENEW_AFTER_S",
+    "REVOCATION_MAX",
+    "REVOKED_LOCKED",
+    "REVOKED_SIGNED_OUT",
     "SESSION_TTL_S",
     "THROTTLE_MAX_FAILURES",
     "THROTTLE_MAX_KEYS",
@@ -90,6 +99,16 @@ GLOBAL_MAX_FAILURES = 30
 #: refused (fail closed) and the table is rescanned at most this often.
 PRUNE_INTERVAL_S = 10.0
 
+#: Revocation reasons (:meth:`DashboardAuth.revoke`). ``locked``: the
+#: cookie was replaced by a locked one (``POST /lock``) — it now counts
+#: as locked, so a late response re-sending it can't lift the lock.
+#: ``signed_out``: too many wrong PINs — it no longer counts at all.
+REVOKED_LOCKED = "locked"
+REVOKED_SIGNED_OUT = "signed_out"
+_REVOCATION_REASONS = frozenset({REVOKED_LOCKED, REVOKED_SIGNED_OUT})
+#: Most revoked cookie signatures kept in memory.
+REVOCATION_MAX = 10_000
+
 _PAYLOAD_VERSION = 1
 #: Exact claim set and the type of each value (``bool`` checked exactly,
 #: so ``True`` is never accepted as an int nor ``1`` as a bool).
@@ -99,10 +118,20 @@ _PAYLOAD_TYPES: dict[str, type] = {
     "i": int,
     "k": bool,
     "l": bool,
+    "n": str,
 }
-#: Optional claims: a cookie may lack exactly these (pre-lock cookies).
-_OPTIONAL_CLAIMS = frozenset({"l"})
-_REQUIRED_CLAIMS = frozenset(_PAYLOAD_TYPES) - _OPTIONAL_CLAIMS
+#: The exact claim sets a cookie may carry: pre-lock cookies
+#: (``{v,e,i,k}``), the first lock cookies (``+l``) and current ones
+#: (``+l`` and the per-cookie nonce ``n``). Nothing else.
+_SHAPES = (
+    frozenset({"v", "e", "i", "k"}),
+    frozenset({"v", "e", "i", "k", "l"}),
+    frozenset({"v", "e", "i", "k", "l", "n"}),
+)
+#: Random per cookie, so two cookies minted in the same second differ —
+#: revocation and the PIN throttle key on the exact cookie value.
+_NONCE_BYTES = 16
+_NONCE = re.compile(r"[A-Za-z0-9_-]{16,32}")
 #: Far above any real cookie; refuses absurd inputs before decoding.
 _MAX_COOKIE_LEN = 1024
 _B64URL = re.compile(r"[A-Za-z0-9_-]+")
@@ -116,6 +145,13 @@ class SessionClaims:
     issued_at: int
     keep: bool
     locked: bool = False
+    #: The cookie's HMAC — identifies this exact cookie value (revocation,
+    #: per-tablet PIN throttle). Not part of equality or ``repr``.
+    signature: bytes = field(default=b"", compare=False, repr=False)
+
+
+def _ttl(claims: SessionClaims) -> int:
+    return KEEP_TTL_S if claims.keep else SESSION_TTL_S
 
 
 def _b64encode(data: bytes) -> str:
@@ -139,13 +175,15 @@ def _parse_payload(body: bytes) -> SessionClaims | None:
         return None
     if not isinstance(data, dict):
         return None
-    keys = set(data)
-    if not _REQUIRED_CLAIMS <= keys <= set(_PAYLOAD_TYPES):
+    keys = frozenset(data)
+    if keys not in _SHAPES:
         return None
     for key in keys:
         if type(data[key]) is not _PAYLOAD_TYPES[key]:
             return None
     if data["v"] != _PAYLOAD_VERSION:
+        return None
+    if "n" in data and _NONCE.fullmatch(data["n"]) is None:
         return None
     return SessionClaims(
         epoch=data["e"],
@@ -167,6 +205,8 @@ class DashboardAuth:
         "_global_tripped",
         "_no_room_until",
         "_verify_slot",
+        "_revoked",
+        "_max_revoked",
         "last_seen_at",
     )
 
@@ -176,10 +216,14 @@ class DashboardAuth:
         *,
         clock: Callable[[], float] = time.time,
         max_throttle_keys: int = THROTTLE_MAX_KEYS,
+        max_revocations: int = REVOCATION_MAX,
     ) -> None:
         self._settings = settings_service
         self._clock = clock
         self._max_keys = max_throttle_keys
+        # signature → (reason, expires_at). Insertion-ordered (oldest first).
+        self._revoked: dict[bytes, tuple[str, float]] = {}
+        self._max_revoked = max_revocations
         # Insertion-ordered: eviction walks it from the front.
         self._failures: dict[str, deque[float]] = {}
         self._global: deque[float] = deque(maxlen=GLOBAL_MAX_FAILURES + 1)
@@ -199,6 +243,7 @@ class DashboardAuth:
             "i": int(self._clock()),
             "k": bool(keep),
             "l": bool(locked),
+            "n": _b64encode(secrets.token_bytes(_NONCE_BYTES)),
         }
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         secret = await self._settings.cookie_secret()
@@ -231,10 +276,65 @@ class DashboardAuth:
         now = self._clock()
         if claims.issued_at > now + MAX_CLOCK_SKEW_S:
             return None
-        ttl = KEEP_TTL_S if claims.keep else SESSION_TTL_S
-        if now - claims.issued_at > ttl:
+        if now - claims.issued_at > _ttl(claims):
             return None
+        claims = replace(claims, signature=sig)
+        reason = self.revocation(claims)
+        if reason == REVOKED_SIGNED_OUT:
+            return None
+        if reason == REVOKED_LOCKED:
+            return replace(claims, locked=True)
         return claims
+
+    # ── Revocation ──────────────────────────────────────────────────────
+    #
+    # In memory only: a restart forgets it. The durable revocation is the
+    # session epoch ("Sign out all tablets"). Entries expire with the
+    # cookie they name, so a revoked cookie can never outlive its entry.
+
+    def revoke(self, claims: SessionClaims, reason: str) -> None:
+        """Revoke the cookie ``claims`` came from (by its signature).
+
+        ``signed_out`` wins over ``locked`` and is never downgraded.
+        """
+        if reason not in _REVOCATION_REASONS:
+            raise ValueError(f"unknown revocation reason: {reason}")
+        sig = claims.signature
+        current = self._revoked.get(sig)
+        if current is not None and current[0] == REVOKED_SIGNED_OUT:
+            return
+        if current is None and len(self._revoked) >= self._max_revoked:
+            self._make_revocation_room()
+        self._revoked[sig] = (reason, claims.issued_at + _ttl(claims))
+
+    def revocation(self, claims: SessionClaims) -> str | None:
+        """Why the cookie behind ``claims`` was revoked, or ``None``."""
+        entry = self._revoked.get(claims.signature)
+        if entry is None:
+            return None
+        if self._clock() > entry[1]:
+            del self._revoked[claims.signature]
+            return None
+        return entry[0]
+
+    @property
+    def revoked_count(self) -> int:
+        return len(self._revoked)
+
+    def _make_revocation_room(self) -> None:
+        """Drop expired entries; else the oldest ``locked`` one (losing it
+        only re-opens a lock race), else the oldest of all."""
+        now = self._clock()
+        for sig in [s for s, (_, exp) in self._revoked.items() if now > exp]:
+            del self._revoked[sig]
+        if len(self._revoked) < self._max_revoked:
+            return
+        log.warning("household dashboard: revocation list full — dropping oldest")
+        victim = next(
+            (s for s, (why, _) in self._revoked.items() if why == REVOKED_LOCKED),
+            next(iter(self._revoked)),
+        )
+        del self._revoked[victim]
 
     def needs_renewal(self, claims: SessionClaims) -> bool:
         """``True`` when ``claims`` is old enough to be re-issued."""
@@ -263,15 +363,22 @@ class DashboardAuth:
             return await self._settings.verify_pin(pin)
 
     @staticmethod
-    def pin_throttle_key(client_key: str) -> str:
-        """The throttle bucket for ``client_key``'s PIN guesses.
+    def pin_throttle_key(client_key: str, claims: SessionClaims) -> str:
+        """The throttle bucket for PIN guesses made with this very cookie.
 
-        Separate from its password bucket: a tablet signed out for wrong
-        PINs can sign in with the password straight away. Pass it with
-        ``count_global=False`` (a PIN guess needs a valid cookie, so it
-        mustn't feed the global brake that holds back every login).
+        Per client *and* per cookie value (a hash prefix of its
+        signature): behind a TLS proxy every tablet shares one client
+        address, and one tablet's wrong PINs mustn't sign out another.
+        The signature, not ``issued_at``, because two tablets locked in
+        the same second would share an ``issued_at``; and a guesser can't
+        mint fresh locked cookies without an unlocked session (which needs
+        no PIN). Separate from the password bucket, so a tablet signed out
+        for wrong PINs can sign in with the password straight away. Use
+        with ``count_global=False`` (a PIN guess needs a valid cookie, so
+        it mustn't feed the global brake that holds back every login).
         """
-        return f"pin:{client_key}"
+        tag = hashlib.sha256(claims.signature).hexdigest()[:16]
+        return f"pin:{client_key}:{tag}"
 
     # ── Throttle ────────────────────────────────────────────────────────
     #
@@ -319,6 +426,21 @@ class DashboardAuth:
     def throttle_remaining(self, key: str) -> int:
         """Seconds until ``key`` may try again (``0`` = allowed now)."""
         return self._remaining(key, self._clock())
+
+    def failure_count(self, key: str) -> int:
+        """``key``'s own failures inside the window."""
+        stamps = self._live(key, self._clock())
+        return 0 if stamps is None else len(stamps)
+
+    def attempt_wait(self, key: str, *, count_global: bool = True) -> int:
+        """Seconds :meth:`begin_attempt` would make ``key`` wait now —
+        including a full client table refusing newcomers — counting
+        nothing."""
+        now = self._clock()
+        wait = self._remaining(key, now, count_global=count_global)
+        if wait or key in self._failures or len(self._failures) < self._max_keys:
+            return wait
+        return max(0, math.ceil(self._no_room_until - now))
 
     def begin_attempt(self, key: str, *, count_global: bool = True) -> int:
         """Start a sign-in attempt for ``key``.

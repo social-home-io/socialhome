@@ -544,7 +544,11 @@ async def test_pin_locks_and_unlocks_a_real_tablet(client):
         async with browser.post(
             f"{origin}/unlock", data={"pin": "0000"}, headers=form
         ) as resp:
-            assert resp.status == 401
+            # Post/Redirect/Get: lands on the lock screen with the flag.
+            assert resp.status == 200
+            assert resp.url.path_qs == "/?pin=wrong"
+            html = await resp.text()
+            assert "data-lock" in html and "Wrong PIN" in html
         async with browser.post(
             f"{origin}/unlock", data={"pin": "4829"}, headers=form
         ) as resp:
