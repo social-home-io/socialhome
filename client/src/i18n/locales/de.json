@@ -3369,6 +3369,7 @@
   "admin.dashboard.tablet.open": "Öffnen",
   "admin.dashboard.tablet.guess": "Geschätzt – danach, wie du Social Home aufgerufen hast. Falls das Tablet sie nicht öffnen kann, bearbeite die Adresse.",
   "admin.dashboard.tablet.guess_app": "Geschätzt. Verwende die IP deines Home Assistant und den Port unter Einstellungen › Apps › Social Home › Netzwerk.",
+  "admin.dashboard.tablet.port_not_mapped": "Der Dashboard-Port ist noch nicht eingeschaltet. Öffne in Home Assistant Einstellungen › Apps › Social Home › Netzwerk, trage einen Host-Port ein, speichere und starte die App neu.",
   "admin.dashboard.tablet.host_refused": "Unter dieser Adresse öffnet sich das Dashboard nicht – gib die Adresse ein, die das Tablet verwendet.",
   "admin.dashboard.tablet.edit_address": "Adresse bearbeiten",
   "admin.dashboard.tablet.address_label": "Dashboard-Adresse",

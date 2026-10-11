@@ -85,6 +85,9 @@ function AddressEditor({ state, save }: { state: DashboardState, save: SaveFn })
 
   return (
     <div class="sh-dashboard-address">
+      {state.host_port_mapped === false && (
+        <p class="sh-dashboard-admin__warn" role="note">⚠ {t('admin.dashboard.tablet.port_not_mapped')}</p>
+      )}
       {!state.url_host_allowed && (
         <p class="sh-dashboard-admin__warn" role="note">⚠ {t('admin.dashboard.tablet.host_refused')}</p>
       )}

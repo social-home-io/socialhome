@@ -3396,6 +3396,7 @@
   "admin.dashboard.tablet.open": "Abrir",
   "admin.dashboard.tablet.guess": "Estimada a partir de cómo abriste Social Home. Si la tablet no puede abrirla, edita la dirección.",
   "admin.dashboard.tablet.guess_app": "Estimada. Usa la IP de tu Home Assistant y el puerto de Ajustes › Apps › Social Home › Red.",
+  "admin.dashboard.tablet.port_not_mapped": "El puerto del panel aún no está activado. En Home Assistant abre Ajustes › Apps › Social Home › Red, introduce un puerto del host, guarda y reinicia la App.",
   "admin.dashboard.tablet.host_refused": "Esta dirección no abrirá el panel: indica la dirección que usa la tablet.",
   "admin.dashboard.tablet.edit_address": "Editar dirección",
   "admin.dashboard.tablet.address_label": "Dirección del panel",

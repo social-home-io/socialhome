@@ -3369,6 +3369,7 @@
   "admin.dashboard.tablet.open": "Openen",
   "admin.dashboard.tablet.guess": "Een schatting, op basis van hoe je Social Home hebt geopend. Kan de tablet het niet openen, bewerk dan het adres.",
   "admin.dashboard.tablet.guess_app": "Een schatting. Gebruik het IP-adres van je Home Assistant en de poort onder Instellingen › Apps › Social Home › Netwerk.",
+  "admin.dashboard.tablet.port_not_mapped": "De dashboardpoort staat nog niet aan. Open in Home Assistant Instellingen › Apps › Social Home › Netwerk, vul een hostpoort in, sla op en herstart de App.",
   "admin.dashboard.tablet.host_refused": "Met dit adres opent het dashboard niet — stel het adres in dat de tablet gebruikt.",
   "admin.dashboard.tablet.edit_address": "Adres bewerken",
   "admin.dashboard.tablet.address_label": "Dashboardadres",

@@ -31,6 +31,9 @@ export interface DashboardState {
   address: string | null
   url: string
   url_host_allowed: boolean
+  /** Home Assistant App only: ``false`` = the App offers the dashboard
+   *  port but no host port is mapped yet; ``null`` = not applicable. */
+  host_port_mapped?: boolean | null
   locale: string
   idle_return_minutes: number
   night_start: string

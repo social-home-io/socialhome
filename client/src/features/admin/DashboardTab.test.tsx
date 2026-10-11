@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, fireEvent, waitFor, screen, act } from '@testing-library/preact'
+import { render, fireEvent, waitFor, screen, act, cleanup } from '@testing-library/preact'
 import type { DashboardState } from './DashboardTab'
 
 vi.mock('@/api', async (importOriginal) => {
@@ -327,6 +327,19 @@ describe('DashboardTab — open on the tablet', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(mPut).toHaveBeenCalledWith(
       '/api/admin/dashboard', { address: 'http://192.168.1.20:8100' }))
+  })
+
+  it('asks to turn the Home Assistant App port on when it is not mapped', async () => {
+    await mount(state({ port_fixed: true, host_port_mapped: false }))
+    expect(screen.getByText(/The dashboard port isn't turned on yet/)).toBeTruthy()
+  })
+
+  it('says nothing about the App port when it is mapped or not applicable', async () => {
+    await mount(state({ port_fixed: true, host_port_mapped: true }))
+    expect(screen.queryByText(/The dashboard port isn't turned on yet/)).toBeNull()
+    cleanup()
+    await mount(state({ host_port_mapped: null }))
+    expect(screen.queryByText(/The dashboard port isn't turned on yet/)).toBeNull()
   })
 
   it('clears a set address back to the guess (null)', async () => {
