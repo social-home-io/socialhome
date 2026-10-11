@@ -17,6 +17,7 @@ from socialhome.domain.household_dashboard import (
     DashboardPasswordTooShortError,
     DashboardPersonSettings,
     DashboardPortFixedError,
+    DashboardPortInUseError,
     DashboardSettings,
     DashboardSettingsInvalidError,
 )
@@ -89,6 +90,14 @@ def test_port_fixed_error():
     assert isinstance(e, CodedError)
     assert e.status == 422
     assert e.code == "DASHBOARD_PORT_FIXED"
+
+
+def test_port_in_use_error():
+    e = DashboardPortInUseError(8100)
+    assert isinstance(e, CodedError)
+    assert e.status == 409
+    assert e.code == "DASHBOARD_PORT_IN_USE"
+    assert e.params == {"port": 8100}
 
 
 def test_settings_invalid_error_names_field():

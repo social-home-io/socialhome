@@ -33,5 +33,15 @@
   "notification.space.feature.stickies": "Notities",
   "notification.space.feature.calendar": "Agenda-items",
   "notification.space.admins_reconfirm": "Hersteld uit back-up: controleer de beheerders van de ruimte en zet gedelegeerd beheer daarna weer aan",
-  "notification.space.report.filed": "Nieuwe melding in {space_name}"
+  "notification.space.report.filed": "Nieuwe melding in {space_name}",
+  "dashboard.login.title": "Dashboard openen",
+  "dashboard.login.password": "Dashboardwachtwoord",
+  "dashboard.login.keep_signed_in": "Deze tablet ingelogd houden",
+  "dashboard.login.open": "Openen",
+  "dashboard.login.wrong_password": "Dat is niet het wachtwoord.",
+  "dashboard.login.too_many_tries": "Te veel pogingen — probeer het over {minutes} min opnieuw",
+  "dashboard.login.not_set_up": "Het dashboard is nog niet ingesteld.",
+  "dashboard.login.ask": "Weet je het niet? Vraag het aan een volwassene die Social Home beheert.",
+  "dashboard.ready": "Je dashboard is klaar — de weergaven komen eraan.",
+  "dashboard.sign_out": "Uitloggen"
 }

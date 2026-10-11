@@ -172,3 +172,11 @@ async def test_running_server_never_logs_secrets(caplog):
         assert "/api/ws?" in record.getMessage()
         assert record.first_request_line.startswith("GET /api/ws?")
         assert record.request_header["Referer"] == "http://x/?token=***"
+
+
+def test_redact_dashboard_setup_token_param():
+    """The household dashboard's ``/enter?t=<setup token>`` link."""
+    assert redact_query_string("GET /enter?t=s3cr3t HTTP/1.1") == (
+        "GET /enter?t=*** HTTP/1.1"
+    )
+    assert redact_query_string("/x?at=1&tz=UTC") == "/x?at=1&tz=UTC"

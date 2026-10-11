@@ -33,5 +33,15 @@
   "notification.space.feature.stickies": "Notas adhesivas",
   "notification.space.feature.calendar": "Eventos",
   "notification.space.admins_reconfirm": "Restaurado desde una copia de seguridad: revisa los administradores del espacio y vuelve a activar la administración delegada",
-  "notification.space.report.filed": "Nueva denuncia en {space_name}"
+  "notification.space.report.filed": "Nueva denuncia en {space_name}",
+  "dashboard.login.title": "Abrir el panel",
+  "dashboard.login.password": "Contraseña del panel",
+  "dashboard.login.keep_signed_in": "Mantener esta tableta con la sesión iniciada",
+  "dashboard.login.open": "Abrir",
+  "dashboard.login.wrong_password": "Esa no es la contraseña.",
+  "dashboard.login.too_many_tries": "Demasiados intentos — vuelve a intentarlo en {minutes} min",
+  "dashboard.login.not_set_up": "El panel aún no está configurado.",
+  "dashboard.login.ask": "¿No la sabes? Pregunta a un adulto que gestione Social Home.",
+  "dashboard.ready": "Tu panel está listo — las vistas llegarán pronto.",
+  "dashboard.sign_out": "Cerrar sesión"
 }

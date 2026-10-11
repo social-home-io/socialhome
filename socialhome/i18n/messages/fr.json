@@ -33,5 +33,15 @@
   "notification.space.feature.stickies": "Notes",
   "notification.space.feature.calendar": "Événements",
   "notification.space.admins_reconfirm": "Restauré depuis une sauvegarde : vérifie les administrateurs de l'espace, puis réactive l'administration déléguée",
-  "notification.space.report.filed": "Nouveau signalement dans {space_name}"
+  "notification.space.report.filed": "Nouveau signalement dans {space_name}",
+  "dashboard.login.title": "Ouvrir le tableau de bord",
+  "dashboard.login.password": "Mot de passe du tableau de bord",
+  "dashboard.login.keep_signed_in": "Garder cette tablette connectée",
+  "dashboard.login.open": "Ouvrir",
+  "dashboard.login.wrong_password": "Ce n'est pas le mot de passe.",
+  "dashboard.login.too_many_tries": "Trop d'essais — réessayez dans {minutes} min",
+  "dashboard.login.not_set_up": "Le tableau de bord n'est pas encore configuré.",
+  "dashboard.login.ask": "Vous ne le connaissez pas ? Demandez à un adulte qui gère Social Home.",
+  "dashboard.ready": "Votre tableau de bord est prêt — les vues arrivent bientôt.",
+  "dashboard.sign_out": "Se déconnecter"
 }

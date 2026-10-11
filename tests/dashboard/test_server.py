@@ -1,0 +1,110 @@
+"""Tests for DashboardServer — the dashboard's own listener lifecycle."""
+
+from __future__ import annotations
+
+import socket
+
+import aiohttp
+import pytest
+from aiohttp import web
+
+from socialhome.dashboard.server import DashboardServer
+from socialhome.domain.household_dashboard import (
+    DashboardPortInUseError,
+    DashboardSettings,
+)
+
+HOST = "127.0.0.1"
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, 0))
+        return s.getsockname()[1]
+
+
+def _build() -> web.Application:
+    async def hello(_request: web.Request) -> web.Response:
+        return web.Response(text="hi")
+
+    app = web.Application()
+    app.router.add_get("/", hello)
+    return app
+
+
+async def _get(port: int) -> str:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"http://{HOST}:{port}/") as resp:
+            return await resp.text()
+
+
+@pytest.fixture
+async def server():
+    srv = DashboardServer(_build, HOST)
+    yield srv
+    await srv.stop()
+
+
+async def test_start_serves_and_stop(server):
+    port = _free_port()
+    assert server.running_port is None
+    await server.start(port)
+    assert server.running_port == port
+    assert await _get(port) == "hi"
+    await server.stop()
+    assert server.running_port is None
+    with pytest.raises(aiohttp.ClientConnectionError):
+        await _get(port)
+
+
+async def test_stop_is_idempotent(server):
+    await server.stop()
+    await server.start(_free_port())
+    await server.stop()
+    await server.stop()
+    assert server.running_port is None
+
+
+async def test_port_in_use(server):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.bind((HOST, 0))
+        blocker.listen()
+        port = blocker.getsockname()[1]
+        with pytest.raises(DashboardPortInUseError) as exc:
+            await server.start(port)
+    assert exc.value.status == 409
+    assert exc.value.code == "DASHBOARD_PORT_IN_USE"
+    assert exc.value.params == {"port": port}
+    assert server.running_port is None
+
+
+async def test_apply_transitions(server):
+    p1, p2 = _free_port(), _free_port()
+    await server.apply(DashboardSettings(enabled=False, port=p1))
+    assert server.running_port is None
+
+    await server.apply(DashboardSettings(enabled=True, port=p1))
+    assert server.running_port == p1
+    runner = server._runner
+
+    # Same port → no-op (the runner is untouched).
+    await server.apply(DashboardSettings(enabled=True, port=p1))
+    assert server._runner is runner
+
+    await server.apply(DashboardSettings(enabled=True, port=p2))
+    assert server.running_port == p2
+    assert await _get(p2) == "hi"
+    with pytest.raises(aiohttp.ClientConnectionError):
+        await _get(p1)
+
+    await server.apply(DashboardSettings(enabled=False, port=p2))
+    assert server.running_port is None
+
+
+async def test_start_while_running_restarts(server):
+    p1, p2 = _free_port(), _free_port()
+    await server.start(p1)
+    await server.start(p2)
+    assert server.running_port == p2
+    with pytest.raises(aiohttp.ClientConnectionError):
+        await _get(p1)

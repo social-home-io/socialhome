@@ -33,5 +33,15 @@
   "notification.space.feature.stickies": "Haftnotizen",
   "notification.space.feature.calendar": "Termine",
   "notification.space.admins_reconfirm": "Aus Backup wiederhergestellt: Prüfe die Space-Admins und schalte dann die delegierte Verwaltung wieder ein",
-  "notification.space.report.filed": "Neue Meldung in {space_name}"
+  "notification.space.report.filed": "Neue Meldung in {space_name}",
+  "dashboard.login.title": "Dashboard öffnen",
+  "dashboard.login.password": "Dashboard-Passwort",
+  "dashboard.login.keep_signed_in": "Dieses Tablet angemeldet lassen",
+  "dashboard.login.open": "Öffnen",
+  "dashboard.login.wrong_password": "Das ist nicht das Passwort.",
+  "dashboard.login.too_many_tries": "Zu viele Versuche — versuch es in {minutes} Min. noch einmal",
+  "dashboard.login.not_set_up": "Das Dashboard ist noch nicht eingerichtet.",
+  "dashboard.login.ask": "Du kennst es nicht? Frag einen Erwachsenen, der Social Home verwaltet.",
+  "dashboard.ready": "Dein Dashboard ist bereit — die Ansichten kommen bald.",
+  "dashboard.sign_out": "Abmelden"
 }

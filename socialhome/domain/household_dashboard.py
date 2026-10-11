@@ -22,6 +22,7 @@ __all__ = [
     "DashboardPasswordTooShortError",
     "DashboardPersonSettings",
     "DashboardPortFixedError",
+    "DashboardPortInUseError",
     "DashboardSettings",
     "DashboardSettingsInvalidError",
 ]
@@ -103,6 +104,17 @@ class DashboardPortFixedError(CodedError):
     status = 422
     code = "DASHBOARD_PORT_FIXED"
     detail = "The dashboard port is fixed on this installation."
+
+
+class DashboardPortInUseError(CodedError):
+    """Another process already listens on the dashboard port."""
+
+    status = 409
+    code = "DASHBOARD_PORT_IN_USE"
+    detail = "The dashboard port is already in use."
+
+    def __init__(self, port: int) -> None:
+        super().__init__(params={"port": port})
 
 
 class DashboardSettingsInvalidError(CodedError, ValueError):

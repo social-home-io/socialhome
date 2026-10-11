@@ -1,0 +1,26 @@
+{% extends "base.html.j2" %}
+{% block body_class %}dash-login{% endblock %}
+{% block content %}
+<section class="dash-card" aria-labelledby="dash-login-title">
+  <p class="dash-household">{{ household }}</p>
+  <h1 id="dash-login-title">{{ t("dashboard.login.title") }}</h1>
+  {% if error %}
+  <p class="dash-error" role="alert">{{ error }}</p>
+  {% endif %}
+  {% if show_form %}
+  <form class="dash-form" method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next_path }}">
+    <label class="dash-field">
+      <span>{{ t("dashboard.login.password") }}</span>
+      <input type="password" name="password" autocomplete="current-password" required autofocus>
+    </label>
+    <label class="dash-check">
+      <input type="checkbox" name="keep" value="1"{% if keep %} checked{% endif %}>
+      <span>{{ t("dashboard.login.keep_signed_in") }}</span>
+    </label>
+    <button type="submit" class="dash-button">{{ t("dashboard.login.open") }}</button>
+  </form>
+  <p class="dash-hint">{{ t("dashboard.login.ask") }}</p>
+  {% endif %}
+</section>
+{% endblock %}

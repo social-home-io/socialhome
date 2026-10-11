@@ -1,0 +1,180 @@
+/* Household dashboard — login + placeholder. System fonts only: the
+   dashboard never fetches from a third-party host. */
+
+:root {
+  color-scheme: light dark;
+  --dash-bg: #f4f2ee;
+  --dash-surface: #ffffff;
+  --dash-text: #1f1d1a;
+  --dash-muted: #5f5a52;
+  --dash-accent: #2f6f5e;
+  --dash-accent-text: #ffffff;
+  --dash-border: #d6d1c8;
+  --dash-error-bg: #fbe9e7;
+  --dash-error-text: #8a1c12;
+  --dash-focus: #1d5fd1;
+  --dash-radius: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --dash-bg: #151412;
+    --dash-surface: #22201d;
+    --dash-text: #f1eee9;
+    --dash-muted: #b3ada3;
+    --dash-accent: #6cc3a8;
+    --dash-accent-text: #0f1a16;
+    --dash-border: #3d3a35;
+    --dash-error-bg: #3a1a16;
+    --dash-error-text: #ffb4a9;
+    --dash-focus: #8ab4ff;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-block-size: 100%;
+}
+
+body {
+  background: var(--dash-bg);
+  color: var(--dash-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  font-size: 1.125rem;
+  line-height: 1.5;
+}
+
+.dash-main {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 100vh;
+  min-block-size: 100dvh;
+  padding-block: 24px;
+  padding-inline: 16px;
+}
+
+.dash-card {
+  inline-size: 100%;
+  max-inline-size: 28rem;
+  padding-block: 32px;
+  padding-inline: 28px;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius);
+  text-align: center;
+}
+
+.dash-home .dash-card {
+  max-inline-size: 40rem;
+}
+
+.dash-household {
+  margin: 0;
+  color: var(--dash-muted);
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+h1 {
+  margin-block: 4px 24px;
+  font-size: clamp(1.5rem, 4vw, 2.25rem);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.dash-ready {
+  margin-block: 0 32px;
+  color: var(--dash-muted);
+  font-size: clamp(1.125rem, 2.5vw, 1.5rem);
+}
+
+.dash-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  text-align: start;
+}
+
+.dash-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.dash-field input {
+  min-block-size: 56px;
+  padding-inline: 16px;
+  font: inherit;
+  font-weight: 400;
+  color: inherit;
+  background: var(--dash-bg);
+  border: 1px solid var(--dash-border);
+  border-radius: 12px;
+}
+
+.dash-check {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-block-size: 48px;
+  cursor: pointer;
+}
+
+.dash-check input {
+  inline-size: 28px;
+  block-size: 28px;
+  margin: 0;
+  accent-color: var(--dash-accent);
+}
+
+.dash-button {
+  min-block-size: 56px;
+  padding-inline: 28px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--dash-accent-text);
+  background: var(--dash-accent);
+  border: 0;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.dash-button-quiet {
+  min-block-size: 48px;
+  color: var(--dash-text);
+  background: transparent;
+  border: 1px solid var(--dash-border);
+}
+
+.dash-field input:focus-visible,
+.dash-check input:focus-visible,
+.dash-button:focus-visible {
+  outline: 3px solid var(--dash-focus);
+  outline-offset: 2px;
+}
+
+.dash-error {
+  margin-block: 0 20px;
+  padding-block: 12px;
+  padding-inline: 16px;
+  color: var(--dash-error-text);
+  background: var(--dash-error-bg);
+  border-radius: 12px;
+  text-align: start;
+}
+
+.dash-hint {
+  margin-block: 24px 0;
+  color: var(--dash-muted);
+  font-size: 1rem;
+}
