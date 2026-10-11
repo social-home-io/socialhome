@@ -62,7 +62,10 @@ from socialhome.federation.invite_bootstrap import (
     InviteBootstrapHint,
     seal_bootstrap_envelope,
 )
-from socialhome.global_server.envelope_relay import ENVELOPE_MAX_BODY_BYTES
+from socialhome.global_server.envelope_relay import (
+    ENVELOPE_MAX_BODY_BYTES,
+    KeyedLocks,
+)
 from socialhome.federation.private_invite_handler import PrivateSpaceInviteHandler
 from socialhome.federation.gfs_relay_transport import (
     RELAY_SIZE_BUCKETS,
@@ -140,6 +143,9 @@ class _FakeGfs:
         self._tasks: set[asyncio.Task] = set()
         #: Envelopes refused with 413 — over the real relay's body cap.
         self.too_large = 0
+        #: One push leg at a time per recipient, in POST order — see
+        #: :meth:`_push`.
+        self._push_locks = KeyedLocks()
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -178,14 +184,27 @@ class _FakeGfs:
             # The push leg: a real GFS writes the frame to the household's
             # open socket, so delivery is concurrent with this response.
             task = asyncio.create_task(
-                target.handle_frame(
-                    {"sealed": body.get("sealed")},
-                    gfs_url=self.url,
-                ),
+                self._push(to_instance, target, body.get("sealed")),
             )
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
         return web.json_response({"status": "accepted"}, status=202)
+
+    async def _push(self, to_instance: str, target, sealed) -> None:
+        """Hand one frame to *to_instance*'s socket, in submit order.
+
+        The real relay serialises one recipient's envelopes under a
+        per-recipient lock (``GfsEnvelopeRelay._accept_in_background``)
+        and the household's socket reader awaits each frame's handler
+        before reading the next (``GfsWsClient``). Spawning an unguarded
+        task per POST let a later envelope overtake an earlier one
+        whenever the first dispatch paused longer — a reorder the product
+        never does. Holding the recipient's lock across ``handle_frame``
+        models both halves; tasks start in creation order and the lock
+        hands over FIFO, exactly like the relay's.
+        """
+        async with self._push_locks.hold(to_instance):
+            await target.handle_frame({"sealed": sealed}, gfs_url=self.url)
 
     async def drain(self) -> None:
         """Await every push-leg task, including ones spawned while draining.
@@ -983,13 +1002,56 @@ async def test_every_relayed_body_is_a_recipient_and_ciphertext(households, gfs)
     assert a.instance_id not in json.dumps(gfs.mailbox[1][1])
 
 
-async def test_a_relayed_envelope_is_bucket_sized_and_still_verifies(households, gfs):
+class _SlowFirstFrame:
+    """A household socket whose first frame takes *delay* seconds longer.
+
+    Stands in for a receiver that is momentarily busy (a slow DB write in
+    the first dispatch). It must not change the ORDER the household sees
+    its envelopes in: the real relay pushes one recipient's envelopes in
+    submit order and the household's socket reader handles one frame at a
+    time, so a slow first frame delays the second rather than letting it
+    overtake.
+    """
+
+    def __init__(self, inner, delay: float) -> None:
+        self._inner = inner
+        self._delay = delay
+
+    async def handle_frame(self, frame: dict, **kwargs):
+        delay, self._delay = self._delay, 0.0
+        if delay:
+            await asyncio.sleep(delay)
+        return await self._inner.handle_frame(frame, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "first_frame_delay",
+    [0.0, 0.2],
+    ids=["as-scheduled", "first-frame-is-slow"],
+)
+async def test_a_relayed_envelope_is_bucket_sized_and_still_verifies(
+    households,
+    gfs,
+    first_frame_delay,
+):
     """The relay sees the blob's length, so the sealed plaintext is padded
     to a size bucket — beside the envelope, never in it: the receiver's
     unchanged §24.11 pipeline still verifies the pair signature and
-    dispatches the event."""
+    dispatches the event.
+
+    The two envelopes also arrive in the order they were sent, which is
+    what the real relay + socket reader guarantee for one recipient. The
+    ``first-frame-is-slow`` case pins that: before the fake GFS serialised
+    its push leg per recipient, a slow first frame let the second one
+    overtake it (an intermittent CI failure, not a product reorder).
+    """
     a, b = households
     space = await _join(a, b, gfs)
+    if first_frame_delay:
+        gfs.sockets[a.instance_id] = _SlowFirstFrame(
+            gfs.sockets[a.instance_id],
+            first_frame_delay,
+        )
 
     # Different lengths, one bucket (4 KiB).
     markers = ("a" * 400, "b" * 1500)
@@ -1585,7 +1647,18 @@ async def test_the_gps_fanout_skips_a_link_joined_seat_even_with_share_home_on(
     assert a.received == []
 
 
-async def test_both_households_log_the_successful_redeem(households, gfs, caplog):
+@pytest.mark.parametrize(
+    "issuer_commit_delay",
+    [0.0, 0.2],
+    ids=["as-scheduled", "issuer-commit-lags-the-redeemer"],
+)
+async def test_both_households_log_the_successful_redeem(
+    households,
+    gfs,
+    caplog,
+    monkeypatch,
+    issuer_commit_delay,
+):
     """A link redeem that WORKS leaves a record on both sides.
 
     Every failing outcome on this path already logs (a DENY, a rejected
@@ -1594,9 +1667,31 @@ async def test_both_households_log_the_successful_redeem(households, gfs, caplog
     link work?" had nothing to read in either household's log. The
     routing facts only — who, which space, which seat — never the token,
     which is a live bearer credential, and never the space name.
+
+    The two lines are written by two different tasks. The redeemer's is
+    logged before its Future resolves, so it is in by the time
+    ``redeem_invite_token`` returns. The issuer's is logged at the end of
+    its own push-leg task, AFTER the ACK went out and ``_commit_redeem``
+    ran — by design, the joiner holds the ACK before the issuer finishes
+    committing. Nothing ties that task to the redeemer's return, so the
+    test has to drain the relay before reading the issuer's record; the
+    ``issuer-commit-lags-the-redeemer`` case slows the issuer's commit to
+    pin that ordering down (it failed intermittently in full-suite runs).
     """
     a, b = households
     space, hint = await _mint_invite(b, gfs.url)
+    if issuer_commit_delay:
+        real_commit = SpaceInviteTokenRedeemCoordinator._commit_redeem
+
+        async def _slow_commit(self, res):
+            await asyncio.sleep(issuer_commit_delay)
+            await real_commit(self, res)
+
+        monkeypatch.setattr(
+            SpaceInviteTokenRedeemCoordinator,
+            "_commit_redeem",
+            _slow_commit,
+        )
 
     with caplog.at_level(
         logging.INFO, logger="socialhome.federation.invite_token_redeem"
@@ -1607,6 +1702,9 @@ async def test_both_households_log_the_successful_redeem(households, gfs, caplog
             issuer_instance_id=b.instance_id,
             bootstrap=hint,
         )
+        # The issuer logs from its push-leg task, which may still be
+        # committing the seat when the redeemer has already returned.
+        await gfs.drain()
 
     messages = [r.getMessage() for r in caplog.records]
     issuer_line = [
