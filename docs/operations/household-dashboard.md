@@ -84,6 +84,31 @@ must open.
   `.home.arpa`) or the configured address are refused (421) — protection
   against DNS rebinding.
 
+## Privacy lock (guests, cleaners)
+
+When someone who shouldn't see the household's people is around, tap
+the 🔒 button on the tablet. It switches to a neutral lock screen: the
+household name, the time and the date — no names, pictures, presence,
+events or chores. Reloading the page or restarting the browser keeps it
+locked (the lock lives in that tablet's sign-in cookie, so it is per
+tablet: locking the hallway tablet doesn't lock the kitchen one).
+
+To unlock, tap **🔒 PIN** and type the PIN on the keypad.
+
+- **Set a PIN first.** The 🔒 button only appears once a household
+  admin has set a PIN — `PUT /api/admin/dashboard/pin` with
+  `{"pin": "4829"}` (4 to 6 digits).
+- **The PIN is not the dashboard password.** It's a short code for the
+  people who live there; the password stays with whoever sets tablets
+  up. Setting or changing the PIN signs no tablet out.
+- **Five wrong PINs sign the tablet out.** After five wrong tries within
+  15 minutes the next one signs that tablet out, and it needs the
+  dashboard password (or a fresh setup link) again.
+- **Removing the PIN** (`DELETE /api/admin/dashboard/pin`) unlocks every
+  locked tablet and hides the 🔒 button.
+- It is a privacy screen, not a safe: anyone who knows the dashboard
+  password can still sign a tablet in.
+
 ## Signing tablets out
 
 - **"Sign out all tablets"** (`DELETE /api/admin/dashboard/sessions`)

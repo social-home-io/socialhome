@@ -9,6 +9,12 @@ signed session cookie (:mod:`socialhome.dashboard.auth`).
 
 Middleware order: ``Host`` allow-list (DNS rebinding) → body-size cap →
 same-origin check on ``POST`` → the session guard.
+
+A privacy-locked session (``SessionClaims.locked``) reaches only
+``/lock`` and ``/unlock``; the guard answers every other non-public
+route itself — the lock screen for a page view, a marker for a
+``/fragment/…`` (:data:`~.views.LOCKED_FRAGMENT`), ``423`` for anything
+else (``/avatar/…``, writes) — so no view can leak a person.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ import ipaddress
 import logging
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import replace
 from urllib.parse import quote, urlsplit
 
 from aiohttp import web
@@ -29,12 +36,21 @@ from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
     HOUSEHOLD_NAME_KEY,
+    HOUSEHOLD_TZ_KEY,
     RENDERER_KEY,
     SETTINGS_KEY,
     HouseholdNameFn,
+    HouseholdTzFn,
 )
 from .render import DashboardRenderer
-from .views import redirect, register_routes, set_session_cookie
+from .views import (
+    LOCKED_FRAGMENT,
+    LOCKED_HEADER,
+    redirect,
+    register_routes,
+    render_lock_screen,
+    set_session_cookie,
+)
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +86,9 @@ MAX_BODY_BYTES = 16 * 1024
 PUBLIC_PATHS = frozenset({"/login", "/enter", "/logout", "/healthz"})
 _STATIC_PREFIX = "/static/"
 _FRAGMENT_PREFIX = "/fragment/"
+_AVATAR_PREFIX = "/avatar/"
+#: The only non-public routes a privacy-locked tablet reaches.
+_LOCK_PATHS = frozenset({"/lock", "/unlock"})
 
 #: Same-origin only; no third-party host of any kind (no web fonts, no
 #: CDNs). Inline ``<style>`` blocks are admitted per page by hash
@@ -240,13 +259,40 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
             )
         return web.Response(status=401, text="Unauthorized")
     auth.touch()
+    if claims.locked and not (await request.app[SETTINGS_KEY].get()).pin_set:
+        # The PIN was removed: nothing could unlock this tablet any more.
+        claims = replace(claims, locked=False)
     request[CLAIMS_KEY] = claims
-    response = await handler(request)
-    if auth.needs_renewal(claims):
+    if claims.locked and request.path not in _LOCK_PATHS:
+        response = await _locked_response(request)
+    else:
+        response = await handler(request)
+    # ``/lock`` and ``/unlock`` set a fresh cookie themselves — keep it.
+    if auth.needs_renewal(claims) and COOKIE_NAME not in response.cookies:
         await set_session_cookie(
-            response, request, await auth.issue(claims.keep), keep=claims.keep
+            response,
+            request,
+            await auth.issue(claims.keep, locked=claims.locked),
+            keep=claims.keep,
         )
     return response
+
+
+async def _locked_response(request: web.Request) -> web.StreamResponse:
+    """What a privacy-locked tablet gets instead of any content route."""
+    if request.path.startswith(_FRAGMENT_PREFIX):
+        return web.Response(
+            text=LOCKED_FRAGMENT,
+            content_type="text/html",
+            charset="utf-8",
+            headers={LOCKED_HEADER: "1"},
+        )
+    if request.method in ("GET", "HEAD") and not request.path.startswith(
+        _AVATAR_PREFIX
+    ):
+        # 200, not a redirect: a reload keeps showing the lock screen.
+        return await render_lock_screen(request)
+    return web.Response(status=423, text="Locked")
 
 
 def build_dashboard_app(
@@ -255,6 +301,7 @@ def build_dashboard_app(
     auth: DashboardAuth,
     renderer: DashboardRenderer,
     household_name: HouseholdNameFn,
+    household_tz: HouseholdTzFn,
     extra_hosts: ExtraHosts = (),
     local_hostnames: frozenset[str] = frozenset(),
 ) -> web.Application:
@@ -284,6 +331,7 @@ def build_dashboard_app(
     app[AUTH_KEY] = auth
     app[RENDERER_KEY] = renderer
     app[HOUSEHOLD_NAME_KEY] = household_name
+    app[HOUSEHOLD_TZ_KEY] = household_tz
     install_security_headers(app)
     # After the shared hook (which only ``setdefault``s), so these win.
     app.on_response_prepare.append(_dashboard_headers)

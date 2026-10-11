@@ -6,7 +6,14 @@ and a signed cookie keeps the tablet signed in.
 Cookie (``sh_dash``) = ``b64url(payload) "." b64url(HMAC-SHA256(key,
 payload))`` where ``payload`` is compact JSON::
 
-    {"v": 1, "e": <session epoch>, "i": <issued-at unix int>, "k": <keep>}
+    {"v": 1, "e": <session epoch>, "i": <issued-at unix int>, "k": <keep>,
+     "l": <locked>}
+
+``l`` is the privacy lock: a locked tablet shows only the lock screen
+until someone types the PIN. It lives in the cookie so it is per tablet
+and survives reloads and browser restarts. Cookies minted before the
+claim existed carry exactly ``{v,e,i,k}`` and still verify, as unlocked;
+any other key set (or a non-``bool`` ``l``) is refused.
 
 The key is the KEK-wrapped dashboard cookie secret
 (:meth:`DashboardSettingsService.cookie_secret`); bumping the session
@@ -21,7 +28,9 @@ On top, a global brake: more than thirty failures across *all* clients
 in that window holds every client back (a guesser with many addresses),
 and password checks (scrypt) run one at a time so a flood of logins
 can't pin every CPU. A tablet with a valid cookie never logs in, so the
-brakes don't touch it.
+brakes don't touch it. Privacy-lock PIN guesses use the same per-client
+limit in a bucket of their own (:meth:`DashboardAuth.pin_throttle_key`)
+and never the global brake; the PIN check shares the scrypt slot.
 """
 
 from __future__ import annotations
@@ -84,7 +93,16 @@ PRUNE_INTERVAL_S = 10.0
 _PAYLOAD_VERSION = 1
 #: Exact claim set and the type of each value (``bool`` checked exactly,
 #: so ``True`` is never accepted as an int nor ``1`` as a bool).
-_PAYLOAD_TYPES: dict[str, type] = {"v": int, "e": int, "i": int, "k": bool}
+_PAYLOAD_TYPES: dict[str, type] = {
+    "v": int,
+    "e": int,
+    "i": int,
+    "k": bool,
+    "l": bool,
+}
+#: Optional claims: a cookie may lack exactly these (pre-lock cookies).
+_OPTIONAL_CLAIMS = frozenset({"l"})
+_REQUIRED_CLAIMS = frozenset(_PAYLOAD_TYPES) - _OPTIONAL_CLAIMS
 #: Far above any real cookie; refuses absurd inputs before decoding.
 _MAX_COOKIE_LEN = 1024
 _B64URL = re.compile(r"[A-Za-z0-9_-]+")
@@ -97,6 +115,7 @@ class SessionClaims:
     epoch: int
     issued_at: int
     keep: bool
+    locked: bool = False
 
 
 def _b64encode(data: bytes) -> str:
@@ -118,14 +137,22 @@ def _parse_payload(body: bytes) -> SessionClaims | None:
         data = json.loads(body)
     except ValueError:  # covers JSONDecodeError and UnicodeDecodeError
         return None
-    if not isinstance(data, dict) or set(data) != set(_PAYLOAD_TYPES):
+    if not isinstance(data, dict):
         return None
-    for key, kind in _PAYLOAD_TYPES.items():
-        if type(data[key]) is not kind:
+    keys = set(data)
+    if not _REQUIRED_CLAIMS <= keys <= set(_PAYLOAD_TYPES):
+        return None
+    for key in keys:
+        if type(data[key]) is not _PAYLOAD_TYPES[key]:
             return None
     if data["v"] != _PAYLOAD_VERSION:
         return None
-    return SessionClaims(epoch=data["e"], issued_at=data["i"], keep=data["k"])
+    return SessionClaims(
+        epoch=data["e"],
+        issued_at=data["i"],
+        keep=data["k"],
+        locked=data.get("l", False),
+    )
 
 
 class DashboardAuth:
@@ -164,13 +191,14 @@ class DashboardAuth:
 
     # ── Cookie ──────────────────────────────────────────────────────────
 
-    async def issue(self, keep: bool) -> str:
+    async def issue(self, keep: bool, *, locked: bool = False) -> str:
         """A fresh cookie value for the current epoch."""
         payload = {
             "v": _PAYLOAD_VERSION,
             "e": await self._settings.epoch(),
             "i": int(self._clock()),
             "k": bool(keep),
+            "l": bool(locked),
         }
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         secret = await self._settings.cookie_secret()
@@ -212,6 +240,11 @@ class DashboardAuth:
         """``True`` when ``claims`` is old enough to be re-issued."""
         return self._clock() - claims.issued_at > RENEW_AFTER_S
 
+    def now(self) -> float:
+        """The dashboard's clock (unix seconds) — one source for cookies,
+        the throttle and the wall clock on the page."""
+        return self._clock()
+
     def touch(self) -> None:
         """Record a signed-in request (surfaced to admins as "last seen")."""
         self.last_seen_at = self._clock()
@@ -222,6 +255,23 @@ class DashboardAuth:
         """Verify the household password — one check at a time."""
         async with self._verify_slot:
             return await self._settings.verify_password(password)
+
+    async def check_pin(self, pin: str) -> bool:
+        """Verify the privacy-lock PIN — scrypt too, so it queues in the
+        same one-at-a-time slot as the password."""
+        async with self._verify_slot:
+            return await self._settings.verify_pin(pin)
+
+    @staticmethod
+    def pin_throttle_key(client_key: str) -> str:
+        """The throttle bucket for ``client_key``'s PIN guesses.
+
+        Separate from its password bucket: a tablet signed out for wrong
+        PINs can sign in with the password straight away. Pass it with
+        ``count_global=False`` (a PIN guess needs a valid cookie, so it
+        mustn't feed the global brake that holds back every login).
+        """
+        return f"pin:{client_key}"
 
     # ── Throttle ────────────────────────────────────────────────────────
     #
@@ -309,6 +359,11 @@ class DashboardAuth:
     @property
     def throttle_key_count(self) -> int:
         return len(self._failures)
+
+    @property
+    def global_failure_count(self) -> int:
+        """Failures currently feeding the global brake (unpruned)."""
+        return len(self._global)
 
     def _room(self, now: float) -> bool:
         """Free one slot in the full client table, or fail closed."""

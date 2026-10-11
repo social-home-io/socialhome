@@ -1405,7 +1405,7 @@ and is then served by a **separate aiohttp application on its own port**
   straight from the network and would be spoofable, so the dashboard
   never looks at them. The only credential is its own cookie.
 - **Stateless signed cookie.** `sh_dash` = `b64url(payload).b64url(HMAC-SHA256)`
-  over `{v, epoch, issued_at, keep}`. The 32-byte HMAC key is stored in
+  over `{v, epoch, issued_at, keep, locked}`. The 32-byte HMAC key is stored in
   `instance_config` wrapped under the instance KEK (`KeyManager`, attached
   at startup) and cached unwrapped in memory. 12 h session, 365 d when the
   tablet ticks "keep me signed in" (and for setup links), renewed after a
@@ -1421,6 +1421,26 @@ and is then served by a **separate aiohttp application on its own port**
   the per-client limit. scrypt checks run one at a time (a semaphore) in a
   worker thread. The throttle table is bounded; a full table of locked-out
   clients fails closed.
+- **Privacy lock.** When a guest is around, someone taps 🔒 and the
+  tablet shows a neutral lock screen (household name, clock and date in
+  the household time zone — no person, picture, presence, event or
+  chore) until a 4–6 digit **PIN** is typed. The PIN is admin-set and
+  separate from the dashboard password (`dashboard.pin_hash`, scrypt).
+  The lock is a claim in the tablet's own cookie (`l`), not server
+  state: it is per tablet, survives reloads and browser restarts, and
+  needs no table — cookie renewal carries it over. Cookies minted
+  before the claim existed (exactly `{v,e,i,k}`) still verify, as
+  unlocked; any other key set is refused. For a locked session the
+  session guard answers every content route itself (lock page /
+  `X-Dashboard-Locked` fragment marker / 423), so no view has to
+  remember to check. PIN guesses use the per-client limit in a bucket of
+  their own (never the global brake): past 5 wrong PINs in 15 min the
+  next try **signs the tablet out** — from then on only the household
+  password helps, and a password sign-in clears the PIN bucket. A
+  stateless cookie can't be revoked one by one, so someone replaying a
+  copied locked cookie stays held to that per-client limit. Deleting the
+  PIN makes locked cookies count as unlocked (nothing could unlock
+  them otherwise).
 - **Host allow-list (DNS rebinding).** The first middleware answers 421 to
   any `Host` that is not an IP literal, `localhost`, `homeassistant`, the
   machine's own host names, a home-network suffix (`.local`, `.lan`,
@@ -1440,7 +1460,7 @@ and is then served by a **separate aiohttp application on its own port**
   there and the port can't be changed (422 `DASHBOARD_PORT_FIXED`);
   standalone and `ha` installs return `None` and let the admin choose.
 
-Settings, password hash, cookie key, epoch and the pending setup token live
+Settings, password hash, PIN hash, cookie key, epoch and the pending setup token live
 under `dashboard.*` keys of `instance_config` (no table of their own —
 [database.md](./database.md)). Operator guidance (LAN only, TLS, port
 mapping): [operations/household-dashboard.md](./operations/household-dashboard.md).

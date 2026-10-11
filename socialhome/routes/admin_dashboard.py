@@ -4,7 +4,9 @@
 * ``PUT /api/admin/dashboard/password`` — the household dashboard password;
 * ``POST /api/admin/dashboard/setup-link`` — a one-time tablet sign-in link
   (only while the dashboard runs);
-* ``DELETE /api/admin/dashboard/sessions`` — sign out every tablet.
+* ``DELETE /api/admin/dashboard/sessions`` — sign out every tablet;
+* ``PUT / DELETE /api/admin/dashboard/pin`` — the tablets' privacy-lock
+  PIN (4–6 digits, separate from the password; never read back).
 
 Admin-only: every call goes through a
 :class:`~socialhome.services.dashboard_settings_service.DashboardSettingsService`
@@ -40,6 +42,7 @@ from .base import BaseView
 
 __all__ = [
     "AdminDashboardPasswordView",
+    "AdminDashboardPinView",
     "AdminDashboardSessionsView",
     "AdminDashboardSetupLinkView",
     "AdminDashboardView",
@@ -163,6 +166,7 @@ class _DashboardAdminView(BaseView):
                 "port_fixed": self.settings.port_fixed,
                 "password_set": settings.password_set_at is not None,
                 "password_set_at": settings.password_set_at,
+                "pin_set": settings.pin_set,
                 "address": settings.address,
                 "url": url,
                 # ``False`` when the dashboard would refuse ``url``'s host
@@ -210,6 +214,28 @@ class AdminDashboardPasswordView(_DashboardAdminView):
             actor_is_admin=self.is_admin,
             password=password,  # type: ignore[arg-type]
         )
+        return web.Response(status=204)
+
+
+class AdminDashboardPinView(_DashboardAdminView):
+    """``PUT / DELETE /api/admin/dashboard/pin`` — the privacy-lock PIN.
+
+    Setting it signs nobody out; deleting it lifts the lock on every
+    locked tablet (nothing could unlock them otherwise).
+    """
+
+    async def put(self) -> web.Response:
+        body = await self.body()
+        pin = body.get("pin") if isinstance(body, dict) else None
+        # Anything but 4–6 ASCII digits is 422 DASHBOARD_PIN_INVALID.
+        await self.settings.set_pin(
+            actor_is_admin=self.is_admin,
+            pin=pin,  # type: ignore[arg-type]
+        )
+        return web.Response(status=204)
+
+    async def delete(self) -> web.Response:
+        await self.settings.delete_pin(actor_is_admin=self.is_admin)
         return web.Response(status=204)
 
 

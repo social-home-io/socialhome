@@ -55,14 +55,46 @@ def test_cookie_name():
 async def test_round_trip(auth, clock, keep):
     raw = await auth.issue(keep)
     claims = await auth.verify(raw)
-    assert claims == SessionClaims(epoch=0, issued_at=int(clock.now), keep=keep)
+    assert claims == SessionClaims(
+        epoch=0, issued_at=int(clock.now), keep=keep, locked=False
+    )
 
 
 async def test_payload_shape(auth, clock):
     raw = await auth.issue(True)
     body = raw.split(".")[0]
     payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
-    assert payload == {"v": 1, "e": 0, "i": int(clock.now), "k": True}
+    assert payload == {"v": 1, "e": 0, "i": int(clock.now), "k": True, "l": False}
+
+
+@pytest.mark.parametrize("keep", [True, False])
+async def test_locked_round_trip(auth, clock, keep):
+    claims = await auth.verify(await auth.issue(keep, locked=True))
+    assert claims == SessionClaims(
+        epoch=0, issued_at=int(clock.now), keep=keep, locked=True
+    )
+
+
+async def test_pre_lock_four_key_cookie_verifies_unlocked(
+    auth, settings_service, clock
+):
+    """Cookies minted before the lock claim existed keep working."""
+    raw = await _forge(
+        settings_service, {"v": 1, "e": 0, "i": int(clock.now), "k": True}
+    )
+    claims = await auth.verify(raw)
+    assert claims == SessionClaims(
+        epoch=0, issued_at=int(clock.now), keep=True, locked=False
+    )
+
+
+async def test_five_key_cookie_with_lock_verifies_locked(auth, settings_service, clock):
+    raw = await _forge(
+        settings_service,
+        {"v": 1, "e": 0, "i": int(clock.now), "k": False, "l": True},
+    )
+    claims = await auth.verify(raw)
+    assert claims is not None and claims.locked is True and claims.keep is False
 
 
 async def test_tampered_payload_rejected(auth, clock):
@@ -170,6 +202,14 @@ async def test_garbage_strings_rejected(auth, raw):
         {"v": 1, "e": 0, "i": "NOW", "k": "true"},
         {"v": 1, "e": 0, "i": "NOW"},
         {"v": 1, "e": 0, "i": "NOW", "k": True, "x": 1},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": 1},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": 0},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": "true"},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": None},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "x": 1},
+        {"v": 1, "e": 0, "i": "NOW", "l": True},
+        {"v": 1, "e": 0, "i": None, "k": True, "l": True},
+        {"v": 1, "e": 0, "i": "NOW", "l": False, "x": True},
     ],
 )
 async def test_wrong_shapes_rejected(auth, settings_service, clock, payload):
@@ -411,3 +451,44 @@ async def test_password_checks_run_one_at_a_time(clock):
     )
     assert results == [False, True, False, False]
     assert slow.peak == 1
+
+
+# ─── PIN verify + throttle key ───────────────────────────────────────────
+
+
+class _SlowPinSettings(_SlowSettings):
+    async def verify_pin(self, pin: str) -> bool:
+        return await self.verify_password(pin)
+
+
+async def test_pin_and_password_checks_share_one_slot(clock):
+    """scrypt either way — PIN checks queue behind password checks too."""
+    slow = _SlowPinSettings()
+    auth = DashboardAuth(slow, clock=clock)  # type: ignore[arg-type]
+    results = await asyncio.gather(
+        auth.check_pin("a"),
+        auth.check_password("right"),
+        auth.check_pin("right"),
+        auth.check_password("b"),
+    )
+    assert results == [False, True, True, False]
+    assert slow.peak == 1
+
+
+def test_pin_throttle_key_is_its_own_bucket(auth):
+    assert DashboardAuth.pin_throttle_key("10.0.0.5") == "pin:10.0.0.5"
+    _fail(auth, DashboardAuth.pin_throttle_key("10.0.0.5"), THROTTLE_MAX_FAILURES)
+    assert auth.throttle_remaining("10.0.0.5") == 0
+
+
+def test_now_is_the_auth_clock(auth, clock):
+    assert auth.now() == clock.now
+    clock.advance(5)
+    assert auth.now() == clock.now
+
+
+def test_global_failure_count(auth):
+    assert auth.global_failure_count == 0
+    auth.begin_attempt("a")
+    auth.begin_attempt("b", count_global=False)
+    assert auth.global_failure_count == 1
