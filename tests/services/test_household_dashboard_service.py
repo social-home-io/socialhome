@@ -939,10 +939,14 @@ async def test_disabled_sections_are_empty_and_not_read():
     assert snap.school == () and snap.school_tomorrow == ()
     assert snap.tomorrow_first is None
     assert all(p.presence == "unknown" for p in snap.people)
-    # Colours don't follow the calendar toggle: calendars are still read
-    # (once) for them, but no events are.
-    assert [p.color for p in snap.people] == ["#112233", "#445566", PERSON_PALETTE[3]]
-    assert h.calendar.calls == ["list_calendars"]
+    # Calendar off → the calendar service isn't called at all, so person
+    # colours fall back to the palette (by position in the household).
+    assert [p.color for p in snap.people] == [
+        PERSON_PALETTE[0],
+        PERSON_PALETTE[1],
+        PERSON_PALETTE[3],
+    ]
+    assert h.calendar.calls == []
     assert h.tasks.calls == []
     assert h.stickies.calls == []
     assert h.presence.calls == []
@@ -952,7 +956,7 @@ async def test_disabled_sections_are_empty_and_not_read():
     page = await h.person("u-ben", at(MONDAY, 8, 10))
     assert page is not None
     assert page.today_items == () and page.chores == () and page.school is None
-    assert "list_events_in_range" not in h.calendar.calls
+    assert h.calendar.calls == []
     assert h.timetables.rec.calls == []
 
 
@@ -1345,10 +1349,15 @@ async def test_a_timetable_resolves_in_its_own_zone():
     assert day.lessons[0].start.utcoffset() == timedelta(hours=-4)  # NY zone
 
 
-async def test_person_colours_dont_follow_the_calendar_toggle():
+async def test_person_colours_follow_calendars_only_while_the_calendar_is_on():
     on = await Harness().home(at(MONDAY, 15, 30))
-    off = await Harness(
-        prefs=HouseholdPreferences(tz=BERLIN, feat_calendar=False)
-    ).home(at(MONDAY, 15, 30))
-    assert [p.color for p in on.people] == [p.color for p in off.people]
+    assert [p.color for p in on.people] == ["#112233", "#445566", PERSON_PALETTE[3]]
+    h = Harness(prefs=HouseholdPreferences(tz=BERLIN, feat_calendar=False))
+    off = await h.home(at(MONDAY, 15, 30))
+    assert [p.color for p in off.people] == [
+        PERSON_PALETTE[0],
+        PERSON_PALETTE[1],
+        PERSON_PALETTE[3],
+    ]
     assert off.events_today == ()
+    assert h.calendar.calls == []
