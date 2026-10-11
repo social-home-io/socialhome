@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from socialhome.dashboard.auth import (
     DashboardAuth,
 )
 from socialhome.dashboard.render import DashboardRenderer
-from socialhome.dashboard.views import safe_next
+from socialhome.dashboard.views import _hostname, cookie_secure, safe_next
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
 from socialhome.i18n import Catalog
 
@@ -436,25 +437,75 @@ async def _https_address(settings_service) -> None:
     )
 
 
+#: What a browser sends through the TLS proxy (which keeps ``Host``).
+_PROXIED = {
+    "Host": "dash.example.lan",
+    "Origin": "https://dash.example.lan",
+    "Referer": "https://dash.example.lan/login",
+}
+
+
 async def test_login_cookie_secure_behind_https_address(client, settings_service):
+    await _https_address(settings_service)
+    resp = await client.post(
+        "/login",
+        data={"password": PASSWORD, "keep": "1"},
+        headers=_PROXIED,
+        allow_redirects=False,
+    )
+    assert resp.status == 303
+    assert resp.cookies[COOKIE_NAME]["secure"] is True
+
+
+async def test_https_address_lan_login_cookie_not_secure(client, settings_service):
+    """A tablet that opens the LAN IP directly is on plain HTTP: a
+    ``Secure`` cookie there would be dropped and login would loop."""
     await _https_address(settings_service)
     resp = await _login(client)
     assert resp.status == 303
-    assert resp.cookies[COOKIE_NAME]["secure"] is True
+    assert not resp.cookies[COOKIE_NAME]["secure"]
 
 
 async def test_enter_cookie_secure_behind_https_address(client, settings_service):
     await _https_address(settings_service)
     token = await settings_service.issue_setup_token(actor_is_admin=True)
-    resp = await _enter(client, token)
+    resp = await client.post(
+        "/enter",
+        data={"t": token},
+        headers={**_PROXIED, "Referer": "https://dash.example.lan/enter"},
+        allow_redirects=False,
+    )
     assert resp.cookies[COOKIE_NAME]["secure"] is True
 
 
 async def test_logout_clears_the_secure_cookie(client, settings_service, auth):
     await _https_address(settings_service)
-    headers = {**await _cookie(auth), **_origin(client, "/")}
+    headers = {
+        **await _cookie(auth),
+        **_PROXIED,
+        "Referer": "https://dash.example.lan/",
+    }
     resp = await client.post("/logout", headers=headers, allow_redirects=False)
     assert resp.cookies[COOKIE_NAME]["secure"] is True
+
+
+async def test_tls_request_cookie_always_secure():
+    """A request that arrived over TLS needs no address to be ``Secure``."""
+    request = SimpleNamespace(secure=True, host="192.168.1.20:8100", app={})
+    assert await cookie_secure(request) is True
+
+
+@pytest.mark.parametrize(
+    ("netloc", "expected"),
+    [
+        ("Dash.Example.LAN:8443", "dash.example.lan"),
+        ("dash.example.lan.", "dash.example.lan"),
+        ("[::1]:8100", "::1"),
+        ("[::1", ""),  # malformed IPv6 netloc → no name, never Secure
+    ],
+)
+def test_hostname(netloc, expected):
+    assert _hostname(netloc) == expected
 
 
 async def test_http_address_keeps_cookie_not_secure(client, settings_service):

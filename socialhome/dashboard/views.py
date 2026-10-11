@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -73,13 +74,27 @@ def redirect(location: str, *, status: int = 303) -> web.Response:
 
 
 async def cookie_secure(request: web.Request) -> bool:
-    """Mark the cookie ``Secure``? Yes over TLS — and also when the admin
-    set an ``https://`` address: behind a TLS-terminating reverse proxy
-    the request reaches us as plain HTTP, but the browser is on HTTPS."""
+    """Mark the cookie ``Secure``? Yes over TLS — and also for a request
+    to the admin-set ``https://`` address: behind a TLS-terminating reverse
+    proxy (which keeps ``Host``) the request reaches us as plain HTTP, but
+    the browser is on HTTPS. A tablet opening the LAN address directly is
+    on plain HTTP, where a ``Secure`` cookie would be dropped and login
+    would loop — so the address only counts when the request names it."""
     if request.secure:
         return True
     address = (await request.app[SETTINGS_KEY].get()).address
-    return address is not None and address.startswith("https://")
+    if address is None or not address.startswith("https://"):
+        return False
+    return _hostname(request.host) == _hostname(urlsplit(address).netloc)
+
+
+def _hostname(netloc: str) -> str:
+    """The host part of ``netloc`` (no port), lower-case, no root dot."""
+    try:
+        name = urlsplit(f"//{netloc}").hostname or ""
+    except ValueError:
+        return ""
+    return name.rstrip(".")
 
 
 async def set_session_cookie(

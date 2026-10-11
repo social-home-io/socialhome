@@ -1410,8 +1410,9 @@ and is then served by a **separate aiohttp application on its own port**
   at startup) and cached unwrapped in memory. 12 h session, 365 d when the
   tablet ticks "keep me signed in" (and for setup links), renewed after a
   day of use. It is `HttpOnly`, `SameSite=Strict`, and `Secure` over TLS or
-  when the admin-set address is `https://` (a TLS-terminating proxy hands
-  us plain HTTP). Bumping the stored **epoch** — "Sign out all tablets" or a
+  for a request to the admin-set `https://` address (a TLS-terminating
+  proxy that keeps `Host` hands us plain HTTP); a direct plain-HTTP LAN
+  request never gets `Secure`, which the browser would drop. Bumping the stored **epoch** — "Sign out all tablets" or a
   new password — invalidates every cookie at once.
 - **Throttles.** Failed attempts are counted up front, per client address
   (socket peer only, never `X-Forwarded-For`): 5 per 15 min. `/login`

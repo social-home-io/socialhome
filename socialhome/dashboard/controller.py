@@ -21,7 +21,10 @@ from ..domain.household_dashboard import (
     DashboardPortInUseError,
     DashboardSettings,
 )
-from ..services.dashboard_settings_service import DashboardSettingsService
+from ..services.dashboard_settings_service import (
+    DashboardSettingsService,
+    require_admin,
+)
 from .app import host_allowed, normalise_host
 
 log = logging.getLogger(__name__)
@@ -140,13 +143,15 @@ class DashboardController:
     ) -> str:
         """A one-time tablet sign-in token — only while the dashboard
         listens (the link would lead nowhere otherwise)."""
-        if not actor_is_admin:
-            raise PermissionError("Only household admins may manage the dashboard")
-        if self._server.running_port is None:
-            raise DashboardNotRunningError()
-        return await self._settings.issue_setup_token(
-            actor_is_admin=actor_is_admin, now=now
-        )
+        require_admin(actor_is_admin)
+        # Under the controller lock so a concurrent PUT can't switch the
+        # listener off between this check and the token being issued.
+        async with self._lock:
+            if self._server.running_port is None:
+                raise DashboardNotRunningError()
+            return await self._settings.issue_setup_token(
+                actor_is_admin=actor_is_admin, now=now
+            )
 
     async def url_host_allowed(self, url: str) -> bool:
         """Would the dashboard answer a request for ``url``'s host?

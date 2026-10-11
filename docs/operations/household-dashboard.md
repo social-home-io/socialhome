@@ -58,8 +58,10 @@ must open.
 - **It is plain HTTP by default.** The password and the session cookie
   cross your network unencrypted. If the dashboard must be reachable
   beyond a trusted LAN, put it behind a TLS reverse proxy and set the
-  dashboard **address** to the public `https://` URL — that also marks
-  the session cookie `Secure`.
+  dashboard **address** to the public `https://` URL — sign-ins through
+  that address get a `Secure` session cookie. Tablets on the LAN can keep
+  opening the plain `http://` LAN address; their cookie is not marked
+  `Secure` (a browser would drop it over HTTP).
 - **A reverse proxy must preserve the `Host` header.** Sign-in forms are
   accepted only when the browser's `Origin` matches the `Host` the
   dashboard receives, so a proxy that rewrites `Host` makes every login

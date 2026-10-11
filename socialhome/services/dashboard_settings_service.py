@@ -77,7 +77,8 @@ class _Invalid(Exception):
     """Internal: a value failed validation (field named by the caller)."""
 
 
-def _require_admin(actor_is_admin: bool) -> None:
+def require_admin(actor_is_admin: bool) -> None:
+    """Refuse a dashboard management call from a non-admin (403 via BaseView)."""
     if not actor_is_admin:
         raise PermissionError("Only household admins may manage the dashboard")
 
@@ -350,7 +351,7 @@ class DashboardSettingsService:
         are reported as ``unknown`` — the submitted key is never echoed)
         and nothing is written.
         """
-        _require_admin(actor_is_admin)
+        require_admin(actor_is_admin)
         if not isinstance(patch, Mapping):
             raise DashboardSettingsInvalidError("patch")
         async with self._lock:
@@ -403,7 +404,7 @@ class DashboardSettingsService:
         """Put ``previous`` (from :meth:`snapshot`) back as the stored
         settings — undoes a change the dashboard listener couldn't follow
         (port taken). The password timestamp is not part of it."""
-        _require_admin(actor_is_admin)
+        require_admin(actor_is_admin)
         async with self._lock:
             self._wrote(None)
             await self._repo.set(KEY_SETTINGS, _settings_to_json(previous))
@@ -416,7 +417,7 @@ class DashboardSettingsService:
 
     async def set_password(self, *, actor_is_admin: bool, password: str) -> None:
         """Set the dashboard password. Signs out every tablet."""
-        _require_admin(actor_is_admin)
+        require_admin(actor_is_admin)
         if not isinstance(password, str):
             raise DashboardSettingsInvalidError("password")
         if len(password) < MIN_PASSWORD_LENGTH:
@@ -466,7 +467,7 @@ class DashboardSettingsService:
 
     async def revoke_sessions(self, *, actor_is_admin: bool) -> None:
         """Sign out every tablet."""
-        _require_admin(actor_is_admin)
+        require_admin(actor_is_admin)
         async with self._lock:
             await self._repo.set(KEY_EPOCH, str(await self._epoch_unlocked() + 1))
 
@@ -514,7 +515,7 @@ class DashboardSettingsService:
         now: float | None = None,
     ) -> str:
         """Mint a single-use tablet setup token, replacing any pending one."""
-        _require_admin(actor_is_admin)
+        require_admin(actor_is_admin)
         if not await self._has_password():
             raise DashboardPasswordRequiredError()
         issued_at = time.time() if now is None else now
