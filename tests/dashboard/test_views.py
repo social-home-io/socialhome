@@ -1047,6 +1047,8 @@ def test_dashboard_js_never_leaves_the_page_while_offline():
     js = RENDERER.static_asset("dashboard.js").body.decode()
     assert "goWhenReachable(window.location.pathname, fragmentUrl)" in js
     assert 'goWhenReachable("/", HOME_PROBE)' in js
+    # A gone person (404 on the probe) goes Home, never a script-less 404 page.
+    assert "res.status === 404" in js and 'go("/")' in js
     tick = js[js.index("function tick()") : js.index("tick();")]
     assert "location.reload" not in tick and "go(" not in tick
     idle = js[js.index("var idleDue") : js.index("var armIdle")]

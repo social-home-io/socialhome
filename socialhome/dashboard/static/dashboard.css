@@ -106,12 +106,6 @@ h1 {
   color: var(--dash-muted);
 }
 
-.dash-ready {
-  margin-block: 0 32px;
-  color: var(--dash-muted);
-  font-size: clamp(1.125rem, 2.5vw, 1.5rem);
-}
-
 .dash-form {
   display: flex;
   flex-direction: column;
@@ -162,13 +156,6 @@ h1 {
   border: 0;
   border-radius: 12px;
   cursor: pointer;
-}
-
-.dash-button-quiet {
-  min-block-size: 48px;
-  color: var(--dash-text);
-  background: transparent;
-  border: 1px solid var(--dash-border);
 }
 
 .dash-field input:focus-visible,

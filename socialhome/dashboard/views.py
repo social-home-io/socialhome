@@ -679,8 +679,9 @@ class AvatarView(_DashboardView):
     """``GET /avatar/{user_id}`` — a shown person's profile picture.
 
     ``404`` for anyone hidden, inactive or unknown, and for a person
-    without a picture (the page shows initials). Cached privately for a
-    few minutes and revalidated by ``ETag`` (the picture hash).
+    without a picture (the page shows initials). ``private, no-cache``:
+    every load revalidates by ``ETag`` (the picture hash) through the
+    session guard, so a lock or a hidden person takes effect at once.
     """
 
     async def get(self) -> web.Response:

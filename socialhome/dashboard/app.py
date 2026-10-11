@@ -123,7 +123,7 @@ async def _dashboard_headers(
         and response.status in (200, 304)
         and "Cache-Control" in response.headers
     ):
-        # A shown person's picture: the view set a short private cache.
+        # A shown person's picture: the view set ``private, no-cache``.
         return
     # Pages, redirects (which may carry Set-Cookie) and errors are
     # per-session — never cache them; only static files and avatars may be.

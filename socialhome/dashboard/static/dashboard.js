@@ -96,8 +96,12 @@
       redirect: "error",
     })
       .then(function (res) {
-        if (res.ok || res.status === 401 || res.status === 404) {
+        if (res.ok || res.status === 401) {
           go(path);
+        } else if (res.status === 404) {
+          // The page's person is gone (hidden meanwhile): Home, like
+          // refresh() — never a static not-found page with no script.
+          go("/");
         } else {
           failed();
         }
