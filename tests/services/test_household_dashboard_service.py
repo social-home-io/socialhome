@@ -202,16 +202,6 @@ class SpyTimetables(TimetableService):
         return await super().active_for_user(user_id, on)
 
 
-class FakeSpaceTimetables(Recorder):
-    def __init__(self, pinned: dict[str, list[Timetable]]) -> None:
-        super().__init__()
-        self.pinned = pinned
-
-    async def pinned_for_user(self, user_id: str, pins) -> list[Timetable]:
-        self.hit("pinned_for_user")
-        return [tt for tt in self.pinned.get(user_id, []) if tt.id in pins]
-
-
 class FakePreferences(Recorder):
     def __init__(self, prefs: HouseholdPreferences) -> None:
         super().__init__()
@@ -411,15 +401,17 @@ def carl_timetable() -> Timetable:
     )
 
 
-def space_timetable() -> Timetable:
+def music_timetable() -> Timetable:
+    """A second plan Ben is assigned to (only some tests use it)."""
     stamp = datetime(2026, 9, 1, tzinfo=timezone.utc)
     return Timetable(
-        id="space-tt",
-        name="Choir",
-        created_by="u-x",
+        id="tt-music",
+        name="Music school",
+        created_by="u-anna",
         created_at=stamp,
         updated_at=stamp,
         tz=BERLIN,
+        assignees=("u-ben",),
         entries=(entry("s1", 0, time(14, 0), time(15, 0), "Choir"),),
     )
 
@@ -524,7 +516,6 @@ class Harness:
         prefs: HouseholdPreferences | None = None,
         settings: DashboardSettings | None = None,
         users: list[User] | None = None,
-        with_space_timetables: bool = True,
     ) -> None:
         self.users = FakeUsers(users if users is not None else [ANNA, BEN, CARL, DORA])
         self.presence = FakePresence(presence())
@@ -587,7 +578,6 @@ class Harness:
             ]
         )
         self.timetables = SpyTimetables([ben_timetable(), carl_timetable()])
-        self.space_timetables = FakeSpaceTimetables({"u-ben": [space_timetable()]})
         self.prefs = FakePreferences(
             prefs or HouseholdPreferences(household_name="Villa", tz=BERLIN)
         )
@@ -607,9 +597,6 @@ class Harness:
             sticky_service=self.stickies,  # type: ignore[arg-type]
             preferences_service=self.prefs,  # type: ignore[arg-type]
             dashboard_settings=self.settings,  # type: ignore[arg-type]
-            space_timetable_service=(
-                self.space_timetables if with_space_timetables else None  # type: ignore[arg-type]
-            ),
         )
 
     async def home(self, now: datetime) -> HomeSnapshot:
@@ -790,16 +777,9 @@ async def test_home_school():
     assert [d.person_id for d in snap.school] == ["u-ben"]  # Carl hidden
     day = snap.school[0]
     assert day.date == MONDAY
-    assert day.timetable_name == "5b · Choir"  # pinned space timetable merged
-    assert titles(day.lessons) == [
-        "Mathe",
-        "Deutsch",
-        "Pause",
-        "Sport",
-        "Kunst",
-        "Choir",
-    ]
-    mathe, deutsch, pause, sport, kunst, choir = day.lessons
+    assert day.timetable_name == "5b"
+    assert titles(day.lessons) == ["Mathe", "Deutsch", "Pause", "Sport", "Kunst"]
+    mathe, deutsch, pause, sport, kunst = day.lessons
     assert mathe.start == at(MONDAY, 8) and mathe.end == at(MONDAY, 8, 45)
     assert mathe.start.utcoffset() == timedelta(hours=2)
     assert mathe.room == "101"
@@ -813,9 +793,22 @@ async def test_home_school():
     assert sport.status == "changed" and sport.room == "Gym 2" and sport.icon == "⚽"
     assert kunst.status == "added"
     assert kunst.color == hash_color("Kunst")  # not a subject of the plan
-    assert choir.timetable_name == "Choir"
+    assert kunst.timetable_name == "5b"
     assert [c.title for c in day.changes] == ["Deutsch", "Sport", "Kunst"]
     assert day.first_start == at(MONDAY, 8)
+    assert day.last_end == at(MONDAY, 11, 45)
+
+
+async def test_two_assigned_timetables_merge_into_one_school_day():
+    h = Harness()
+    h.service._timetables = SpyTimetables(  # type: ignore[attr-defined]
+        [ben_timetable(), music_timetable()]
+    )
+    snap = await h.home(at(MONDAY, 8, 10))
+    day = snap.school[0]
+    assert day.timetable_name == "5b · Music school"
+    assert titles(day.lessons)[-1] == "Choir"
+    assert day.lessons[-1].timetable_name == "Music school"
     assert day.last_end == at(MONDAY, 15)
 
 
@@ -852,27 +845,6 @@ async def test_no_school_on_the_weekend():
     assert page.school_tomorrow_first is None
 
 
-async def test_without_space_timetables_only_assigned_plans_count():
-    h = Harness(with_space_timetables=False)
-    snap = await h.home(at(MONDAY, 8, 10))
-    assert snap.school[0].timetable_name == "5b"
-
-
-async def test_a_pinned_copy_of_an_assigned_timetable_counts_once():
-    h = Harness()
-    h.space_timetables.pinned["u-ben"] = [ben_timetable()]
-    h.service._users = FakeUsers(  # type: ignore[attr-defined]
-        [
-            dataclasses.replace(
-                BEN, preferences_json='{"timetable_home_pins": ["tt-ben"]}'
-            )
-        ]
-    )
-    snap = await h.home(at(MONDAY, 8, 10))
-    assert snap.school[0].timetable_name == "5b"
-    assert titles(snap.school[0].lessons).count("Mathe") == 1
-
-
 async def test_zero_length_event_is_a_point_in_time():
     h = Harness()
     h.calendar.events = [
@@ -885,7 +857,7 @@ async def test_zero_length_event_is_a_point_in_time():
 
 
 async def test_school_day_with_every_lesson_cancelled():
-    h = Harness(with_space_timetables=False)
+    h = Harness()
     tt = ben_timetable()
     h.timetables = SpyTimetables(
         [
@@ -909,9 +881,12 @@ async def test_school_day_with_every_lesson_cancelled():
 
 async def test_a_broken_timetable_is_skipped(monkeypatch, caplog):
     h = Harness()
+    h.service._timetables = SpyTimetables(  # type: ignore[attr-defined]
+        [ben_timetable(), music_timetable()]
+    )
 
     def boom(tt, d, **kw):
-        if tt.id == "space-tt":
+        if tt.id == "tt-music":
             raise ValueError("bad row")
         return real(tt, d, **kw)
 
@@ -920,7 +895,7 @@ async def test_a_broken_timetable_is_skipped(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         snap = await h.home(at(MONDAY, 8, 10))
     assert snap.school[0].timetable_name == "5b"
-    assert "space-tt" in caplog.text
+    assert "tt-music" in caplog.text
 
 
 async def test_night_window_wraps_midnight():
@@ -971,7 +946,6 @@ async def test_disabled_sections_are_empty_and_not_read():
     assert h.stickies.calls == []
     assert h.presence.calls == []
     assert h.timetables.rec.calls == []
-    assert h.space_timetables.calls == []
     assert snap.shopping_total == 2
 
     page = await h.person("u-ben", at(MONDAY, 8, 10))
@@ -991,7 +965,6 @@ async def test_disabled_sections_are_empty_and_not_read():
         ("tasks", "list_lists"),
         ("shopping", "list_items"),
         ("stickies", "list_stickies"),
-        ("space_timetables", "pinned_for_user"),
     ],
 )
 async def test_a_failing_slice_degrades_alone(target, method, caplog):
@@ -1009,7 +982,7 @@ async def test_a_failing_slice_degrades_alone(target, method, caplog):
         assert snap.events_today
     if target != "stickies":
         assert snap.stickies
-    assert snap.school  # school survives (pins only drop the space plan)
+    assert snap.school
 
 
 async def test_failing_slices_leave_the_rest():
@@ -1088,7 +1061,6 @@ async def test_person_page_for_a_pupil():
         "Sport",
         "Kunst",
         "Zoo",
-        "Choir",
         "Piano",
         "Dinner at Oma",
     ]
@@ -1111,7 +1083,7 @@ async def test_person_now_item_prefers_the_latest_start():
 
 
 async def test_person_tomorrow_items_are_capped():
-    h = Harness(with_space_timetables=False)
+    h = Harness()
     h.calendar.events = [
         event(f"e{n}", "c-anna", f"E{n}", at(TUESDAY, 9 + n), at(TUESDAY, 9 + n, 30))
         for n in range(8)
@@ -1179,3 +1151,18 @@ async def test_one_person():
 
 def test_zone_of_berlin_is_cest_on_the_test_day():
     assert at(MONDAY, 12).astimezone(zone_of(BERLIN)).utcoffset() == timedelta(hours=2)
+
+
+async def test_pinned_space_timetables_never_count_as_school():
+    """Regression: a Home pin is a personal choice, not "goes to school" —
+    Ben pinned the "Choir" space timetable, yet only his assigned plan
+    shows on the shared dashboard."""
+    h = Harness()
+    assert "space-tt" in BEN.preferences_json  # the pin is really there
+    snap = await h.home(at(MONDAY, 8, 10))
+    assert [d.timetable_name for d in snap.school] == ["5b"]
+    assert "Choir" not in titles(snap.school[0].lessons)
+    page = await h.person("u-ben", at(MONDAY, 8, 10))
+    assert page is not None
+    assert page.school is not None and page.school.timetable_name == "5b"
+    assert "Choir" not in titles(page.today_items)
