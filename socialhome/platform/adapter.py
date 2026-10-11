@@ -481,8 +481,30 @@ class PlatformAdapter(abc.ABC):
         startup-ordering fact with nothing for the UI to render.
         Platforms that will never push a list leave this ``False``, and
         ``create_app`` releases the gate immediately on their behalf.
+
+        The admin ICE-servers diagnostic reports the same fact as
+        ``pulls_from_home_assistant``: a pulled list replaces the
+        config-derived one, so an operator's TOML TURN settings are not
+        what federation ends up using.
         """
         return False
+
+    @property
+    def honours_manual_federation_base(self) -> bool:
+        """``True`` when :meth:`get_federation_base` takes the admin-set
+        base (``PUT /api/admin/federation/external-url``) into account.
+
+        The Home Assistant App returns ``False``: it sits behind ingress
+        with no address of its own that peers could reach, so peers POST
+        to the inbox forwarder the companion integration registers inside
+        Home Assistant, and the integration owns that URL. A hand-typed
+        base there would never take effect, so the admin API refuses to
+        store one rather than report a change that didn't happen.
+
+        Deliberately NOT a :class:`Capability` — it is a backend fact;
+        the external-URL admin API surfaces it as ``manual_supported``.
+        """
+        return True
 
     @property
     def fixed_dashboard_port(self) -> int | None:

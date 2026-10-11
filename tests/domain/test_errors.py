@@ -11,6 +11,7 @@ from socialhome.domain.conversation import (
     GroupTooSmallError,
 )
 from socialhome.domain.federation import (
+    FederationBaseManagedByPlatformError,
     GfsNotConnectedError,
     GfsNotSharedError,
     PairingKeywrapInvalidError,
@@ -335,3 +336,10 @@ def test_gfs_selection_refusals_are_coded():
         "reason": "too_many",
         "max": 8,
     }
+
+
+def test_federation_base_managed_by_platform_is_coded():
+    exc = FederationBaseManagedByPlatformError()
+    assert (exc.status, exc.code) == (422, "FEDERATION_BASE_MANAGED_BY_PLATFORM")
+    assert exc.detail == "This home's address is managed by Home Assistant."
+    assert exc.params == {}

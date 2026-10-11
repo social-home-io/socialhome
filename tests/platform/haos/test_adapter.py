@@ -356,6 +356,13 @@ def test_fixed_dashboard_port_is_the_container_port():
     assert _build_haos_adapter().fixed_dashboard_port == DEFAULT_DASHBOARD_PORT
 
 
+def test_does_not_honour_a_manual_federation_base():
+    """The Home Assistant App sits behind ingress: peers reach it only
+    through the integration's inbox forwarder, so the integration owns the
+    federation base and an admin-typed one is never used."""
+    assert _build_haos_adapter().honours_manual_federation_base is False
+
+
 class _IceHaClient(_FakeHaClient):
     """Adds the ``web_rtc/ice_servers`` WS reply the sync needs."""
 

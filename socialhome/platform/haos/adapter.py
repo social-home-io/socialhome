@@ -185,6 +185,14 @@ class HaosAdapter(PlatformAdapter):
         return True
 
     @property
+    def honours_manual_federation_base(self) -> bool:
+        """``False`` — the App sits behind ingress, so peers reach it only
+        through the integration's inbox forwarder and the integration owns
+        the federation base (:meth:`get_federation_base` ignores any
+        admin-set value)."""
+        return False
+
+    @property
     def fixed_dashboard_port(self) -> int | None:
         """The container port — HA Supervisor maps the host port, so the
         dashboard port is not the admin's to change here."""

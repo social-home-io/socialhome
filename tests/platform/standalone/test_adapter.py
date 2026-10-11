@@ -331,6 +331,12 @@ async def test_provides_ice_servers_is_false(adapter):
     assert adapter.provides_ice_servers is False
 
 
+async def test_honours_a_manual_federation_base(adapter):
+    """Standalone resolves the admin-set base first, so the admin API
+    must accept one."""
+    assert adapter.honours_manual_federation_base is True
+
+
 async def test_stream_transcribe_audio_raises(adapter):
     """Streaming STT raises NotImplementedError on standalone."""
 
