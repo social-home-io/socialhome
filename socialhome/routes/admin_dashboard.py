@@ -191,11 +191,15 @@ class _DashboardAdminView(BaseView):
                 # ``False`` when the dashboard would refuse ``url``'s host
                 # (421, DNS-rebinding guard): the admin should set the address.
                 "url_host_allowed": await self.controller.url_host_allowed(url),
-                # ``False`` when the platform publishes the dashboard on a
-                # host port the user must turn on (Home Assistant App:
-                # Settings › Apps › Social Home › Network); ``null`` when
-                # not applicable or unknown.
-                "host_port_mapped": None if host_port is None else host_port.mapped,
+                # ``False`` when the platform offers a host port the user
+                # must turn on (Home Assistant App: Settings › Apps ›
+                # Social Home › Network); ``null`` when not applicable,
+                # unknown, or the platform doesn't offer the port at all.
+                "host_port_mapped": (
+                    host_port.mapped
+                    if host_port is not None and host_port.declared
+                    else None
+                ),
                 "locale": settings.locale,
                 "idle_return_minutes": settings.idle_return_minutes,
                 "night_start": settings.night_start,

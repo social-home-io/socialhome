@@ -232,6 +232,19 @@ async def test_get_unmapped_host_port_tells_the_admin(client, monkeypatch):
     assert body["host_port_mapped"] is False
 
 
+async def test_get_undeclared_host_port_is_null(client, monkeypatch):
+    """The App doesn't declare the port (older App releases): nothing the
+    admin can do, so no "turn it on" prompt — the container port stays."""
+    _host_port(monkeypatch, client, DashboardHostPort(None, declared=False))
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={**_auth(client._tok), "Host": "homeassistant.local:8123"},
+    )
+    body = await resp.json()
+    assert body["url"] == "http://homeassistant.local:8100"
+    assert body["host_port_mapped"] is None
+
+
 async def test_put_reports_the_mapped_host_port(client, monkeypatch):
     _host_port(monkeypatch, client, DashboardHostPort(9200))
     body = await (await _put(client, {"locale": "de"})).json()

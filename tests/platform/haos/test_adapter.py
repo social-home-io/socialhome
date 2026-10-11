@@ -390,18 +390,35 @@ async def test_dashboard_host_port_reads_the_mapped_port():
     assert sv.calls == 1
 
 
-@pytest.mark.parametrize(
-    "data",
-    [{"network": {"8100/tcp": None}}, {"network": {"8099/tcp": 8099}}, {}],
-    ids=["null", "missing-key", "no-network"],
-)
-async def test_dashboard_host_port_not_mapped(data):
+async def test_dashboard_host_port_declared_but_not_mapped():
+    """The App declares ``8100/tcp`` but the user hasn't set a host port:
+    the admin can fix that under the App's Network settings."""
     adapter = _build_haos_adapter(
-        supervisor_client=_FakeSupervisor(_addon_info(**data))
+        supervisor_client=_FakeSupervisor(_addon_info(network={"8100/tcp": None}))
     )
     result = await adapter.dashboard_host_port()
-    assert result == DashboardHostPort(None)
+    assert result == DashboardHostPort(None, declared=True)
     assert result.mapped is False
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{"network": {"8099/tcp": 8099}}, {"network": None}, {}],
+    ids=["missing-key", "network-null", "no-network"],
+)
+async def test_dashboard_host_port_undeclared_logs_once_at_info(data, caplog):
+    """An App release whose manifest doesn't declare ``8100/tcp`` — an
+    expected state, nothing the admin can change: INFO, once."""
+    sv = _FakeSupervisor(_addon_info(**data))
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    with caplog.at_level("INFO"):
+        first = await adapter.dashboard_host_port()
+        second = await adapter.dashboard_host_port()
+    assert first == second == DashboardHostPort(None, declared=False)
+    assert sv.calls == 1
+    records = [r for r in caplog.records if "does not declare" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelname == "INFO"
 
 
 async def test_dashboard_host_port_supervisor_failure_degrades(caplog):

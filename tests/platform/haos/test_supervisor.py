@@ -154,6 +154,17 @@ def test_addon_info_malformed_host_port_is_unpublished(value):
     assert _info(network={"8100/tcp": value}).host_port("8100/tcp") is None
 
 
+def test_addon_info_declares():
+    """Key present (even ``null``) = the manifest declares the port; a
+    missing key or no ``network`` at all = it doesn't."""
+    assert _info(network={"8100/tcp": 8100}).declares("8100/tcp") is True
+    assert _info(network={"8100/tcp": None}).declares("8100/tcp") is True
+    assert _info(network={"1883/tcp": 1883}).declares("8100/tcp") is False
+    assert _info(network=None).declares("8100/tcp") is False
+    assert _info().declares("8100/tcp") is False
+    assert _info(host_network=True).declares("8100/tcp") is True
+
+
 def test_addon_info_host_network_publishes_the_container_port():
     info = _info(host_network=True, network=None)
     assert info.host_port("8100/tcp") == 8100

@@ -56,6 +56,10 @@ Social Home reads the mapped port from Supervisor and shows the right
 address automatically (for example `http://homeassistant.local:8100`, or
 your own host port if you picked another). Until a port is mapped the
 admin view reports `host_port_mapped: false` and asks you to turn it on.
+App releases that don't offer the dashboard port yet have no such entry
+under **Network**: the admin view then reports `host_port_mapped: null`
+and the address uses `8100` — update the App, or set the dashboard
+**address** to whatever reaches the tablet.
 If tablets must use a different name or a reverse proxy, set the
 dashboard **address** — it always wins over the guess.
 

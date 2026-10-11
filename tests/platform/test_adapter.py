@@ -267,7 +267,9 @@ async def test_dashboard_host_port_defaults_to_unknown():
 
 def test_dashboard_host_port_mapped_flag():
     assert DashboardHostPort(8100).mapped is True
+    assert DashboardHostPort(8100).declared is True
     assert DashboardHostPort(None).mapped is False
+    assert DashboardHostPort(None, declared=False).mapped is False
 
 
 # ── honours_manual_federation_base (ABC default) ─────────────────────────────

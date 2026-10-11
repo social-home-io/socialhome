@@ -1493,7 +1493,9 @@ and is then served by a **separate aiohttp application on its own port**
   `PlatformAdapter.dashboard_host_port()` reads it from Supervisor's
   `GET /addons/self/info` `network["8100/tcp"]` (cached for the process —
   a new mapping only applies after the App restarts), and the admin API
-  reports `host_port_mapped: false` when the user hasn't turned it on.
+  reports `host_port_mapped: false` when the App declares the port but the
+  user hasn't turned it on (`null` when the App release doesn't declare it
+  — an expected state, logged once at INFO).
 
 Settings, password hash, PIN hash, cookie key, epoch and the pending setup token live
 under `dashboard.*` keys of `instance_config` (no table of their own —

@@ -78,12 +78,19 @@ class InstanceConfig:
 class DashboardHostPort:
     """Where the platform publishes the household dashboard on the host.
 
-    ``port`` is the host port tablets dial, or ``None`` when the platform
-    knows the dashboard is NOT published (e.g. the Home Assistant App's
-    port left unset under the App's Network settings).
+    Three states:
+
+    * ``port`` set — published on that host port (``mapped``);
+    * ``port=None, declared=True`` — the platform could publish it but
+      the user hasn't turned it on (Home Assistant App: the port left
+      empty under the App's Network settings) — the admin can fix this;
+    * ``port=None, declared=False`` — the platform doesn't offer the port
+      at all (an App release whose manifest doesn't declare it) — nothing
+      the admin can do.
     """
 
     port: int | None
+    declared: bool = True
 
     @property
     def mapped(self) -> bool:
@@ -543,9 +550,11 @@ class PlatformAdapter(abc.ABC):
         ``None`` (the default) means "not applicable or unknown": the
         dashboard is reached on the port it listens on. The Home Assistant
         App returns the port HA Supervisor maps to the container port —
-        ``DashboardHostPort(None)`` when the user hasn't mapped one — and
-        degrades to ``None`` (logged at WARNING) when Supervisor can't be
-        asked. The dashboard admin API surfaces it as ``host_port_mapped``.
+        ``DashboardHostPort(None)`` when the user hasn't mapped one,
+        ``DashboardHostPort(None, declared=False)`` when the App release
+        doesn't declare the port — and degrades to ``None`` (logged at
+        WARNING) when Supervisor can't be asked. The dashboard admin API
+        surfaces it as ``host_port_mapped`` (``null`` unless declared).
         """
         return None
 

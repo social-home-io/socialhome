@@ -94,6 +94,14 @@ class AddonInfo:
             host_network=data.get("host_network") is True,
         )
 
+    def declares(self, container_port: str) -> bool:
+        """Does the App manifest declare ``container_port``? A key with a
+        ``null`` host port is declared (the user just hasn't turned it
+        on); a missing key or no ``network`` map at all is not."""
+        if self.host_network:
+            return True
+        return self.network is not None and container_port in self.network
+
     def host_port(self, container_port: str) -> int | None:
         """The host port ``container_port`` (e.g. ``"8100/tcp"``) is
         published on, or ``None`` when it isn't published."""

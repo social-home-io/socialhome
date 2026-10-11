@@ -207,7 +207,9 @@ class HaosAdapter(PlatformAdapter):
         Read from ``GET /addons/self/info`` → ``network["8100/tcp"]`` (see
         :class:`~socialhome.platform.haos.supervisor.AddonInfo` for the
         verified Supervisor contract): an int is the mapped host port,
-        ``null`` / a missing key means the user hasn't turned the port on.
+        ``null`` means the App declares the port but the user hasn't turned
+        it on, and a missing key / no ``network`` map means this App
+        release doesn't declare it at all (``declared=False``).
 
         Cached after the first successful read: Supervisor only applies a
         changed mapping when it next starts the App (``APIApps.options``
@@ -237,9 +239,20 @@ class HaosAdapter(PlatformAdapter):
                 DEFAULT_DASHBOARD_PORT,
             )
             return None
-        self._dashboard_host_port = DashboardHostPort(
-            info.host_port(f"{DEFAULT_DASHBOARD_PORT}/tcp")
-        )
+        container_port = f"{DEFAULT_DASHBOARD_PORT}/tcp"
+        if not info.declares(container_port):
+            # Expected for App releases whose manifest predates the
+            # dashboard port — INFO, and only once (the result is cached).
+            log.info(
+                "haos_adapter: the App does not declare %s — the dashboard"
+                " URL uses the container port",
+                container_port,
+            )
+            self._dashboard_host_port = DashboardHostPort(None, declared=False)
+        else:
+            self._dashboard_host_port = DashboardHostPort(
+                info.host_port(container_port)
+            )
         return self._dashboard_host_port
 
     @property
