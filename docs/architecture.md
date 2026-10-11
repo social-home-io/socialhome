@@ -1405,7 +1405,10 @@ and is then served by a **separate aiohttp application on its own port**
   straight from the network and would be spoofable, so the dashboard
   never looks at them. The only credential is its own cookie.
 - **Stateless signed cookie.** `sh_dash` = `b64url(payload).b64url(HMAC-SHA256)`
-  over `{v, epoch, issued_at, keep}`. The 32-byte HMAC key is stored in
+  over `{v, epoch, issued_at, keep, locked, n}`. `n` is a random
+  **session id**: minted at sign-in, `/lock` and `/unlock`, carried
+  unchanged by renewal (an older cookie without it gets one derived from
+  its signature, which renewal then carries). The 32-byte HMAC key is stored in
   `instance_config` wrapped under the instance KEK (`KeyManager`, attached
   at startup) and cached unwrapped in memory. 12 h session, 365 d when the
   tablet ticks "keep me signed in" (and for setup links), renewed after a
@@ -1421,6 +1424,53 @@ and is then served by a **separate aiohttp application on its own port**
   the per-client limit. scrypt checks run one at a time (a semaphore) in a
   worker thread. The throttle table is bounded; a full table of locked-out
   clients fails closed.
+- **Privacy lock.** When a guest is around, someone taps 🔒 and the
+  tablet shows a neutral lock screen (household name, clock and date in
+  the household time zone — no person, picture, presence, event or
+  chore) until a 4–6 digit **PIN** is typed. The PIN is admin-set and
+  separate from the dashboard password (`dashboard.pin_hash`, scrypt).
+  The lock is a claim in the tablet's own cookie (`l`), not server
+  state: it is per tablet, survives reloads and browser restarts, and
+  needs no table — cookie renewal carries it over. Cookies minted
+  before the claim existed (exactly `{v,e,i,k}`) still verify, as
+  unlocked; only `{v,e,i,k}`, `{v,e,i,k,l}` and `{v,e,i,k,l,n}` are
+  accepted. For a locked session the session guard answers every
+  content route itself (lock page / `X-Dashboard-Locked` fragment
+  marker / 423), so no view has to remember to check. Deleting the PIN
+  makes locked cookies count as unlocked (nothing could unlock them
+  otherwise).
+  - **Races.** Only page loads renew the cookie — an allow-list of `GET` /
+    `HEAD` `/` and `/p/{id}`; never `/fragment/…`, `/avatar/…`, static files or
+    a `POST` — and `POST /lock` revokes the incoming unlocked cookie as
+    *locked* — by session id, so every renewed copy of it too: if a
+    slow response still lands one, it shows the lock screen (not a
+    sign-out). Renewal re-checks revocation just before
+    issuing, so a request in flight across a `/lock` renews into a
+    locked cookie. `dashboard.js` reloads pages restored from the
+    back/forward cache.
+  - **PIN throttle.** Per lock: the bucket is the locked session's id
+    alone. Not the client address — tablets behind one TLS proxy share
+    it, and a guesser rotating addresses (an IPv6 /64 each) would get a
+    fresh bucket per address. Not the cookie value — renewal keeps the
+    id, so it doesn't reset the bucket either. A locked session can't
+    mint a new id: `/lock` on it changes nothing (no cookie, no
+    revocation) and `/unlock` needs the PIN. Never the global brake.
+    Once this lock's 5 wrong PINs / 15 min are spent the next try
+    **signs the tablet out** and revokes the session as *signed out*,
+    so neither a copied nor a renewed cookie of it can keep guessing;
+    only the household password helps then. Any other hold-back (a
+    full throttle table) only asks the tablet to wait. `/unlock`
+    answers with redirects only (Post/Redirect/Get).
+  - **Revocation is in memory.** A bounded map of session ids (10k;
+    an entry lasts a full cookie lifetime from the revocation, so no
+    copy issued before it outlives it; when full, expired entries go
+    first, then the oldest *locked* one). Entries are added only by a
+    `/lock` from an unlocked session (a password holder) or by a
+    lock's own sign-out — one per session — so someone holding only a
+    locked cookie can't flood it and evict other sign-outs. A restart
+    forgets it: a revoked cookie then counts as what its claims say
+    again. The durable revocation is the session epoch — "Sign out
+    all tablets" or a new password.
 - **Host allow-list (DNS rebinding).** The first middleware answers 421 to
   any `Host` that is not an IP literal, `localhost`, `homeassistant`, the
   machine's own host names, a home-network suffix (`.local`, `.lan`,
@@ -1440,10 +1490,86 @@ and is then served by a **separate aiohttp application on its own port**
   there and the port can't be changed (422 `DASHBOARD_PORT_FIXED`);
   standalone and `ha` installs return `None` and let the admin choose.
 
-Settings, password hash, cookie key, epoch and the pending setup token live
+Settings, password hash, PIN hash, cookie key, epoch and the pending setup token live
 under `dashboard.*` keys of `instance_config` (no table of their own —
 [database.md](./database.md)). Operator guidance (LAN only, TLS, port
 mapping): [operations/household-dashboard.md](./operations/household-dashboard.md).
+
+**What the tablet shows.** `HouseholdDashboardService`
+(`services/household_dashboard_service.py`) builds the read model the
+views render: a `HomeSnapshot` (people, today's events, next up, chores,
+shopping, household stickies, today's school timetables, night-mode
+"tomorrow") and a per-member `PersonSnapshot` — frozen types in
+`domain/household_dashboard.py`. It only reads the owning services, never
+anything with side effects, and is *household-safe*: presence is home /
+away / a zone name (never coordinates), events come from members' personal
+calendars (recurring ones as occurrences, a shared household event once),
+and DMs, notifications, chat and polls never appear. School is only the
+timetables a member is *assigned* to: space timetables pinned to someone's
+Home are deliberately ignored (unlike My Corner), because a pin is a
+personal Home choice — a parent pinning a child's class plan — and on the
+shared screen it would show that parent as being at school. A member the admin
+hid is removed from every slice (an event or chore left with only hidden
+people is dropped, and a shared event never takes its id or colour from a
+hidden member's copy); a section whose household `feat_*` toggle is off is
+empty and its service isn't called (person colours follow members'
+calendar colours only while the calendar is on, else a fixed palette);
+status text shows only with
+`show_status_text`. "Today" and every time in a snapshot are in the
+household zone (`HouseholdPreferences.tz`). Each slice fails soft — logged
+at WARNING, empty — so one broken service never blanks the tablet. The
+picture-view default (on for child-protected minors) is one shared rule,
+`picture_effective`, used by the admin API too.
+
+**How it is rendered.** The views (`dashboard/views.py`) fetch a snapshot
+per request and render Jinja templates (`dashboard/templates/`); the pure
+`dashboard/presenter.py` decides the look — swim-lane geometry, the
+night-mode item, time phrases (`dashboard/clock.py`: 24-hour times in the
+household zone, localised "in 28 min" / "2 days late"). The CSP has no
+`'unsafe-inline'` and pages carry no `style=` attribute, so every colour
+(person, calendar, timetable, sticky, household theme) is validated as a
+plain hex (`dashboard/contrast.py`) and lands only as a class (`.kN` sets
+`--kc` / `--kt`, the ink picked for WCAG contrast) in **one** inline
+`<style>` admitted by its sha256 in that response's CSP
+(`dashboard/policy.py`). The household theme colour becomes the accent
+only per colour scheme where it reaches 4.5:1 on the page backgrounds;
+otherwise the built-in high-contrast accent stays. Timeline positions are
+whole-percent classes (`.x-N` / `.w-N`) in the static stylesheet; a bar
+too narrow for its title shows an icon (forced below 10 % of the day, else
+by a container query on its real width). Home also renders the day as a
+chronological list, which a media query swaps in for the lanes under
+600 px (the server can't know the width). On a person page events are
+painted in that person's colour, not the colour of whichever calendar copy
+of a shared event won the merge.
+
+**Live refresh, offline, idle, night.** `dashboard.js` (CSP
+`script-src 'self'`) ticks the clock every second from the server's time
+(`data-now`; the tablet's own clock is never trusted) and reloads at the
+household's midnight. Every 30 s it fetches the page's `/fragment/…`
+(the `<main>` content only) and swaps it in; a fragment carries a *view
+key* — a digest of everything outside `<main>`: the inline style, night
+mode, the rail (names, pictures), the page, locale, PIN, idle and wake
+settings —
+and a different key reloads the whole page, because a fragment can't add
+CSS the page's CSP never admitted. The lock marker reloads into the lock
+screen, 401 goes to `/login?next=…`, 404 (person hidden) goes Home. Two
+failed refreshes in a row show the offline banner (rendered hidden in
+every fragment, with that snapshot's time), hide relative times
+(`data-rel`) and grey "now" / presence (`data-live`) until a refresh works.
+A person page returns Home after `idle_return_minutes` without a touch.
+That return and the midnight reload first probe the server and, while it
+can't be reached, keep the last page and the ticking clock (retrying).
+With `keep_screen_on` the Screen Wake Lock is requested and re-acquired
+when the page becomes visible again. Every 10 minutes the content drifts
+1–2 px against burn-in (not under `prefers-reduced-motion`). Night mode is
+decided on the server (`is_night`, the household's night window): the
+page shows only a dim clock, the date and the first item of the morning
+(today's next before noon, tomorrow's first from noon on); the day view is
+rendered too but hidden, and a tap shows it — rail and lock button
+included — for 60 s. Without JS the page reloads every two minutes
+(`<noscript>` refresh). A person in picture view gets the reader page
+behind a template seam (`_person_picture.html.j2`) until the picture view
+lands.
 
 ## Where things live
 

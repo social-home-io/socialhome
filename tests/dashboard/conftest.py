@@ -7,8 +7,11 @@ import os
 
 import pytest
 
+from socialhome.domain.theme import HouseholdTheme
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
+
+from .factories import FakeDashboardService
 
 MAIN_PORT = 8080
 PASSWORD = "correct horse"
@@ -60,3 +63,13 @@ def settings_service() -> DashboardSettingsService:
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
+
+
+async def default_theme() -> HouseholdTheme:
+    """The household theme as a fresh install has it."""
+    return HouseholdTheme()
+
+
+@pytest.fixture
+def snapshots() -> FakeDashboardService:
+    return FakeDashboardService()

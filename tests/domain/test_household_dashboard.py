@@ -3,25 +3,55 @@
 from __future__ import annotations
 
 import dataclasses
+import re
+from datetime import datetime, time, timezone
 
 import pytest
 
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
+    is_pure_emoji,
     DEFAULT_DASHBOARD_PORT,
     IDLE_RETURN_CHOICES,
     MIN_PASSWORD_LENGTH,
+    PERSON_PALETTE,
     SETUP_TOKEN_TTL_SECONDS,
     SUPPORTED_DASHBOARD_LOCALES,
-    DashboardPasswordRequiredError,
+    TIMETABLE_COLOR_HEX,
+    DashboardEvent,
+    DashboardLesson,
     DashboardNotRunningError,
+    DashboardPasswordRequiredError,
     DashboardPasswordTooShortError,
+    DashboardPerson,
     DashboardPersonSettings,
+    DashboardPinInvalidError,
     DashboardPortFixedError,
     DashboardPortInUseError,
+    DashboardSchoolDay,
     DashboardSettings,
     DashboardSettingsInvalidError,
+    DashboardShoppingItem,
+    DashboardSticky,
+    DashboardTask,
+    HomeSnapshot,
+    PersonSnapshot,
+    hash_color,
+    in_night_window,
+    initials,
+    lesson_color_token,
+    normalize_token_key,
+    picture_effective,
+    subject_color_tokens,
+    token_hex,
 )
+from socialhome.domain.timetable import (
+    TIMETABLE_COLORS,
+    EntryKind,
+    Timetable,
+    TimetableEntry,
+)
+from socialhome.domain.user import User
 
 
 def test_constants():
@@ -126,3 +156,217 @@ def test_not_running_error():
     assert exc.status == 409
     assert exc.code == "DASHBOARD_NOT_RUNNING"
     assert exc.detail == "Turn the dashboard on before creating a sign-in link."
+
+
+# ── Snapshot helpers (the dashboard's read model) ────────────────────────
+
+
+def _user(**kw) -> User:
+    base: dict = {"user_id": "u1", "username": "anna", "display_name": "Anna"}
+    base.update(kw)
+    return User(**base)
+
+
+@pytest.mark.parametrize(
+    ("stored", "minor", "protected", "expected"),
+    [
+        (None, True, True, True),  # default: child-protected minor → on
+        (None, True, False, False),
+        (None, False, True, False),
+        (None, False, False, False),
+        (True, False, False, True),  # an explicit choice always wins
+        (False, True, True, False),
+    ],
+)
+def test_picture_effective(stored, minor, protected, expected):
+    user = _user(is_minor=minor, child_protection_enabled=protected)
+    got = picture_effective(DashboardPersonSettings(picture=stored), user)
+    assert got is expected
+
+
+def test_timetable_color_hex_covers_every_token():
+    assert set(TIMETABLE_COLOR_HEX) == set(TIMETABLE_COLORS)
+    for value in TIMETABLE_COLOR_HEX.values():
+        assert re.fullmatch(r"#[0-9A-F]{6}", value)
+    # Mirrors the light-theme ``--sh-tt-<token>-edge`` in app.css.
+    assert TIMETABLE_COLOR_HEX["terracotta"] == "#C8562E"
+    assert TIMETABLE_COLOR_HEX["coral"] == "#CF5439"
+
+
+def test_token_hex():
+    assert token_hex("sky") == "#357BBB"
+    assert token_hex(None) is None
+    assert token_hex("not-a-token") is None
+
+
+def test_person_palette_follows_the_token_order():
+    assert PERSON_PALETTE[0] == TIMETABLE_COLOR_HEX["terracotta"]
+    assert PERSON_PALETTE[-1] == TIMETABLE_COLOR_HEX["coral"]
+    assert len(set(PERSON_PALETTE)) == len(TIMETABLE_COLORS)
+
+
+def test_normalize_token_key():
+    assert normalize_token_key("  Música   Theorie ") == "musica theorie"
+    assert normalize_token_key("GÄRDEN") == "garden"
+
+
+@pytest.mark.parametrize(
+    ("name", "token"),
+    # Reference values from client/src/utils/tokenColor.ts ``hashColor``.
+    [
+        ("Mathe", "sand"),
+        ("Deutsch", "moss"),
+        ("Música", "violet"),
+        ("Sport 🏃", "sand"),
+        ("", "amber"),
+    ],
+)
+def test_hash_color_matches_the_spa(name, token):
+    assert hash_color(name) == token
+
+
+def _tt(*entries: TimetableEntry) -> Timetable:
+    at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return Timetable(
+        id="tt1",
+        name="5b",
+        created_by="u1",
+        created_at=at,
+        updated_at=at,
+        entries=entries,
+    )
+
+
+def _entry(eid: str, title: str | None, color: str | None = None, **kw):
+    return TimetableEntry(
+        id=eid,
+        weekday=0,
+        start=time(8, 0),
+        end=time(8, 45),
+        title=title,
+        color=color,
+        **kw,
+    )
+
+
+def test_subject_color_tokens_mirror_the_spa():
+    tt = _tt(
+        _entry("a", "Mathe"),
+        _entry("b", "Deutsch", color="terracotta"),  # explicit — not handed out
+        _entry("c", "  mathe "),  # same subject
+        _entry("d", "Biologie"),
+        _entry("e", None),  # untitled slot
+        _entry("f", "Pause", kind=EntryKind.BREAK),  # breaks never coloured
+    )
+    # Sorted distinct titles get the free tokens in palette order,
+    # skipping the explicitly used "terracotta".
+    assert subject_color_tokens(tt) == {"biologie": "amber", "mathe": "olive"}
+
+
+def test_subject_color_tokens_fall_back_to_the_hash_past_the_palette():
+    titles = [f"subject {i:02d}" for i in range(13)]
+    tt = _tt(*(_entry(str(i), t) for i, t in enumerate(titles)))
+    colors = subject_color_tokens(tt)
+    assert len(colors) == 13
+    assert colors["subject 12"] == hash_color("subject 12")
+
+
+def test_lesson_color_token():
+    tt = _tt(_entry("a", "Mathe"))
+    subjects = subject_color_tokens(tt)
+    assert lesson_color_token("sky", "Mathe", subjects) == "sky"
+    assert lesson_color_token(None, "MATHE", subjects) == subjects["mathe"]
+    assert lesson_color_token(None, "Kunst", subjects) == hash_color("Kunst")
+    assert lesson_color_token(None, "  ", subjects) is None
+    assert lesson_color_token(None, None, subjects) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Anna Maria Schmidt", "AM"),
+        ("anna", "A"),
+        ("  ", "?"),
+        ("Émile", "É"),
+    ],
+)
+def test_initials(name, expected):
+    assert initials(name) == expected
+
+
+@pytest.mark.parametrize(
+    ("now", "start", "end", "expected"),
+    [
+        (time(23, 0), "22:00", "06:00", True),  # window wraps midnight
+        (time(2, 0), "22:00", "06:00", True),
+        (time(6, 0), "22:00", "06:00", False),  # end is exclusive
+        (time(22, 0), "22:00", "06:00", True),  # start is inclusive
+        (time(12, 0), "22:00", "06:00", False),
+        (time(13, 0), "12:00", "14:00", True),  # same-day window
+        (time(14, 0), "12:00", "14:00", False),
+        (time(11, 59), "12:00", "14:00", False),
+        (time(3, 0), "05:00", "05:00", False),  # empty window — never night
+        (time(3, 0), "bad", "06:00", False),  # unparsable → never night
+    ],
+)
+def test_in_night_window(now, start, end, expected):
+    assert in_night_window(now, start, end) is expected
+
+
+def test_snapshot_types_are_frozen_and_slotted():
+    for cls in (
+        DashboardPerson,
+        DashboardEvent,
+        DashboardTask,
+        DashboardLesson,
+        DashboardSchoolDay,
+        DashboardShoppingItem,
+        DashboardSticky,
+        HomeSnapshot,
+        PersonSnapshot,
+    ):
+        params = cls.__dataclass_params__  # type: ignore[attr-defined]
+        assert params.frozen, cls
+        assert hasattr(cls, "__slots__"), cls
+
+
+def test_item_types_tell_events_and_lessons_apart():
+    assert DashboardEvent.item_type == "event"
+    assert DashboardLesson.item_type == "lesson"
+
+
+def test_pin_invalid_error():
+    e = DashboardPinInvalidError()
+    assert isinstance(e, CodedError)
+    assert isinstance(e, ValueError)
+    assert e.status == 422
+    assert e.code == "DASHBOARD_PIN_INVALID"
+    assert e.params == {"min": 4, "max": 6}
+
+
+def test_settings_pin_set_defaults_off():
+    assert DashboardSettings().pin_set is False
+
+
+@pytest.mark.parametrize(
+    ("text", "pure"),
+    [
+        ("🎉", True),
+        ("👍🏽", True),
+        ("🇩🇪", True),
+        ("❤️", True),
+        ("👩‍👧", True),
+        ("", False),
+        ("Ärzt·Termin", False),
+        ("🎉🎉", False),
+        ("🎉 x", False),
+        # A zero-width joiner may only join another emoji — never letters:
+        # "🏥‍K‍l‍i‍n‍i‍k" would read "🏥Klinik" on the wall.
+        ("🏥\u200dK\u200dl\u200di\u200dn\u200di\u200dk", False),
+        ("🏥\u200dK", False),
+        ("👨\u200d👩\u200d👧\u200d👦", True),
+        ("🧑\u200d🚒", True),
+    ],
+)
+def test_is_pure_emoji(text, pure):
+    assert is_pure_emoji(text) is pure

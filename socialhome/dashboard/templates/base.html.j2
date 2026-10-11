@@ -7,10 +7,15 @@
 <meta name="color-scheme" content="light dark">
 <title>{% block title %}{{ household }}{% endblock %}</title>
 <link rel="stylesheet" href="/static/dashboard.css" referrerpolicy="no-referrer">
+{% block style %}{% endblock %}
+<script src="/static/dashboard.js" defer></script>
+{% block head %}{% endblock %}
 </head>
-<body class="{% block body_class %}{% endblock %}">
+<body class="{% block body_class %}{% endblock %}"{% block body_attrs %}{% endblock %}>
+{% block body %}
 <main class="dash-main">
 {% block content %}{% endblock %}
 </main>
+{% endblock %}
 </body>
 </html>

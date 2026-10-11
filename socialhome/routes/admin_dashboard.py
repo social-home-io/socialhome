@@ -4,7 +4,9 @@
 * ``PUT /api/admin/dashboard/password`` — the household dashboard password;
 * ``POST /api/admin/dashboard/setup-link`` — a one-time tablet sign-in link
   (only while the dashboard runs);
-* ``DELETE /api/admin/dashboard/sessions`` — sign out every tablet.
+* ``DELETE /api/admin/dashboard/sessions`` — sign out every tablet;
+* ``PUT / DELETE /api/admin/dashboard/pin`` — the tablets' privacy-lock
+  PIN (4–6 digits, separate from the password; never read back).
 
 Admin-only: every call goes through a
 :class:`~socialhome.services.dashboard_settings_service.DashboardSettingsService`
@@ -28,7 +30,11 @@ from ..app_keys import (
 )
 from ..dashboard.auth import DashboardAuth
 from ..dashboard.controller import DashboardController
-from ..domain.household_dashboard import SETUP_TOKEN_TTL_SECONDS, DashboardSettings
+from ..domain.household_dashboard import (
+    SETUP_TOKEN_TTL_SECONDS,
+    DashboardSettings,
+    picture_effective,
+)
 from ..domain.user import User, _picture_url
 from ..media_signer import sign_media_urls_in
 from ..services.dashboard_settings_service import DashboardSettingsService
@@ -36,6 +42,7 @@ from .base import BaseView
 
 __all__ = [
     "AdminDashboardPasswordView",
+    "AdminDashboardPinView",
     "AdminDashboardSessionsView",
     "AdminDashboardSetupLinkView",
     "AdminDashboardView",
@@ -84,15 +91,11 @@ def _iso(ts: float | None) -> str | None:
 def _person(user: User, settings: DashboardSettings) -> dict[str, Any]:
     """One household member as the admin UI sees them.
 
-    ``picture_effective`` resolves the "default" (``picture=None``):
-    pictures are on by default for child-protected minors. Only that
-    boolean leaves — never the age or minor flag behind it.
+    ``picture_effective`` resolves the "default" (``picture=None``) with
+    the shared :func:`~socialhome.domain.household_dashboard.picture_effective`
+    rule. Only that boolean leaves — never the age or minor flag behind it.
     """
     stored = settings.person(user.user_id)
-    if stored.picture is None:
-        effective = bool(user.is_minor and user.child_protection_enabled)
-    else:
-        effective = stored.picture
     return {
         "user_id": user.user_id,
         "username": user.username,
@@ -100,7 +103,7 @@ def _person(user: User, settings: DashboardSettings) -> dict[str, Any]:
         "picture_url": _picture_url(user.user_id, user.picture_hash),
         "show": stored.show,
         "picture": stored.picture,
-        "picture_effective": effective,
+        "picture_effective": picture_effective(stored, user),
     }
 
 
@@ -163,6 +166,7 @@ class _DashboardAdminView(BaseView):
                 "port_fixed": self.settings.port_fixed,
                 "password_set": settings.password_set_at is not None,
                 "password_set_at": settings.password_set_at,
+                "pin_set": settings.pin_set,
                 "address": settings.address,
                 "url": url,
                 # ``False`` when the dashboard would refuse ``url``'s host
@@ -210,6 +214,28 @@ class AdminDashboardPasswordView(_DashboardAdminView):
             actor_is_admin=self.is_admin,
             password=password,  # type: ignore[arg-type]
         )
+        return web.Response(status=204)
+
+
+class AdminDashboardPinView(_DashboardAdminView):
+    """``PUT / DELETE /api/admin/dashboard/pin`` — the privacy-lock PIN.
+
+    Setting it signs nobody out; deleting it lifts the lock on every
+    locked tablet (nothing could unlock them otherwise).
+    """
+
+    async def put(self) -> web.Response:
+        body = await self.body()
+        pin = body.get("pin") if isinstance(body, dict) else None
+        # Anything but 4–6 ASCII digits is 422 DASHBOARD_PIN_INVALID.
+        await self.settings.set_pin(
+            actor_is_admin=self.is_admin,
+            pin=pin,  # type: ignore[arg-type]
+        )
+        return web.Response(status=204)
+
+    async def delete(self) -> web.Response:
+        await self.settings.delete_pin(actor_is_admin=self.is_admin)
         return web.Response(status=204)
 
 

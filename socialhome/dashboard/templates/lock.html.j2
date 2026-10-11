@@ -1,0 +1,30 @@
+{#- The privacy lock screen. Shows ONLY the household name, clock and
+    date — never a person, picture, presence, event or chore. Works
+    without JS (plain form); lock.js adds the ticking clock + keypad. -#}
+{% extends "base.html.j2" %}
+{% block head %}
+<script src="/static/lock.js" defer></script>
+<noscript><meta http-equiv="refresh" content="60;url=/"></noscript>
+{% endblock %}
+{% block body_class %}dash-locked{% endblock %}
+{% block content %}
+<section class="dash-lock" data-lock>
+  <h1 class="dash-visually-hidden">{{ t("dashboard.lock.locked") }}</h1>
+  <p class="dash-lock-household">{{ household }}</p>
+  <time class="dash-lock-time" datetime="{{ clock.iso }}" data-clock data-tz="{{ clock.tz }}" data-day="{{ clock.day }}" data-now="{{ clock.unix }}">{{ clock.time }}</time>
+  <p class="dash-lock-date">{{ clock.date }}</p>
+  <details class="dash-lock-pin"{% if error %} open{% endif %}>
+    <summary class="dash-lock-summary"><span aria-hidden="true">🔒</span> {{ t("dashboard.lock.pin_button") }}</summary>
+    <form class="dash-pin-form{% if error %} dash-lock-error{% endif %}" method="post" action="/unlock" data-pin-form data-label-delete="{{ t("dashboard.lock.delete") }}" data-label-submit="{{ t("dashboard.lock.unlock") }}">
+      {% if error %}
+      <p class="dash-error" role="alert">{{ error }}</p>
+      {% endif %}
+      <label class="dash-field dash-pin-native">
+        <span>{{ t("dashboard.lock.enter_pin") }}</span>
+        <input type="password" name="pin" inputmode="numeric" pattern="[0-9]*" autocomplete="off" minlength="4" maxlength="6" required{% if error %} autofocus{% endif %}>
+      </label>
+      <button type="submit" class="dash-button dash-pin-native">{{ t("dashboard.lock.unlock") }}</button>
+    </form>
+  </details>
+</section>
+{% endblock %}

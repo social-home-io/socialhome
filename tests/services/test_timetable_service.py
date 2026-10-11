@@ -518,6 +518,24 @@ async def test_copy_and_shift(env):
 # ─── validity + overrides ────────────────────────────────────────────────
 
 
+async def test_in_effect_for_is_the_active_for_user_rule(env):
+    """``in_effect_for`` is the per-timetable filter ``active_for_user``
+    applies — callers holding ``list_all()`` reuse it in memory."""
+    ben = await env.svc.create(name="Ben", created_by="u-anna", assignees=["u-ben"])
+    assert TimetableService.in_effect_for(ben, "u-ben", MON) is True
+    assert TimetableService.in_effect_for(ben, "u-anna", MON) is False  # not assigned
+    saturday = MON + timedelta(days=5)
+    assert TimetableService.in_effect_for(ben, "u-ben", saturday) is False
+    for day in (MON, saturday):
+        expected = [t.id for t in await env.svc.active_for_user("u-ben", day)]
+        got = [
+            t.id
+            for t in await env.svc.list_all()
+            if TimetableService.in_effect_for(t, "u-ben", day)
+        ]
+        assert got == expected
+
+
 async def test_validity_and_active_for_user(env):
     anna = await env.svc.create(name="Anna", created_by="u-anna")
     ben = await env.svc.create(name="Ben", created_by="u-anna", assignees=["u-ben"])

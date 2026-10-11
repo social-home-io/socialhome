@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +14,7 @@ from socialhome.domain.household_dashboard import (
     DashboardPasswordRequiredError,
     DashboardPasswordTooShortError,
     DashboardPersonSettings,
+    DashboardPinInvalidError,
     DashboardPortFixedError,
     DashboardSettings,
     DashboardSettingsInvalidError,
@@ -293,7 +295,11 @@ async def test_get_reads_no_secrets():
     spy = _SpyRepo()
     svc = DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT)
     await svc.get()
-    assert sorted(spy.read) == ["dashboard.password_set_at", "dashboard.settings"]
+    assert sorted(spy.read) == [
+        "dashboard.password_set_at",
+        "dashboard.pin_set_at",
+        "dashboard.settings",
+    ]
 
 
 # ── people ───────────────────────────────────────────────────────────────
@@ -864,3 +870,174 @@ async def test_cache_never_keeps_a_read_that_raced_a_write():
     await svc.update(actor_is_admin=True, patch={"locale": "nl"})
     await reader
     assert (await svc.get()).locale == "nl"
+
+
+# ── privacy-lock PIN ─────────────────────────────────────────────────────
+
+
+async def test_pin_not_set_by_default(svc):
+    assert (await svc.get()).pin_set is False
+    assert await svc.verify_pin("1234") is False
+
+
+@pytest.mark.parametrize("pin", ["1234", "12345", "123456"])
+async def test_set_pin_accepts_four_to_six_digits(svc, pin):
+    await svc.set_pin(actor_is_admin=True, pin=pin)
+    assert (await svc.get()).pin_set is True
+    assert await svc.verify_pin(pin) is True
+
+
+@pytest.mark.parametrize(
+    "pin",
+    [
+        "123",
+        "1234567",
+        "",
+        "12a4",
+        "abcd",
+        "12 34",
+        " 1234",
+        "1234\n",
+        "١٢٣٤",  # Arabic-Indic digits — str.isdigit() would accept them
+        "１２３４",  # full-width digits
+        "+123",
+        "-1234",
+        1234,
+        None,
+    ],
+)
+async def test_set_pin_rejects_anything_but_ascii_digits(svc, repo, pin):
+    with pytest.raises(DashboardPinInvalidError):
+        await svc.set_pin(actor_is_admin=True, pin=pin)
+    assert "dashboard.pin_hash" not in repo.rows
+    assert (await svc.get()).pin_set is False
+
+
+async def test_set_pin_requires_admin(svc, repo):
+    with pytest.raises(PermissionError):
+        await svc.set_pin(actor_is_admin=False, pin="1234")
+    assert repo.rows == {}
+
+
+async def test_set_pin_stores_a_scrypt_hash_not_the_pin(svc, repo):
+    await svc.set_pin(actor_is_admin=True, pin="482913")
+    stored = repo.rows["dashboard.pin_hash"]
+    assert stored.startswith("scrypt$")
+    assert "482913" not in stored
+    assert all("482913" not in v for v in repo.rows.values())
+
+
+async def test_set_pin_writes_hash_and_marker_atomically(svc, repo):
+    batches: list[dict[str, str]] = []
+    real = repo.set_many
+
+    async def spy(items):
+        batches.append(dict(items))
+        await real(items)
+
+    repo.set_many = spy
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    assert len(batches) == 1
+    assert set(batches[0]) == {"dashboard.pin_hash", "dashboard.pin_set_at"}
+    assert batches[0]["dashboard.pin_set_at"].endswith("+00:00")
+
+
+async def test_set_pin_hashes_off_the_event_loop(svc):
+    with patch(
+        "socialhome.services.dashboard_settings_service.asyncio.to_thread",
+        wraps=asyncio.to_thread,
+    ) as to_thread:
+        await svc.set_pin(actor_is_admin=True, pin="1234")
+        await svc.verify_pin("1234")
+    assert to_thread.call_count == 2
+
+
+async def test_set_pin_does_not_sign_tablets_out(svc):
+    before = await svc.epoch()
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    assert await svc.epoch() == before
+
+
+async def test_verify_pin(svc):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    assert await svc.verify_pin("1234") is True
+    assert await svc.verify_pin("4321") is False
+    assert await svc.verify_pin("") is False
+    assert await svc.verify_pin("١٢٣٤") is False
+    assert await svc.verify_pin(None) is False  # type: ignore[arg-type]
+
+
+async def test_malformed_pin_never_reaches_scrypt(svc):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    with patch(
+        "socialhome.services.dashboard_settings_service.verify_password"
+    ) as verify:
+        assert await svc.verify_pin("x" * 10_000) is False
+    verify.assert_not_called()
+
+
+async def test_change_pin(svc):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    await svc.set_pin(actor_is_admin=True, pin="98765")
+    assert await svc.verify_pin("1234") is False
+    assert await svc.verify_pin("98765") is True
+
+
+async def test_delete_pin(svc, repo):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    await svc.delete_pin(actor_is_admin=True)
+    assert (await svc.get()).pin_set is False
+    assert await svc.verify_pin("1234") is False
+    assert "dashboard.pin_hash" not in repo.rows
+    assert "dashboard.pin_set_at" not in repo.rows
+
+
+async def test_delete_pin_drops_the_marker_first(svc, repo):
+    """A crash between the two deletes leaves "no PIN" (what the admin
+    asked for) — never "PIN set" with nothing that can unlock."""
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    order: list[str] = []
+    real = repo.delete
+
+    async def spy(key):
+        order.append(key)
+        await real(key)
+
+    repo.delete = spy
+    await svc.delete_pin(actor_is_admin=True)
+    assert order == ["dashboard.pin_set_at", "dashboard.pin_hash"]
+
+
+async def test_delete_pin_when_none_is_a_noop(svc):
+    await svc.delete_pin(actor_is_admin=True)
+    assert (await svc.get()).pin_set is False
+
+
+async def test_delete_pin_requires_admin(svc):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    with pytest.raises(PermissionError):
+        await svc.delete_pin(actor_is_admin=False)
+    assert (await svc.get()).pin_set is True
+
+
+async def test_pin_writes_keep_the_settings_cache_coherent(svc):
+    assert (await svc.get()).pin_set is False  # cached
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    assert (await svc.get()).pin_set is True
+    await svc.delete_pin(actor_is_admin=True)
+    assert (await svc.get()).pin_set is False
+
+
+async def test_pin_set_survives_settings_edits_and_restore(svc):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    snap = await svc.snapshot()
+    await svc.update(actor_is_admin=True, patch={"locale": "de"})
+    assert (await svc.get()).pin_set is True
+    await svc.restore(actor_is_admin=True, previous=snap)
+    assert (await svc.get()).pin_set is True
+
+
+async def test_pin_set_is_never_stored_in_the_settings_json(svc, repo):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    await svc.update(actor_is_admin=True, patch={"locale": "de"})
+    assert "pin" not in repo.rows["dashboard.settings"]

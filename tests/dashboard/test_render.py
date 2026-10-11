@@ -11,6 +11,7 @@ import jinja2
 import pytest
 
 import socialhome.i18n as i18n_pkg
+from socialhome.dashboard.clock import WallClock
 from socialhome.dashboard.render import (
     STATIC_DIR,
     DashboardRenderer,
@@ -35,6 +36,7 @@ def _login_ctx(**over):
         "error": None,
         "keep": True,
         "show_form": True,
+        "notice": None,
     }
     ctx.update(over)
     return ctx
@@ -91,16 +93,79 @@ def test_not_set_up_hides_form(renderer):
     assert "set up yet" in html
 
 
-def test_placeholder(renderer):
-    html = renderer.render("placeholder.html.j2", locale="en", household="Casa")
+def test_not_found_page(renderer):
+    html = renderer.render("not_found.html.j2", locale="en", household="Casa")
     assert "Casa" in html
-    assert "Your dashboard is ready" in html
-    assert 'action="/logout"' in html
+    assert "This page isn&#39;t on the dashboard." in html
+    assert 'href="/"' in html
+
+
+def test_lock_button(renderer):
+    html = renderer.render("_lock_button.html.j2", locale="de")
+    assert '<form class="dash-lock-form" method="post" action="/lock">' in html
+    assert 'aria-label="Bildschirm sperren"' in html
+    assert 'class="dash-lock-button"' in html
+
+
+def test_login_notice(renderer):
+    html = renderer.render(
+        "login.html.j2", locale="en", **_login_ctx(notice="Signed out")
+    )
+    assert '<p class="dash-notice" role="status">Signed out</p>' in html
+
+
+def _clock(**over):
+    data = {
+        "time": "09:00",
+        "date": "Friday, January 15",
+        "day": "2027-01-15",
+        "iso": "2027-01-15T09:00:00+01:00",
+        "tz": "Europe/Berlin",
+        "unix": 1_800_000_000,
+    }
+    data.update(over)
+    return WallClock(**data)
+
+
+def test_lock_screen(renderer):
+    html = renderer.render(
+        "lock.html.j2",
+        locale="en",
+        household="<b>Casa</b>",
+        clock=_clock(),
+        error=None,
+    )
+    assert "&lt;b&gt;Casa&lt;/b&gt;" in html
+    assert (
+        '<time class="dash-lock-time" datetime="2027-01-15T09:00:00+01:00" '
+        'data-clock data-tz="Europe/Berlin" data-day="2027-01-15" '
+        'data-now="1800000000">09:00</time>'
+    ) in html
+    assert "Friday, January 15" in html
+    assert 'data-label-delete="Delete last digit"' in html
+    assert 'data-label-submit="Unlock"' in html
+    assert "Screen locked" in html
+    assert 'role="alert"' not in html
+    assert '<noscript><meta http-equiv="refresh" content="60;url=/"></noscript>' in html
+
+
+def test_lock_screen_error_opens_the_keypad(renderer):
+    html = renderer.render(
+        "lock.html.j2",
+        locale="fr",
+        household="Casa",
+        clock=_clock(),
+        error="Code PIN incorrect",
+    )
+    assert '<details class="dash-lock-pin" open>' in html
+    assert '<p class="dash-error" role="alert">Code PIN incorrect</p>' in html
+    assert "dash-lock-error" in html
+    assert "autofocus" in html
 
 
 def test_strict_undefined(renderer):
     with pytest.raises(jinja2.UndefinedError):
-        renderer.render("placeholder.html.j2", locale="en")
+        renderer.render("not_found.html.j2", locale="en")
 
 
 def test_gettext_with_format(renderer):
@@ -138,7 +203,28 @@ def test_templates_never_reload_from_disk(renderer):
         patch("os.path.getmtime", side_effect=AssertionError("stat")),
     ):
         for _ in range(2):
-            renderer.render("placeholder.html.j2", locale="en", household="H")
+            renderer.render("not_found.html.j2", locale="en", household="H")
+
+
+def test_lock_script_preloaded(renderer):
+    js = renderer.static_asset("lock.js")
+    assert js is not None
+    assert js.content_type == "text/javascript"
+    assert js.body == (STATIC_DIR / "lock.js").read_bytes()
+
+
+def test_dashboard_script_preloaded_and_on_every_page(renderer):
+    js = renderer.static_asset("dashboard.js")
+    assert js is not None and js.content_type == "text/javascript"
+    tag = '<script src="/static/dashboard.js" defer></script>'
+    assert tag in renderer.render("login.html.j2", locale="en", **_login_ctx())
+    assert tag in renderer.render("not_found.html.j2", locale="en", household="H")
+
+
+def test_translator_binds_the_locale(renderer):
+    t = renderer.translator("de")
+    assert t("dashboard.lock.unlock") == "Entsperren"
+    assert t("dashboard.login.too_many_tries", minutes=2).endswith("2 Min. noch einmal")
 
 
 def test_static_assets_preloaded(renderer):

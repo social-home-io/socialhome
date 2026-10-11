@@ -84,6 +84,78 @@ must open.
   `.home.arpa`) or the configured address are refused (421) — protection
   against DNS rebinding.
 
+## What the tablet shows
+
+- **Home** (`/`): the time and date, the next thing coming up today
+  (with whose it is and "in 28 min"), who's home and who's away (a zone
+  name like "Work" at most — never a map or coordinates), then **Today**:
+  one lane per person from 08:00 to 22:00 (stretched for earlier / later
+  plans) with their calendar events, a striped school block from their
+  timetable and a "now" line; under it who is at school right now and
+  today's timetable changes (⚠ cancelled, 🔁 changed, + added). Last, the
+  chores due today (✓ done, ☐ to do, ⚠ "2 days late"), the shopping list
+  (the first six and "+ 5 more") and the household sticky notes. Empty
+  columns are left out; a day with nothing on it says "Nothing planned
+  today 🎈". With more than six people — and on a phone — the lanes become
+  one list in time order; with one person there is no rail and no "who's
+  home". A bar too short for its title shows just an icon. When nothing is
+  left today, the "Next" box shows tomorrow's first item instead.
+- **A person** (tap their face in the rail): what they're doing now and
+  next, their school day with rooms and teachers (a cancelled lesson is
+  struck through *and* says "Cancelled"), today's and tomorrow's plans
+  and their chores. After the "Back to Home after" time without a touch
+  (setting `idle_return_minutes`, default 3, `0` = never) the tablet goes
+  back to Home. People set to picture view see the same page for now.
+- **Night** (between `night_start` and `night_end`, default 22:00–06:00):
+  only a dim clock, the date and the first thing of the morning. Tap the
+  screen to see everything (and the 🔒 button) for a minute.
+- **When Social Home can't be reached** the last page stays up with a
+  banner "Can't reach Social Home — showing info from 14:02" and the
+  "in 28 min"-style times hidden; it recovers on its own (↻ reloads now).
+- With **Keep screen on** (`keep_screen_on`) the browser is asked to keep
+  the screen awake; some kiosk browsers also need their own setting.
+
+**Privacy reminders.** Everything on these pages is visible to anyone
+standing in front of the tablet: event titles, chores, the shopping list,
+sticky notes, who is home and timetables. Hide a person who shouldn't be
+on the wall (`people: {"<id>": {"show": false}}`) — they then have no
+page and their presence, events, chores and timetables are left out of
+Home. DMs, notifications, chat, event locations and coordinates are never
+shown. Use the privacy lock below when visitors are around.
+
+## Privacy lock (guests, cleaners)
+
+When someone who shouldn't see the household's people is around, tap
+the 🔒 button on the tablet. It switches to a neutral lock screen: the
+household name, the time and the date — no names, pictures, presence,
+events or chores. Reloading the page or restarting the browser keeps it
+locked (the lock lives in that tablet's sign-in cookie, so it is per
+tablet: locking the hallway tablet doesn't lock the kitchen one).
+
+To unlock, tap **🔒 PIN** and type the PIN on the keypad.
+
+- **Set a PIN first.** The 🔒 button only appears once a household
+  admin has set a PIN — `PUT /api/admin/dashboard/pin` with
+  `{"pin": "4829"}` (4 to 6 digits).
+- **The PIN is not the dashboard password.** It's a short code for the
+  people who live there; the password stays with whoever sets tablets
+  up. Setting or changing the PIN signs no tablet out.
+- **Five wrong PINs sign the tablet out.** After five wrong tries within
+  15 minutes the next one signs that tablet out, and it needs the
+  dashboard password (or a fresh setup link) again. This is counted per
+  lock on each tablet — tablets behind one reverse proxy don't use up
+  each other's tries, and neither reloading, re-tapping 🔒 on a locked
+  tablet nor changing network address starts the count over.
+- **That sign-out is remembered in memory only.** The signed-out cookie
+  (and any copy of it) stays refused until Social Home restarts. To be
+  sure a lost or copied tablet cookie is dead for good, use **"Sign out
+  all tablets"** (`DELETE /api/admin/dashboard/sessions`) — that one
+  survives restarts.
+- **Removing the PIN** (`DELETE /api/admin/dashboard/pin`) unlocks every
+  locked tablet and hides the 🔒 button.
+- It is a privacy screen, not a safe: anyone who knows the dashboard
+  password can still sign a tablet in.
+
 ## Signing tablets out
 
 - **"Sign out all tablets"** (`DELETE /api/admin/dashboard/sessions`)

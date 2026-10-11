@@ -1,0 +1,19 @@
+{#- The swappable content of <main>. data-view-key changes with what a
+    swap can't change (inline style, night mode, rail) — dashboard.js
+    reloads the page then. At night the day view is rendered too but
+    stays hidden until someone taps the screen (dashboard.js, 60 s). -#}
+<div class="dash-view" data-view-key="{{ view_key }}">
+  <div class="dash-offline" data-offline role="status" hidden>
+    <span aria-hidden="true">⚠</span>
+    <span class="dash-offline-text">{{ t("dashboard.offline", time=clock.time) }}</span>
+    <button type="button" class="dash-offline-retry" data-reload aria-label="{{ t("dashboard.offline.retry") }}" title="{{ t("dashboard.offline.retry") }}"><span aria-hidden="true">↻</span></button>
+  </div>
+  {% if night %}
+  {% include "_night.html.j2" %}
+  <div class="dash-day" data-day-view>
+    {% include view_template %}
+  </div>
+  {% else %}
+  {% include view_template %}
+  {% endif %}
+</div>

@@ -1,0 +1,21 @@
+{#- Night mode (mockup E): only the clock, the date and the first thing
+    of the morning — burn-in safe, nothing personal beyond that item. -#}
+{% from "_macros.html.j2" import faces with context %}
+<section class="dash-night-view" aria-label="{{ clock.date }}">
+  <time class="dash-night-clock" datetime="{{ clock.iso }}" data-clock>{{ clock.time }}</time>
+  <p class="dash-night-date">{{ clock.date }}</p>
+  {% if night_item %}
+  {% set when, item = night_item %}
+  <p class="dash-night-next">
+    <span class="dash-night-when">{{ t("dashboard.night." ~ when) }}</span>
+    <span class="dash-night-time">{{ f.hhmm(item.start) }}</span>
+    {% if item.item_type == "lesson" %}
+    <span class="dash-night-title"><span aria-hidden="true">🎒</span> {{ t("dashboard.school") }}</span>
+    {% else %}
+    <span class="dash-night-title">{{ f.title(item) }}</span>
+    {% endif %}
+    {% if current is none %}{{ faces(item) }}{% endif %}
+  </p>
+  {% endif %}
+  <p class="dash-night-hint" data-wake-hint>{{ t("dashboard.night.wake") }}</p>
+</section>

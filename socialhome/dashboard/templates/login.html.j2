@@ -4,6 +4,9 @@
 <section class="dash-card" aria-labelledby="dash-login-title">
   <p class="dash-household">{{ household }}</p>
   <h1 id="dash-login-title">{{ t("dashboard.login.title") }}</h1>
+  {% if notice %}
+  <p class="dash-notice" role="status">{{ notice }}</p>
+  {% endif %}
   {% if error %}
   <p class="dash-error" role="alert">{{ error }}</p>
   {% endif %}

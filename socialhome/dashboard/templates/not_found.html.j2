@@ -1,0 +1,11 @@
+{#- An unknown or hidden person (or a page that isn't there): the same
+    page either way, so it never tells whether someone exists. -#}
+{% extends "base.html.j2" %}
+{% block body_class %}dash-login{% endblock %}
+{% block content %}
+<section class="dash-card">
+  <p class="dash-household">{{ household }}</p>
+  <h1>{{ t("dashboard.not_found") }}</h1>
+  <a class="dash-button dash-link-button" href="/">{{ t("dashboard.not_found.back") }}</a>
+</section>
+{% endblock %}

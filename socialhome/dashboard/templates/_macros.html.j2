@@ -1,0 +1,62 @@
+{#- Shared bits. Import "with context" (they use f and t). -#}
+
+{#- A person's face: their picture, else initials on their colour. The
+    name is spoken (visually hidden) unless `named` shows it. -#}
+{% macro face(p, size="md", named=False) -%}
+<span class="dash-face dash-face-{{ size }} {{ f.kc(p.color) }}" aria-hidden="true">
+{%- set url = f.avatar(p) -%}
+<span class="dash-initials">{{ p.initials }}</span>
+{%- if url %}<img src="{{ url }}" alt="" decoding="async">{% endif -%}
+</span>
+{%- if named %}<span class="dash-face-name">{{ p.display_name }}</span>{% else %}<span class="dash-visually-hidden">{{ p.display_name }}</span>{% endif %}
+{%- endmacro %}
+
+{#- Small faces for everyone an item belongs to. -#}
+{% macro faces(item) -%}
+<span class="dash-faces">{% for p in f.people(item) %}{{ face(p, "xs") }}{% endfor %}</span>
+{%- endmacro %}
+
+{#- Where someone is: home / a zone / away — never coordinates. -#}
+{% macro whereabouts(p) -%}
+{% if p.presence == "home" %}<span aria-hidden="true">🏠</span> {{ t("dashboard.presence.home") }}
+{%- elif p.presence == "zone" and p.zone_name %}<span aria-hidden="true">📍</span> {{ p.zone_name }}
+{%- elif p.presence in ("zone", "away") %}<span aria-hidden="true">🚗</span> {{ t("dashboard.presence.away") }}
+{%- endif %}
+{%- endmacro %}
+
+{#- One line of a day list: time, (icon) title, timetable state, room /
+    teacher. A cancelled lesson is struck through AND labelled; a
+    changed one says so — never colour alone. -#}
+{% macro agenda_row(item, with_people=False) -%}
+{%- set lesson = item.item_type == "lesson" -%}
+<li class="dash-row {{ f.kc(f.item_color(item)) }}{% if f.is_past(item) %} dash-past{% endif %}{% if f.is_now(item) %} dash-current{% endif %}{% if lesson %} dash-st-{{ item.status }}{% if item.kind == "break" %} dash-break{% endif %}{% endif %}">
+  <span class="dash-row-time">{{ f.span(item) }}</span>
+  <span class="dash-row-main">
+    <span class="dash-row-title">{% if f.icon(item) %}<span aria-hidden="true">{{ f.icon(item) }}</span> {% endif %}{{ f.title(item) }}</span>
+    {%- if lesson and item.status == "cancelled" %} <span class="dash-tag dash-tag-warn"><span aria-hidden="true">✕</span> {{ t("dashboard.lesson.cancelled") }}</span>
+    {%- elif lesson and item.status == "changed" %} <span class="dash-tag"><span aria-hidden="true">🔁</span> {{ t("dashboard.lesson.changed") }}</span>
+    {%- elif lesson and item.status == "added" %} <span class="dash-tag"><span aria-hidden="true">+</span> {{ t("dashboard.lesson.added") }}</span>
+    {%- endif %}
+    {%- if f.is_now(item) %} <span class="dash-tag dash-tag-now" data-live>{{ t("dashboard.timeline.now") }}</span>{% endif %}
+    {%- if f.lesson_meta(item) %}
+    <span class="dash-row-meta">{{ f.lesson_meta(item) }}</span>
+    {%- endif %}
+  </span>
+  {%- if with_people %} {{ faces(item) }}{% endif %}
+</li>
+{%- endmacro %}
+
+{#- A chore: ✓ done / ⚠ overdue / ☐ open, spoken too. -#}
+{% macro chore(c, show_people=True, show_due=False) -%}
+<li class="dash-chore{% if c.done %} dash-chore-done{% elif c.overdue_days %} dash-chore-late{% endif %}">
+  <span class="dash-glyph" aria-hidden="true">{% if c.done %}✓{% elif c.overdue_days %}⚠{% else %}☐{% endif %}</span>
+  <span class="dash-visually-hidden">{% if c.done %}{{ t("dashboard.chore.done") }}{% elif c.overdue_days %}{{ t("dashboard.chore.overdue") }}{% else %}{{ t("dashboard.chore.open") }}{% endif %}:</span>
+  <span class="dash-chore-text">
+    <span class="dash-chore-title">{{ c.title }}</span>
+    {%- if c.overdue_days and not c.done %} <span class="dash-chore-late-text">· {{ f.late(c.overdue_days) }}</span>
+    {%- elif show_due and f.due(c.due) and not c.done %} <span class="dash-chore-due">· {{ f.due(c.due) }}</span>
+    {%- endif %}
+  </span>
+  {%- if show_people %} {{ faces(c.person_ids) }}{% endif %}
+</li>
+{%- endmacro %}

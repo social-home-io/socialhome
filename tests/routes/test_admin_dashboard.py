@@ -99,6 +99,8 @@ def test_dashboard_base_url(address, host, port, expected):
         ("PUT", "/api/admin/dashboard/password", {"password": PASSWORD}),
         ("POST", "/api/admin/dashboard/setup-link", None),
         ("DELETE", "/api/admin/dashboard/sessions", None),
+        ("PUT", "/api/admin/dashboard/pin", {"pin": "1234"}),
+        ("DELETE", "/api/admin/dashboard/pin", None),
     ],
 )
 async def test_non_admin_is_refused(client, method, path, body):
@@ -126,6 +128,7 @@ async def test_get_defaults(client):
     assert body["port_fixed"] is False
     assert body["password_set"] is False
     assert body["password_set_at"] is None
+    assert body["pin_set"] is False
     assert body["address"] is None
     host = urlsplit(f"http://{client.host}").hostname
     assert body["url"] == f"http://{host}:8100"
@@ -432,3 +435,122 @@ async def test_password_body_must_be_an_object(client):
     )
     assert resp.status == 422
     assert (await resp.json())["error"]["code"] == "DASHBOARD_SETTINGS_INVALID"
+
+
+# ── Privacy-lock PIN ────────────────────────────────────────────────────
+
+
+async def _put_pin(client, body):
+    return await client.put(
+        "/api/admin/dashboard/pin", headers=_auth(client._tok), json=body
+    )
+
+
+async def _state(client) -> dict:
+    resp = await client.get("/api/admin/dashboard", headers=_auth(client._tok))
+    return await resp.json()
+
+
+async def test_set_pin(client):
+    svc = client.app[dashboard_settings_service_key]
+    resp = await _put_pin(client, {"pin": "4829"})
+    assert resp.status == 204
+    assert (await _state(client))["pin_set"] is True
+    assert await svc.verify_pin("4829")
+
+
+async def test_set_pin_does_not_sign_tablets_out(client):
+    svc = client.app[dashboard_settings_service_key]
+    before = await svc.epoch()
+    assert (await _put_pin(client, {"pin": "4829"})).status == 204
+    assert await svc.epoch() == before
+
+
+async def test_pin_never_leaves_the_server(client):
+    await _put_pin(client, {"pin": "482913"})
+    raw = await (
+        await client.get("/api/admin/dashboard", headers=_auth(client._tok))
+    ).text()
+    assert "482913" not in raw
+    assert "scrypt" not in raw
+    assert "pin_hash" not in raw
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"pin": "123"},
+        {"pin": "1234567"},
+        {"pin": "12a4"},
+        {"pin": "١٢٣٤"},
+        {"pin": 1234},
+        {"pin": None},
+        {},
+        ["1234"],
+    ],
+)
+async def test_invalid_pin_is_422(client, body):
+    resp = await _put_pin(client, body)
+    assert resp.status == 422
+    err = (await resp.json())["error"]
+    assert err["code"] == "DASHBOARD_PIN_INVALID"
+    assert err["params"] == {"min": 4, "max": 6}
+    assert (await _state(client))["pin_set"] is False
+
+
+async def test_delete_pin(client):
+    svc = client.app[dashboard_settings_service_key]
+    await _put_pin(client, {"pin": "4829"})
+    resp = await client.delete("/api/admin/dashboard/pin", headers=_auth(client._tok))
+    assert resp.status == 204
+    assert (await _state(client))["pin_set"] is False
+    assert not await svc.verify_pin("4829")
+
+
+async def test_delete_pin_when_none_is_204(client):
+    resp = await client.delete("/api/admin/dashboard/pin", headers=_auth(client._tok))
+    assert resp.status == 204
+
+
+async def test_put_state_reports_pin_set(client):
+    await _put_pin(client, {"pin": "4829"})
+    body = await (await _put(client, {"locale": "de"})).json()
+    assert body["pin_set"] is True
+
+
+async def test_pin_locks_and_unlocks_a_real_tablet(client):
+    """End to end on the dashboard's own port: lock, reload, unlock."""
+    await _set_password(client)
+    await _put_pin(client, {"pin": "4829"})
+    port = _free_port()
+    assert (await _put(client, {"enabled": True, "port": port})).status == 200
+    origin = f"http://127.0.0.1:{port}"
+    form = {"Origin": origin}
+    jar = aiohttp.CookieJar(unsafe=True)
+    async with aiohttp.ClientSession(cookie_jar=jar) as browser:
+        async with browser.post(
+            f"{origin}/login",
+            data={"password": PASSWORD, "keep": "1"},
+            headers=form,
+        ) as resp:
+            assert resp.status == 200
+            assert 'action="/lock"' in await resp.text()
+        async with browser.post(f"{origin}/lock", headers=form) as resp:
+            assert resp.status == 200
+            html = await resp.text()
+            assert "data-lock" in html and 'action="/lock"' not in html
+        async with browser.get(f"{origin}/") as resp:
+            assert "data-lock" in await resp.text()
+        async with browser.post(
+            f"{origin}/unlock", data={"pin": "0000"}, headers=form
+        ) as resp:
+            # Post/Redirect/Get: lands on the lock screen with the flag.
+            assert resp.status == 200
+            assert resp.url.path_qs == "/?pin=wrong"
+            html = await resp.text()
+            assert "data-lock" in html and "Wrong PIN" in html
+        async with browser.post(
+            f"{origin}/unlock", data={"pin": "4829"}, headers=form
+        ) as resp:
+            assert resp.status == 200
+            assert "data-lock" not in await resp.text()

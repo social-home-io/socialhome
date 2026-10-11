@@ -13,8 +13,11 @@ def test_keys_are_distinct_typed_keys():
         keys.SETTINGS_KEY,
         keys.RENDERER_KEY,
         keys.HOUSEHOLD_NAME_KEY,
+        keys.HOUSEHOLD_TZ_KEY,
+        keys.HOUSEHOLD_THEME_KEY,
+        keys.SNAPSHOTS_KEY,
     ]
     assert all(isinstance(k, web.AppKey) for k in app_keys)
     assert isinstance(keys.CLAIMS_KEY, web.RequestKey)
     names = {str(k) for k in app_keys} | {str(keys.CLAIMS_KEY)}
-    assert len(names) == 5
+    assert len(names) == 8
