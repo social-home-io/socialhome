@@ -8,6 +8,7 @@ from socialhome.platform import build_platform_adapter
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
 from socialhome.platform.adapter import (
+    DashboardHostPort,
     Capability,
     ExternalUser,
     InstanceConfig,
@@ -256,6 +257,19 @@ def test_fixed_dashboard_port_is_not_a_spa_capability():
     """Backend fact surfaced by the admin API as ``port_fixed`` — never
     a :class:`Capability`."""
     assert not any("dashboard" in str(c).lower() for c in Capability)
+
+
+async def test_dashboard_host_port_defaults_to_unknown():
+    """``None`` = not applicable: tablets dial the port the dashboard
+    listens on, and the admin API reports ``host_port_mapped: null``."""
+    assert await _MinimalAdapter().dashboard_host_port() is None
+
+
+def test_dashboard_host_port_mapped_flag():
+    assert DashboardHostPort(8100).mapped is True
+    assert DashboardHostPort(8100).declared is True
+    assert DashboardHostPort(None).mapped is False
+    assert DashboardHostPort(None, declared=False).mapped is False
 
 
 # ── honours_manual_federation_base (ABC default) ─────────────────────────────

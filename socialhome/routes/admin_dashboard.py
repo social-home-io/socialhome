@@ -26,6 +26,7 @@ from ..app_keys import (
     dashboard_auth_key,
     dashboard_controller_key,
     media_signer_key,
+    platform_adapter_key,
     user_service_key,
 )
 from ..dashboard.auth import DashboardAuth
@@ -37,6 +38,7 @@ from ..domain.household_dashboard import (
 )
 from ..domain.user import User, _picture_url
 from ..media_signer import sign_media_urls_in
+from ..platform.adapter import DashboardHostPort
 from ..services.dashboard_settings_service import DashboardSettingsService
 from .base import BaseView
 
@@ -141,9 +143,25 @@ class _DashboardAdminView(BaseView):
         user = self.user
         return bool(user is not None and user.is_admin)
 
-    def base_url(self, settings: DashboardSettings) -> str:
+    async def host_port(self) -> DashboardHostPort | None:
+        """Where the platform publishes the dashboard on the host —
+        ``None`` when that's simply the listen port (or unknown)."""
+        result: DashboardHostPort | None = await self.svc(
+            platform_adapter_key
+        ).dashboard_host_port()
+        return result
+
+    def base_url(
+        self, settings: DashboardSettings, host_port: DashboardHostPort | None
+    ) -> str:
+        """The tablet URL — on the port the platform publishes the
+        dashboard on when it maps one (Home Assistant App: the host port
+        set under the App's Network settings), else the listen port."""
+        port = settings.port
+        if host_port is not None and host_port.port is not None:
+            port = host_port.port
         return dashboard_base_url(
-            settings.address, admin_request_host(self.request), settings.port
+            settings.address, admin_request_host(self.request), port
         )
 
     async def state(self) -> web.Response:
@@ -156,7 +174,8 @@ class _DashboardAdminView(BaseView):
         if signer is not None:
             sign_media_urls_in(people, signer)
         running_port = self.controller.running_port
-        url = self.base_url(settings)
+        host_port = await self.host_port()
+        url = self.base_url(settings, host_port)
         return self._json(
             {
                 "enabled": settings.enabled,
@@ -172,6 +191,15 @@ class _DashboardAdminView(BaseView):
                 # ``False`` when the dashboard would refuse ``url``'s host
                 # (421, DNS-rebinding guard): the admin should set the address.
                 "url_host_allowed": await self.controller.url_host_allowed(url),
+                # ``False`` when the platform offers a host port the user
+                # must turn on (Home Assistant App: Settings › Apps ›
+                # Social Home › Network); ``null`` when not applicable,
+                # unknown, or the platform doesn't offer the port at all.
+                "host_port_mapped": (
+                    host_port.mapped
+                    if host_port is not None and host_port.declared
+                    else None
+                ),
                 "locale": settings.locale,
                 "idle_return_minutes": settings.idle_return_minutes,
                 "night_start": settings.night_start,
@@ -249,9 +277,10 @@ class AdminDashboardSetupLinkView(_DashboardAdminView):
             actor_is_admin=self.is_admin, now=now
         )
         settings = await self.settings.get()
+        base = self.base_url(settings, await self.host_port())
         return self._json(
             {
-                "url": f"{self.base_url(settings)}/enter?t={token}",
+                "url": f"{base}/enter?t={token}",
                 "expires_at": _iso(now + SETUP_TOKEN_TTL_SECONDS),
             }
         )

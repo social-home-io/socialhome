@@ -1489,6 +1489,13 @@ and is then served by a **separate aiohttp application on its own port**
   port mapping, so `PlatformAdapter.fixed_dashboard_port` returns `8100`
   there and the port can't be changed (422 `DASHBOARD_PORT_FIXED`);
   standalone and `ha` installs return `None` and let the admin choose.
+  The tablet URL uses the *host* port instead:
+  `PlatformAdapter.dashboard_host_port()` reads it from Supervisor's
+  `GET /addons/self/info` `network["8100/tcp"]` (cached for the process —
+  a new mapping only applies after the App restarts), and the admin API
+  reports `host_port_mapped: false` when the App declares the port but the
+  user hasn't turned it on (`null` when the App release doesn't declare it
+  — an expected state, logged once at INFO).
 
 Settings, password hash, PIN hash, cookie key, epoch and the pending setup token live
 under `dashboard.*` keys of `instance_config` (no table of their own —

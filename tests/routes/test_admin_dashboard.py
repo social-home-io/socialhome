@@ -17,8 +17,10 @@ from socialhome.app_keys import (
     dashboard_auth_key,
     dashboard_server_key,
     dashboard_settings_service_key,
+    platform_adapter_key,
 )
 from socialhome.dashboard.auth import COOKIE_NAME
+from socialhome.platform.adapter import DashboardHostPort
 from socialhome.routes.admin_dashboard import dashboard_base_url
 
 from .conftest import _auth
@@ -139,6 +141,7 @@ async def test_get_defaults(client):
     assert body["keep_screen_on"] is True
     assert body["show_status_text"] is False
     assert body["url_host_allowed"] is True
+    assert body["host_port_mapped"] is None
     assert body["last_seen_at"] is None
     assert isinstance(body["people"], list)
 
@@ -190,6 +193,70 @@ async def test_url_host_allowed_flags_a_public_name(client):
     body = await resp.json()
     assert body["url"] == "https://social.example.com"
     assert body["url_host_allowed"] is True
+
+
+# ── Platform-published host port (Home Assistant App) ──────────────────
+
+
+def _host_port(monkeypatch, client, result: DashboardHostPort | None) -> None:
+    """Make the platform adapter report ``result`` as the dashboard's
+    published host port (the Home Assistant App asks Supervisor)."""
+
+    async def fake(self):
+        return result
+
+    adapter = client.app[platform_adapter_key]
+    monkeypatch.setattr(type(adapter), "dashboard_host_port", fake)
+
+
+async def test_get_url_uses_the_mapped_host_port(client, monkeypatch):
+    _host_port(monkeypatch, client, DashboardHostPort(18100))
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={**_auth(client._tok), "X-Forwarded-Host": "homeassistant.local:8123"},
+    )
+    body = await resp.json()
+    assert body["url"] == "http://homeassistant.local:18100"
+    assert body["port"] == 8100
+    assert body["host_port_mapped"] is True
+
+
+async def test_get_unmapped_host_port_tells_the_admin(client, monkeypatch):
+    _host_port(monkeypatch, client, DashboardHostPort(None))
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={**_auth(client._tok), "X-Forwarded-Host": "homeassistant.local:8123"},
+    )
+    body = await resp.json()
+    assert body["url"] == "http://homeassistant.local:8100"
+    assert body["host_port_mapped"] is False
+
+
+async def test_get_undeclared_host_port_is_null(client, monkeypatch):
+    """The App doesn't declare the port (older App releases): nothing the
+    admin can do, so no "turn it on" prompt — the container port stays."""
+    _host_port(monkeypatch, client, DashboardHostPort(None, declared=False))
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={**_auth(client._tok), "Host": "homeassistant.local:8123"},
+    )
+    body = await resp.json()
+    assert body["url"] == "http://homeassistant.local:8100"
+    assert body["host_port_mapped"] is None
+
+
+async def test_put_reports_the_mapped_host_port(client, monkeypatch):
+    _host_port(monkeypatch, client, DashboardHostPort(9200))
+    body = await (await _put(client, {"locale": "de"})).json()
+    assert body["url"].endswith(":9200")
+    assert body["host_port_mapped"] is True
+
+
+async def test_address_wins_over_the_mapped_host_port(client, monkeypatch):
+    _host_port(monkeypatch, client, DashboardHostPort(9200))
+    body = await (await _put(client, {"address": "https://dash.example.com"})).json()
+    assert body["url"] == "https://dash.example.com"
+    assert body["host_port_mapped"] is True
 
 
 async def test_get_last_seen_at_is_iso_utc(client):
@@ -415,6 +482,21 @@ async def test_setup_link_signs_a_tablet_in(client):
             assert enter.status in (302, 303)
             assert enter.headers["Location"] == "/"
             assert COOKIE_NAME in enter.cookies
+
+
+async def test_setup_link_uses_the_mapped_host_port(client, monkeypatch):
+    await _set_password(client)
+    port = _free_port()
+    assert (await _put(client, {"enabled": True, "port": port})).status == 200
+    _host_port(monkeypatch, client, DashboardHostPort(18100))
+    resp = await client.post(
+        "/api/admin/dashboard/setup-link",
+        headers={**_auth(client._tok), "Host": "homeassistant.local:8123"},
+    )
+    assert resp.status == 200
+    parts = urlsplit((await resp.json())["url"])
+    assert parts.netloc == "homeassistant.local:18100"
+    assert parts.path == "/enter"
 
 
 async def test_revoke_sessions_bumps_the_epoch(client):
