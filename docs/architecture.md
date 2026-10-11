@@ -1590,14 +1590,19 @@ on the NEXT card); the day's items bucketed into four day parts (🌅 < 12,
 ☀️ < 17, 🌇 < 20, 🌙) with past / running / cancelled states; tomorrow as
 "sleeps"; today's jobs and who's home vs away. The clock is inline SVG
 drawn only with presentation attributes (the CSP forbids `style=`);
-`dashboard.js` turns the hands once a minute with `setAttribute("transform",
-…)` using the same formula, and the wedge — like a relative time — is
+`dashboard.js` re-checks every second, writes the hands when they
+change (`setAttribute("transform", …)`, the same formula), and the wedge — like a relative time — is
 `data-rel`, hidden while the data is stale. Icons come from
 `dashboard/icons.py`: a lesson's own timetable icon, a title's leading
 emoji, else a keyword guess over normalised words (casefolded, diacritics
 stripped) in en / de / es / fr / nl that mirrors the SPA's `suggestIcon`
 — whole words for short keywords, word starts for 4 letters, anywhere in
-a word from 5 letters so German compounds match — else a neutral 🔹.
+a word from 5 letters so German compounds match, with explicit
+word-start / whole-word markers where a stem hides in common words or
+surnames ("Kerstin", "Müller", "zwischen", "Preise") — else a neutral
+🔹. The subject table (kept equal to the SPA's by a test) is used only
+for lessons; a title's leading emoji counts only when it is a picture,
+not a letterlike or enclosed letter / digit (©, Ⓜ️, 🅰️, 🔟).
 Home's narrow lane bars use the same guess. Picture mode is part of the
 view key (it changes the rail and the night view), so toggling it reloads
 the tablet; night mode for a picture person is the analog clock, 🌙 / 🌅

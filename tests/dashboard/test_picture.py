@@ -40,7 +40,6 @@ from .factories import (
     MATHS,
     MIA,
     PASCAL,
-    SPORT,
     TODAY,
     TOMORROW,
     at,
@@ -379,6 +378,32 @@ def test_tomorrow_tiles_and_sleeps():
     assert _view(person(LEO)).sleeps == 0 and _view(person(LEO)).tomorrow == ()
 
 
+@pytest.mark.parametrize(
+    "started",
+    [
+        # A holiday Mon–Fri: all-day, started yesterday, sorts first.
+        event(
+            "trip",
+            "Urlaub",
+            at(0, day=TODAY - timedelta(days=1)),
+            at(0, day=TOMORROW + timedelta(days=3)),
+            "u-leo",
+            all_day=True,
+        ),
+        # A sleepover: 18:00 today until 10:00 tomorrow — running now.
+        event("so", "Sleepover", at(18), at(10, day=TOMORROW), "u-leo"),
+    ],
+)
+def test_tomorrow_items_that_started_earlier_are_still_one_sleep_away(started):
+    page = person(LEO, now=at(19), now_item=None, next_item=None)
+    swim = event("s", "Swimming", at(15, day=TOMORROW), at(16, day=TOMORROW), "u-leo")
+    v = _view(page, tomorrow=(started, swim))
+    # Everything in the list is tomorrow's: one sleep, never 0.
+    assert v.sleeps == 1
+    # A tomorrow tile is never "now" or "over" today.
+    assert [(t.current, t.past) for t in v.tomorrow] == [(False, False)] * 2
+
+
 def test_clock_label_and_current_day_part():
     v = _view(mia_page(now=at(18, 5)))
     assert v.clock.label == "It's 18:05"
@@ -409,8 +434,3 @@ def test_night_before_noon_shows_the_morning_item():
     # A lesson is "school" at night, as on the reader page.
     assert v.night.icon == "🎒"
     assert v.night.label == "Today 08:20: School"
-
-
-def test_sport_fixture_is_cancelled():
-    assert SPORT.status == "cancelled"  # the fixture the tests above rely on
-    assert MIA.picture_view is False and LEO.picture_view is True

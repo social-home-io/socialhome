@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from socialhome.dashboard.icons import (
@@ -71,6 +74,21 @@ def test_normalized_words_fold_case_diacritics_and_sharp_s():
         ("Reitstunde", "🐴"),
         ("Kuchen backen", "🍪"),
         ("Tisch decken", "🍽️"),
+        ("Kindergarten", "🎒"),
+        ("Preise abholen", "🚗"),
+        ("Baby shower", "🎉"),
+        ("Shower", "🛁"),
+        ("Müll rausbringen", "🗑️"),
+        ("Mülltonne", "🗑️"),
+        ("Biomüll", "🗑️"),
+        ("Feiertag", "🎉"),
+        ("Gartenarbeit", "🌱"),
+        ("Plätzchen backen", "🍪"),
+        ("Bett machen", "🛏️"),
+        ("Fischfutter", "🐟"),
+        ("Staub wischen", "🧹"),
+        ("Reiseapotheke", "🧳"),
+        ("Kerstmis", "🎄"),
         # Spanish
         ("Natación", "🏊"),
         ("Lavarse los dientes", "🦷"),
@@ -115,6 +133,39 @@ def test_suggest_icon_per_locale(title, icon):
         "Cathedral",  # not "cat"
         "Distanz",  # not "Tanz"
         "Nachmittag",  # not lunch
+        "Treffen mit Kerstin",  # not Christmas
+        "Termin bei Müller",  # not trash
+        "Frau Mueller",
+        "Zwischenprüfung",  # not cleaning
+        "Kaffee zwischen zwei Terminen",
+        "Lieferung geplant",  # not plants
+        "Feierabend",  # not a party
+        "Backend deploy",  # not baking
+        "Investir",  # not getting dressed
+        "Attendance",  # not dancing
+        "Unterzeichnen",  # not drawing
+        "Churchill",  # not church
+        "Bettina",  # not bed
+        "Herr Fischer",  # not fish
+        "Marcello",  # not cello
+        "Fleur",  # a name, not flowers
+        "Kitty",  # a name
+        "Chevalier",
+        "Obediente",  # not teeth
+        "Barrera",  # not sweeping
+        "Rechercher",  # not picking up
+        "Afvallen",  # not trash
+        "Aircraft",  # not crafts
+        "Spielberg",  # not play
+        "Biergarten",  # not gardening
+        "Termin in Gießen",  # a town, not watering
+        "Relief",  # not religion (subject table is for lessons)
+        "Germany",  # not German (subject table is for lessons)
+        "Breaking news",  # not a break
+        "Captain Cook",  # surnames
+        "Familie Flores",
+        "Julio Iglesias",
+        "Noel kommt",
         "Xyz",
         "",
         "123",
@@ -148,8 +199,9 @@ def test_lessons_use_the_spa_subject_table_first():
     assert suggest_icon("Homework", school=True) == "📚"  # not "home$"
     # A lesson title only the everyday table knows.
     assert suggest_icon("Schwimmtraining", school=True) == "🏊"
-    # An event title only the subject table knows.
-    assert suggest_icon("Mathe") == "🔢"
+    # The subject table is for lessons only: SPA-style word starts
+    # ("reli", "german", "break") misfire on everyday event titles.
+    assert suggest_icon("Mathe") is None
 
 
 def test_title_icon_prefers_a_leading_emoji():
@@ -198,3 +250,36 @@ def test_keyword_forms(keyword, needle):
 def test_spa_keyword_forms_never_match_inside_a_word():
     assert _needle("art", by_length=False) == " art "
     assert _needle("schwimm", by_length=False) == " schwimm"
+
+
+ICONS_TS = (
+    Path(__file__).resolve().parents[2] / "client/src/features/timetable/icons.ts"
+)
+
+
+def _spa_tables() -> list[tuple[str, tuple[str, ...]]]:
+    """``KEYWORDS`` of the SPA's ``icons.ts``, in this module's notation:
+    ``$``-marked and ≤ 3-letter keywords are whole words (``=``), the
+    rest word starts (``^``) — with each row's preset emoji."""
+    ts = ICONS_TS.read_text(encoding="utf-8")
+    emoji = dict((key, e) for e, key in re.findall(r"preset\('([^']+)', '(\w+)'\)", ts))
+    block = ts[ts.index("const KEYWORDS") : ts.index("export function suggestIcon")]
+    rows = []
+    for key, body in re.findall(r"\['(\w+)',\s*\[(.*?)\]\]", block, flags=re.S):
+        words = []
+        for k in re.findall(r"'([^']+)'", body):
+            if k.endswith("$"):
+                words.append("=" + k[:-1])
+            elif len(k) <= 3:
+                words.append("=" + k)
+            else:
+                words.append("^" + k)
+        rows.append((emoji[key], tuple(words)))
+    return rows
+
+
+def test_lesson_table_matches_the_spa():
+    """Keep in sync with client/src/features/timetable/icons.ts."""
+    spa = _spa_tables()
+    assert len(spa) >= 20
+    assert [(e, tuple(k)) for e, k in LESSON_KEYWORDS] == spa

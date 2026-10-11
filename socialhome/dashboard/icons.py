@@ -67,7 +67,7 @@ LESSON_KEYWORDS: Final[_Table] = (
         "🔬",
         (
             "^science",
-            "=nawi",
+            "^nawi",
             "^naturwissenschaft",
             "^biolog",
             "=bio",
@@ -86,7 +86,7 @@ LESSON_KEYWORDS: Final[_Table] = (
             "^turnen",
             "=pe",
             "=eps",
-            "educacion fisica",
+            "^educacion fisica",
             "=gym",
             "=lo",
             "^gymnastik",
@@ -207,7 +207,7 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "teeth",
             "tooth",
             "dentist",
-            "diente",
+            "^diente",
             "=dents",
             "^tanden",
             "^tandarts",
@@ -240,10 +240,35 @@ GENERAL_KEYWORDS: Final[_Table] = (
         "🎂",
         ("birthday", "geburtstag", "cumplean", "anniversaire", "verjaardag", "=jarig"),
     ),
-    ("🎄", ("weihnacht", "christmas", "xmas", "navidad", "=noel", "kerst")),
+    (
+        "🎄",
+        (
+            "weihnacht",
+            "christmas",
+            "xmas",
+            "navidad",
+            "=kerst",
+            "^kerstmis",
+            "^kerstfeest",
+            "^kerstavond",
+        ),
+    ),
     ("🐣", ("ostern", "easter", "pascua", "=paques", "=pasen")),
     ("🎃", ("halloween",)),
-    ("🎉", ("party", "fiesta", "feier", "=fete", "feest")),
+    (
+        "🎉",
+        (
+            "baby shower",
+            "party",
+            "fiesta",
+            "=feier",
+            "=feiern",
+            "^feiertag",
+            "^abschlussfeier",
+            "=fete",
+            "feest",
+        ),
+    ),
     # ── Meals ──
     (
         "🥣",
@@ -281,7 +306,11 @@ GENERAL_KEYWORDS: Final[_Table] = (
     (
         "🍪",
         (
-            "backen",
+            "=backen",
+            "^kuchenback",
+            "^platzchenback",
+            "^plaetzchenback",
+            "^brotback",
             "baking",
             "=bake",
             "hornear",
@@ -295,7 +324,7 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "gateau",
         ),
     ),
-    ("🍳", ("cooking", "=cook", "kochen", "cocinar", "cuisiner", "=koken", "^kook")),
+    ("🍳", ("cooking", "kochen", "cocinar", "cuisiner", "=koken", "^kook")),
     # ── Chores ──
     (
         "🍽️",
@@ -332,14 +361,26 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "rubbish",
             "=bin",
             "=bins",
-            "*mull",
-            "muell",
+            "=mull",
+            "^mulltonne",
+            "^mulleimer",
+            "^mullabfuhr",
+            "^restmull",
+            "^biomull",
+            "=muell",
+            "^muelltonne",
+            "^muelleimer",
+            "^restmuell",
+            "^biomuell",
             "abfall",
             "basura",
             "poubelle",
             "ordures",
             "vuilnis",
-            "afval",
+            "=afval",
+            "^afvalbak",
+            "^afvalzak",
+            "^afvalcontainer",
         ),
     ),
     (
@@ -377,11 +418,11 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "staubsaug",
             "=fegen",
             "=kehren",
-            "wischen",
+            "^wischen",
             "limpiar",
             "limpieza",
             "ordenar",
-            "barrer",
+            "=barrer",
             "aspirar",
             "nettoy",
             "=ranger",
@@ -402,7 +443,10 @@ GENERAL_KEYWORDS: Final[_Table] = (
         (
             "bedtime",
             "=bed",
-            "^bett",
+            "=bett",
+            "^bettzeit",
+            "^bettgeh",
+            "^betthupferl",
             "schlaf",
             "sleep",
             "=nap",
@@ -430,7 +474,7 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "=baden",
             "^badewanne",
             "=bad",
-            "shower",
+            "^shower",
             "dusch",
             "=bano",
             "^banar",
@@ -439,14 +483,13 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "douche",
         ),
     ),
-    ("👕", ("get dressed", "anzieh", "^umzieh", "vestir", "habiller", "aankleden")),
+    ("👕", ("get dressed", "anzieh", "^umzieh", "^vestir", "habiller", "aankleden")),
     # ── Pets + garden ──
     (
         "🐱",
         (
             "=cat",
             "=cats",
-            "kitty",
             "kitten",
             "^katze",
             "=gato",
@@ -472,14 +515,28 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "=hond",
         ),
     ),
-    ("🐟", ("=fish", "^fisch", "=pez", "=peces", "poisson", "=vis", "aquarium")),
+    (
+        "🐟",
+        (
+            "=fish",
+            "=fisch",
+            "=fische",
+            "^fischfutter",
+            "=pez",
+            "=peces",
+            "poisson",
+            "=vis",
+            "aquarium",
+        ),
+    ),
     (
         "🐰",
         (
             "rabbit",
             "bunny",
             "kaninchen",
-            "^hase",
+            "=hase",
+            "=hasen",
             "conejo",
             "lapin",
             "konijn",
@@ -492,13 +549,17 @@ GENERAL_KEYWORDS: Final[_Table] = (
     (
         "🐴",
         (
-            "^reit",
+            "^reiten",
+            "^reitstunde",
+            "^reitunterricht",
+            "^reitstall",
+            "^reithalle",
             "riding",
             "horse",
             "^pferd",
             "caballo",
             "equitation",
-            "cheval",
+            "=cheval",
             "^paard",
             "=pony",
         ),
@@ -506,20 +567,18 @@ GENERAL_KEYWORDS: Final[_Table] = (
     (
         "🌱",
         (
-            "plant",
+            "^plant",
             "pflanz",
             "^blume",
             "flower",
             "=flor",
-            "=flores",
-            "fleur",
+            "=fleurs",
             "bloem",
-            "garden",
-            "garten",
-            "jardin",
+            "^garden",
+            "^garten",
+            "^jardin",
             "=tuin",
             "tuinieren",
-            "giess",
             "=regar",
             "arroser",
             "=gieten",
@@ -608,8 +667,8 @@ GENERAL_KEYWORDS: Final[_Table] = (
     (
         "💃",
         (
-            "dance",
-            "dancing",
+            "^dance",
+            "^dancing",
             "^tanz",
             "danza",
             "danse",
@@ -631,7 +690,7 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "jiu jitsu",
         ),
     ),
-    ("🤸", ("turnen", "gymnast", "gimnasia", "^acro")),
+    ("🤸", ("turnen", "gymnast", "gimnasia", "^acrobat", "^akrobat")),
     ("🧘", ("=yoga",)),
     ("🏋️", ("=gym", "fitness", "gimnasio", "workout", "^sportschool")),
     (
@@ -668,7 +727,7 @@ GENERAL_KEYWORDS: Final[_Table] = (
     # ── Music + making things ──
     ("🎹", ("piano", "klavier", "keyboard")),
     ("🎸", ("guitar", "gitarre", "guitarra", "guitare", "gitaar")),
-    ("🎻", ("violin", "geige", "violon", "viool", "cello")),
+    ("🎻", ("violin", "geige", "violon", "viool", "=cello")),
     ("🥁", ("=drums", "drumming", "schlagzeug", "trommel", "drummen")),
     ("🪈", ("flote", "floete", "=flute", "flauta", "=fluit")),
     (
@@ -691,17 +750,17 @@ GENERAL_KEYWORDS: Final[_Table] = (
         "🎨",
         (
             "basteln",
-            "craft",
+            "^craft",
             "painting",
             "^malen",
             "=paint",
             "pintar",
             "peindre",
             "dessin",
-            "schilder",
+            "^schilderen",
             "knutsel",
             "tekenen",
-            "zeichnen",
+            "^zeichnen",
             "dibujo",
             "dibujar",
             "manualidad",
@@ -729,7 +788,21 @@ GENERAL_KEYWORDS: Final[_Table] = (
     ("🎬", ("movie", "=film", "=films", "=kino", "=cine", "cinema", "bioscoop")),
     ("🦁", ("=zoo", "^zoolog", "tierpark", "dierentuin")),
     ("🛝", ("spielplatz", "playground", "=parque", "=parc", "=park", "speeltuin")),
-    ("🧩", ("playdate", "^spiel", "=play", "=jugar", "=jouer", "=spelen")),
+    (
+        "🧩",
+        (
+            "playdate",
+            "=spiel",
+            "=spielen",
+            "^spielgruppe",
+            "^spieltreff",
+            "^spielenach",
+            "=play",
+            "=jugar",
+            "=jouer",
+            "=spelen",
+        ),
+    ),
     (
         "👵",
         (
@@ -752,7 +825,19 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "grootouders",
         ),
     ),
-    ("⛪", ("church", "kirche", "iglesia", "eglise", "=kerk", "=misa", "gottesdienst")),
+    (
+        "⛪",
+        (
+            "=church",
+            "=churches",
+            "kirche",
+            "=iglesia",
+            "eglise",
+            "=kerk",
+            "=misa",
+            "gottesdienst",
+        ),
+    ),
     # ── Travel + work ──
     (
         "✈️",
@@ -784,9 +869,9 @@ GENERAL_KEYWORDS: Final[_Table] = (
             "=plage",
         ),
     ),
-    ("🧳", ("=trip", "reise", "=viaje", "voyage", "=reis", "^reizen")),
+    ("🧳", ("=trip", "^reise", "=viaje", "voyage", "=reis", "^reizen")),
     ("🚌", ("=bus", "schulbus", "=autobus")),
-    ("🚗", ("abholen", "pick up", "pickup", "=recoger", "chercher", "=ophalen")),
+    ("🚗", ("abholen", "pick up", "pickup", "=recoger", "aller chercher", "=ophalen")),
     (
         "💼",
         (
@@ -891,13 +976,15 @@ def _search(hay: str, table: _Compiled) -> str | None:
 def suggest_icon(title: str | None, *, school: bool = False) -> str | None:
     """An emoji for ``title`` from the keyword tables — ``None`` when
     nothing matches. ``school=True`` (a timetable slot) tries the
-    subject table first, then the everyday one; otherwise the other way
-    round."""
+    subject table first, then the everyday one; anything else uses only
+    the everyday one."""
     words = normalized_words(title or "")
     if not words:
         return None
     hay = f" {' '.join(words)} "
-    tables = (_LESSONS, _GENERAL) if school else (_GENERAL, _LESSONS)
+    # The subject table only for lessons: its SPA-style word starts
+    # ("reli", "german", "break") misfire on everyday event titles.
+    tables = (_LESSONS, _GENERAL) if school else (_GENERAL,)
     for table in tables:
         found = _search(hay, table)
         if found is not None:

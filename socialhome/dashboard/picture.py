@@ -4,7 +4,8 @@ Mockup D: no words except names, no digits. What a five-year-old reads
 instead:
 
 * **an analog clock** showing the real household time, its hands set
-  server-side (and turned each minute by ``dashboard.js``);
+  server-side (``dashboard.js`` re-checks them every second and
+  writes the hands when they change);
 * **NOW → NEXT**: two big emoji cards. NEXT carries a *time-timer
   wedge* — see :func:`wedge`;
 * **MY DAY**: the day's events and lessons as emoji tiles under the
@@ -34,7 +35,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Final
 
 from ..domain.household_dashboard import (
@@ -98,8 +99,8 @@ FREE_HOME_ICON: Final = "🏠"
 def hand_angles(now: datetime) -> tuple[float, float]:
     """Hour and minute hand, in degrees clockwise from twelve, for
     ``now``'s wall-clock time (in its own zone — the household's).
-    Whole minutes only: ``dashboard.js`` turns the hands once a minute
-    with the same formula."""
+    Whole minutes only: ``dashboard.js`` re-checks every second with
+    the same formula and writes the hands when they change."""
     hour = (now.hour % 12) * 30 + now.minute * 0.5
     return hour, now.minute * 6.0
 
@@ -305,15 +306,18 @@ def _is_cancelled(item: DashboardAgendaItem) -> bool:
     return isinstance(item, DashboardLesson) and item.status == "cancelled"
 
 
-def _tile(item: DashboardAgendaItem, f: Fmt) -> PictureTile:
+def _tile(item: DashboardAgendaItem, f: Fmt, *, today: bool = True) -> PictureTile:
+    """An item's tile. ``today=False`` (tomorrow's list): never past or
+    running — an event that started earlier (a holiday, a sleepover)
+    still shows as tomorrow's."""
     cancelled = _is_cancelled(item)
     key = "dashboard.picture.cancelled" if cancelled else "dashboard.picture.item"
     return PictureTile(
         icon=item_icon(item),
         label=f.t(key, when=f.span(item), title=f.title(item)),
         color=f.kc(f.item_color(item)),
-        past=f.is_past(item),
-        current=f.is_now(item) and not cancelled,
+        past=today and f.is_past(item),
+        current=today and f.is_now(item) and not cancelled,
         cancelled=cancelled,
     )
 
@@ -460,7 +464,9 @@ def picture_view(
             r=PIE_RADIUS,
         )
     tomorrow_tiles = tuple(
-        _school_tile(i, f) if isinstance(i, DashboardLesson) else _tile(i, f)
+        _school_tile(i, f)
+        if isinstance(i, DashboardLesson)
+        else _tile(i, f, today=False)
         for i in tomorrow
     )
     home, away = _whereabouts(page)
@@ -473,7 +479,11 @@ def picture_view(
         next=next_tile,
         next_pie=pie,
         tomorrow=tomorrow_tiles,
-        sleeps=(sleeps_until(page.today, tomorrow[0].start.date()) if tomorrow else 0),
+        # The list holds only tomorrow's things (some may have started
+        # earlier — a holiday, a sleepover): always one sleep away.
+        sleeps=(
+            sleeps_until(page.today, page.today + timedelta(days=1)) if tomorrow else 0
+        ),
         jobs=_jobs(page, f),
         home=home,
         away=away,

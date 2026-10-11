@@ -21,6 +21,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
+from typing import cast
 from urllib.parse import quote, urlsplit
 
 from aiohttp import web
@@ -560,8 +561,7 @@ async def _home_board(request: web.Request) -> _Board:
         template="_home.html.j2",
         extra={},
     )
-    fmt = board.context["f"]
-    assert isinstance(fmt, Fmt)
+    fmt = cast(Fmt, board.context["f"])
     board.context.update(
         snap=snap,
         timeline=build_timeline(snap, fmt),
@@ -614,8 +614,7 @@ async def _person_board(request: web.Request) -> _Board | None:
         },
     )
     if page.person.picture_view:
-        fmt = board.context["f"]
-        assert isinstance(fmt, Fmt)
+        fmt = cast(Fmt, board.context["f"])
         board.context["picture"] = picture_view(page, fmt, tomorrow=tomorrow)
     return board
 

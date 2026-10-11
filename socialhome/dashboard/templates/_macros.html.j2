@@ -64,7 +64,8 @@
 {#- ── Picture view (no words except names, no digits) ───────────────── -#}
 
 {#- The analog clock: hands set from the household time (dashboard.js
-    turns them each minute through their transform attribute) and the
+    re-checks every second and writes their transform attribute when
+    they change) and the
     time-timer wedge until NEXT. SVG attributes only — never style=. -#}
 {% macro analog_clock(c, cls="", wedge=True) -%}
 <svg class="dash-pv-clock{% if cls %} {{ cls }}{% endif %}" viewBox="0 0 200 200" role="img" aria-label="{{ c.label }}" focusable="false">
