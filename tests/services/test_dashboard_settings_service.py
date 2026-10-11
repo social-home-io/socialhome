@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -15,6 +17,7 @@ from socialhome.domain.household_dashboard import (
     DashboardSettings,
     DashboardSettingsInvalidError,
 )
+from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.instance_config_repo import AbstractInstanceConfigRepo
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
 
@@ -36,6 +39,25 @@ class _FakeRepo:
 
     async def delete(self, key: str) -> None:
         self.rows.pop(key, None)
+
+    async def set_many(self, items) -> None:
+        self.rows.update(items)
+
+
+class _SpyRepo(_FakeRepo):
+    """Records every key read, to prove ``get`` never loads secrets."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.read: list[str] = []
+
+    async def get(self, key: str) -> str | None:
+        self.read.append(key)
+        return await super().get(key)
+
+    async def get_many(self, prefix: str) -> dict[str, str]:
+        self.read.append(prefix + "*")
+        return await super().get_many(prefix)
 
 
 @pytest.fixture
@@ -252,6 +274,35 @@ async def test_fixed_port_bool_refused_as_invalid(fixed_svc):
         await fixed_svc.update(actor_is_admin=True, patch={"port": True})
 
 
+async def test_enable_rejected_when_stored_port_clashes_with_main(repo):
+    """The clash is checked on the merged state, not only the patch."""
+    svc = DashboardSettingsService(repo, fixed_port=None, main_port=8100)
+    await _with_password(svc)
+    with pytest.raises(DashboardSettingsInvalidError) as exc:
+        await svc.update(actor_is_admin=True, patch={"enabled": True})
+    assert exc.value.params == {"field": "port"}
+
+
+async def test_disabled_dashboard_may_keep_clashing_default_port(repo):
+    svc = DashboardSettingsService(repo, fixed_port=None, main_port=8100)
+    s = await svc.update(actor_is_admin=True, patch={"locale": "de"})
+    assert s.locale == "de"
+
+
+async def test_fixed_port_skips_main_port_clash(repo):
+    svc = DashboardSettingsService(repo, fixed_port=8100, main_port=8100)
+    await _with_password(svc)
+    s = await svc.update(actor_is_admin=True, patch={"enabled": True})
+    assert s.enabled is True
+
+
+async def test_get_reads_no_secrets():
+    spy = _SpyRepo()
+    svc = DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT)
+    await svc.get()
+    assert sorted(spy.read) == ["dashboard.password_set_at", "dashboard.settings"]
+
+
 # ── people ───────────────────────────────────────────────────────────────
 
 
@@ -274,6 +325,21 @@ async def test_people_picture_reset_to_default(svc):
         actor_is_admin=True, patch={"people": {"u1": {"picture": None}}}
     )
     assert s.person("u1").picture is None
+
+
+async def test_people_null_deletes_entry(svc):
+    await svc.update(
+        actor_is_admin=True,
+        patch={"people": {"u1": {"show": False}, "u2": {"show": False}}},
+    )
+    s = await svc.update(actor_is_admin=True, patch={"people": {"u1": None}})
+    assert s.people_map() == {"u2": DashboardPersonSettings(show=False)}
+    assert s.person("u1") == DashboardPersonSettings()
+
+
+async def test_people_null_for_absent_user_is_noop(svc):
+    s = await svc.update(actor_is_admin=True, patch={"people": {"ghost": None}})
+    assert s.people == ()
 
 
 @pytest.mark.parametrize(
@@ -328,6 +394,26 @@ async def test_verify_password(svc):
     assert await svc.verify_password(None) is False  # type: ignore[arg-type]
 
 
+async def test_set_password_writes_atomically(svc, repo):
+    """Hash, timestamp and new epoch land in one ``set_many`` batch."""
+    batches: list[dict[str, str]] = []
+    real = repo.set_many
+
+    async def spy(items):
+        batches.append(dict(items))
+        await real(items)
+
+    repo.set_many = spy
+    await _with_password(svc)
+    assert len(batches) == 1
+    assert set(batches[0]) == {
+        "dashboard.password_hash",
+        "dashboard.password_set_at",
+        "dashboard.epoch",
+    }
+    assert batches[0]["dashboard.epoch"] == "1"
+
+
 async def test_set_password_bumps_epoch(svc):
     assert await svc.epoch() == 0
     await _with_password(svc)
@@ -350,35 +436,127 @@ async def test_revoke_sessions_bumps_epoch(svc):
     assert await svc.epoch() == 2
 
 
-async def test_corrupt_epoch_reads_zero(svc, repo):
+class _YieldingRepo(_FakeRepo):
+    """Yields to the loop on every call, like a real DB round-trip."""
+
+    async def get(self, key: str) -> str | None:
+        await asyncio.sleep(0)
+        return await super().get(key)
+
+    async def get_many(self, prefix: str) -> dict[str, str]:
+        await asyncio.sleep(0)
+        return await super().get_many(prefix)
+
+    async def set(self, key: str, value: str) -> None:
+        await asyncio.sleep(0)
+        await super().set(key, value)
+
+    async def set_many(self, items) -> None:
+        await asyncio.sleep(0)
+        await super().set_many(items)
+
+
+async def test_concurrent_revokes_each_bump():
+    svc = DashboardSettingsService(_YieldingRepo(), fixed_port=None, main_port=1)
+    await asyncio.gather(*(svc.revoke_sessions(actor_is_admin=True) for _ in range(5)))
+    assert await svc.epoch() == 5
+
+
+async def test_concurrent_updates_do_not_lose_people():
+    svc = DashboardSettingsService(_YieldingRepo(), fixed_port=None, main_port=1)
+    await asyncio.gather(
+        *(
+            svc.update(
+                actor_is_admin=True, patch={"people": {f"u{i}": {"show": False}}}
+            )
+            for i in range(5)
+        )
+    )
+    assert len((await svc.get()).people) == 5
+
+
+async def test_corrupt_epoch_is_reseeded_high(svc, repo):
+    """A corrupt epoch must not reset to 0 — old cookies minted at small
+    epochs would validate again. A fresh random epoch is persisted."""
     repo.rows["dashboard.epoch"] = "x"
-    assert await svc.epoch() == 0
+    first = await svc.epoch()
+    assert first > 1_000_000
+    assert repo.rows["dashboard.epoch"] == str(first)
+    assert await svc.epoch() == first
     await svc.revoke_sessions(actor_is_admin=True)
-    assert await svc.epoch() == 1
+    assert await svc.epoch() == first + 1
 
 
 # ── cookie secret ────────────────────────────────────────────────────────
 
 
-async def test_cookie_secret_created_once(svc, repo):
+def _km() -> KeyManager:
+    return KeyManager(os.urandom(32))
+
+
+async def test_cookie_secret_requires_key_manager(svc, repo):
+    """Fail closed: never store the cookie key in plaintext."""
+    with pytest.raises(RuntimeError):
+        await svc.cookie_secret()
+    assert "dashboard.cookie_secret" not in repo.rows
+
+
+async def test_cookie_secret_created_once_and_kek_wrapped(svc, repo):
+    km = _km()
+    svc.attach_key_manager(km)
     first = await svc.cookie_secret()
     assert len(first) == 32
-    assert repo.rows["dashboard.cookie_secret"] == first.hex()
+    stored = repo.rows["dashboard.cookie_secret"]
+    assert stored != first.hex()
+    assert first.hex() not in stored
+    assert km.decrypt(stored, associated_data=b"dashboard.cookie_secret") == first
     assert await svc.cookie_secret() == first
 
 
 async def test_cookie_secret_survives_new_service(repo):
+    km = _km()
     a = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
     b = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    a.attach_key_manager(km)
+    b.attach_key_manager(km)
     assert await a.cookie_secret() == await b.cookie_secret()
 
 
-@pytest.mark.parametrize("stored", ["zz", "ab" * 8])
+async def test_cookie_secret_other_kek_is_replaced(repo):
+    a = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    a.attach_key_manager(_km())
+    old = await a.cookie_secret()
+    b = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    km_b = _km()
+    b.attach_key_manager(km_b)
+    new = await b.cookie_secret()
+    assert new != old
+    assert len(new) == 32
+    assert (
+        km_b.decrypt(
+            repo.rows["dashboard.cookie_secret"],
+            associated_data=b"dashboard.cookie_secret",
+        )
+        == new
+    )
+
+
+@pytest.mark.parametrize("stored", ["zz", "ab" * 32])
 async def test_cookie_secret_corrupt_is_replaced(svc, repo, stored):
     repo.rows["dashboard.cookie_secret"] = stored
+    svc.attach_key_manager(_km())
     secret = await svc.cookie_secret()
     assert len(secret) == 32
-    assert repo.rows["dashboard.cookie_secret"] == secret.hex()
+    assert repo.rows["dashboard.cookie_secret"] != stored
+
+
+async def test_cookie_secret_wrong_length_plaintext_is_replaced(svc, repo):
+    km = _km()
+    repo.rows["dashboard.cookie_secret"] = km.encrypt(
+        b"short", associated_data=b"dashboard.cookie_secret"
+    )
+    svc.attach_key_manager(km)
+    assert len(await svc.cookie_secret()) == 32
 
 
 # ── setup token ──────────────────────────────────────────────────────────

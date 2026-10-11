@@ -73,3 +73,24 @@ async def test_get_many_empty_prefix_returns_all(repo):
     await repo.set("x", "1")
     result = await repo.get_many("")
     assert result["x"] == "1"
+
+
+async def test_set_many_upserts_all(repo):
+    await repo.set("a", "old")
+    await repo.set_many({"a": "1", "b": "2"})
+    assert await repo.get("a") == "1"
+    assert await repo.get("b") == "2"
+
+
+async def test_set_many_empty_is_noop(repo):
+    await repo.set_many({})
+    assert await repo.get_many("") == {}
+
+
+async def test_set_many_is_atomic(repo):
+    """A failing row rolls back every row of the batch."""
+    await repo.set("a", "old")
+    with pytest.raises(Exception):
+        await repo.set_many({"a": "new", "b": object()})  # type: ignore[dict-item]
+    assert await repo.get("a") == "old"
+    assert await repo.get("b") is None

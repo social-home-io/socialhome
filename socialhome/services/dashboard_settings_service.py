@@ -6,7 +6,8 @@ Everything lives in the ``instance_config`` key/value table under the
 * ``dashboard.settings`` — JSON of the non-secret settings (incl. people);
 * ``dashboard.password_hash`` / ``dashboard.password_set_at`` — the
   scrypt hash of the household dashboard password and when it was set;
-* ``dashboard.cookie_secret`` — hex of the 32-byte tablet-cookie key;
+* ``dashboard.cookie_secret`` — the 32-byte tablet-cookie key, wrapped
+  under the instance KEK (:class:`KeyManager`, attached after startup);
 * ``dashboard.epoch`` — session epoch; bumping it signs out every tablet;
 * ``dashboard.setup_token`` — JSON ``{"hash", "expires_at"}`` of the one
   pending single-use tablet setup token (only the SHA-256 is stored).
@@ -41,6 +42,7 @@ from ..domain.household_dashboard import (
     DashboardSettings,
     DashboardSettingsInvalidError,
 )
+from ..infrastructure.key_manager import KeyManager, KeyManagerError
 from ..platform.local_credentials import hash_password, verify_password
 from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
 
@@ -55,6 +57,7 @@ KEY_EPOCH = "dashboard.epoch"
 KEY_SETUP_TOKEN = "dashboard.setup_token"
 
 _COOKIE_SECRET_BYTES = 32
+_COOKIE_SECRET_AAD = KEY_COOKIE_SECRET.encode("ascii")
 _MIN_PORT = 1024
 _MAX_PORT = 65535
 _HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
@@ -137,6 +140,10 @@ def _merge_people(
     for user_id, entry in raw.items():
         if not isinstance(user_id, str) or not user_id:
             raise _Invalid
+        if entry is None:
+            # ``null`` drops the entry — the person is back on defaults.
+            merged.pop(user_id, None)
+            continue
         merged[user_id] = _check_person(
             entry, current.get(user_id, DashboardPersonSettings())
         )
@@ -192,7 +199,7 @@ def _token_hash(raw: str) -> str:
 class DashboardSettingsService:
     """Admin-managed household dashboard configuration and credentials."""
 
-    __slots__ = ("_repo", "_fixed_port", "_main_port", "_lock")
+    __slots__ = ("_repo", "_fixed_port", "_main_port", "_lock", "_key_manager")
 
     def __init__(
         self,
@@ -204,10 +211,16 @@ class DashboardSettingsService:
         self._repo = repo
         self._fixed_port = fixed_port
         self._main_port = main_port
-        # Serialises read-modify-write on the cookie secret and setup token
-        # so concurrent callers can't mint two secrets or spend one token
-        # twice.
+        # Serialises every read-modify-write (settings, epoch, password,
+        # cookie secret, setup token) so concurrent callers can't lose an
+        # update, mint two secrets or spend one token twice. Locked public
+        # methods only call the unlocked ``_*_unlocked`` helpers.
         self._lock = asyncio.Lock()
+        self._key_manager: KeyManager | None = None
+
+    def attach_key_manager(self, key_manager: KeyManager) -> None:
+        """Late-wire the instance KEK — it only exists after startup."""
+        self._key_manager = key_manager
 
     @property
     def port_fixed(self) -> bool:
@@ -217,10 +230,15 @@ class DashboardSettingsService:
     # ── Settings ────────────────────────────────────────────────────────
 
     async def _load(self) -> DashboardSettings:
-        """Stored settings as-is (the stored port, even when fixed)."""
-        rows = await self._repo.get_many(KEY_PREFIX)
-        settings = _settings_from_json(rows.get(KEY_SETTINGS))
-        return replace(settings, password_set_at=rows.get(KEY_PASSWORD_SET_AT))
+        """Stored settings as-is (the stored port, even when fixed).
+
+        Reads only the two non-secret keys — never the hash, cookie key
+        or setup token.
+        """
+        settings = _settings_from_json(await self._repo.get(KEY_SETTINGS))
+        return replace(
+            settings, password_set_at=await self._repo.get(KEY_PASSWORD_SET_AT)
+        )
 
     async def get(self) -> DashboardSettings:
         """Current settings; a platform-fixed port always wins."""
@@ -245,6 +263,11 @@ class DashboardSettingsService:
         _require_admin(actor_is_admin)
         if not isinstance(patch, Mapping):
             raise DashboardSettingsInvalidError("patch")
+        async with self._lock:
+            await self._update_unlocked(patch)
+        return await self.get()
+
+    async def _update_unlocked(self, patch: Mapping[str, object]) -> None:
         current = await self._load()
         changes: dict[str, object] = {}
         for key, value in patch.items():
@@ -272,8 +295,15 @@ class DashboardSettingsService:
         if changes.get("enabled") is True and not await self._has_password():
             raise DashboardPasswordRequiredError()
         updated = replace(current, **changes)  # type: ignore[arg-type]
+        if (
+            updated.enabled
+            and self._fixed_port is None
+            and updated.port == self._main_port
+        ):
+            # Checked on the merged state: enabling with a stored (or
+            # default) port that clashes with the main app is refused too.
+            raise DashboardSettingsInvalidError("port")
         await self._repo.set(KEY_SETTINGS, _settings_to_json(updated))
-        return await self.get()
 
     # ── Password ────────────────────────────────────────────────────────
 
@@ -288,11 +318,16 @@ class DashboardSettingsService:
         if len(password) < MIN_PASSWORD_LENGTH:
             raise DashboardPasswordTooShortError()
         hashed = await asyncio.to_thread(hash_password, password)
-        await self._repo.set(KEY_PASSWORD_HASH, hashed)
-        await self._repo.set(
-            KEY_PASSWORD_SET_AT, datetime.now(timezone.utc).isoformat()
-        )
-        await self._bump_epoch()
+        async with self._lock:
+            # Hash, timestamp and new epoch land together — a crash can't
+            # leave a new password with old tablets still signed in.
+            await self._repo.set_many(
+                {
+                    KEY_PASSWORD_HASH: hashed,
+                    KEY_PASSWORD_SET_AT: datetime.now(timezone.utc).isoformat(),
+                    KEY_EPOCH: str(await self._epoch_unlocked() + 1),
+                }
+            )
 
     async def verify_password(self, password: str) -> bool:
         if not isinstance(password, str):
@@ -305,37 +340,56 @@ class DashboardSettingsService:
     # ── Sessions ────────────────────────────────────────────────────────
 
     async def epoch(self) -> int:
+        """Current session epoch (``0`` before the first bump)."""
+        async with self._lock:
+            return await self._epoch_unlocked()
+
+    async def _epoch_unlocked(self) -> int:
         raw = await self._repo.get(KEY_EPOCH)
         if raw is None:
             return 0
         try:
             return int(raw)
         except ValueError:
-            log.warning("stored dashboard epoch is not an integer — treating as 0")
-            return 0
-
-    async def _bump_epoch(self) -> None:
-        await self._repo.set(KEY_EPOCH, str(await self.epoch() + 1))
+            # Never fall back to 0: cookies minted at small epochs would
+            # validate again. Reseed far above any epoch reached by bumps.
+            fresh = (1 << 61) | secrets.randbits(61)
+            log.warning("stored dashboard epoch is corrupt — reseeding")
+            await self._repo.set(KEY_EPOCH, str(fresh))
+            return fresh
 
     async def revoke_sessions(self, *, actor_is_admin: bool) -> None:
         """Sign out every tablet."""
         _require_admin(actor_is_admin)
-        await self._bump_epoch()
+        async with self._lock:
+            await self._repo.set(KEY_EPOCH, str(await self._epoch_unlocked() + 1))
 
     async def cookie_secret(self) -> bytes:
-        """The tablet-cookie signing key, created on first use."""
+        """The tablet-cookie signing key, created on first use.
+
+        Stored KEK-wrapped. Raises :class:`RuntimeError` before
+        :meth:`attach_key_manager` — the key is never kept in plaintext.
+        A value that won't unwrap (other KEK, corrupt) is replaced, which
+        signs every tablet out.
+        """
+        km = self._key_manager
+        if km is None:
+            raise RuntimeError("dashboard cookie secret needs the instance KEK")
         async with self._lock:
             stored = await self._repo.get(KEY_COOKIE_SECRET)
             if stored is not None:
                 try:
-                    secret = bytes.fromhex(stored)
-                except ValueError:
+                    secret = km.decrypt(stored, associated_data=_COOKIE_SECRET_AAD)
+                except KeyManagerError:
                     secret = b""
                 if len(secret) == _COOKIE_SECRET_BYTES:
                     return secret
                 log.warning("stored dashboard cookie secret is invalid — replacing")
             secret = secrets.token_bytes(_COOKIE_SECRET_BYTES)
-            await self._repo.set(KEY_COOKIE_SECRET, secret.hex())
+            await self._repo.set(
+                KEY_COOKIE_SECRET,
+                km.encrypt(secret, associated_data=_COOKIE_SECRET_AAD),
+            )
             return secret
 
     # ── Setup token ─────────────────────────────────────────────────────

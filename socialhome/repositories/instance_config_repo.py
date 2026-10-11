@@ -9,9 +9,15 @@ is the owning service's concern.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+
+_UPSERT = (
+    "INSERT INTO instance_config(key, value) VALUES(?, ?) "
+    "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+)
 
 
 @runtime_checkable
@@ -21,6 +27,8 @@ class AbstractInstanceConfigRepo(Protocol):
     async def get_many(self, prefix: str) -> dict[str, str]: ...
 
     async def set(self, key: str, value: str) -> None: ...
+
+    async def set_many(self, items: Mapping[str, str]) -> None: ...
 
     async def delete(self, key: str) -> None: ...
 
@@ -54,10 +62,20 @@ class SqliteInstanceConfigRepo:
 
     async def set(self, key: str, value: str) -> None:
         await self._db.enqueue(
-            "INSERT INTO instance_config(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            _UPSERT,
             (key, value),
         )
+
+    async def set_many(self, items: Mapping[str, str]) -> None:
+        """Upsert every pair in one transaction — all land or none do."""
+        rows = list(items.items())
+        if not rows:
+            return
+
+        def _write(conn) -> None:
+            conn.executemany(_UPSERT, rows)
+
+        await self._db.transact(_write)
 
     async def delete(self, key: str) -> None:
         await self._db.enqueue(
