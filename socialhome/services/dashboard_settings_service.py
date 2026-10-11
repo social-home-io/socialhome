@@ -9,6 +9,10 @@ Everything lives in the ``instance_config`` key/value table under the
 * ``dashboard.cookie_secret`` — the 32-byte tablet-cookie key, wrapped
   under the instance KEK (:class:`KeyManager`, attached after startup);
 * ``dashboard.epoch`` — session epoch; bumping it signs out every tablet;
+* ``dashboard.pin_hash`` / ``dashboard.pin_set_at`` — the scrypt hash of
+  the tablets' privacy-lock PIN and when it was set (the timestamp alone
+  tells the dashboard a PIN exists, so its per-request settings read
+  never touches the hash);
 * ``dashboard.setup_token`` — JSON ``{"hash", "expires_at"}`` of the one
   pending single-use tablet setup token (only the SHA-256 is stored).
 
@@ -35,12 +39,15 @@ from urllib.parse import urlsplit
 from ..domain.household_dashboard import (
     IDLE_RETURN_CHOICES,
     MAX_ADDRESS_LENGTH,
+    MAX_PIN_LENGTH,
     MIN_PASSWORD_LENGTH,
+    MIN_PIN_LENGTH,
     SETUP_TOKEN_TTL_SECONDS,
     SUPPORTED_DASHBOARD_LOCALES,
     DashboardPasswordRequiredError,
     DashboardPasswordTooShortError,
     DashboardPersonSettings,
+    DashboardPinInvalidError,
     DashboardPortFixedError,
     DashboardSettings,
     DashboardSettingsInvalidError,
@@ -58,11 +65,15 @@ KEY_PASSWORD_SET_AT = "dashboard.password_set_at"
 KEY_COOKIE_SECRET = "dashboard.cookie_secret"
 KEY_EPOCH = "dashboard.epoch"
 KEY_SETUP_TOKEN = "dashboard.setup_token"
+KEY_PIN_HASH = "dashboard.pin_hash"
+KEY_PIN_SET_AT = "dashboard.pin_set_at"
 
 _COOKIE_SECRET_BYTES = 32
 _COOKIE_SECRET_AAD = KEY_COOKIE_SECRET.encode("ascii")
 _MIN_PORT = 1024
 _MAX_PORT = 65535
+# ``[0-9]``, not ``\d`` — ``\d`` also matches other scripts' digits.
+_PIN = re.compile(rf"[0-9]{{{MIN_PIN_LENGTH},{MAX_PIN_LENGTH}}}")
 _HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 _BOOL_FIELDS = frozenset({"enabled", "keep_screen_on", "show_status_text"})
 _PERSON_KEYS = frozenset({"show", "picture"})
@@ -305,8 +316,8 @@ class DashboardSettingsService:
     async def _load(self) -> DashboardSettings:
         """Stored settings as-is (the stored port, even when fixed).
 
-        Reads only the two non-secret keys — never the hash, cookie key
-        or setup token — and only until the first load is cached.
+        Reads only the three non-secret keys — never a hash, the cookie
+        key or setup token — and only until the first load is cached.
         """
         cached = self._cached
         if cached is not None:
@@ -314,7 +325,9 @@ class DashboardSettingsService:
         generation = self._generation
         settings = _settings_from_json(await self._repo.get(KEY_SETTINGS))
         settings = replace(
-            settings, password_set_at=await self._repo.get(KEY_PASSWORD_SET_AT)
+            settings,
+            password_set_at=await self._repo.get(KEY_PASSWORD_SET_AT),
+            pin_set=await self._repo.get(KEY_PIN_SET_AT) is not None,
         )
         if generation == self._generation:
             self._cached = settings
@@ -443,6 +456,51 @@ class DashboardSettingsService:
         if stored is None:
             return False
         return await asyncio.to_thread(verify_password, password, stored)
+
+    # ── Privacy-lock PIN ────────────────────────────────────────────────
+
+    async def set_pin(self, *, actor_is_admin: bool, pin: str) -> None:
+        """Set (or change) the PIN that unlocks a privacy-locked tablet.
+
+        Exactly 4–6 ASCII digits, else :class:`DashboardPinInvalidError`.
+        Separate from the household password and signs nobody out.
+        """
+        require_admin(actor_is_admin)
+        if not isinstance(pin, str) or _PIN.fullmatch(pin) is None:
+            raise DashboardPinInvalidError()
+        hashed = await asyncio.to_thread(hash_password, pin)
+        async with self._lock:
+            self._wrote(None)
+            await self._repo.set_many(
+                {
+                    KEY_PIN_HASH: hashed,
+                    KEY_PIN_SET_AT: datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self._wrote(None)
+
+    async def delete_pin(self, *, actor_is_admin: bool) -> None:
+        """Remove the PIN — locked tablets then count as unlocked.
+
+        The marker goes first: a crash in between leaves "no PIN" (what
+        was asked for), never "PIN set" with no hash able to unlock.
+        """
+        require_admin(actor_is_admin)
+        async with self._lock:
+            self._wrote(None)
+            await self._repo.delete(KEY_PIN_SET_AT)
+            await self._repo.delete(KEY_PIN_HASH)
+            self._wrote(None)
+
+    async def verify_pin(self, pin: str) -> bool:
+        """``True`` when ``pin`` matches the stored PIN (constant-time
+        scrypt compare, off the event loop). ``False`` when none is set."""
+        if not isinstance(pin, str) or _PIN.fullmatch(pin) is None:
+            return False
+        stored = await self._repo.get(KEY_PIN_HASH)
+        if stored is None:
+            return False
+        return await asyncio.to_thread(verify_password, pin, stored)
 
     # ── Sessions ────────────────────────────────────────────────────────
 

@@ -24,6 +24,7 @@ from socialhome.domain.household_dashboard import (
     DashboardPasswordTooShortError,
     DashboardPerson,
     DashboardPersonSettings,
+    DashboardPinInvalidError,
     DashboardPortFixedError,
     DashboardPortInUseError,
     DashboardSchoolDay,
@@ -331,3 +332,16 @@ def test_snapshot_types_are_frozen_and_slotted():
 def test_item_types_tell_events_and_lessons_apart():
     assert DashboardEvent.item_type == "event"
     assert DashboardLesson.item_type == "lesson"
+
+
+def test_pin_invalid_error():
+    e = DashboardPinInvalidError()
+    assert isinstance(e, CodedError)
+    assert isinstance(e, ValueError)
+    assert e.status == 422
+    assert e.code == "DASHBOARD_PIN_INVALID"
+    assert e.params == {"min": 4, "max": 6}
+
+
+def test_settings_pin_set_defaults_off():
+    assert DashboardSettings().pin_set is False
