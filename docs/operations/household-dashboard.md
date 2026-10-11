@@ -171,7 +171,7 @@ dashboard **address** — it always wins over the guess.
   transcript (or "🎤 Voice message"). Only the household chat — never
   DMs, space chats or the feed — and never a shared location. A picture-view
   page shows up to three message faces with a 💬 next to NOW ➜ NEXT
-  (the newest framed while it is new), no words. Tap a message to have it
+  (a new one's 💬 sits on a coloured circle), no words. Tap a message to have it
   read aloud ("Anna says: …") — only on a tap, never on its own, a second
   tap stops it; on a tablet without a voice for the dashboard's language
   there is no 🔊 and a tap does nothing. Nothing is shown at night, on a

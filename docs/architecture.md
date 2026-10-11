@@ -1594,7 +1594,7 @@ A person page returns Home after `idle_return_minutes` without a touch.
 A household message is a `<button>`: a tap reads its `data-say` with the
 browser's `speechSynthesis` in the page language — only on a tap, one
 utterance at a time, a second tap stops it, a swap that drops the message
-(deleted) stops it too; a static 🔊 badge shows while it speaks. Only
+(deleted) stops it too; a static 🔊 badge shows while it speaks (on a picture tile only then — the tile itself is the affordance). Only
 where the browser has a voice for the language does the script add the
 "Read aloud" description and the 🔊 affordance; elsewhere the message is
 still shown and a tap does nothing.

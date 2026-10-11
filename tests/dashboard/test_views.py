@@ -2405,12 +2405,19 @@ async def test_picture_page_message_tiles(client, auth, snapshots):
     assert head.count('<button type="button" class="dash-pv-msg') == 3
     assert 'aria-label="Message from Anna"' in head and _SAY_ANNA in head
     assert 'aria-label="Message from Pascal"' in head
-    assert '<span class="dash-pv-msg-badge" aria-hidden="true">💬</span>' in head
     assert "dash-face dash-face-lg" in head
-    # The new one wears the "now" ring; the older ones don't.
-    assert head.count("dash-pv-msg dash-pv-current") == 1
-    tile = head[head.index('data-msg="m1"') - 200 : head.index('data-msg="m1"')]
-    assert "dash-pv-current" in tile
+    # No ring on message tiles (the page owner's face wears it): a new one
+    # gets a filled 💬 badge, the older ones the plain 💬.
+    assert "dash-pv-current" not in head[head.index('class="dash-pv-msgs"') :]
+    new = '<span class="dash-pv-msg-badge dash-pv-msg-badge-new" aria-hidden="true">💬</span>'
+    plain = '<span class="dash-pv-msg-badge" aria-hidden="true">💬</span>'
+    assert head.count(new) == 1 and head.count(plain) == 2
+    tile = head[head.index('data-msg="m1"') :]
+    assert tile.index(new) < tile.index("</button>")
+    # The tile itself is the affordance: no idle 🔊 (only while speaking,
+    # shown by the script); Home rows keep theirs.
+    assert "🔊" not in head
+    assert '<span class="dash-msg-speaker" aria-hidden="true">🔊</span>' not in head
 
 
 async def test_picture_page_messages_without_now_or_next(client, auth, snapshots):

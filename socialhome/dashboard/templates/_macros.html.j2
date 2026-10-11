@@ -121,13 +121,16 @@
 </li>
 {%- endmacro %}
 
-{#- Picture view: the sender's face and a 💬, no words. -#}
+{#- Picture view: the sender's face and a 💬, no words. A new one's 💬
+    sits on a filled accent circle — never the ring the page owner's face
+    wears. The tile itself is the affordance: its 🔊 is drawn by the CSS
+    only while it speaks. -#}
 {% macro message_tile(m) -%}
 <li class="dash-pv-msg-item">
-<button type="button" class="dash-pv-msg{% if m.new %} dash-pv-current{% endif %}" aria-label="{{ t("dashboard.messages.from", name=m.person.display_name) }}" data-say="{{ m.say }}" data-msg="{{ m.id }}">
+<button type="button" class="dash-pv-msg" aria-label="{{ t("dashboard.messages.from", name=m.person.display_name) }}" data-say="{{ m.say }}" data-msg="{{ m.id }}">
 {{ face(m.person, "lg", spoken=False) }}
-<span class="dash-pv-msg-badge" aria-hidden="true">💬</span>
-<span class="dash-msg-speaker" aria-hidden="true">🔊</span>
+<span class="dash-pv-msg-badge{% if m.new %} dash-pv-msg-badge-new{% endif %}" aria-hidden="true">💬</span>
+<span class="dash-pv-msg-speaker" aria-hidden="true"></span>
 </button>
 </li>
 {%- endmacro %}

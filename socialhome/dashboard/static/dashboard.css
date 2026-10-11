@@ -929,17 +929,50 @@ h3.dash-sublabel {
   line-height: 1;
 }
 
-.dash-pv-msg .dash-msg-speaker {
+/* New (under 15 min): the 💬 on a filled accent circle, a little larger.
+   No ring — the page owner's face wears that. */
+.dash-pv-msg-badge-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 48px;
+  block-size: 48px;
+  inset-block-end: -10px;
+  inset-inline-end: -12px;
+  font-size: 1.75rem;
+  background: var(--dash-accent);
+  border: 3px solid var(--dash-bg);
+  border-radius: 50%;
+}
+
+/* The tile is the affordance: its 🔊 shows only while it speaks. */
+.dash-pv-msg-speaker {
+  display: none;
+}
+
+.dash-pv-msg.dash-speaking .dash-pv-msg-speaker {
   position: absolute;
   inset-block-start: -8px;
   inset-inline-end: -8px;
-  background: var(--dash-surface);
-  border: 1px solid var(--dash-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 40px;
+  block-size: 40px;
+  font-size: 1.25rem;
+  line-height: 1;
+  background: var(--dash-accent);
+  border-radius: 50%;
 }
 
-.dash-pv-msg.dash-speaking .dash-msg-speaker {
-  background: var(--dash-accent);
-  border-color: var(--dash-accent);
+.dash-pv-msg.dash-speaking .dash-pv-msg-speaker::after {
+  content: "🔊";
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dash-pv-msg.dash-speaking .dash-pv-msg-speaker {
+    animation: dash-say 1.2s ease-in-out infinite alternate;
+  }
 }
 
 .dash-presence {
@@ -2228,6 +2261,15 @@ h3.dash-sublabel {
 
   .dash-pv-x {
     font-size: 3rem;
+  }
+
+  /* The 64 px phone face: a smaller "new" badge keeps the initials clear. */
+  .dash-pv-msg-badge-new {
+    inline-size: 38px;
+    block-size: 38px;
+    inset-block-end: -8px;
+    inset-inline-end: -14px;
+    font-size: 1.25rem;
   }
 }
 
