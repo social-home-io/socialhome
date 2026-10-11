@@ -11,6 +11,7 @@ import pytest
 import socialhome.i18n as i18n_pkg
 from socialhome.dashboard.clock import (
     WallClock,
+    ago,
     days_late,
     due_label,
     hhmm,
@@ -128,6 +129,23 @@ def test_hhmm_is_24_hour_in_the_values_own_zone():
 )
 def test_relative_in(delta, expected):
     assert relative_in(T0, T0 + delta, _t("en")) == expected
+
+
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [
+        (timedelta(seconds=-30), "just now"),  # a tablet clock a bit behind
+        (timedelta(seconds=59), "just now"),
+        (timedelta(minutes=1), "1 min ago"),
+        (timedelta(minutes=4, seconds=50), "4 min ago"),
+    ],
+)
+def test_ago(delta, expected):
+    assert ago(T0 + delta, T0, _t("en")) == expected
+
+
+def test_ago_is_localised():
+    assert ago(T0 + timedelta(minutes=4), T0, _t("de")) == "vor 4 Min."
 
 
 def test_relative_in_is_localised():

@@ -298,7 +298,7 @@ function SwitchRow({ id, label, hint, checked, disabled, onChange }: {
   // The hint is a description, not part of the switch's name.
   const hintId = hint ? `${id}-hint` : undefined
   return (
-    <div class="sh-dashboard-row">
+    <div class={`sh-dashboard-row${disabled ? ' sh-dashboard-row--disabled' : ''}`}>
       <div class="sh-dashboard-row__label">
         <label for={id}>{label}</label>
         {hint && <span id={hintId} class="sh-form-hint">{hint}</span>}
@@ -391,6 +391,12 @@ function DisplaySection({ state, save }: { state: DashboardState, save: SaveFn }
       <SwitchRow id="sh-dash-status-text" label={t('admin.dashboard.display.status_text')}
         hint={t('admin.dashboard.display.status_text_hint')} checked={state.show_status_text}
         onChange={(v) => void save({ show_status_text: v })} />
+      <SwitchRow id="sh-dash-messages" label={t('admin.dashboard.display.messages')}
+        hint={state.household_chat_enabled
+          ? t('admin.dashboard.display.messages_hint')
+          : `${t('admin.dashboard.display.messages_chat_off')} ${t('admin.dashboard.display.messages_hint')}`}
+        checked={state.show_household_messages} disabled={!state.household_chat_enabled}
+        onChange={(v) => void save({ show_household_messages: v })} />
 
       <div class="sh-dashboard-sessions">
         <p class="sh-muted">

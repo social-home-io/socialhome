@@ -56,6 +56,8 @@ function state(over: Partial<DashboardState> = {}): DashboardState {
     night_end: '06:00',
     keep_screen_on: true,
     show_status_text: false,
+    show_household_messages: false,
+    household_chat_enabled: true,
     last_seen_at: null,
     people: [
       { user_id: 'u1', username: 'pascal', display_name: 'Pascal', picture_url: null,
@@ -409,6 +411,31 @@ describe('DashboardTab — display settings', () => {
     fireEvent.click(screen.getByRole('switch', { name: /Show status text/ }))
     await waitFor(() => expect(mPut).toHaveBeenLastCalledWith(
       '/api/admin/dashboard', { show_status_text: true }))
+  })
+
+  it('turns the household messages on with a privacy note', async () => {
+    await mount(state())
+    const sw = screen.getByRole('switch', { name: 'Show household messages' }) as HTMLInputElement
+    expect(sw.disabled).toBe(false)
+    expect(sw.checked).toBe(false)
+    expect(document.getElementById(sw.getAttribute('aria-describedby')!)?.textContent).toBe(
+      'Shows the last 3 household-chat messages (up to 6 h) on Home and on picture-view pages. Anyone at the tablet can see them. '
+      + "The tablet can't confirm a message was read — call if it's urgent.")
+    mPut.mockResolvedValueOnce(state({ show_household_messages: true }))
+    fireEvent.click(sw)
+    await waitFor(() => expect(mPut).toHaveBeenLastCalledWith(
+      '/api/admin/dashboard', { show_household_messages: true }))
+    await waitFor(() => expect(sw.checked).toBe(true))
+  })
+
+  it('greys the household messages switch while the household chat is off', async () => {
+    await mount(state({ household_chat_enabled: false, show_household_messages: true }))
+    const sw = screen.getByRole('switch', { name: 'Show household messages' }) as HTMLInputElement
+    expect(sw.disabled).toBe(true)
+    expect(sw.checked).toBe(true)
+    expect(document.getElementById(sw.getAttribute('aria-describedby')!)?.textContent)
+      .toMatch(/^Turn on household chat first\. Shows the last 3/)
+    expect(sw.closest('.sh-dashboard-row')?.classList.contains('sh-dashboard-row--disabled')).toBe(true)
   })
 
   it('lists the languages by their own names', async () => {

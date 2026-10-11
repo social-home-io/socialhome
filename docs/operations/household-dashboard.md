@@ -161,6 +161,34 @@ dashboard **address** — it always wins over the guess.
   `{"people": {"<user_id>": {"picture": true}}}` (`false` = reader page,
   `null` = back to the default); `GET /api/admin/dashboard` lists each
   person's stored `picture` and the resolved `picture_effective`.
+- **Household messages** (off by default — Admin › Dashboard › Display ›
+  *Show household messages*, `show_household_messages`; needs the
+  household chat turned on). Home shows a **Messages** card right under
+  "Next": the last three messages of the household chat from the past six
+  hours — the sender's face, the text (two lines at most) and when; one
+  under 15 minutes old is marked "new" with "4 min ago". A photo, video
+  or file says "📷 Photo" / "🎬 Video" / "📎 File" (its caption isn't
+  shown), a voice note shows its transcript (or "🎤 Voice message"). Only
+  the household chat — never DMs, space chats or the feed — never a
+  shared location, and never messages between a child and someone a
+  guardian blocked for them: the blocked person's messages don't show,
+  and neither do the child's while that person is in the household. A picture-view
+  page shows up to three message faces with a 💬 next to NOW ➜ NEXT
+  (a new one's 💬 sits on a coloured circle), no words. Tap a message to have it
+  read aloud ("Anna says: …") — only on a tap, never on its own, a second
+  tap stops it. Speech never leaves the tablet: only a voice installed
+  on the tablet itself is used, never an online one — a tablet without an
+  on-device voice for the dashboard's language shows no 🔊, and a tap does
+  nothing. Nothing is shown at night, on a
+  locked tablet or on a reader person page, and the card disappears when
+  there's nothing new.
+
+  **What parents should know.** Anyone standing at the tablet — guests,
+  the cleaner, a babysitter — can read these messages, so keep private
+  things in a DM. To take a message off the wall, delete it in the app;
+  it disappears with the tablet's next refresh (within 30 seconds).
+  The tablet can't confirm that anyone read a message, and reading it
+  there doesn't mark it read for anyone — if it's urgent, call.
 - **Night** (between `night_start` and `night_end`, default 22:00–06:00):
   only a dim clock, the date and the first thing of the morning. Tap the
   screen to see everything (and the 🔒 button) for a minute.
@@ -182,8 +210,9 @@ sticky notes, who is home and timetables. Hide a person who shouldn't be
 on the wall — switch **On dashboard** off for them under **People on the
 dashboard** in **Admin › Dashboard** (*headless:*
 `people: {"<id>": {"show": false}}`) — they then have no page and their presence, events, chores and timetables are left out of
-Home. DMs, notifications, chat, event locations and coordinates are never
-shown. Use the privacy lock below when visitors are around.
+Home. DMs, notifications, space chats, event locations and coordinates
+are never shown; the household chat only when you turn on *Show household
+messages* (see above), and never a hidden person's messages. Use the privacy lock below when visitors are around.
 
 ## Privacy lock (guests, cleaners)
 

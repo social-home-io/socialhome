@@ -27,6 +27,7 @@ from ..app_keys import (
     dashboard_controller_key,
     media_signer_key,
     platform_adapter_key,
+    preferences_service_key,
     user_service_key,
 )
 from ..dashboard.auth import DashboardAuth
@@ -40,6 +41,7 @@ from ..domain.user import User, _picture_url
 from ..media_signer import sign_media_urls_in
 from ..platform.adapter import DashboardHostPort
 from ..services.dashboard_settings_service import DashboardSettingsService
+from ..services.system_chat_policy import HOUSEHOLD_CHAT_SECTION
 from .base import BaseView
 
 __all__ = [
@@ -176,6 +178,7 @@ class _DashboardAdminView(BaseView):
         running_port = self.controller.running_port
         host_port = await self.host_port()
         url = self.base_url(settings, host_port)
+        prefs = await self.svc(preferences_service_key).get_household()
         return self._json(
             {
                 "enabled": settings.enabled,
@@ -206,6 +209,10 @@ class _DashboardAdminView(BaseView):
                 "night_end": settings.night_end,
                 "keep_screen_on": settings.keep_screen_on,
                 "show_status_text": settings.show_status_text,
+                "show_household_messages": settings.show_household_messages,
+                # The messages come from the household chat: the admin UI
+                # greys the switch while the chat itself is off.
+                "household_chat_enabled": prefs.is_enabled(HOUSEHOLD_CHAT_SECTION),
                 "last_seen_at": _iso(auth.last_seen_at),
                 "people": people,
             }

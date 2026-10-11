@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from socialhome.utils.datetime import (
+    as_utc,
     parse_iso8601_lenient,
     parse_iso8601_optional,
     parse_iso8601_strict,
@@ -81,3 +82,17 @@ def test_lenient_parses_valid_timestamps():
     """A valid ISO timestamp is parsed precisely, no fallback."""
     t = parse_iso8601_lenient("2026-04-18T12:00:00Z")
     assert t == datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_as_utc_treats_naive_as_utc():
+    assert as_utc(datetime(2026, 10, 11, 12, 0)) == datetime(
+        2026, 10, 11, 12, 0, tzinfo=timezone.utc
+    )
+    assert as_utc(datetime(2026, 10, 11, 12, 0)).tzinfo is timezone.utc
+
+
+def test_as_utc_converts_aware_values():
+    berlin = timezone(timedelta(hours=2))
+    out = as_utc(datetime(2026, 10, 11, 14, 0, tzinfo=berlin))
+    assert out == datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+    assert out.utcoffset() == timedelta(0)

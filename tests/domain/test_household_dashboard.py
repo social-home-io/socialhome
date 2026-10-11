@@ -73,6 +73,7 @@ def test_settings_defaults():
     assert s.night_end == "06:00"
     assert s.keep_screen_on is True
     assert s.show_status_text is False
+    assert s.show_household_messages is False
     assert s.address is None
     assert s.people == ()
     assert s.password_set_at is None

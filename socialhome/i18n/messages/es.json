@@ -138,5 +138,20 @@
   "dashboard.picture.jobs": "Mis tareas",
   "dashboard.picture.job": "{state}: {title}",
   "dashboard.picture.sleeps": "Noches que faltan: {n}",
-  "dashboard.picture.night": "{when} {time}: {title}"
+  "dashboard.picture.night": "{when} {time}: {title}",
+  "dashboard.rel.just_now": "ahora mismo",
+  "dashboard.rel.minutes_ago": "hace {n} min",
+  "dashboard.messages.heading": "Mensajes",
+  "dashboard.messages.new": "nuevo",
+  "dashboard.messages.from": "Mensaje de {name}",
+  "dashboard.messages.read_aloud": "Leer en voz alta",
+  "dashboard.messages.photo": "Foto",
+  "dashboard.messages.video": "Vídeo",
+  "dashboard.messages.file": "Archivo",
+  "dashboard.messages.voice": "Mensaje de voz",
+  "dashboard.messages.say.text": "{name} dice: {text}",
+  "dashboard.messages.say.photo": "{name} envió una foto.",
+  "dashboard.messages.say.video": "{name} envió un vídeo.",
+  "dashboard.messages.say.file": "{name} envió un archivo.",
+  "dashboard.messages.say.voice": "{name} envió un mensaje de voz."
 }

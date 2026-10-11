@@ -12,7 +12,19 @@ House rules:
 * **Household-safe.** Presence is home / away / a zone name, never
   coordinates; calendar events come from members' personal calendars;
   chores, the shopping list, today's timetables and household stickies.
-  Never DMs, notifications, chat or polls.
+  Never DMs, notifications, space chats or polls.
+* **Household chat, only when asked.** With the admin's
+  ``show_household_messages`` on (and ``feat_household_chat`` on), Home
+  and picture-view pages carry the newest :data:`MESSAGES_SHOWN`
+  household-chat messages of the last :data:`MESSAGE_MAX_AGE` — never at
+  night, never on a reader page, never a location, a deleted message,
+  one stamped in the future or one from a hidden person. The read
+  (:meth:`HouseholdChatService.recent_messages`) never creates the chat
+  and never moves anyone's read watermark. Guardian blocks (§CP.F2) hold
+  on the shared screen, failing closed: a blocked counterpart's messages
+  never show, nor do a protected member's own while anyone they are
+  blocked from is shown — the chat hides them from each other, and
+  either could be standing at the wall.
 * **Assigned timetables only.** School is the timetables a member is
   assigned to; space timetables pinned to someone's Home are ignored on
   purpose — a pin is a personal Home choice (a parent pinning a child's
@@ -51,7 +63,10 @@ from datetime import date, datetime, timedelta, timezone
 
 from ..domain import timetable as td
 from ..domain.calendar import Calendar, CalendarEvent, all_day_covers
+from ..domain.conversation import ConversationMessage
 from ..domain.household_dashboard import (
+    MESSAGE_MAX_AGE,
+    MESSAGES_SHOWN,
     PERSON_PALETTE,
     SECTION_CALENDAR,
     SECTION_PRESENCE,
@@ -62,6 +77,7 @@ from ..domain.household_dashboard import (
     DashboardAgendaItem,
     DashboardEvent,
     DashboardLesson,
+    DashboardMessage,
     DashboardPerson,
     DashboardSchoolDay,
     DashboardSettings,
@@ -83,13 +99,17 @@ from ..domain.presence import PersonPresence
 from ..domain.task import Task, TaskList, TaskStatus
 from ..domain.timetable import Timetable
 from ..domain.user import User
+from ..utils.datetime import as_utc
 from ..utils.timezones import local_date, local_day_bounds, zone_of
 from .calendar_service import CalendarService
+from .child_protection_service import ChildProtectionService
 from .dashboard_settings_service import DashboardSettingsService
+from .household_chat_service import HouseholdChatService
 from .preferences_service import PreferencesService
 from .presence_service import PresenceService
 from .shopping_service import ShoppingService
 from .sticky_service import StickyService
+from .system_chat_policy import HOUSEHOLD_CHAT_SECTION
 from .task_service import TaskService
 from .timetable_service import TimetableService
 from .user_service import UserService
@@ -110,6 +130,20 @@ CHORE_LOOKAHEAD_DAYS = 7
 #: Done chores are read back this far by due date; only those completed
 #: today are kept (bounds the read of a long, never-archived done list).
 DONE_LOOKBACK_DAYS = 14
+
+#: Household-chat message ``type`` → :attr:`DashboardMessage.kind`.
+_MESSAGE_KIND = {
+    "text": "text",
+    "transcript": "text",
+    "image": "photo",
+    "video": "video",
+    "file": "file",
+    "audio": "voice",
+}
+
+#: A message stamped this far past "now" (a sender's clock a little
+#: ahead) is still read; anything later is not.
+MESSAGE_CLOCK_SKEW = timedelta(minutes=2)
 
 #: ``PersonPresence.state`` → the dashboard's presence word.
 _PRESENCE = {"home": "home", "away": "away", "zone": "zone"}
@@ -174,11 +208,6 @@ async def _safe[T](label: str, aw: Awaitable[T], default: T) -> T:
     except Exception:
         log.warning("household dashboard: %s failed", label, exc_info=True)
         return default
-
-
-def _aware(value: datetime) -> datetime:
-    """Treat a naive datetime as UTC."""
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 def _agenda_key(item: DashboardAgendaItem) -> tuple[int, datetime, datetime]:
@@ -256,6 +285,8 @@ class HouseholdDashboardService:
         "_stickies",
         "_preferences",
         "_settings",
+        "_chat",
+        "_cp",
     )
 
     def __init__(
@@ -270,6 +301,8 @@ class HouseholdDashboardService:
         sticky_service: StickyService,
         preferences_service: PreferencesService,
         dashboard_settings: DashboardSettingsService,
+        household_chat: HouseholdChatService,
+        child_protection: ChildProtectionService,
     ) -> None:
         self._users = user_service
         self._presence = presence_service
@@ -280,6 +313,8 @@ class HouseholdDashboardService:
         self._stickies = sticky_service
         self._preferences = preferences_service
         self._settings = dashboard_settings
+        self._chat = household_chat
+        self._cp = child_protection
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -291,12 +326,13 @@ class HouseholdDashboardService:
             self._calendars(ctx), self._timetable_rows(ctx)
         )
         colors = self._person_colors(ctx, calendars)
-        people, events, chores, shopping, stickies = await asyncio.gather(
+        people, events, chores, shopping, stickies, messages = await asyncio.gather(
             self._people(ctx, colors),
             self._events(ctx, calendars, colors),
             self._chores(ctx, due_to=ctx.today),
             self._shopping_slice(),
             self._sticky_slice(ctx),
+            self._messages(ctx),
         )
         school = [self._school(ctx, user.user_id, timetables) for user in ctx.shown]
         shopping_items, shopping_total = shopping
@@ -324,6 +360,7 @@ class HouseholdDashboardService:
             tomorrow_first=_next_after(
                 ctx.now, [*events.get(tomorrow, []), *school_tomorrow]
             ),
+            messages=messages,
         )
 
     async def person(
@@ -350,6 +387,8 @@ class HouseholdDashboardService:
         )
         school = self._school(ctx, user_id, timetables)
         person = next(p for p in people if p.user_id == user_id)
+        # Only the picture view shows messages; a reader page never reads them.
+        messages = await self._messages(ctx) if person.picture_view else ()
 
         def mine(day: date) -> list[DashboardEvent]:
             return [e for e in events.get(day, []) if user_id in e.person_ids]
@@ -384,6 +423,7 @@ class HouseholdDashboardService:
             school=school.today,
             school_tomorrow_first=_first_lesson(school.tomorrow),
             people=people,
+            messages=messages,
         )
 
     async def avatar(self, user_id: str) -> tuple[bytes, str] | None:
@@ -409,7 +449,7 @@ class HouseholdDashboardService:
         members = tuple(await _safe("users", self._users.list_active(), list[User]()))
         hidden = frozenset(uid for uid, s in settings.people if not s.show)
         shown = tuple(u for u in members if u.user_id not in hidden)
-        local_now = _aware(now or datetime.now(timezone.utc)).astimezone(
+        local_now = as_utc(now or datetime.now(timezone.utc)).astimezone(
             zone_of(prefs.tz)
         )
         sections = frozenset(
@@ -660,7 +700,7 @@ class HouseholdDashboardService:
         if t.archived_at is not None or t.due_date is None:
             return None
         done = t.status == TaskStatus.DONE
-        if done and local_date(_aware(t.updated_at), ctx.tz) != ctx.today:
+        if done and local_date(as_utc(t.updated_at), ctx.tz) != ctx.today:
             return None
         person_ids = ctx.keep(t.assignees)
         if t.assignees and not person_ids:
@@ -697,6 +737,82 @@ class HouseholdDashboardService:
             for n in notes
             if n.author not in ctx.hidden_ids
         )[:MAX_STICKIES]
+
+    # ── Household chat ───────────────────────────────────────────────────
+
+    async def _messages(self, ctx: _Context) -> tuple[DashboardMessage, ...]:
+        """The newest household-chat messages of the last
+        :data:`MESSAGE_MAX_AGE` from shown members — ``()`` without
+        reading anything while the admin hasn't turned them on, the
+        household chat is off, or it is night."""
+        if (
+            not ctx.settings.show_household_messages
+            or not ctx.prefs.is_enabled(HOUSEHOLD_CHAT_SECTION)
+            or self._is_night(ctx)
+            or not ctx.shown_ids
+        ):
+            return ()
+        try:
+            withheld = await self._guardian_withheld(ctx)
+        except Exception:
+            # Fail closed: without the blocks nothing is safe to show.
+            log.warning("household dashboard: guardian blocks failed", exc_info=True)
+            return ()
+        senders = ctx.shown_ids - withheld
+        if not senders:
+            return ()
+        rows = await _safe(
+            "household chat",
+            self._chat.recent_messages(
+                since=ctx.now - MESSAGE_MAX_AGE,
+                until=ctx.now + MESSAGE_CLOCK_SKEW,
+                senders=senders,
+                limit=MESSAGES_SHOWN,
+            ),
+            list[ConversationMessage](),
+        )
+        zone = zone_of(ctx.tz)
+        out: list[DashboardMessage] = []
+        for m in rows:
+            kind = _MESSAGE_KIND.get(m.type)
+            if (
+                kind is None
+                or m.deleted
+                or m.sender_user_id not in senders
+                or as_utc(m.created_at) > ctx.now
+            ):
+                continue  # the read filters these already; never trust it alone
+            text = m.content.strip() if kind in ("text", "voice") else ""
+            if kind == "text" and not text:
+                continue
+            out.append(
+                DashboardMessage(
+                    id=m.id,
+                    sender_id=m.sender_user_id,
+                    kind=kind,
+                    text=text,
+                    sent_at=as_utc(m.created_at).astimezone(zone),
+                )
+            )
+        return tuple(out)
+
+    async def _guardian_withheld(self, ctx: _Context) -> frozenset[str]:
+        """Whose messages a guardian block (§CP.F2) keeps off the wall.
+
+        For every protected active member (hidden ones too — they can
+        still stand at the tablet): everyone a block separates them from,
+        and the member themself while one of those is a household member —
+        shown or hidden, anyone local can stand in front of the wall."""
+        out: set[str] = set()
+        local = {u.user_id for u in ctx.members}
+        for user in ctx.members:
+            if not user.child_protection_enabled:
+                continue
+            counterparts = await self._cp.guardian_block_counterparts(user.user_id)
+            out |= counterparts
+            if counterparts & local:
+                out.add(user.user_id)
+        return frozenset(out)
 
     # ── Timetables ───────────────────────────────────────────────────────
 

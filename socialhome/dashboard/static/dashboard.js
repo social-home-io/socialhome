@@ -18,7 +18,12 @@
  *   - the Wake Lock keeps the screen on (data-keep-awake);
  *   - every 10 min the content drifts 1–2 px against burn-in (not with
  *     prefers-reduced-motion);
- *   - night mode: a tap shows the normal page for 60 s.
+ *   - night mode: a tap shows the normal page for 60 s;
+ *   - household messages ([data-say]): a tap reads one aloud with the
+ *     browser's speech synthesis in the page language — never on its
+ *     own, one at a time, a second tap stops it; only an on-device voice
+ *     for the language is used (the text never leaves the tablet) —
+ *     without one there is no 🔊 and a tap does nothing.
  */
 (function () {
   "use strict";
@@ -215,6 +220,7 @@
     failures = 0;
     setStale(false);
     tick();
+    sayAfterSwap();
   }
 
   function refresh() {
@@ -269,6 +275,142 @@
     if (event.target.closest && event.target.closest("[data-reload]")) {
       window.location.reload();
     }
+  });
+
+  // ── Household messages: tap to hear one ──────────────────────────────
+  // Only on a tap, never on its own; a second tap on the same message
+  // stops it; one at a time. Only where the browser has a voice for the
+  // page language — otherwise there is no 🔊 and no "Read aloud", and a
+  // tap does nothing (the message is still shown).
+  var synth = window.speechSynthesis || null;
+  var lang = (document.documentElement.getAttribute("lang") || "en").toLowerCase();
+  var voice = null;
+  var speakingId = null;
+  var current = null; // the utterance being spoken
+
+  function findVoice() {
+    if (!synth || typeof window.SpeechSynthesisUtterance !== "function") {
+      return null;
+    }
+    var primary = lang.split("-")[0];
+    var voices = synth.getVoices() || [];
+    var exact = null;
+    var near = null;
+    voices.forEach(function (v) {
+      // On-device voices only: a remote one (Chrome's "Google …") would
+      // send the message text off the tablet.
+      if (!v || v.localService !== true) {
+        return;
+      }
+      var code = String(v.lang || "").toLowerCase().replace("_", "-");
+      if (!exact && code === lang) {
+        exact = v;
+      } else if (!near && code.split("-")[0] === primary) {
+        near = v;
+      }
+    });
+    return exact || near;
+  }
+
+  function markSay() {
+    var can = voice !== null;
+    document.documentElement.classList.toggle("dash-can-speak", can);
+    document.querySelectorAll("[data-say]").forEach(function (el) {
+      if (can) {
+        el.setAttribute("aria-describedby", "dash-say-hint");
+      } else {
+        el.removeAttribute("aria-describedby");
+      }
+      el.classList.toggle(
+        "dash-speaking",
+        speakingId !== null && el.getAttribute("data-msg") === speakingId
+      );
+    });
+  }
+
+  function stopSpeaking() {
+    speakingId = null;
+    current = null;
+    if (synth) {
+      synth.cancel();
+    }
+    markSay();
+  }
+
+  function sayAfterSwap() {
+    // The message being read was deleted meanwhile: stop reading it.
+    if (
+      speakingId !== null &&
+      !document.querySelector('[data-say][data-msg="' + CSS.escape(speakingId) + '"]')
+    ) {
+      stopSpeaking();
+    } else {
+      markSay();
+    }
+  }
+
+  function updateVoice() {
+    voice = findVoice();
+    markSay();
+  }
+
+  if (synth) {
+    updateVoice();
+    // Voices often load after the page does (older engines only know the
+    // handler property); look once more after a second either way.
+    if (synth.addEventListener) {
+      synth.addEventListener("voiceschanged", updateVoice);
+    } else {
+      synth.onvoiceschanged = updateVoice;
+    }
+    window.setTimeout(updateVoice, 1000);
+    // Leaving the page stops it — and forgets it, so a page restored
+    // from the back/forward cache shows no stale 🔊.
+    window.addEventListener("pagehide", function () {
+      stopSpeaking();
+    });
+  }
+
+  document.addEventListener("click", function (event) {
+    var el = event.target.closest && event.target.closest("[data-say]");
+    if (!el || voice === null) {
+      return;
+    }
+    var id = el.getAttribute("data-msg");
+    if (speakingId === id) {
+      stopSpeaking(); // a second tap stops it
+      return;
+    }
+    synth.cancel(); // one at a time
+    var utterance = new window.SpeechSynthesisUtterance(el.getAttribute("data-say"));
+    utterance.lang = voice.lang || lang;
+    try {
+      utterance.voice = voice;
+    } catch (e) {
+      // Can't pin the on-device voice: the engine might pick a remote
+      // default — don't speak at all.
+      stopSpeaking();
+      return;
+    }
+    if (utterance.voice !== voice) {
+      stopSpeaking();
+      return;
+    }
+    // A cancelled utterance reports its end late: only the current one
+    // may clear the 🔊.
+    var done = function () {
+      if (current === utterance) {
+        current = null;
+        speakingId = null;
+        markSay();
+      }
+    };
+    utterance.onend = done;
+    utterance.onerror = done;
+    current = utterance;
+    speakingId = id;
+    markSay();
+    synth.speak(utterance);
   });
 
   // ── Night mode: a tap shows the normal page for a minute ─────────────

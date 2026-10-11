@@ -1512,7 +1512,8 @@ shopping, household stickies, today's school timetables, night-mode
 anything with side effects, and is *household-safe*: presence is home /
 away / a zone name (never coordinates), events come from members' personal
 calendars (recurring ones as occurrences, a shared household event once),
-and DMs, notifications, chat and polls never appear. School is only the
+and DMs, notifications, space chats and polls never appear (the
+household chat only as the opt-in glance below). School is only the
 timetables a member is *assigned* to: space timetables pinned to someone's
 Home are deliberately ignored (unlike My Corner), because a pin is a
 personal Home choice — a parent pinning a child's class plan — and on the
@@ -1528,6 +1529,39 @@ household zone (`HouseholdPreferences.tz`). Each slice fails soft — logged
 at WARNING, empty — so one broken service never blanks the tablet. The
 picture-view default (on for child-protected minors) is one shared rule,
 `picture_effective`, used by the admin API too.
+
+**Household messages (opt-in glance).** With the admin's
+`show_household_messages` (default off) and `feat_household_chat` on,
+Home and picture-view pages carry the newest three household-chat
+messages of the last six hours (wall-clock age) — nothing at night, and a
+reader person page never reads them. The source is the household group
+chat only, through `HouseholdChatService.recent_messages`: a plain read
+(`ConversationRepo.list_recent_messages`) that finds the chat with
+`get_household_chat` and never creates it, never reconciles seats and
+never moves anyone's read watermark — the tablet can't mark anything read
+(never the `summary` path, which reconciles). Only what a person writes or
+records counts: text (typed or dictated), photo, video, file and voice
+notes; location pins (no coordinates on the wall), call entries, deleted
+or blank messages, anything stamped more than two minutes ahead (shown
+only once it isn't in the future) and anything from a hidden person stay
+out (filtered in SQL, then again in the snapshot; a coarse `created_at`
+bound lets the `(conversation_id, created_at)` index narrow the scan
+before the exact `julianday` compare). Guardian blocks (§CP.F2) hold on
+the shared screen and fail closed: for every protected member (hidden
+ones too) the people a block separates them from never appear, and
+neither does the protected member while one of those people is shown —
+the chat already hides them from each other, and either could be the
+one standing at the wall; if the blocks can't be read, no message shows.
+An edit shows its latest text; captions of media aren't shown;
+reactions, mentions and links are plain text. `dashboard/messages.py` turns each into a row —
+media as "📷 Photo" / "🎬 Video" / "📎 File", a voice note as its
+transcript or "🎤 Voice message", "new" + "4 min ago" for one under 15
+minutes, else its clock time — and the sentence tap-to-speak reads
+("Anna says: …", "Anna sent a photo."), rendered into a `data-say`
+attribute (Jinja-escaped) so the picture view, which shows only the
+sender's face and a 💬, keeps its no-words rule. Every sender is a shown
+person whose colour is already in the page style, so a new or deleted
+message just swaps in with the next fragment (no view-key change).
 
 **How it is rendered.** The views (`dashboard/views.py`) fetch a snapshot
 per request and render Jinja templates (`dashboard/templates/`); the pure
@@ -1566,6 +1600,19 @@ failed refreshes in a row show the offline banner (rendered hidden in
 every fragment, with that snapshot's time), hide relative times
 (`data-rel`) and grey "now" / presence (`data-live`) until a refresh works.
 A person page returns Home after `idle_return_minutes` without a touch.
+A household message is a `<button>`: a tap reads its `data-say` with the
+browser's `speechSynthesis` in the page language — only on a tap, one
+utterance at a time, a second tap stops it, a swap that drops the message
+(deleted, pushed out or aged out) stops it too, and so does leaving the
+page; a static 🔊 badge shows while it speaks (on a picture tile only
+then — the tile itself is the affordance). Speech never leaves the
+tablet: only an on-device voice (`localService`) for the page language
+is used — never a remote one such as Chrome's "Google …" voices — and an
+utterance whose voice can't be pinned isn't spoken (the engine could
+fall back to a remote default). Only where such a voice exists (checked
+again when voices load late) does the script add the "Read aloud"
+description and the 🔊 affordance; elsewhere the message is still shown
+and a tap does nothing.
 That return and the midnight reload first probe the server and, while it
 can't be reached, keep the last page and the ticking clock (retrying).
 With `keep_screen_on` the Screen Wake Lock is requested and re-acquired

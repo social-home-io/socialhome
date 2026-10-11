@@ -21,15 +21,20 @@ This service owns the chat's lifecycle:
 * ``feat_household_chat`` off: :meth:`summary` reports ``enabled=False``
   and creates nothing; the policy refuses every read and write; the data
   is kept.
+* :meth:`recent_messages` is the household dashboard's glance: a plain
+  read that never creates the chat, never reconciles seats and never
+  moves anyone's read watermark (so nothing reads as "seen").
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from datetime import datetime, timezone
 
 from ..domain.conversation import (
     Conversation,
+    ConversationMessage,
     SystemChatScope,
     SystemChatSummary,
     mute_active,
@@ -42,6 +47,13 @@ from .dm_mentions import DmMentionResolver
 from .system_chat_policy import HouseholdChatAccess
 
 log = logging.getLogger(__name__)
+
+#: Message types a person writes or records: text (typed or dictated),
+#: a photo, a video, a file, a voice note. Never a location pin (no GPS
+#: on a shared screen), a call entry or a tombstone.
+GLANCE_MESSAGE_TYPES: frozenset[str] = frozenset(
+    {"text", "transcript", "image", "video", "file", "audio"}
+)
 
 
 class HouseholdChatService:
@@ -94,6 +106,36 @@ class HouseholdChatService:
             if seated and username not in active:
                 await self._convos.remove_seat(chat.id, username)
         return chat
+
+    async def recent_messages(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        senders: Collection[str],
+        limit: int,
+    ) -> list[ConversationMessage]:
+        """The household chat's newest messages from ``since`` to ``until``
+        (newest first, at most ``limit``) — only :data:`GLANCE_MESSAGE_TYPES`,
+        only from ``senders``, never a deleted or blank one.
+
+        Read-only on purpose (the household dashboard calls it): ``[]``
+        while ``feat_household_chat`` is off or before the chat exists —
+        it is never created here — and no seat or read watermark moves.
+        """
+        if not await self._access.enabled():
+            return []
+        chat = await self._convos.get_household_chat()
+        if chat is None:
+            return []
+        return await self._convos.list_recent_messages(
+            chat.id,
+            since=since,
+            until=until,
+            types=GLANCE_MESSAGE_TYPES,
+            senders=senders,
+            limit=limit,
+        )
 
     async def summary(self, username: str) -> SystemChatSummary:
         """What the feed's Chat tab needs for ``username``.

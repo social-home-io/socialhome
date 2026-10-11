@@ -154,6 +154,7 @@ async def test_update_partial_round_trip(svc):
             "night_end": "00:00",
             "keep_screen_on": False,
             "show_status_text": True,
+            "show_household_messages": True,
         },
     )
     assert s.port == 9000
@@ -163,6 +164,7 @@ async def test_update_partial_round_trip(svc):
     assert s.night_end == "00:00"
     assert s.keep_screen_on is False
     assert s.show_status_text is True
+    assert s.show_household_messages is True
     # Partial: an untouched field keeps its value.
     s2 = await svc.update(actor_is_admin=True, patch={"locale": "fr"})
     assert s2.port == 9000
@@ -185,6 +187,9 @@ async def test_update_does_not_store_secrets_in_settings(svc, repo):
         ("enabled", "true"),
         ("keep_screen_on", None),
         ("show_status_text", 0),
+        ("show_household_messages", 1),
+        ("show_household_messages", "true"),
+        ("show_household_messages", None),
         ("port", "9000"),
         ("port", True),
         ("port", 1023),

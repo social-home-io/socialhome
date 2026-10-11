@@ -1,14 +1,15 @@
 {#- Shared bits. Import "with context" (they use f and t). -#}
 
 {#- A person's face: their picture, else initials on their colour. The
-    name is spoken (visually hidden) unless `named` shows it. -#}
-{% macro face(p, size="md", named=False) -%}
+    name is spoken (visually hidden) unless `named` shows it — or not at
+    all with `spoken=False` (the caller names them itself). -#}
+{% macro face(p, size="md", named=False, spoken=True) -%}
 <span class="dash-face dash-face-{{ size }} {{ f.kc(p.color) }}" aria-hidden="true">
 {%- set url = f.avatar(p) -%}
 <span class="dash-initials">{{ p.initials }}</span>
 {%- if url %}<img src="{{ url }}" alt="" decoding="async">{% endif -%}
 </span>
-{%- if named %}<span class="dash-face-name">{{ p.display_name }}</span>{% else %}<span class="dash-visually-hidden">{{ p.display_name }}</span>{% endif %}
+{%- if named %}<span class="dash-face-name">{{ p.display_name }}</span>{% elif spoken %}<span class="dash-visually-hidden">{{ p.display_name }}</span>{% endif %}
 {%- endmacro %}
 
 {#- Small faces for everyone an item belongs to. -#}
@@ -89,5 +90,47 @@
 <li class="dash-pv-tile {{ tile.color }}{% if tile.past %} dash-pv-past{% endif %}{% if tile.current %} dash-pv-current{% endif %}{% if tile.cancelled %} dash-pv-cancelled{% endif %}"{% if tile.current %} data-live{% endif %}>
 <span class="dash-pv-emoji" role="img" aria-label="{{ tile.label }}">{{ tile.icon }}</span>
 {%- if tile.cancelled %}<span class="dash-pv-x" aria-hidden="true">✕</span>{% endif -%}
+</li>
+{%- endmacro %}
+
+{#- ── Household-chat messages (messages.py) ─────────────────────────────
+    Each is a real button: a tap reads `data-say` aloud (dashboard.js —
+    only where the browser has a voice for the page language; the script
+    then points the button at the "Read aloud" description and shows the
+    🔊). -#}
+
+{#- The description the script points every message button at. -#}
+{% macro say_hint() -%}
+<span id="dash-say-hint" hidden>{{ t("dashboard.messages.read_aloud") }}</span>
+{%- endmacro %}
+
+{#- Home: face, text (two lines at most), when. -#}
+{% macro message_row(m) -%}
+<li class="dash-msg-item">
+<button type="button" class="dash-msg{% if m.new %} dash-msg-new{% endif %}" data-say="{{ m.say }}" data-msg="{{ m.id }}">
+{{ face(m.person, "msg", spoken=False) }}
+<span class="dash-msg-body">
+<span class="dash-msg-text"><span class="dash-visually-hidden">{{ t("dashboard.messages.from", name=m.person.display_name) }}:</span> {% if m.icon %}<span aria-hidden="true">{{ m.icon }}</span> {% endif %}{{ m.text }}</span>
+<span class="dash-msg-when">
+{%- if m.new %}<span class="dash-tag dash-tag-now">{{ t("dashboard.messages.new") }}</span> <time datetime="{{ m.iso }}" data-rel>{{ m.when }}</time>
+{%- else %}<time datetime="{{ m.iso }}">{{ m.when }}</time>{% endif -%}
+</span>
+</span>
+<span class="dash-msg-speaker" aria-hidden="true">🔊</span>
+</button>
+</li>
+{%- endmacro %}
+
+{#- Picture view: the sender's face and a 💬, no words. A new one's 💬
+    sits on a filled accent circle — never the ring the page owner's face
+    wears. The tile itself is the affordance: its 🔊 is drawn by the CSS
+    only while it speaks. -#}
+{% macro message_tile(m) -%}
+<li class="dash-pv-msg-item">
+<button type="button" class="dash-pv-msg" aria-label="{{ t("dashboard.messages.from", name=m.person.display_name) }}" data-say="{{ m.say }}" data-msg="{{ m.id }}">
+{{ face(m.person, "lg", spoken=False) }}
+<span class="dash-pv-msg-badge{% if m.new %} dash-pv-msg-badge-new{% endif %}" aria-hidden="true">💬</span>
+<span class="dash-pv-msg-speaker" aria-hidden="true"></span>
+</button>
 </li>
 {%- endmacro %}

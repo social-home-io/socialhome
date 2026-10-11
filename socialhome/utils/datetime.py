@@ -15,6 +15,9 @@ Python 3.11's broader tolerance.
   where a malformed peer-supplied timestamp should land locally as "now"
   rather than raising — the signature has already been verified by the
   time we reach the timestamp fallback.
+
+And :func:`as_utc` — the one "a naive datetime means UTC" rule for
+values already parsed.
 """
 
 from __future__ import annotations
@@ -57,3 +60,11 @@ def parse_iso8601_lenient(value: object) -> datetime:
         except ValueError:
             pass
     return datetime.now(timezone.utc)
+
+
+def as_utc(value: datetime) -> datetime:
+    """``value`` as a tz-aware UTC datetime; a naive one is taken as UTC
+    already (the shape SQLite ``datetime('now')`` stamps parse to)."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

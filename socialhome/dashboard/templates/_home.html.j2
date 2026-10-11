@@ -1,6 +1,6 @@
 {#- Home (mockup B): clock + next up + who's home, then today, then the
     chores / shopping / notes columns. Empty columns are left out. -#}
-{% from "_macros.html.j2" import face, faces, agenda_row, chore with context %}
+{% from "_macros.html.j2" import face, faces, agenda_row, chore, say_hint, message_row with context %}
 {% set day_on = "calendar" in snap.sections or "timetable" in snap.sections %}
 {#- Today in time order (crowded households; phones instead of lanes). -#}
 {% macro day_list_ol(extra="") -%}
@@ -25,6 +25,8 @@
       <time class="dash-clock" datetime="{{ clock.iso }}" data-clock>{{ clock.time }}</time>
       <p class="dash-date">{{ clock.date }}</p>
     </div>
+    {% if snap.next_up or snap.tomorrow_first or messages %}
+    <div class="dash-top-side">
     {% if snap.next_up %}
     {% set nx = snap.next_up %}
     <section class="dash-next {{ f.kc(f.item_color(nx)) }}" aria-labelledby="dash-next-label">
@@ -55,6 +57,19 @@
       </p>
       <p class="dash-next-meta">{{ faces(nx) }}</p>
     </section>
+    {% endif %}
+    {% if messages %}
+    {#- The newest household-chat messages (admin opt-in), right under
+        NEXT; the card is left out entirely when there are none. -#}
+    <section class="dash-msgs" aria-labelledby="dash-msgs-label">
+      <h2 class="dash-label" id="dash-msgs-label">{{ t("dashboard.messages.heading") }}</h2>
+      {{ say_hint() }}
+      <ul class="dash-msg-list">
+        {% for m in messages %}{{ message_row(m) }}{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+    </div>
     {% endif %}
   </header>
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, ClassVar, Final
 
 from .errors import CodedError
@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_DASHBOARD_PORT",
     "IDLE_RETURN_CHOICES",
+    "MESSAGE_KINDS",
+    "MESSAGE_MAX_AGE",
+    "MESSAGES_SHOWN",
     "MAX_ADDRESS_LENGTH",
     "MAX_PIN_LENGTH",
     "MIN_PASSWORD_LENGTH",
@@ -50,6 +53,7 @@ __all__ = [
     "DashboardAgendaItem",
     "DashboardEvent",
     "DashboardLesson",
+    "DashboardMessage",
     "DashboardNotRunningError",
     "DashboardPasswordRequiredError",
     "DashboardPasswordTooShortError",
@@ -101,6 +105,14 @@ MAX_ADDRESS_LENGTH = 200
 #: Lifetime of a one-time tablet setup token (QR / link pairing).
 SETUP_TOKEN_TTL_SECONDS = 600
 
+#: Household-chat messages on the wall (``show_household_messages``): the
+#: newest few, and none older than this (wall-clock age).
+MESSAGES_SHOWN = 3
+MESSAGE_MAX_AGE = timedelta(hours=6)
+
+#: :attr:`DashboardMessage.kind` values.
+MESSAGE_KINDS = frozenset({"text", "photo", "video", "file", "voice"})
+
 
 @dataclass(slots=True, frozen=True)
 class DashboardPersonSettings:
@@ -133,6 +145,9 @@ class DashboardSettings:
     night_end: str = "06:00"
     keep_screen_on: bool = True
     show_status_text: bool = False
+    #: Home (and picture-view pages) show the last few household-chat
+    #: messages. Off by default: anyone at the tablet can read them.
+    show_household_messages: bool = False
     #: Admin-set base URL tablets use (``http(s)://host[:port]``), shown
     #: in the admin UI and setup links instead of a guessed address.
     address: str | None = None
@@ -597,13 +612,34 @@ class DashboardSticky:
 
 
 @dataclass(slots=True, frozen=True)
+class DashboardMessage:
+    """A recent household-chat message, as the wall may show it.
+
+    ``kind`` is one of :data:`MESSAGE_KINDS`: ``"text"`` (typed or
+    dictated), ``"photo"``, ``"video"``, ``"file"`` or ``"voice"`` (a voice
+    note). ``text`` is plain text — the message (its latest edit), or a
+    voice note's transcript — and ``""`` for media and for a voice note
+    not transcribed yet. ``sent_at`` is in the household zone. Never a
+    location, never a reaction, never who has read it.
+    """
+
+    id: str
+    sender_id: str
+    kind: str
+    text: str
+    sent_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
 class HomeSnapshot:
     """Everything the dashboard's household overview renders.
 
     ``sections`` names the enabled sections (``SECTION_*``); a slice whose
     section is off is empty. ``next_up`` is the soonest timed event or
     lesson still to start today. ``tomorrow_first`` is the earliest timed
-    event or first lesson tomorrow — for night mode.
+    event or first lesson tomorrow — for night mode. ``messages`` are the
+    newest household-chat messages, newest first — empty unless the admin
+    turned them on, and always at night.
     """
 
     now: datetime
@@ -620,6 +656,7 @@ class HomeSnapshot:
     stickies: tuple[DashboardSticky, ...] = ()
     school: tuple[DashboardSchoolDay, ...] = ()
     tomorrow_first: DashboardAgendaItem | None = None
+    messages: tuple[DashboardMessage, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -634,7 +671,8 @@ class PersonSnapshot:
     ``chores`` are tasks assigned to the person: open ones due within a
     week (overdue included) and those completed today. ``people`` is
     every shown member (``person`` among them), in household order — the
-    dashboard's rail.
+    dashboard's rail. ``messages`` (as on Home) only for a picture-view
+    person — a reader page never shows them.
     """
 
     person: DashboardPerson
@@ -650,6 +688,7 @@ class PersonSnapshot:
     school: DashboardSchoolDay | None = None
     school_tomorrow_first: DashboardLesson | None = None
     people: tuple[DashboardPerson, ...] = ()
+    messages: tuple[DashboardMessage, ...] = ()
 
 
 class DashboardPinInvalidError(CodedError, ValueError):

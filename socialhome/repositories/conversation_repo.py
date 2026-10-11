@@ -15,7 +15,7 @@ names, and driving delivery. This module is thin data access.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
@@ -40,6 +40,7 @@ from .base import (
     rows_to_dicts,
     sync_page_cursor,
 )
+from ..utils.datetime import as_utc
 from .cp_repo import guardian_block_counterparts_sql
 
 
@@ -148,6 +149,16 @@ class AbstractConversationRepo(Protocol):
         since_iso: str | None,
         *,
         limit: int = 500,
+    ) -> list[ConversationMessage]: ...
+    async def list_recent_messages(
+        self,
+        conversation_id: str,
+        *,
+        since: datetime,
+        until: datetime,
+        types: Collection[str],
+        senders: Collection[str],
+        limit: int,
     ) -> list[ConversationMessage]: ...
     async def list_messages_sync_page(
         self,
@@ -1013,6 +1024,57 @@ class SqliteConversationRepo:
                 """,
                 (conversation_id, before, int(limit)),
             )
+        return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
+
+    async def list_recent_messages(
+        self,
+        conversation_id: str,
+        *,
+        since: datetime,
+        until: datetime,
+        types: Collection[str],
+        senders: Collection[str],
+        limit: int,
+    ) -> list[ConversationMessage]:
+        """The newest messages of ``conversation_id`` created between
+        ``since`` and ``until`` (both inclusive), newest first: only
+        ``types``, only from ``senders``, never a deleted one, never a
+        ``text`` / ``transcript`` with blank content. A plain read — no
+        seat, read watermark or conversation row is touched.
+
+        Times compare as instants (``julianday``), so a naive
+        ``datetime('now')`` stamp and a tz-aware ISO one order correctly
+        against each other; a coarse ``created_at`` bound a day before
+        ``since`` (true for both stamp shapes) lets the
+        ``(conversation_id, created_at)`` index narrow the scan first.
+        Empty ``types`` / ``senders`` (or ``limit`` below one) read nothing.
+        """
+        type_list = sorted(set(types))
+        sender_list = sorted(set(senders))
+        if not type_list or not sender_list or limit < 1:
+            return []
+        rows = await self._db.fetchall(
+            f"""
+            SELECT * FROM conversation_messages
+             WHERE conversation_id=? AND deleted=0
+               AND type IN ({",".join("?" * len(type_list))})
+               AND sender_user_id IN ({",".join("?" * len(sender_list))})
+               AND NOT (type IN ('text', 'transcript') AND trim(content) = '')
+               AND created_at >= ?
+               AND julianday(created_at) >= julianday(?)
+               AND julianday(created_at) <= julianday(?)
+             ORDER BY julianday(created_at) DESC, id DESC LIMIT ?
+            """,
+            (
+                conversation_id,
+                *type_list,
+                *sender_list,
+                (as_utc(since) - timedelta(days=1)).date().isoformat(),
+                as_utc(since).isoformat(),
+                as_utc(until).isoformat(),
+                int(limit),
+            ),
+        )
         return [m for m in (_row_to_message(d) for d in rows_to_dicts(rows)) if m]
 
     async def list_messages_since(
