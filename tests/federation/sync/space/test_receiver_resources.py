@@ -14,7 +14,11 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
-from socialhome.domain.events import RemoteSpaceMemberBanned, TimetableSaved
+from socialhome.domain.events import (
+    RemoteSpaceMemberBanned,
+    SpaceCommentSynced,
+    TimetableSaved,
+)
 from socialhome.domain.task import Task, TaskPriority, TaskStatus
 from socialhome.domain.timetable import Timetable, to_wire_dict
 from socialhome.federation.encoder import FederationEncoder
@@ -492,6 +496,33 @@ async def test_comments(setup):
     )
     assert len(c.comments) == 1
     assert c.comments[0].id == "c-1"
+
+
+async def test_a_synced_comment_tells_the_parent_wait_buffer(setup, bus):
+    """A stored comment publishes ``SpaceCommentSynced`` (and nothing that
+    notifies), so replies held for it replay."""
+    r, c, kp = setup
+    seen: list = []
+
+    async def _on(event):
+        seen.append(event)
+
+    bus.subscribe(SpaceCommentSynced, _on)
+    await _send(
+        r,
+        kp,
+        "comments",
+        [
+            {
+                "id": "c-s",
+                "post_id": "p-1",
+                "author": "u-1",
+                "type": "text",
+                "content": "x",
+            }
+        ],
+    )
+    assert [(e.comment.id, e.space_id) for e in seen] == [("c-s", "sp-1")]
 
 
 async def test_an_older_providers_deleted_comment_record_is_not_stored(setup):

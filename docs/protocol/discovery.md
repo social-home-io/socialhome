@@ -1552,11 +1552,15 @@ acts on bound inside the author signature:
   held here at all** — and a reply whose parent comment is not — waits in a
   bounded, expiring in-memory buffer
   (`socialhome/federation/pending_parent_buffer.py`: 512 entries, at most
-  128 from one origin household, 64 per parent, 4 MiB, 10 min) and its whole
-  frame is re-run — decrypt, writer cert, epoch freshness, author signature,
-  roster — when the post lands (`SpacePostCreated` / `SpacePostSynced`) or
-  the parent comment does (`CommentAdded`). A copy of the same frame from a
-  second GFS takes no second slot. A post held here deleted (a tombstone) or
+  128 and 512 KiB from one origin household, 64 per parent, 64 KiB per
+  frame, 4 MiB, 10 min) and its whole frame is re-run — decrypt, writer
+  cert, epoch freshness, author signature, roster — when the post lands
+  (`SpacePostCreated` / `SpacePostSynced`) or the parent comment does
+  (`CommentAdded` / `SpaceCommentSynced`). Replays drain iteratively, so a
+  long reply chain cannot overflow the stack. A copy of the same frame from
+  a second GFS takes no second slot (deduped by a SHA-256 digest of the
+  ciphertext). A frame that cannot be held (a cap hit) is dropped, as before
+  — a reply is never stored without its parent comment. A post held here deleted (a tombstone) or
   in another space is still a refusal, never held; a post that never arrives
   drops the item when its entry expires (logged at DEBUG). The federated
   `SPACE_COMMENT_*` / `SPACE_POST_UPDATED` / `SPACE_POST_DELETED` handlers
@@ -1577,9 +1581,11 @@ acts on bound inside the author signature:
   column's shape), never on a deleted row. An edit that overtakes its create
   IS the create, at its newest content, under the create's own rules; the
   later create is a duplicate. Member households also apply the federated
-  `SPACE_*_UPDATED` copy, which stamps its own clock and applies in arrival
-  order — each path is ordered on its own, so both converge on the author's
-  last edit.
+  `SPACE_*_UPDATED` copy under the same last-writer-wins rule, by the
+  sender's `edited_at` in its payload (the same stamp the author's
+  `post_edit` signs; an older sender's copy by its envelope `timestamp`) —
+  never the receiver's clock, so both paths converge on the author's last
+  edit even when one copy is replayed late.
 - **Reactions** are ordered per `(post, user, emoji)` by their signed `ts`,
   persisted next to the reactions in the same transaction
   (`space_posts.reaction_stamps_json`, migration `0075`; local writes stamp

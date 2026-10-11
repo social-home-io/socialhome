@@ -15,6 +15,7 @@ from socialhome.crypto import (
     verify_ed25519,
 )
 from socialhome.domain.events import (
+    CommentUpdated,
     PostDeleted,
     PostEdited,
     SpacePostCreated,
@@ -276,6 +277,8 @@ async def test_post_edited_in_space_broadcasts_update():
     payload = call.args[2]
     assert payload["post_id"] == "post-edit-1"
     assert payload["content"] == "updated body"
+    # The sender's edit stamp, for last-writer-wins on every receiver.
+    assert datetime.fromisoformat(payload["edited_at"]).tzinfo is not None
 
 
 async def test_post_edited_household_only_skipped():
@@ -1377,3 +1380,45 @@ async def test_items_in_a_private_channel_space_are_scheduled():
         )
     )
     assert [m[2] for m in member.scheduled] == ["comment", "reaction_add"]
+
+
+async def test_an_own_post_edit_carries_one_stamp_on_both_paths():
+    """The federated ``SPACE_POST_UPDATED`` and the GFS ``post_edit`` carry
+    the same ``edited_at``, so receivers order the two copies as one edit."""
+    member = _ItemGfs()
+    bus = EventBus()
+    federation = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+    outbound = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo(
+            {
+                "sp-1": _FakeSpace(
+                    space_type=SpaceType.PUBLIC,
+                    features=_FakeFeatures(allow_subscribers=True),
+                )
+            }
+        ),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    outbound.attach_member_gfs(member)
+    await bus.publish(
+        PostEdited(post=_post_obj(uid), space_id="sp-1", actor_user_id=uid)
+    )
+    federated = federation.broadcast_to_space_members.call_args.args[2]
+    assert member.scheduled[0][3]["edited_at"] == federated["edited_at"]
+
+
+async def test_a_comment_edit_carries_its_stamp():
+    bus = EventBus()
+    federation = AsyncMock()
+    _make_outbound(bus=bus, federation=federation)
+    await bus.publish(
+        CommentUpdated(post_id="post-1", comment=_comment_obj("u-1"), space_id="sp-1")
+    )
+    call = federation.broadcast_to_space_members.call_args
+    assert call.args[1] is FederationEventType.SPACE_COMMENT_UPDATED
+    assert datetime.fromisoformat(call.args[2]["edited_at"]).tzinfo is not None

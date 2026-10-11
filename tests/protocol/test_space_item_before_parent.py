@@ -38,7 +38,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key, federation_service_key
+from socialhome.app_keys import (
+    db_key,
+    federation_inbound_service_key,
+    federation_service_key,
+)
 from socialhome.crypto import (
     derive_instance_id,
     derive_user_id,
@@ -70,7 +74,15 @@ from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
 
-from .test_space_content_authorship import _SEED, AUTHOR, OTHER, SP, _config
+from .test_space_content_authorship import (
+    _SEED,
+    ADMIN,
+    AUTHOR,
+    OTHER,
+    SP,
+    THIRD,
+    _config,
+)
 
 pytestmark = pytest.mark.security
 
@@ -366,14 +378,14 @@ async def direct(aiohttp_client, tmp_dir):
     return app, db
 
 
-async def _deliver(app, event_type, payload, *, sender) -> None:
+async def _deliver(app, event_type, payload, *, sender, timestamp=None) -> None:
     await app[federation_service_key].replay_held(
         FederationEvent(
             msg_id=f"m-{next(_msg_ids)}",
             event_type=event_type,
             from_instance=sender,
             to_instance="us",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
             payload=dict(payload),
             space_id=SP,
         ),
@@ -506,3 +518,129 @@ async def test_direct_a_comment_naming_someone_else_is_never_held(direct):
     )
     await _deliver(app, FET.SPACE_POST_CREATED, _post("p-late"), sender=AUTHOR)
     assert await _comment_row(db, "c-forged") is None
+
+
+#: Households seated in the seeded space, with a seated user each — a long
+#: chain spread over them stays under the per-household caps.
+_CHAIN_SEATS = [(AUTHOR, "u-a"), (OTHER, "u-o"), (THIRD, "u-t"), (ADMIN, "u-adm")]
+
+
+async def test_direct_a_reply_chain_deeper_than_300_all_lands(direct):
+    """Every reply overtook its parent: the whole chain waits, then drains
+    when the root lands — iteratively, so the depth never reaches the stack
+    (a recursive drain lost everything past ~157 levels)."""
+    app, db = direct
+    depth = 320
+    for i in range(depth, 1, -1):
+        sender, author = _CHAIN_SEATS[i % len(_CHAIN_SEATS)]
+        await _deliver(
+            app,
+            FET.SPACE_COMMENT_CREATED,
+            _comment("post-a", f"k{i}", author=author, parent_id=f"k{i - 1}"),
+            sender=sender,
+        )
+    sender, author = _CHAIN_SEATS[1 % len(_CHAIN_SEATS)]
+    await _deliver(
+        app,
+        FET.SPACE_COMMENT_CREATED,
+        _comment("post-a", "k1", author=author),
+        sender=sender,
+    )
+    missing = [
+        i for i in range(1, depth + 1) if await _comment_row(db, f"k{i}") is None
+    ]
+    assert missing == []
+
+
+def _ago(seconds: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+async def _post_content(db, pid: str) -> str:
+    row = await db.fetchone("SELECT content FROM space_posts WHERE id=?", (pid,))
+    return row["content"]
+
+
+async def test_direct_a_replayed_edit_keeps_its_own_stamp(direct):
+    """A held edit replayed when its post lands is stamped with the sender's
+    ``edited_at``, not the receiver's clock — so a newer edit from another
+    path (here: a later copy) still lands over it, and an older one never."""
+    app, db = direct
+    await _deliver(
+        app,
+        FET.SPACE_POST_UPDATED,
+        {"post_id": "p-ed", "content": "first edit", "edited_at": _ago(60)},
+        sender=AUTHOR,
+    )
+    await _deliver(app, FET.SPACE_POST_CREATED, _post("p-ed"), sender=AUTHOR)
+    assert await _post_content(db, "p-ed") == "first edit"
+    await _deliver(
+        app,
+        FET.SPACE_POST_UPDATED,
+        {"post_id": "p-ed", "content": "newer edit", "edited_at": _ago(30)},
+        sender=AUTHOR,
+    )
+    assert await _post_content(db, "p-ed") == "newer edit"
+    await _deliver(
+        app,
+        FET.SPACE_POST_UPDATED,
+        {"post_id": "p-ed", "content": "stale edit", "edited_at": _ago(45)},
+        sender=AUTHOR,
+    )
+    assert await _post_content(db, "p-ed") == "newer edit"
+
+
+async def test_direct_an_older_sender_edit_is_ordered_by_its_envelope(direct):
+    app, db = direct
+    await _deliver(app, FET.SPACE_POST_CREATED, _post("p-env"), sender=AUTHOR)
+    await _deliver(
+        app,
+        FET.SPACE_POST_UPDATED,
+        {"post_id": "p-env", "content": "new"},
+        sender=AUTHOR,
+        timestamp=_ago(10),
+    )
+    await _deliver(
+        app,
+        FET.SPACE_POST_UPDATED,
+        {"post_id": "p-env", "content": "old"},
+        sender=AUTHOR,
+        timestamp=_ago(20),
+    )
+    assert await _post_content(db, "p-env") == "new"
+
+
+async def test_direct_a_comment_edit_keeps_its_own_stamp(direct):
+    app, db = direct
+    await _deliver(
+        app,
+        FET.SPACE_COMMENT_UPDATED,
+        {"id": "cmt-a", "content": "newer", "edited_at": _ago(10)},
+        sender=AUTHOR,
+    )
+    await _deliver(
+        app,
+        FET.SPACE_COMMENT_UPDATED,
+        {"id": "cmt-a", "content": "stale", "edited_at": _ago(20)},
+        sender=AUTHOR,
+    )
+    assert (await _comment_row(db, "cmt-a"))["content"] == "newer"
+
+
+async def test_direct_a_reply_that_cannot_be_held_is_refused_never_orphaned(direct):
+    """No room to hold (here: no buffer at all): the reply is refused as
+    before — the same outcome as the space_item path — never stored without
+    its parent."""
+    app, db = direct
+    app[federation_inbound_service_key]._pending_parents = None
+    await _deliver(
+        app,
+        FET.SPACE_COMMENT_CREATED,
+        _comment("post-a", "c-orphan", parent_id="c-missing"),
+        sender=AUTHOR,
+    )
+    await _deliver(
+        app, FET.SPACE_COMMENT_CREATED, _comment("p-none", "c-nopost"), sender=AUTHOR
+    )
+    assert await _comment_row(db, "c-orphan") is None
+    assert await _comment_row(db, "c-nopost") is None

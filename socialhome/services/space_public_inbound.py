@@ -70,6 +70,7 @@ household relayed); a frame from an older GFS may still carry an outer
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -337,11 +338,11 @@ class SpacePublicInbound:
                 self._hold_for_parent(
                     wait,
                     space_id=space_id,
-                    token=f"relay:{ciphertext}",
+                    token=_digest("relay", ciphertext),
                     # The relay frame names no household: the notice is
                     # charged to the space's host, its only signer.
                     sender=space.owner_instance_id or space_id,
-                    size=len(ciphertext),
+                    size=_retained_bytes(envelope),
                     replay=functools.partial(self._on_relay, envelope),
                     label=f"space_public removal in space {space_id}",
                 )
@@ -670,9 +671,9 @@ class SpacePublicInbound:
                 self._hold_for_parent(
                     wait,
                     space_id=item.space_id,
-                    token=f"item:{item.payload}",
+                    token=_digest("item", item.payload),
                     sender=origin_instance_id,
-                    size=len(item.payload),
+                    size=_retained_bytes(frame),
                     replay=functools.partial(self._on_space_item, frame),
                     label=f"space_item {item_type} {item_id} from {origin_instance_id}",
                 )
@@ -931,6 +932,20 @@ class SpacePublicInbound:
             created_at=parse_iso8601_lenient(inner.get("created_at")),
             hidden_from_feed=bool(inner.get("hidden_from_feed", False)),
         )
+
+
+def _retained_bytes(frame: dict) -> int:
+    """What a held replay keeps alive: the whole frame it re-runs."""
+    try:
+        return len(json.dumps(frame))
+    except TypeError, ValueError:
+        return len(repr(frame))
+
+
+def _digest(kind: str, ciphertext: str) -> str:
+    """A short dedupe token for a held frame — two copies of one frame (from
+    two GFSs) share it; the buffer keeps 64 hex chars, not the ciphertext."""
+    return f"{kind}:{hashlib.sha256(ciphertext.encode()).hexdigest()}"
 
 
 def _origin_is_author_household(inner: dict, origin_instance_id: str) -> bool:

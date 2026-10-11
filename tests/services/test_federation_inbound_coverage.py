@@ -273,7 +273,9 @@ async def test_space_comment_updated_happy_path(svc):
             space_id="sp",
         ),
     )
-    svc.sp_post.edit_comment.assert_awaited_once_with("c", "new", space_id="sp")
+    svc.sp_post.edit_comment.assert_awaited_once_with(
+        "c", "new", space_id="sp", edited_at=None
+    )
     assert any(isinstance(e, CommentUpdated) for e in svc.bus.events)
 
 

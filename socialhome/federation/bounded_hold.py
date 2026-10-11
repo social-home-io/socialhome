@@ -9,9 +9,10 @@ Two inbound buffers park a write that arrived before the state it needs:
   comment) it references.
 
 Both are fed by remote households, so both must be cheap to flood: capped in
-entries, entries per sending household, entries per key and bytes, and every
-entry expires. The per-sender cap is checked before the shared one, so no
-single household can take every slot. In memory on purpose — a restart loses
+entries, entries per sending household, entries per key and bytes (optionally
+also bytes per sending household and per entry), and every entry expires. The
+per-sender caps are checked before the shared ones, so no single household
+can take every slot or every byte. In memory on purpose — a restart loses
 what was held, the same outcome as before the buffers existed.
 
 :class:`BoundedHold` owns exactly that bookkeeping; what a held entry *is*
@@ -50,6 +51,8 @@ class BoundedHold[T]:
         "_max_per_key",
         "_max_per_sender",
         "_max_bytes",
+        "_max_bytes_per_sender",
+        "_max_entry_bytes",
         "_bytes",
         "_clock",
         "_on_expire",
@@ -63,6 +66,8 @@ class BoundedHold[T]:
         max_per_key: int,
         max_per_sender: int,
         max_bytes: int,
+        max_bytes_per_sender: int | None = None,
+        max_entry_bytes: int | None = None,
         clock: Callable[[], float] = time.monotonic,
         on_expire: Callable[[HoldKey, T], None] | None = None,
     ) -> None:
@@ -72,6 +77,9 @@ class BoundedHold[T]:
         self._max_per_key = max_per_key
         self._max_per_sender = max_per_sender
         self._max_bytes = max_bytes
+        #: ``None`` = only the shared ``max_bytes`` budget applies.
+        self._max_bytes_per_sender = max_bytes_per_sender
+        self._max_entry_bytes = max_entry_bytes
         self._bytes = 0
         self._clock = clock
         self._on_expire = on_expire
@@ -84,10 +92,15 @@ class BoundedHold[T]:
         """Bytes currently held (the ``max_bytes`` budget's fill)."""
         return self._bytes
 
-    def _held_from(self, sender: str) -> int:
-        return sum(
-            1 for bucket in self._by_key.values() for h in bucket if h.sender == sender
-        )
+    def _held_from(self, sender: str) -> tuple[int, int]:
+        """``(entries, bytes)`` currently held from ``sender``."""
+        entries = size = 0
+        for bucket in self._by_key.values():
+            for h in bucket:
+                if h.sender == sender:
+                    entries += 1
+                    size += h.size
+        return entries, size
 
     def purge(self) -> None:
         """Drop every expired entry (``on_expire`` is told about each)."""
@@ -116,8 +129,15 @@ class BoundedHold[T]:
         bucket = self._by_key.get(key, [])
         if any(h.token == token for h in bucket):
             return True
+        if self._max_entry_bytes is not None and size > self._max_entry_bytes:
+            return False
+        sender_entries, sender_bytes = self._held_from(sender)
         if (
-            self._held_from(sender) >= self._max_per_sender
+            sender_entries >= self._max_per_sender
+            or (
+                self._max_bytes_per_sender is not None
+                and sender_bytes + size > self._max_bytes_per_sender
+            )
             or len(self) >= self._max_entries
             or len(bucket) >= self._max_per_key
             or self._bytes + size > self._max_bytes

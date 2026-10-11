@@ -69,6 +69,7 @@ from ....domain.events import (
     PageDeleted,
     PostDeleted,
     RemoteSpaceMemberBanned,
+    SpaceCommentSynced,
     SpacePostSynced,
     TaskDeleted,
     TaskListDeleted,
@@ -1191,9 +1192,14 @@ class SpaceSyncReceiver:
                 if r.get("deleted"):
                     continue
                 comment = _comment_from_record(r)
-                if comment is None or await self._space_post_repo.add_comment(
-                    comment, space_id=space_id
-                ):
+                if comment is None:
+                    continue
+                if await self._space_post_repo.add_comment(comment, space_id=space_id):
+                    # History, not news: only replies held for this comment
+                    # (the parent-wait buffer) follow it.
+                    await self._bus.publish(
+                        SpaceCommentSynced(comment=comment, space_id=space_id)
+                    )
                     continue
                 # Not inserted: an id held here already (a member-relayed
                 # copy, or a delete's tombstone) stays as it is …

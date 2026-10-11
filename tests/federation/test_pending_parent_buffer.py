@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from socialhome.domain.events import CommentAdded, SpacePostCreated, SpacePostSynced
+from socialhome.domain.events import (
+    CommentAdded,
+    SpaceCommentSynced,
+    SpacePostCreated,
+    SpacePostSynced,
+)
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.federation.pending_parent_buffer import (
     PARENT_COMMENT,
@@ -167,3 +172,117 @@ def test_awaiting_parent_names_the_parent() -> None:
     wait = AwaitingParent(PARENT_POST, "p")
     assert (wait.kind, wait.parent_id) == (PARENT_POST, "p")
     assert "p" in str(wait)
+
+
+async def test_a_reply_chain_far_deeper_than_the_stack_drains_iteratively() -> None:
+    """Each replayed comment lands and publishes ``CommentAdded``, which
+    releases the next reply from inside the outer replay. A recursive drain
+    nests one replay per level and overflows the stack; the queue doesn't."""
+    bus = EventBus()
+    depth = 3000
+    buf = PendingParentBuffer(
+        max_entries=depth,
+        max_per_key=1,
+        max_per_sender=depth,
+        max_bytes=depth * 1024,
+        max_bytes_per_sender=depth * 1024,
+    )
+    buf.attach_bus(bus)
+    landed: list[int] = []
+
+    def _replay(n: int):
+        async def _run() -> None:
+            landed.append(n)
+            await bus.publish(
+                CommentAdded(post_id="p", comment=_comment(f"c{n}"), space_id="sp")
+            )
+
+        return _run
+
+    for n in range(1, depth + 1):
+        assert buf.hold(
+            space_id="sp",
+            kind=PARENT_COMMENT,
+            parent_id=f"c{n - 1}",
+            token=f"c{n}",
+            sender="s",
+            size=1,
+            replay=_replay(n),
+            label=f"c{n}",
+        )
+    replayed = await buf.release(space_id="sp", kind=PARENT_COMMENT, parent_id="c0")
+    assert replayed == depth
+    assert landed == list(range(1, depth + 1))
+    assert len(buf) == 0
+
+
+async def test_a_release_inside_a_drain_only_enqueues() -> None:
+    buf = PendingParentBuffer()
+    rec = _Recorder()
+    inner: list[int] = []
+
+    async def _outer() -> None:
+        inner.append(await buf.release(space_id="sp", kind=PARENT_POST, parent_id="q"))
+
+    buf.hold(
+        space_id="sp",
+        kind=PARENT_POST,
+        parent_id="p",
+        token="outer",
+        sender="s",
+        size=1,
+        replay=_outer,
+        label="outer",
+    )
+    _hold(buf, rec, "nested", parent="q")
+    assert await buf.release(space_id="sp", kind=PARENT_POST, parent_id="p") == 2
+    assert inner == [0]
+    assert rec.calls == ["nested"]
+
+
+async def test_a_comment_stored_by_sync_releases_its_replies() -> None:
+    bus = EventBus()
+    buf = PendingParentBuffer()
+    buf.attach_bus(bus)
+    rec = _Recorder()
+    _hold(buf, rec, "reply", kind=PARENT_COMMENT, parent="c")
+    await bus.publish(SpaceCommentSynced(comment=_comment("c"), space_id="sp"))
+    assert rec.calls == ["reply"]
+
+
+async def test_one_household_cannot_take_the_shared_bytes() -> None:
+    buf = PendingParentBuffer(max_bytes=100_000, max_bytes_per_sender=10_000)
+    rec = _Recorder()
+
+    def _big(name: str, sender: str) -> bool:
+        return buf.hold(
+            space_id="sp",
+            kind=PARENT_POST,
+            parent_id=name,
+            token=name,
+            sender=sender,
+            size=4_000,
+            replay=rec.replay(name),
+            label=name,
+        )
+
+    # 4 000 B + the per-entry overhead: two fit in 10 000, the third doesn't.
+    assert _big("a", "s") and _big("b", "s")
+    assert not _big("c", "s")
+    assert _big("d", "other")
+
+
+async def test_an_oversized_item_is_not_held() -> None:
+    buf = PendingParentBuffer(max_item_bytes=1_000)
+    rec = _Recorder()
+    assert not buf.hold(
+        space_id="sp",
+        kind=PARENT_POST,
+        parent_id="p",
+        token="big",
+        sender="s",
+        size=1_001,
+        replay=rec.replay("big"),
+        label="big",
+    )
+    assert len(buf) == 0

@@ -208,6 +208,20 @@ class SpacePostSynced(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceCommentSynced(DomainEvent):
+    """A live space comment was stored by a §25.6 sync stream.
+
+    Not :class:`CommentAdded`: catch-up history notifies, broadcasts and
+    fans out nothing. Its one consumer is the parent-wait buffer
+    (:class:`~socialhome.federation.pending_parent_buffer.PendingParentBuffer`),
+    which replays replies held for this comment."""
+
+    comment: "Comment"
+    space_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpacePostModerated(DomainEvent):
     """An admin removed a post as a moderation action.
 

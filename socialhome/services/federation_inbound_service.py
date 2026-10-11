@@ -70,6 +70,7 @@ from ..domain.post import (
 )
 from ..domain.moment import MOMENT_RETENTION_DAYS, Moment
 from ..domain.presence import truncate_coord
+from ..domain.space_item import item_stamp, stamp_to_db
 from ..domain.space import (
     MODERATION_BLOCK_KEY,
     ContentAction,
@@ -2146,6 +2147,7 @@ class FederationInboundService(ProtectionGateMixin):
             new_content,
             space_id=gated_space_id,
             clear_link_preview=clear_card,
+            edited_at=_edit_stamp(event),
         ):
             log_cross_space_refusal(
                 event,
@@ -2267,10 +2269,18 @@ class FederationInboundService(ProtectionGateMixin):
         parent_id = p.get("parent_id")
         held_post = await self._space_post_repo.get(post_id)
         if held_post is None:
-            if self._hold_for_parent(
+            if not self._hold_for_parent(
                 event, space_id, PARENT_POST, post_id, what="comment", row_id=comment_id
             ):
-                return
+                # Not held (buffer full, or no buffer): an absent post is
+                # benign out-of-order delivery, not a cross-space attempt.
+                log_not_applied(
+                    event,
+                    what="comment",
+                    row_id=comment_id,
+                    reason=f"post {post_id} not held here",
+                )
+            return
         elif held_post[0] == space_id and held_post[1].deleted:
             log_not_applied(
                 event, what="comment", row_id=comment_id, reason="post deleted"
@@ -2281,15 +2291,23 @@ class FederationInboundService(ProtectionGateMixin):
             and isinstance(parent_id, str)
             and parent_id
             and await self._space_post_repo.get_comment(parent_id) is None
-            and self._hold_for_parent(
+        ):
+            # Not held (buffer full): refused, as before — the repo never
+            # stores an orphan reply, on this path or the space_item one.
+            if not self._hold_for_parent(
                 event,
                 space_id,
                 PARENT_COMMENT,
                 parent_id,
                 what="comment",
                 row_id=comment_id,
-            )
-        ):
+            ):
+                log_not_applied(
+                    event,
+                    what="comment",
+                    row_id=comment_id,
+                    reason=f"parent comment {parent_id} not held here",
+                )
             return
         comment_type_str = str(p.get("type") or "text")
         try:
@@ -2350,6 +2368,7 @@ class FederationInboundService(ProtectionGateMixin):
             comment_id,
             str(content),
             space_id=space_id,
+            edited_at=_edit_stamp(event),
         ):
             log_cross_space_refusal(
                 event,
@@ -4569,3 +4588,16 @@ class FederationInboundService(ProtectionGateMixin):
             # SPACE_MEDIA_BLOB). This household never fetches the URL.
             link_preview=wire_link_preview(payload.get("link_preview")),
         )
+
+
+def _edit_stamp(event: "FederationEvent") -> str | None:
+    """When the sender made an edit, for last-writer-wins against the edits
+    other paths deliver (a GFS ``post_edit`` / ``comment_edit``, a later
+    federated edit): the payload's ``edited_at``, else the envelope's own
+    timestamp — never this household's clock, so an edit replayed from the
+    parent-wait buffer cannot beat a newer one that landed meanwhile.
+    ``None`` (stamped now, as before) only when neither parses."""
+    stamp = item_stamp(event.payload.get("edited_at")) or item_stamp(
+        getattr(event, "timestamp", None)
+    )
+    return stamp_to_db(stamp) if stamp is not None else None

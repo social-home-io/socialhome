@@ -92,3 +92,13 @@ def test_expiry_frees_the_slots() -> None:
     h.purge()
     assert len(h) == 0
     assert h.hold(("sp", "k", "q"), 2, token=2, sender="s", size=1)
+
+
+def test_the_per_sender_byte_budget_and_entry_cap() -> None:
+    h = _hold(max_per_sender=100, max_bytes=1000, max_bytes_per_sender=100)
+    assert h.hold(("sp", "k", "p"), 1, token=1, sender="s", size=60)
+    assert not h.hold(("sp", "k", "p"), 2, token=2, sender="s", size=60)
+    assert h.hold(("sp", "k", "p"), 3, token=3, sender="t", size=60)
+    capped = _hold(max_entry_bytes=50)
+    assert not capped.hold(("sp", "k", "p"), 1, token=1, sender="s", size=51)
+    assert capped.hold(("sp", "k", "p"), 2, token=2, sender="s", size=50)
