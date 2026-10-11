@@ -372,7 +372,11 @@
     synth.cancel(); // one at a time
     var utterance = new window.SpeechSynthesisUtterance(el.getAttribute("data-say"));
     utterance.lang = voice.lang || lang;
-    utterance.voice = voice;
+    try {
+      utterance.voice = voice;
+    } catch (e) {
+      // Not a SpeechSynthesisVoice (an odd engine): lang picks one.
+    }
     // A cancelled utterance reports its end late: only the current one
     // may clear the 🔊.
     var done = function () {
