@@ -3436,6 +3436,7 @@
   "admin.dashboard.people.show_aria": "{name} op het dashboard tonen",
   "admin.dashboard.people.picture": "Plaatjesweergave",
   "admin.dashboard.people.picture_aria": "Plaatjesweergave voor {name}",
+  "admin.dashboard.people.picture_hint": "Plaatjesweergave: een pagina met emoji's en een wijzerklok voor kinderen die nog niet kunnen lezen.",
   "admin.dashboard.people.default": "Standaard",
   "admin.dashboard.people.default_child": "Standaard (kinderaccount)",
   "admin.dashboard.people.reset": "Terugzetten naar standaard",

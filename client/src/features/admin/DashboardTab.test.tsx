@@ -519,6 +519,22 @@ describe('DashboardTab — people', () => {
     expect((screen.getByRole('switch', { name: 'Picture view for Mia' }) as HTMLInputElement).checked).toBe(true)
   })
 
+  it('explains picture view once and describes every picture switch with it', async () => {
+    await mount(state())
+    const hint = screen.getByText("Picture view: an emoji page with an analog clock for children who can't read yet.")
+    expect(hint.id).toBe('sh-dash-picture-hint')
+    for (const name of ['Pascal', 'Mia', 'Leo']) {
+      const sw = screen.getByRole('switch', { name: `Picture view for ${name}` })
+      expect(sw.getAttribute('aria-describedby')).toBe('sh-dash-picture-hint')
+    }
+  })
+
+  it('leaves the picture-view hint out when there is nobody to list', async () => {
+    await mount(state({ people: [] }))
+    expect(screen.getByText('No household members yet.')).toBeTruthy()
+    expect(document.getElementById('sh-dash-picture-hint')).toBeNull()
+  })
+
   it('hides a person from the dashboard', async () => {
     await mount(state())
     fireEvent.click(screen.getByRole('switch', { name: 'Show Pascal on the dashboard' }))

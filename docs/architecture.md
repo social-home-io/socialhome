@@ -1378,8 +1378,9 @@ Rules:
 A wall tablet in the hallway shows the household at a glance. It is not a
 household member and has no account: it signs in once with a
 household-wide **dashboard password** the admin sets
-(`/api/admin/dashboard*`, see [api.md](./api.md#hfs--household-dashboard))
-and is then served by a **separate aiohttp application on its own port**
+(`/api/admin/dashboard*`, see [api.md](./api.md#hfs--household-dashboard);
+the SPA's **Admin › Dashboard** tab, `client/src/features/admin/DashboardTab.tsx`,
+drives it) and is then served by a **separate aiohttp application on its own port**
 (`socialhome/dashboard/`, default `8100`).
 
 - **Separate app + runner.** `DashboardServer` (`dashboard/server.py`) owns

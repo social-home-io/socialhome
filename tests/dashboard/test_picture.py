@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -23,7 +23,6 @@ from socialhome.dashboard.picture import (
     picture_view,
     rotate,
     sector_path,
-    sleeps_until,
     wedge,
 )
 from socialhome.dashboard.presenter import Fmt, person_colors
@@ -164,7 +163,7 @@ def test_analog_clock_across_dst_shows_wall_time_and_real_minutes():
     assert clock.wedge is not None and clock.wedge.minutes == 20
 
 
-# ─── Day parts + sleeps ──────────────────────────────────────────────────
+# ─── Day parts ───────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
@@ -192,15 +191,6 @@ def test_day_parts_are_the_four_icons_in_order():
 def test_day_part_uses_wall_clock_time_in_the_household_zone():
     utc_noon = datetime(2026, 10, 12, 10, 30, tzinfo=UTC)  # 12:30 in Berlin
     assert day_part(utc_noon.astimezone(BERLIN)).key == "afternoon"
-
-
-def test_sleeps_until():
-    assert sleeps_until(TODAY, TOMORROW) == 1
-    assert sleeps_until(TODAY, TODAY + timedelta(days=3)) == 3
-    assert sleeps_until(TODAY, TODAY) == 0
-    assert sleeps_until(TODAY, TODAY - timedelta(days=1)) == 0
-    # Across the DST weekend: still whole days.
-    assert sleeps_until(date(2026, 10, 24), date(2026, 10, 26)) == 2
 
 
 # ─── Icons ───────────────────────────────────────────────────────────────

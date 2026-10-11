@@ -3463,6 +3463,7 @@
   "admin.dashboard.people.show_aria": "Mostrar a {name} en el panel",
   "admin.dashboard.people.picture": "Vista con imágenes",
   "admin.dashboard.people.picture_aria": "Vista con imágenes para {name}",
+  "admin.dashboard.people.picture_hint": "Vista con imágenes: una página de emojis con un reloj de agujas para niños que aún no saben leer.",
   "admin.dashboard.people.default": "Predeterminado",
   "admin.dashboard.people.default_child": "Predeterminado (cuenta infantil)",
   "admin.dashboard.people.reset": "Restablecer",

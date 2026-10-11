@@ -3436,6 +3436,7 @@
   "admin.dashboard.people.show_aria": "Afficher {name} sur le tableau de bord",
   "admin.dashboard.people.picture": "Vue en images",
   "admin.dashboard.people.picture_aria": "Vue en images pour {name}",
+  "admin.dashboard.people.picture_hint": "Vue en images : une page d'emojis avec une horloge à aiguilles pour les enfants qui ne savent pas encore lire.",
   "admin.dashboard.people.default": "Par défaut",
   "admin.dashboard.people.default_child": "Par défaut (compte enfant)",
   "admin.dashboard.people.reset": "Rétablir par défaut",

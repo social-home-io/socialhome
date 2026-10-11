@@ -3472,6 +3472,7 @@
   "admin.dashboard.people.show_aria": "Show {name} on the dashboard",
   "admin.dashboard.people.picture": "Picture view",
   "admin.dashboard.people.picture_aria": "Picture view for {name}",
+  "admin.dashboard.people.picture_hint": "Picture view: an emoji page with an analog clock for children who can't read yet.",
   "admin.dashboard.people.default": "Default",
   "admin.dashboard.people.default_child": "Default (child account)",
   "admin.dashboard.people.reset": "Reset to default",

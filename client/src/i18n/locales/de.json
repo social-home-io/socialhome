@@ -3436,6 +3436,7 @@
   "admin.dashboard.people.show_aria": "{name} auf dem Dashboard zeigen",
   "admin.dashboard.people.picture": "Bilderansicht",
   "admin.dashboard.people.picture_aria": "Bilderansicht für {name}",
+  "admin.dashboard.people.picture_hint": "Bilderansicht: eine Seite mit Emojis und einer Zeigeruhr für Kinder, die noch nicht lesen können.",
   "admin.dashboard.people.default": "Standard",
   "admin.dashboard.people.default_child": "Standard (Kinderkonto)",
   "admin.dashboard.people.reset": "Auf Standard zurücksetzen",

@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Final
 
 from ..domain.household_dashboard import (
@@ -74,7 +74,6 @@ __all__ = [
     "picture_view",
     "rotate",
     "sector_path",
-    "sleeps_until",
     "wedge",
 ]
 
@@ -201,7 +200,7 @@ def analog_clock(
     )
 
 
-# ─── Day parts + sleeps ──────────────────────────────────────────────────
+# ─── Day parts ───────────────────────────────────────────────────────────
 
 
 @dataclass(slots=True, frozen=True)
@@ -223,11 +222,6 @@ DAY_PARTS: Final[tuple[DayPart, ...]] = (
 def day_part(value: datetime) -> DayPart:
     """The part of the day ``value``'s wall-clock hour falls in."""
     return next(p for p in reversed(DAY_PARTS) if value.hour >= p.starts)
-
-
-def sleeps_until(today: date, day: date) -> int:
-    """Nights between ``today`` and ``day`` — tomorrow is one sleep."""
-    return max(0, (day - today).days)
 
 
 # ─── Tiles ───────────────────────────────────────────────────────────────
@@ -481,9 +475,7 @@ def picture_view(
         tomorrow=tomorrow_tiles,
         # The list holds only tomorrow's things (some may have started
         # earlier — a holiday, a sleepover): always one sleep away.
-        sleeps=(
-            sleeps_until(page.today, page.today + timedelta(days=1)) if tomorrow else 0
-        ),
+        sleeps=1 if tomorrow else 0,
         jobs=_jobs(page, f),
         home=home,
         away=away,

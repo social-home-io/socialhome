@@ -420,57 +420,63 @@ function PeopleSection({ state, save }: { state: DashboardState, save: SaveFn })
       {state.people.length === 0 ? (
         <p class="sh-muted">{t('admin.dashboard.people.empty')}</p>
       ) : (
-        <ul class="sh-dashboard-people">
-          {state.people.map((p) => {
-            const name = p.display_name || p.username
-            return (
-              <li key={p.user_id} class="sh-dashboard-person">
-                <Avatar name={name} src={p.picture_url} size={36} />
-                <div class="sh-dashboard-person__name">
-                  <span class="sh-dashboard-person__display" title={name}>{name}</span>
-                  <span class="sh-muted">@{p.username}</span>
-                </div>
-                <div class="sh-dashboard-person__toggles">
-                  <label class="sh-dashboard-person__toggle">
-                    <span class="sh-switch">
-                      <input type="checkbox" role="switch" checked={p.show}
-                        aria-label={t('admin.dashboard.people.show_aria', { name })}
-                        onChange={() => set(p, { show: !p.show })} />
-                      <span class="sh-switch-track" />
-                    </span>
-                    <span aria-hidden="true">{t('admin.dashboard.people.show')}</span>
-                  </label>
-                  <div class="sh-dashboard-person__picture">
+        <>
+          <p id="sh-dash-picture-hint" class="sh-form-hint">
+            {t('admin.dashboard.people.picture_hint')}
+          </p>
+          <ul class="sh-dashboard-people">
+            {state.people.map((p) => {
+              const name = p.display_name || p.username
+              return (
+                <li key={p.user_id} class="sh-dashboard-person">
+                  <Avatar name={name} src={p.picture_url} size={36} />
+                  <div class="sh-dashboard-person__name">
+                    <span class="sh-dashboard-person__display" title={name}>{name}</span>
+                    <span class="sh-muted">@{p.username}</span>
+                  </div>
+                  <div class="sh-dashboard-person__toggles">
                     <label class="sh-dashboard-person__toggle">
                       <span class="sh-switch">
-                        <input type="checkbox" role="switch" checked={p.picture_effective}
-                          disabled={!p.show}
-                          aria-label={t('admin.dashboard.people.picture_aria', { name })}
-                          onChange={() => set(p, { picture: !p.picture_effective })} />
+                        <input type="checkbox" role="switch" checked={p.show}
+                          aria-label={t('admin.dashboard.people.show_aria', { name })}
+                          onChange={() => set(p, { show: !p.show })} />
                         <span class="sh-switch-track" />
                       </span>
-                      <span aria-hidden="true">{t('admin.dashboard.people.picture')}</span>
+                      <span aria-hidden="true">{t('admin.dashboard.people.show')}</span>
                     </label>
-                    {p.picture === null ? (
-                      <span class="sh-form-hint">
-                        {p.picture_effective
-                          ? t('admin.dashboard.people.default_child')
-                          : t('admin.dashboard.people.default')}
-                      </span>
-                    ) : (
-                      <button type="button" class="sh-link-button sh-form-hint"
-                        disabled={!p.show}
-                        aria-label={t('admin.dashboard.people.reset_aria', { name })}
-                        onClick={() => set(p, { picture: null })}>
-                        {t('admin.dashboard.people.reset')}
-                      </button>
-                    )}
+                    <div class="sh-dashboard-person__picture">
+                      <label class="sh-dashboard-person__toggle">
+                        <span class="sh-switch">
+                          <input type="checkbox" role="switch" checked={p.picture_effective}
+                            disabled={!p.show}
+                            aria-label={t('admin.dashboard.people.picture_aria', { name })}
+                            aria-describedby="sh-dash-picture-hint"
+                            onChange={() => set(p, { picture: !p.picture_effective })} />
+                          <span class="sh-switch-track" />
+                        </span>
+                        <span aria-hidden="true">{t('admin.dashboard.people.picture')}</span>
+                      </label>
+                      {p.picture === null ? (
+                        <span class="sh-form-hint">
+                          {p.picture_effective
+                            ? t('admin.dashboard.people.default_child')
+                            : t('admin.dashboard.people.default')}
+                        </span>
+                      ) : (
+                        <button type="button" class="sh-link-button sh-form-hint"
+                          disabled={!p.show}
+                          aria-label={t('admin.dashboard.people.reset_aria', { name })}
+                          onClick={() => set(p, { picture: null })}>
+                          {t('admin.dashboard.people.reset')}
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </li>
-            )
-          })}
-        </ul>
+                </li>
+              )
+            })}
+          </ul>
+        </>
       )}
     </section>
   )

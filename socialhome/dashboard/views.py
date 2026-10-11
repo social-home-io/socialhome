@@ -55,8 +55,8 @@ from .keys import (
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
 )
-from .policy import build_dashboard_csp
 from .picture import picture_view
+from .policy import build_dashboard_csp
 from .presenter import (
     MAX_LANES,
     SHOPPING_SHOWN,
