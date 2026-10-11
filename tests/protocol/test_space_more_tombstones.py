@@ -294,6 +294,17 @@ async def _hold_album(apps, album_id):
     await _hold_album_with_item(apps, album_id, f"it-of-{album_id}")
 
 
+def _assert_no_coordinates(records: list[dict]) -> None:
+    """No tombstone carries the zone's coordinates — checked by key and by
+    value, never by substring: a tombstone's ISO timestamp can contain
+    ``47.12`` by chance (``…:47.129201+00:00``), which made a substring
+    check fail about once in every few thousand runs."""
+    for record in records:
+        assert not {"latitude", "longitude", "lat", "lon", "lng"} & set(record)
+        for value in record.values():
+            assert value not in (47.1234, 8.5678)
+
+
 async def _hold_zone(apps, zid):
     for app in apps:
         assert await _rx(app)._zone_repo.upsert(
@@ -456,7 +467,8 @@ async def test_a_caught_up_household_never_re_exports_it(houses, kind):
     # C streams the tombstone on, identity only: never the content.
     tombs = await exporters[kind.tomb].list_records(SPACE)
     assert row_id in {r["id"] for r in tombs}
-    assert "secret" not in repr(tombs) and "47.12" not in repr(tombs)
+    assert "secret" not in repr(tombs)
+    _assert_no_coordinates(tombs)
     await _sync(c, d, provider=MEMBER)
     assert not await _live(d, kind, row_id)
 
@@ -703,3 +715,19 @@ async def test_a_member_tombstone_records_only_an_actor_seated_on_it(
         )
         assert row["deleted_at"] is not None
         assert row["deleted_by"] == expected, actor
+
+
+def test_coordinate_check_ignores_timestamps_that_happen_to_contain_47_12():
+    """Regression: CI failed when ``deleted_at`` read ``…T17:57:47.129201``."""
+    _assert_no_coordinates(
+        [{"id": "x", "deleted_at": "2026-10-11T17:57:47.129201+00:00"}]
+    )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{"id": "x", "latitude": 1.0}, {"id": "x", "where": 47.1234}],
+)
+def test_coordinate_check_still_catches_leaked_coordinates(record):
+    with pytest.raises(AssertionError):
+        _assert_no_coordinates([record])
