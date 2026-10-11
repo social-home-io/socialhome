@@ -232,6 +232,8 @@ async def test_garbage_strings_rejected(auth, raw):
         {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "short"},
         {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "A" * 33},
         {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "a b" * 8},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "A" * 21 + "="},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "A" * 22 + "\n"},
         {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "A" * 22, "x": 1},
         {"v": 1, "e": 0, "i": "NOW", "l": True},
         {"v": 1, "e": 0, "i": None, "k": True, "l": True},
@@ -501,17 +503,17 @@ async def test_pin_and_password_checks_share_one_slot(clock):
     assert slow.peak == 1
 
 
-async def test_pin_throttle_key_is_per_client_and_per_cookie(auth, clock):
+async def test_pin_throttle_key_is_the_session_id_alone(auth, clock):
+    """Per lock, never per address: rotating client addresses (an IPv6
+    /64 each) can't buy a fresh bucket, and tablets behind one proxy
+    still don't share one."""
     a = await auth.verify(await auth.issue(True, locked=True))
     b = await auth.verify(await auth.issue(True, locked=True))  # same second
-    key_a = DashboardAuth.pin_throttle_key("10.0.0.5", a)
-    assert key_a.startswith("pin:10.0.0.5:") and len(key_a) == len("pin:10.0.0.5:") + 16
-    assert key_a != DashboardAuth.pin_throttle_key("10.0.0.5", b)
-    assert key_a != DashboardAuth.pin_throttle_key("10.0.0.6", a)
-    # Stable for the same cookie value.
-    assert key_a == DashboardAuth.pin_throttle_key("10.0.0.5", a)
+    key_a = DashboardAuth.pin_throttle_key(a)
+    assert key_a == f"pin:{a.session_id}"
+    assert key_a != DashboardAuth.pin_throttle_key(b)
     _fail(auth, key_a, THROTTLE_MAX_FAILURES)
-    assert auth.throttle_remaining("10.0.0.5") == 0
+    assert auth.failure_count(DashboardAuth.pin_throttle_key(a)) == 5
 
 
 def test_failure_count(auth, clock):
@@ -552,14 +554,60 @@ def test_attempt_wait_global_brake(auth):
 # ─── revocation ──────────────────────────────────────────────────────────
 
 
-async def test_claims_carry_the_signature_outside_equality(auth, clock):
+def _payload(raw: str) -> dict:
+    body = raw.split(".")[0]
+    return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+
+
+async def test_claims_carry_the_session_id_outside_equality(auth, clock):
     raw = await auth.issue(True)
     claims = await auth.verify(raw)
-    assert claims.signature == base64.urlsafe_b64decode(
-        raw.split(".")[1] + "=" * (-len(raw.split(".")[1]) % 4)
-    )
+    assert claims.session_id == _payload(raw)["n"]
     assert claims == SessionClaims(epoch=0, issued_at=int(clock.now), keep=True)
-    assert "signature" not in repr(claims)
+    assert "session_id" not in repr(claims)
+
+
+async def test_issue_carries_a_given_session_id(auth):
+    first = await auth.verify(await auth.issue(True))
+    again = await auth.issue(False, locked=True, session_id=first.session_id)
+    assert _payload(again)["n"] == first.session_id
+    assert (await auth.verify(again)).session_id == first.session_id
+
+
+@pytest.mark.parametrize("locked", [None, True])
+async def test_legacy_cookie_session_id_is_derived_from_its_signature(
+    auth, settings_service, clock, locked
+):
+    payload = {"v": 1, "e": 0, "i": int(clock.now), "k": True}
+    if locked is not None:
+        payload["l"] = locked
+    raw = await _forge(settings_service, payload)
+    claims = await auth.verify(raw)
+    sig = base64.urlsafe_b64decode(raw.split(".")[1] + "==")
+    assert claims.session_id == hashlib.sha256(sig).hexdigest()[:22]
+    # A renewal carries it, and the result verifies with the same id.
+    renewed = await auth.issue(True, session_id=claims.session_id)
+    assert (await auth.verify(renewed)).session_id == claims.session_id
+
+
+async def test_revocation_covers_every_cookie_of_the_session(auth):
+    first = await auth.issue(True, locked=True)
+    claims = await auth.verify(first)
+    sibling = await auth.issue(True, locked=True, session_id=claims.session_id)
+    auth.revoke(claims, REVOKED_SIGNED_OUT)
+    assert await auth.verify(first) is None
+    assert await auth.verify(sibling) is None
+
+
+async def test_revocation_entry_outlives_every_older_sibling(auth, clock):
+    """A sibling issued before the revocation can't outlive the entry."""
+    raw = await auth.issue(False)
+    claims = await auth.verify(raw)
+    clock.advance(SESSION_TTL_S - 10)
+    auth.revoke(claims, REVOKED_SIGNED_OUT)
+    sibling = await auth.issue(False, session_id=claims.session_id)
+    clock.advance(SESSION_TTL_S - 1)
+    assert await auth.verify(sibling) is None
 
 
 async def test_revoked_locked_cookie_verifies_locked(auth):
@@ -599,7 +647,7 @@ async def test_locked_can_be_upgraded_to_signed_out(auth):
 
 
 def test_revoke_rejects_an_unknown_reason(auth):
-    claims = SessionClaims(epoch=0, issued_at=0, keep=True, signature=b"x")
+    claims = SessionClaims(epoch=0, issued_at=0, keep=True, session_id="x")
     with pytest.raises(ValueError):
         auth.revoke(claims, "whatever")
 
@@ -623,7 +671,7 @@ async def test_revocation_set_is_bounded(settings_service, clock):
             epoch=0,
             issued_at=int(clock.now),
             keep=True,
-            signature=os.urandom(32),
+            session_id=os.urandom(16).hex(),
         )
         cookies.append(claims)
         auth.revoke(claims, REVOKED_LOCKED)
@@ -635,12 +683,12 @@ async def test_revocation_set_is_bounded(settings_service, clock):
 
 async def test_full_revocation_set_drops_expired_entries_first(settings_service, clock):
     auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
-    old = SessionClaims(epoch=0, issued_at=int(clock.now), keep=False, signature=b"o")
+    old = SessionClaims(epoch=0, issued_at=int(clock.now), keep=False, session_id="o")
     auth.revoke(old, REVOKED_LOCKED)
-    keep = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"k")
+    keep = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="k")
     auth.revoke(keep, REVOKED_LOCKED)
     clock.advance(SESSION_TTL_S + 1)
-    new = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"n")
+    new = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="n")
     auth.revoke(new, REVOKED_LOCKED)
     assert auth.revocation(keep) == REVOKED_LOCKED
     assert auth.revocation(new) == REVOKED_LOCKED
@@ -651,11 +699,11 @@ async def test_revocation_eviction_prefers_locked_over_signed_out(
     settings_service, clock
 ):
     auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
-    gone = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"g")
+    gone = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="g")
     auth.revoke(gone, REVOKED_SIGNED_OUT)
-    lock1 = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"1")
+    lock1 = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="1")
     auth.revoke(lock1, REVOKED_LOCKED)
-    lock2 = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"2")
+    lock2 = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="2")
     auth.revoke(lock2, REVOKED_LOCKED)
     assert auth.revocation(gone) == REVOKED_SIGNED_OUT
     assert auth.revocation(lock1) is None
@@ -666,8 +714,8 @@ async def test_full_revocation_set_of_signed_out_drops_the_oldest(
     settings_service, clock
 ):
     auth = DashboardAuth(settings_service, clock=clock, max_revocations=1)
-    a = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"a")
-    b = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"b")
+    a = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="a")
+    b = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="b")
     auth.revoke(a, REVOKED_SIGNED_OUT)
     auth.revoke(b, REVOKED_SIGNED_OUT)
     assert auth.revocation(a) is None
