@@ -7,10 +7,14 @@ default aiohttp access log would write that token verbatim. We strip
 ``token``, ``api_key``, ``access_token`` and ``password`` values from
 every formatted access-log field — the request line (``%r``), request
 headers such as ``%{Referer}i``, and the matching ``extra`` attributes
-aiohttp attaches to the log record.
+aiohttp attaches to the log record. Bearer tokens that ride in the URL
+*path* — the GFS's ``/join/{token}`` invite links and
+``/highlight/…/{token}`` share links — are redacted too
+(:func:`redact_secrets`).
 
 Wired in via ``web.run_app(..., access_log_class=RedactingAccessLogger)``
-in :mod:`socialhome.__main__` + :mod:`socialhome.app`.
+in :mod:`socialhome.__main__`, :mod:`socialhome.app` and the GFS's
+:func:`socialhome.global_server.server.main`.
 """
 
 from __future__ import annotations
@@ -62,6 +66,56 @@ def redact_query_string(line: str) -> str:
     return _PARAM_RE.sub(_redact_match, line)
 
 
+#: One path segment (no ``/``, query, fragment or whitespace).
+_SEG = r"[^/?#\s]+"
+#: Where a URL path may start in a log field: the start of the value
+#: (``%{Referer}i`` relative form), after whitespace (``%r`` request
+#: line ``GET /…``), or right after a ``//authority`` (absolute Referer).
+#: Anchoring here keeps ``/api/…/join/x`` or ``/static/highlight/…``
+#: from matching a root-level shape.
+_PATH_START = r"(^|\s|//[^/?#\s]*)"
+#: The end of the token segment: end of value, query, fragment or space.
+_SEG_END = r"(?=$|[?#\s])"
+
+#: URL paths whose segment IS a bearer credential — anyone holding the
+#: string can use it. Each pattern captures ``(start, prefix, token)``;
+#: only the token is replaced. GFS shapes:
+#:
+#: * ``/join/{gfs_token}`` — invite-link landing; the token serves the
+#:   space's invite blob.
+#: * ``/highlight/{instance_id}/{highlight_id}/{token}`` — public
+#:   highlight share link (and the ``Referer`` its viewer's assets send).
+#: * ``/gfs/highlight_tokens/{token}/revoke`` and
+#:   ``/gfs/spaces/{space_id}/invite/{gfs_token}`` — the owner's signed
+#:   revoke calls name the same tokens.
+_PATH_TOKEN_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(rf"{_PATH_START}(/join/)({_SEG}){_SEG_END}"),
+    re.compile(rf"{_PATH_START}(/highlight/{_SEG}/{_SEG}/)({_SEG}){_SEG_END}"),
+    re.compile(
+        rf"{_PATH_START}(/gfs/highlight_tokens/)({_SEG})(?=/revoke(?:$|[?#\s]))"
+    ),
+    re.compile(rf"{_PATH_START}(/gfs/spaces/{_SEG}/invite/)({_SEG}){_SEG_END}"),
+)
+
+
+def _redact_path_match(m: re.Match[str]) -> str:
+    return f"{m.group(1)}{m.group(2)}***"
+
+
+def redact_secrets(line: str) -> str:
+    """Redact sensitive query params AND bearer tokens carried in paths.
+
+    Query handling is :func:`redact_query_string`; on top of it, every
+    :data:`_PATH_TOKEN_RES` shape has its token segment replaced with
+    ``***`` (the rest of the path stays readable for operators).
+    """
+    if not line:
+        return line
+    for pattern in _PATH_TOKEN_RES:
+        line = pattern.sub(_redact_path_match, line)
+    return redact_query_string(line)
+
+
 class RedactingAccessLogger(AccessLogger):
     """AccessLogger that redacts secrets from every formatted field.
 
@@ -78,6 +132,6 @@ class RedactingAccessLogger(AccessLogger):
         self, request: Any, response: Any, time: float
     ) -> Iterable[tuple[str | tuple[str, str], str]]:
         return [
-            (key, redact_query_string(value) if isinstance(value, str) else value)
+            (key, redact_secrets(value) if isinstance(value, str) else value)
             for key, value in super()._format_line(request, response, time)
         ]

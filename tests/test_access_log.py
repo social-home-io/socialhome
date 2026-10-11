@@ -5,9 +5,14 @@ from __future__ import annotations
 import logging
 
 import aiohttp
+import pytest
 from aiohttp import web
 
-from socialhome.access_log import RedactingAccessLogger, redact_query_string
+from socialhome.access_log import (
+    RedactingAccessLogger,
+    redact_query_string,
+    redact_secrets,
+)
 
 
 def test_redact_strips_token_value():
@@ -67,6 +72,65 @@ def test_redact_does_not_touch_short_lookalike_params():
     """``tz`` / ``at`` / ``%74z`` must never be mistaken for a secret."""
     line = "/x?tz=Europe%2FZurich&at=2026-01-01&%74z=UTC"
     assert redact_query_string(line) == line
+
+
+# ─── Bearer tokens carried in the URL *path* (GFS share / invite links) ───
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("GET /join/tok123 HTTP/1.1", "GET /join/*** HTTP/1.1"),
+        ("/join/tok123?x=1", "/join/***?x=1"),
+        (
+            "GET /highlight/inst/hl-1/tok123 HTTP/1.1",
+            "GET /highlight/inst/hl-1/*** HTTP/1.1",
+        ),
+        (
+            "POST /gfs/highlight_tokens/tok123/revoke HTTP/1.1",
+            "POST /gfs/highlight_tokens/***/revoke HTTP/1.1",
+        ),
+        (
+            "DELETE /gfs/spaces/sp-1/invite/tok123 HTTP/1.1",
+            "DELETE /gfs/spaces/sp-1/invite/*** HTTP/1.1",
+        ),
+        # Referer: a full URL, path anchored after the authority.
+        ("https://gfs.example/join/tok123", "https://gfs.example/join/***"),
+        (
+            "https://gfs.example:8443/highlight/i/h/tok123#x",
+            "https://gfs.example:8443/highlight/i/h/***#x",
+        ),
+    ],
+)
+def test_redact_path_bearer_tokens(line, expected):
+    assert redact_secrets(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # No token segment at all.
+        "GET /join HTTP/1.1",
+        "GET /join/ HTTP/1.1",
+        "POST /gfs/spaces/sp-1/invite HTTP/1.1",
+        "GET /highlight/inst/hl HTTP/1.1",
+        # Lookalike prefixes / non-root positions.
+        "GET /joined/abc HTTP/1.1",
+        "GET /api/spaces/join/abc HTTP/1.1",
+        "GET /api/me/join-requests HTTP/1.1",
+        "GET /gfs/highlights/hl-1/publish HTTP/1.1",
+        "GET /gfs/highlight_rtc/relay/inst/hl HTTP/1.1",
+        "GET /static/highlight/a/b/c.js HTTP/1.1",
+        "GET /spaces/my-space HTTP/1.1",
+    ],
+)
+def test_redact_path_leaves_non_token_paths_alone(line):
+    assert redact_secrets(line) == line
+
+
+def test_redact_path_and_query_together():
+    line = "GET /join/tok123?token=abc HTTP/1.1"
+    assert redact_secrets(line) == "GET /join/***?token=*** HTTP/1.1"
 
 
 # ─── Integration: the logger actually wired into a running server ─────────

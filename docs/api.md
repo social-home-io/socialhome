@@ -27,7 +27,15 @@ GFS topology, identity model, sync tiers — see
 API tokens appear in access logs (because of the WebSocket `?token=`
 fallback) and browser history. **Operators must redact tokens from
 log aggregation.** Code must never log the full query string of
-`/api/ws`.
+`/api/ws`. Both the household server and the GFS run aiohttp with
+`RedactingAccessLogger` (`socialhome/access_log.py`), which writes
+`token` / `api_key` / `access_token` / `password` query values — and the
+bearer token segment of the GFS's `/join/{token}`,
+`/highlight/{instance_id}/{highlight_id}/{token}`,
+`/gfs/highlight_tokens/{token}/revoke` and
+`/gfs/spaces/{space_id}/invite/{gfs_token}` paths — as `***`, in the
+request line and the `Referer` alike. A reverse proxy in front keeps its
+own log and needs the same treatment.
 
 ## Conventions
 

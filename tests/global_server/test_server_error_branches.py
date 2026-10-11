@@ -910,7 +910,7 @@ def test_main_runtime_path_calls_run_app(tmp_path, monkeypatch):
     # Stub out run_app so we don't actually bind a port.
     called = {}
 
-    def _fake_run_app(app, *, host, port):  # noqa: D401
+    def _fake_run_app(app, *, host, port, access_log_class):  # noqa: D401
         called["host"] = host
         called["port"] = port
 
