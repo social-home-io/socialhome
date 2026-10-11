@@ -13,6 +13,10 @@ House rules:
   coordinates; calendar events come from members' personal calendars;
   chores, the shopping list, today's timetables and household stickies.
   Never DMs, notifications, chat or polls.
+* **Assigned timetables only.** School is the timetables a member is
+  assigned to; space timetables pinned to someone's Home are ignored on
+  purpose — a pin is a personal Home choice (a parent pinning a child's
+  class plan) and here would show that member as being at school.
 * **Hidden people are gone.** A member the admin hid
   (``DashboardPersonSettings.show=False``) has no page and is removed
   from every slice: their presence, their events (an event left with no
@@ -69,7 +73,6 @@ from ..domain.household_dashboard import (
 from ..domain.preferences import HouseholdPreferences
 from ..domain.presence import PersonPresence
 from ..domain.task import Task, TaskStatus
-from ..domain.timetable import Timetable
 from ..domain.user import User
 from ..utils.timezones import local_date, local_instant, zone_of
 from .calendar_service import CalendarService
@@ -79,8 +82,7 @@ from .presence_service import PresenceService
 from .shopping_service import ShoppingService
 from .sticky_service import StickyService
 from .task_service import TaskService
-from .timetable_service import SpaceTimetableService, TimetableService
-from .user_preferences import parse_timetable_home_pins
+from .timetable_service import TimetableService
 from .user_service import UserService
 
 log = logging.getLogger(__name__)
@@ -209,7 +211,6 @@ class HouseholdDashboardService:
         "_tasks",
         "_shopping",
         "_timetables",
-        "_space_timetables",
         "_stickies",
         "_preferences",
         "_settings",
@@ -227,7 +228,6 @@ class HouseholdDashboardService:
         sticky_service: StickyService,
         preferences_service: PreferencesService,
         dashboard_settings: DashboardSettingsService,
-        space_timetable_service: SpaceTimetableService | None = None,
     ) -> None:
         self._users = user_service
         self._presence = presence_service
@@ -235,7 +235,6 @@ class HouseholdDashboardService:
         self._tasks = task_service
         self._shopping = shopping_service
         self._timetables = timetable_service
-        self._space_timetables = space_timetable_service
         self._stickies = sticky_service
         self._preferences = preferences_service
         self._settings = dashboard_settings
@@ -579,50 +578,39 @@ class HouseholdDashboardService:
     # ── Timetables ───────────────────────────────────────────────────────
 
     async def _school(self, ctx: _Context, user: User) -> _Days:
-        """``user``'s school today and tomorrow (household-local dates)."""
+        """``user``'s school today and tomorrow (household-local dates).
+
+        Only timetables the person is *assigned* to count. Space
+        timetables pinned to a member's Home are deliberately ignored
+        (unlike My Corner): a pin is a personal "show this on my Home"
+        choice — a parent pinning their child's class plan — and on the
+        shared household screen it would mislabel that member as being at
+        school.
+        """
         if not ctx.on(SECTION_TIMETABLE):
             return _Days()
-        pinned = await self._pinned(user)
         tomorrow = ctx.today + timedelta(days=1)
         return _Days(
             today=await _safe(
                 "timetable today",
-                self._school_day(ctx, user.user_id, ctx.today, pinned),
+                self._school_day(ctx, user.user_id, ctx.today),
                 None,
             ),
             tomorrow=await _safe(
                 "timetable tomorrow",
-                self._school_day(ctx, user.user_id, tomorrow, pinned),
+                self._school_day(ctx, user.user_id, tomorrow),
                 None,
             ),
         )
 
-    async def _pinned(self, user: User) -> list[Timetable]:
-        """Space timetables ``user`` pinned to their Home and may still
-        read — the same extra plans My Corner shows."""
-        if self._space_timetables is None:
-            return []
-        pins = parse_timetable_home_pins(user.preferences_json)
-        if not pins:
-            return []
-        return await _safe(
-            "pinned space timetables",
-            self._space_timetables.pinned_for_user(user.user_id, pins),
-            list[Timetable](),
-        )
-
     async def _school_day(
-        self, ctx: _Context, user_id: str, day: date, pinned: Sequence[Timetable]
+        self, ctx: _Context, user_id: str, day: date
     ) -> DashboardSchoolDay | None:
         assigned = await self._timetables.active_for_user(user_id, day)
         zone = zone_of(ctx.tz)
         names: list[str] = []
         lessons: list[DashboardLesson] = []
-        seen: set[str] = set()
-        for tt in (*assigned, *pinned):
-            if tt.id in seen:
-                continue
-            seen.add(tt.id)
+        for tt in assigned:
             try:
                 resolved = td.today_timetable(tt, day)
             except Exception:  # one bad row never empties the slice

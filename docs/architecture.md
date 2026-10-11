@@ -1454,7 +1454,11 @@ shopping, household stickies, today's school timetables, night-mode
 anything with side effects, and is *household-safe*: presence is home /
 away / a zone name (never coordinates), events come from members' personal
 calendars (recurring ones as occurrences, a shared household event once),
-and DMs, notifications, chat and polls never appear. A member the admin
+and DMs, notifications, chat and polls never appear. School is only the
+timetables a member is *assigned* to: space timetables pinned to someone's
+Home are deliberately ignored (unlike My Corner), because a pin is a
+personal Home choice — a parent pinning a child's class plan — and on the
+shared screen it would show that parent as being at school. A member the admin
 hid is removed from every slice (an event or chore left with only hidden
 people is dropped); a section whose household `feat_*` toggle is off is
 empty and its service isn't called; status text shows only with
