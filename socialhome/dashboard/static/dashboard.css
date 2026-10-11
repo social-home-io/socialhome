@@ -2012,6 +2012,13 @@ h3.dash-sublabel {
     font-size: 4rem;
   }
 
+  .dash-pv-pie {
+    inset-block-end: 5px;
+    inset-inline-end: 5px;
+    inline-size: 32px;
+    block-size: 32px;
+  }
+
   .dash-pv-arrow {
     font-size: 2rem;
   }
