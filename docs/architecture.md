@@ -1460,8 +1460,10 @@ Home are deliberately ignored (unlike My Corner), because a pin is a
 personal Home choice — a parent pinning a child's class plan — and on the
 shared screen it would show that parent as being at school. A member the admin
 hid is removed from every slice (an event or chore left with only hidden
-people is dropped); a section whose household `feat_*` toggle is off is
-empty and its service isn't called; status text shows only with
+people is dropped, and a shared event never takes its id or colour from a
+hidden member's copy); a section whose household `feat_*` toggle is off is
+empty and its service isn't called (the calendar list is still read once
+for person colours, so they don't change with the toggle); status text shows only with
 `show_status_text`. "Today" and every time in a snapshot are in the
 household zone (`HouseholdPreferences.tz`). Each slice fails soft — logged
 at WARNING, empty — so one broken service never blanks the tablet. The

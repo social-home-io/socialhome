@@ -717,12 +717,17 @@ class TimetableService(BusPublisherMixin, TimetableEditorMixin):
 
     # ── Resolved views ───────────────────────────────────────────────────
 
+    @staticmethod
+    def in_effect_for(tt: Timetable, user_id: str, on: date) -> bool:
+        """Whether ``tt`` is assigned to ``user_id`` and in effect on
+        ``on`` — the rule :meth:`active_for_user` applies, for callers
+        that already hold :meth:`list_all` (one read, many users / days)."""
+        return user_id in tt.assignees and td.resolve_day(tt, on).valid
+
     async def active_for_user(self, user_id: str, on: date) -> list[Timetable]:
         """Timetables assigned to ``user_id`` that are in effect on ``on``."""
         return [
-            tt
-            for tt in await self.list_all()
-            if user_id in tt.assignees and td.resolve_day(tt, on).valid
+            tt for tt in await self.list_all() if self.in_effect_for(tt, user_id, on)
         ]
 
     async def today_for_user(

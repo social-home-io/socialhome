@@ -16,11 +16,12 @@ Two entry points, matching the two policies already in the codebase:
   the event must still land. Fails closed on the *value*, not the event.
 
 Plus the wall-clock ↔ instant helpers every "today in zone X" caller
-shares: :func:`zone_of`, :func:`local_date`, :func:`local_instant`.
+shares: :func:`zone_of`, :func:`local_date`, :func:`local_instant`,
+:func:`local_day_bounds`.
 """
 
 import logging
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 log = logging.getLogger(__name__)
@@ -95,3 +96,13 @@ def local_instant(d: date, t: time, tz: str) -> datetime:
     """
     local = datetime.combine(d, t).replace(tzinfo=zone_of(tz), fold=0)
     return local.astimezone(timezone.utc)
+
+
+def local_day_bounds(d: date, tz: str) -> tuple[datetime, datetime]:
+    """The UTC instants of local midnight starting ``d`` and the next day
+    in ``tz`` — the half-open window ``[start, end)`` of that calendar day
+    (23 or 25 hours long across a DST change)."""
+    return (
+        local_instant(d, time(0, 0), tz),
+        local_instant(d + timedelta(days=1), time(0, 0), tz),
+    )

@@ -20,27 +20,34 @@ House rules:
 * **Hidden people are gone.** A member the admin hid
   (``DashboardPersonSettings.show=False``) has no page and is removed
   from every slice: their presence, their events (an event left with no
-  shown person is dropped), their chores (a task assigned only to hidden
-  people is dropped) and their timetables; stickies they wrote are left
-  out too.
+  shown person is dropped, and a shared event never takes its row id or
+  colour from a hidden member's copy), their chores (a task assigned only
+  to hidden people is dropped) and their timetables; stickies they wrote
+  are left out too.
 * **Household time.** "Today" is the household-local date of ``now``
   (``HouseholdPreferences.tz``), and every datetime in a snapshot is in
-  that zone — the server renders, so this is the tz boundary.
+  that zone — the server renders, so this is the tz boundary. Timetables
+  are the exception that proves the rule: like My Corner, each one shows
+  its lessons for "today" in *its own* zone (then converted for display).
 * **Toggles.** A section whose household ``feat_*`` toggle is off is
-  empty and its service is not called (shopping has no toggle).
-* **Fail soft.** Each slice that fails is logged at WARNING and comes
-  back empty; one broken slice never breaks the page. The settings and
-  household preferences are not slices — without them the page can't
-  tell who is hidden, so their errors propagate.
+  empty and its service is not called (shopping has no toggle). The
+  calendar list is still read once for person colours, so colours don't
+  change when the calendar toggle flips.
+* **Fail soft.** Each slice — and each calendar / task list inside one —
+  that fails is logged at WARNING and comes back empty; one broken slice
+  never breaks the page. The settings and household preferences are not
+  slices — without them the page can't tell who is hidden, so their
+  errors propagate.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from ..domain import timetable as td
 from ..domain.calendar import Calendar, CalendarEvent, all_day_covers
@@ -72,9 +79,10 @@ from ..domain.household_dashboard import (
 )
 from ..domain.preferences import HouseholdPreferences
 from ..domain.presence import PersonPresence
-from ..domain.task import Task, TaskStatus
+from ..domain.task import Task, TaskList, TaskStatus
+from ..domain.timetable import Timetable
 from ..domain.user import User
-from ..utils.timezones import local_date, local_instant, zone_of
+from ..utils.timezones import local_date, local_day_bounds, zone_of
 from .calendar_service import CalendarService
 from .dashboard_settings_service import DashboardSettingsService
 from .preferences_service import PreferencesService
@@ -95,7 +103,8 @@ MAX_CHORES = 30
 MAX_SHOPPING = 20
 MAX_STICKIES = 20
 MAX_TOMORROW_ITEMS = 5
-#: A person's page lists chores due within this many days.
+#: A person's page lists chores due within this many days; done chores
+#: due that far ahead still count when they were finished today.
 CHORE_LOOKAHEAD_DAYS = 7
 #: Done chores are read back this far by due date; only those completed
 #: today are kept (bounds the read of a long, never-archived done list).
@@ -146,6 +155,15 @@ class _Days:
 
     today: DashboardSchoolDay | None = None
     tomorrow: DashboardSchoolDay | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class _Copy:
+    """One calendar's row of a (possibly shared) event."""
+
+    event: CalendarEvent
+    owner_id: str
+    color: str
 
 
 async def _safe[T](label: str, aw: Awaitable[T], default: T) -> T:
@@ -201,6 +219,29 @@ def _first_lesson(day: DashboardSchoolDay | None) -> DashboardLesson | None:
     return next((ls for ls in day.lessons if ls.takes_place), None)
 
 
+def _merge_key(ev: CalendarEvent) -> str:
+    """Which rows are copies of one shared event — the SPA's
+    ``groupSharedEvents`` (``client/src/utils/calendar.ts``): the
+    client-stamped ``client_event_uuid`` when present, else the content
+    key (summary, start, end, creator, description, location, cover).
+    The start is part of the uuid key too, so each occurrence of a
+    recurring shared event stays its own item."""
+    if ev.client_event_uuid:
+        return f"uuid\x1f{ev.client_event_uuid}\x1f{ev.start.isoformat()}"
+    return "\x1f".join(
+        (
+            "content",
+            ev.summary,
+            ev.start.isoformat(),
+            ev.end.isoformat(),
+            ev.created_by,
+            ev.description or "",
+            ev.location or "",
+            ev.cover_url or "",
+        )
+    )
+
+
 class HouseholdDashboardService:
     """Build the household dashboard's snapshots (read-only)."""
 
@@ -245,17 +286,20 @@ class HouseholdDashboardService:
         """The household overview at ``now`` (default: the current time)."""
         ctx = await self._context(now)
         tomorrow = ctx.today + timedelta(days=1)
-        calendars = await self._calendars(ctx)
-        people, events, chores, shopping, stickies, school = await asyncio.gather(
-            self._people(ctx, calendars),
-            self._events(ctx, calendars),
+        calendars, timetables = await asyncio.gather(
+            self._calendars(ctx), self._timetable_rows(ctx)
+        )
+        colors = self._person_colors(ctx, calendars)
+        people, events, chores, shopping, stickies = await asyncio.gather(
+            self._people(ctx, colors),
+            self._events(ctx, calendars, colors),
             self._chores(ctx, due_to=ctx.today),
             self._shopping_slice(),
             self._sticky_slice(ctx),
-            asyncio.gather(*(self._school(ctx, user) for user in ctx.shown)),
         )
+        school = [self._school(ctx, user.user_id, timetables) for user in ctx.shown]
         shopping_items, shopping_total = shopping
-        events_today = events.get(ctx.today, [])[:MAX_EVENTS]
+        all_today = events.get(ctx.today, [])
         school_today = tuple(d.today for d in school if d.today is not None)
         school_tomorrow = tuple(
             ls for ls in (_first_lesson(d.tomorrow) for d in school) if ls is not None
@@ -268,8 +312,9 @@ class HouseholdDashboardService:
             sections=ctx.sections,
             is_night=self._is_night(ctx),
             people=people,
-            events_today=tuple(events_today),
-            next_up=_next_after(ctx.now, [*events_today, *lessons_today]),
+            events_today=tuple(all_today[:MAX_EVENTS]),
+            # From the whole day, not just the displayed (capped) events.
+            next_up=_next_after(ctx.now, [*all_today, *lessons_today]),
             chores_today=chores,
             shopping=shopping_items,
             shopping_total=shopping_total,
@@ -287,17 +332,23 @@ class HouseholdDashboardService:
         """``user_id``'s page at ``now`` — ``None`` for an unknown,
         inactive or hidden member."""
         ctx = await self._context(now)
-        user = next((u for u in ctx.shown if u.user_id == user_id), None)
-        if user is None:
+        if user_id not in ctx.shown_ids:
             return None
         tomorrow = ctx.today + timedelta(days=1)
-        calendars = await self._calendars(ctx)
-        people, events, chores, school = await asyncio.gather(
-            self._people(ctx, calendars),
-            self._events(ctx, calendars),
-            self._chores(ctx, due_to=ctx.today + timedelta(days=CHORE_LOOKAHEAD_DAYS)),
-            self._school(ctx, user),
+        calendars, timetables = await asyncio.gather(
+            self._calendars(ctx), self._timetable_rows(ctx)
         )
+        colors = self._person_colors(ctx, calendars)
+        people, events, chores = await asyncio.gather(
+            self._people(ctx, colors),
+            self._events(ctx, calendars, colors),
+            self._chores(
+                ctx,
+                due_to=ctx.today + timedelta(days=CHORE_LOOKAHEAD_DAYS),
+                user_id=user_id,
+            ),
+        )
+        school = self._school(ctx, user_id, timetables)
         person = next(p for p in people if p.user_id == user_id)
 
         def mine(day: date) -> list[DashboardEvent]:
@@ -323,7 +374,7 @@ class HouseholdDashboardService:
             next_item=_next_after(ctx.now, today_items),
             today_items=tuple(today_items),
             tomorrow_items=tuple(tomorrow_items[:MAX_TOMORROW_ITEMS]),
-            chores=tuple(c for c in chores if user_id in c.person_ids),
+            chores=chores,
             school=school.today,
             school_tomorrow_first=_first_lesson(school.tomorrow),
         )
@@ -365,10 +416,10 @@ class HouseholdDashboardService:
     # ── People ───────────────────────────────────────────────────────────
 
     async def _calendars(self, ctx: _Context) -> list[Calendar]:
-        """Every member's personal calendar (``[]`` when the calendar is
-        off). The username is ignored for ``scope="household"``."""
-        if not ctx.on(SECTION_CALENDAR):
-            return []
+        """Every member's personal calendar. Read even when the calendar
+        section is off — person colours come from it and must not change
+        with the toggle (events are only read when it's on). The username
+        is ignored for ``scope="household"``."""
         rows = await _safe(
             "calendars",
             self._calendar.list_calendars("", scope="household"),
@@ -380,6 +431,21 @@ class HouseholdDashboardService:
             if c.calendar_type == "personal" and c.owner_username in ctx.by_username
         ]
 
+    @staticmethod
+    def _person_colors(ctx: _Context, calendars: Sequence[Calendar]) -> dict[str, str]:
+        """Each shown member's colour: their first personal calendar's,
+        else a palette colour by their position in the household."""
+        from_calendars: dict[str, str] = {}
+        for c in calendars:
+            from_calendars.setdefault(ctx.by_username[c.owner_username], c.color)
+        return {
+            user.user_id: from_calendars.get(
+                user.user_id, PERSON_PALETTE[index % len(PERSON_PALETTE)]
+            )
+            for index, user in enumerate(ctx.members)
+            if user.user_id in ctx.shown_ids
+        }
+
     async def _presence_rows(self, ctx: _Context) -> dict[str, PersonPresence]:
         if not ctx.on(SECTION_PRESENCE):
             return {}
@@ -389,16 +455,11 @@ class HouseholdDashboardService:
         return {r.user_id: r for r in rows}
 
     async def _people(
-        self, ctx: _Context, calendars: Sequence[Calendar]
+        self, ctx: _Context, colors: Mapping[str, str]
     ) -> tuple[DashboardPerson, ...]:
         presence = await self._presence_rows(ctx)
-        colors: dict[str, str] = {}
-        for c in calendars:
-            colors.setdefault(ctx.by_username[c.owner_username], c.color)
         out: list[DashboardPerson] = []
-        for index, user in enumerate(ctx.members):
-            if user.user_id not in ctx.shown_ids:
-                continue
+        for user in ctx.shown:
             row = presence.get(user.user_id)
             state = _PRESENCE.get(row.state, "unknown") if row else "unknown"
             status = user.status
@@ -408,9 +469,7 @@ class HouseholdDashboardService:
                     user_id=user.user_id,
                     display_name=user.display_name,
                     initials=initials(user.display_name),
-                    color=colors.get(
-                        user.user_id, PERSON_PALETTE[index % len(PERSON_PALETTE)]
-                    ),
+                    color=colors[user.user_id],
                     picture_hash=user.picture_hash,
                     picture_view=picture_effective(
                         ctx.settings.person(user.user_id), user
@@ -430,47 +489,65 @@ class HouseholdDashboardService:
     # ── Calendar ─────────────────────────────────────────────────────────
 
     async def _events(
-        self, ctx: _Context, calendars: Sequence[Calendar]
+        self,
+        ctx: _Context,
+        calendars: Sequence[Calendar],
+        colors: Mapping[str, str],
     ) -> dict[date, list[DashboardEvent]]:
         """Shown members' events overlapping household-local today and
         tomorrow, keyed by that date (an event spanning both is in both).
 
         Recurring events arrive as their occurrences (the calendar repo
-        expands them in range). A household event shared with several
-        members — one row per member's calendar, same
-        ``client_event_uuid`` — is merged into one event.
+        expands them in range). The copies of a shared event (one row per
+        member's calendar, see :func:`_merge_key`) become one event whose
+        id, text and colour come from a *shown* member's copy — the
+        creator's when shown. When only a hidden member's copy exists (a
+        shown member is just an attendee), the event gets a derived id and
+        the first shown person's colour, never the hidden calendar's.
         """
-        if not calendars:
+        if not ctx.on(SECTION_CALENDAR) or not calendars:
             return {}
         days = (ctx.today, ctx.today + timedelta(days=1))
-        start = local_instant(days[0], time(0, 0), ctx.tz)
-        end = local_instant(days[1] + timedelta(days=1), time(0, 0), ctx.tz)
-        merged: dict[str, tuple[CalendarEvent, str, list[str]]] = {}
-        for c in calendars:
-            owner = ctx.by_username[c.owner_username]
-            rows = await _safe(
-                f"calendar {c.id}",
-                self._calendar.list_events_in_range(
-                    c.id, start=start.isoformat(), end=end.isoformat()
-                ),
-                list[CalendarEvent](),
-            )
-            for ev in rows:
-                key = (
-                    f"{ev.client_event_uuid}|{ev.start.isoformat()}"
-                    if ev.client_event_uuid
-                    else ev.id
+        start = local_day_bounds(days[0], ctx.tz)[0]
+        end = local_day_bounds(days[1], ctx.tz)[1]
+        reads = await asyncio.gather(
+            *(
+                _safe(
+                    f"calendar {c.id}",
+                    self._calendar.list_events_in_range(
+                        c.id, start=start.isoformat(), end=end.isoformat()
+                    ),
+                    list[CalendarEvent](),
                 )
-                hit = merged.setdefault(key, (ev, c.color, []))
-                hit[2].extend((owner, *ev.attendees))
+                for c in calendars
+            )
+        )
+        groups: dict[str, list[_Copy]] = {}
+        for c, rows in zip(calendars, reads, strict=True):
+            owner = ctx.by_username[c.owner_username]
+            for ev in rows:
+                groups.setdefault(_merge_key(ev), []).append(_Copy(ev, owner, c.color))
         zone = zone_of(ctx.tz)
         out: dict[date, list[DashboardEvent]] = {}
-        for ev, color, people in merged.values():
-            person_ids = ctx.keep(people)
+        for key, copies in groups.items():
+            person_ids = ctx.keep(
+                uid for cp in copies for uid in (cp.owner_id, *cp.event.attendees)
+            )
             if not person_ids:
                 continue
+            shown_copies = [cp for cp in copies if cp.owner_id in ctx.shown_ids]
+            if shown_copies:
+                primary = next(
+                    (cp for cp in shown_copies if cp.owner_id == cp.event.created_by),
+                    shown_copies[0],
+                )
+                ev, event_id, color = primary.event, primary.event.id, primary.color
+            else:
+                ev = copies[0].event
+                event_id = "event-" + hashlib.sha256(key.encode()).hexdigest()[:16]
+                color = colors[person_ids[0]]
             item = DashboardEvent(
-                id=ev.id,
+                id=event_id,
                 title=ev.summary,
                 start=ev.start.astimezone(zone),
                 end=ev.end.astimezone(zone),
@@ -490,8 +567,7 @@ class HouseholdDashboardService:
     def _on_day(ctx: _Context, ev: CalendarEvent, day: date) -> bool:
         if ev.all_day:
             return all_day_covers(ev, day, ctx.tz)
-        lo = local_instant(day, time(0, 0), ctx.tz)
-        hi = local_instant(day + timedelta(days=1), time(0, 0), ctx.tz)
+        lo, hi = local_day_bounds(day, ctx.tz)
         if ev.end <= ev.start:  # zero-length: a point in time
             return lo <= ev.start < hi
         return ev.start < hi and ev.end > lo
@@ -499,37 +575,55 @@ class HouseholdDashboardService:
     # ── Tasks ────────────────────────────────────────────────────────────
 
     async def _chores(
-        self, ctx: _Context, *, due_to: date
-    ) -> tuple[DashboardTask, ...]:
-        if not ctx.on(SECTION_TASKS):
-            return ()
-        return await _safe("tasks", self._read_chores(ctx, due_to), ())
-
-    async def _read_chores(
-        self, ctx: _Context, due_to: date
+        self, ctx: _Context, *, due_to: date, user_id: str | None = None
     ) -> tuple[DashboardTask, ...]:
         """Open tasks due by ``due_to`` (overdue included) plus those
-        completed today. :class:`Task` has no completion stamp, so
-        "completed today" is a done task whose ``updated_at`` falls on
-        household-local today (a later edit to a done task re-dates it).
-        Tasks without a due date aren't chores and never show."""
-        out: list[DashboardTask] = []
-        for lst in await self._tasks.list_lists():
-            open_ = await self._tasks.list_tasks(
-                lst.id, include_done=False, due_to=due_to.isoformat()
+        completed today — only ``user_id``'s when given, filtered before
+        the :data:`MAX_CHORES` cap so a busy household can't push a
+        person's own chores off their page."""
+        if not ctx.on(SECTION_TASKS):
+            return ()
+        lists = await _safe("tasks", self._tasks.list_lists(), list[TaskList]())
+        per_list = await asyncio.gather(
+            *(
+                _safe(
+                    f"task list {lst.id}",
+                    self._list_chores(ctx, lst, due_to),
+                    list[DashboardTask](),
+                )
+                for lst in lists
             )
-            done = await self._tasks.list_tasks(
-                lst.id,
-                status=TaskStatus.DONE.value,
-                due_from=(ctx.today - timedelta(days=DONE_LOOKBACK_DAYS)).isoformat(),
-                due_to=due_to.isoformat(),
-            )
-            for t in (*open_, *done):
-                chore = self._chore(ctx, t, lst.name)
-                if chore is not None:
-                    out.append(chore)
+        )
+        out = [c for chores in per_list for c in chores]
+        if user_id is not None:
+            out = [c for c in out if user_id in c.person_ids]
         out.sort(key=lambda c: (c.done, c.due or date.max, c.title))
         return tuple(out[:MAX_CHORES])
+
+    async def _list_chores(
+        self, ctx: _Context, lst: TaskList, due_to: date
+    ) -> list[DashboardTask]:
+        """One list's chores. :class:`Task` has no completion stamp, so
+        "completed today" is a done task whose ``updated_at`` falls on
+        household-local today (a later edit to a done task re-dates it);
+        done tasks due up to :data:`CHORE_LOOKAHEAD_DAYS` ahead count, so a
+        chore finished a day early still shows as done today. Tasks
+        without a due date aren't chores and never show."""
+        open_ = await self._tasks.list_tasks(
+            lst.id, include_done=False, due_to=due_to.isoformat()
+        )
+        done = await self._tasks.list_tasks(
+            lst.id,
+            status=TaskStatus.DONE.value,
+            due_from=(ctx.today - timedelta(days=DONE_LOOKBACK_DAYS)).isoformat(),
+            due_to=(ctx.today + timedelta(days=CHORE_LOOKAHEAD_DAYS)).isoformat(),
+        )
+        out: list[DashboardTask] = []
+        for t in (*open_, *done):
+            chore = self._chore(ctx, t, lst.name)
+            if chore is not None:
+                out.append(chore)
+        return out
 
     @staticmethod
     def _chore(ctx: _Context, t: Task, list_name: str) -> DashboardTask | None:
@@ -577,8 +671,17 @@ class HouseholdDashboardService:
 
     # ── Timetables ───────────────────────────────────────────────────────
 
-    async def _school(self, ctx: _Context, user: User) -> _Days:
-        """``user``'s school today and tomorrow (household-local dates).
+    async def _timetable_rows(self, ctx: _Context) -> list[Timetable]:
+        """Every household timetable, read once per snapshot (``[]`` when
+        the timetable section is off); people and days filter in memory."""
+        if not ctx.on(SECTION_TIMETABLE):
+            return []
+        return await _safe("timetables", self._timetables.list_all(), list[Timetable]())
+
+    def _school(
+        self, ctx: _Context, user_id: str, timetables: Sequence[Timetable]
+    ) -> _Days:
+        """``user_id``'s school today and tomorrow.
 
         Only timetables the person is *assigned* to count. Space
         timetables pinned to a member's Home are deliberately ignored
@@ -587,31 +690,31 @@ class HouseholdDashboardService:
         shared household screen it would mislabel that member as being at
         school.
         """
-        if not ctx.on(SECTION_TIMETABLE):
-            return _Days()
-        tomorrow = ctx.today + timedelta(days=1)
         return _Days(
-            today=await _safe(
-                "timetable today",
-                self._school_day(ctx, user.user_id, ctx.today),
-                None,
-            ),
-            tomorrow=await _safe(
-                "timetable tomorrow",
-                self._school_day(ctx, user.user_id, tomorrow),
-                None,
-            ),
+            today=self._school_day(ctx, user_id, timetables, offset=0),
+            tomorrow=self._school_day(ctx, user_id, timetables, offset=1),
         )
 
-    async def _school_day(
-        self, ctx: _Context, user_id: str, day: date
+    def _school_day(
+        self,
+        ctx: _Context,
+        user_id: str,
+        timetables: Sequence[Timetable],
+        *,
+        offset: int,
     ) -> DashboardSchoolDay | None:
-        assigned = await self._timetables.active_for_user(user_id, day)
+        """The lessons ``offset`` days after "today" — today in each
+        timetable's own zone, like :meth:`TimetableService.today_for_user`
+        (a Berlin plan seen from New York at 20:00 already shows Berlin's
+        tomorrow morning). ``date`` on the result is the household day."""
         zone = zone_of(ctx.tz)
         names: list[str] = []
         lessons: list[DashboardLesson] = []
-        for tt in assigned:
+        for tt in timetables:
             try:
+                day = local_date(ctx.now, tt.tz) + timedelta(days=offset)
+                if not TimetableService.in_effect_for(tt, user_id, day):
+                    continue
                 resolved = td.today_timetable(tt, day)
             except Exception:  # one bad row never empties the slice
                 log.warning(
@@ -653,7 +756,7 @@ class HouseholdDashboardService:
         taking_place = [ls for ls in lessons if ls.takes_place]
         return DashboardSchoolDay(
             person_id=user_id,
-            date=day,
+            date=ctx.today + timedelta(days=offset),
             timetable_name=" · ".join(names),
             lessons=tuple(lessons),
             first_start=taking_place[0].start if taking_place else None,
