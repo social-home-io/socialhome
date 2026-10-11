@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -17,6 +18,8 @@ from socialhome.dashboard.auth import (
     PRUNE_INTERVAL_S,
     KEEP_TTL_S,
     RENEW_AFTER_S,
+    REVOKED_LOCKED,
+    REVOKED_SIGNED_OUT,
     SESSION_TTL_S,
     THROTTLE_MAX_FAILURES,
     THROTTLE_WINDOW_S,
@@ -64,7 +67,24 @@ async def test_payload_shape(auth, clock):
     raw = await auth.issue(True)
     body = raw.split(".")[0]
     payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    nonce = payload.pop("n")
     assert payload == {"v": 1, "e": 0, "i": int(clock.now), "k": True, "l": False}
+    assert isinstance(nonce, str) and len(nonce) == 22
+
+
+async def test_cookies_of_the_same_second_differ(auth):
+    """A per-cookie nonce: revoking or throttling one tablet's cookie
+    never touches a twin minted in the same second."""
+    assert await auth.issue(True) != await auth.issue(True)
+
+
+async def test_six_key_cookie_verifies(auth, settings_service, clock):
+    raw = await _forge(
+        settings_service,
+        {"v": 1, "e": 0, "i": int(clock.now), "k": True, "l": True, "n": "A" * 22},
+    )
+    claims = await auth.verify(raw)
+    assert claims is not None and claims.locked is True
 
 
 @pytest.mark.parametrize("keep", [True, False])
@@ -207,6 +227,12 @@ async def test_garbage_strings_rejected(auth, raw):
         {"v": 1, "e": 0, "i": "NOW", "k": True, "l": "true"},
         {"v": 1, "e": 0, "i": "NOW", "k": True, "l": None},
         {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "x": 1},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "n": "A" * 22},  # n needs l
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": 5},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "short"},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "A" * 33},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "a b" * 8},
+        {"v": 1, "e": 0, "i": "NOW", "k": True, "l": False, "n": "A" * 22, "x": 1},
         {"v": 1, "e": 0, "i": "NOW", "l": True},
         {"v": 1, "e": 0, "i": None, "k": True, "l": True},
         {"v": 1, "e": 0, "i": "NOW", "l": False, "x": True},
@@ -475,10 +501,177 @@ async def test_pin_and_password_checks_share_one_slot(clock):
     assert slow.peak == 1
 
 
-def test_pin_throttle_key_is_its_own_bucket(auth):
-    assert DashboardAuth.pin_throttle_key("10.0.0.5") == "pin:10.0.0.5"
-    _fail(auth, DashboardAuth.pin_throttle_key("10.0.0.5"), THROTTLE_MAX_FAILURES)
+async def test_pin_throttle_key_is_per_client_and_per_cookie(auth, clock):
+    a = await auth.verify(await auth.issue(True, locked=True))
+    b = await auth.verify(await auth.issue(True, locked=True))  # same second
+    key_a = DashboardAuth.pin_throttle_key("10.0.0.5", a)
+    assert key_a.startswith("pin:10.0.0.5:") and len(key_a) == len("pin:10.0.0.5:") + 16
+    assert key_a != DashboardAuth.pin_throttle_key("10.0.0.5", b)
+    assert key_a != DashboardAuth.pin_throttle_key("10.0.0.6", a)
+    # Stable for the same cookie value.
+    assert key_a == DashboardAuth.pin_throttle_key("10.0.0.5", a)
+    _fail(auth, key_a, THROTTLE_MAX_FAILURES)
     assert auth.throttle_remaining("10.0.0.5") == 0
+
+
+def test_failure_count(auth, clock):
+    assert auth.failure_count("k") == 0
+    _fail(auth, "k", 3)
+    assert auth.failure_count("k") == 3
+    clock.advance(THROTTLE_WINDOW_S)
+    assert auth.failure_count("k") == 0
+
+
+def test_attempt_wait_counts_nothing(auth):
+    _fail(auth, "k", THROTTLE_MAX_FAILURES)
+    wait = auth.attempt_wait("k", count_global=False)
+    assert wait > 0
+    assert auth.failure_count("k") == THROTTLE_MAX_FAILURES
+    assert auth.attempt_wait("other", count_global=False) == 0
+    assert auth.failure_count("other") == 0
+
+
+def test_attempt_wait_sees_a_full_table(settings_service, clock):
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=1)
+    _fail(auth, "a", THROTTLE_MAX_FAILURES)
+    assert auth.attempt_wait("newcomer", count_global=False) == 0  # not tried yet
+    assert auth.begin_attempt("newcomer", count_global=False) > 0
+    assert auth.attempt_wait("newcomer", count_global=False) > 0
+    assert auth.failure_count("newcomer") == 0
+    clock.advance(PRUNE_INTERVAL_S)
+    assert auth.attempt_wait("newcomer", count_global=False) == 0
+
+
+def test_attempt_wait_global_brake(auth):
+    for i in range(GLOBAL_MAX_FAILURES + 1):
+        auth.begin_attempt(f"c{i}")
+    assert auth.attempt_wait("fresh") > 0
+    assert auth.attempt_wait("fresh", count_global=False) == 0
+
+
+# ─── revocation ──────────────────────────────────────────────────────────
+
+
+async def test_claims_carry_the_signature_outside_equality(auth, clock):
+    raw = await auth.issue(True)
+    claims = await auth.verify(raw)
+    assert claims.signature == base64.urlsafe_b64decode(
+        raw.split(".")[1] + "=" * (-len(raw.split(".")[1]) % 4)
+    )
+    assert claims == SessionClaims(epoch=0, issued_at=int(clock.now), keep=True)
+    assert "signature" not in repr(claims)
+
+
+async def test_revoked_locked_cookie_verifies_locked(auth):
+    raw = await auth.issue(True)
+    claims = await auth.verify(raw)
+    assert auth.revocation(claims) is None
+    auth.revoke(claims, REVOKED_LOCKED)
+    assert auth.revocation(claims) == REVOKED_LOCKED
+    again = await auth.verify(raw)
+    assert again is not None and again.locked is True and again.keep is True
+    # Other cookies are untouched.
+    other = await auth.verify(await auth.issue(True))
+    assert other.locked is False
+
+
+async def test_revoked_signed_out_cookie_no_longer_verifies(auth):
+    raw = await auth.issue(True, locked=True)
+    auth.revoke(await auth.verify(raw), REVOKED_SIGNED_OUT)
+    assert await auth.verify(raw) is None
+
+
+async def test_signed_out_is_never_downgraded_to_locked(auth):
+    raw = await auth.issue(True)
+    claims = await auth.verify(raw)
+    auth.revoke(claims, REVOKED_SIGNED_OUT)
+    auth.revoke(claims, REVOKED_LOCKED)
+    assert await auth.verify(raw) is None
+    assert auth.revoked_count == 1
+
+
+async def test_locked_can_be_upgraded_to_signed_out(auth):
+    raw = await auth.issue(True)
+    claims = await auth.verify(raw)
+    auth.revoke(claims, REVOKED_LOCKED)
+    auth.revoke(claims, REVOKED_SIGNED_OUT)
+    assert await auth.verify(raw) is None
+
+
+def test_revoke_rejects_an_unknown_reason(auth):
+    claims = SessionClaims(epoch=0, issued_at=0, keep=True, signature=b"x")
+    with pytest.raises(ValueError):
+        auth.revoke(claims, "whatever")
+
+
+@pytest.mark.parametrize(("keep", "ttl"), [(True, KEEP_TTL_S), (False, SESSION_TTL_S)])
+async def test_revocation_expires_with_the_cookie(auth, clock, keep, ttl):
+    claims = await auth.verify(await auth.issue(keep))
+    auth.revoke(claims, REVOKED_LOCKED)
+    clock.advance(ttl)
+    assert auth.revocation(claims) == REVOKED_LOCKED
+    clock.advance(1)
+    assert auth.revocation(claims) is None
+    assert auth.revoked_count == 0
+
+
+async def test_revocation_set_is_bounded(settings_service, clock):
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=3)
+    cookies = []
+    for _ in range(4):
+        claims = SessionClaims(
+            epoch=0,
+            issued_at=int(clock.now),
+            keep=True,
+            signature=os.urandom(32),
+        )
+        cookies.append(claims)
+        auth.revoke(claims, REVOKED_LOCKED)
+    assert auth.revoked_count == 3
+    # The oldest made room.
+    assert auth.revocation(cookies[0]) is None
+    assert all(auth.revocation(c) == REVOKED_LOCKED for c in cookies[1:])
+
+
+async def test_full_revocation_set_drops_expired_entries_first(settings_service, clock):
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
+    old = SessionClaims(epoch=0, issued_at=int(clock.now), keep=False, signature=b"o")
+    auth.revoke(old, REVOKED_LOCKED)
+    keep = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"k")
+    auth.revoke(keep, REVOKED_LOCKED)
+    clock.advance(SESSION_TTL_S + 1)
+    new = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"n")
+    auth.revoke(new, REVOKED_LOCKED)
+    assert auth.revocation(keep) == REVOKED_LOCKED
+    assert auth.revocation(new) == REVOKED_LOCKED
+    assert auth.revoked_count == 2
+
+
+async def test_revocation_eviction_prefers_locked_over_signed_out(
+    settings_service, clock
+):
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
+    gone = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"g")
+    auth.revoke(gone, REVOKED_SIGNED_OUT)
+    lock1 = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"1")
+    auth.revoke(lock1, REVOKED_LOCKED)
+    lock2 = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"2")
+    auth.revoke(lock2, REVOKED_LOCKED)
+    assert auth.revocation(gone) == REVOKED_SIGNED_OUT
+    assert auth.revocation(lock1) is None
+    assert auth.revocation(lock2) == REVOKED_LOCKED
+
+
+async def test_full_revocation_set_of_signed_out_drops_the_oldest(
+    settings_service, clock
+):
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=1)
+    a = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"a")
+    b = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, signature=b"b")
+    auth.revoke(a, REVOKED_SIGNED_OUT)
+    auth.revoke(b, REVOKED_SIGNED_OUT)
+    assert auth.revocation(a) is None
+    assert auth.revocation(b) == REVOKED_SIGNED_OUT
 
 
 def test_now_is_the_auth_clock(auth, clock):
