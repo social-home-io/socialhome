@@ -2999,7 +2999,9 @@ def create_app(config: Config | None = None) -> web.Application:
     typing_service.attach_system_chats(system_chat_policy)
 
     # ── Platform adapter (HA vs standalone) ──────────────────────────────
-    platform_adapter = build_platform_adapter(config.mode, db, config)
+    platform_adapter = build_platform_adapter(
+        config.mode, db, config, instance_config=repos.instance_config
+    )
 
     # ── Household dashboard (wall tablet, own port) ──────────────────────
     dashboard = _build_household_dashboard(
@@ -3034,7 +3036,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # First-boot wizard — gates `/api/setup/*` and feeds
     # `setup_required` into `/api/instance/config` so the SPA can
     # redirect to `/setup` until the operator completes the flow.
-    setup_service = SetupService(db)
+    setup_service = SetupService(repos.instance_config)
 
     # ── Auth middleware ───────────────────────────────────────────────────
     # Order matters: signed-URL checks first so browser-loaded media (img,
@@ -3140,6 +3142,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # a second instance.
     app[K.rate_limiter_key] = limiter
     app[K.db_key] = db
+    app[K.instance_config_repo_key] = repos.instance_config
     app[K.event_bus_key] = bus
     app[K.ws_manager_key] = ws_manager
     app[K.push_service_key] = push_service
@@ -4326,7 +4329,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # startup. The rotation service also defers echoes while it is
         # pending, should it fail here.
         recovery_reconnect_service = RecoveryReconnectService(
-            db, app[K.url_update_outbound_key], platform_adapter
+            repos.instance_config, app[K.url_update_outbound_key], platform_adapter
         )
         app[K.recovery_reconnect_service_key] = recovery_reconnect_service
         if space_authority_rotation is not None:

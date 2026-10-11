@@ -39,6 +39,7 @@ from ...identity_bootstrap import derive_local_user_id
 from .supervisor import SupervisorClient
 
 if TYPE_CHECKING:
+    from ...repositories.instance_config_repo import AbstractInstanceConfigRepo
     from ...services.user_service import UserService
     from ..ha.providers import HaUserDirectory
 
@@ -56,6 +57,9 @@ class HaBootstrap:
     ----------
     db:
         The application database.
+    instance_config:
+        ``instance_config`` key/value repo — holds the one-off
+        provisioning flag (:data:`BOOTSTRAP_FLAG`).
     users:
         :class:`HaUserDirectory` from the haos adapter — the source of
         the HA owner record (auth-provider ``username`` + display
@@ -75,17 +79,26 @@ class HaBootstrap:
         bootstrap; when absent the rename-follow step is skipped.
     """
 
-    __slots__ = ("_db", "_users", "_sv", "_data_dir", "_user_service")
+    __slots__ = (
+        "_db",
+        "_instance_config",
+        "_users",
+        "_sv",
+        "_data_dir",
+        "_user_service",
+    )
 
     def __init__(
         self,
         db: AsyncDatabase,
+        instance_config: AbstractInstanceConfigRepo,
         users: HaUserDirectory,
         supervisor: SupervisorClient,
         data_dir: str,
         user_service: UserService | None = None,
     ) -> None:
         self._db = db
+        self._instance_config = instance_config
         self._users = users
         self._sv = supervisor
         self._data_dir = data_dir
@@ -359,20 +372,10 @@ class HaBootstrap:
     # ─── Config-flag helpers ──────────────────────────────────────────────
 
     async def _is_done(self) -> bool:
-        row = await self._db.fetchone(
-            "SELECT value FROM instance_config WHERE key=?",
-            (BOOTSTRAP_FLAG,),
-        )
-        return row is not None and row["value"] == "1"
+        return await self._instance_config.get(BOOTSTRAP_FLAG) == "1"
 
     async def _mark_done(self) -> None:
-        await self._db.enqueue(
-            """
-            INSERT INTO instance_config(key, value) VALUES(?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            (BOOTSTRAP_FLAG, "1"),
-        )
+        await self._instance_config.set(BOOTSTRAP_FLAG, "1")
 
     def _token_path(self) -> str:
         return os.path.join(self._data_dir, INTEGRATION_TOKEN_FILENAME)

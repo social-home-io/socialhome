@@ -15,11 +15,13 @@ from socialhome.app_keys import (
     event_bus_key,
     federation_service_key,
     http_session_key,
+    instance_config_repo_key,
 )
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.platform.ha.adapter import HomeAssistantAdapter
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
 
 # ─── Fake HaClient ───────────────────────────────────────────────────────
@@ -254,6 +256,7 @@ async def test_local_password_login_round_trip(tmp_path):
 
     app = web.Application()
     app[db_key] = db
+    app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
     app[event_bus_key] = EventBus()
     async with aiohttp.ClientSession() as session:
         app[http_session_key] = session
@@ -298,6 +301,7 @@ async def test_local_password_wrong_returns_none(tmp_path):
     )
     app = web.Application()
     app[db_key] = db
+    app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
     app[event_bus_key] = EventBus()
     async with aiohttp.ClientSession() as session:
         app[http_session_key] = session
@@ -802,6 +806,7 @@ async def test_on_startup_does_not_provision_users(tmp_path, monkeypatch):
 
     app = web.Application()
     app[db_key] = db
+    app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
     app[event_bus_key] = EventBus()
     async with aiohttp.ClientSession() as session:
         app[http_session_key] = session
@@ -859,6 +864,7 @@ async def test_get_federation_base_appends_inbox_path(tmp_path):
 
     app = web.Application()
     app[db_key] = db
+    app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
     app[event_bus_key] = EventBus()
     async with aiohttp.ClientSession() as session:
         app[http_session_key] = session
@@ -897,6 +903,7 @@ async def test_get_federation_base_strips_trailing_slash(tmp_path):
 
     app = web.Application()
     app[db_key] = db
+    app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
     app[event_bus_key] = EventBus()
     async with aiohttp.ClientSession() as session:
         app[http_session_key] = session
@@ -936,6 +943,7 @@ async def test_get_federation_base_idempotent_if_already_appended(tmp_path):
 
     app = web.Application()
     app[db_key] = db
+    app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
     app[event_bus_key] = EventBus()
     async with aiohttp.ClientSession() as session:
         app[http_session_key] = session
@@ -990,6 +998,7 @@ async def _ha_adapter_app(tmp_path, db_key_, bus_key_, session):
     await db.startup()
     app = web.Application()
     app[db_key_] = db
+    app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
     app[bus_key_] = EventBus()
     app[http_session_key] = session
     return app, db

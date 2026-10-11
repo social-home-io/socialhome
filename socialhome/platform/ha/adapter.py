@@ -46,6 +46,8 @@ from .providers import (
 if TYPE_CHECKING:
     from aiohttp import web
 
+    from ...repositories.instance_config_repo import AbstractInstanceConfigRepo
+
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +78,7 @@ class HaAdapter(PlatformAdapter):
         "_ha_bridge",
         "_ice_sync",
         "_db",
+        "_instance_config",
         "_credentials",
         "auth",
         "users",
@@ -102,6 +105,7 @@ class HaAdapter(PlatformAdapter):
         self._ha_bridge: HaBridgeService | None = None
         self._ice_sync: HaIceServerSync | None = None
         self._db: Any | None = None
+        self._instance_config: "AbstractInstanceConfigRepo | None" = None
         self._credentials: LocalCredentialStore | None = None
 
         self.auth = HaAuthProvider(self)
@@ -261,18 +265,12 @@ class HaAdapter(PlatformAdapter):
         Returns ``None`` until either is set; the pairing route surfaces
         it as 422 ``NOT_CONFIGURED``.
         """
-        manual = await manual_federation_base(self._db)
+        manual = await manual_federation_base(self._instance_config)
         if manual is not None:
             return manual
-        if self._db is None:
+        if self._instance_config is None:
             return None
-        row = await self._db.fetchone(
-            "SELECT value FROM instance_config WHERE key=?",
-            ("ha_federation_base",),
-        )
-        if row is None:
-            return None
-        raw = str(row["value"] or "").strip()
+        raw = (await self._instance_config.get("ha_federation_base") or "").strip()
         if not raw:
             return None
         base = raw.rstrip("/")
@@ -285,6 +283,7 @@ class HaAdapter(PlatformAdapter):
         that lives in :class:`~socialhome.platform.haos.HaosAdapter`."""
         session = app[K.http_session_key]
         self._db = app[K.db_key]
+        self._instance_config = app[K.instance_config_repo_key]
         self._credentials = LocalCredentialStore(self._db)
         if self._ha_client is None:
             self._ha_client = build_ha_client(

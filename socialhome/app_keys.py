@@ -15,12 +15,16 @@ from .config import Config
 from .db import AsyncDatabase
 
 if TYPE_CHECKING:  # circular at runtime: services → … → auth → app_keys
+    from .repositories.instance_config_repo import AbstractInstanceConfigRepo
     from .services.link_preview_service import LinkPreviewService
     from .services.map_tile_service import MapTileService
 
 # ── Core ─────────────────────────────────────────────────────────────────
 config_key: AppKey[Config] = AppKey("config")
 db_key: AppKey[AsyncDatabase] = AppKey("db")
+instance_config_repo_key: AppKey[AbstractInstanceConfigRepo] = AppKey(
+    "instance_config_repo"
+)
 #: Shared aiohttp.ClientSession used by every HTTP caller in the app
 #: (HA adapter, Supervisor client, federation, GFS, standalone push).
 #: Created during app startup, closed on cleanup.

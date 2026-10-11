@@ -151,7 +151,7 @@ def test_build_platform_adapter_ha(tmp_path):
     from socialhome.platform.ha.adapter import HomeAssistantAdapter
 
     cfg = Config(mode="ha")
-    adapter = build_platform_adapter("ha", db=None, config=cfg)
+    adapter = build_platform_adapter("ha", db=None, config=cfg, instance_config=None)
     assert isinstance(adapter, HomeAssistantAdapter)
 
 
@@ -160,12 +160,20 @@ async def test_build_platform_adapter_standalone(tmp_path):
     from socialhome.config import Config
     from socialhome.db.database import AsyncDatabase
     from socialhome.platform.standalone.adapter import StandaloneAdapter
+    from socialhome.repositories.instance_config_repo import (
+        SqliteInstanceConfigRepo,
+    )
 
     db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
     await db.startup()
     try:
         cfg = Config(mode="standalone")
-        adapter = build_platform_adapter("standalone", db=db, config=cfg)
+        adapter = build_platform_adapter(
+            "standalone",
+            db=db,
+            config=cfg,
+            instance_config=SqliteInstanceConfigRepo(db),
+        )
         assert isinstance(adapter, StandaloneAdapter)
     finally:
         await db.shutdown()
@@ -177,7 +185,7 @@ def test_build_platform_adapter_unknown_mode():
 
     cfg = Config(mode="unknown")
     with pytest.raises(ValueError, match="Unknown platform mode"):
-        build_platform_adapter("unknown", db=None, config=cfg)
+        build_platform_adapter("unknown", db=None, config=cfg, instance_config=None)
 
 
 # ── provides_ice_servers (ABC default) ───────────────────────────────────────

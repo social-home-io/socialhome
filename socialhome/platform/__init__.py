@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from ..config import Config
 from ..db import AsyncDatabase
@@ -26,11 +26,16 @@ from .ha import HaAdapter, HomeAssistantAdapter
 from .haos import HaosAdapter
 from .standalone import StandaloneAdapter
 
+if TYPE_CHECKING:
+    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
+
 
 def build_platform_adapter(
     mode: str,
     db: AsyncDatabase,
     config: Config,
+    *,
+    instance_config: AbstractInstanceConfigRepo,
 ) -> PlatformAdapter:
     """Instantiate the platform adapter selected by ``mode``.
 
@@ -43,6 +48,10 @@ def build_platform_adapter(
     ``ha_token``) only apply to ``ha`` mode; ``haos`` mode reads
     ``SUPERVISOR_TOKEN`` from the environment instead (injected by the
     Supervisor at runtime — there is no TOML mirror).
+
+    ``instance_config`` goes to the standalone adapter's constructor; the
+    ``ha`` / ``haos`` adapters pick the same repo up from the app in
+    ``on_startup``, alongside the database.
     """
     options: Mapping[str, Any] = config.platform_options.get(
         _PLATFORM_SECTION.get(mode, mode),
@@ -50,7 +59,12 @@ def build_platform_adapter(
     )
     match mode:
         case "standalone":
-            return StandaloneAdapter(db=db, config=config, options=options)
+            return StandaloneAdapter(
+                db=db,
+                config=config,
+                options=options,
+                instance_config=instance_config,
+            )
         case "ha":
             return HaAdapter(
                 ha_url=config.ha_url,

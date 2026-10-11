@@ -51,6 +51,8 @@ from .supervisor import SupervisorClient
 if TYPE_CHECKING:
     from aiohttp import web
 
+    from ...repositories.instance_config_repo import AbstractInstanceConfigRepo
+
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +123,7 @@ class HaosAdapter(PlatformAdapter):
         "_ha_bridge",
         "_ice_sync",
         "_db",
+        "_instance_config",
         "auth",
         "users",
         "push",
@@ -148,6 +151,7 @@ class HaosAdapter(PlatformAdapter):
         self._ha_bridge: HaBridgeService | None = None
         self._ice_sync: HaIceServerSync | None = None
         self._db: Any | None = None
+        self._instance_config: "AbstractInstanceConfigRepo | None" = None
 
         # HAOS-specific auth — ingress header trust, no bearer fallback.
         self.auth = HaIngressAuthProvider(self)
@@ -225,15 +229,9 @@ class HaosAdapter(PlatformAdapter):
         against an integration that ever pushes the full path so we
         don't double-append.
         """
-        if self._db is None:
+        if self._instance_config is None:
             return None
-        row = await self._db.fetchone(
-            "SELECT value FROM instance_config WHERE key=?",
-            ("ha_federation_base",),
-        )
-        if row is None:
-            return None
-        raw = str(row["value"] or "").strip()
+        raw = (await self._instance_config.get("ha_federation_base") or "").strip()
         if not raw:
             return None
         base = raw.rstrip("/")
@@ -265,6 +263,8 @@ class HaosAdapter(PlatformAdapter):
         the integration discovery record is published."""
         session = app[K.http_session_key]
         self._db = app[K.db_key]
+        instance_config = app[K.instance_config_repo_key]
+        self._instance_config = instance_config
         if self._ha_client is None:
             self._ha_client = build_ha_client(
                 session,
@@ -317,6 +317,7 @@ class HaosAdapter(PlatformAdapter):
             )
         await HaBootstrap(
             db=self._db,
+            instance_config=instance_config,
             users=self.users,
             supervisor=self._supervisor_client,
             data_dir=self._data_dir,

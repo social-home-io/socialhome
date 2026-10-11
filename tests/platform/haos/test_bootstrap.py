@@ -21,6 +21,7 @@ from socialhome.platform.haos.bootstrap import (
     HaBootstrap,
 )
 from socialhome.platform.haos.supervisor import AddonInfo
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.user_service import UserService
 
@@ -110,6 +111,7 @@ def _make_bootstrap(
     want non-default."""
     return HaBootstrap(
         db=env.db,
+        instance_config=SqliteInstanceConfigRepo(env.db),
         users=users or _FakeUsers(),
         supervisor=supervisor or _FakeSupervisor(),
         data_dir=env.data_dir,
