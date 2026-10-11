@@ -801,14 +801,16 @@ class HouseholdDashboardService:
 
         For every protected active member (hidden ones too — they can
         still stand at the tablet): everyone a block separates them from,
-        and the member themself while one of those is shown."""
+        and the member themself while one of those is a household member —
+        shown or hidden, anyone local can stand in front of the wall."""
         out: set[str] = set()
+        local = {u.user_id for u in ctx.members}
         for user in ctx.members:
             if not user.child_protection_enabled:
                 continue
             counterparts = await self._cp.guardian_block_counterparts(user.user_id)
             out |= counterparts
-            if counterparts & ctx.shown_ids:
+            if counterparts & local:
                 out.add(user.user_id)
         return frozenset(out)
 

@@ -1677,14 +1677,44 @@ async def test_guardian_blocked_pair_is_never_on_the_wall():
     assert page is not None and [m.id for m in page.messages] == ["from-dora"]
 
 
-async def test_a_minor_blocked_only_from_someone_not_shown_still_shows():
+async def test_a_minor_blocked_from_a_hidden_member_stays_off_the_wall():
+    """A hidden member can still stand at the tablet: the chat hides the
+    minor's messages from them, so the wall does too (fail closed)."""
     h = Harness(settings=messages_on())
     h.cp.counterparts = {"u-ben": frozenset({"u-carl"})}  # Carl is hidden
     now = at(MONDAY, 15, 30)
     h.chat.rows = [chat_msg("from-ben", "u-ben", now - timedelta(minutes=1))]
     snap = await h.home(now)
-    assert h.chat.args["senders"] == frozenset({"u-anna", "u-ben", "u-dora"})
+    assert h.chat.args["senders"] == frozenset({"u-anna", "u-dora"})
+    assert snap.messages == ()
+
+
+async def test_a_minor_blocked_from_someone_outside_the_household_still_shows():
+    """Only household members can stand at the wall: a block against a
+    remote person withholds that person, not the minor's own messages."""
+    h = Harness(settings=messages_on())
+    h.cp.counterparts = {"u-ben": frozenset({"u-remote"})}
+    now = at(MONDAY, 15, 30)
+    h.chat.rows = [chat_msg("from-ben", "u-ben", now - timedelta(minutes=1))]
+    snap = await h.home(now)
+    assert "u-ben" in h.chat.args["senders"]
     assert [m.id for m in snap.messages] == ["from-ben"]
+
+
+async def test_no_message_read_when_every_shown_sender_is_withheld():
+    h = Harness(
+        settings=DashboardSettings(
+            show_household_messages=True,
+            people=(
+                ("u-carl", DashboardPersonSettings(show=False)),
+                ("u-anna", DashboardPersonSettings(show=False)),
+                ("u-dora", DashboardPersonSettings(show=False)),
+            ),
+        )
+    )
+    h.cp.counterparts = {"u-ben": frozenset({"u-carl"})}
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert snap.messages == () and h.chat.calls == []
 
 
 async def test_a_failing_guardian_block_read_shows_no_message(caplog):
@@ -1749,8 +1779,8 @@ async def test_guardian_block_against_a_hidden_person_from_the_database(cp_db):
     now = at(MONDAY, 15, 30)
     h.chat.rows = [chat_msg("from-ben", "u-ben", now - timedelta(minutes=1))]
     snap = await h.home(now)
-    assert "u-ben" in h.chat.args["senders"]
-    assert [m.id for m in snap.messages] == ["from-ben"]
+    assert "u-ben" not in h.chat.args["senders"]
+    assert snap.messages == ()
 
 
 async def test_a_lifted_protection_lifts_the_block_from_the_database(cp_db):
