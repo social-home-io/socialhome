@@ -14,6 +14,7 @@ import pytest
 
 from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.preferences import HouseholdPreferences
+from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.timetable import (
     EntryKind,
     LessonStatus,
@@ -172,6 +173,7 @@ def _svc(
     timetable_service="real",
     users=None,
     space_timetables=None,
+    tasks=None,
 ):
     prefs = prefs or _Prefs()
     nothing = _Nothing()
@@ -184,7 +186,7 @@ def _svc(
         conversation_repo=nothing,
         calendar_repo=calendar,
         presence_service=nothing,
-        task_repo=nothing,
+        task_repo=tasks or nothing,
         bazaar_repo=nothing,
         user_repo=users or nothing,
         space_repo=nothing,
@@ -444,3 +446,61 @@ async def test_pins_respect_the_today_cap():
     svc, _ = _svc(users=users, space_timetables=_SpaceTimetables(pins))
     bundle = await _build(svc, _utc(MON, 5))
     assert len(bundle.today_timetable) == MAX_TODAY_TIMETABLES
+
+
+# ─── tasks_due_today ─────────────────────────────────────────────────────
+
+#: A Monday far in the future, so a server-clock ``date.today()`` can
+#: never accidentally agree with the household day under test.
+FAR_MON = date(2099, 9, 28)
+
+
+class _Tasks:
+    def __init__(self, tasks):
+        self.tasks = list(tasks)
+
+    async def list_by_assignee(self, user_id):
+        return list(self.tasks)
+
+
+def _task(tid, due, *, status=TaskStatus.TODO) -> Task:
+    return Task(
+        id=tid,
+        list_id="l-1",
+        title=tid,
+        status=status,
+        position=0,
+        created_by="u-anna",
+        created_at=T0,
+        updated_at=T0,
+        due_date=due,
+        assignees=("u-anna",),
+    )
+
+
+def _day_tasks():
+    tue = FAR_MON + timedelta(days=1)
+    return _Tasks(
+        [
+            _task("mon", FAR_MON),
+            _task("tue", tue),
+            _task("wed", tue + timedelta(days=1)),
+            _task("done-mon", FAR_MON, status=TaskStatus.DONE),
+        ]
+    )
+
+
+async def test_tasks_due_today_west_of_utc_uses_the_household_day():
+    # Tue 03:00Z is still Monday 20:00 in Los Angeles: Monday's task is
+    # due today, Tuesday's is not.
+    svc, _ = _svc(tasks=_day_tasks(), prefs=_Prefs(tz="America/Los_Angeles"))
+    bundle = await _build(svc, _utc(FAR_MON + timedelta(days=1), 3))
+    assert [t.id for t in bundle.tasks_due_today] == ["mon"]
+
+
+async def test_tasks_due_today_east_of_utc_uses_the_household_day():
+    # Mon 20:00Z is already Tuesday 09:00 in Auckland: Tuesday's task is
+    # due today (plus overdue Monday), Wednesday's is not.
+    svc, _ = _svc(tasks=_day_tasks(), prefs=_Prefs(tz="Pacific/Auckland"))
+    bundle = await _build(svc, _utc(FAR_MON, 20))
+    assert [t.id for t in bundle.tasks_due_today] == ["mon", "tue"]
