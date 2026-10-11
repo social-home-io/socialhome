@@ -1273,6 +1273,17 @@ class PairingKeywrapInvalidError(CodedError, ValueError):
     detail = "The pairing code's keys don't check out — ask for a fresh one."
 
 
+class FederationBaseManagedByPlatformError(CodedError):
+    """``PUT /api/admin/federation/external-url`` on a platform that owns
+    the federation base (``PlatformAdapter.honours_manual_federation_base``
+    is ``False`` — the Home Assistant App, where the integration supplies
+    it). Refused rather than stored: the value would never take effect."""
+
+    status = 422
+    code = "FEDERATION_BASE_MANAGED_BY_PLATFORM"
+    detail = "This home's address is managed by Home Assistant."
+
+
 @dataclass(slots=True, frozen=True)
 class PairingSession:
     """An in-progress pairing handshake (§11).

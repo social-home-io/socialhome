@@ -258,6 +258,21 @@ def test_fixed_dashboard_port_is_not_a_spa_capability():
     assert not any("dashboard" in str(c).lower() for c in Capability)
 
 
+# ── honours_manual_federation_base (ABC default) ─────────────────────────────
+
+
+def test_honours_manual_federation_base_defaults_to_true():
+    """A platform that says nothing lets the admin set the federation base
+    from the UI — refusing it must be an explicit opt-out."""
+    assert _MinimalAdapter().honours_manual_federation_base is True
+
+
+def test_honours_manual_federation_base_is_not_a_spa_capability():
+    """Backend fact surfaced by the admin API as ``manual_supported`` —
+    never a :class:`Capability`."""
+    assert not any("manual" in str(c).lower() for c in Capability)
+
+
 # ── get_public_base_url (ABC default) ────────────────────────────────────────
 
 

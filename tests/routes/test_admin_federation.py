@@ -7,6 +7,7 @@ capabilities (NULL ``capabilities_seen_at`` ⇒ never).
 
 from __future__ import annotations
 
+from socialhome.app_keys import platform_adapter_key, url_update_outbound_key
 from socialhome.domain.federation_capabilities import (
     OURS,
     feature_keys_missing_below,
@@ -424,6 +425,115 @@ async def test_external_url_unchanged_value_reports_not_changed(client):
     assert body["peers_notified"] == 0
 
 
+# ── A platform that owns the federation base (the Home Assistant App) ──
+#
+# Under haos the companion integration owns the address peers reach this
+# home at, and ``HaosAdapter.get_federation_base`` ignores any admin-set
+# value. Accepting a PUT there would store a value that never takes
+# effect, report ``ok`` and fan out ``URL_UPDATED`` for a move that never
+# happened — so the route refuses it, and GET says the manual source is
+# not in play.
+
+_INTEGRATION_BASE = "https://abc.ui.nabu.casa/api/socialhome/inbox"
+
+
+def _platform_owns_base(client, monkeypatch) -> None:
+    """Make the test app's adapter behave like ``HaosAdapter``: no manual
+    base honoured, the integration's URL resolved regardless."""
+    adapter_cls = type(client.app[platform_adapter_key])
+    monkeypatch.setattr(
+        adapter_cls,
+        "honours_manual_federation_base",
+        property(lambda self: False),
+    )
+
+    async def _integration_base(self) -> str | None:
+        return _INTEGRATION_BASE
+
+    monkeypatch.setattr(adapter_cls, "get_federation_base", _integration_base)
+
+
+def _record_fan_out(client, monkeypatch) -> list[str]:
+    calls: list[str] = []
+    outbound = client.app[url_update_outbound_key]
+
+    async def _publish(self, *, new_inbox_base_url: str) -> int:
+        calls.append(new_inbox_base_url)
+        return 1
+
+    # Slotted service — patch the class, monkeypatch restores it.
+    monkeypatch.setattr(type(outbound), "publish", _publish)
+    return calls
+
+
+async def test_external_url_reports_manual_supported_by_default(client):
+    resp = await client.get(
+        "/api/admin/federation/external-url", headers=_auth(client._tok)
+    )
+    assert (await resp.json())["manual_supported"] is True
+
+
+async def test_external_url_put_refused_where_the_platform_owns_it(client, monkeypatch):
+    _platform_owns_base(client, monkeypatch)
+    fan_out = _record_fan_out(client, monkeypatch)
+
+    resp = await client.put(
+        "/api/admin/federation/external-url",
+        json={"base": "https://home.example.com"},
+        headers=_auth(client._tok),
+    )
+    assert resp.status == 422
+    err = (await resp.json())["error"]
+    assert err["code"] == "FEDERATION_BASE_MANAGED_BY_PLATFORM"
+    assert err["detail"] == "This home's address is managed by Home Assistant."
+    # Nothing stored, nobody told about a move that never happened.
+    rows = await client._db.fetchall(
+        "SELECT value FROM instance_config WHERE key='federation_base_url'",
+    )
+    assert rows == []
+    assert fan_out == []
+
+
+async def test_external_url_clear_refused_where_the_platform_owns_it(
+    client, monkeypatch
+):
+    """Clearing is a write too — refused the same way, so the answer
+    never depends on what the admin typed."""
+    _platform_owns_base(client, monkeypatch)
+    resp = await client.put(
+        "/api/admin/federation/external-url",
+        json={"base": None},
+        headers=_auth(client._tok),
+    )
+    assert resp.status == 422
+    assert (await resp.json())["error"]["code"] == (
+        "FEDERATION_BASE_MANAGED_BY_PLATFORM"
+    )
+
+
+async def test_external_url_get_reports_automatic_source_when_not_honoured(
+    client, monkeypatch
+):
+    """A value stored before (e.g. under an earlier build) is still
+    reported as ``base``, but ``source`` says what is actually in effect."""
+    await client.put(
+        "/api/admin/federation/external-url",
+        json={"base": "https://home.example.com"},
+        headers=_auth(client._tok),
+    )
+    _platform_owns_base(client, monkeypatch)
+
+    resp = await client.get(
+        "/api/admin/federation/external-url", headers=_auth(client._tok)
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["base"] == "https://home.example.com"
+    assert body["effective"] == _INTEGRATION_BASE
+    assert body["source"] == "auto"
+    assert body["manual_supported"] is False
+
+
 # ── GET /api/admin/federation/ice-servers ─────────────────────────────
 #
 # Read-only diagnostic overview. Whether RTC can traverse a network is
@@ -511,3 +621,17 @@ async def test_ice_servers_reports_stun_only(client):
     assert body["servers"][0]["kinds"] == ["stun"]
     # standalone in tests — nothing replaces the config list here.
     assert body["pulls_from_home_assistant"] is False
+
+
+async def test_ice_servers_pull_flag_follows_the_adapter(client, monkeypatch):
+    """The flag is the adapter's own ``provides_ice_servers`` fact (HA-backed
+    adapters pull HA Core's list and replace the config one) — never a
+    ``config.mode`` check in the route."""
+    adapter_cls = type(client.app[platform_adapter_key])
+    monkeypatch.setattr(
+        adapter_cls, "provides_ice_servers", property(lambda self: True)
+    )
+    resp = await client.get(
+        "/api/admin/federation/ice-servers", headers=_auth(client._tok)
+    )
+    assert (await resp.json())["pulls_from_home_assistant"] is True

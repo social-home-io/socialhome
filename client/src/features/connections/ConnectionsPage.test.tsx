@@ -681,6 +681,7 @@ describe('ConnectionsPage — External URL (admin, non-haos)', () => {
     base?: string | null
     effective?: string | null
     source?: string | null
+    manualSupported?: boolean
   } = {}) {
     const { api } = await import('@/api')
     const { instanceConfig } = await import('@/store/instance')
@@ -701,6 +702,7 @@ describe('ConnectionsPage — External URL (admin, non-haos)', () => {
           base: opts.base ?? null,
           effective: opts.effective ?? null,
           source: opts.source ?? null,
+          manual_supported: opts.manualSupported ?? true,
         })
       }
       return Promise.resolve([])
@@ -753,6 +755,23 @@ describe('ConnectionsPage — External URL (admin, non-haos)', () => {
     // the integration registers inside Home Assistant, so offering the
     // field would invite an unreachable address rather than fix one.
     const { container } = await renderPage({ mode: 'haos' })
+    expect(container.querySelector('.sh-external-url-section')).toBeNull()
+  })
+
+  it('hides it whenever the server says a manual base is not honoured', async () => {
+    // The server is the authority on whether a typed URL would take
+    // effect (``manual_supported``); a PUT there is refused with 422.
+    const { api } = await import('@/api')
+    const { container } = await renderPage({
+      mode: 'ha',
+      effective: 'https://abc.ui.nabu.casa/api/socialhome/inbox',
+      source: 'auto',
+      manualSupported: false,
+    })
+    await waitFor(() => {
+      expect(api.get).toHaveBeenCalledWith('/api/admin/federation/external-url')
+    })
+    await new Promise(r => setTimeout(r, 0))
     expect(container.querySelector('.sh-external-url-section')).toBeNull()
   })
 

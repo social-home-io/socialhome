@@ -528,6 +528,7 @@ function IceServersPanel() {
 const extUrlStored = signal<string | null>(null)
 const extUrlEffective = signal<string | null>(null)
 const extUrlSource = signal<string | null>(null)
+const extUrlManualSupported = signal(true)
 const extUrlDraft = signal('')
 const extUrlBusy = signal(false)
 const extUrlLoaded = signal(false)
@@ -536,8 +537,12 @@ async function loadExternalUrl() {
   try {
     const r = await api.get('/api/admin/federation/external-url') as {
       base: string | null; effective: string | null; source: string | null
+      manual_supported?: boolean
     }
     extUrlStored.value = r.base
+    // Older servers omit the flag; they honour a manual base everywhere
+    // the section is shown.
+    extUrlManualSupported.value = r.manual_supported !== false
     extUrlEffective.value = r.effective
     extUrlSource.value = r.source
     extUrlDraft.value = r.base ?? ''
@@ -555,7 +560,9 @@ async function loadExternalUrl() {
  * companion Home Assistant integration owns this value, and a
  * hand-typed URL would point at an inbox path only that integration
  * registers inside Home Assistant — so offering the field would invite
- * an unreachable address rather than fix one.
+ * an unreachable address rather than fix one. The server says the same
+ * thing as `manual_supported: false` (and refuses a PUT with 422), so
+ * the section also hides whenever the server reports it.
  *
  * `effective` is shown alongside the stored value because the two differ when
  * an automatic source is also present (`socialhome.toml` under
@@ -595,7 +602,7 @@ function ExternalUrlSection() {
     }
   }
 
-  if (!extUrlLoaded.value) return null
+  if (!extUrlLoaded.value || !extUrlManualSupported.value) return null
 
   const dirty = extUrlDraft.value.trim() !== (extUrlStored.value ?? '')
 

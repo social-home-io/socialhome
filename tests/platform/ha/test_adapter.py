@@ -1081,6 +1081,17 @@ def test_provides_ice_servers_is_true():
     assert adapter.provides_ice_servers is True
 
 
+def test_honours_a_manual_federation_base():
+    """ha mode resolves an admin-set base ahead of the integration's push,
+    so the admin API must accept one."""
+    adapter = HomeAssistantAdapter(
+        ha_url="http://ha.local:8123",
+        ha_token="",
+        data_dir="/tmp",
+    )
+    assert adapter.honours_manual_federation_base is True
+
+
 class _PrimingFederation(_RecordingFederation):
     def __init__(self) -> None:
         super().__init__()

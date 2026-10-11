@@ -26,7 +26,6 @@ import logging
 from aiohttp import web
 
 from ..app_keys import (
-    config_key,
     federation_repo_key,
     federation_service_key,
     instance_config_repo_key,
@@ -39,7 +38,11 @@ from ..platform.federation_base import (
     MANUAL_BASE_KEY,
     read_manual_base,
 )
-from ..domain.federation import FederationEventType, PairingStatus
+from ..domain.federation import (
+    FederationBaseManagedByPlatformError,
+    FederationEventType,
+    PairingStatus,
+)
 from ..domain.federation_capabilities import (
     OURS,
     FederationCapability,
@@ -211,7 +214,7 @@ class AdminFederationIceServersView(BaseView):
             and any(u.startswith(("turn:", "turns:")) for u in s["urls"])
             for s in servers
         )
-        config = self.svc(config_key)
+        adapter = self.svc(platform_adapter_key)
         return self._json(
             {
                 "servers": servers,
@@ -219,9 +222,9 @@ class AdminFederationIceServersView(BaseView):
                 # same conclusion without re-deriving it.
                 "has_turn": has_turn,
                 "turn_usable": turn_usable,
-                # ``ha``/``haos`` pull from HA Core and replace this list;
-                # standalone never does.
-                "pulls_from_home_assistant": config.mode in ("ha", "haos"),
+                # HA-backed adapters pull HA Core's list and replace this
+                # one; standalone never does.
+                "pulls_from_home_assistant": adapter.provides_ice_servers,
             }
         )
 
@@ -238,30 +241,49 @@ class AdminFederationExternalUrlView(BaseView):
     actually resolve, so an admin can tell "I typed something" apart from
     "it is in effect" — the two differ whenever an automatic source is
     also present.
+
+    A platform whose adapter does not honour a manual base
+    (``honours_manual_federation_base`` — the Home Assistant App, where
+    the integration owns the URL) refuses PUT with 422
+    ``FEDERATION_BASE_MANAGED_BY_PLATFORM`` and reports
+    ``manual_supported: false`` on GET, so neither surface claims a
+    manual value is in effect.
     """
 
     async def get(self) -> web.Response:
         if self.user is None or not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
+        adapter = self.svc(platform_adapter_key)
+        manual_supported = adapter.honours_manual_federation_base
         manual = await read_manual_base(self.svc(instance_config_repo_key))
         effective: str | None = None
         try:
-            effective = await self.svc(platform_adapter_key).get_federation_base()
+            effective = await adapter.get_federation_base()
         except Exception:  # pragma: no cover — a read must not 500
             effective = None
+        # Which source the resolved value came from, so the UI can say so
+        # instead of leaving the admin to guess. A stored value the
+        # adapter ignores is never "the" source.
+        if manual and manual_supported:
+            source: str | None = "manual"
+        else:
+            source = "auto" if effective else None
         return self._json(
             {
                 "base": manual,
                 "effective": effective,
-                # Which source the resolved value came from, so the UI can
-                # say so instead of leaving the admin to guess.
-                "source": ("manual" if manual else ("auto" if effective else None)),
+                "source": source,
+                "manual_supported": manual_supported,
             }
         )
 
     async def put(self) -> web.Response:
         if self.user is None or not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
+        if not self.svc(platform_adapter_key).honours_manual_federation_base:
+            # Storing it would report a change that never takes effect
+            # and fan out URL_UPDATED for a move that never happened.
+            raise FederationBaseManagedByPlatformError()
         body = await self.body()
         raw = body.get("base")
         instance_config = self.svc(instance_config_repo_key)
