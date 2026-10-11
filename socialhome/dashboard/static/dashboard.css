@@ -189,3 +189,258 @@ h1 {
   color: var(--dash-muted);
   font-size: 1rem;
 }
+
+.dash-notice {
+  margin-block: 0 20px;
+  padding-block: 12px;
+  padding-inline: 16px;
+  background: var(--dash-bg);
+  border: 1px solid var(--dash-border);
+  border-radius: 12px;
+  text-align: start;
+}
+
+.dash-visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Privacy lock ─────────────────────────────────────────────────────── */
+
+/* The lock button (placeholder home now, the rail later). */
+.dash-lock-form {
+  display: flex;
+  justify-content: center;
+  margin-block: 0 24px;
+}
+
+.dash-lock-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 64px;
+  block-size: 64px;
+  padding: 0;
+  font-size: 1.75rem;
+  line-height: 1;
+  color: var(--dash-text);
+  background: var(--dash-bg);
+  border: 1px solid var(--dash-border);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+/* The lock screen: household name, big clock, date — nothing else. */
+.dash-lock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  inline-size: 100%;
+  max-inline-size: 40rem;
+  text-align: center;
+}
+
+.dash-lock-household {
+  margin: 0;
+  color: var(--dash-muted);
+  font-size: clamp(1.125rem, 2.5vw, 1.5rem);
+  overflow-wrap: anywhere;
+}
+
+.dash-lock-time {
+  display: block;
+  font-size: clamp(4.5rem, min(20vw, 24vh), 10rem);
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.dash-lock-date {
+  margin-block: 8px 40px;
+  font-size: clamp(1.25rem, 3.5vw, 2rem);
+}
+
+/* With the keypad out, the clock steps back so the whole pad fits on a
+   landscape tablet without scrolling. */
+.dash-lock:has(.dash-lock-pin[open]) .dash-lock-time {
+  font-size: clamp(3rem, min(14vw, 12vh), 6rem);
+}
+
+.dash-lock:has(.dash-lock-pin[open]) .dash-lock-date {
+  margin-block-end: 20px;
+  font-size: clamp(1.125rem, 2.5vw, 1.5rem);
+}
+
+.dash-lock-pin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  inline-size: 100%;
+}
+
+.dash-lock-summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-block-size: 64px;
+  min-inline-size: 64px;
+  padding-inline: 28px;
+  font-weight: 600;
+  color: var(--dash-text);
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: 999px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.dash-lock-summary::-webkit-details-marker {
+  display: none;
+}
+
+.dash-lock-pin[open] > .dash-lock-summary {
+  display: none;
+}
+
+.dash-pin-form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 16px;
+  inline-size: 100%;
+  max-inline-size: 20rem;
+  margin-inline: auto;
+  text-align: start;
+}
+
+/* With lock.js the field + submit stay in the form (they carry the
+   value) but the keypad is what people see and use. */
+.dash-has-keypad input[name="pin"],
+.dash-has-keypad button.dash-pin-native {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  border: 0;
+}
+
+.dash-has-keypad .dash-field {
+  align-items: center;
+  text-align: center;
+}
+
+.dash-pin-dots {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  min-block-size: 20px;
+}
+
+.dash-pin-dot {
+  inline-size: 18px;
+  block-size: 18px;
+  background: var(--dash-text);
+  border-radius: 50%;
+}
+
+.dash-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(64px, 1fr));
+  gap: 12px;
+}
+
+.dash-key {
+  min-block-size: 72px;
+  font: inherit;
+  font-size: 1.75rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--dash-text);
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: 16px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.dash-key:active {
+  background: var(--dash-bg);
+}
+
+.dash-key-quiet {
+  background: transparent;
+}
+
+.dash-key-ok {
+  color: var(--dash-accent-text);
+  background: var(--dash-accent);
+  border-color: var(--dash-accent);
+}
+
+.dash-key:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.dash-lock-button:focus-visible,
+.dash-lock-summary:focus-visible,
+.dash-key:focus-visible {
+  outline: 3px solid var(--dash-focus);
+  outline-offset: 2px;
+}
+
+/* A wrong PIN shakes the dots — unless the tablet asks for less motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .dash-lock-error .dash-pin-dots,
+  .dash-lock-error .dash-error {
+    animation: dash-shake 0.4s ease-in-out;
+  }
+}
+
+@keyframes dash-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-8px);
+  }
+  40%,
+  80% {
+    transform: translateX(8px);
+  }
+}
+
+/* Short screens (landscape phones, small tablets): tighter pad, never
+   below the 64 px tap target. */
+@media (max-height: 820px) {
+  .dash-key {
+    min-block-size: 64px;
+  }
+
+  .dash-keypad {
+    gap: 10px;
+  }
+
+  .dash-pin-form {
+    gap: 12px;
+  }
+}
+
+.dash-has-keypad .dash-error {
+  margin-block-end: 0;
+  text-align: center;
+}

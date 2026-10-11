@@ -102,7 +102,9 @@ class DashboardRenderer:
     def gettext(self, key: str, locale: str, **fmt: object) -> str:
         return self._catalog.gettext(key, locale=locale, **fmt)
 
-    def _translator(self, locale: str) -> Callable[..., str]:
+    def translator(self, locale: str) -> Callable[..., str]:
+        """``t(key, **fmt)`` bound to ``locale`` (what templates call)."""
+
         def t(key: str, **fmt: object) -> str:
             return self._catalog.gettext(key, locale=locale, **fmt)
 
@@ -113,6 +115,6 @@ class DashboardRenderer:
         return self._env.get_template(template).render(
             lang=locale,
             dir=text_direction(locale),
-            t=self._translator(locale),
+            t=self.translator(locale),
             **context,
         )

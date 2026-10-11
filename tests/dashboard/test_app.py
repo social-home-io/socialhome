@@ -30,6 +30,10 @@ async def _name() -> str:
     return "Home"
 
 
+async def _tz() -> str:
+    return "UTC"
+
+
 @pytest.fixture
 def auth(settings_service, clock) -> DashboardAuth:
     return DashboardAuth(settings_service, clock=clock)
@@ -43,6 +47,7 @@ async def client(aiohttp_client, settings_service, auth):
         auth=auth,
         renderer=RENDERER,
         household_name=_name,
+        household_tz=_tz,
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
 
@@ -430,6 +435,7 @@ async def test_local_hostnames_param(aiohttp_client, settings_service, auth):
         auth=auth,
         renderer=RENDERER,
         household_name=_name,
+        household_tz=_tz,
         local_hostnames=frozenset({"Kitchen-Pi"}),
     )
     client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
@@ -460,6 +466,7 @@ async def test_extra_hosts(aiohttp_client, settings_service, auth, kind):
         auth=auth,
         renderer=RENDERER,
         household_name=_name,
+        household_tz=_tz,
         extra_hosts=extra if kind == "callable" else ["dash.example.com."],
     )
     client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())

@@ -1,12 +1,14 @@
-"""Household dashboard pages — login, setup link, logout, home.
+"""Household dashboard pages — login, setup link, logout, home, lock.
 
 Every view is server-rendered HTML; the session guard in
 :mod:`socialhome.dashboard.app` has already decided whether the request
-may reach a non-public view.
+may reach a non-public view (and answers every content route of a
+privacy-locked tablet with :func:`render_lock_screen` itself).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from urllib.parse import urlsplit
@@ -16,26 +18,49 @@ from aiohttp import web
 from ..rate_limiter import client_bucket
 from ..services.dashboard_settings_service import DashboardSettingsService
 from .auth import COOKIE_NAME, KEEP_TTL_S, DashboardAuth
-from .keys import AUTH_KEY, HOUSEHOLD_NAME_KEY, RENDERER_KEY, SETTINGS_KEY
+from .clock import household_clock, resolve_zone
+from .keys import (
+    AUTH_KEY,
+    CLAIMS_KEY,
+    HOUSEHOLD_NAME_KEY,
+    HOUSEHOLD_TZ_KEY,
+    RENDERER_KEY,
+    SETTINGS_KEY,
+)
 from .render import DashboardRenderer
 
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "LOCKED_FRAGMENT",
+    "LOCKED_HEADER",
+    "SIGNED_OUT_PATH",
     "EnterView",
     "HealthView",
     "HomeView",
+    "LockView",
     "LoginView",
     "LogoutView",
     "StaticView",
+    "UnlockView",
     "clear_session_cookie",
     "cookie_secure",
     "html_response",
     "redirect",
     "register_routes",
+    "render_lock_screen",
     "safe_next",
     "set_session_cookie",
 ]
+
+#: What a locked tablet gets for ``/fragment/…`` (fetched by page JS): a
+#: ``200`` with this header and body, so the script can reload into the
+#: lock screen instead of painting a fragment.
+LOCKED_HEADER = "X-Dashboard-Locked"
+LOCKED_FRAGMENT = '<div data-dashboard-locked="1"></div>'
+
+#: Where a tablet lands after too many wrong PINs.
+SIGNED_OUT_PATH = "/login?signed_out=1"
 
 _MAX_NEXT_LEN = 2048
 
@@ -124,6 +149,28 @@ async def clear_session_cookie(
     )
 
 
+async def render_lock_screen(
+    request: web.Request, *, status: int = 200, wrong_pin: bool = False
+) -> web.Response:
+    """The privacy lock screen: household name, clock, date, PIN form.
+
+    Takes nothing about any person — so nothing about one can leak.
+    """
+    app = request.app
+    renderer = app[RENDERER_KEY]
+    locale = (await app[SETTINGS_KEY].get()).locale
+    zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
+    t = renderer.translator(locale)
+    text = renderer.render(
+        "lock.html.j2",
+        locale=locale,
+        household=await app[HOUSEHOLD_NAME_KEY](),
+        clock=household_clock(app[AUTH_KEY].now(), zone, t),
+        error=t("dashboard.lock.wrong_pin") if wrong_pin else None,
+    )
+    return html_response(text, status=status)
+
+
 class _DashboardView(web.View):
     @property
     def auth(self) -> DashboardAuth:
@@ -157,6 +204,7 @@ class _DashboardView(web.View):
         next_path: str = "/",
         keep: bool = True,
         error_key: str | None = None,
+        notice_key: str | None = None,
         show_form: bool = True,
         **fmt: object,
     ) -> web.Response:
@@ -165,6 +213,9 @@ class _DashboardView(web.View):
             if error_key is None
             else self.renderer.gettext(error_key, locale, **fmt)
         )
+        notice = (
+            None if notice_key is None else self.renderer.gettext(notice_key, locale)
+        )
         return await self.render(
             "login.html.j2",
             locale=locale,
@@ -172,7 +223,15 @@ class _DashboardView(web.View):
             next_path=next_path,
             keep=keep,
             error=error,
+            notice=notice,
             show_form=show_form,
+        )
+
+    def forget_pin_failures(self, key: str) -> None:
+        """The household password (or an admin's setup link) outranks the
+        PIN: forget this client's PIN guesses."""
+        self.auth.record_success(
+            DashboardAuth.pin_throttle_key(key), count_global=False
         )
 
     async def too_many_tries(
@@ -207,8 +266,12 @@ class LoginView(_DashboardView):
                 error_key="dashboard.login.not_set_up",
                 show_form=False,
             )
+        signed_out = self.request.query.get("signed_out") == "1"
         return await self.login_form(
-            locale=settings.locale, status=200, next_path=next_path
+            locale=settings.locale,
+            status=200,
+            next_path=next_path,
+            notice_key="dashboard.lock.signed_out" if signed_out else None,
         )
 
     async def post(self) -> web.Response:
@@ -249,6 +312,7 @@ class LoginView(_DashboardView):
             )
 
         self.auth.record_success(key)
+        self.forget_pin_failures(key)
         response = redirect(next_path)
         await set_session_cookie(
             response, self.request, await self.auth.issue(keep), keep=keep
@@ -286,6 +350,7 @@ class EnterView(_DashboardView):
         if not await self.settings.consume_setup_token(token):
             return redirect("/login")
         self.auth.record_success(key, count_global=False)
+        self.forget_pin_failures(key)
         response = redirect("/")
         await set_session_cookie(
             response, self.request, await self.auth.issue(True), keep=True
@@ -306,8 +371,72 @@ class HomeView(_DashboardView):
     """``GET /`` — placeholder until the real overview ships."""
 
     async def get(self) -> web.Response:
-        locale = (await self.settings.get()).locale
-        return await self.render("placeholder.html.j2", locale=locale)
+        settings = await self.settings.get()
+        return await self.render(
+            "placeholder.html.j2", locale=settings.locale, pin_set=settings.pin_set
+        )
+
+
+class LockView(_DashboardView):
+    """``POST /lock`` — privacy-lock this tablet (needs a session).
+
+    The lock is a claim in this tablet's signed cookie, so it is per
+    tablet and survives reloads and browser restarts. ``409`` when no PIN
+    is set: nothing could unlock it (the button isn't shown then).
+    """
+
+    async def post(self) -> web.Response:
+        if not (await self.settings.get()).pin_set:
+            return web.Response(status=409, text="No dashboard PIN is set")
+        claims = self.request[CLAIMS_KEY]
+        response = redirect("/")
+        await set_session_cookie(
+            response,
+            self.request,
+            await self.auth.issue(claims.keep, locked=True),
+            keep=claims.keep,
+        )
+        return response
+
+
+class UnlockView(_DashboardView):
+    """``POST /unlock`` (form field ``pin``) — lift this tablet's lock.
+
+    Only a valid *and* locked session is checked against the PIN; an
+    unlocked one just goes home. Guesses are throttled per client in
+    their own bucket (:meth:`DashboardAuth.pin_throttle_key`): after five
+    wrong PINs in 15 minutes the next try signs the tablet out — then
+    only the household password brings it back.
+    """
+
+    async def post(self) -> web.Response:
+        claims = self.request[CLAIMS_KEY]
+        if not claims.locked:
+            return redirect("/")
+        form = await self.request.post()
+        key = DashboardAuth.pin_throttle_key(self.client_key)
+        # Counted before the slow scrypt check — see ``begin_attempt``.
+        if self.auth.begin_attempt(key, count_global=False):
+            log.warning(
+                "household dashboard: too many wrong PINs from %s — tablet signed out",
+                self.client_key,
+            )
+            response = redirect(SIGNED_OUT_PATH)
+            await clear_session_cookie(response, self.request)
+            return response
+        pin = form.get("pin")
+        if not isinstance(pin, str) or not await self.auth.check_pin(pin):
+            log.info("household dashboard: wrong PIN from %s", self.client_key)
+            return await render_lock_screen(self.request, status=401, wrong_pin=True)
+        self.auth.record_success(key, count_global=False)
+        response = redirect("/")
+        await set_session_cookie(
+            response,
+            self.request,
+            await self.auth.issue(claims.keep, locked=False),
+            keep=claims.keep,
+        )
+        return response
 
 
 class HealthView(web.View):
@@ -343,5 +472,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_view("/login", LoginView)
     app.router.add_view("/enter", EnterView)
     app.router.add_view("/logout", LogoutView)
+    app.router.add_view("/lock", LockView)
+    app.router.add_view("/unlock", UnlockView)
     app.router.add_view("/healthz", HealthView)
     app.router.add_view("/static/{name}", StaticView)

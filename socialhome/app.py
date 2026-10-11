@@ -2133,6 +2133,9 @@ def _build_household_dashboard(
         prefs = await preferences_service.get_household()
         return prefs.household_name or "Home"
 
+    async def household_tz() -> str:
+        return (await preferences_service.get_household()).tz
+
     async def extra_hosts() -> frozenset[str]:
         return address_hosts(await settings.get())
 
@@ -2142,6 +2145,7 @@ def _build_household_dashboard(
             auth=auth,
             renderer=renderer,
             household_name=household_name,
+            household_tz=household_tz,
             extra_hosts=extra_hosts,
             local_hostnames=own_names,
         )

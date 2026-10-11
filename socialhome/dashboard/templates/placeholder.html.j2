@@ -4,6 +4,9 @@
 <section class="dash-card">
   <h1>{{ household }}</h1>
   <p class="dash-ready">{{ t("dashboard.ready") }}</p>
+  {% if pin_set %}
+  {% include "_lock_button.html.j2" %}
+  {% endif %}
   <form method="post" action="/logout">
     <button type="submit" class="dash-button dash-button-quiet">{{ t("dashboard.sign_out") }}</button>
   </form>

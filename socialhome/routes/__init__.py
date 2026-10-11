@@ -344,6 +344,7 @@ from .moments_public import (
 )
 from .admin_dashboard import (
     AdminDashboardPasswordView,
+    AdminDashboardPinView,
     AdminDashboardSessionsView,
     AdminDashboardSetupLinkView,
     AdminDashboardView,
@@ -518,6 +519,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/admin/dashboard/password", AdminDashboardPasswordView)
     app.router.add_view("/api/admin/dashboard/setup-link", AdminDashboardSetupLinkView)
     app.router.add_view("/api/admin/dashboard/sessions", AdminDashboardSessionsView)
+    app.router.add_view("/api/admin/dashboard/pin", AdminDashboardPinView)
     app.router.add_view("/api/me/export", MeExportView)
     app.router.add_view("/api/users", UserCollectionView)
     app.router.add_view("/api/users/{user_id}", UserDetailView)
