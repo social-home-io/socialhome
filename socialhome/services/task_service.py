@@ -15,6 +15,7 @@ HTTP status codes via ``_map_exc``:
 from __future__ import annotations
 
 import calendar
+import logging
 import uuid
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -73,10 +74,13 @@ from ..repositories.user_repo import AbstractUserRepo
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .space_moderation_service import ApplyResult, item_payload_snapshot
+from ..utils.timezones import DEFAULT_TZ, local_date
 from .space_service import SpaceService
 
 if TYPE_CHECKING:
     from .space_moderation_service import ModerationSubmitter
+
+log = logging.getLogger(__name__)
 
 
 def parse_assignees(value: object) -> tuple[str, ...] | None:
@@ -287,6 +291,16 @@ class TaskService(BusPublisherMixin):
     async def _require_tasks_enabled(self) -> None:
         if self._household is not None:
             await self._household.require_enabled("tasks")
+
+    async def _household_tz(self) -> str:
+        """The household's IANA zone — UTC when it can't be read."""
+        if self._household is None:
+            return DEFAULT_TZ
+        try:
+            return (await self._household.get_household()).tz
+        except Exception as exc:  # defensive — fall back to UTC
+            log.warning("tasks: household tz failed: %s", exc)
+            return DEFAULT_TZ
 
     # ── Lists ────────────────────────────────────────────────────────────
 
@@ -728,6 +742,7 @@ class TaskService(BusPublisherMixin):
         self,
         *,
         today: date | None = None,
+        now: datetime | None = None,
     ) -> list[Task]:
         """For every recurring task whose due-date has passed without
         a follow-up, spawn the next occurrence.
@@ -735,8 +750,14 @@ class TaskService(BusPublisherMixin):
         Exposed for :class:`TaskRecurrenceScheduler`. Idempotent — the
         repo filter ``last_spawned_at <= due_date`` keeps us from
         re-spawning the same row.
+
+        "Overdue" is judged against the household-local date
+        (``HouseholdPreferences.tz``), not the server's clock — a task
+        due today stays today's until the household's midnight.
         """
-        today = today or date.today()
+        if today is None:
+            instant = now or datetime.now(timezone.utc)
+            today = local_date(instant, await self._household_tz())
         overdue = await self._repo.list_recurring_overdue(today)
         spawned: list[Task] = []
         for task in overdue:

@@ -4613,6 +4613,7 @@ def create_app(config: Config | None = None) -> web.Application:
             repo=task_repo,
             db=db,
             bus=bus,
+            preferences=preferences_service,
         )
         await task_deadline_scheduler.start()
 

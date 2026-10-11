@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import logging
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from socialhome.domain.events import TaskDeadlineDue
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.infrastructure.event_bus import EventBus
-from datetime import timedelta
-
 from socialhome.infrastructure.task_deadline_scheduler import (
     DEADLINE_NOTIF_RETENTION_DAYS,
     TaskDeadlineScheduler,
@@ -109,3 +109,88 @@ async def test_tick_prunes_stale_dedupe_rows(env):
 
     assert ("old-task", old) not in db._rows
     assert ("recent-task", recent) in db._rows
+
+
+# ─── Household time zone ──────────────────────────────────────────────
+
+
+class _FakePreferences:
+    """Stand-in for :class:`PreferencesService` — only ``get_household``."""
+
+    def __init__(self, tz: str) -> None:
+        self._tz = tz
+
+    async def get_household(self) -> SimpleNamespace:
+        return SimpleNamespace(tz=self._tz)
+
+
+class _BrokenPreferences:
+    async def get_household(self) -> SimpleNamespace:
+        raise RuntimeError("preferences table unreadable")
+
+
+def _tz_env(preferences) -> tuple[TaskDeadlineScheduler, list[TaskDeadlineDue]]:
+    tasks = [
+        _task("apr20", TaskStatus.TODO, date(2026, 4, 20)),
+        _task("apr21", TaskStatus.TODO, date(2026, 4, 21)),
+    ]
+    bus = EventBus()
+    fired: list[TaskDeadlineDue] = []
+
+    async def _on_due(event: TaskDeadlineDue) -> None:
+        fired.append(event)
+
+    bus.subscribe(TaskDeadlineDue, _on_due)
+    sched = TaskDeadlineScheduler(
+        repo=_FakeTaskRepo(tasks),
+        db=_FakeDb(),
+        bus=bus,
+        preferences=preferences,
+    )
+    return sched, fired
+
+
+async def test_tick_uses_household_date_west_of_utc():
+    """Los Angeles, 20:00 on Apr 20 local = 03:00 UTC on Apr 21: only the
+    task due on the household's Apr 20 fires — not tomorrow's."""
+    sched, fired = _tz_env(_FakePreferences("America/Los_Angeles"))
+    now = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+
+    assert await sched.tick_once(now=now) == 1
+
+    assert [e.task.id for e in fired] == ["apr20"]
+    assert fired[0].due_date == date(2026, 4, 20)
+    # Dedupe row is keyed on the household date too.
+    assert ("apr20", "2026-04-20") in sched._db._rows
+
+
+async def test_tick_uses_household_date_east_of_utc():
+    """Auckland, 01:00 on Apr 21 local = 13:00 UTC on Apr 20: today's
+    (Apr 21) task fires now, not ~13 h later at UTC midnight."""
+    sched, fired = _tz_env(_FakePreferences("Pacific/Auckland"))
+    now = datetime(2026, 4, 20, 13, 0, tzinfo=timezone.utc)
+
+    assert await sched.tick_once(now=now) == 1
+
+    assert [e.task.id for e in fired] == ["apr21"]
+    assert fired[0].due_date == date(2026, 4, 21)
+
+
+async def test_tick_falls_back_to_utc_when_preferences_fail(caplog):
+    sched, fired = _tz_env(_BrokenPreferences())
+    now = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+
+    with caplog.at_level(logging.WARNING):
+        assert await sched.tick_once(now=now) == 1
+
+    assert [e.task.id for e in fired] == ["apr21"]
+    assert "household tz" in caplog.text
+
+
+async def test_tick_without_preferences_uses_utc():
+    sched, fired = _tz_env(None)
+    now = datetime(2026, 4, 20, 13, 0, tzinfo=timezone.utc)
+
+    assert await sched.tick_once(now=now) == 1
+
+    assert [e.task.id for e in fired] == ["apr20"]

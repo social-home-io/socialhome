@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
+from dataclasses import replace
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
+from socialhome.domain.task import (
+    RecurrenceRule,
+    Task,
+    TaskList,
+    TaskPriority,
+    TaskStatus,
+)
 from socialhome.federation.owner_bound_id import (
     SPACE_TASK_KIND,
     SPACE_TASK_LIST_KIND,
@@ -1689,3 +1698,73 @@ async def test_moderated_moderator_writes_directly(env):
         space_id="sp-mo", list_id=lst.id, title="M", created_by="u-mod"
     )
     await svc.update_task(task.id, space_id="sp-mo", actor_user_id="u-mod", title="M2")
+
+
+# ─── Overdue recurrences follow the household time zone ───────────────
+
+
+class _HouseholdPrefs:
+    """Stand-in for :class:`PreferencesService` (tasks on, fixed tz)."""
+
+    def __init__(self, tz: str | None) -> None:
+        self._tz = tz
+
+    async def require_enabled(self, _section: str) -> None:
+        return None
+
+    async def get_household(self) -> SimpleNamespace:
+        if self._tz is None:
+            raise RuntimeError("preferences table unreadable")
+        return SimpleNamespace(tz=self._tz)
+
+
+async def _daily_task_due(env, due: date) -> Task:
+    lst = await env.task_svc.create_list(name="Chores", created_by="u1")
+    task = await env.task_svc.create_task(
+        list_id=lst.id,
+        title="Water plants",
+        created_by="u1",
+        due_date=due.isoformat(),
+    )
+    task = replace(task, recurrence=RecurrenceRule(rrule="FREQ=DAILY"))
+    await env.task_repo.save(task)
+    return task
+
+
+async def test_spawn_overdue_waits_for_household_day_west_of_utc(env):
+    """Los Angeles, 20:00 on Apr 20 local = 03:00 UTC on Apr 21: a task
+    due on Apr 20 is still due *today* for the household — no spawn yet;
+    it spawns once the household's Apr 21 begins."""
+    env.task_svc.attach_household_features(_HouseholdPrefs("America/Los_Angeles"))
+    await _daily_task_due(env, date(2026, 4, 20))
+
+    evening = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    assert await env.task_svc.spawn_overdue_recurrences(now=evening) == []
+
+    next_morning = datetime(2026, 4, 21, 8, 0, tzinfo=timezone.utc)
+    spawned = await env.task_svc.spawn_overdue_recurrences(now=next_morning)
+    assert [t.due_date for t in spawned] == [date(2026, 4, 21)]
+
+
+async def test_spawn_overdue_on_household_day_east_of_utc(env):
+    """Auckland, 01:00 on Apr 21 local = 13:00 UTC on Apr 20: the Apr 20
+    task is already overdue for the household and spawns now, not ~13 h
+    later at UTC midnight."""
+    env.task_svc.attach_household_features(_HouseholdPrefs("Pacific/Auckland"))
+    await _daily_task_due(env, date(2026, 4, 20))
+
+    now = datetime(2026, 4, 20, 13, 0, tzinfo=timezone.utc)
+    spawned = await env.task_svc.spawn_overdue_recurrences(now=now)
+    assert [t.due_date for t in spawned] == [date(2026, 4, 21)]
+
+
+async def test_spawn_overdue_falls_back_to_utc_when_preferences_fail(env, caplog):
+    await _daily_task_due(env, date(2026, 4, 20))
+    env.task_svc.attach_household_features(_HouseholdPrefs(None))
+
+    now = datetime(2026, 4, 21, 3, 0, tzinfo=timezone.utc)
+    with caplog.at_level(logging.WARNING):
+        spawned = await env.task_svc.spawn_overdue_recurrences(now=now)
+
+    assert [t.due_date for t in spawned] == [date(2026, 4, 21)]
+    assert "household tz" in caplog.text
