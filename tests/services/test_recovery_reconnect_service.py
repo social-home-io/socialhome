@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from socialhome.db.database import AsyncDatabase
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.services.recovery_kit_service import RECOVERED_AT_KEY
 from socialhome.services.recovery_reconnect_service import (
     RECONNECTED_AT_KEY,
@@ -63,7 +64,7 @@ async def test_recovered_and_base_present_fans_out_and_marks(tmp_path):
     await _set(db, RECOVERED_AT_KEY, "2026-06-14T00:00:00+00:00")
     url_update = _UrlUpdateStub()
     adapter = _AdapterStub("https://new.example/inbox")
-    svc = RecoveryReconnectService(db, url_update, adapter)
+    svc = RecoveryReconnectService(SqliteInstanceConfigRepo(db), url_update, adapter)
 
     ran = await svc.maybe_reconnect()
 
@@ -77,7 +78,9 @@ async def test_recovered_and_base_present_fans_out_and_marks(tmp_path):
 async def test_not_recovered_does_nothing(tmp_path):
     db = await _make_db(tmp_path)
     url_update = _UrlUpdateStub()
-    svc = RecoveryReconnectService(db, url_update, _AdapterStub())
+    svc = RecoveryReconnectService(
+        SqliteInstanceConfigRepo(db), url_update, _AdapterStub()
+    )
 
     ran = await svc.maybe_reconnect()
 
@@ -93,7 +96,9 @@ async def test_already_reconnected_does_nothing(tmp_path):
     await _set(db, RECOVERED_AT_KEY, "2026-06-14T00:00:00+00:00")
     await _set(db, RECONNECTED_AT_KEY, "2026-06-14T01:00:00+00:00")
     url_update = _UrlUpdateStub()
-    svc = RecoveryReconnectService(db, url_update, _AdapterStub())
+    svc = RecoveryReconnectService(
+        SqliteInstanceConfigRepo(db), url_update, _AdapterStub()
+    )
 
     ran = await svc.maybe_reconnect()
 
@@ -107,7 +112,9 @@ async def test_recovered_but_no_base_is_retryable(tmp_path):
     db = await _make_db(tmp_path)
     await _set(db, RECOVERED_AT_KEY, "2026-06-14T00:00:00+00:00")
     url_update = _UrlUpdateStub()
-    svc = RecoveryReconnectService(db, url_update, _AdapterStub(base=None))
+    svc = RecoveryReconnectService(
+        SqliteInstanceConfigRepo(db), url_update, _AdapterStub(base=None)
+    )
 
     ran = await svc.maybe_reconnect()
 
@@ -123,7 +130,9 @@ async def test_publish_raises_still_marks_done(tmp_path):
     db = await _make_db(tmp_path)
     await _set(db, RECOVERED_AT_KEY, "2026-06-14T00:00:00+00:00")
     url_update = _UrlUpdateStub(raises=True)
-    svc = RecoveryReconnectService(db, url_update, _AdapterStub())
+    svc = RecoveryReconnectService(
+        SqliteInstanceConfigRepo(db), url_update, _AdapterStub()
+    )
 
     ran = await svc.maybe_reconnect()
 
@@ -155,7 +164,9 @@ async def test_rotation_runs_once_per_restore(tmp_dir):
 
     db = await _make_db(tmp_dir)
     try:
-        svc = RecoveryReconnectService(db, _UrlUpdateStub(), _AdapterStub())
+        svc = RecoveryReconnectService(
+            SqliteInstanceConfigRepo(db), _UrlUpdateStub(), _AdapterStub()
+        )
         rot = _RotationStub()
         assert await svc.maybe_rotate_space_authority(rot) == 0  # no restore
         assert rot.calls == 0
@@ -174,7 +185,9 @@ async def test_rotation_runs_once_per_restore(tmp_dir):
 async def test_rotation_failure_is_retried_next_boot(tmp_dir):
     db = await _make_db(tmp_dir)
     try:
-        svc = RecoveryReconnectService(db, _UrlUpdateStub(), _AdapterStub())
+        svc = RecoveryReconnectService(
+            SqliteInstanceConfigRepo(db), _UrlUpdateStub(), _AdapterStub()
+        )
         await _set(db, RECOVERED_AT_KEY, "2026-10-01T00:00:00+00:00")
         assert await svc.maybe_rotate_space_authority(_RotationStub(raises=True)) == 0
         assert await svc.maybe_rotate_space_authority(_RotationStub()) == 2
@@ -188,7 +201,9 @@ async def test_authority_rotation_pending_until_the_restore_rotated(tmp_dir):
     rotation ran; a failed rotation keeps it pending (fail closed)."""
     db = await _make_db(tmp_dir)
     try:
-        svc = RecoveryReconnectService(db, _UrlUpdateStub(), _AdapterStub())
+        svc = RecoveryReconnectService(
+            SqliteInstanceConfigRepo(db), _UrlUpdateStub(), _AdapterStub()
+        )
         assert await svc.authority_rotation_pending() is False  # no restore
         await _set(db, RECOVERED_AT_KEY, "2026-10-01T00:00:00+00:00")
         assert await svc.authority_rotation_pending() is True
@@ -211,7 +226,9 @@ async def test_rotation_gets_the_restore_marker_and_failure_warns(tmp_dir, caplo
                 seen.append(marker)
                 return await super().rotate_hosted_after_restore(marker)
 
-        svc = RecoveryReconnectService(db, _UrlUpdateStub(), _AdapterStub())
+        svc = RecoveryReconnectService(
+            SqliteInstanceConfigRepo(db), _UrlUpdateStub(), _AdapterStub()
+        )
         await _set(db, RECOVERED_AT_KEY, "2026-10-01T00:00:00+00:00")
         with caplog.at_level("WARNING"):
             await svc.maybe_rotate_space_authority(_RotationStub(raises=True))

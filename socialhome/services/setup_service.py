@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from ..db import AsyncDatabase
+from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
 
 log = logging.getLogger(__name__)
 
@@ -32,27 +32,16 @@ class SetupService:
     re-setup flow would have to be a separate decision).
     """
 
-    __slots__ = ("_db",)
+    __slots__ = ("_instance_config",)
 
-    def __init__(self, db: AsyncDatabase) -> None:
-        self._db = db
+    def __init__(self, instance_config: AbstractInstanceConfigRepo) -> None:
+        self._instance_config = instance_config
 
     async def is_required(self) -> bool:
         """``True`` until :meth:`mark_complete` has been called once."""
-        row = await self._db.fetchone(
-            "SELECT value FROM instance_config WHERE key=?",
-            (SETUP_COMPLETE_KEY,),
-        )
-        if row is None:
-            return True
-        return str(row["value"] or "").strip() != "1"
+        value = await self._instance_config.get(SETUP_COMPLETE_KEY)
+        return (value or "").strip() != "1"
 
     async def mark_complete(self) -> None:
         """Persist the "setup finished" flag. Safe to call repeatedly."""
-        await self._db.enqueue(
-            """
-            INSERT INTO instance_config(key, value) VALUES(?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            (SETUP_COMPLETE_KEY, "1"),
-        )
+        await self._instance_config.set(SETUP_COMPLETE_KEY, "1")

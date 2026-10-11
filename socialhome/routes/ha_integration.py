@@ -41,7 +41,11 @@ import logging
 
 from aiohttp import web
 
-from ..app_keys import db_key, platform_adapter_key, url_update_outbound_key
+from ..app_keys import (
+    instance_config_repo_key,
+    platform_adapter_key,
+    url_update_outbound_key,
+)
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..security import error_response
 from .base import BaseView
@@ -83,12 +87,7 @@ class HaIntegrationFederationBaseView(BaseView):
         ctx = self.user
         if not ctx.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
-        db = self.svc(db_key)
-        row = await db.fetchone(
-            "SELECT value FROM instance_config WHERE key=?",
-            (_INSTANCE_CONFIG_KEY,),
-        )
-        base = str(row["value"]) if row is not None else None
+        base = await self.svc(instance_config_repo_key).get(_INSTANCE_CONFIG_KEY)
         return web.json_response({"base": base})
 
     async def put(self) -> web.Response:
@@ -105,13 +104,9 @@ class HaIntegrationFederationBaseView(BaseView):
                 "base must be a non-empty http(s) URL.",
             )
 
-        db = self.svc(db_key)
+        instance_config = self.svc(instance_config_repo_key)
         adapter = self.svc(platform_adapter_key)
-        previous_row = await db.fetchone(
-            "SELECT value FROM instance_config WHERE key=?",
-            (_INSTANCE_CONFIG_KEY,),
-        )
-        previous = str(previous_row["value"]) if previous_row is not None else None
+        previous = await instance_config.get(_INSTANCE_CONFIG_KEY)
         # What peers actually POST to is the adapter's EFFECTIVE base — the
         # pushed URL plus the HA-hosted forwarder path
         # (``/api/socialhome/inbox``), or an admin override that wins over
@@ -119,11 +114,7 @@ class HaIntegrationFederationBaseView(BaseView):
         # peer that learnt the bare URL would POST to HA's frontend.
         effective_before = await self._effective_base(adapter)
 
-        await db.enqueue(
-            "INSERT INTO instance_config(key, value) VALUES(?,?)"
-            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (_INSTANCE_CONFIG_KEY, cleaned),
-        )
+        await instance_config.set(_INSTANCE_CONFIG_KEY, cleaned)
 
         effective_after = await self._effective_base(adapter)
         notified = 0

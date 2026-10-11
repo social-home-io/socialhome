@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
     from ...config import Config
     from ...db import AsyncDatabase
+    from ...repositories.instance_config_repo import AbstractInstanceConfigRepo
 
 log = logging.getLogger(__name__)
 
@@ -216,10 +217,13 @@ class StandaloneAdapter(PlatformAdapter):
     :param db: Open :class:`~socialhome.db.AsyncDatabase` instance.
     :param config: Runtime :class:`~socialhome.config.Config`.
     :param options: Raw ``[standalone]`` TOML section.
+    :param instance_config: ``instance_config`` key/value repo — holds the
+        admin-set federation base URL.
     """
 
     __slots__ = (
         "_db",
+        "_instance_config",
         "_config",
         "_options",
         "_session",
@@ -238,9 +242,11 @@ class StandaloneAdapter(PlatformAdapter):
         config: "Config",
         options: Mapping[str, Any] | None = None,
         *,
+        instance_config: "AbstractInstanceConfigRepo",
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         self._db = db
+        self._instance_config = instance_config
         self._config = config
         self._options: Mapping[str, Any] = options or MappingProxyType({})
         self._session: aiohttp.ClientSession | None = session
@@ -354,7 +360,7 @@ class StandaloneAdapter(PlatformAdapter):
         that to a 422 ``NOT_CONFIGURED`` so the admin knows to set the URL
         before issuing a QR.
         """
-        manual = await manual_federation_base(self._db)
+        manual = await manual_federation_base(self._instance_config)
         if manual is not None:
             return manual
         raw = self._options.get("external_url") if self._options else None

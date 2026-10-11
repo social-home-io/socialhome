@@ -8,6 +8,7 @@ import logging
 from socialhome.app_keys import (
     db_key as _db_key,
     federation_repo_key,
+    instance_config_repo_key,
     platform_adapter_key,
     url_update_outbound_key,
 )
@@ -140,7 +141,7 @@ def _ha_mode(client, tmp_path) -> _RecordingOutbound:
     """Swap in the real HA adapter (reading this app's ``instance_config``)
     and a recording outbound."""
     adapter = HaAdapter(ha_url="http://ha.local", ha_token="t", data_dir=str(tmp_path))
-    adapter._db = client.app[_db_key]
+    adapter._instance_config = client.app[instance_config_repo_key]
     client.app[platform_adapter_key] = adapter
     outbound = _RecordingOutbound()
     client.app[url_update_outbound_key] = outbound

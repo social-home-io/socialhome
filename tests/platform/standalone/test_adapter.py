@@ -22,6 +22,7 @@ from socialhome.crypto import (
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.post import Post, PostType
 from socialhome.platform.standalone.adapter import StandaloneAdapter
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.services.space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
@@ -76,7 +77,9 @@ def cfg():
 @pytest.fixture
 def adapter(db, cfg):
     """A StandaloneAdapter wired to the test database."""
-    return StandaloneAdapter(db=db, config=cfg)
+    return StandaloneAdapter(
+        db=db, config=cfg, instance_config=SqliteInstanceConfigRepo(db)
+    )
 
 
 async def _add_user(
@@ -343,7 +346,9 @@ async def test_stream_transcribe_audio_raises(adapter):
 
 async def test_get_federation_base_returns_none_when_unset(db, cfg):
     """No [standalone].external_url → None."""
-    adapter = StandaloneAdapter(db=db, config=cfg)
+    adapter = StandaloneAdapter(
+        db=db, config=cfg, instance_config=SqliteInstanceConfigRepo(db)
+    )
     assert await adapter.get_federation_base() is None
 
 
@@ -352,6 +357,7 @@ async def test_get_federation_base_composes_inbox_path(db, cfg):
     adapter = StandaloneAdapter(
         db=db,
         config=cfg,
+        instance_config=SqliteInstanceConfigRepo(db),
         options={"external_url": "https://social.example.com"},
     )
     assert (
@@ -365,6 +371,7 @@ async def test_get_federation_base_strips_trailing_slash(db, cfg):
     adapter = StandaloneAdapter(
         db=db,
         config=cfg,
+        instance_config=SqliteInstanceConfigRepo(db),
         options={"external_url": "https://social.example.com/"},
     )
     assert (
@@ -377,6 +384,7 @@ async def test_get_federation_base_empty_string_is_none(db, cfg):
     adapter = StandaloneAdapter(
         db=db,
         config=cfg,
+        instance_config=SqliteInstanceConfigRepo(db),
         options={"external_url": ""},
     )
     assert await adapter.get_federation_base() is None

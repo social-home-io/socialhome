@@ -27,9 +27,9 @@ from aiohttp import web
 
 from ..app_keys import (
     config_key,
-    db_key,
     federation_repo_key,
     federation_service_key,
+    instance_config_repo_key,
     platform_adapter_key,
     url_update_outbound_key,
 )
@@ -243,8 +243,7 @@ class AdminFederationExternalUrlView(BaseView):
     async def get(self) -> web.Response:
         if self.user is None or not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
-        db = self.svc(db_key)
-        manual = await read_manual_base(db)
+        manual = await read_manual_base(self.svc(instance_config_repo_key))
         effective: str | None = None
         try:
             effective = await self.svc(platform_adapter_key).get_federation_base()
@@ -265,8 +264,8 @@ class AdminFederationExternalUrlView(BaseView):
             return error_response(403, "FORBIDDEN", "Admin only.")
         body = await self.body()
         raw = body.get("base")
-        db = self.svc(db_key)
-        previous = await read_manual_base(db)
+        instance_config = self.svc(instance_config_repo_key)
+        previous = await read_manual_base(instance_config)
 
         if raw is None or not str(raw).strip():
             cleaned: str | None = None
@@ -280,16 +279,9 @@ class AdminFederationExternalUrlView(BaseView):
                 )
 
         if cleaned is None:
-            await db.enqueue(
-                "DELETE FROM instance_config WHERE key=?",
-                (MANUAL_BASE_KEY,),
-            )
+            await instance_config.delete(MANUAL_BASE_KEY)
         else:
-            await db.enqueue(
-                "INSERT INTO instance_config(key, value) VALUES(?,?)"
-                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (MANUAL_BASE_KEY, cleaned),
-            )
+            await instance_config.set(MANUAL_BASE_KEY, cleaned)
 
         changed = previous != cleaned
         notified = 0

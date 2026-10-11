@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..db.database import AsyncDatabase
+    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
 
 #: ``instance_config`` key holding the admin-set base URL. Deliberately
 #: not ``ha_federation_base`` — that one is the integration's, means a
@@ -44,31 +44,29 @@ MANUAL_BASE_KEY = "federation_base_url"
 INBOX_PATH = "/federation/inbox"
 
 
-async def read_manual_base(db: "AsyncDatabase | None") -> str | None:
+async def read_manual_base(
+    instance_config: "AbstractInstanceConfigRepo | None",
+) -> str | None:
     """Return the admin-set base URL, or ``None`` when unset/blank.
 
     Bare value as stored — no inbox path appended. Callers that need a
     peer-facing base want :func:`manual_federation_base`.
     """
-    if db is None:
+    if instance_config is None:
         return None
-    row = await db.fetchone(
-        "SELECT value FROM instance_config WHERE key=?",
-        (MANUAL_BASE_KEY,),
-    )
-    if row is None:
-        return None
-    raw = str(row["value"] or "").strip()
+    raw = (await instance_config.get(MANUAL_BASE_KEY) or "").strip()
     return raw.rstrip("/") or None
 
 
-async def manual_federation_base(db: "AsyncDatabase | None") -> str | None:
+async def manual_federation_base(
+    instance_config: "AbstractInstanceConfigRepo | None",
+) -> str | None:
     """The admin-set base with Social Home's inbox path appended.
 
     Idempotent against a value that already carries the path, so an admin
     who pastes the full inbox URL doesn't get it doubled.
     """
-    base = await read_manual_base(db)
+    base = await read_manual_base(instance_config)
     if base is None:
         return None
     if base.endswith(INBOX_PATH):

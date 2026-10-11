@@ -20,50 +20,52 @@ from socialhome.platform.federation_base import (
 )
 
 
-class _FakeDb:
-    """Minimal stand-in exposing just ``fetchone``."""
+class _FakeRepo:
+    """Minimal ``AbstractInstanceConfigRepo`` stand-in exposing ``get``."""
 
     def __init__(self, value: str | None, *, row_missing: bool = False) -> None:
         self._value = value
         self._row_missing = row_missing
-        self.queried: list[tuple] = []
+        self.queried: list[str] = []
 
-    async def fetchone(self, sql: str, params: tuple = ()):
-        self.queried.append(params)
+    async def get(self, key: str) -> str | None:
+        self.queried.append(key)
         if self._row_missing:
             return None
-        return {"value": self._value}
+        return self._value
 
 
-async def test_read_manual_base_none_without_a_db():
-    """An adapter constructed without a DB must not explode."""
+async def test_read_manual_base_none_without_a_repo():
+    """An adapter not yet wired to the repo must not explode."""
     assert await read_manual_base(None) is None
     assert await manual_federation_base(None) is None
 
 
 async def test_read_manual_base_reads_the_documented_key():
-    db = _FakeDb("https://home.example.com")
-    assert await read_manual_base(db) == "https://home.example.com"
-    assert db.queried == [(MANUAL_BASE_KEY,)]
+    repo = _FakeRepo("https://home.example.com")
+    assert await read_manual_base(repo) == "https://home.example.com"
+    assert repo.queried == [MANUAL_BASE_KEY]
 
 
 async def test_read_manual_base_none_when_row_absent():
-    assert await read_manual_base(_FakeDb(None, row_missing=True)) is None
+    assert await read_manual_base(_FakeRepo(None, row_missing=True)) is None
 
 
 @pytest.mark.parametrize("stored", ["", "   ", None])
 async def test_read_manual_base_treats_blank_as_unset(stored):
     """A blank must read as unset, or the adapter would prefer it over a
     perfectly good automatic source and resolve to nothing useful."""
-    assert await read_manual_base(_FakeDb(stored)) is None
+    assert await read_manual_base(_FakeRepo(stored)) is None
 
 
 async def test_read_manual_base_strips_trailing_slash():
-    assert await read_manual_base(_FakeDb("https://h.example/")) == "https://h.example"
+    assert (
+        await read_manual_base(_FakeRepo("https://h.example/")) == "https://h.example"
+    )
 
 
 async def test_manual_federation_base_appends_our_inbox_path():
-    assert await manual_federation_base(_FakeDb("https://h.example")) == (
+    assert await manual_federation_base(_FakeRepo("https://h.example")) == (
         f"https://h.example{INBOX_PATH}"
     )
 
@@ -71,7 +73,7 @@ async def test_manual_federation_base_appends_our_inbox_path():
 async def test_manual_federation_base_is_idempotent():
     """An admin who pastes the full inbox URL must not get it doubled."""
     already = f"https://h.example{INBOX_PATH}"
-    assert await manual_federation_base(_FakeDb(already)) == already
+    assert await manual_federation_base(_FakeRepo(already)) == already
 
 
 async def test_manual_key_is_not_the_integration_key():

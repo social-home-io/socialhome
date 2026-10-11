@@ -23,7 +23,7 @@ from .backup_service import BACKUP_RESTORED_AT_KEY
 from .recovery_kit_service import RECOVERED_AT_KEY
 
 if TYPE_CHECKING:
-    from ..db import AsyncDatabase
+    from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
     from ..platform.adapter import PlatformAdapter
     from .space_authority_rotation_service import SpaceAuthorityRotationService
     from .url_update_outbound import UrlUpdateOutbound
@@ -41,15 +41,15 @@ AUTHORITY_ROTATED_FOR_KEY = "authority.rotated_after_restore"
 class RecoveryReconnectService:
     """One-shot post-restore peer reconnect (see module docstring)."""
 
-    __slots__ = ("_db", "_url_update", "_adapter")
+    __slots__ = ("_instance_config", "_url_update", "_adapter")
 
     def __init__(
         self,
-        db: "AsyncDatabase",
+        instance_config: "AbstractInstanceConfigRepo",
         url_update: "UrlUpdateOutbound",
         adapter: "PlatformAdapter",
     ) -> None:
-        self._db = db
+        self._instance_config = instance_config
         self._url_update = url_update
         self._adapter = adapter
 
@@ -146,14 +146,7 @@ class RecoveryReconnectService:
         )
 
     async def _get(self, key: str) -> str | None:
-        row = await self._db.fetchone(
-            "SELECT value FROM instance_config WHERE key=?", (key,)
-        )
-        return None if row is None else (row["value"] or None)
+        return await self._instance_config.get(key) or None
 
     async def _set(self, key: str, value: str) -> None:
-        await self._db.enqueue(
-            "INSERT INTO instance_config(key,value) VALUES(?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, value),
-        )
+        await self._instance_config.set(key, value)

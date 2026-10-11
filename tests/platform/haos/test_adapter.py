@@ -7,6 +7,7 @@ import pytest
 from socialhome.domain.household_dashboard import DEFAULT_DASHBOARD_PORT
 from socialhome.platform.adapter import Capability
 from socialhome.platform.haos.adapter import HaosAdapter
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
 
 # ─── Fake HaClient (mirrors the one in tests/platform/ha/test_adapter.py) ──
@@ -221,24 +222,22 @@ async def test_update_location_truncates_coords_keeps_tz():
 # ─── Federation base lookup (cached in instance_config kv table) ───────────
 
 
-async def test_get_federation_base_returns_none_before_db_wired():
+async def test_get_federation_base_returns_none_before_repo_wired():
     adapter = _build_haos_adapter()
     assert await adapter.get_federation_base() is None
 
 
-class _FakeDb:
+class _FakeInstanceConfig:
     def __init__(self, value: str | None):
         self._value = value
 
-    async def fetchone(self, sql, params):
-        if self._value is None:
-            return None
-        return {"value": self._value}
+    async def get(self, key):
+        return self._value
 
 
 async def test_get_federation_base_returns_none_when_unset():
     adapter = _build_haos_adapter()
-    adapter._db = _FakeDb(None)
+    adapter._instance_config = _FakeInstanceConfig(None)
     assert await adapter.get_federation_base() is None
 
 
@@ -251,7 +250,7 @@ async def test_get_federation_base_appends_inbox_path():
     pairing coordinator's ``{base}/{secret_id}`` concat assumes the
     full inbox base already."""
     adapter = _build_haos_adapter()
-    adapter._db = _FakeDb("https://abc.ui.nabu.casa")
+    adapter._instance_config = _FakeInstanceConfig("https://abc.ui.nabu.casa")
     assert (
         await adapter.get_federation_base()
         == "https://abc.ui.nabu.casa/api/socialhome/inbox"
@@ -260,7 +259,7 @@ async def test_get_federation_base_appends_inbox_path():
 
 async def test_get_federation_base_strips_trailing_slash_before_append():
     adapter = _build_haos_adapter()
-    adapter._db = _FakeDb("https://x.example/")
+    adapter._instance_config = _FakeInstanceConfig("https://x.example/")
     assert (
         await adapter.get_federation_base() == "https://x.example/api/socialhome/inbox"
     )
@@ -269,7 +268,9 @@ async def test_get_federation_base_strips_trailing_slash_before_append():
 async def test_get_federation_base_idempotent_if_already_appended():
     """No double-append if the integration ever pushes the full path."""
     adapter = _build_haos_adapter()
-    adapter._db = _FakeDb("https://x.example/api/socialhome/inbox")
+    adapter._instance_config = _FakeInstanceConfig(
+        "https://x.example/api/socialhome/inbox"
+    )
     assert (
         await adapter.get_federation_base() == "https://x.example/api/socialhome/inbox"
     )
@@ -277,7 +278,7 @@ async def test_get_federation_base_idempotent_if_already_appended():
 
 async def test_get_federation_base_returns_none_for_blank_value():
     adapter = _build_haos_adapter()
-    adapter._db = _FakeDb("   ")
+    adapter._instance_config = _FakeInstanceConfig("   ")
     assert await adapter.get_federation_base() is None
 
 
@@ -395,6 +396,7 @@ async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(
         event_bus_key,
         federation_service_key,
         http_session_key,
+        instance_config_repo_key,
     )
     from socialhome.db.database import AsyncDatabase
     from socialhome.infrastructure.event_bus import EventBus
@@ -414,6 +416,7 @@ async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(
     async with aiohttp.ClientSession() as session:
         app = web.Application()
         app[db_key] = db
+        app[instance_config_repo_key] = SqliteInstanceConfigRepo(db)
         app[event_bus_key] = EventBus()
         app[http_session_key] = session
         fed = _PrimingFederation()
