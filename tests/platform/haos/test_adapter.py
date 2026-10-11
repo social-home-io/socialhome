@@ -7,6 +7,7 @@ import pytest
 from socialhome.domain.household_dashboard import DEFAULT_DASHBOARD_PORT
 from socialhome.platform.adapter import Capability
 from socialhome.platform.haos.adapter import HaosAdapter
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
 
 # ─── Fake HaClient (mirrors the one in tests/platform/ha/test_adapter.py) ──
@@ -400,9 +401,6 @@ async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(
     from socialhome.db.database import AsyncDatabase
     from socialhome.infrastructure.event_bus import EventBus
     from socialhome.platform.haos import adapter as haos_adapter_mod
-    from socialhome.repositories.instance_config_repo import (
-        SqliteInstanceConfigRepo,
-    )
 
     class _NoopBootstrap:
         def __init__(self, **kwargs):

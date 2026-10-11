@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from socialhome.platform import build_platform_adapter
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
+
 from socialhome.platform.adapter import (
     Capability,
     ExternalUser,
@@ -15,6 +17,13 @@ from socialhome.platform.adapter import (
 
 
 # ── InstanceConfig ────────────────────────────────────────────────────────────
+
+
+class _StubInstanceConfig:
+    """An empty instance_config repo for modes that never read it."""
+
+    async def get(self, key: str) -> str | None:
+        return None
 
 
 def test_instance_config_fields():
@@ -151,7 +160,9 @@ def test_build_platform_adapter_ha(tmp_path):
     from socialhome.platform.ha.adapter import HomeAssistantAdapter
 
     cfg = Config(mode="ha")
-    adapter = build_platform_adapter("ha", db=None, config=cfg, instance_config=None)
+    adapter = build_platform_adapter(
+        "ha", db=None, config=cfg, instance_config=_StubInstanceConfig()
+    )
     assert isinstance(adapter, HomeAssistantAdapter)
 
 
@@ -160,9 +171,6 @@ async def test_build_platform_adapter_standalone(tmp_path):
     from socialhome.config import Config
     from socialhome.db.database import AsyncDatabase
     from socialhome.platform.standalone.adapter import StandaloneAdapter
-    from socialhome.repositories.instance_config_repo import (
-        SqliteInstanceConfigRepo,
-    )
 
     db = AsyncDatabase(tmp_path / "test.db", batch_timeout_ms=10)
     await db.startup()
@@ -185,7 +193,9 @@ def test_build_platform_adapter_unknown_mode():
 
     cfg = Config(mode="unknown")
     with pytest.raises(ValueError, match="Unknown platform mode"):
-        build_platform_adapter("unknown", db=None, config=cfg, instance_config=None)
+        build_platform_adapter(
+            "unknown", db=None, config=cfg, instance_config=_StubInstanceConfig()
+        )
 
 
 # ── provides_ice_servers (ABC default) ───────────────────────────────────────
