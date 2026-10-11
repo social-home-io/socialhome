@@ -1334,6 +1334,122 @@ describe('SpaceSettings — private space GFS (owner-only)', () => {
     await vi.waitFor(() => expect(onUpdate).toHaveBeenCalled())
   })
 
+  // ── The private channel's GFSs (v_57) ───────────────────────────────
+
+  const TOWN = { gfs_id: 'g-town', display_name: 'Town GFS', inbox_url: 'https://town.example' }
+  const CLUB = { gfs_id: 'g-club', display_name: 'Club GFS', inbox_url: 'https://club.example' }
+
+  function channelView(over: Record<string, unknown> = {}) {
+    return {
+      space_type: 'private',
+      mode: 'channel',
+      gfs_ids: [],
+      max: 8,
+      unlisted: false,
+      servers: null,
+      listings: [],
+      available: [
+        { ...TOWN, listed: false, listing_status: null, channel_capable: true },
+      ],
+      ...over,
+    }
+  }
+
+  function getFor(view: unknown) {
+    apiMock.get.mockImplementation((url: string) =>
+      Promise.resolve(url.endsWith('/gfs-servers') ? view : []))
+  }
+
+  it('turning it on offers the channel GFSs, pre-ticked when there is one, and saves them after the option', async () => {
+    getFor(channelView({ mode: 'listing' }))
+    apiMock.patch.mockResolvedValueOnce({})
+    ;(apiMock as unknown as { put: ReturnType<typeof vi.fn> }).put
+      .mockResolvedValueOnce({ listed: ['g-town'], failed: [] })
+    const { getByTestId, queryByTestId, getByText } = render(
+      <SpaceSettings space={space()} onUpdate={() => {}} isOwner />,
+    )
+    expect(queryByTestId('private-channel-checklist')).toBeNull()
+    fireEvent.click(getByTestId('private-gfs-toggle'))
+    await vi.waitFor(() => expect(getByTestId('private-channel-checklist')).toBeTruthy())
+    expect(getByText('space.private_gfs.channels_legend')).toBeTruthy()
+    const box = getByTestId('private-channel-checklist')
+      .querySelector('input[value="g-town"]') as HTMLInputElement
+    expect(box.checked).toBe(true)
+    fireEvent.click(getByText('space.settings.save'))
+    const put = (apiMock as unknown as { put: ReturnType<typeof vi.fn> }).put
+    await vi.waitFor(() => expect(put).toHaveBeenCalledOnce())
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({ features: { private_gfs: true } })
+    expect(put.mock.calls[0]).toEqual([
+      '/api/spaces/s-1/gfs-servers', { gfs_ids: ['g-town'] },
+    ])
+    // The option first, then the servers.
+    expect(apiMock.patch.mock.invocationCallOrder[0])
+      .toBeLessThan(put.mock.invocationCallOrder[0])
+  })
+
+  it('refuses to save the option on with several GFSs and none ticked', async () => {
+    getFor(channelView({
+      mode: 'listing',
+      available: [
+        { ...TOWN, listed: false, listing_status: null },
+        { ...CLUB, listed: false, listing_status: null },
+      ],
+    }))
+    const { getByTestId, getByText, findByText } = render(
+      <SpaceSettings space={space()} onUpdate={() => {}} isOwner />,
+    )
+    fireEvent.click(getByTestId('private-gfs-toggle'))
+    await vi.waitFor(() => expect(getByTestId('private-channel-checklist')).toBeTruthy())
+    fireEvent.click(getByText('space.settings.save'))
+    expect(await findByText('space.private_gfs.channels_required')).toBeTruthy()
+    expect(apiMock.patch).not.toHaveBeenCalled()
+  })
+
+  it('with the option on, a new channel GFS pick saves without a config PATCH', async () => {
+    getFor(channelView({
+      gfs_ids: ['g-town'],
+      available: [
+        { ...TOWN, listed: true, listing_status: null, channel_capable: true },
+        { ...CLUB, listed: false, listing_status: null, channel_capable: true },
+        {
+          gfs_id: 'g-old', display_name: 'Old GFS', inbox_url: 'https://old.example',
+          listed: false, listing_status: null, channel_capable: false,
+        },
+      ],
+    }))
+    const put = (apiMock as unknown as { put: ReturnType<typeof vi.fn> }).put
+    put.mockReset()
+    put.mockResolvedValueOnce({
+      listed: ['g-town'], failed: [{ gfs_id: 'g-club', reason: 'channel_failed' }],
+    })
+    const onUpdate = vi.fn()
+    const { getByTestId, getByText } = render(
+      <SpaceSettings space={space({ private_gfs: true })} onUpdate={onUpdate} isOwner />,
+    )
+    await vi.waitFor(() => expect(getByTestId('private-channel-checklist')).toBeTruthy())
+    const list = getByTestId('private-channel-checklist')
+    // A GFS that can't carry a private channel is not offered.
+    expect(list.querySelector('input[value="g-old"]')).toBeNull()
+    fireEvent.click(list.querySelector('input[value="g-club"]') as HTMLInputElement)
+    fireEvent.click(getByText('space.settings.save'))
+    await vi.waitFor(() => expect(put).toHaveBeenCalledOnce())
+    expect(apiMock.patch).not.toHaveBeenCalled()
+    expect(put.mock.calls[0][1]).toEqual({ gfs_ids: ['g-town', 'g-club'] })
+    await vi.waitFor(() => expect(onUpdate).toHaveBeenCalled())
+    expect(vi.mocked(showToast)).toHaveBeenCalledWith(
+      'space.private_gfs.channels_failed', 'info',
+    )
+  })
+
+  it('says so when no GFS can carry a private channel', async () => {
+    getFor(channelView({ available: [] }))
+    const { findByTestId } = render(
+      <SpaceSettings space={space({ private_gfs: true })} onUpdate={() => {}} isOwner />,
+    )
+    expect((await findByTestId('private-channel-none')).textContent)
+      .toBe('space.private_gfs.channels_none')
+  })
+
   it('PATCHes exactly {features: {private_gfs: false}} and warns about keys', async () => {
     apiMock.patch.mockResolvedValueOnce({})
     const { getByTestId, getByText, queryByTestId } = render(

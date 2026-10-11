@@ -9,6 +9,7 @@ the code that checks them in production. Repositories are in-memory stubs.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 
@@ -42,10 +43,14 @@ from socialhome.gfs_channel import (
     derive_channel_epoch_offset,
     derive_channel_seed,
 )
+from socialhome.domain.gfs_server import GfsServer
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services import gfs_channel_service as chan_mod
+from socialhome.outbound_fetch import OutboundFetchRefused
 from socialhome.services.gfs_channel_service import GfsChannelService
+from socialhome.services.gfs_server_targets import listing_target
 
 GFS_ID = "gfs-node-a"
 SPACE_ID = "sp-private-7c1"
@@ -183,7 +188,7 @@ class _Gfs:
         self.previous: dict[str, set[str]] = {}
 
     async def private_channels_supported(self, conn):
-        return self.capable
+        return self.capable and conn.id not in getattr(self, "incapable", set())
 
     def known_instance_ids(self, conn):
         return frozenset({conn.gfs_instance_id, *self.previous.get(conn.id, ())})
@@ -202,6 +207,34 @@ class _Gfs:
 
     def publish_client(self):
         return self.session
+
+    async def server_targets(self, space_id):
+        # No owner list known (an owner before v_57) unless a test sets one.
+        return getattr(self, "targets", None)
+
+    @asynccontextmanager
+    async def anon_session(self, conn):
+        if conn.registered:
+            yield self.session
+            return
+        # A listing target: record what it is sent (its own session).
+        yield _Recording(self.session, getattr(self, "sent", None))
+
+    def capability_unknown(self, conn):
+        return conn.id in getattr(self, "unknown", set())
+
+
+class _Recording:
+    """A session proxy that records each POST body (a listing target's)."""
+
+    def __init__(self, session, sink: list | None) -> None:
+        self._session = session
+        self._sink = sink
+
+    def post(self, url, *, json, **kw):
+        if self._sink is not None:
+            self._sink.append((url, json))
+        return self._session.post(url, json=json, **kw)
 
 
 class _Conns:
@@ -1259,3 +1292,254 @@ async def test_a_refused_gfs_key_is_retried_once_without_it(env):
     calls.clear()
     assert await svc._keyed(conn, attempt) == "done"
     assert calls == [None]
+
+
+# ── v_57: the owner's chosen channel servers; anonymous sends to all ─────
+
+
+_CONN_KEY = "c1" * 32
+_OWNER_SEED = os.urandom(32)
+
+
+def _server(gfs_instance_id: str, inbox_url: str, key: str) -> GfsServer:
+    return GfsServer(
+        gfs_instance_id=gfs_instance_id,
+        inbox_url=inbox_url,
+        public_key=key,
+        gfs_key_suite="ed25519",
+        display_name=gfs_instance_id,
+    )
+
+
+def _choose(env, node: _Node, *servers: GfsServer) -> None:
+    """Store the owner's signed channel list on *node*'s copy of the space,
+    and give *node*'s connection the key the list names for it."""
+    conn = node.svc._conn_repo.conn
+    node.svc._conn_repo.conn = replace(conn, public_key=_CONN_KEY)
+    signed = sign_gfs_server_list(
+        space_id=SPACE_ID, servers=servers, issued_at=1, owner_seed=_OWNER_SEED
+    )
+    space = node.spaces.spaces[SPACE_ID]
+    node.spaces.spaces[SPACE_ID] = replace(space, gfs_servers=signed)
+
+
+def _own(env, node: _Node) -> GfsServer:
+    conn = node.svc._conn_repo.conn
+    return _server(GFS_ID, conn.inbox_url, _CONN_KEY)
+
+
+def _unconnected(env, node: _Node, gfs_instance_id: str = GFS_ID) -> GfsConnection:
+    """A channel server on the owner's list that *node* never connected to
+    (a listing target) — here the same test GFS under another key / id."""
+    conn = node.svc._conn_repo.conn
+    return listing_target(_server(gfs_instance_id, conn.inbox_url, "d2" * 32))
+
+
+@pytest.mark.security
+async def test_the_channel_is_registered_only_on_the_chosen_servers(env):
+    _choose(env, env.owner, _server("gfs-elsewhere", "https://x.example", "e3" * 32))
+    # Our only connection is not chosen: no channel, nothing sent to it.
+    assert await env.owner.svc.reconcile(SPACE_ID) == "none"
+    assert SPACE_ID not in env.owner.spaces.channels
+    _choose(env, env.owner, _own(env, env.owner))
+    assert await env.owner.svc.reconcile(SPACE_ID) == "created"
+    channel_id = env.owner.spaces.channels[SPACE_ID][0]
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is not None
+
+
+async def test_an_empty_choice_retires_the_channel(env):
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    _choose(env, env.owner)
+    assert await env.owner.svc.reconcile(SPACE_ID) == "retired"
+    assert SPACE_ID not in env.owner.spaces.channels
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+async def test_a_blip_never_retires_a_chosen_channel(env):
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    env.owner.gfs.capable = False
+    assert await env.owner.svc.reconcile(SPACE_ID) == "none"
+    assert env.owner.spaces.channels[SPACE_ID][0] == channel_id
+
+
+async def test_servers_changed_withdraws_where_dropped(env):
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    env.owner.space_service.snapshots.clear()
+    # Unchanged choice: kept, announced, every member re-granted.
+    assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
+    assert len(env.owner.space_service.snapshots) == 2
+    # The owner drops the server: the channel is unregistered there.
+    _choose(env, env.owner, _server("gfs-elsewhere", "https://x.example", "e3" * 32))
+    assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+    assert await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id) is None
+
+
+async def test_servers_changed_reports_a_failed_registration(env, monkeypatch):
+    _choose(env, env.owner, _own(env, env.owner))
+    await _channel_ready(env)
+    env.owner.svc._registered.clear()
+
+    async def refuse(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(GfsChannelService, "_post_status", refuse)
+    assert await env.owner.svc.on_servers_changed(SPACE_ID) == {"conn-1"}
+
+
+async def test_servers_changed_is_owner_only_and_never_raises(env):
+    assert await env.member.svc.on_servers_changed(SPACE_ID) == set()
+    assert await env.owner.svc.on_servers_changed("nope") == set()
+
+    async def boom(_space_id):
+        raise RuntimeError("x")
+
+    env.owner.spaces.get = boom  # type: ignore[method-assign]
+    assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
+
+
+async def test_trusted_writer_key_goes_to_v57_members_only(env):
+    env.owner.federation.versions[env.other.h.instance_id] = 57
+    env.owner.federation.versions[env.member.h.instance_id] = 56
+    channel_id = await _channel_ready(env)
+    row = await env.app[gfs_channel_repo_key].get(channel_id)
+    # Trusted channel, but its writer key is pinned for anonymous sends.
+    assert not row.strict
+    assert row.writer_pk_for(_wire(env, channel_id)) is not None
+    v57 = await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id)
+    v56 = await env.owner.svc.grant_for_peer(SPACE_ID, env.member.h.instance_id)
+    assert "writer_key" in v57 and "channel_cert" in v57
+    assert "writer_key" not in v56 and "channel_cert" in v56
+
+
+@pytest.mark.security
+async def test_a_v57_member_sends_anonymously_to_every_chosen_server(env):
+    """A member connected to one channel server publishes to a second one it
+    never connected to — anonymously: no instance id, no household
+    signature, no cookie session; never the space id."""
+    env.owner.federation.versions[env.other.h.instance_id] = 57
+    await _channel_ready(env)
+    await _hand_grants(env, env.member, env.other)
+    member_conn = env.other.svc._conn_repo.conn
+    unconnected = _unconnected(env, env.other)
+    env.other.gfs.targets = [member_conn, unconnected]
+    env.other.gfs.sent = []
+    targets = await env.other.svc.plan(SPACE_ID)
+    assert [t.id for t in targets] == [member_conn.id, unconnected.id]
+    accepted = await env.other.svc.publish_sealed(SPACE_ID, 3, "YW5vbg", targets)
+    assert [c.id for c in accepted] == [member_conn.id, unconnected.id]
+    assert len(env.other.gfs.sent) == 1
+    url, body = env.other.gfs.sent[0]
+    assert url.endswith("/gfs/channels/publish-anon")
+    for field_name in ("instance_id", "signature", "channel_cert", "space_id"):
+        assert field_name not in body
+    assert env.other.h.instance_id not in str(body)
+    assert SPACE_ID not in str(body)
+    # The link-joined member receives both copies (the same item twice).
+    assert len(await _queued(env, env.member)) == 2
+
+
+@pytest.mark.security
+async def test_a_server_the_grant_does_not_name_gets_nothing(env):
+    env.owner.federation.versions[env.other.h.instance_id] = 57
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    stranger = _unconnected(env, env.other, gfs_instance_id="gfs-not-named")
+    env.other.gfs.targets = [env.other.svc._conn_repo.conn, stranger]
+    env.other.gfs.sent = []
+    targets = await env.other.svc.plan(SPACE_ID)
+    assert stranger.id not in {t.id for t in targets}
+    await env.other.svc.publish_sealed(SPACE_ID, 3, "eA", [*targets, stranger])
+    assert env.other.gfs.sent == []
+
+
+async def test_an_unproven_channel_server_is_skipped(env):
+    env.owner.federation.versions[env.other.h.instance_id] = 57
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    unconnected = _unconnected(env, env.other)
+    env.other.gfs.targets = [env.other.svc._conn_repo.conn, unconnected]
+    env.other.gfs.incapable = {unconnected.id}
+    assert [t.id for t in await env.other.svc.plan(SPACE_ID)] == ["conn-1"]
+
+
+@pytest.mark.security
+async def test_identified_channel_items_never_reach_an_unconnected_server(env):
+    """A member without the channel writer key (below v_57) publishes with
+    its channel cert — only where it is registered."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    unconnected = _unconnected(env, env.other)
+    env.other.gfs.targets = [env.other.svc._conn_repo.conn, unconnected]
+    env.other.gfs.sent = []
+    targets = await env.other.svc.plan(SPACE_ID)
+    assert [t.id for t in targets] == ["conn-1"]
+    accepted = await env.other.svc.publish_sealed(
+        SPACE_ID, 3, "eA", [*targets, unconnected]
+    )
+    assert [c.id for c in accepted] == ["conn-1"]
+    assert env.other.gfs.sent == []
+    # Even a queued identified item addressed to it is refused outright.
+    outcome = await env.other.svc._post_item(
+        unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=False
+    )
+    assert outcome.kind == "permanent"
+    assert env.other.gfs.sent == []
+
+
+async def test_identified_targets_follow_the_owners_list(env):
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    # The owner's list no longer names our connection.
+    env.other.gfs.targets = [_unconnected(env, env.other)]
+    assert await env.other.svc.plan(SPACE_ID) == []
+
+
+async def test_retry_to_an_unconnected_server(env):
+    env.owner.federation.versions[env.other.h.instance_id] = 57
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    unconnected = _unconnected(env, env.other)
+    item = chan_mod.GfsPublish(
+        space_id=SPACE_ID,
+        event_type=chan_mod._KIND_ANON,
+        payload={"epoch": 3, "payload": "eA"},
+    )
+    svc, gfs = env.other.svc, env.other.gfs
+    # Off the owner's list: dropped.
+    gfs.targets = [svc._conn_repo.conn]
+    assert (await svc._retry_send(unconnected.id, item)).kind == "permanent"
+    gfs.targets = [svc._conn_repo.conn, unconnected]
+    # Capability unknown: wait; a "no": drop.
+    gfs.incapable, gfs.unknown = {unconnected.id}, {unconnected.id}
+    assert (await svc._retry_send(unconnected.id, item)).kind == "transient"
+    gfs.unknown = set()
+    assert (await svc._retry_send(unconnected.id, item)).kind == "permanent"
+    gfs.incapable = set()
+    assert (await svc._retry_send(unconnected.id, item)).kind == "delivered"
+    # Never an identified item, never without a grant for the epoch.
+    ident = replace(item, event_type=chan_mod._KIND_ITEM)
+    assert (await svc._retry_send(unconnected.id, ident)).kind == "permanent"
+    stale = replace(item, payload={"epoch": 1, "payload": "eA"})
+    assert (await svc._retry_send(unconnected.id, stale)).kind == "permanent"
+
+
+async def test_a_refused_listing_address_is_classified(env):
+    env.owner.federation.versions[env.other.h.instance_id] = 57
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    unconnected = _unconnected(env, env.other)
+
+    @asynccontextmanager
+    async def refused(conn):
+        raise OutboundFetchRefused("private")
+        yield  # pragma: no cover
+
+    env.other.gfs.anon_session = refused  # type: ignore[method-assign]
+    outcome = await env.other.svc._post_item(
+        unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=True
+    )
+    assert outcome.kind == "permanent"

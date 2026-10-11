@@ -602,6 +602,42 @@ that reach each other without the host. A household that would rather not
 appear can decline to connect to that server or stay below v_51 (no grant,
 host path).
 
+### Sign-off: private channels on owner-chosen GFSs (v_57)
+
+**Owner decision (2026-10-10):** a private space whose owner turned
+`private_gfs` on follows the same model as a global space — the OWNER picks
+the GFSs that carry its channel (at most 8, among its own connections that
+prove `private_channels`), and members send each item to every one of them.
+**What that concedes, exactly:**
+
+- **A channel GFS a member never connected to sees the member's IP address
+  and publish timing — never its household identity, never the space.** It
+  gets only the anonymous `POST /gfs/channels/publish-anon` (the opaque
+  channel id, an epoch, the ciphertext and a writer-key signature), over a
+  cookie-less session pinned to the listed address, after it proved
+  possession of the listed key. Nothing identified ever goes there: no
+  instance id, no household signature, no channel cert, no subscribe, no
+  pairing, no `client_instances` row. Everything in the "Sign-off: a member
+  publishes to GFSs it never connected to" section above applies to these
+  targets as it does to a global space's listing targets.
+- **A GFS the owner did not choose never hears of the channel** — no
+  register, notice, unregister, grant or seat, even when the owner holds an
+  active, capable connection to it (pinned by
+  `tests/protocol/test_gfs_private_channel_multi_blind.py`).
+- **Trusted channels go anonymous for v_57 members.** The channel writer
+  key, strict-only before, is handed to every v_57 writer, and the owner's
+  channel notice pins it in trusted mode too; a member holding it publishes
+  anonymously to every chosen server. As for global spaces, a channel GFS
+  loses per-household bans and limits for that member (it keeps the per-IP,
+  per-channel and per-key limits); receivers still enforce the space writer
+  cert inside the ciphertext, and the owner revokes a writer by rotating.
+  Older members keep publishing identified, to their own servers only.
+- **What it does not change:** seats (identified subscribes) are still taken
+  only on servers a member household is registered on — the owner's
+  `private_gfs` opt-in above; the owner still never subscribes to or
+  publishes into its own channel; no private space with the option OFF ever
+  touches a GFS.
+
 ### Sign-off: per-user routing on the app channel (§FIX-I2 relaxed, v_18)
 
 `APP_SESSION` and `APP_MESSAGE` events may carry `to_user` (the target user's

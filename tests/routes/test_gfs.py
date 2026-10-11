@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 
 import aiohttp
 import pytest
@@ -992,3 +993,105 @@ async def test_gfs_servers_are_the_owners_alone(client, is_admin):
 async def test_gfs_servers_requires_auth(client):
     r = await client.get("/api/spaces/sp-1/gfs-servers")
     assert r.status == 401
+
+
+async def _seed_channel_space(client, space_id: str = "sp-priv", *, on: bool = True):
+    await _seed_space(client, space_id, space_type="private")
+    await client._db.enqueue(
+        "UPDATE spaces SET private_gfs=? WHERE id=?", (int(on), space_id)
+    )
+
+
+def _channel_capable(client, *gfs_ids: str) -> None:
+    svc = client.app[gfs_connection_service_key]
+    for gfs_id in gfs_ids:
+        svc._private_channels[gfs_id] = True
+
+
+async def _seed_keyed_gfs(client, *gfs_ids: str) -> None:
+    """Connections with distinct, well-formed keys (the signed list names
+    a server by its key)."""
+    repo = SqliteGfsConnectionRepo(client._db)
+    for n, gfs_id in enumerate(gfs_ids, start=1):
+        await repo.save(replace(_make_conn(gfs_id), public_key=f"{n:02x}" * 32))
+
+
+async def test_gfs_servers_choose_a_private_spaces_channel_servers(client):
+    """A private space with ``private_gfs`` on: the owner picks its channel
+    servers — stored in the signed list, never a listing."""
+    await _seed_keyed_gfs(client, "gfs-1", "gfs-2")
+    await _seed_channel_space(client)
+    _channel_capable(client, "gfs-1", "gfs-2")
+    _stub_session(client, status=200)
+    r = await client.put(
+        "/api/spaces/sp-priv/gfs-servers",
+        json={"gfs_ids": ["gfs-2"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert await r.json() == {"listed": ["gfs-2"], "failed": []}
+    repo = SqliteGfsConnectionRepo(client._db)
+    assert await repo.list_publications_for_space("sp-priv") == []
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
+    r = await client.get("/api/spaces/sp-priv/gfs-servers", headers=_auth(client._tok))
+    body = await r.json()
+    assert body["mode"] == "channel"
+    assert body["gfs_ids"] == ["gfs-2"]
+    assert body["listings"] == []
+    assert {a["gfs_id"]: a["channel_capable"] for a in body["available"]} == {
+        "gfs-1": True,
+        "gfs-2": True,
+    }
+    # Members read the channel servers on the space detail.
+    r = await client.get("/api/spaces/sp-priv", headers=_auth(client._tok))
+    detail = await r.json()
+    assert [s["display_name"] for s in detail["gfs_servers"]] == ["GFS gfs-2"]
+    assert detail["gfs_unlisted"] is False
+
+
+async def test_gfs_servers_refuse_a_server_without_private_channels(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_channel_space(client)
+    client.app[gfs_connection_service_key]._private_channels["gfs-1"] = False
+    client.app[gfs_connection_service_key]._info_failed_at["gfs-1"] = 10**12
+    r = await client.put(
+        "/api/spaces/sp-priv/gfs-servers",
+        json={"gfs_ids": ["gfs-1"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422
+    err = (await r.json())["error"]
+    assert err["code"] == "GFS_SELECTION_INVALID"
+    assert err["params"]["reason"] == "unsupported"
+
+
+@pytest.mark.security
+async def test_gfs_servers_private_without_the_option_are_refused(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_channel_space(client, on=False)
+    _channel_capable(client, "gfs-1")
+    _stub_session(client, status=200)
+    r = await client.put(
+        "/api/spaces/sp-priv/gfs-servers",
+        json={"gfs_ids": ["gfs-1"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status != 200
+    assert (await r.json())["error"]["code"] == "SPACE_NOT_PUBLIC"
+    assert client.app[gfs_connection_service_key]._http_client.posted == []
+
+
+@pytest.mark.security
+async def test_gfs_channel_servers_are_the_owners_alone(client):
+    await _seed_gfs(client, "gfs-1")
+    await _seed_channel_space(client)
+    _channel_capable(client, "gfs-1")
+    raw = await _seed_user(client, "erin", is_admin=True)
+    r = await client.get("/api/spaces/sp-priv/gfs-servers", headers=_auth(raw))
+    assert r.status == 403
+    r = await client.put(
+        "/api/spaces/sp-priv/gfs-servers",
+        json={"gfs_ids": ["gfs-1"]},
+        headers=_auth(raw),
+    )
+    assert r.status == 403

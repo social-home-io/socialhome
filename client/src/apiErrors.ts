@@ -73,6 +73,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
       case 'unknown': return t('error.gfs_selection.unknown')
       case 'too_many': return t('error.gfs_selection.too_many', { max: str(p, 'max') })
       case 'not_global': return t('error.gfs_selection.not_global')
+      case 'unsupported': return t('error.gfs_selection.unsupported')
       default: return null
     }
   },

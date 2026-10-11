@@ -779,6 +779,7 @@ python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
+python .claude/skills/federation-demo/harness.py gfs-private-channel-multi
 python .claude/skills/federation-demo/harness.py verify
 python .claude/skills/federation-demo/harness.py gfs-b-down
 python .claude/skills/federation-demo/harness.py gfs-down
@@ -901,6 +902,24 @@ route), and the log names neither d (id, key hex / base64url) nor the
 content. Clean-up: a and d restart normally, e reconnects to A. ``verify``
 then pins ``MIN_FOR_MULTI_GFS_PUBLISH`` at v_57 and checks d's writer key,
 d's two-server list and e's copy of the post.
+
+### ``gfs-private-channel-multi`` — a private channel on the owner's chosen GFSs (v_57)
+
+After ``gfs-multi-listing`` (a ↔ d paired, a and e on A and B), before
+``verify``. a creates a TRUSTED private space, turns ``private_gfs`` on and
+picks **GFS A only** as its channel server (``PUT
+/api/spaces/{id}/gfs-servers``, ``mode: "channel"``); e joins through a gfs
+link, d through an internal one. The channel is registered on A — **B holds
+no row for it**, though a is connected to B. a then picks A **and** B: B gets
+the channel with its trusted-mode writer key pinned, and d stores the
+owner's two-server list. d restarts with the loopback shim, e leaves A (it
+reaches the channel over B only, seated there). a goes offline; d (on A
+only) posts; e receives it over B. Asserts B saw only anonymous
+``/gfs/channels/publish-anon`` requests (never the identified route), holds
+no ``client_instances`` row for d, and its log and database never name the
+space (id, name, authority key hex / base64url), d or the text. Clean-up: a
+and d restart normally, e reconnects to A. ``verify`` checks d's two-server
+list, e's copy of the post and that B's database never names the space.
 
 ### ``gfs-fallback-switch`` — the GFS fallback for an existing pair (v_54)
 

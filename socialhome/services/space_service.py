@@ -2769,10 +2769,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
     async def _after_private_gfs_change(self, space: Space) -> None:
         """The owner switched ``private_gfs`` on a PRIVATE space we host.
 
-        * ON: start the space's opaque channel now (when it has a remote
-          member household and a capable connection server), announce it and
-          hand every member household its grant — with a seat pass, paired
-          members included.
+        * ON: choose the default channel server (the single capable
+          connection, when none is chosen yet), start the space's opaque
+          channel on the chosen servers now (when it has a remote member
+          household), announce it and hand every member household its grant
+          — with a seat pass, paired members included.
         * OFF (only reached with no link-joined member left — refused
           earlier otherwise): every ``gfs`` invite link stops working (and
           comes down where it was parked), the channel is unregistered on
@@ -2782,6 +2783,14 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         if space.space_type is not SpaceType.PRIVATE:
             return
         if space.features.private_gfs:
+            # The owner chooses the channel servers; with exactly one capable
+            # connection there is nothing to choose — it becomes the default
+            # (with several, the owner's pick follows from the settings).
+            if self._gfs_selection is not None:
+                try:
+                    await self._gfs_selection.default_channels(space.id)
+                except Exception:
+                    log.exception("private gfs: default channel server failed")
             if self._member_gfs is not None:
                 try:
                     await self._member_gfs.enable_channel(space.id)

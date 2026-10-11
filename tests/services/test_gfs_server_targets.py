@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 import pytest
@@ -9,8 +10,10 @@ import pytest
 from socialhome.domain.federation import GfsConnection
 from socialhome.domain.gfs_server import GFS_KEY_SUITE_ED25519, GfsServer
 from socialhome.outbound_fetch import OutboundFetchRefused
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.services.gfs_server_targets import (
     LISTING_TARGET_PREFIX,
+    connections_on_list,
     is_listing_target_id,
     listing_target,
     listing_target_id,
@@ -167,3 +170,27 @@ def test_a_listing_target_id_covers_id_key_and_url():
 )
 def test_normalized_url(url, want):
     assert normalized_url(url) == want
+
+
+def test_connections_on_list_matches_own_active_connections_by_key():
+    key_c = "cc" * 32
+    signed = sign_gfs_server_list(
+        space_id="sp",
+        servers=(
+            _server("gfs-b", KEY_B),
+            # The id moved since the owner chose it: the key still matches.
+            _server("gfs-a-old", KEY_A),
+            _server("gfs-c", key_c),
+        ),
+        issued_at=1,
+        owner_seed=b"\x01" * 32,
+    )
+    conns = [
+        _conn("ca", "gfs-a-new", KEY_A.upper()),
+        _conn("cb", "gfs-b", KEY_B),
+        _conn("cc", "gfs-c", key_c, status="suspended"),
+        _conn("cd", "gfs-d", "dd" * 32),
+    ]
+    assert [c.id for c in connections_on_list(signed, conns)] == ["cb", "ca"]
+    unregistered = dataclasses.replace(conns[1], registered=False)
+    assert connections_on_list(signed, [unregistered]) == []

@@ -35,6 +35,20 @@ describe('GfsChecklist', () => {
     expect((getByLabelText(/Club GFS/) as HTMLInputElement).checked).toBe(true)
   })
 
+  it('takes another legend (a private channel is never "listed")', () => {
+    const { container } = render(
+      <GfsChecklist
+        name="t" choices={[A]} selected={[]} onChange={() => {}}
+        legend="space.private_gfs.channels_legend" icon="🛰️"
+      />,
+    )
+    const legend = container.querySelector('legend')!.textContent
+    expect(legend).toContain('space.private_gfs.channels_legend')
+    expect(legend).toContain('🛰️')
+    expect(legend).not.toContain('🌐')
+    expect(legend).not.toContain('space.gfs_choice.legend')
+  })
+
   it('adds and removes ids through onChange', () => {
     const onChange = vi.fn()
     const { getByLabelText, rerender } = render(

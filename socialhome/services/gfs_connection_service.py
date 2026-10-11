@@ -362,6 +362,7 @@ class GfsConnectionService:
         "_publish_client",
         "_on_repinned",
         "_on_disconnect",
+        "_on_removed",
         "_on_rebound",
         "_rebind_warned",
         "_replaces",
@@ -482,6 +483,10 @@ class GfsConnectionService:
             lambda _space_id: nullcontext()
         )
         self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
+        #: Called with the removed connection AFTER its row is gone — the
+        #: owner's private-channel lists drop that server
+        #: (:meth:`GfsServerSelectionService.on_connection_removed`).
+        self._on_removed: Callable[[GfsConnection], Awaitable[object]] | None = None
         #: Called in order with the connection id after it adopted the
         #: server's new public id (:meth:`_rebind_to_served_id`): the seat
         #: keeper moves this household's follow seats to the new id, the
@@ -718,6 +723,12 @@ class GfsConnectionService:
         """Wire the seat keeper's unpair handling (local bookkeeping; any
         request it needs runs in the background, never in the route)."""
         self._on_disconnect = hook
+
+    def attach_on_removed(
+        self, hook: Callable[[GfsConnection], Awaitable[object]]
+    ) -> None:
+        """Wire the follow-up run after a connection's row was deleted."""
+        self._on_removed = hook
 
     def attach_on_rebound(self, hook: Callable[[str], Awaitable[object]]) -> None:
         """Add a hook run after a connection adopted a new public id (hooks
@@ -2226,6 +2237,11 @@ class GfsConnectionService:
         await self._repo.delete(gfs_id)
         for space_id in listed:
             await self._listings_changed(space_id)
+        if self._on_removed is not None:
+            try:
+                await self._on_removed(conn)
+            except Exception:
+                log.exception("gfs: on-removed hook failed for %s", gfs_id)
 
     async def list_connections(self) -> list[GfsConnection]:
         """Return ALL GFS connections for this household — active, pending,

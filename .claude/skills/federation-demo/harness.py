@@ -6181,6 +6181,335 @@ def _check_multi_listing(state: dict, failures: list[str]) -> None:
         failures.append("e: lost d's post from the multi-GFS step")
 
 
+# ─── Step: gfs-private-channel-multi (v_57) ────────────────────────────────
+
+
+def _gfs_connection_to(state: dict, label: str, base_url: str) -> dict:
+    """``label``'s connection to the GFS at ``base_url`` — the existing one
+    when it holds it (an earlier step connected it), else a fresh pairing."""
+    st, rows = _as(state, label, "GET", "/api/gfs/connections")
+    if st == 200 and isinstance(rows, list):
+        want = base_url.rstrip("/")
+        for row in rows:
+            if (row.get("inbox_url") or "").rstrip("/") == want:
+                return row
+    return _pair_with(state, label, base_url)
+
+
+def _wait_gfs_connected(
+    state: dict, label: str, base_url: str, timeout: float = 60.0
+) -> None:
+    """Wait until ``label``'s WebSocket to the GFS at ``base_url`` is up —
+    a connection made moments ago (an earlier step's clean-up re-pairs e
+    with A) queues every relayed envelope until it is, and a link redeem
+    through it would time out waiting for the issuer's answer."""
+    want = base_url.rstrip("/")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        st, rows = _as(state, label, "GET", "/api/gfs/connections")
+        if st == 200 and isinstance(rows, list):
+            if any(
+                (r.get("inbox_url") or "").rstrip("/") == want and r.get("connected")
+                for r in rows
+            ):
+                return
+        time.sleep(2.0)
+    raise SystemExit(
+        f"gfs-private-channel-multi: {label} never connected to {base_url} "
+        f"within {timeout:.0f} s"
+    )
+
+
+def _poll_gfs_b_rows(sql: str, params: tuple, ok, *, what: str, timeout=60.0):
+    """:func:`_poll_gfs_rows` against GFS B."""
+    deadline = time.monotonic() + timeout
+    rows: list[tuple] = []
+    while time.monotonic() < deadline:
+        rows = _gfs_b_rows(sql, params)
+        if ok(rows):
+            return rows
+        time.sleep(3.0)
+    raise SystemExit(
+        f"gfs-private-channel-multi: {what} within {timeout:.0f} s (last rows {rows!r})"
+    )
+
+
+def cmd_gfs_private_channel_multi() -> None:
+    """v_57: a PRIVATE space's channel lives on the GFSs its OWNER picks, and
+    a member reaches every one of them — anonymously at the ones it never
+    connected to — while a GFS the owner did not pick never hears of it.
+
+    Prereqs: the gfs chain (a, d, e on GFS A; a ↔ d paired) + ``gfs-b-up``;
+    runs after ``gfs-multi-listing`` (reuses its B connections when there)
+    and before ``verify``.
+
+    1. a and e hold connections to A and B. a creates a TRUSTED private
+       space, turns ``private_gfs`` on and picks **A only** as its channel
+       server (``PUT /api/spaces/{id}/gfs-servers``, channel mode).
+    2. e joins through a gfs link, d (paired) through an internal one. a
+       registers the channel on A — B holds NO row for it, though a is
+       connected to B and B can carry channels.
+    3. a picks **A and B**. B now holds the channel, its trusted-mode writer
+       key pinned (v_57); d holds the owner's two-server list.
+    4. d restarts with loopback treated as public (B is on 127.0.0.1, see
+       :data:`_LOOPBACK_IS_PUBLIC_PRELUDE`). e leaves A — it now reaches the
+       channel over B only — and holds its seat on B.
+    5. a goes offline. d (registered on A only) posts; e receives it over B.
+    6. B: only anonymous ``publish-anon`` requests, no ``client_instances``
+       row for d, and its log and database never name the space (id, name,
+       authority key), d, or the post's text.
+    7. Clean-up: a and d restart normally; e reconnects to A.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run 'gfs-up' + 'gfs-pair' first")
+    if not _gfs_b_alive(state):
+        raise SystemExit("run 'gfs-b-up' first")
+    a, d, e = (state["instances"][x] for x in ("a", "d", "e"))
+    a_base = f"http://127.0.0.1:{a['port']}"
+    a_url = f"http://127.0.0.1:{GFS_PORT}"
+    b_url = state["gfs_b"]["base_url"]
+    d_iid = d["instance_id"]
+    if d_iid not in _peer_ids(a):
+        raise SystemExit(
+            "gfs-private-channel-multi: a and d are not paired — run "
+            "'gfs-multi-listing' (or 'relay-pair') first"
+        )
+    d_pk = _rows("d", "SELECT identity_public_key FROM instance_identity")[0][0]
+
+    # 1. Connections, the space, the owner's first choice (A only).
+    a_a = _gfs_connection_to(state, "a", a_url)
+    a_b = _gfs_connection_to(state, "a", b_url)
+    _gfs_connection_to(state, "e", a_url)
+    _gfs_connection_to(state, "e", b_url)
+    for label in ("a", "e"):
+        for url in (a_url, b_url):
+            _wait_gfs_connected(state, label, url)
+    print("  a and e hold live connections to GFS A and GFS B ✓")
+    space_name = f"Private on two GFSs {time.time_ns()}"
+    st, space = _as(
+        state,
+        "a",
+        "POST",
+        "/api/spaces",
+        {"name": space_name, "space_type": "private"},
+    )
+    space_id = _must("a creates a private space", st, space, ok=(200, 201))["id"]
+    space_pk = _rows(
+        "a", "SELECT identity_public_key FROM spaces WHERE id=?", (space_id,)
+    )[0][0]
+    space_pk_b64 = (
+        base64.urlsafe_b64encode(bytes.fromhex(space_pk)).rstrip(b"=").decode()
+    )
+    st, body = _as(
+        state,
+        "a",
+        "PATCH",
+        f"/api/spaces/{space_id}",
+        {"features": {"private_gfs": True}},
+    )
+    _must("a turns private_gfs on", st, body)
+    st, view = _as(state, "a", "GET", f"/api/spaces/{space_id}/gfs-servers")
+    view = _must("a reads its channel picker", st, view)
+    if view.get("mode") != "channel":
+        raise SystemExit(f"gfs-private-channel-multi: picker answered {view!r}")
+    st, body = _as(
+        state,
+        "a",
+        "PUT",
+        f"/api/spaces/{space_id}/gfs-servers",
+        {"gfs_ids": [a_a["id"]]},
+    )
+    body = _must("a picks GFS A as the channel server", st, body)
+    if body.get("listed") != [a_a["id"]]:
+        raise SystemExit(f"gfs-private-channel-multi: owner choice answered {body!r}")
+    print("  a picked GFS A as the private channel's server ✓")
+
+    # 2. Members; the channel on A only.
+    _join_private_link(state, "e", space_id, a_base, via="gfs")
+    _join_private_link(state, "d", space_id, a_base, via="internal")
+    print("  e (gfs link) and d (internal link) joined ✓")
+    rows = _poll_rows(
+        "a",
+        "SELECT gfs_channel_id FROM spaces WHERE id=?",
+        (space_id,),
+        lambda r: bool(r) and bool(r[0][0]),
+        what="a never created the private space's channel",
+    )
+    channel_id = rows[0][0]
+    _poll_gfs_rows(
+        "SELECT 1 FROM gfs_channels WHERE channel_id=?",
+        (channel_id,),
+        bool,
+        what="GFS A never registered the channel",
+    )
+    if _gfs_b_rows("SELECT 1 FROM gfs_channels WHERE channel_id=?", (channel_id,)):
+        raise SystemExit(
+            "gfs-private-channel-multi: GFS B holds the channel though the "
+            "owner did not choose it"
+        )
+    print(f"  channel {channel_id} lives on A only — B never heard of it ✓")
+
+    # 3. A and B.
+    st, body = _as(
+        state,
+        "a",
+        "PUT",
+        f"/api/spaces/{space_id}/gfs-servers",
+        {"gfs_ids": [a_a["id"], a_b["id"]]},
+    )
+    body = _must("a picks GFS A and B", st, body)
+    if sorted(body.get("listed") or []) != sorted([a_a["id"], a_b["id"]]):
+        raise SystemExit(f"gfs-private-channel-multi: owner choice answered {body!r}")
+    _poll_gfs_b_rows(
+        "SELECT writer_key_pk FROM gfs_channels WHERE channel_id=? "
+        "AND publish_mode='trusted'",
+        (channel_id,),
+        lambda r: bool(r) and bool(r[0][0]),
+        what="GFS B never got the channel with its trusted writer key pinned",
+    )
+    _poll_rows(
+        "d",
+        "SELECT gfs_servers FROM spaces WHERE id=?",
+        (space_id,),
+        lambda r: bool(r) and bool(r[0][0]) and r[0][0].count("inbox_url") == 2,
+        what="d never stored the owner's two channel servers",
+        timeout=90.0,
+    )
+    print(
+        "  the channel lives on A and B (writer key pinned, trusted); d holds "
+        "the two-server list ✓"
+    )
+
+    # 4. d sees loopback as public; e reaches the channel over B only.
+    _kill_household("d", d)
+    state["instances"]["d"]["pid"] = _spawn_loopback_public("d", d["port"])
+    _save(state)
+    _wait_ready(d["port"])
+    e_a_id = state["gfs"]["pairings"]["e"]["id"]
+    st, body = _as(state, "e", "DELETE", f"/api/gfs/connections/{e_a_id}")
+    _must("e leaves GFS A", st, body, ok=(200, 204))
+    _poll_gfs_b_rows(
+        "SELECT instance_id FROM gfs_channel_subscribers WHERE channel_id=?",
+        (channel_id,),
+        lambda r: e["instance_id"] in {x[0] for x in r},
+        what="e never took its seat on GFS B",
+        timeout=90.0,
+    )
+    print(
+        "  d restarted (loopback public — harness shim); e is on B only, seated there ✓"
+    )
+
+    # 5. Host offline; d posts through every channel server.
+    _kill_household("a", a)
+    b_off = _gfs_b_log_size()
+    e_off = _log_size("e")
+    content = f"Private channel, two GFSs, host offline — {time.time_ns()}"
+    st, post = _as(
+        state,
+        "d",
+        "POST",
+        f"/api/spaces/{space_id}/posts",
+        {"type": "text", "content": content},
+    )
+    post_id = _must("d posts with the host offline", st, post, ok=(201,))["id"]
+    _poll_rows(
+        "e",
+        "SELECT content FROM space_posts WHERE id=?",
+        (post_id,),
+        lambda r: bool(r) and r[0][0] == content,
+        what=f"e never received d's post {post_id} over GFS B",
+        timeout=90.0,
+    )
+    if not _log_lines_matching(
+        "e", f"gfs.relay.received: channel={channel_id}", offset=e_off
+    ):
+        raise SystemExit(
+            "gfs-private-channel-multi: e logged no channel frame — d's post "
+            "reached it some other way"
+        )
+    print("  e (on B only) received d's post over the channel, host offline ✓")
+
+    # 6. What B saw.
+    if _gfs_b_rows("SELECT 1 FROM client_instances WHERE instance_id=?", (d_iid,)):
+        raise SystemExit("gfs-private-channel-multi: GFS B holds a client row for d")
+    b_log = _gfs_b_log_text(b_off)
+    if "POST /gfs/channels/publish-anon" not in b_log:
+        raise SystemExit(
+            "gfs-private-channel-multi: no anonymous channel publish reached GFS B"
+        )
+    if "POST /gfs/channels/publish HTTP" in b_log:
+        raise SystemExit(
+            "gfs-private-channel-multi: an IDENTIFIED channel publish reached GFS B"
+        )
+    whole_log = _gfs_b_log_text(0)
+    db_bytes = b"".join(
+        p.read_bytes() for p in GFS_B_DIR.glob("gfs.db*") if p.is_file()
+    )
+    d_leaks = (
+        d_iid,
+        d_pk,
+        base64.urlsafe_b64encode(bytes.fromhex(d_pk)).decode().rstrip("="),
+    )
+    for needle in (space_id, space_name, space_pk, space_pk_b64, content):
+        if needle in whole_log or needle.encode() in db_bytes:
+            raise SystemExit(
+                f"gfs-private-channel-multi: GFS B saw the space or the post "
+                f"({needle[:24]!r}…)"
+            )
+    for needle in d_leaks:
+        if needle in b_log:
+            raise SystemExit(
+                f"gfs-private-channel-multi: GFS B's log names d ({needle[:16]!r})"
+            )
+    print(
+        "  GFS B: anonymous publishes only, no row for d, never the space, "
+        "d or the text ✓"
+    )
+
+    # 7. Clean-up for the rest of the chain.
+    _kill_household("d", d)
+    state["instances"]["d"]["pid"] = _spawn("d", d["port"])
+    state["instances"]["a"]["pid"] = _spawn("a", a["port"])
+    _save(state)
+    _wait_ready(d["port"])
+    _wait_ready(a["port"])
+    again = _pair_with(state, "e", a_url)
+    state["gfs"]["pairings"]["e"] = {
+        "id": again["id"],
+        "gfs_instance_id": again["gfs_instance_id"],
+        "status": again["status"],
+    }
+    state["gfs_private_channel_multi"] = {
+        "space_id": space_id,
+        "post_id": post_id,
+        "channel_id": channel_id,
+    }
+    _save(state)
+    print(
+        "gfs-private-channel-multi: ok (the owner's channel servers only; a "
+        "member reached B anonymously)"
+    )
+
+
+def _check_private_channel_multi(state: dict, failures: list[str]) -> None:
+    """v_57 tripwire for ``verify``: d still holds the owner's two channel
+    servers, e still holds d's post, and GFS B still never stored the
+    space."""
+    info = state["gfs_private_channel_multi"]
+    space_id = info["space_id"]
+    rows = _rows("d", "SELECT gfs_servers FROM spaces WHERE id=?", (space_id,))
+    if not rows or not rows[0][0] or rows[0][0].count("inbox_url") != 2:
+        failures.append("d: the owner's private channel list does not name both GFSs")
+    if not _rows("e", "SELECT 1 FROM space_posts WHERE id=?", (info["post_id"],)):
+        failures.append("e: lost d's post from the private multi-GFS step")
+    db_bytes = b"".join(
+        p.read_bytes() for p in GFS_B_DIR.glob("gfs.db*") if p.is_file()
+    )
+    if space_id.encode() in db_bytes:
+        failures.append("GFS B: its database names the private space")
+
+
 # ─── Step: pair ────────────────────────────────────────────────────────────
 
 
@@ -7090,6 +7419,18 @@ def cmd_verify() -> None:
             )
     else:
         print("  (v_57 multi-listing check skipped — run 'gfs-multi-listing')")
+    if state.get("gfs_private_channel_multi"):
+        before = len(failures)
+        _check_private_channel_multi(state, failures)
+        if len(failures) == before:
+            print(
+                "  v_57 private channel on owner-chosen GFSs round-tripped "
+                "(d holds A + B, e holds d's post, B never stored the space) ✓"
+            )
+    else:
+        print(
+            "  (v_57 private multi-GFS check skipped — run 'gfs-private-channel-multi')"
+        )
 
     # 0c. v_29 round-trip on the §D2b BOOTSTRAP wire. The capability
     #     integer normally travels in INSTANCE_CAPABILITIES_UPDATED, over a

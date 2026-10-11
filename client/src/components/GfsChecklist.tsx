@@ -53,6 +53,8 @@ export function GfsChecklist({
   max = 8,
   error = null,
   intro,
+  legend,
+  icon = '🌐',
 }: {
   /** Prefix for element ids (two checklists may share a page). */
   name: string
@@ -64,6 +66,10 @@ export function GfsChecklist({
   /** Shown under the list (e.g. "choose at least one"). */
   error?: string | null
   intro?: string
+  /** Replaces the default "List it on" legend (a private channel). */
+  legend?: string
+  /** The legend's icon (a private channel isn't the public globe). */
+  icon?: string
 }): JSX.Element {
   const errorId = `${name}-error`
   const atMax = selected.length >= max
@@ -79,7 +85,7 @@ export function GfsChecklist({
       data-testid={`${name}-checklist`}
       aria-describedby={error ? errorId : undefined}
     >
-      <legend><span aria-hidden="true">🌐</span> {t('space.gfs_choice.legend')}</legend>
+      <legend><span aria-hidden="true">{icon}</span> {legend ?? t('space.gfs_choice.legend')}</legend>
       <p class="sh-muted sh-gfs-checklist__intro">
         {intro ?? t('space.gfs_choice.intro')}
       </p>

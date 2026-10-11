@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -120,6 +121,13 @@ class _Gfs:
 
     async def server_targets(self, space_id):
         return None
+
+    @asynccontextmanager
+    async def anon_session(self, conn):
+        yield self._s
+
+    def capability_unknown(self, conn):
+        return False
 
 
 class _Spaces:

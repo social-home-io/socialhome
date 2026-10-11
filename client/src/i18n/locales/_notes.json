@@ -471,6 +471,8 @@
   "space.gfs_choice.intro": "One sentence above the GFS checklist when making a space global.",
   "space.gfs_listing.intro_owner": "Owner-only intro of the GFS list in space settings.",
   "space.gfs_listing.intro_member": "Read-only intro of the GFS list for members.",
+  "space.gfs_listing.channel_intro": "Read-only list of a PRIVATE space's channel GFSs in its settings. Never say 'listed'.",
+  "space.gfs_listing.channel_owner_hint": "Hint for the owner under the read-only private-channel list: the picker lives in the 'GFS' section (space.private_gfs.legend) above.",
   "space.gfs_listing.unlisted_owner": "Warning banner for the owner: the space is global but no GFS lists it.",
   "space.gfs_listing.unlisted_member": "Warning banner for members: the space is global but no GFS lists it; only the owner can fix it.",
   "space.gfs_listing.public_note": "Shown in a public space's settings instead of Publish buttons.",
@@ -495,5 +497,12 @@
   "space.gfs_listing.connection_inactive_hint": "Shown under such a row: the listing can't be refreshed, but Remove still works.",
   "space.gfs_listing.connect_hint": "Shown on a GFS row this household isn't connected to; {name} is the GFS name. Followed by a link 'Open connections'.",
   "space.gfs_listing.connect_link": "Link to the household's Connections page.",
-  "space.gfs_listing.connect_hint_member": "Like connect_hint, for a non-admin (only admins can connect a GFS)."
+  "space.gfs_listing.connect_hint_member": "Like connect_hint, for a non-admin (only admins can connect a GFS).",
+  "space.private_gfs.channels_legend": "Legend of the checklist where the owner of a PRIVATE space picks the GFSs that carry its private channel. Followed by a list of GFS names. Never say 'listed': a private space is never listed anywhere.",
+  "space.private_gfs.channels_intro": "Intro of the private-channel GFS checklist (owner of a private space). 'GFS' = Global Federation Server, never translate.",
+  "space.private_gfs.channels_required": "Validation error under the private-channel checklist when the owner turned the GFS on but ticked no server.",
+  "space.private_gfs.channels_none": "Shown instead of the private-channel checklist when no connected GFS supports private channels.",
+  "space.private_gfs.channels_saved": "Success toast after the owner saved which GFSs carry the private channel.",
+  "space.private_gfs.channels_failed": "Info toast: {names} is a comma-separated list of GFS names the channel could not be registered on.",
+  "error.gfs_selection.unsupported": "Error when the owner picks a GFS without private-channel support for a private space."
 }

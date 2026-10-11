@@ -953,6 +953,9 @@ def _build_gfs_server_selection(
     # v_57 — every send to a space's GFSs (member publish, delegated-admin
     # notices, the host relay) reaches every server on the owner's list.
     gfs_connection_service.attach_member_servers(selection.member_servers)
+    # A disconnected GFS leaves the owner's private-channel lists too (the
+    # FK cascade that removes its rows bypasses every service).
+    gfs_connection_service.attach_on_removed(selection.on_connection_removed)
     selection.wire()
     return selection
 
@@ -3484,6 +3487,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # A connection adopted its server's new public id: re-register the
         # owner's channels there and re-issue grants naming the new id.
         gfs_connection_service.attach_on_rebound(gfs_channels.on_gfs_rebound)
+        # The owner changed a private space's channel servers: register the
+        # channel there (only there) and re-grant the members.
+        gfs_server_selection.attach_channel_hook(gfs_channels.on_servers_changed)
         space_public_outbound = SpacePublicOutbound(
             bus=bus,
             space_repo=space_repo,

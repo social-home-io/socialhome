@@ -12,6 +12,10 @@
  * - Everyone else sees the owner's signed list read-only
  *   (``space.gfs_servers``), with a hint for each GFS their own household
  *   isn't connected to.
+ * - A PRIVATE space whose owner turned the GFS on (``private_gfs``) is
+ *   never listed: it shows the GFSs carrying its private channel,
+ *   read-only, with no public links (the owner picks them under the GFS
+ *   toggle in the settings above).
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
@@ -362,6 +366,64 @@ export function SpaceGfsServersReadOnly({ space }: { space: Space }): JSX.Elemen
   )
 }
 
+/** A private space using the GFS: its channel servers are known. */
+export function hasChannelServersToShow(space: Space): boolean {
+  return space.space_type === 'private'
+    && Boolean(space.features?.private_gfs)
+    && (space.gfs_servers?.length ?? 0) > 0
+}
+
+/** "Private channel on" — a private space's channel GFSs, read-only. Never
+ *  a public link: nothing of a private space is public anywhere. */
+export function SpaceChannelServers({
+  space,
+  isOwner,
+}: {
+  space: Space
+  isOwner: boolean
+}): JSX.Element | null {
+  if (!hasChannelServersToShow(space)) return null
+  const servers: SpaceGfsServer[] = space.gfs_servers ?? []
+  const isAdmin = currentUser.value?.is_admin === true
+  return (
+    <div class="sh-gfs-listing" data-testid="gfs-channel-servers">
+      <p class="sh-gfs-listing__label">
+        <span aria-hidden="true">🛰️</span> {t('space.private_gfs.channels_legend')}
+      </p>
+      <p class="sh-muted" style={{ marginTop: 0 }}>{t('space.gfs_listing.channel_intro')}</p>
+      <ul class="sh-federation-list sh-gfs-listing__list">
+        {servers.map(s => (
+          <li key={s.inbox_url} class="sh-federation-row">
+            <div class="sh-connection-info sh-gfs-listing__info">
+              <strong>{s.display_name}</strong>
+              <span class="sh-muted">{gfsHost(s.inbox_url)}</span>
+            </div>
+            {s.connected ? (
+              <span class="sh-text-success sh-gfs-listing__state">
+                ✓ {t('space.gfs_listing.connected')}
+              </span>
+            ) : (
+              <p class="sh-muted sh-gfs-listing__hint" data-testid="gfs-connect-hint">
+                {isAdmin ? (
+                  <>
+                    {t('space.gfs_listing.connect_hint', { name: s.display_name })}{' '}
+                    <a href={addBase('/connections')}>{t('space.gfs_listing.connect_link')}</a>
+                  </>
+                ) : t('space.gfs_listing.connect_hint_member', { name: s.display_name })}
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+      {isOwner && (
+        <p class="sh-muted sh-gfs-listing__hint" data-testid="gfs-channel-owner-hint">
+          {t('space.gfs_listing.channel_owner_hint')}
+        </p>
+      )}
+    </div>
+  )
+}
+
 /**
  * The settings section. ``null`` when there's nothing to say (a private /
  * household space, or a global one with no list known yet for a member).
@@ -382,6 +444,10 @@ export function SpaceGfsListing({
         {t('space.gfs_listing.public_note')}
       </p>
     )
+  } else if (space.space_type === 'private' && space.features?.private_gfs) {
+    body = hasChannelServersToShow(space)
+      ? <SpaceChannelServers space={space} isOwner={isOwner && !isRemoteSpace} />
+      : null
   } else if (space.space_type !== 'global') {
     body = isRemoteSpace ? null : (
       <p class="sh-muted" data-testid="gfs-publish-tier-note">
@@ -397,7 +463,10 @@ export function SpaceGfsListing({
   return (
     <section class="sh-gfs-listing-section" aria-labelledby={`gfs-listing-${space.id}`}>
       <hr />
-      <h3 tabIndex={-1} id={`gfs-listing-${space.id}`}>{t('space.federation')}</h3>
+      <h3 tabIndex={-1} id={`gfs-listing-${space.id}`}>
+        {/* A private space is never "listed": its section is just "GFS". */}
+        {space.space_type === 'private' ? t('space.private_gfs.legend') : t('space.federation')}
+      </h3>
       {body}
     </section>
   )
