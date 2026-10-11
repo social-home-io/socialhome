@@ -1542,7 +1542,8 @@ plain hex (`dashboard/contrast.py`) and lands only as a class (`.kN` sets
 only per colour scheme where it reaches 4.5:1 on the page backgrounds;
 otherwise the built-in high-contrast accent stays. Timeline positions are
 whole-percent classes (`.x-N` / `.w-N`) in the static stylesheet; a bar
-too narrow for its title shows an icon (forced below 10 % of the day, else
+too narrow for its title shows an icon (`dashboard/icons.py`: its leading
+emoji or a keyword guess, else 🔹; forced below 10 % of the day, else
 by a container query on its real width). Home also renders the day as a
 chronological list, which a media query swaps in for the lanes under
 600 px (the server can't know the width). On a person page events are
@@ -1574,9 +1575,33 @@ page shows only a dim clock, the date and the first item of the morning
 (today's next before noon, tomorrow's first from noon on); the day view is
 rendered too but hidden, and a tap shows it — rail and lock button
 included — for 60 s. Without JS the page reloads every two minutes
-(`<noscript>` refresh). A person in picture view gets the reader page
-behind a template seam (`_person_picture.html.j2`) until the picture view
-lands.
+(`<noscript>` refresh).
+
+**Picture view.** A person with `picture_view` (the admin's per-person
+choice; default on for child-protected minors, `picture_effective`) gets
+`_person_picture.html.j2` instead of the reader page — no words except
+names, no digits, every tile's real title and time in its `aria-label`.
+`dashboard/picture.py` builds it from the same `PersonSnapshot`: hand
+angles from the household wall time; the NEXT *wedge*, a time-timer
+sector of the clock face from the minute hand clockwise to where it will
+be when NEXT starts (real minutes, computed in UTC so a DST switch can't
+stretch it; capped at a full disc from 60 minutes out, repeated as a pie
+on the NEXT card); the day's items bucketed into four day parts (🌅 < 12,
+☀️ < 17, 🌇 < 20, 🌙) with past / running / cancelled states; tomorrow as
+"sleeps"; today's jobs and who's home vs away. The clock is inline SVG
+drawn only with presentation attributes (the CSP forbids `style=`);
+`dashboard.js` turns the hands once a minute with `setAttribute("transform",
+…)` using the same formula, and the wedge — like a relative time — is
+`data-rel`, hidden while the data is stale. Icons come from
+`dashboard/icons.py`: a lesson's own timetable icon, a title's leading
+emoji, else a keyword guess over normalised words (casefolded, diacritics
+stripped) in en / de / es / fr / nl that mirrors the SPA's `suggestIcon`
+— whole words for short keywords, word starts for 4 letters, anywhere in
+a word from 5 letters so German compounds match — else a neutral 🔹.
+Home's narrow lane bars use the same guess. Picture mode is part of the
+view key (it changes the rail and the night view), so toggling it reloads
+the tablet; night mode for a picture person is the analog clock, 🌙 / 🌅
+and the morning's first icon.
 
 ## Where things live
 

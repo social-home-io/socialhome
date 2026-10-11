@@ -110,14 +110,41 @@ dashboard **address** — it always wins over the guess.
   columns are left out; a day with nothing on it says "Nothing planned
   today 🎈". With more than six people — and on a phone — the lanes become
   one list in time order; with one person there is no rail and no "who's
-  home". A bar too short for its title shows just an icon. When nothing is
+  home". A bar too short for its title shows just an icon (its leading
+  emoji, a guess from its words, else 🔹). When nothing is
   left today, the "Next" box shows tomorrow's first item instead.
 - **A person** (tap their face in the rail): what they're doing now and
   next, their school day with rooms and teachers (a cancelled lesson is
   struck through *and* says "Cancelled"), today's and tomorrow's plans
   and their chores. After the "Back to Home after" time without a touch
   (setting `idle_return_minutes`, default 3, `0` = never) the tablet goes
-  back to Home. People set to picture view see the same page for now.
+  back to Home.
+- **A person in picture view** — for children who can't read yet. The
+  page has no words except names and no digits: a big analog clock with
+  the real time; a **NOW** card (thick frame) ➜ a **NEXT** card, each one
+  big emoji; a coloured wedge on the clock (and a small pie on the NEXT
+  card) shows the time left until NEXT starts — like a kitchen "time
+  timer", it shrinks as the minute hand eats it and is a full disc from
+  an hour out. Under it **my day**: every event and lesson as an emoji
+  tile under 🌅 morning, ☀️ afternoon, 🌇 evening and 🌙 night — past ones
+  faded, the running one framed, a cancelled lesson grey with a big ✕.
+  Then tomorrow (one 🌙 per sleep, then tomorrow's first things — 🎒 for
+  school), today's jobs (emoji with ☐ / ✓) and who's home (faces under
+  🏠 and 🚗). An empty day is one big 🎈. At night it shows the analog
+  clock, 🌙 and the icon of the morning's first thing. The icon is the
+  lesson's own timetable icon, else the emoji a title starts with
+  ("🏊 Swimming"), else a guess from the title's words in English,
+  German, Spanish, French or Dutch ("Zähneputzen" → 🦷), else a neutral
+  🔹 — start a title with an emoji to pick it yourself. Every tile still
+  tells a screen reader its real title and time.
+
+  Picture view is **on by default for child-protected minors** and off
+  for everyone else; an admin turns it on or off per person with
+  `PUT /api/admin/dashboard` and `{"people": {"<user_id>": {"picture":
+  true}}}` (`false` = reader page, `null` = back to the default). An open
+  tablet switches on its next refresh.
+  `GET /api/admin/dashboard` lists each person's stored `picture` and the
+  resolved `picture_effective`.
 - **Night** (between `night_start` and `night_end`, default 22:00–06:00):
   only a dim clock, the date and the first thing of the morning. Tap the
   screen to see everything (and the 🔒 button) for a minute.
