@@ -1585,7 +1585,18 @@ async def test_the_gps_fanout_skips_a_link_joined_seat_even_with_share_home_on(
     assert a.received == []
 
 
-async def test_both_households_log_the_successful_redeem(households, gfs, caplog):
+@pytest.mark.parametrize(
+    "issuer_commit_delay",
+    [0.0, 0.2],
+    ids=["as-scheduled", "issuer-commit-lags-the-redeemer"],
+)
+async def test_both_households_log_the_successful_redeem(
+    households,
+    gfs,
+    caplog,
+    monkeypatch,
+    issuer_commit_delay,
+):
     """A link redeem that WORKS leaves a record on both sides.
 
     Every failing outcome on this path already logs (a DENY, a rejected
@@ -1594,9 +1605,31 @@ async def test_both_households_log_the_successful_redeem(households, gfs, caplog
     link work?" had nothing to read in either household's log. The
     routing facts only — who, which space, which seat — never the token,
     which is a live bearer credential, and never the space name.
+
+    The two lines are written by two different tasks. The redeemer's is
+    logged before its Future resolves, so it is in by the time
+    ``redeem_invite_token`` returns. The issuer's is logged at the end of
+    its own push-leg task, AFTER the ACK went out and ``_commit_redeem``
+    ran — by design, the joiner holds the ACK before the issuer finishes
+    committing. Nothing ties that task to the redeemer's return, so the
+    test has to drain the relay before reading the issuer's record; the
+    ``issuer-commit-lags-the-redeemer`` case slows the issuer's commit to
+    pin that ordering down (it failed intermittently in full-suite runs).
     """
     a, b = households
     space, hint = await _mint_invite(b, gfs.url)
+    if issuer_commit_delay:
+        real_commit = SpaceInviteTokenRedeemCoordinator._commit_redeem
+
+        async def _slow_commit(self, res):
+            await asyncio.sleep(issuer_commit_delay)
+            await real_commit(self, res)
+
+        monkeypatch.setattr(
+            SpaceInviteTokenRedeemCoordinator,
+            "_commit_redeem",
+            _slow_commit,
+        )
 
     with caplog.at_level(
         logging.INFO, logger="socialhome.federation.invite_token_redeem"
@@ -1607,6 +1640,9 @@ async def test_both_households_log_the_successful_redeem(households, gfs, caplog
             issuer_instance_id=b.instance_id,
             bootstrap=hint,
         )
+        # The issuer logs from its push-leg task, which may still be
+        # committing the seat when the redeemer has already returned.
+        await gfs.drain()
 
     messages = [r.getMessage() for r in caplog.records]
     issuer_line = [
