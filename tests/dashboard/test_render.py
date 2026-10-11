@@ -53,7 +53,10 @@ def test_login_renders_form_in_locale(renderer):
     assert "Dashboard-Passwort" in html
     assert 'autocomplete="current-password"' in html
     assert 'name="keep"' in html and "checked" in html
-    assert 'href="/static/dashboard.css"' in html
+    assert (
+        '<link rel="stylesheet" href="/static/dashboard.css" '
+        'referrerpolicy="no-referrer">'
+    ) in html
     assert "<style" not in html  # no inline styles → no CSP hashes needed
 
 

@@ -251,14 +251,15 @@ class EnterView(_DashboardView):
         if not isinstance(token, str) or not token:
             return redirect("/login")
         key = self.client_key
-        wait = self.auth.begin_attempt(key)
+        # Per-client limit only: see ``DashboardAuth.begin_attempt``.
+        wait = self.auth.begin_attempt(key, count_global=False)
         if wait:
             # Don't even try the token — a locked-out client can't spend it.
             locale = (await self.settings.get()).locale
             return await self.too_many_tries(locale=locale, wait=wait)
         if not await self.settings.consume_setup_token(token):
             return redirect("/login")
-        self.auth.record_success(key)
+        self.auth.record_success(key, count_global=False)
         response = redirect("/")
         set_session_cookie(
             response, self.request, await self.auth.issue(True), keep=True
@@ -305,6 +306,10 @@ class StaticView(_DashboardView):
         return web.Response(
             body=asset.body, content_type=asset.content_type, headers=headers
         )
+
+    async def head(self) -> web.Response:
+        # aiohttp sends the GET response's headers without its body.
+        return await self.get()
 
 
 def register_routes(app: web.Application) -> None:

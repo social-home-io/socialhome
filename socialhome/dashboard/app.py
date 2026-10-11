@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 __all__ = [
     "DASHBOARD_CSP_DIRECTIVES",
     "MAX_BODY_BYTES",
+    "DEFAULT_LOCAL_HOSTNAMES",
     "PUBLIC_PATHS",
     "ExtraHosts",
     "build_dashboard_app",
@@ -51,6 +52,9 @@ __all__ = [
 #: Extra host names the dashboard answers to (e.g. an admin-set address):
 #: a fixed iterable, or an async callable read per request.
 ExtraHosts = Iterable[str] | Callable[[], Awaitable[frozenset[str]]]
+
+#: Single-label names always accepted in ``Host`` (the HA OS default).
+DEFAULT_LOCAL_HOSTNAMES = frozenset({"homeassistant"})
 
 #: Home-network name suffixes always accepted in ``Host``.
 LOCAL_HOST_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa")
@@ -126,9 +130,11 @@ def host_allowed(host: str, extra: frozenset[str]) -> bool:
     """May the dashboard answer a request whose ``Host`` is ``host``?
 
     The port is ignored. Accepted: IP literals (IPv6 bracketed),
-    ``localhost``, single-label names (``homeassistant``), home-network
-    suffixes (:data:`LOCAL_HOST_SUFFIXES`) and the names in ``extra``
-    (already normalised). Everything else is refused, so a public DNS
+    ``localhost``, home-network suffixes (:data:`LOCAL_HOST_SUFFIXES`) and
+    the names in ``extra`` (already normalised: the machine's own
+    hostnames, ``homeassistant`` and any admin-set address). Other
+    single-label names are refused — that includes the decimal / hex
+    IPv4 spellings (``2130706433``). Everything else is refused, so a public DNS
     name rebound to the tablet's LAN address can't reach the dashboard
     with the victim browser's cookie.
     """
@@ -151,7 +157,7 @@ def host_allowed(host: str, extra: frozenset[str]) -> bool:
     name = name.rstrip(".")
     if not name:
         return False
-    if name in extra:
+    if name == "localhost" or name in DEFAULT_LOCAL_HOSTNAMES or name in extra:
         return True
     try:
         ipaddress.ip_address(name)
@@ -162,18 +168,19 @@ def host_allowed(host: str, extra: frozenset[str]) -> bool:
     labels = name.split(".")
     if not all(_LABEL.fullmatch(label) for label in labels):
         return False
-    return len(labels) == 1 or name.endswith(LOCAL_HOST_SUFFIXES)
+    return len(labels) > 1 and name.endswith(LOCAL_HOST_SUFFIXES)
 
 
-def _build_host_middleware(extra_hosts: ExtraHosts):
+def _build_host_middleware(extra_hosts: ExtraHosts, local_hostnames: Iterable[str]):
+    local = frozenset(_normalise_host(h) for h in local_hostnames)
     if callable(extra_hosts):
         dynamic = extra_hosts
 
         async def allowed_extra() -> frozenset[str]:
-            return frozenset(_normalise_host(h) for h in await dynamic())
+            return local | frozenset(_normalise_host(h) for h in await dynamic())
 
     else:
-        fixed = frozenset(_normalise_host(h) for h in extra_hosts)
+        fixed = local | frozenset(_normalise_host(h) for h in extra_hosts)
 
         async def allowed_extra() -> frozenset[str]:
             return fixed
@@ -247,8 +254,14 @@ def build_dashboard_app(
     renderer: DashboardRenderer,
     household_name: HouseholdNameFn,
     extra_hosts: ExtraHosts = (),
+    local_hostnames: frozenset[str] = frozenset(),
 ) -> web.Application:
     """A fresh dashboard application (one per :meth:`DashboardServer.start`).
+
+    ``local_hostnames`` are this machine's own names (the caller resolves
+    them once, e.g. from :func:`socket.gethostname`); with ``homeassistant``
+    and ``extra_hosts`` they are the only single-label ``Host`` values the
+    dashboard answers.
 
     Does no filesystem work — ``renderer`` (templates + static files) is
     built once by the caller at wiring time — so it is safe to call from
@@ -257,7 +270,7 @@ def build_dashboard_app(
     app = web.Application(
         client_max_size=MAX_BODY_BYTES,
         middlewares=[
-            _build_host_middleware(extra_hosts),
+            _build_host_middleware(extra_hosts, local_hostnames),
             build_body_size_middleware(
                 json_max_bytes=MAX_BODY_BYTES, media_max_bytes=MAX_BODY_BYTES
             ),

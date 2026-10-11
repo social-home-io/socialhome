@@ -357,10 +357,23 @@ def test_host_allowed(host):
         "-bad.local",
         ":8100",
         "evil.com.",
+        # Arbitrary single-label names are no longer accepted …
+        "intranet",
+        "router:8100",
+        # … which also refuses the decimal / hex single-label IPv4 forms.
+        "2130706433",
+        "0x7f000001",
     ],
 )
 def test_host_refused(host):
     assert host_allowed(host, frozenset()) is False
+
+
+def test_host_local_machine_names():
+    local = frozenset({"nas-box"})
+    assert host_allowed("nas-box:8100", local) is True
+    assert host_allowed("NAS-BOX", local) is True
+    assert host_allowed("other-box", local) is False
 
 
 def test_host_extra_allowed():
@@ -394,6 +407,32 @@ async def test_foreign_host_is_421(client):
 async def test_local_hosts_are_served(client, host):
     resp = await client.get("/login", headers={"Host": host}, allow_redirects=False)
     assert resp.status == 200
+
+
+async def test_local_hostnames_param(aiohttp_client, settings_service, auth):
+    app = build_dashboard_app(
+        settings_service=settings_service,
+        auth=auth,
+        renderer=RENDERER,
+        household_name=_name,
+        local_hostnames=frozenset({"Kitchen-Pi"}),
+    )
+    client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+    ok = await client.get("/healthz", headers={"Host": "kitchen-pi:8100"})
+    assert ok.status == 200
+    ha = await client.get("/healthz", headers={"Host": "homeassistant:8100"})
+    assert ha.status == 200
+    bad = await client.get("/healthz", headers={"Host": "intranet"})
+    assert bad.status == 421
+
+
+async def test_static_head(client):
+    resp = await client.head("/static/dashboard.css")
+    assert resp.status == 200
+    assert resp.headers["ETag"] == RENDERER.static_asset("dashboard.css").etag
+    assert resp.headers["Content-Type"].startswith("text/css")
+    assert await resp.read() == b""
+    assert (await client.head("/static/nope.css")).status == 404
 
 
 @pytest.mark.parametrize("kind", ["iterable", "callable"])

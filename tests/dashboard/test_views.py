@@ -347,6 +347,29 @@ async def test_global_brake_spares_signed_in_tablets(client, auth):
     assert resp.status == 200
 
 
+async def test_enter_failures_do_not_trip_the_global_brake(client, auth):
+    # 40 setup-link failures from many addresses (8 each would lock a
+    # client, so spread them out: the per-client limit is 5).
+    for n in range(40):
+        assert auth.begin_attempt(f"10.3.{n}.1", count_global=False) == 0
+    for _ in range(4):
+        assert (await _enter(client, "guess")).headers["Location"] == "/login"
+    assert (await _login(client)).status == 303
+
+
+async def test_global_brake_does_not_block_a_valid_setup_link(
+    client, auth, settings_service
+):
+    for n in range(31):
+        auth.begin_attempt(f"10.0.{n}.1")
+    assert (await _login(client)).status == 429
+    token = await settings_service.issue_setup_token(actor_is_admin=True)
+    resp = await _enter(client, token)
+    assert resp.status == 303
+    assert resp.headers["Location"] == "/"
+    assert COOKIE_NAME in resp.cookies
+
+
 async def test_login_reads_settings_once(client):
     with patch.object(
         DashboardSettingsService,

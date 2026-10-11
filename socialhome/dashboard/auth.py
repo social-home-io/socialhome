@@ -259,8 +259,8 @@ class DashboardAuth:
             )
         return max(1, math.ceil(stamps[0] + THROTTLE_WINDOW_S - now))
 
-    def _remaining(self, key: str, now: float) -> int:
-        wait = self._global_remaining(now)
+    def _remaining(self, key: str, now: float, *, count_global: bool = True) -> int:
+        wait = self._global_remaining(now) if count_global else 0
         stamps = self._live(key, now)
         if stamps is not None and len(stamps) >= THROTTLE_MAX_FAILURES:
             wait = max(wait, math.ceil(stamps[0] + THROTTLE_WINDOW_S - now), 1)
@@ -270,15 +270,20 @@ class DashboardAuth:
         """Seconds until ``key`` may try again (``0`` = allowed now)."""
         return self._remaining(key, self._clock())
 
-    def begin_attempt(self, key: str) -> int:
+    def begin_attempt(self, key: str, *, count_global: bool = True) -> int:
         """Start a sign-in attempt for ``key``.
 
         Returns ``0`` when the attempt may go ahead — it is then counted
         as a failure until :meth:`record_success` — else the seconds to
         wait (nothing is counted).
+
+        ``count_global=False`` (the 256-bit setup link) uses only the
+        per-client limit: it neither feeds nor obeys the global brake, so
+        cheap token guesses can't lock everyone out of password sign-in
+        and a tripped brake can't block pairing a tablet.
         """
         now = self._clock()
-        wait = self._remaining(key, now)
+        wait = self._remaining(key, now, count_global=count_global)
         if wait:
             return wait
         stamps = self._live(key, now)
@@ -288,13 +293,17 @@ class DashboardAuth:
             stamps = deque(maxlen=THROTTLE_MAX_FAILURES)
             self._failures[key] = stamps
         stamps.append(now)
-        self._global.append(now)
+        if count_global:
+            self._global.append(now)
         return 0
 
-    def record_success(self, key: str) -> None:
-        """The attempt was right: forget ``key``'s failures."""
+    def record_success(self, key: str, *, count_global: bool = True) -> None:
+        """The attempt was right: forget ``key``'s failures.
+
+        Pass the same ``count_global`` as the matching :meth:`begin_attempt`.
+        """
         self._failures.pop(key, None)
-        if self._global:
+        if count_global and self._global:
             self._global.pop()
 
     @property

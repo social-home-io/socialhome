@@ -301,6 +301,30 @@ def test_success_does_not_feed_the_global_brake(auth):
     assert auth.begin_attempt("another") == 0
 
 
+def test_setup_link_attempts_skip_the_global_window(auth):
+    """``/enter`` tokens are 256-bit: per-client limits suffice, and cheap
+    token guesses must neither trip nor be blocked by the global brake."""
+    for n in range(40):
+        assert auth.begin_attempt(f"10.1.{n}.1", count_global=False) == 0
+    assert auth.begin_attempt("192.168.1.2") == 0  # login brake not tripped
+    for n in range(31):
+        auth.begin_attempt(f"10.2.{n}.1")
+    assert auth.begin_attempt("192.168.1.3") > 0  # login brake tripped …
+    assert auth.begin_attempt("192.168.1.4", count_global=False) == 0  # … not /enter
+    # The per-client limit still applies to setup-link attempts.
+    for _ in range(4):
+        auth.begin_attempt("192.168.1.4", count_global=False)
+    assert auth.begin_attempt("192.168.1.4", count_global=False) > 0
+
+
+def test_setup_link_success_leaves_the_global_window_alone(auth):
+    for n in range(31):
+        auth.begin_attempt(f"10.2.{n}.1")
+    auth.begin_attempt("tablet", count_global=False)
+    auth.record_success("tablet", count_global=False)
+    assert auth.begin_attempt("192.168.1.3") > 0  # still tripped
+
+
 # ─── key cap ─────────────────────────────────────────────────────────────
 
 
