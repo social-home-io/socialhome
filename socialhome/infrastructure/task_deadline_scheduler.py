@@ -1,8 +1,9 @@
 """Periodic deadline notifier for tasks (§17.2 / §23.54).
 
-Fires :class:`TaskDeadlineDue` for every task whose ``due_date`` is
-today (or earlier, and not yet completed) that we haven't already
-notified on that specific date. The repo's
+Fires :class:`TaskDeadlineDue` for every open task whose ``due_date``
+is today — the household-local date (``HouseholdPreferences.tz``) —
+that we haven't already notified on that specific date. The sweep runs
+every few minutes, so a task notifies shortly after local midnight. The repo's
 ``task_deadline_notifications`` table provides the dedupe key
 ``(task_id, due_date)`` so a restart never fires duplicates.
 
@@ -20,11 +21,13 @@ from typing import TYPE_CHECKING
 
 from ..domain.events import TaskDeadlineDue
 from ..domain.task import TaskStatus
+from ..utils.timezones import DEFAULT_TZ, local_date
 
 if TYPE_CHECKING:
     from ..db import AsyncDatabase
     from ..infrastructure.event_bus import EventBus
     from ..repositories.task_repo import AbstractTaskRepo
+    from ..services.preferences_service import PreferencesService
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ DEADLINE_NOTIF_RETENTION_DAYS = 30
 class TaskDeadlineScheduler:
     """Background task that publishes ``TaskDeadlineDue`` events."""
 
-    __slots__ = ("_repo", "_db", "_bus", "_interval", "_task", "_stop")
+    __slots__ = ("_repo", "_db", "_bus", "_preferences", "_interval", "_task", "_stop")
 
     def __init__(
         self,
@@ -44,11 +47,13 @@ class TaskDeadlineScheduler:
         db: "AsyncDatabase",
         bus: "EventBus",
         *,
+        preferences: "PreferencesService | None" = None,
         interval_seconds: float = 300.0,  # 5 min
     ) -> None:
         self._repo = repo
         self._db = db
         self._bus = bus
+        self._preferences = preferences
         self._interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -84,9 +89,23 @@ class TaskDeadlineScheduler:
             except asyncio.TimeoutError:
                 continue
 
-    async def tick_once(self, *, today: date | None = None) -> int:
-        """Run one sweep. Returns the count of events published."""
-        today = today or datetime.now(timezone.utc).date()
+    async def tick_once(
+        self,
+        *,
+        today: date | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        """Run one sweep. Returns the count of events published.
+
+        "Today" is the household-local date (``HouseholdPreferences.tz``),
+        not the UTC one — otherwise a household far from UTC is told
+        about tomorrow's tasks in its evening (west) or about today's
+        half a day late (east). The dedupe + prune keys use the same
+        household date, so each task notifies once per local day.
+        """
+        if today is None:
+            instant = now or datetime.now(timezone.utc)
+            today = local_date(instant, await self._household_tz())
         due_today = await self._repo.list_due_on(today)
         fired = 0
         for task in due_today:
@@ -104,6 +123,15 @@ class TaskDeadlineScheduler:
             fired += 1
         await self._prune_old(today)
         return fired
+
+    async def _household_tz(self) -> str:
+        if self._preferences is None:
+            return DEFAULT_TZ
+        try:
+            return (await self._preferences.get_household()).tz
+        except Exception as exc:  # defensive — fall back to UTC
+            log.warning("task-deadline: household tz failed: %s", exc)
+            return DEFAULT_TZ
 
     async def _prune_old(self, today: date) -> None:
         """Drop dedupe rows older than the retention window (best-effort)."""
