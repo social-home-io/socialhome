@@ -255,7 +255,9 @@ class SpacePostOutbound:
                 target,
             )
 
-    async def _schedule_post_edit(self, space_id: str, post: Post) -> None:
+    async def _schedule_post_edit(
+        self, space_id: str, post: Post, *, edited_at: str | None = None
+    ) -> None:
         """The author's edit as a signed snapshot of the edited post plus its
         signed ``edited_at`` (receivers keep the newest). Never raises."""
         assert self._member_gfs is not None
@@ -273,7 +275,7 @@ class SpacePostOutbound:
                 author_identity_anchor=author.identity_anchor,
                 item_type=ITEM_TYPE_POST_EDIT,
                 item_target=post.id,
-                edited_at=datetime.now(timezone.utc).isoformat(),
+                edited_at=edited_at or datetime.now(timezone.utc).isoformat(),
             )
             self._member_gfs.schedule_item(
                 space_id, post.author, ITEM_TYPE_POST_EDIT, inner
@@ -525,11 +527,15 @@ class SpacePostOutbound:
         if event.post.linked_event_id is not None:
             return
         post = event.post
+        # One stamp for both paths: receivers order a post's edits by it
+        # (last writer wins), whichever path delivers — or replays — them.
+        edited_at = datetime.now(timezone.utc).isoformat()
         payload = {
             "id": post.id,
             "post_id": post.id,
             "space_id": event.space_id,
             "content": post.content,
+            "edited_at": edited_at,
         }
         if event.actor_user_id:
             # v_42: the editor (the author, or a moderator / admin).
@@ -551,7 +557,7 @@ class SpacePostOutbound:
         if event.actor_user_id == post.author and await self._member_publishable(
             event.space_id
         ):
-            await self._schedule_post_edit(event.space_id, post)
+            await self._schedule_post_edit(event.space_id, post, edited_at=edited_at)
 
     async def _on_post_deleted(self, event: PostDeleted) -> None:
         if not event.space_id:
@@ -648,6 +654,8 @@ class SpacePostOutbound:
             "post_id": event.post_id,
             "space_id": event.space_id,
             "content": c.content,
+            # Receivers order a comment's edits by it (last writer wins).
+            "edited_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
             await self._federation.broadcast_to_space_members(

@@ -338,6 +338,7 @@ from .domain.conversation import SystemChatScope
 from .domain.events import PeerProtoVersionRaised
 from .domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
 from .domain.space import ContentAction
+from .federation.pending_parent_buffer import PendingParentBuffer
 from .federation.pending_seat_buffer import PendingSeatBuffer
 from .federation.space_authorship import SpaceAuthorship
 from .federation.sync.space.resume import SpaceSyncResumeProvider
@@ -1408,6 +1409,13 @@ def _wire_federation_stack(
         # The senders' proto_version: a v_42 sender always names its actor.
         federation_repo=federation_repo,
     )
+    # A comment / reaction / edit / delete that overtook the post (or the
+    # parent comment) it references on another delivery path waits here and
+    # replays when the parent lands — shared by the federated handlers and
+    # the GFS member-publish door (``SpacePublicInbound``).
+    # Subscribed to the bus late (``attach_bus`` below the outbound / realtime
+    # wiring), so a post's own fan-out runs before the replays it releases.
+    pending_parent_buffer = PendingParentBuffer()
 
     inbound_service = FederationInboundService(
         bus=bus,
@@ -1438,6 +1446,7 @@ def _wire_federation_stack(
         # profile / role-change handlers find a remote member's seat.
         space_remote_member_repo=space_remote_member_repo,
         pending_seat_buffer=pending_seat_buffer,
+        pending_parent_buffer=pending_parent_buffer,
         authorship_federation_repo=federation_repo,
         # A host's cover / icon change ships the image; members store it.
         space_cover_repo=space_cover_repo,
@@ -2000,6 +2009,7 @@ def _wire_federation_stack(
         sync_manager=sync_manager,
         inbound_service=inbound_service,
         space_authorship=space_authorship,
+        pending_parent_buffer=pending_parent_buffer,
         pairing_relay_queue=pairing_relay_queue,
         household_instance_ban_repo=household_instance_ban_repo,
         relay_policy=relay_policy,
@@ -3699,6 +3709,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # against their own roster and access levels too.
         if space_public_inbound is not None:
             space_public_inbound.attach_authorship(fed.space_authorship)
+            space_public_inbound.attach_pending_parents(fed.pending_parent_buffer)
         nonlocal moderation_expiry_scheduler
         moderation_expiry_scheduler = ModerationExpiryScheduler(space_moderation)
         await moderation_expiry_scheduler.start()
@@ -3951,6 +3962,9 @@ def create_app(config: Config | None = None) -> web.Application:
         fed.inbound_service.attach_realtime(realtime_service)
         # §CP.F2: guardian blocks on inbound DMs and DM history sync.
         fed.inbound_service.attach_child_protection(child_protection_service)
+        # Last on the post / comment events: the parent's own fan-out and
+        # realtime frame go first, then the items it releases replay.
+        fed.pending_parent_buffer.attach_bus(bus)
         app[K.dm_history_receiver_key].attach_child_protection(child_protection_service)
         # Personal calendar federation (§23.60). Cross-household invites
         # ride on regular send_event envelopes; attendee → instance

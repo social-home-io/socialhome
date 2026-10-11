@@ -68,6 +68,8 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.space_mentions import SpaceMentionResolver
 from socialhome.services.space_crypto_service import SpaceContentEncryption
+from socialhome.federation.pending_parent_buffer import PendingParentBuffer
+from socialhome.services.space_item_author import build_signed_item_inner
 from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
 from socialhome.writer_cert import bind_writer_users, sign_writer_cert
@@ -1956,3 +1958,49 @@ async def test_an_approved_post_after_its_removal_stays_removed(env):
     _space, row = await env["post_repo"].get(post.id)
     assert row.deleted
     assert env["events"] == []
+
+
+# ── An item that overtook its post ─────────────────────────────────────────
+
+
+def _early_comment(env, post_id: str = "post-late") -> dict:
+    return build_signed_item_inner(
+        item_type="comment",
+        item_target=mint_owner_bound_id(
+            SPACE_COMMENT_KIND, space_id="sp-1", owner_user_id=env["author_user_id"]
+        ),
+        space_id="sp-1",
+        post_id=post_id,
+        author_user_id=env["author_user_id"],
+        author_username="bob",
+        author_pk=env["author_kp"].public_key,
+        author_identity_seed=env["author_kp"].private_key,
+        origin_instance_id=env["author_origin"],
+        ts=datetime.now(timezone.utc).isoformat(),
+        comment_type="text",
+        content="early",
+    )
+
+
+async def test_an_early_comment_without_a_buffer_is_dropped(item_env, caplog):
+    inner = _early_comment(item_env)
+    with caplog.at_level(logging.INFO):
+        await item_env["inbound"].handle(
+            await _item_frame(item_env, inner=inner, item_type="comment")
+        )
+    assert await item_env["post_repo"].get_comment(inner["item_target"]) is None
+    assert any("dropped" in r.getMessage() for r in caplog.records)
+
+
+async def test_an_early_comment_is_held_and_replayed_with_its_post(item_env):
+    buffer = PendingParentBuffer()
+    buffer.attach_bus(item_env["bus"])
+    item_env["inbound"].attach_pending_parents(buffer)
+    inner = _early_comment(item_env, post_id="post-1")
+    await item_env["inbound"].handle(
+        await _item_frame(item_env, inner=inner, item_type="comment")
+    )
+    assert len(buffer) == 1
+    await item_env["inbound"].handle(await _item_frame(item_env))  # post-1
+    assert await item_env["post_repo"].get_comment(inner["item_target"]) is not None
+    assert len(buffer) == 0

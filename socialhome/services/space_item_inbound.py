@@ -45,8 +45,14 @@ federated copy, the retry queues and space sync interleave with it.
   duplicate ``reaction_add`` from a second connection server, a queued
   copy, or one arriving after a restart cannot undo a later remove.
 
-A comment, reaction or edit whose post is not held here yet is dropped:
-the federated copy (members) or a later space sync carries it.
+A comment, reaction, early comment delete or authority comment removal
+whose post is **not held here at all** — and a reply whose parent comment
+is not — raises :class:`~socialhome.federation.pending_parent_buffer.
+AwaitingParent`: the caller (:class:`~socialhome.services.
+space_public_inbound.SpacePublicInbound`) holds the whole frame in the
+bounded :class:`~socialhome.federation.pending_parent_buffer.
+PendingParentBuffer` and re-runs it, every check included, when the parent
+lands. A post held here as a deleted row (a tombstone) stays a refusal.
 
 **Authority removals** (:meth:`SpaceItemInbound.apply_authority_removal`)
 come over the host relay, not ``space_item``: a seed holder's notice that a
@@ -87,6 +93,11 @@ from ..domain.space_item import (
     stamp_to_db,
 )
 from ..domain.writer_cert import WRITER_SCOPE_WRITE
+from ..federation.pending_parent_buffer import (
+    PARENT_COMMENT,
+    PARENT_POST,
+    AwaitingParent,
+)
 from ..federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -176,7 +187,11 @@ class SpaceItemInbound:
         authorship: "SpaceAuthorship | None",
     ) -> bool:
         """Apply one verified generic item. ``True`` when it changed
-        something here; every refusal is logged."""
+        something here; every refusal is logged.
+
+        Raises :class:`AwaitingParent` when the item's post (or a reply's
+        parent comment) is not held here at all — the caller holds the
+        frame and re-runs it when the parent lands."""
         stamp = item_stamp(inner.get("ts"))
         if stamp is None:
             log.warning(
@@ -234,6 +249,18 @@ class SpaceItemInbound:
             return None
         return got[1]
 
+    async def _await_post(self, item: _Item, *, subscriber_ok: bool) -> None:
+        """Raise :class:`AwaitingParent` when ``item``'s post is not held
+        here at all — once the author's seat admits the item, so a write
+        that would be refused anyway never takes a slot in the buffer. A
+        post held deleted, or in another space, returns: the caller refuses
+        it."""
+        if not item.post_id or await self._posts.get(item.post_id) is not None:
+            return
+        if not await self._seat_ok(item, subscriber_ok=subscriber_ok):
+            return
+        raise AwaitingParent(PARENT_POST, item.post_id)
+
     async def _comment_here(self, comment_id: str, item: _Item) -> Comment | None:
         """``comment_id`` iff its post lives in this space — a held comment
         of another space is refused (logged) as ``None``."""
@@ -274,10 +301,14 @@ class SpaceItemInbound:
             return False
         if edited and ctype is not CommentType.TEXT:
             return False
+        await self._await_post(
+            item, subscriber_ok=item.space.features.allow_subscriber_comment
+        )
         post = await self._post_here(item.post_id, item)
         if post is None or post.deleted:
             log.info(
-                "space_item: comment %s on a post not held here (or deleted) — dropped",
+                "space_item: comment %s on a post of another space (or deleted) — "
+                "dropped",
                 cid,
             )
             return False
@@ -293,6 +324,13 @@ class SpaceItemInbound:
             )
             return False
         parent = item.inner.get("parent_id")
+        if (
+            isinstance(parent, str)
+            and parent
+            and await self._posts.get_comment(parent) is None
+        ):
+            # A reply that overtook its parent comment.
+            raise AwaitingParent(PARENT_COMMENT, parent)
         comment = Comment(
             id=cid,
             post_id=post.id,
@@ -428,11 +466,12 @@ class SpaceItemInbound:
                 cid,
             )
             return False
+        await self._await_post(item, subscriber_ok=True)
         post = await self._post_here(item.post_id, item)
         if post is None:
             log.info(
-                "space_item: early delete of comment %s on a post not held here — "
-                "dropped",
+                "space_item: early delete of comment %s on a post of another space "
+                "— dropped",
                 cid,
             )
             return False
@@ -525,7 +564,10 @@ class SpaceItemInbound:
         create is a duplicate on every path; a removal is final, so a
         duplicate changes nothing. The events it publishes carry the space's
         owner household as their origin: never fanned back out, never
-        credited to the remover (whom the notice does not name)."""
+        credited to the remover (whom the notice does not name).
+
+        Raises :class:`AwaitingParent` for a comment removal whose post is
+        not held here yet (the caller holds the notice until it lands)."""
         if removal.target == REMOVAL_TARGET_POST:
             return await self._remove_post(space, removal)
         return await self._remove_comment(space, removal)
@@ -567,9 +609,14 @@ class SpaceItemInbound:
     async def _remove_comment(self, space: "Space", removal: AuthorityRemoval) -> bool:
         cid = removal.item_id
         got = await self._posts.get(removal.post_id)
+        if got is None and removal.post_id:
+            # The removal overtook its post: wait for it, or the comment
+            # would show once the post and the comment land.
+            raise AwaitingParent(PARENT_POST, removal.post_id)
         if got is None or got[0] != space.id:
             log.info(
-                "space_item: removal of comment %s on a post not held here — dropped",
+                "space_item: removal of comment %s on a post of another space — "
+                "dropped",
                 cid,
             )
             return False
@@ -636,6 +683,7 @@ class SpaceItemInbound:
         if not await self._seat_ok(item, subscriber_ok=features.allow_subscriber_react):
             log.warning("space_item: reactor holds no reacting seat here — dropped")
             return False
+        await self._await_post(item, subscriber_ok=features.allow_subscriber_react)
         try:
             if added:
                 post = await self._posts.add_reaction(

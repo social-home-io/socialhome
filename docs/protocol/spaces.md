@@ -455,6 +455,38 @@ member household, not only on the host:
   when the seat lands (`SpaceRemoteSeatLive`). A user seated on *another*
   household, or one who was removed, is known, so that is always a
   refusal, never held.
+- **Items held for their parent.** A space's items travel several paths at
+  once (direct federation, `SPACE_ROUTED`, the host's relay, the v_49
+  member publish over one or more GFSs, §25.6 sync), so a
+  `SPACE_COMMENT_CREATED` often beats its post — or a reply its parent
+  comment, a `SPACE_COMMENT_UPDATED` / `_DELETED` its comment, a
+  `SPACE_POST_UPDATED` / `_DELETED` its post. When that parent is **absent**
+  here (no row at all), the write is held in a second bounded, expiring
+  buffer (`socialhome/federation/pending_parent_buffer.py`: 512 entries, at
+  most 128 and 512 KiB from any one sending household, 64 per parent, 64 KiB
+  per item, 4 MiB in all, 10 min; each entry is charged its payload plus a
+  fixed 512 B; both buffers share `socialhome/federation/bounded_hold.py`)
+  and replayed through the same post-decrypt gates and handlers
+  (`FederationService.replay_held`) when the parent lands
+  (`SpacePostCreated`, `SpacePostSynced`, `CommentAdded`, and
+  `SpaceCommentSynced` for a comment a §25.6 sync stored). Every held write
+  has passed the §24.11 gates (signature, writer household, ban, archive). A
+  **create** is held only after its claimed author is bound to the sender.
+  An **edit or delete** is held *before* its authorship check, because that
+  check needs the row's author and the row is what is missing — the replay
+  runs it, so a write the sender may not make is refused then. Replays drain
+  iteratively (a long reply chain never nests one replay inside another). A
+  parent held here deleted (a tombstone) or in another space is a refusal,
+  never held — a comment on a deleted post is refused outright; a write that
+  cannot be held (a cap hit) is refused as before, and a reply is never
+  stored without its parent comment; a parent that never arrives drops the
+  write when its entry expires (DEBUG, not WARNING).
+- **Edit order.** `SPACE_POST_UPDATED` and `SPACE_COMMENT_UPDATED` carry the
+  sender's `edited_at` (tz-aware ISO 8601, the same stamp the author's GFS
+  `post_edit` signs). Receivers apply an edit only over an older stored
+  stamp (last writer wins), using the payload's `edited_at`, else the
+  envelope's own `timestamp` from an older sender — never their own clock,
+  so a held edit replayed late cannot overwrite a newer one.
 
 Known edges of the snapshot, all self-limiting:
 

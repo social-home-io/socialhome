@@ -31,6 +31,11 @@ from socialhome.domain.events import (
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.space_item import AuthorityRemoval
+from socialhome.federation.pending_parent_buffer import (
+    PARENT_COMMENT,
+    PARENT_POST,
+    AwaitingParent,
+)
 from socialhome.federation.owner_bound_id import (
     SPACE_COMMENT_KIND,
     SPACE_POST_KIND,
@@ -209,13 +214,35 @@ async def test_a_comment_needs_an_id_bound_to_its_author(env, case):
     assert await env["posts"].get_comment(cid) is None
 
 
-async def test_a_comment_on_an_unknown_or_deleted_post_is_dropped(env):
+async def test_a_comment_on_an_unknown_post_awaits_it(env):
     inner = _inner(
         "comment", _cid(), "nope", comment_type="text", content="x", created_at=_ts(0)
     )
-    assert not await _apply(env, "comment", inner)
+    with pytest.raises(AwaitingParent) as wait:
+        await _apply(env, "comment", inner)
+    assert (wait.value.kind, wait.value.parent_id) == (PARENT_POST, "nope")
+
+
+async def test_a_comment_on_an_unknown_post_without_a_seat_is_not_held(env):
+    inner = _inner(
+        "comment", _cid(), "nope", comment_type="text", content="x", created_at=_ts(0)
+    )
+    assert not await _apply(
+        env, "comment", inner, member=True, authorship=_Seats(admits=False)
+    )
+
+
+async def test_a_comment_on_a_deleted_post_is_dropped_not_held(env):
     await env["posts"].soft_delete(env["post_id"], space_id=SPACE)
     assert not await _apply(env, "comment", _comment(env, _cid()))
+
+
+async def test_a_reply_before_its_parent_comment_awaits_it(env):
+    parent = _cid()
+    inner = _comment(env, _cid(), parent_id=parent)
+    with pytest.raises(AwaitingParent) as wait:
+        await _apply(env, "comment", inner)
+    assert (wait.value.kind, wait.value.parent_id) == (PARENT_COMMENT, parent)
 
 
 @pytest.mark.parametrize(
@@ -572,9 +599,24 @@ async def test_items_never_reach_into_another_space(env):
     assert not (await env["posts"].get(pid))[1].deleted
 
 
-async def test_an_early_comment_delete_on_an_unknown_post_is_dropped(env):
+async def test_an_early_comment_delete_on_an_unknown_post_awaits_it(env):
     cid = _cid()
     inner = _inner("comment_delete", cid, "unknown-post", ts=1)
+    with pytest.raises(AwaitingParent) as wait:
+        await _apply(env, "comment_delete", inner)
+    assert (wait.value.kind, wait.value.parent_id) == (PARENT_POST, "unknown-post")
+    assert await env["posts"].get_comment(cid) is None
+
+
+async def test_an_early_comment_delete_on_another_spaces_post_is_dropped(env):
+    other = dataclasses.replace(await env["spaces"].get(SPACE), id="sp-other")
+    await env["spaces"].save(other)
+    await env["posts"].save(
+        "sp-other",
+        Post(id="other-post", author=AUTHOR, type=PostType.TEXT, created_at=T0),
+    )
+    cid = _cid()
+    inner = _inner("comment_delete", cid, "other-post", ts=1)
     assert not await _apply(env, "comment_delete", inner)
     assert await env["posts"].get_comment(cid) is None
 
@@ -599,7 +641,35 @@ async def test_an_image_comment_is_kept_and_a_bad_parent_refused(env):
         parent_id="no-such-comment",
         created_at=_ts(0),
     )
-    assert not await _apply(env, "comment", orphan)
+    # A parent not held yet is awaited …
+    with pytest.raises(AwaitingParent):
+        await _apply(env, "comment", orphan)
+    # … a parent held under another post is refused.
+    await env["posts"].save(
+        SPACE,
+        Post(id="post-2", author=AUTHOR, type=PostType.TEXT, created_at=T0),
+    )
+    await env["posts"].add_comment(
+        Comment(
+            id="c-on-2",
+            post_id="post-2",
+            author=AUTHOR,
+            type=CommentType.TEXT,
+            created_at=T0,
+            content="x",
+        ),
+        space_id=SPACE,
+    )
+    cross = _inner(
+        "comment",
+        _cid(),
+        env["post_id"],
+        comment_type="text",
+        content="reply",
+        parent_id="c-on-2",
+        created_at=_ts(0),
+    )
+    assert not await _apply(env, "comment", cross)
 
 
 async def test_an_item_without_a_target_is_dropped(env):
@@ -729,3 +799,27 @@ async def test_an_authority_tombstone_needs_an_id_bound_here(env):
         space=space, removal=_removal("post", elsewhere, elsewhere)
     )
     assert await env["posts"].get(elsewhere) is None
+
+
+# ─── Items that overtook their post ───────────────────────────────────────
+
+
+async def test_a_reaction_on_a_post_not_held_yet_awaits_it(env):
+    inner = _inner("reaction_add", "p-late", "p-late", ts=1, emoji="👍")
+    with pytest.raises(AwaitingParent) as wait:
+        await _apply(env, "reaction_add", inner)
+    assert (wait.value.kind, wait.value.parent_id) == (PARENT_POST, "p-late")
+
+
+async def test_a_reaction_on_a_deleted_post_is_dropped_not_held(env):
+    await env["posts"].soft_delete(env["post_id"], space_id=SPACE)
+    assert not await _apply(env, "reaction_add", _react(env, "reaction_add", "👍", 1))
+
+
+async def test_an_authority_comment_removal_before_its_post_awaits_it(env):
+    removal = _removal("comment", _cid(), "p-late")
+    with pytest.raises(AwaitingParent) as wait:
+        await env["applier"].apply_authority_removal(
+            space=await _space(env), removal=removal
+        )
+    assert (wait.value.kind, wait.value.parent_id) == (PARENT_POST, "p-late")
