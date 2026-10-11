@@ -19,6 +19,7 @@ __all__ = [
     "MIN_PASSWORD_LENGTH",
     "SETUP_TOKEN_TTL_SECONDS",
     "SUPPORTED_DASHBOARD_LOCALES",
+    "DashboardNotRunningError",
     "DashboardPasswordRequiredError",
     "DashboardPasswordTooShortError",
     "DashboardPersonSettings",
@@ -122,6 +123,14 @@ class DashboardPortInUseError(CodedError):
 
     def __init__(self, port: int) -> None:
         super().__init__(params={"port": port})
+
+
+class DashboardNotRunningError(CodedError):
+    """A tablet sign-in link only works while the dashboard listens."""
+
+    status = 409
+    code = "DASHBOARD_NOT_RUNNING"
+    detail = "Turn the dashboard on before creating a sign-in link."
 
 
 class DashboardSettingsInvalidError(CodedError, ValueError):

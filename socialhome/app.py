@@ -20,13 +20,11 @@ Entry point: ``python -m socialhome.app`` (or via ``socialhome/__main__.py``).
 from __future__ import annotations
 
 import logging
-import socket
 from collections.abc import Awaitable, Callable
 from typing import Any
 import pathlib
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlsplit
 
 import aiohttp
 import aiolibdatachannel as rtc
@@ -122,10 +120,10 @@ from .infrastructure.highlight_retention_scheduler import HighlightRetentionSche
 from .platform import build_platform_adapter
 from .platform.adapter import Capability, PlatformAdapter
 from .dashboard.app import build_dashboard_app
+from .dashboard.controller import DashboardController, address_hosts, local_hostnames
 from .dashboard.auth import DashboardAuth
 from .dashboard.render import DashboardRenderer
 from .dashboard.server import DashboardServer
-from .domain.household_dashboard import DashboardPortInUseError, DashboardSettings
 from .repositories.instance_config_repo import SqliteInstanceConfigRepo
 from .services.dashboard_settings_service import DashboardSettingsService
 from .rate_limiter import RateLimiter, build_rate_limit_middleware
@@ -2106,23 +2104,6 @@ def _build_link_previews(
     )
 
 
-def _local_hostnames() -> frozenset[str]:
-    """This machine's own names for the dashboard ``Host`` allow-list:
-    the hostname, lower-cased, plus its first label when it is dotted."""
-    name = socket.gethostname().strip().lower().rstrip(".")
-    if not name:
-        return frozenset()
-    return frozenset({name, name.split(".", 1)[0]})
-
-
-def _address_hosts(settings: DashboardSettings) -> frozenset[str]:
-    """The host name of the admin-set dashboard address, if any."""
-    if not settings.address:
-        return frozenset()
-    host = urlsplit(settings.address).hostname
-    return frozenset({host}) if host else frozenset()
-
-
 def _build_household_dashboard(
     config: Config,
     repos: SimpleNamespace,
@@ -2145,14 +2126,14 @@ def _build_household_dashboard(
     )
     auth = DashboardAuth(settings)
     renderer = DashboardRenderer(catalog)
-    local_hostnames = _local_hostnames()
+    own_names = local_hostnames()
 
     async def household_name() -> str:
         prefs = await preferences_service.get_household()
         return prefs.household_name or "Home"
 
     async def extra_hosts() -> frozenset[str]:
-        return _address_hosts(await settings.get())
+        return address_hosts(await settings.get())
 
     def build_app() -> web.Application:
         return build_dashboard_app(
@@ -2161,11 +2142,14 @@ def _build_household_dashboard(
             renderer=renderer,
             household_name=household_name,
             extra_hosts=extra_hosts,
-            local_hostnames=local_hostnames,
+            local_hostnames=own_names,
         )
 
     server = DashboardServer(build_app=build_app, host=config.listen_host)
-    return SimpleNamespace(settings=settings, auth=auth, server=server)
+    controller = DashboardController(settings, server, local_hostnames=own_names)
+    return SimpleNamespace(
+        settings=settings, auth=auth, server=server, controller=controller
+    )
 
 
 def _build_space_moderation(
@@ -3191,6 +3175,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.dashboard_settings_service_key] = dashboard.settings
     app[K.dashboard_auth_key] = dashboard.auth
     app[K.dashboard_server_key] = dashboard.server
+    app[K.dashboard_controller_key] = dashboard.controller
     app[K.calendar_import_service_key] = calendar_import_service
     app[K.stt_service_key] = stt_service
     app[K.setup_service_key] = setup_service
@@ -4719,15 +4704,7 @@ def create_app(config: Config | None = None) -> web.Application:
         # 10. Household dashboard listener — last, once everything it reads
         #     is up. A taken port must not stop the main app: the admin UI
         #     shows ``running: false`` and the admin can pick another port.
-        dashboard_settings = await dashboard.settings.get()
-        if dashboard_settings.enabled:
-            try:
-                await dashboard.server.apply(dashboard_settings)
-            except DashboardPortInUseError:
-                log.warning(
-                    "household dashboard is enabled but port %d is taken — not started",
-                    dashboard_settings.port,
-                )
+        await dashboard.controller.start()
 
     async def _on_shutdown(app: web.Application) -> None:  # noqa: RUF029
         """Tell every connected WebSocket client we're going away.
@@ -4744,7 +4721,7 @@ def create_app(config: Config | None = None) -> web.Application:
     async def _on_cleanup(app: web.Application) -> None:  # noqa: RUF029
         log.info("socialhome: shutting down")
         # First: the dashboard listener reads the database.
-        await dashboard.server.stop()
+        await dashboard.controller.stop()
         await platform_adapter.on_cleanup(app)
         if outbox_processor is not None:
             await outbox_processor.stop()

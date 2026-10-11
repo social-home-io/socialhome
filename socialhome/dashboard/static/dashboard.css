@@ -91,6 +91,17 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+/* The login / setup cards: one line for "Open the dashboard" at desktop
+   and tablet widths (28rem card), still large on a phone. */
+.dash-login h1 {
+  font-size: clamp(1.5rem, 1rem + 1.6vw, 2rem);
+}
+
+.dash-explain {
+  margin-block: 0 24px;
+  color: var(--dash-muted);
+}
+
 .dash-ready {
   margin-block: 0 32px;
   color: var(--dash-muted);

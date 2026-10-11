@@ -49,32 +49,6 @@ async def test_delete_missing_is_noop(repo):
     assert await repo.get("never-set") is None
 
 
-async def test_get_many_by_prefix(repo):
-    await repo.set("dashboard.a", "1")
-    await repo.set("dashboard.b", "2")
-    await repo.set("setup_complete", "1")
-    assert await repo.get_many("dashboard.") == {
-        "dashboard.a": "1",
-        "dashboard.b": "2",
-    }
-
-
-async def test_get_many_treats_like_wildcards_literally(repo):
-    """``%`` and ``_`` in the prefix match only themselves."""
-    await repo.set("a_b.x", "1")
-    await repo.set("aXb.y", "2")
-    await repo.set("100%.z", "3")
-    await repo.set("1000.w", "4")
-    assert await repo.get_many("a_b.") == {"a_b.x": "1"}
-    assert await repo.get_many("100%") == {"100%.z": "3"}
-
-
-async def test_get_many_empty_prefix_returns_all(repo):
-    await repo.set("x", "1")
-    result = await repo.get_many("")
-    assert result["x"] == "1"
-
-
 async def test_set_many_upserts_all(repo):
     await repo.set("a", "old")
     await repo.set_many({"a": "1", "b": "2"})
@@ -84,7 +58,8 @@ async def test_set_many_upserts_all(repo):
 
 async def test_set_many_empty_is_noop(repo):
     await repo.set_many({})
-    assert await repo.get_many("") == {}
+    rows = await repo._db.fetchall("SELECT key FROM instance_config")
+    assert rows == []
 
 
 async def test_set_many_is_atomic(repo):

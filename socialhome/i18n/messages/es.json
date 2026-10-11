@@ -44,5 +44,6 @@
   "dashboard.login.ask": "¿No la sabes? Pregunta a un adulto que gestione Social Home.",
   "dashboard.ready": "Tu panel está listo — las vistas llegarán pronto.",
   "dashboard.sign_out": "Cerrar sesión",
-  "dashboard.enter.confirm": "Iniciar sesión en esta tableta"
+  "dashboard.enter.confirm": "Iniciar sesión en esta tableta",
+  "dashboard.enter.explain": "Esta tableta seguirá con la sesión iniciada en el panel del hogar."
 }

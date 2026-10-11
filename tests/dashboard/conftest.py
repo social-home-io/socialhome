@@ -25,9 +25,6 @@ class FakeConfigRepo:
         await asyncio.sleep(0)
         return self.rows.get(key)
 
-    async def get_many(self, prefix: str) -> dict[str, str]:
-        return {k: v for k, v in self.rows.items() if k.startswith(prefix)}
-
     async def set(self, key: str, value: str) -> None:
         self.rows[key] = value
 

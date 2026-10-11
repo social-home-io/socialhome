@@ -2,7 +2,8 @@
 
 * ``GET / PUT /api/admin/dashboard`` — settings + listener status + people;
 * ``PUT /api/admin/dashboard/password`` — the household dashboard password;
-* ``POST /api/admin/dashboard/setup-link`` — a one-time tablet sign-in link;
+* ``POST /api/admin/dashboard/setup-link`` — a one-time tablet sign-in link
+  (only while the dashboard runs);
 * ``DELETE /api/admin/dashboard/sessions`` — sign out every tablet.
 
 Admin-only: every call goes through a
@@ -21,18 +22,13 @@ from aiohttp import web
 
 from ..app_keys import (
     dashboard_auth_key,
-    dashboard_server_key,
-    dashboard_settings_service_key,
+    dashboard_controller_key,
     media_signer_key,
     user_service_key,
 )
 from ..dashboard.auth import DashboardAuth
-from ..dashboard.server import DashboardServer
-from ..domain.household_dashboard import (
-    SETUP_TOKEN_TTL_SECONDS,
-    DashboardPortInUseError,
-    DashboardSettings,
-)
+from ..dashboard.controller import DashboardController
+from ..domain.household_dashboard import SETUP_TOKEN_TTL_SECONDS, DashboardSettings
 from ..domain.user import User, _picture_url
 from ..media_signer import sign_media_urls_in
 from ..services.dashboard_settings_service import DashboardSettingsService
@@ -43,6 +39,7 @@ __all__ = [
     "AdminDashboardSessionsView",
     "AdminDashboardSetupLinkView",
     "AdminDashboardView",
+    "admin_request_host",
     "dashboard_base_url",
 ]
 
@@ -107,14 +104,34 @@ def _person(user: User, settings: DashboardSettings) -> dict[str, Any]:
     }
 
 
+def admin_request_host(request: web.BaseRequest) -> str:
+    """The host the admin's browser used to reach Social Home.
+
+    ``X-Forwarded-Host`` (first entry) wins over ``Host`` — the convention
+    of ``hardening.py``'s CORS check and ``routes/ws.py``. Under the Home
+    Assistant App the request reaches us through HA Core's ingress proxy
+    (``homeassistant/components/hassio/ingress.py`` ``_init_header``: copies
+    the client's headers, ``Host`` included, and sets ``X-Forwarded-Host``
+    to the incoming ``X-Forwarded-Host`` or else the request's host) and
+    then Supervisor (``supervisor/api/ingress.py`` ``_init_header``: passes
+    ``Host`` / ``X-Forwarded-Host`` through untouched, only appends to
+    ``X-Forwarded-For``), so ``X-Forwarded-Host`` is the name the browser
+    typed, e.g. ``homeassistant.local:8123``. Trusting the header is safe
+    here: the endpoint is admin-only and the value only shapes a URL shown
+    back to that admin.
+    """
+    forwarded = request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
+    return forwarded or request.host
+
+
 class _DashboardAdminView(BaseView):
     @property
-    def settings(self) -> DashboardSettingsService:
-        return self.svc(dashboard_settings_service_key)
+    def controller(self) -> DashboardController:
+        return self.svc(dashboard_controller_key)
 
     @property
-    def server(self) -> DashboardServer:
-        return self.svc(dashboard_server_key)
+    def settings(self) -> DashboardSettingsService:
+        return self.controller.settings
 
     @property
     def is_admin(self) -> bool:
@@ -122,7 +139,9 @@ class _DashboardAdminView(BaseView):
         return bool(user is not None and user.is_admin)
 
     def base_url(self, settings: DashboardSettings) -> str:
-        return dashboard_base_url(settings.address, self.request.host, settings.port)
+        return dashboard_base_url(
+            settings.address, admin_request_host(self.request), settings.port
+        )
 
     async def state(self) -> web.Response:
         """The full admin view of the dashboard (``GET`` / ``PUT`` body)."""
@@ -133,7 +152,8 @@ class _DashboardAdminView(BaseView):
         signer = self.request.app.get(media_signer_key)
         if signer is not None:
             sign_media_urls_in(people, signer)
-        running_port = self.server.running_port
+        running_port = self.controller.running_port
+        url = self.base_url(settings)
         return self._json(
             {
                 "enabled": settings.enabled,
@@ -144,7 +164,10 @@ class _DashboardAdminView(BaseView):
                 "password_set": settings.password_set_at is not None,
                 "password_set_at": settings.password_set_at,
                 "address": settings.address,
-                "url": self.base_url(settings),
+                "url": url,
+                # ``False`` when the dashboard would refuse ``url``'s host
+                # (421, DNS-rebinding guard): the admin should set the address.
+                "url_host_allowed": await self.controller.url_host_allowed(url),
                 "locale": settings.locale,
                 "idle_return_minutes": settings.idle_return_minutes,
                 "night_start": settings.night_start,
@@ -168,20 +191,11 @@ class AdminDashboardView(_DashboardAdminView):
         return await self.state()
 
     async def put(self) -> web.Response:
-        """Apply a settings patch, then move the listener to match.
-
-        When the listener can't follow (port taken) the previous settings
-        are put back and the 409 surfaces; the listener keeps its old
-        state (an old port keeps serving).
-        """
+        """Save a settings patch; the listener follows ``enabled`` / ``port``
+        (see :meth:`DashboardController.update` — a port it can't bind is
+        409 and nothing is saved)."""
         patch = await self.body()
-        previous = await self.settings.get()
-        updated = await self.settings.update(actor_is_admin=self.is_admin, patch=patch)
-        try:
-            await self.server.apply(updated)
-        except DashboardPortInUseError:
-            await self.settings.restore(actor_is_admin=True, previous=previous)
-            raise
+        await self.controller.update(actor_is_admin=self.is_admin, patch=patch)
         return await self.state()
 
 
@@ -205,7 +219,7 @@ class AdminDashboardSetupLinkView(_DashboardAdminView):
 
     async def post(self) -> web.Response:
         now = time.time()
-        token = await self.settings.issue_setup_token(
+        token = await self.controller.issue_setup_token(
             actor_is_admin=self.is_admin, now=now
         )
         settings = await self.settings.get()

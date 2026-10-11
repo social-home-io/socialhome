@@ -54,5 +54,6 @@
   "dashboard.login.ask": "Don't know it? Ask a grown-up who manages Social Home.",
   "dashboard.ready": "Your dashboard is ready — views are on the way.",
   "dashboard.sign_out": "Sign out",
-  "dashboard.enter.confirm": "Sign in this tablet"
+  "dashboard.enter.confirm": "Sign in this tablet",
+  "dashboard.enter.explain": "This tablet will stay signed in to the household dashboard."
 }

@@ -14,6 +14,7 @@ from socialhome.domain.household_dashboard import (
     SETUP_TOKEN_TTL_SECONDS,
     SUPPORTED_DASHBOARD_LOCALES,
     DashboardPasswordRequiredError,
+    DashboardNotRunningError,
     DashboardPasswordTooShortError,
     DashboardPersonSettings,
     DashboardPortFixedError,
@@ -117,3 +118,11 @@ def test_password_too_short_error():
     assert e.status == 422
     assert e.code == "DASHBOARD_PASSWORD_TOO_SHORT"
     assert e.params == {"min": MIN_PASSWORD_LENGTH}
+
+
+def test_not_running_error():
+    exc = DashboardNotRunningError()
+    assert isinstance(exc, CodedError)
+    assert exc.status == 409
+    assert exc.code == "DASHBOARD_NOT_RUNNING"
+    assert exc.detail == "Turn the dashboard on before creating a sign-in link."

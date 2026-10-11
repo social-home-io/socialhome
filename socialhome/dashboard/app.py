@@ -47,6 +47,7 @@ __all__ = [
     "build_dashboard_app",
     "build_dashboard_csp",
     "host_allowed",
+    "normalise_host",
 ]
 
 #: Extra host names the dashboard answers to (e.g. an admin-set address):
@@ -122,7 +123,8 @@ async def _dashboard_headers(
         response.headers["Cache-Control"] = "no-store"
 
 
-def _normalise_host(name: str) -> str:
+def normalise_host(name: str) -> str:
+    """A host name as the allow-list compares it (lower-case, no root dot)."""
     return name.strip().lower().rstrip(".")
 
 
@@ -172,15 +174,15 @@ def host_allowed(host: str, extra: frozenset[str]) -> bool:
 
 
 def _build_host_middleware(extra_hosts: ExtraHosts, local_hostnames: Iterable[str]):
-    local = frozenset(_normalise_host(h) for h in local_hostnames)
+    local = frozenset(normalise_host(h) for h in local_hostnames)
     if callable(extra_hosts):
         dynamic = extra_hosts
 
         async def allowed_extra() -> frozenset[str]:
-            return local | frozenset(_normalise_host(h) for h in await dynamic())
+            return local | frozenset(normalise_host(h) for h in await dynamic())
 
     else:
-        fixed = local | frozenset(_normalise_host(h) for h in extra_hosts)
+        fixed = local | frozenset(normalise_host(h) for h in extra_hosts)
 
         async def allowed_extra() -> frozenset[str]:
             return fixed
@@ -241,7 +243,7 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
     request[CLAIMS_KEY] = claims
     response = await handler(request)
     if auth.needs_renewal(claims):
-        set_session_cookie(
+        await set_session_cookie(
             response, request, await auth.issue(claims.keep), keep=claims.keep
         )
     return response

@@ -31,9 +31,6 @@ class _FakeRepo:
     async def get(self, key: str) -> str | None:
         return self.rows.get(key)
 
-    async def get_many(self, prefix: str) -> dict[str, str]:
-        return {k: v for k, v in self.rows.items() if k.startswith(prefix)}
-
     async def set(self, key: str, value: str) -> None:
         self.rows[key] = value
 
@@ -54,10 +51,6 @@ class _SpyRepo(_FakeRepo):
     async def get(self, key: str) -> str | None:
         self.read.append(key)
         return await super().get(key)
-
-    async def get_many(self, prefix: str) -> dict[str, str]:
-        self.read.append(prefix + "*")
-        return await super().get_many(prefix)
 
 
 @pytest.fixture
@@ -443,10 +436,6 @@ class _YieldingRepo(_FakeRepo):
         await asyncio.sleep(0)
         return await super().get(key)
 
-    async def get_many(self, prefix: str) -> dict[str, str]:
-        await asyncio.sleep(0)
-        return await super().get_many(prefix)
-
     async def set(self, key: str, value: str) -> None:
         await asyncio.sleep(0)
         await super().set(key, value)
@@ -808,13 +797,70 @@ async def test_restore_requires_admin(svc):
 
 async def test_restore_puts_back_previous_settings(svc):
     await _with_password(svc)
-    previous = await svc.update(
+    await svc.update(
         actor_is_admin=True,
         patch={"locale": "de", "address": "http://dash.local", "port": 9001},
     )
+    previous = await svc.snapshot()
     await svc.update(actor_is_admin=True, patch={"enabled": True, "port": 9002})
     await svc.restore(actor_is_admin=True, previous=previous)
     restored = await svc.get()
     assert restored == previous
     assert restored.enabled is False
     assert restored.port == 9001
+
+
+async def test_snapshot_is_the_stored_value_not_the_fixed_port(fixed_svc, repo):
+    repo.rows["dashboard.settings"] = json.dumps({"port": 9000})
+    snap = await fixed_svc.snapshot()
+    assert snap.port == 9000
+    await fixed_svc.update(actor_is_admin=True, patch={"locale": "de"})
+    await fixed_svc.restore(actor_is_admin=True, previous=snap)
+    # The platform-fixed port never leaks into storage on a restore.
+    assert json.loads(repo.rows["dashboard.settings"])["port"] == 9000
+    assert json.loads(repo.rows["dashboard.settings"])["locale"] == "en"
+    assert (await fixed_svc.get()).port == 8100
+
+
+# ── Settings cache ──────────────────────────────────────────────────────
+
+
+async def test_get_is_cached_after_first_load():
+    spy = _SpyRepo()
+    svc = DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT)
+    first = await svc.get()
+    reads = len(spy.read)
+    for _ in range(5):
+        assert await svc.get() == first
+    assert len(spy.read) == reads
+
+
+async def test_cache_follows_every_write():
+    spy = _SpyRepo()
+    svc = DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT)
+    await svc.get()
+    await svc.update(actor_is_admin=True, patch={"locale": "de"})
+    assert (await svc.get()).locale == "de"
+    snap = await svc.snapshot()
+    await _with_password(svc)
+    assert (await svc.get()).password_set_at is not None
+    await svc.update(actor_is_admin=True, patch={"locale": "fr"})
+    await svc.restore(actor_is_admin=True, previous=snap)
+    restored = await svc.get()
+    assert restored.locale == "de"
+    assert restored.password_set_at is not None
+    # A fresh service reading the same storage agrees with the cache.
+    assert (
+        await DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT).get()
+        == restored
+    )
+
+
+async def test_cache_never_keeps_a_read_that_raced_a_write():
+    repo = _YieldingRepo()
+    svc = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    reader = asyncio.create_task(svc.get())
+    await asyncio.sleep(0)
+    await svc.update(actor_is_admin=True, patch={"locale": "nl"})
+    await reader
+    assert (await svc.get()).locale == "nl"

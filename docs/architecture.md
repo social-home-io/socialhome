@@ -1383,14 +1383,20 @@ and is then served by a **separate aiohttp application on its own port**
 (`socialhome/dashboard/`, default `8100`).
 
 - **Separate app + runner.** `DashboardServer` (`dashboard/server.py`) owns
-  one `web.AppRunner` and moves it between "off" and "listening on port N"
-  as the admin changes the settings; a port change binds the new port
-  before releasing the old one, so a taken port (409
-  `DASHBOARD_PORT_IN_USE`) leaves the old one serving and the admin route
-  puts the previous settings back. `create_app` wires it in
-  `_build_household_dashboard`, starts it last in `_on_startup` when the
-  stored settings say `enabled` (a taken port is logged at WARNING and
-  never stops the main app), and stops it first in `_on_cleanup`. The
+  one `web.AppRunner` and moves it between "off" and "listening on port N";
+  a port change binds the new port before releasing the old one, so a
+  taken port (409 `DASHBOARD_PORT_IN_USE`) leaves the old one serving.
+  `DashboardController` (`dashboard/controller.py`) is what the admin API
+  and startup talk to: an edit touching `enabled` / `port` is saved,
+  applied and — on any listener error — rolled back to the stored
+  snapshot from before it, all under one lock, so concurrent admin edits
+  can't interleave; other edits never touch the listener. `create_app`
+  wires it in `_build_household_dashboard`, starts it last in
+  `_on_startup` when the stored settings say `enabled` (a taken port is
+  logged at WARNING and never stops the main app), and stops it first in
+  `_on_cleanup`. `DashboardSettingsService` caches the stored settings in
+  memory (every write path replaces or drops the cache), so per-request
+  reads (locale, `Host` allow-list) don't hit the database. The
   `DashboardAuth` (throttle state) and `DashboardRenderer` (Jinja templates
   + preloaded static files, read from disk once at wiring time) are built
   once per process and survive a listener restart.
@@ -1403,7 +1409,9 @@ and is then served by a **separate aiohttp application on its own port**
   `instance_config` wrapped under the instance KEK (`KeyManager`, attached
   at startup) and cached unwrapped in memory. 12 h session, 365 d when the
   tablet ticks "keep me signed in" (and for setup links), renewed after a
-  day of use. Bumping the stored **epoch** — "Sign out all tablets" or a
+  day of use. It is `HttpOnly`, `SameSite=Strict`, and `Secure` over TLS or
+  when the admin-set address is `https://` (a TLS-terminating proxy hands
+  us plain HTTP). Bumping the stored **epoch** — "Sign out all tablets" or a
   new password — invalidates every cookie at once.
 - **Throttles.** Failed attempts are counted up front, per client address
   (socket peer only, never `X-Forwarded-For`): 5 per 15 min. `/login`

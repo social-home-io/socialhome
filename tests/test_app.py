@@ -21,9 +21,7 @@ from socialhome.app import (
     _build_gfs_route_discovery,
     _build_gfs_route_resolver,
     MAP_TILE_USER_AGENT,
-    _address_hosts,
     _build_link_previews,
-    _local_hostnames,
     create_app,
     dispatch_gfs_relay_frame,
 )
@@ -39,7 +37,6 @@ from socialhome.domain.federation import (
     InstanceSource,
     RemoteInstance,
 )
-from socialhome.domain.household_dashboard import DashboardSettings
 from socialhome.platform.local_credentials import hash_password
 from socialhome.repositories.federation_repo import SqliteFederationRepo
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
@@ -756,17 +753,3 @@ async def test_busy_dashboard_port_does_not_stop_the_main_app(tmp_dir, caplog):
                 assert resp.status == 200
                 assert app[K.dashboard_server_key].running_port is None
     assert "household dashboard" in caplog.text
-
-
-def test_local_hostnames_include_the_short_name(monkeypatch):
-    monkeypatch.setattr(socket, "gethostname", lambda: "Box.Example.LAN")
-    assert _local_hostnames() == frozenset({"box.example.lan", "box"})
-    monkeypatch.setattr(socket, "gethostname", lambda: "box")
-    assert _local_hostnames() == frozenset({"box"})
-
-
-def test_dashboard_address_hosts():
-    assert _address_hosts(DashboardSettings()) == frozenset()
-    assert _address_hosts(
-        DashboardSettings(address="https://dash.example.com:8443")
-    ) == frozenset({"dash.example.com"})

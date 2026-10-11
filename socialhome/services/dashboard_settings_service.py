@@ -256,6 +256,8 @@ class DashboardSettingsService:
         "_lock",
         "_key_manager",
         "_cookie_secret",
+        "_cached",
+        "_generation",
     )
 
     def __init__(
@@ -279,6 +281,13 @@ class DashboardSettingsService:
         # the lock + a KEK decrypt each time. Only this service writes the
         # stored key, so the cache can't go stale behind its back.
         self._cookie_secret: bytes | None = None
+        # The stored settings (+ password timestamp) after the first load:
+        # the dashboard reads them on every request (locale, Host
+        # allow-list). Every write path replaces or drops the cache and
+        # bumps ``_generation``, so a read that raced a write is never
+        # cached (only this service writes these keys).
+        self._cached: DashboardSettings | None = None
+        self._generation = 0
 
     def attach_key_manager(self, key_manager: KeyManager) -> None:
         """Late-wire the instance KEK — it only exists after startup."""
@@ -296,12 +305,30 @@ class DashboardSettingsService:
         """Stored settings as-is (the stored port, even when fixed).
 
         Reads only the two non-secret keys — never the hash, cookie key
-        or setup token.
+        or setup token — and only until the first load is cached.
         """
+        cached = self._cached
+        if cached is not None:
+            return cached
+        generation = self._generation
         settings = _settings_from_json(await self._repo.get(KEY_SETTINGS))
-        return replace(
+        settings = replace(
             settings, password_set_at=await self._repo.get(KEY_PASSWORD_SET_AT)
         )
+        if generation == self._generation:
+            self._cached = settings
+        return settings
+
+    def _wrote(self, settings: DashboardSettings | None) -> None:
+        """Record a write: cache ``settings`` (or drop the cache)."""
+        self._generation += 1
+        self._cached = settings
+
+    async def snapshot(self) -> DashboardSettings:
+        """The stored settings, to hand back to :meth:`restore` — unlike
+        :meth:`get`, a platform-fixed port is not substituted, so a
+        restore never writes it into storage."""
+        return await self._load()
 
     async def get(self) -> DashboardSettings:
         """Current settings; a platform-fixed port always wins."""
@@ -366,17 +393,21 @@ class DashboardSettingsService:
             # Checked on the merged state: enabling with a stored (or
             # default) port that clashes with the main app is refused too.
             raise DashboardSettingsInvalidError("port")
+        self._wrote(None)
         await self._repo.set(KEY_SETTINGS, _settings_to_json(updated))
+        self._wrote(updated)
 
     async def restore(
         self, *, actor_is_admin: bool, previous: DashboardSettings
     ) -> None:
-        """Put ``previous`` (a value from :meth:`get`) back as the stored
+        """Put ``previous`` (from :meth:`snapshot`) back as the stored
         settings — undoes a change the dashboard listener couldn't follow
         (port taken). The password timestamp is not part of it."""
         _require_admin(actor_is_admin)
         async with self._lock:
+            self._wrote(None)
             await self._repo.set(KEY_SETTINGS, _settings_to_json(previous))
+            self._wrote(None)
 
     # ── Password ────────────────────────────────────────────────────────
 
@@ -394,6 +425,7 @@ class DashboardSettingsService:
         async with self._lock:
             # Hash, timestamp and new epoch land together — a crash can't
             # leave a new password with old tablets still signed in.
+            self._wrote(None)
             await self._repo.set_many(
                 {
                     KEY_PASSWORD_HASH: hashed,
@@ -401,6 +433,7 @@ class DashboardSettingsService:
                     KEY_EPOCH: str(await self._epoch_unlocked() + 1),
                 }
             )
+            self._wrote(None)
 
     async def verify_password(self, password: str) -> bool:
         if not isinstance(password, str):

@@ -44,5 +44,6 @@
   "dashboard.login.ask": "Du kennst es nicht? Frag einen Erwachsenen, der Social Home verwaltet.",
   "dashboard.ready": "Dein Dashboard ist bereit — die Ansichten kommen bald.",
   "dashboard.sign_out": "Abmelden",
-  "dashboard.enter.confirm": "Dieses Tablet anmelden"
+  "dashboard.enter.confirm": "Dieses Tablet anmelden",
+  "dashboard.enter.explain": "Dieses Tablet bleibt beim Haushalts-Dashboard angemeldet."
 }

@@ -28,6 +28,7 @@ __all__ = [
     "LogoutView",
     "StaticView",
     "clear_session_cookie",
+    "cookie_secure",
     "html_response",
     "redirect",
     "register_routes",
@@ -71,8 +72,18 @@ def redirect(location: str, *, status: int = 303) -> web.Response:
     return web.Response(status=status, headers={"Location": location})
 
 
-def set_session_cookie(
-    response: web.StreamResponse, request: web.BaseRequest, value: str, *, keep: bool
+async def cookie_secure(request: web.Request) -> bool:
+    """Mark the cookie ``Secure``? Yes over TLS — and also when the admin
+    set an ``https://`` address: behind a TLS-terminating reverse proxy
+    the request reaches us as plain HTTP, but the browser is on HTTPS."""
+    if request.secure:
+        return True
+    address = (await request.app[SETTINGS_KEY].get()).address
+    return address is not None and address.startswith("https://")
+
+
+async def set_session_cookie(
+    response: web.StreamResponse, request: web.Request, value: str, *, keep: bool
 ) -> None:
     """Attach the session cookie: persistent (one year) only when ``keep``."""
     response.set_cookie(
@@ -80,19 +91,19 @@ def set_session_cookie(
         value,
         max_age=KEEP_TTL_S if keep else None,
         path="/",
-        secure=request.secure,
+        secure=await cookie_secure(request),
         httponly=True,
         samesite="Strict",
     )
 
 
-def clear_session_cookie(
-    response: web.StreamResponse, request: web.BaseRequest
+async def clear_session_cookie(
+    response: web.StreamResponse, request: web.Request
 ) -> None:
     response.del_cookie(
         COOKIE_NAME,
         path="/",
-        secure=request.secure,
+        secure=await cookie_secure(request),
         httponly=True,
         samesite="Strict",
     )
@@ -224,7 +235,7 @@ class LoginView(_DashboardView):
 
         self.auth.record_success(key)
         response = redirect(next_path)
-        set_session_cookie(
+        await set_session_cookie(
             response, self.request, await self.auth.issue(keep), keep=keep
         )
         return response
@@ -261,7 +272,7 @@ class EnterView(_DashboardView):
             return redirect("/login")
         self.auth.record_success(key, count_global=False)
         response = redirect("/")
-        set_session_cookie(
+        await set_session_cookie(
             response, self.request, await self.auth.issue(True), keep=True
         )
         return response
@@ -272,7 +283,7 @@ class LogoutView(_DashboardView):
 
     async def post(self) -> web.Response:
         response = redirect("/login")
-        clear_session_cookie(response, self.request)
+        await clear_session_cookie(response, self.request)
         return response
 
 

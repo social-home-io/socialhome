@@ -18,8 +18,8 @@ It is **off by default**. Design notes:
    `{"enabled": true}` (and, outside the Home Assistant App, optionally a
    `port`). The listener starts at once; `GET /api/admin/dashboard`
    reports `running: true` and the `url` tablets should open.
-3. On the tablet, either open that `url` and type the password, or
-   create a one-time setup link (`POST /api/admin/dashboard/setup-link`,
+3. On the tablet, either open that `url` and type the password, or —
+   while the dashboard is running — create a one-time setup link (`POST /api/admin/dashboard/setup-link`,
    valid 10 minutes, shown as a QR code) and open it on the tablet — it
    signs the tablet in for a year without typing the password.
 
@@ -32,8 +32,11 @@ warning; the admin view shows `running: false`.
 
 Social Home guesses the address from the host name you reached it under
 plus the dashboard port (for example `http://homeassistant.local:8100`).
-When that is wrong — a reverse proxy, a different host name, TLS in front
-— set the real one as the dashboard **address**
+(Under the Home Assistant App the host name comes from the
+`X-Forwarded-Host` header HA's ingress proxy sets.) When the admin view
+reports `url_host_allowed: false` — the dashboard would refuse that host
+name — or the guess is otherwise wrong (a reverse proxy, a different host
+name, TLS in front), set the real one as the dashboard **address**
 (`{"address": "https://dashboard.example.lan"}`); it is then used for the
 displayed URL and for setup links, and its host name is added to the
 dashboard's `Host` allow-list.
@@ -55,7 +58,12 @@ must open.
 - **It is plain HTTP by default.** The password and the session cookie
   cross your network unencrypted. If the dashboard must be reachable
   beyond a trusted LAN, put it behind a TLS reverse proxy and set the
-  `https://` address.
+  dashboard **address** to the public `https://` URL — that also marks
+  the session cookie `Secure`.
+- **A reverse proxy must preserve the `Host` header.** Sign-in forms are
+  accepted only when the browser's `Origin` matches the `Host` the
+  dashboard receives, so a proxy that rewrites `Host` makes every login
+  fail with 403. With nginx: `proxy_set_header Host $host;`.
 - **Cookies are shared across ports on the same host.** Browsers don't
   isolate cookies by port, so any other web app served under the same host
   name (for example Home Assistant on `:8123`) receives the dashboard's

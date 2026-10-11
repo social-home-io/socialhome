@@ -135,6 +135,7 @@ async def test_get_defaults(client):
     assert body["night_end"] == "06:00"
     assert body["keep_screen_on"] is True
     assert body["show_status_text"] is False
+    assert body["url_host_allowed"] is True
     assert body["last_seen_at"] is None
     assert isinstance(body["people"], list)
 
@@ -145,6 +146,47 @@ async def test_get_url_follows_request_host(client):
         headers={**_auth(client._tok), "Host": "homeassistant.local:8123"},
     )
     assert (await resp.json())["url"] == "http://homeassistant.local:8100"
+
+
+async def test_get_url_under_ha_ingress(client):
+    """HA Core's ingress proxy sets ``X-Forwarded-Host`` to the host the
+    browser used; the App sees the Supervisor hop as the peer."""
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={
+            **_auth(client._tok),
+            "Host": "172.30.33.5:8099",
+            "X-Forwarded-Host": "homeassistant.local:8123",
+        },
+    )
+    body = await resp.json()
+    assert body["url"] == "http://homeassistant.local:8100"
+    assert body["url_host_allowed"] is True
+
+
+async def test_get_url_uses_the_first_forwarded_host(client):
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={
+            **_auth(client._tok),
+            "X-Forwarded-Host": "box.lan:443, proxy.internal",
+        },
+    )
+    assert (await resp.json())["url"] == "http://box.lan:8100"
+
+
+async def test_url_host_allowed_flags_a_public_name(client):
+    resp = await client.get(
+        "/api/admin/dashboard",
+        headers={**_auth(client._tok), "Host": "social.example.com"},
+    )
+    body = await resp.json()
+    assert body["url"] == "http://social.example.com:8100"
+    assert body["url_host_allowed"] is False
+    resp = await _put(client, {"address": "https://social.example.com"})
+    body = await resp.json()
+    assert body["url"] == "https://social.example.com"
+    assert body["url_host_allowed"] is True
 
 
 async def test_get_last_seen_at_is_iso_utc(client):
@@ -282,6 +324,25 @@ async def test_enable_on_a_taken_port_stays_disabled(client):
     assert stored.port == 8100
 
 
+async def test_other_edits_save_while_the_port_is_taken(client):
+    """Enabled, but the port was taken at startup: ``running`` is false and
+    edits that don't move the listener still save."""
+    await _set_password(client)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.bind(("0.0.0.0", 0))
+        blocker.listen()
+        taken = blocker.getsockname()[1]
+        svc = client.app[dashboard_settings_service_key]
+        await svc.update(actor_is_admin=True, patch={"enabled": True, "port": taken})
+        resp = await _put(client, {"locale": "de"})
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["locale"] == "de"
+        assert body["enabled"] is True
+        assert body["running"] is False
+    assert (await svc.get()).locale == "de"
+
+
 # ── Password ────────────────────────────────────────────────────────────
 
 
@@ -311,12 +372,17 @@ async def test_set_password_marks_it_set_and_signs_tablets_out(client):
 # ── Setup link + sessions ───────────────────────────────────────────────
 
 
-async def test_setup_link_requires_a_password(client):
+async def test_setup_link_requires_a_running_dashboard(client):
+    await _set_password(client)
     resp = await client.post(
         "/api/admin/dashboard/setup-link", headers=_auth(client._tok)
     )
-    assert resp.status == 422
-    assert (await resp.json())["error"]["code"] == "DASHBOARD_PASSWORD_REQUIRED"
+    assert resp.status == 409
+    body = await resp.json()
+    assert body["error"]["code"] == "DASHBOARD_NOT_RUNNING"
+    assert body["error"]["detail"] == (
+        "Turn the dashboard on before creating a sign-in link."
+    )
 
 
 async def test_setup_link_signs_a_tablet_in(client):

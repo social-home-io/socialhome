@@ -44,5 +44,6 @@
   "dashboard.login.ask": "Weet je het niet? Vraag het aan een volwassene die Social Home beheert.",
   "dashboard.ready": "Je dashboard is klaar — de weergaven komen eraan.",
   "dashboard.sign_out": "Uitloggen",
-  "dashboard.enter.confirm": "Deze tablet aanmelden"
+  "dashboard.enter.confirm": "Deze tablet aanmelden",
+  "dashboard.enter.explain": "Deze tablet blijft aangemeld bij het dashboard van het huishouden."
 }

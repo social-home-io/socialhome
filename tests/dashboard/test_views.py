@@ -425,3 +425,62 @@ async def test_parallel_guesses_cannot_outrun_the_throttle(client):
     results = await asyncio.gather(*(_login(client, "nope") for _ in range(10)))
     statuses = sorted(r.status for r in results)
     assert statuses == [401] * 5 + [429] * 5
+
+
+# ─── Secure cookie behind a TLS reverse proxy ────────────────────────────
+
+
+async def _https_address(settings_service) -> None:
+    await settings_service.update(
+        actor_is_admin=True, patch={"address": "https://dash.example.lan"}
+    )
+
+
+async def test_login_cookie_secure_behind_https_address(client, settings_service):
+    await _https_address(settings_service)
+    resp = await _login(client)
+    assert resp.status == 303
+    assert resp.cookies[COOKIE_NAME]["secure"] is True
+
+
+async def test_enter_cookie_secure_behind_https_address(client, settings_service):
+    await _https_address(settings_service)
+    token = await settings_service.issue_setup_token(actor_is_admin=True)
+    resp = await _enter(client, token)
+    assert resp.cookies[COOKIE_NAME]["secure"] is True
+
+
+async def test_logout_clears_the_secure_cookie(client, settings_service, auth):
+    await _https_address(settings_service)
+    headers = {**await _cookie(auth), **_origin(client, "/")}
+    resp = await client.post("/logout", headers=headers, allow_redirects=False)
+    assert resp.cookies[COOKIE_NAME]["secure"] is True
+
+
+async def test_http_address_keeps_cookie_not_secure(client, settings_service):
+    await settings_service.update(
+        actor_is_admin=True, patch={"address": "http://dash.example.lan"}
+    )
+    resp = await _login(client)
+    assert not resp.cookies[COOKIE_NAME]["secure"]
+
+
+# ─── Page polish ─────────────────────────────────────────────────────────
+
+
+async def test_password_input_autofocus_on_load_and_after_a_wrong_password(client):
+    html = await (await client.get("/login")).text()
+    assert 'type="password"' in html and "autofocus" in html
+    resp = await _login(client, "nope")
+    assert resp.status == 401
+    html = await resp.text()
+    assert 'name="password"' in html
+    assert "autofocus" in html
+
+
+async def test_enter_confirm_page_explains_itself(client, settings_service):
+    html = await (await client.get("/enter?t=abc")).text()
+    assert "This tablet will stay signed in to the household dashboard." in html
+    await settings_service.update(actor_is_admin=True, patch={"locale": "de"})
+    html = await (await client.get("/enter?t=abc")).text()
+    assert "This tablet will stay signed in" not in html

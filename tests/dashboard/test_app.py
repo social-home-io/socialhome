@@ -132,6 +132,21 @@ async def test_old_cookie_is_renewed(client, auth, clock):
     assert morsel["max-age"] == str(365 * 86400)
 
 
+async def test_renewed_cookie_secure_behind_https_address(
+    client, auth, clock, settings_service
+):
+    await settings_service.update(
+        actor_is_admin=True, patch={"address": "https://dash.example.lan"}
+    )
+    headers = await _cookie(auth, keep=True)
+    clock.advance(RENEW_AFTER_S + 1)
+    resp = await client.get(
+        "/", headers={**headers, "Host": "dash.example.lan"}, allow_redirects=False
+    )
+    assert resp.status == 200
+    assert resp.cookies[COOKIE_NAME]["secure"] is True
+
+
 async def test_fresh_cookie_not_renewed(client, auth, clock):
     headers = await _cookie(auth, keep=True)
     clock.advance(RENEW_AFTER_S)

@@ -44,5 +44,6 @@
   "dashboard.login.ask": "Vous ne le connaissez pas ? Demandez à un adulte qui gère Social Home.",
   "dashboard.ready": "Votre tableau de bord est prêt — les vues arrivent bientôt.",
   "dashboard.sign_out": "Se déconnecter",
-  "dashboard.enter.confirm": "Connecter cette tablette"
+  "dashboard.enter.confirm": "Connecter cette tablette",
+  "dashboard.enter.explain": "Cette tablette restera connectée au tableau de bord du foyer."
 }
