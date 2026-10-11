@@ -454,7 +454,8 @@ def test_narrow_blocks_show_an_icon_instead_of_text():
     assert tl is not None
     lanes = {lane.person.user_id: lane for lane in tl.lanes}
     dentist = lanes["u-pascal"].blocks[0]  # 1 h of 14 → 7 %
-    assert dentist.narrow is True and dentist.icon == "•"
+    # No leading emoji: the keyword guess ("Dentist" → 🦷).
+    assert dentist.narrow is True and dentist.icon == "🦷"
     work = lanes["u-anna"].blocks[0]
     assert work.narrow is False
     school = next(b for b in lanes["u-mia"].blocks if b.kind == "school")
@@ -469,6 +470,14 @@ def test_narrow_event_uses_its_leading_emoji():
     assert tl is not None
     block = next(lane for lane in tl.lanes if lane.person == LEO).blocks[0]
     assert block.narrow and block.icon == "🏊"
+
+
+def test_narrow_event_without_a_known_word_gets_the_neutral_icon():
+    snap = home(events_today=(event("s", "Taxes", at(15), at(16), "u-leo"),), school=())
+    tl = build_timeline(snap, _fmt(snap))
+    assert tl is not None
+    block = next(lane for lane in tl.lanes if lane.person == LEO).blocks[0]
+    assert block.narrow and block.icon == "🔹"
 
 
 @pytest.mark.parametrize(

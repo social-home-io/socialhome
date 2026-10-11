@@ -43,6 +43,7 @@ from ..domain.household_dashboard import (
 )
 from .clock import days_late, due_label, hhmm, relative_in, until
 from .contrast import hex_color, ink_on, readable_on
+from .icons import title_icon
 
 __all__ = [
     "DARK_SURFACES",
@@ -93,8 +94,6 @@ NOW_LABEL_CLEARANCE = 12
 #: A lane bar narrower than this (percent of the day) shows an icon, not
 #: a cut-off word ("D…").
 NARROW_BLOCK = 10
-#: The icon of a narrow event bar without a leading emoji.
-NEUTRAL_ICON = "•"
 SCHOOL_ICON = "🎒"
 SHOPPING_SHOWN = 6
 STICKIES_SHOWN = 4
@@ -609,11 +608,7 @@ def _lane(
                     sp.end <= now_minute if sp.end > sp.start else sp.start < now_minute
                 ),
                 narrow=w < NARROW_BLOCK,
-                icon=(
-                    SCHOOL_ICON
-                    if sp.kind == "school"
-                    else leading_emoji(sp.title) or NEUTRAL_ICON
-                ),
+                icon=(SCHOOL_ICON if sp.kind == "school" else title_icon(sp.title)),
                 more=sp.more,
             )
         )
