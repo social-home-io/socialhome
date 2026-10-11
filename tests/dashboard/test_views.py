@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 from pathlib import Path
 
 import aiohttp
@@ -15,12 +16,16 @@ from socialhome.dashboard.auth import (
     THROTTLE_WINDOW_S,
     DashboardAuth,
 )
+from socialhome.dashboard.render import DashboardRenderer
 from socialhome.dashboard.views import safe_next
+from socialhome.services.dashboard_settings_service import DashboardSettingsService
 from socialhome.i18n import Catalog
 
 from .conftest import PASSWORD
 
-CATALOG = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+RENDERER = DashboardRenderer(
+    Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+)
 
 
 @pytest.fixture
@@ -41,7 +46,7 @@ async def bare_client(aiohttp_client, settings_service, auth, household):
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
-        catalog=CATALOG,
+        renderer=RENDERER,
         household_name=name,
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
@@ -53,8 +58,10 @@ async def client(bare_client, settings_service):
     return bare_client
 
 
-def _origin(client) -> dict[str, str]:
-    return {"Origin": f"http://{client.host}:{client.port}"}
+def _origin(client, page: str = "/login") -> dict[str, str]:
+    """A browser's form-POST headers under ``Referrer-Policy: same-origin``."""
+    base = f"http://{client.host}:{client.port}"
+    return {"Origin": base, "Referer": f"{base}{page}"}
 
 
 async def _login(client, password=PASSWORD, *, keep=True, next_path=None):
@@ -228,9 +235,52 @@ async def test_login_password_not_set(bare_client):
 # ─── /enter ──────────────────────────────────────────────────────────────
 
 
-async def test_enter_valid_token_then_reuse(client, settings_service, auth):
+async def _enter(client, token: str | None):
+    data = {} if token is None else {"t": token}
+    return await client.post(
+        "/enter", data=data, headers=_origin(client, "/enter"), allow_redirects=False
+    )
+
+
+async def test_enter_get_only_shows_a_confirm_page(client, settings_service):
+    """Link previewers / prefetchers GET the link: that must not spend it."""
     token = await settings_service.issue_setup_token(actor_is_admin=True)
-    resp = await client.get(f"/enter?t={token}", allow_redirects=False)
+    for _ in range(3):
+        resp = await client.get(f"/enter?t={token}", allow_redirects=False)
+        assert resp.status == 200
+        assert COOKIE_NAME not in resp.cookies
+    html = await resp.text()
+    assert 'method="post" action="/enter"' in html
+    assert f'name="t" value="{token}"' in html
+    assert "Sign in this tablet" in html
+    assert await settings_service.consume_setup_token(token) is True
+
+
+async def test_enter_confirm_page_escapes_token(client):
+    resp = await client.get('/enter?t="><b>x', allow_redirects=False)
+    html = await resp.text()
+    assert "<b>x" not in html
+    assert "&#34;&gt;&lt;b&gt;x" in html
+
+
+async def test_enter_confirm_page_localised(client, settings_service):
+    await settings_service.update(actor_is_admin=True, patch={"locale": "nl"})
+    html = await (await client.get("/enter?t=abc")).text()
+    assert "Deze tablet aanmelden" in html
+
+
+async def test_enter_get_without_token_is_not_a_failure(client, auth):
+    for _ in range(10):
+        resp = await client.get("/enter", allow_redirects=False)
+        assert resp.status == 303
+        assert resp.headers["Location"] == "/login"
+    assert auth.throttle_remaining("127.0.0.1") == 0
+    assert (await _login(client)).status == 303
+
+
+async def test_enter_post_valid_token_then_reuse(client, settings_service, auth):
+    token = await settings_service.issue_setup_token(actor_is_admin=True)
+    resp = await _enter(client, token)
     assert resp.status == 303
     assert resp.headers["Location"] == "/"
     morsel = resp.cookies[COOKIE_NAME]
@@ -238,35 +288,84 @@ async def test_enter_valid_token_then_reuse(client, settings_service, auth):
     claims = await auth.verify(morsel.value)
     assert claims is not None and claims.keep is True
 
-    again = await client.get(f"/enter?t={token}", allow_redirects=False)
+    again = await _enter(client, token)
     assert again.status == 303
     assert again.headers["Location"] == "/login"
     assert COOKIE_NAME not in again.cookies
 
 
-async def test_enter_without_token(client):
-    resp = await client.get("/enter", allow_redirects=False)
-    assert resp.status == 303
-    assert resp.headers["Location"] == "/login"
+async def test_enter_post_without_token_is_not_a_failure(client, auth):
+    for _ in range(10):
+        resp = await _enter(client, None)
+        assert resp.headers["Location"] == "/login"
+    assert auth.throttle_remaining("127.0.0.1") == 0
+
+
+async def test_enter_post_cross_origin_is_403(client, settings_service):
+    token = await settings_service.issue_setup_token(actor_is_admin=True)
+    resp = await client.post(
+        "/enter",
+        data={"t": token},
+        headers={"Origin": "https://evil.example"},
+        allow_redirects=False,
+    )
+    assert resp.status == 403
+    assert await settings_service.consume_setup_token(token) is True
 
 
 async def test_enter_failures_share_the_login_throttle(client, settings_service):
     for _ in range(5):
-        await client.get("/enter?t=guess", allow_redirects=False)
+        assert (await _enter(client, "guess")).headers["Location"] == "/login"
     assert (await _login(client)).status == 429
     token = await settings_service.issue_setup_token(actor_is_admin=True)
-    resp = await client.get(f"/enter?t={token}", allow_redirects=False)
-    assert resp.headers["Location"] == "/login"
+    resp = await _enter(client, token)
+    assert resp.status == 429
+    assert resp.headers["Retry-After"] == str(THROTTLE_WINDOW_S)
     assert COOKIE_NAME not in resp.cookies
+    assert "Too many tries — try again in 15 min" in await resp.text()
     # The throttled attempt didn't spend the token.
     assert await settings_service.consume_setup_token(token) is True
+
+
+# ─── global brake ────────────────────────────────────────────────────────
+
+
+async def test_global_brake_holds_back_every_client(client, auth):
+    # Thirty-one failures from other addresses (each under its own limit).
+    for n in range(31):
+        assert auth.begin_attempt(f"10.0.{n}.1") == 0
+    resp = await _login(client)
+    assert resp.status == 429
+    assert int(resp.headers["Retry-After"]) > 0
+    assert COOKIE_NAME not in resp.cookies
+
+
+async def test_global_brake_spares_signed_in_tablets(client, auth):
+    for n in range(31):
+        auth.begin_attempt(f"10.0.{n}.1")
+    resp = await client.get("/", headers=await _cookie(auth))
+    assert resp.status == 200
+
+
+async def test_login_reads_settings_once(client):
+    with patch.object(
+        DashboardSettingsService,
+        "get",
+        autospec=True,
+        side_effect=DashboardSettingsService.get,
+    ) as get:
+        assert (await _login(client, "nope")).status == 401
+        assert get.call_count == 1
+        get.reset_mock()
+        assert (await client.get("/login")).status == 200
+        assert get.call_count == 1
 
 
 # ─── logout ──────────────────────────────────────────────────────────────
 
 
 async def test_logout_clears_cookie(client, auth):
-    headers = {**await _cookie(auth), **_origin(client)}
+    headers = {**await _cookie(auth), **_origin(client, "/")}
     resp = await client.post("/logout", headers=headers, allow_redirects=False)
     assert resp.status == 303
     assert resp.headers["Location"] == "/login"
@@ -276,7 +375,9 @@ async def test_logout_clears_cookie(client, auth):
 
 
 async def test_logout_without_session_still_clears(client):
-    resp = await client.post("/logout", headers=_origin(client), allow_redirects=False)
+    resp = await client.post(
+        "/logout", headers=_origin(client, "/"), allow_redirects=False
+    )
     assert resp.status == 303
     assert resp.headers["Location"] == "/login"
 

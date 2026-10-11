@@ -13,13 +13,17 @@ from socialhome.dashboard.app import (
     DASHBOARD_CSP_DIRECTIVES,
     build_dashboard_app,
     build_dashboard_csp,
+    host_allowed,
 )
 from socialhome.dashboard.auth import COOKIE_NAME, RENEW_AFTER_S, DashboardAuth
+from socialhome.dashboard.render import DashboardRenderer
 from socialhome.i18n import Catalog
 
 from .conftest import PASSWORD
 
-CATALOG = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+RENDERER = DashboardRenderer(
+    Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+)
 
 
 async def _name() -> str:
@@ -37,7 +41,7 @@ async def client(aiohttp_client, settings_service, auth):
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
-        catalog=CATALOG,
+        renderer=RENDERER,
         household_name=_name,
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
@@ -45,6 +49,12 @@ async def client(aiohttp_client, settings_service, auth):
 
 def _origin(client) -> str:
     return f"http://{client.host}:{client.port}"
+
+
+def _browser(client, page: str = "/login") -> dict[str, str]:
+    """What a browser sends on a form POST from our own page, given our
+    ``Referrer-Policy: same-origin``: the real origin + the full referer."""
+    return {"Origin": _origin(client), "Referer": f"{_origin(client)}{page}"}
 
 
 async def _cookie(auth: DashboardAuth, keep: bool = True) -> dict[str, str]:
@@ -73,8 +83,14 @@ async def test_unauthenticated_fragment_is_401(client):
 
 async def test_unauthenticated_post_is_401(client):
     resp = await client.post(
-        "/anything", headers={"Origin": _origin(client)}, allow_redirects=False
+        "/anything", headers=_browser(client), allow_redirects=False
     )
+    assert resp.status == 401
+
+
+async def test_unauthenticated_head_is_401(client):
+    """HEAD isn't a page view: no login redirect (and views answer only GET)."""
+    resp = await client.head("/", allow_redirects=False)
     assert resp.status == 401
 
 
@@ -157,7 +173,10 @@ async def test_post_with_foreign_origin_is_403(client):
     assert "Set-Cookie" not in resp.headers
 
 
-async def test_post_with_null_origin_is_403(client):
+async def test_post_with_opaque_null_origin_is_403(client):
+    """``Origin: null`` is what a browser sends for a cross-site POST from a
+    ``no-referrer`` / sandboxed page — never for our own forms, whose
+    ``Referrer-Policy: same-origin`` keeps the real origin."""
     resp = await client.post(
         "/login",
         data={"password": PASSWORD},
@@ -174,7 +193,17 @@ async def test_post_without_origin_or_referer_is_403(client):
     assert resp.status == 403
 
 
-async def test_post_with_same_origin_referer_passes(client):
+async def test_browser_form_post_passes(client):
+    resp = await client.post(
+        "/login",
+        data={"password": PASSWORD},
+        headers=_browser(client),
+        allow_redirects=False,
+    )
+    assert resp.status == 303
+
+
+async def test_post_with_same_origin_referer_only_passes(client):
     resp = await client.post(
         "/login",
         data={"password": PASSWORD},
@@ -233,8 +262,11 @@ async def test_security_headers_on_html(client, auth):
     ):
         assert resp.headers["Content-Security-Policy"] == build_dashboard_csp()
         assert resp.headers["Cache-Control"] == "no-store"
-        assert resp.headers["Referrer-Policy"] == "no-referrer"
+        assert resp.headers["Referrer-Policy"] == "same-origin"
         assert resp.headers["X-Frame-Options"] == "DENY"
+        assert resp.headers["Permissions-Policy"] == (
+            "camera=(), microphone=(), geolocation=(), screen-wake-lock=(self)"
+        )
         assert resp.headers["X-Content-Type-Options"] == "nosniff"
         assert resp.headers["Content-Type"].startswith("text/html")
 
@@ -242,19 +274,33 @@ async def test_security_headers_on_html(client, auth):
 async def test_redirects_carry_headers(client):
     resp = await client.get("/", allow_redirects=False)
     assert resp.headers["Content-Security-Policy"] == build_dashboard_csp()
-    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    assert resp.headers["Referrer-Policy"] == "same-origin"
 
 
-async def test_static_is_cacheable(client):
+async def test_static_is_revalidated_by_etag(client):
     resp = await client.get("/static/dashboard.css")
-    assert resp.headers.get("Cache-Control") != "no-store"
+    assert resp.headers["Cache-Control"] == "no-cache"
+    etag = resp.headers["ETag"]
+    assert etag == RENDERER.static_asset("dashboard.css").etag
+    again = await client.get("/static/dashboard.css", headers={"If-None-Match": etag})
+    assert again.status == 304
+    assert await again.read() == b""
+    stale = await client.get(
+        "/static/dashboard.css", headers={"If-None-Match": '"other"'}
+    )
+    assert stale.status == 200
+
+
+async def test_static_unknown_is_404(client):
+    assert (await client.get("/static/nope.css")).status == 404
+    assert (await client.get("/static/")).status == 404
 
 
 async def test_oversized_body_is_413(client):
     resp = await client.post(
         "/login",
         data={"password": "x" * 40_000},
-        headers={"Origin": _origin(client)},
+        headers=_browser(client),
         allow_redirects=False,
     )
     assert resp.status == 413
@@ -263,3 +309,107 @@ async def test_oversized_body_is_413(client):
 async def test_redirects_are_not_cacheable(client):
     resp = await client.get("/", allow_redirects=False)
     assert resp.headers["Cache-Control"] == "no-store"
+
+
+# ─── Host allow-list (DNS rebinding) ─────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "192.168.1.20:8100",
+        "[::1]:8100",
+        "[fe80::1]",
+        "localhost",
+        "localhost:8100",
+        "homeassistant",
+        "homeassistant:8100",
+        "HomeAssistant.Local",
+        "homeassistant.local:8100",
+        "tablet.lan",
+        "nas.home",
+        "box.internal",
+        "house.home.arpa",
+        "house.home.arpa.",
+    ],
+)
+def test_host_allowed(host):
+    assert host_allowed(host, frozenset()) is True
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "",
+        "evil.com",
+        "evil.com:8100",
+        "local.evil.com",
+        "evilhome.arpa",
+        "evil.local.com",
+        "[::1",
+        "[nonsense]",
+        "[::1]x",
+        "[::1]:port",
+        "host:port",
+        "a:b:c",
+        "bad_label.local",
+        "-bad.local",
+        ":8100",
+        "evil.com.",
+    ],
+)
+def test_host_refused(host):
+    assert host_allowed(host, frozenset()) is False
+
+
+def test_host_extra_allowed():
+    extra = frozenset({"dash.example.com"})
+    assert host_allowed("dash.example.com:8100", extra) is True
+    assert host_allowed("DASH.example.com", extra) is True
+    assert host_allowed("other.example.com", extra) is False
+
+
+async def test_foreign_host_is_421(client):
+    resp = await client.get(
+        "/login", headers={"Host": "evil.com"}, allow_redirects=False
+    )
+    assert resp.status == 421
+    assert resp.headers["Content-Type"].startswith("text/plain")
+    resp = await client.post(
+        "/login",
+        data={"password": PASSWORD},
+        headers={
+            "Host": "evil.com",
+            "Origin": "http://evil.com",
+            "Referer": "http://evil.com/login",
+        },
+        allow_redirects=False,
+    )
+    assert resp.status == 421
+    assert "Set-Cookie" not in resp.headers
+
+
+@pytest.mark.parametrize("host", ["homeassistant.local:8100", "[::1]:8100", "10.0.0.5"])
+async def test_local_hosts_are_served(client, host):
+    resp = await client.get("/login", headers={"Host": host}, allow_redirects=False)
+    assert resp.status == 200
+
+
+@pytest.mark.parametrize("kind", ["iterable", "callable"])
+async def test_extra_hosts(aiohttp_client, settings_service, auth, kind):
+    async def extra() -> frozenset[str]:
+        return frozenset({"Dash.Example.com"})
+
+    app = build_dashboard_app(
+        settings_service=settings_service,
+        auth=auth,
+        renderer=RENDERER,
+        household_name=_name,
+        extra_hosts=extra if kind == "callable" else ["dash.example.com."],
+    )
+    client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+    ok = await client.get("/healthz", headers={"Host": "dash.example.com:8100"})
+    assert ok.status == 200
+    bad = await client.get("/healthz", headers={"Host": "other.example.com"})
+    assert bad.status == 421

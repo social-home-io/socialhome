@@ -43,5 +43,6 @@
   "dashboard.login.not_set_up": "El panel aún no está configurado.",
   "dashboard.login.ask": "¿No la sabes? Pregunta a un adulto que gestione Social Home.",
   "dashboard.ready": "Tu panel está listo — las vistas llegarán pronto.",
-  "dashboard.sign_out": "Cerrar sesión"
+  "dashboard.sign_out": "Cerrar sesión",
+  "dashboard.enter.confirm": "Iniciar sesión en esta tableta"
 }

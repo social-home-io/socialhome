@@ -5,12 +5,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from string import Formatter
+from unittest.mock import patch
 
 import jinja2
 import pytest
 
 import socialhome.i18n as i18n_pkg
-from socialhome.dashboard.render import DashboardRenderer, text_direction
+from socialhome.dashboard.render import (
+    STATIC_DIR,
+    DashboardRenderer,
+    load_static_assets,
+    text_direction,
+)
 from socialhome.domain.household_dashboard import SUPPORTED_DASHBOARD_LOCALES
 from socialhome.i18n import Catalog
 
@@ -118,3 +124,35 @@ def test_every_locale_has_the_dashboard_strings():
         for key, text in msgs.items():
             assert text.strip(), (locale, key)
             assert _fields(text) == _fields(en[key]), (locale, key)
+
+
+def test_templates_never_reload_from_disk(renderer):
+    """Rendering happens inside request handlers — no FS access there."""
+    with (
+        patch.object(
+            jinja2.FileSystemLoader, "get_source", side_effect=AssertionError("disk")
+        ),
+        patch("os.path.getmtime", side_effect=AssertionError("stat")),
+    ):
+        for _ in range(2):
+            renderer.render("placeholder.html.j2", locale="en", household="H")
+
+
+def test_static_assets_preloaded(renderer):
+    css = renderer.static_asset("dashboard.css")
+    assert css is not None
+    assert css.content_type == "text/css"
+    assert css.body == (STATIC_DIR / "dashboard.css").read_bytes()
+    assert css.etag.startswith('"') and css.etag.endswith('"')
+    assert renderer.static_asset("missing.css") is None
+    assert renderer.static_asset("../render.py") is None
+
+
+def test_load_static_assets_skips_dotfiles_and_dirs(tmp_path):
+    (tmp_path / "a.css").write_text("a{}")
+    (tmp_path / ".hidden").write_text("x")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "blob.unknownext").write_bytes(b"\x00")
+    assets = load_static_assets(tmp_path)
+    assert set(assets) == {"a.css", "blob.unknownext"}
+    assert assets["blob.unknownext"].content_type == "application/octet-stream"

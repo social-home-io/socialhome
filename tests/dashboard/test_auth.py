@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
+from unittest.mock import patch
 
 import pytest
 
 from socialhome.dashboard.auth import (
     COOKIE_NAME,
+    GLOBAL_MAX_FAILURES,
+    PRUNE_INTERVAL_S,
     KEEP_TTL_S,
     RENEW_AFTER_S,
     SESSION_TTL_S,
@@ -214,22 +218,36 @@ def test_touch_sets_last_seen(auth, clock):
 # ─── throttle ────────────────────────────────────────────────────────────
 
 
+def _fail(auth, key: str, n: int = 1) -> None:
+    """``n`` attempts that each turn out wrong (counted up front)."""
+    for _ in range(n):
+        assert auth.begin_attempt(key) == 0
+
+
 def test_throttle_locks_after_five_failures(auth, clock):
     assert THROTTLE_MAX_FAILURES == 5
     assert THROTTLE_WINDOW_S == 15 * 60
     for _ in range(4):
-        auth.record_failure("1.2.3.4")
+        _fail(auth, "1.2.3.4")
         clock.advance(10)
     assert auth.throttle_remaining("1.2.3.4") == 0
-    auth.record_failure("1.2.3.4")
+    _fail(auth, "1.2.3.4")
     # First failure was 40 s ago → 860 s until it leaves the window.
     assert auth.throttle_remaining("1.2.3.4") == THROTTLE_WINDOW_S - 40
+    assert auth.begin_attempt("1.2.3.4") == THROTTLE_WINDOW_S - 40
     assert auth.throttle_remaining("5.6.7.8") == 0
 
 
+def test_throttled_attempt_is_not_counted(auth, clock):
+    _fail(auth, "k", 5)
+    for _ in range(10):
+        assert auth.begin_attempt("k") > 0
+    clock.advance(THROTTLE_WINDOW_S)
+    assert auth.begin_attempt("k") == 0
+
+
 def test_throttle_window_expiry(auth, clock):
-    for _ in range(5):
-        auth.record_failure("k")
+    _fail(auth, "k", 5)
     clock.advance(THROTTLE_WINDOW_S - 0.5)
     assert auth.throttle_remaining("k") == 1
     clock.advance(0.5)
@@ -237,27 +255,135 @@ def test_throttle_window_expiry(auth, clock):
 
 
 def test_throttle_reset_on_success(auth):
-    for _ in range(5):
-        auth.record_failure("k")
+    auth.record_success("nothing-recorded-yet")
+    _fail(auth, "k", 5)
     auth.record_success("k")
     assert auth.throttle_remaining("k") == 0
     auth.record_success("never-seen")
 
 
-def test_throttle_key_cap(settings_service, clock):
+# ─── global brake ────────────────────────────────────────────────────────
+
+
+def test_global_brake_trips_after_thirty_failures(auth, clock, caplog):
+    assert GLOBAL_MAX_FAILURES == 30
+    # 30 failures spread over many addresses (4 each, so none is locked).
+    for n in range(30):
+        _fail(auth, f"10.0.0.{n // 4}")
+        clock.advance(1)
+    assert auth.begin_attempt("10.9.9.9") == 0  # the 31st failure trips it
+    clock.advance(1)
+    with caplog.at_level("WARNING", logger="socialhome.dashboard.auth"):
+        # Every client — even a brand-new one — is now held back until
+        # the oldest failure leaves the window (it was 31 s ago).
+        assert auth.begin_attempt("192.168.1.50") == THROTTLE_WINDOW_S - 31
+        assert auth.throttle_remaining("192.168.1.51") == THROTTLE_WINDOW_S - 31
+        assert auth.begin_attempt("192.168.1.52") > 0
+    assert sum("global" in r.message for r in caplog.records) == 1
+    clock.advance(THROTTLE_WINDOW_S - 31)
+    assert auth.begin_attempt("192.168.1.50") == 0
+
+
+def test_global_brake_warns_again_after_draining(auth, clock, caplog):
+    with caplog.at_level("WARNING", logger="socialhome.dashboard.auth"):
+        for _round in range(2):
+            for n in range(31):
+                _fail(auth, f"r{_round}-{n}")
+            assert auth.begin_attempt("x") > 0
+            clock.advance(THROTTLE_WINDOW_S)
+    assert sum("global" in r.message for r in caplog.records) == 2
+
+
+def test_success_does_not_feed_the_global_brake(auth):
+    for n in range(100):
+        assert auth.begin_attempt(f"tablet-{n}") == 0
+        auth.record_success(f"tablet-{n}")
+    assert auth.begin_attempt("another") == 0
+
+
+# ─── key cap ─────────────────────────────────────────────────────────────
+
+
+def test_throttle_key_cap_prunes_stale_keys(settings_service, clock):
     auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=3)
     for key in ("a", "b", "c"):
-        auth.record_failure(key)
+        _fail(auth, key)
     assert auth.throttle_key_count == 3
     clock.advance(THROTTLE_WINDOW_S + 1)
-    # All stale: adding a fourth prunes them first.
-    auth.record_failure("d")
-    assert auth.throttle_key_count == 1
-    for key in ("e", "f"):
-        auth.record_failure(key)
-    # Full of live keys: the oldest live one is evicted.
-    auth.record_failure("g")
+    _fail(auth, "d")  # "a" was stale → dropped to make room
     assert auth.throttle_key_count == 3
-    for _ in range(4):
-        auth.record_failure("g")
-    assert auth.throttle_remaining("g") > 0
+    clock.advance(1)
+    _fail(auth, "e")
+    _fail(auth, "f")
+    assert auth.throttle_key_count == 3
+
+
+def test_throttle_key_cap_evicts_oldest_unlocked_never_locked(settings_service, clock):
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=3)
+    _fail(auth, "locked", 5)
+    _fail(auth, "b")
+    _fail(auth, "c")
+    _fail(auth, "d")  # full → evicts "b" (oldest unlocked), keeps "locked"
+    assert auth.throttle_key_count == 3
+    assert auth.throttle_remaining("locked") > 0
+    _fail(auth, "b")  # "b" starts over (evicts "c")
+    assert auth.throttle_remaining("locked") > 0
+
+
+def test_throttle_full_of_locked_keys_fails_closed(settings_service, clock):
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=2)
+    _fail(auth, "a", 5)
+    _fail(auth, "b", 5)
+    remaining = auth.begin_attempt("newcomer")
+    assert remaining > 0
+    assert auth.throttle_key_count == 2
+    assert auth.throttle_remaining("a") > 0 and auth.throttle_remaining("b") > 0
+
+
+def test_throttle_full_table_rescans_at_most_once_per_interval(settings_service, clock):
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=2)
+    _fail(auth, "a", 5)
+    _fail(auth, "b", 5)
+    with patch.object(
+        DashboardAuth,
+        "_make_room",
+        autospec=True,
+        side_effect=DashboardAuth._make_room,
+    ) as make_room:
+        for _ in range(50):
+            assert auth.begin_attempt("newcomer") > 0
+        assert make_room.call_count == 1
+        clock.advance(PRUNE_INTERVAL_S)
+        assert auth.begin_attempt("newcomer") > 0
+        assert make_room.call_count == 2
+    # Once the locked keys age out, a newcomer gets in again.
+    clock.advance(THROTTLE_WINDOW_S)
+    assert auth.begin_attempt("newcomer") == 0
+
+
+# ─── password verify ─────────────────────────────────────────────────────
+
+
+class _SlowSettings:
+    """Records how many password checks run at once."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.peak = 0
+
+    async def verify_password(self, password: str) -> bool:
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        await asyncio.sleep(0.01)
+        self.active -= 1
+        return password == "right"
+
+
+async def test_password_checks_run_one_at_a_time(clock):
+    slow = _SlowSettings()
+    auth = DashboardAuth(slow, clock=clock)  # type: ignore[arg-type]
+    results = await asyncio.gather(
+        *(auth.check_password(p) for p in ["a", "right", "b", "c"])
+    )
+    assert results == [False, True, False, False]
+    assert slow.peak == 1

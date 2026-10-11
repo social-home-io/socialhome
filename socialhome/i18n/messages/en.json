@@ -53,5 +53,6 @@
   "dashboard.login.not_set_up": "The dashboard isn't set up yet.",
   "dashboard.login.ask": "Don't know it? Ask a grown-up who manages Social Home.",
   "dashboard.ready": "Your dashboard is ready — views are on the way.",
-  "dashboard.sign_out": "Sign out"
+  "dashboard.sign_out": "Sign out",
+  "dashboard.enter.confirm": "Sign in this tablet"
 }

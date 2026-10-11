@@ -199,7 +199,14 @@ def _token_hash(raw: str) -> str:
 class DashboardSettingsService:
     """Admin-managed household dashboard configuration and credentials."""
 
-    __slots__ = ("_repo", "_fixed_port", "_main_port", "_lock", "_key_manager")
+    __slots__ = (
+        "_repo",
+        "_fixed_port",
+        "_main_port",
+        "_lock",
+        "_key_manager",
+        "_cookie_secret",
+    )
 
     def __init__(
         self,
@@ -217,10 +224,16 @@ class DashboardSettingsService:
         # methods only call the unlocked ``_*_unlocked`` helpers.
         self._lock = asyncio.Lock()
         self._key_manager: KeyManager | None = None
+        # The unwrapped cookie key, cached after the first load / creation:
+        # every dashboard request verifies a cookie, and it shouldn't take
+        # the lock + a KEK decrypt each time. Only this service writes the
+        # stored key, so the cache can't go stale behind its back.
+        self._cookie_secret: bytes | None = None
 
     def attach_key_manager(self, key_manager: KeyManager) -> None:
         """Late-wire the instance KEK — it only exists after startup."""
         self._key_manager = key_manager
+        self._cookie_secret = None
 
     @property
     def port_fixed(self) -> bool:
@@ -372,10 +385,15 @@ class DashboardSettingsService:
         A value that won't unwrap (other KEK, corrupt) is replaced, which
         signs every tablet out.
         """
+        cached = self._cookie_secret
+        if cached is not None:
+            return cached
         km = self._key_manager
         if km is None:
             raise RuntimeError("dashboard cookie secret needs the instance KEK")
         async with self._lock:
+            if self._cookie_secret is not None:
+                return self._cookie_secret
             stored = await self._repo.get(KEY_COOKIE_SECRET)
             if stored is not None:
                 try:
@@ -383,6 +401,7 @@ class DashboardSettingsService:
                 except KeyManagerError:
                     secret = b""
                 if len(secret) == _COOKIE_SECRET_BYTES:
+                    self._cookie_secret = secret
                     return secret
                 log.warning("stored dashboard cookie secret is invalid — replacing")
             secret = secrets.token_bytes(_COOKIE_SECRET_BYTES)
@@ -390,6 +409,7 @@ class DashboardSettingsService:
                 KEY_COOKIE_SECRET,
                 km.encrypt(secret, associated_data=_COOKIE_SECRET_AAD),
             )
+            self._cookie_secret = secret
             return secret
 
     # ── Setup token ─────────────────────────────────────────────────────

@@ -1,7 +1,9 @@
-"""Server-side rendering for the household dashboard (Jinja2).
+"""Server-side rendering for the household dashboard (Jinja2) + its assets.
 
-Templates live in ``templates/`` next to this module and are loaded when
-the renderer is built (startup, not inside a request). Autoescaping is
+Templates (``templates/``) and static files (``static/``) next to this
+module are read once, when the renderer is built at wiring time — never
+inside a request or the server's async start path (``auto_reload`` is
+off, so Jinja doesn't even stat a template again). Autoescaping is
 always on and undefined variables raise, so a typo can't silently render
 an empty string. Strings come from the backend i18n catalog; templates
 call ``t("dashboard.…", name=value)``.
@@ -9,8 +11,11 @@ call ``t("dashboard.…", name=value)``.
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections.abc import Callable
+import mimetypes
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import jinja2
@@ -19,9 +24,18 @@ from ..i18n import Catalog
 
 log = logging.getLogger(__name__)
 
-__all__ = ["RTL_LOCALES", "TEMPLATE_DIR", "DashboardRenderer", "text_direction"]
+__all__ = [
+    "RTL_LOCALES",
+    "STATIC_DIR",
+    "TEMPLATE_DIR",
+    "DashboardRenderer",
+    "StaticAsset",
+    "load_static_assets",
+    "text_direction",
+]
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 
 #: Locales written right-to-left. None of the shipped dashboard locales
 #: are, but the ``dir`` hook is wired so adding one needs no template edit.
@@ -33,12 +47,39 @@ def text_direction(locale: str) -> str:
     return "rtl" if locale.split("-", 1)[0] in RTL_LOCALES else "ltr"
 
 
+@dataclass(slots=True, frozen=True)
+class StaticAsset:
+    """One preloaded ``/static/`` file."""
+
+    body: bytes
+    content_type: str
+    etag: str
+
+
+def load_static_assets(directory: Path) -> dict[str, StaticAsset]:
+    """Read every regular, non-hidden file directly in ``directory``.
+
+    Sync on purpose: called once at wiring time, outside the event loop's
+    request path. Serving from this map also makes path traversal moot —
+    a name is either a key or a 404.
+    """
+    assets: dict[str, StaticAsset] = {}
+    for path in sorted(directory.iterdir()):
+        if path.name.startswith(".") or not path.is_file():
+            continue
+        body = path.read_bytes()
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+        assets[path.name] = StaticAsset(body=body, content_type=content_type, etag=etag)
+    return assets
+
+
 class DashboardRenderer:
     """Renders dashboard pages in a given locale."""
 
-    __slots__ = ("_env", "_catalog")
+    __slots__ = ("_env", "_catalog", "_static")
 
-    def __init__(self, catalog: Catalog) -> None:
+    def __init__(self, catalog: Catalog, *, static_dir: Path = STATIC_DIR) -> None:
         self._catalog = catalog
         self._env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(TEMPLATE_DIR),
@@ -46,11 +87,17 @@ class DashboardRenderer:
             undefined=jinja2.StrictUndefined,
             trim_blocks=True,
             lstrip_blocks=True,
+            auto_reload=False,
         )
         # Compile every template now — a broken template fails at startup,
         # and no request ever touches the filesystem for one.
         for name in self._env.list_templates(extensions=["j2"]):
             self._env.get_template(name)
+        self._static: Mapping[str, StaticAsset] = load_static_assets(static_dir)
+
+    def static_asset(self, name: str) -> StaticAsset | None:
+        """The preloaded ``/static/<name>`` file, or ``None``."""
+        return self._static.get(name)
 
     def gettext(self, key: str, locale: str, **fmt: object) -> str:
         return self._catalog.gettext(key, locale=locale, **fmt)

@@ -108,3 +108,41 @@ async def test_start_while_running_restarts(server):
     assert server.running_port == p2
     with pytest.raises(aiohttp.ClientConnectionError):
         await _get(p1)
+
+
+async def test_failed_port_change_keeps_the_old_port(server):
+    p1 = _free_port()
+    await server.apply(DashboardSettings(enabled=True, port=p1))
+    runner = server._runner
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.bind((HOST, 0))
+        blocker.listen()
+        taken = blocker.getsockname()[1]
+        with pytest.raises(DashboardPortInUseError) as exc:
+            await server.apply(DashboardSettings(enabled=True, port=taken))
+    assert exc.value.params == {"port": taken}
+    assert server.running_port == p1
+    assert server._runner is runner
+    assert await _get(p1) == "hi"
+
+
+async def test_failed_start_while_running_keeps_the_old_port(server):
+    p1 = _free_port()
+    await server.start(p1)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.bind((HOST, 0))
+        blocker.listen()
+        with pytest.raises(DashboardPortInUseError):
+            await server.start(blocker.getsockname()[1])
+    assert server.running_port == p1
+    assert await _get(p1) == "hi"
+
+
+async def test_start_on_the_running_port_restarts(server):
+    p1 = _free_port()
+    await server.start(p1)
+    runner = server._runner
+    await server.start(p1)
+    assert server.running_port == p1
+    assert server._runner is not runner
+    assert await _get(p1) == "hi"

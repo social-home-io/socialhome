@@ -17,6 +17,11 @@ cookies must not verify).
 The login throttle is in memory and keyed per client address
 (:func:`socialhome.rate_limiter.client_bucket`): five failures within a
 rolling 15 minutes lock that client out until the oldest one ages out.
+On top, a global brake: more than thirty failures across *all* clients
+in that window holds every client back (a guesser with many addresses),
+and password checks (scrypt) run one at a time so a flood of logins
+can't pin every CPU. A tablet with a valid cookie never logs in, so the
+brakes don't touch it.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import hashlib
 import hmac
 import json
 import logging
+import asyncio
 import math
 import re
 import time
@@ -42,8 +48,10 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "COOKIE_NAME",
+    "GLOBAL_MAX_FAILURES",
     "KEEP_TTL_S",
     "MAX_CLOCK_SKEW_S",
+    "PRUNE_INTERVAL_S",
     "RENEW_AFTER_S",
     "SESSION_TTL_S",
     "THROTTLE_MAX_FAILURES",
@@ -67,6 +75,11 @@ MAX_CLOCK_SKEW_S = 300
 THROTTLE_MAX_FAILURES = 5
 THROTTLE_WINDOW_S = 15 * 60
 THROTTLE_MAX_KEYS = 10_000
+#: Failures across all clients per window before everyone is held back.
+GLOBAL_MAX_FAILURES = 30
+#: With the client table full of locked-out clients, newcomers are
+#: refused (fail closed) and the table is rescanned at most this often.
+PRUNE_INTERVAL_S = 10.0
 
 _PAYLOAD_VERSION = 1
 #: Exact claim set and the type of each value (``bool`` checked exactly,
@@ -123,6 +136,10 @@ class DashboardAuth:
         "_clock",
         "_max_keys",
         "_failures",
+        "_global",
+        "_global_tripped",
+        "_no_room_until",
+        "_verify_slot",
         "last_seen_at",
     )
 
@@ -136,7 +153,12 @@ class DashboardAuth:
         self._settings = settings_service
         self._clock = clock
         self._max_keys = max_throttle_keys
+        # Insertion-ordered: eviction walks it from the front.
         self._failures: dict[str, deque[float]] = {}
+        self._global: deque[float] = deque(maxlen=GLOBAL_MAX_FAILURES + 1)
+        self._global_tripped = False
+        self._no_room_until = 0.0
+        self._verify_slot = asyncio.Semaphore(1)
         #: When a signed-in tablet last made a request (unix seconds).
         self.last_seen_at: float | None = None
 
@@ -194,7 +216,19 @@ class DashboardAuth:
         """Record a signed-in request (surfaced to admins as "last seen")."""
         self.last_seen_at = self._clock()
 
+    # ── Password ────────────────────────────────────────────────────────
+
+    async def check_password(self, password: str) -> bool:
+        """Verify the household password — one check at a time."""
+        async with self._verify_slot:
+            return await self._settings.verify_password(password)
+
     # ── Throttle ────────────────────────────────────────────────────────
+    #
+    # An attempt is counted as a failure *when it starts*
+    # (:meth:`begin_attempt`) and un-counted on success
+    # (:meth:`record_success`): concurrent guesses can't slip past the
+    # limit while earlier ones are still being checked.
 
     def _live(self, key: str, now: float) -> deque[float] | None:
         """``key``'s failures still inside the window (pruned in place)."""
@@ -208,36 +242,90 @@ class DashboardAuth:
             return None
         return stamps
 
-    def throttle_remaining(self, key: str) -> int:
-        """Seconds until ``key`` may try again (``0`` = allowed now)."""
-        now = self._clock()
-        stamps = self._live(key, now)
-        if stamps is None or len(stamps) < THROTTLE_MAX_FAILURES:
+    def _global_remaining(self, now: float) -> int:
+        stamps = self._global
+        while stamps and now - stamps[0] >= THROTTLE_WINDOW_S:
+            stamps.popleft()
+        if len(stamps) <= GLOBAL_MAX_FAILURES:
+            self._global_tripped = False
             return 0
+        if not self._global_tripped:
+            self._global_tripped = True
+            log.warning(
+                "household dashboard: global login brake engaged — over %d "
+                "failed sign-ins in %d min; every client waits",
+                GLOBAL_MAX_FAILURES,
+                THROTTLE_WINDOW_S // 60,
+            )
         return max(1, math.ceil(stamps[0] + THROTTLE_WINDOW_S - now))
 
-    def record_failure(self, key: str) -> None:
+    def _remaining(self, key: str, now: float) -> int:
+        wait = self._global_remaining(now)
+        stamps = self._live(key, now)
+        if stamps is not None and len(stamps) >= THROTTLE_MAX_FAILURES:
+            wait = max(wait, math.ceil(stamps[0] + THROTTLE_WINDOW_S - now), 1)
+        return wait
+
+    def throttle_remaining(self, key: str) -> int:
+        """Seconds until ``key`` may try again (``0`` = allowed now)."""
+        return self._remaining(key, self._clock())
+
+    def begin_attempt(self, key: str) -> int:
+        """Start a sign-in attempt for ``key``.
+
+        Returns ``0`` when the attempt may go ahead — it is then counted
+        as a failure until :meth:`record_success` — else the seconds to
+        wait (nothing is counted).
+        """
         now = self._clock()
+        wait = self._remaining(key, now)
+        if wait:
+            return wait
         stamps = self._live(key, now)
         if stamps is None:
-            if len(self._failures) >= self._max_keys:
-                self._make_room(now)
+            if len(self._failures) >= self._max_keys and not self._room(now):
+                return max(1, math.ceil(self._no_room_until - now))
             stamps = deque(maxlen=THROTTLE_MAX_FAILURES)
             self._failures[key] = stamps
         stamps.append(now)
+        self._global.append(now)
+        return 0
 
     def record_success(self, key: str) -> None:
+        """The attempt was right: forget ``key``'s failures."""
         self._failures.pop(key, None)
+        if self._global:
+            self._global.pop()
 
     @property
     def throttle_key_count(self) -> int:
         return len(self._failures)
 
-    def _make_room(self, now: float) -> None:
-        """Drop stale keys; if still full, evict the oldest-inserted key."""
-        for key in list(self._failures):
-            self._live(key, now)
-        if len(self._failures) >= self._max_keys:
-            oldest = next(iter(self._failures))
-            log.warning("dashboard login throttle is full — evicting one client")
-            del self._failures[oldest]
+    def _room(self, now: float) -> bool:
+        """Free one slot in the full client table, or fail closed."""
+        if now < self._no_room_until:
+            return False
+        if self._make_room(now):
+            return True
+        self._no_room_until = now + PRUNE_INTERVAL_S
+        log.warning(
+            "household dashboard: login throttle full of locked-out clients — "
+            "refusing new ones"
+        )
+        return False
+
+    def _make_room(self, now: float) -> bool:
+        """Drop the first stale or not-locked client, walking from the
+        oldest. Locked-out clients are never evicted — they rotate to the
+        back so the next walk doesn't step over them again."""
+        for _ in range(len(self._failures)):
+            key = next(iter(self._failures))
+            stamps = self._live(key, now)
+            if stamps is None:
+                return True
+            if len(stamps) < THROTTLE_MAX_FAILURES:
+                del self._failures[key]
+                log.debug("household dashboard: login throttle evicted a client")
+                return True
+            self._failures[key] = self._failures.pop(key)
+        return False

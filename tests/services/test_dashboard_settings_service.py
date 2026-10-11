@@ -650,3 +650,56 @@ async def test_setup_token_non_ascii_stored_hash_is_a_mismatch(svc, repo):
         {"hash": "é" * 64, "expires_at": 9e9}
     )
     assert await svc.consume_setup_token("x", now=1.0) is False
+
+
+async def test_cookie_secret_cached_after_first_load():
+    """Per-request verify must not take the lock + KEK-decrypt every time."""
+    spy = _SpyRepo()
+    km = _km()
+    seed = DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT)
+    seed.attach_key_manager(km)
+    stored_secret = await seed.cookie_secret()
+
+    svc = DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT)
+    svc.attach_key_manager(km)
+    spy.read.clear()
+    assert await svc.cookie_secret() == stored_secret  # loaded + unwrapped once
+    assert spy.read == ["dashboard.cookie_secret"]
+    spy.read.clear()
+    for _ in range(3):
+        assert await svc.cookie_secret() == stored_secret
+    assert spy.read == []
+
+
+async def test_cookie_secret_cache_holds_a_freshly_created_key():
+    spy = _SpyRepo()
+    svc = DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT)
+    svc.attach_key_manager(_km())
+    first = await svc.cookie_secret()
+    spy.read.clear()
+    assert await svc.cookie_secret() == first
+    assert spy.read == []
+
+
+async def test_cookie_secret_cache_dropped_on_new_key_manager(svc, repo):
+    svc.attach_key_manager(_km())
+    old = await svc.cookie_secret()
+    # A different KEK can't unwrap the stored key → it is replaced, not
+    # served from the stale cache.
+    svc.attach_key_manager(_km())
+    assert await svc.cookie_secret() != old
+
+
+class _YieldingRepo(_FakeRepo):
+    async def get(self, key: str) -> str | None:
+        await asyncio.sleep(0)
+        return await super().get(key)
+
+
+async def test_cookie_secret_concurrent_first_use_mints_one_key():
+    svc = DashboardSettingsService(
+        _YieldingRepo(), fixed_port=None, main_port=MAIN_PORT
+    )
+    svc.attach_key_manager(_km())
+    secrets_ = await asyncio.gather(*(svc.cookie_secret() for _ in range(5)))
+    assert len(set(secrets_)) == 1

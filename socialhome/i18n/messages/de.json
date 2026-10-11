@@ -43,5 +43,6 @@
   "dashboard.login.not_set_up": "Das Dashboard ist noch nicht eingerichtet.",
   "dashboard.login.ask": "Du kennst es nicht? Frag einen Erwachsenen, der Social Home verwaltet.",
   "dashboard.ready": "Dein Dashboard ist bereit — die Ansichten kommen bald.",
-  "dashboard.sign_out": "Abmelden"
+  "dashboard.sign_out": "Abmelden",
+  "dashboard.enter.confirm": "Dieses Tablet anmelden"
 }

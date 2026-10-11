@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import math
-from pathlib import Path
 
 from aiohttp import web
 
@@ -22,12 +21,12 @@ from .render import DashboardRenderer
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "STATIC_DIR",
     "EnterView",
     "HealthView",
     "HomeView",
     "LoginView",
     "LogoutView",
+    "StaticView",
     "clear_session_cookie",
     "html_response",
     "redirect",
@@ -35,8 +34,6 @@ __all__ = [
     "safe_next",
     "set_session_cookie",
 ]
-
-STATIC_DIR = Path(__file__).parent / "static"
 
 _MAX_NEXT_LEN = 2048
 
@@ -120,33 +117,31 @@ class _DashboardView(web.View):
         return client_bucket(self.request.remote)
 
     async def render(
-        self, template: str, *, status: int = 200, **ctx: object
+        self, template: str, *, locale: str, status: int = 200, **ctx: object
     ) -> web.Response:
-        locale = (await self.settings.get()).locale
         household = await self.request.app[HOUSEHOLD_NAME_KEY]()
         text = self.renderer.render(template, locale=locale, household=household, **ctx)
         return html_response(text, status=status)
 
-
-class LoginView(_DashboardView):
-    """``GET`` shows the password form, ``POST`` checks it."""
-
-    async def _form(
+    async def login_form(
         self,
         *,
+        locale: str,
         status: int,
-        next_path: str,
+        next_path: str = "/",
         keep: bool = True,
         error_key: str | None = None,
         show_form: bool = True,
         **fmt: object,
     ) -> web.Response:
-        error: str | None = None
-        if error_key is not None:
-            locale = (await self.settings.get()).locale
-            error = self.renderer.gettext(error_key, locale, **fmt)
+        error = (
+            None
+            if error_key is None
+            else self.renderer.gettext(error_key, locale, **fmt)
+        )
         return await self.render(
             "login.html.j2",
+            locale=locale,
             status=status,
             next_path=next_path,
             keep=keep,
@@ -154,56 +149,73 @@ class LoginView(_DashboardView):
             show_form=show_form,
         )
 
+    async def too_many_tries(
+        self, *, locale: str, wait: int, next_path: str = "/", keep: bool = True
+    ) -> web.Response:
+        response = await self.login_form(
+            locale=locale,
+            status=429,
+            next_path=next_path,
+            keep=keep,
+            error_key="dashboard.login.too_many_tries",
+            minutes=math.ceil(wait / 60),
+        )
+        response.headers["Retry-After"] = str(wait)
+        return response
+
+
+class LoginView(_DashboardView):
+    """``GET`` shows the password form, ``POST`` checks it."""
+
     async def get(self) -> web.Response:
         next_path = safe_next(self.request.query.get("next"))
         claims = await self.auth.verify(self.request.cookies.get(COOKIE_NAME))
         if claims is not None:
             return redirect(next_path)
-        if (await self.settings.get()).password_set_at is None:
-            return await self._form(
+        settings = await self.settings.get()
+        if settings.password_set_at is None:
+            return await self.login_form(
+                locale=settings.locale,
                 status=503,
                 next_path=next_path,
                 error_key="dashboard.login.not_set_up",
                 show_form=False,
             )
-        return await self._form(status=200, next_path=next_path)
+        return await self.login_form(
+            locale=settings.locale, status=200, next_path=next_path
+        )
 
     async def post(self) -> web.Response:
         form = await self.request.post()
         next_path = safe_next(form.get("next"))
         keep = form.get("keep") is not None
         key = self.client_key
+        settings = await self.settings.get()
+        locale = settings.locale
 
-        if (await self.settings.get()).password_set_at is None:
-            return await self._form(
+        if settings.password_set_at is None:
+            return await self.login_form(
+                locale=locale,
                 status=503,
                 next_path=next_path,
                 error_key="dashboard.login.not_set_up",
                 show_form=False,
             )
 
-        # Check and count the attempt with no ``await`` in between, and
-        # *before* the slow password check (scrypt in a thread): a burst
-        # of concurrent guesses must not all slip past the throttle while
-        # earlier ones are still being verified. A success clears it.
-        remaining = self.auth.throttle_remaining(key)
-        if remaining:
-            response = await self._form(
-                status=429,
-                next_path=next_path,
-                keep=keep,
-                error_key="dashboard.login.too_many_tries",
-                minutes=math.ceil(remaining / 60),
+        # Checked and counted with no ``await`` in between, before the slow
+        # password check — see :meth:`DashboardAuth.begin_attempt`.
+        wait = self.auth.begin_attempt(key)
+        if wait:
+            return await self.too_many_tries(
+                locale=locale, wait=wait, next_path=next_path, keep=keep
             )
-            response.headers["Retry-After"] = str(remaining)
-            return response
-        self.auth.record_failure(key)
         password = form.get("password")
-        if not isinstance(password, str) or not await self.settings.verify_password(
+        if not isinstance(password, str) or not await self.auth.check_password(
             password
         ):
             log.info("household dashboard: wrong password from %s", key)
-            return await self._form(
+            return await self.login_form(
+                locale=locale,
                 status=401,
                 next_path=next_path,
                 keep=keep,
@@ -219,17 +231,32 @@ class LoginView(_DashboardView):
 
 
 class EnterView(_DashboardView):
-    """``GET /enter?t=<token>`` — the one-time tablet setup link (QR)."""
+    """The one-time tablet setup link (QR): ``/enter?t=<token>``.
+
+    ``GET`` only shows a confirm button — link previewers and prefetchers
+    fetch links too, and must not spend the token. The button's
+    same-origin form ``POST``s the token, which signs the tablet in.
+    """
 
     async def get(self) -> web.Response:
-        key = self.client_key
-        if self.auth.throttle_remaining(key):
-            # Don't even try the token — a locked-out client can't spend it.
-            return redirect("/login")
-        # Counted up front, like a login attempt (see ``LoginView.post``).
-        self.auth.record_failure(key)
         token = self.request.query.get("t", "")
-        if not token or not await self.settings.consume_setup_token(token):
+        if not token:
+            return redirect("/login")
+        locale = (await self.settings.get()).locale
+        return await self.render("enter.html.j2", locale=locale, token=token)
+
+    async def post(self) -> web.Response:
+        form = await self.request.post()
+        token = form.get("t")
+        if not isinstance(token, str) or not token:
+            return redirect("/login")
+        key = self.client_key
+        wait = self.auth.begin_attempt(key)
+        if wait:
+            # Don't even try the token — a locked-out client can't spend it.
+            locale = (await self.settings.get()).locale
+            return await self.too_many_tries(locale=locale, wait=wait)
+        if not await self.settings.consume_setup_token(token):
             return redirect("/login")
         self.auth.record_success(key)
         response = redirect("/")
@@ -252,12 +279,32 @@ class HomeView(_DashboardView):
     """``GET /`` — placeholder until the real overview ships."""
 
     async def get(self) -> web.Response:
-        return await self.render("placeholder.html.j2")
+        locale = (await self.settings.get()).locale
+        return await self.render("placeholder.html.j2", locale=locale)
 
 
 class HealthView(web.View):
     async def get(self) -> web.Response:
         return web.Response(text="ok")
+
+
+class StaticView(_DashboardView):
+    """``/static/<name>`` from the renderer's preloaded assets.
+
+    No filesystem access per request (and so no traversal); revalidated
+    by ``ETag`` so an upgrade's new stylesheet is picked up at once.
+    """
+
+    async def get(self) -> web.Response:
+        asset = self.renderer.static_asset(self.request.match_info["name"])
+        if asset is None:
+            raise web.HTTPNotFound()
+        headers = {"ETag": asset.etag, "Cache-Control": "no-cache"}
+        if self.request.headers.get("If-None-Match") == asset.etag:
+            return web.Response(status=304, headers=headers)
+        return web.Response(
+            body=asset.body, content_type=asset.content_type, headers=headers
+        )
 
 
 def register_routes(app: web.Application) -> None:
@@ -266,4 +313,4 @@ def register_routes(app: web.Application) -> None:
     app.router.add_view("/enter", EnterView)
     app.router.add_view("/logout", LogoutView)
     app.router.add_view("/healthz", HealthView)
-    app.router.add_static("/static/", STATIC_DIR)
+    app.router.add_view("/static/{name}", StaticView)
