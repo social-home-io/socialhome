@@ -1,0 +1,26 @@
+{#- The left rail: Home + one face per shown person, the current page
+    ringed; the lock button at the bottom while a PIN is set. On a
+    portrait tablet or a phone it becomes a face strip on top (CSS). -#}
+{% from "_macros.html.j2" import face with context %}
+<nav class="dash-rail{% if rail_many %} dash-rail-many{% endif %}" aria-label="{{ t("dashboard.nav.label") }}">
+  <ul class="dash-rail-list">
+    <li>
+      <a class="dash-rail-item" href="/"{% if current is none %} aria-current="page"{% endif %}>
+        <span class="dash-face dash-face-rail dash-face-home" aria-hidden="true">🏠</span>
+        <span class="dash-rail-name">{{ t("dashboard.nav.home") }}</span>
+      </a>
+    </li>
+    {% for p in people %}
+    <li>
+      <a class="dash-rail-item" href="/p/{{ p.user_id|urlencode }}"{% if current == p.user_id %} aria-current="page"{% endif %}>
+        {{ face(p, "rail", named=True) }}
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if pin_set %}
+  <div class="dash-rail-lock">
+    {% include "_lock_button.html.j2" %}
+  </div>
+  {% endif %}
+</nav>

@@ -1,0 +1,82 @@
+{#- A person who reads (mockups C + D2): header, NOW / NEXT, then school
+    today (when there is school), today's events + tomorrow, chores. -#}
+{% from "_macros.html.j2" import face, whereabouts, agenda_row, chore with context %}
+{% set p = page.person %}
+<div class="dash-person">
+  <header class="dash-person-head">
+    {{ face(p, "lg") }}
+    <div class="dash-person-id">
+      <h1 class="dash-person-name">{{ p.display_name }}{% if p.status_emoji %} <span class="dash-status">{{ p.status_emoji }}</span>{% endif %}</h1>
+      {% if p.status_text %}<p class="dash-status-text">{{ p.status_text }}</p>{% endif %}
+    </div>
+    {% if "presence" in page.sections and p.presence != "unknown" %}
+    <p class="dash-person-where" data-live>{{ whereabouts(p) }}</p>
+    {% endif %}
+    <time class="dash-clock dash-clock-sm" datetime="{{ clock.iso }}" data-clock>{{ clock.time }}</time>
+  </header>
+
+  {% if page.now_item or page.next_item %}
+  <section class="dash-nownext">
+    {% if page.now_item %}
+    {% set it = page.now_item %}
+    <div class="dash-nn dash-nn-now {{ f.kc(f.item_color(it)) }}" data-live>
+      <h2 class="dash-label">{{ t("dashboard.person.now") }}</h2>
+      <p class="dash-nn-title">{% if f.icon(it) %}<span aria-hidden="true">{{ f.icon(it) }}</span> {% endif %}{{ f.title(it) }}{% if f.lesson_meta(it) %} <span class="dash-nn-meta">· {{ f.lesson_meta(it) }}</span>{% endif %}</p>
+      <p class="dash-nn-when">{{ f.until(it.end) }}</p>
+    </div>
+    {% endif %}
+    {% if page.next_item %}
+    {% set it = page.next_item %}
+    <div class="dash-nn {{ f.kc(f.item_color(it)) }}">
+      <h2 class="dash-label">{{ t("dashboard.person.next") }}</h2>
+      <p class="dash-nn-title">{% if f.icon(it) %}<span aria-hidden="true">{{ f.icon(it) }}</span> {% endif %}{{ f.title(it) }}{% if f.lesson_meta(it) %} <span class="dash-nn-meta">· {{ f.lesson_meta(it) }}</span>{% endif %}</p>
+      <p class="dash-nn-when">{{ f.hhmm(it.start) }}<span data-rel> · {{ f.rel(it.start) }}</span></p>
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <div class="dash-columns">
+    {% if school_lessons %}
+    <section class="dash-col" aria-labelledby="dash-school-label">
+      <h2 class="dash-label" id="dash-school-label">{{ t("dashboard.person.school_today") }}</h2>
+      <ol class="dash-agenda">
+        {% for ls in school_lessons %}{{ agenda_row(ls) }}{% endfor %}
+      </ol>
+    </section>
+    {% endif %}
+    <section class="dash-col" aria-labelledby="dash-day-label">
+      <h2 class="dash-label" id="dash-day-label">{{ t("dashboard.person.today") }}</h2>
+      {% if today_list %}
+      <ol class="dash-agenda">
+        {% for item in today_list %}{{ agenda_row(item) }}{% endfor %}
+      </ol>
+      {% elif not school_lessons %}
+      <p class="dash-empty">{{ t("dashboard.empty_day") }} <span aria-hidden="true">🎈</span></p>
+      {% endif %}
+      {% if tomorrow_list %}
+      <h3 class="dash-sublabel">{{ t("dashboard.person.tomorrow") }}</h3>
+      <ol class="dash-agenda dash-agenda-tomorrow">
+        {% for item in tomorrow_list %}
+        {% if item.item_type == "lesson" %}
+        <li class="dash-row dash-row-school {{ f.kc(item.color_hex) }}">
+          <span class="dash-row-time">{{ f.hhmm(item.start) }}</span>
+          <span class="dash-row-main"><span class="dash-row-title"><span aria-hidden="true">🎒</span> {{ t("dashboard.person.first_lesson") }}</span></span>
+        </li>
+        {% else %}
+        {{ agenda_row(item) }}
+        {% endif %}
+        {% endfor %}
+      </ol>
+      {% endif %}
+    </section>
+    {% if "tasks" in page.sections and page.chores %}
+    <section class="dash-col" aria-labelledby="dash-mychores-label">
+      <h2 class="dash-label" id="dash-mychores-label">{{ t("dashboard.person.chores") }}</h2>
+      <ul class="dash-chores">
+        {% for c in page.chores %}{{ chore(c, show_people=False, show_due=True) }}{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+  </div>
+</div>

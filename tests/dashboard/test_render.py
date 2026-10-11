@@ -93,20 +93,15 @@ def test_not_set_up_hides_form(renderer):
     assert "set up yet" in html
 
 
-def test_placeholder(renderer):
-    html = renderer.render(
-        "placeholder.html.j2", locale="en", household="Casa", pin_set=False
-    )
+def test_not_found_page(renderer):
+    html = renderer.render("not_found.html.j2", locale="en", household="Casa")
     assert "Casa" in html
-    assert "Your dashboard is ready" in html
-    assert 'action="/logout"' in html
-    assert 'action="/lock"' not in html
+    assert "This page isn&#39;t on the dashboard." in html
+    assert 'href="/"' in html
 
 
-def test_placeholder_with_pin_has_the_lock_button(renderer):
-    html = renderer.render(
-        "placeholder.html.j2", locale="de", household="Casa", pin_set=True
-    )
+def test_lock_button(renderer):
+    html = renderer.render("_lock_button.html.j2", locale="de")
     assert '<form class="dash-lock-form" method="post" action="/lock">' in html
     assert 'aria-label="Bildschirm sperren"' in html
     assert 'class="dash-lock-button"' in html
@@ -170,7 +165,7 @@ def test_lock_screen_error_opens_the_keypad(renderer):
 
 def test_strict_undefined(renderer):
     with pytest.raises(jinja2.UndefinedError):
-        renderer.render("placeholder.html.j2", locale="en")
+        renderer.render("not_found.html.j2", locale="en")
 
 
 def test_gettext_with_format(renderer):
@@ -208,9 +203,7 @@ def test_templates_never_reload_from_disk(renderer):
         patch("os.path.getmtime", side_effect=AssertionError("stat")),
     ):
         for _ in range(2):
-            renderer.render(
-                "placeholder.html.j2", locale="en", household="H", pin_set=False
-            )
+            renderer.render("not_found.html.j2", locale="en", household="H")
 
 
 def test_lock_script_preloaded(renderer):
@@ -225,9 +218,7 @@ def test_dashboard_script_preloaded_and_on_every_page(renderer):
     assert js is not None and js.content_type == "text/javascript"
     tag = '<script src="/static/dashboard.js" defer></script>'
     assert tag in renderer.render("login.html.j2", locale="en", **_login_ctx())
-    assert tag in renderer.render(
-        "placeholder.html.j2", locale="en", household="H", pin_set=False
-    )
+    assert tag in renderer.render("not_found.html.j2", locale="en", household="H")
 
 
 def test_translator_binds_the_locale(renderer):

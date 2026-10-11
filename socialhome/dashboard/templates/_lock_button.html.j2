@@ -1,5 +1,5 @@
 {# The privacy-lock button. Rendered only while a PIN is set (else /lock
-   is 409). A form, so it works without JS; T5 moves it into the rail. #}
+   is 409). A form, so it works without JS. #}
 <form class="dash-lock-form" method="post" action="/lock">
   <button type="submit" class="dash-lock-button" aria-label="{{ t("dashboard.lock.lock") }}" title="{{ t("dashboard.lock.lock") }}"><span aria-hidden="true">🔒</span></button>
 </form>

@@ -1,0 +1,7 @@
+{#- A person's page: the picture view for people who can't read yet,
+    else the reader page. -#}
+{% if page.person.picture_view %}
+{% include "_person_picture.html.j2" %}
+{% else %}
+{% include "_person_reader.html.j2" %}
+{% endif %}

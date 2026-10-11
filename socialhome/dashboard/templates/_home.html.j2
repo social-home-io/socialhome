@@ -1,0 +1,162 @@
+{#- Home (mockup B): clock + next up + who's home, then today, then the
+    chores / shopping / notes columns. Empty columns are left out. -#}
+{% from "_macros.html.j2" import face, faces, agenda_row, chore with context %}
+{% set day_on = "calendar" in snap.sections or "timetable" in snap.sections %}
+<div class="dash-home">
+  <h1 class="dash-visually-hidden">{{ household }}</h1>
+  <header class="dash-top">
+    <div class="dash-top-clock">
+      <time class="dash-clock" datetime="{{ clock.iso }}" data-clock>{{ clock.time }}</time>
+      <p class="dash-date">{{ clock.date }}</p>
+    </div>
+    {% if snap.next_up %}
+    {% set nx = snap.next_up %}
+    <section class="dash-next {{ f.kc(f.item_color(nx)) }}" aria-labelledby="dash-next-label">
+      <h2 class="dash-label" id="dash-next-label">{{ t("dashboard.home.next") }}</h2>
+      <p class="dash-next-line">
+        <span class="dash-next-time">{{ f.hhmm(nx.start) }}</span>
+        {% if f.icon(nx) %}<span aria-hidden="true">{{ f.icon(nx) }}</span>{% endif %}
+        <span class="dash-next-title">{{ f.title(nx) }}</span>
+      </p>
+      <p class="dash-next-meta">
+        {{ faces(nx) }}
+        <span class="dash-rel" data-rel>{{ f.rel(nx.start) }}</span>
+      </p>
+    </section>
+    {% endif %}
+  </header>
+
+  {% if presence %}
+  <section class="dash-presence" aria-labelledby="dash-presence-label" data-live>
+    <h2 class="dash-visually-hidden" id="dash-presence-label">{{ t("dashboard.home.whos_home") }}</h2>
+    {% if presence.home %}
+    <p class="dash-presence-group">
+      <span class="dash-presence-icon" aria-hidden="true">🏠</span>
+      <span class="dash-visually-hidden">{{ t("dashboard.presence.home") }}:</span>
+      {% for p in presence.home %}{{ face(p, "sm") }}{% endfor %}
+    </p>
+    {% endif %}
+    {% if presence.away %}
+    <p class="dash-presence-group dash-presence-away">
+      <span class="dash-presence-icon" aria-hidden="true">🚗</span>
+      <span class="dash-visually-hidden">{{ t("dashboard.presence.away") }}:</span>
+      {% for p in presence.away %}
+      <span class="dash-away">{{ face(p, "sm") }}{% if p.zone_name %}<span class="dash-zone">{{ p.zone_name }}</span>{% endif %}</span>
+      {% endfor %}
+    </p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if day_on %}
+  <section class="dash-today" aria-labelledby="dash-today-label">
+    <h2 class="dash-label" id="dash-today-label">{{ t("dashboard.home.today") }}</h2>
+    {% if timeline %}
+    <div class="dash-timeline" role="group" aria-label="{{ t("dashboard.timeline.label") }}">
+      <div class="dash-lane dash-lane-ticks" aria-hidden="true">
+        <div class="dash-lane-head"></div>
+        <div class="dash-ticks">
+          {% for tick in timeline.ticks %}<span class="dash-tick x-{{ tick.x }}{% if tick.minor %} dash-tick-minor{% endif %}">{{ tick.label }}</span>{% endfor %}
+          {% if timeline.now_x is not none %}<span class="dash-tick-now x-{{ timeline.now_x }}" data-live>{{ t("dashboard.timeline.now") }}</span>{% endif %}
+        </div>
+      </div>
+      {% for lane in timeline.lanes %}
+      <div class="dash-lane">
+        <div class="dash-lane-head">{{ face(lane.person, "sm", named=True) }}</div>
+        <div class="dash-lane-body">
+          {% if lane.all_day %}
+          <ul class="dash-allday">
+            {% for title in lane.all_day %}<li class="dash-chip">{{ title }}</li>{% endfor %}
+          </ul>
+          {% endif %}
+          <ul class="dash-track dash-rows-{{ lane.rows }}">
+            {% for b in lane.blocks %}
+            <li class="dash-block dash-block-{{ b.kind }} x-{{ b.x }} w-{{ b.w }} dash-r-{{ b.row }} {{ b.color }}{% if b.past %} dash-past{% endif %}" title="{{ b.label }}">
+              <span class="dash-visually-hidden">{{ b.label }}</span>
+              <span class="dash-block-title" aria-hidden="true">{% if b.kind == "school" %}🎒 {% endif %}{{ b.title }}</span>
+            </li>
+            {% endfor %}
+            {% if timeline.now_x is not none %}<li class="dash-now-line x-{{ timeline.now_x }}" aria-hidden="true" data-live></li>{% endif %}
+          </ul>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% elif rail_many and (snap.events_today or snap.school) %}
+    <ol class="dash-agenda">
+      {% for ev in snap.events_today %}
+      {{ agenda_row(ev, with_people=True) }}
+      {% endfor %}
+      {% for day in snap.school if day.first_start %}
+      <li class="dash-row dash-row-school">
+        <span class="dash-row-time">{{ f.hhmm(day.first_start) }}–{{ f.hhmm(day.last_end) }}</span>
+        <span class="dash-row-main"><span class="dash-row-title"><span aria-hidden="true">🎒</span> {{ t("dashboard.school") }}</span></span>
+        {{ faces([day.person_id]) }}
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="dash-empty">{{ t("dashboard.empty_day") }} <span aria-hidden="true">🎈</span></p>
+    {% endif %}
+
+    {% if at_school %}
+    <p class="dash-school-now">
+      <span class="dash-sublabel">{{ t("dashboard.home.at_school_now") }}</span>
+      {% for ls in at_school %}
+      <span class="dash-school-item">{{ faces(ls) }}{% if f.icon(ls) %}<span aria-hidden="true">{{ f.icon(ls) }}</span> {% endif %}{{ f.title(ls) }} <span class="dash-muted">{{ f.until(ls.end) }}</span></span>{% if not loop.last %}<span class="dash-sep" aria-hidden="true"> · </span>{% endif %}
+      {% endfor %}
+    </p>
+    {% endif %}
+    {% if changes %}
+    <div class="dash-changes">
+      <span class="dash-sublabel">{{ t("dashboard.home.school_changes") }}</span>
+      <ul class="dash-change-list">
+        {% for ls in changes %}
+        {% set who = f.people(ls) %}
+        <li class="dash-change dash-st-{{ ls.status }}">
+          <span aria-hidden="true">{% if ls.status == "cancelled" %}⚠{% elif ls.status == "changed" %}🔁{% else %}+{% endif %}</span>
+          {% if who %}<span class="dash-change-who">{{ who[0].display_name }}:</span>{% endif %}
+          <span class="dash-change-title">{{ f.hhmm(ls.start) }} {{ f.title(ls) }}</span>
+          <span class="dash-tag{% if ls.status == "cancelled" %} dash-tag-warn{% endif %}">{{ t("dashboard.lesson." ~ ls.status) }}</span>
+          {% if ls.status != "cancelled" and f.lesson_meta(ls) %}<span class="dash-muted">{{ f.lesson_meta(ls) }}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% set show_chores = "tasks" in snap.sections and snap.chores_today %}
+  {% set show_shopping = snap.shopping %}
+  {% set show_notes = "stickies" in snap.sections and stickies %}
+  {% if show_chores or show_shopping or show_notes %}
+  <div class="dash-columns">
+    {% if show_chores %}
+    <section class="dash-col" aria-labelledby="dash-chores-label">
+      <h2 class="dash-label" id="dash-chores-label">{{ t("dashboard.home.chores") }}{% if open_chores %} · {{ t("dashboard.home.chores_open", n=open_chores) }}{% endif %}</h2>
+      <ul class="dash-chores">
+        {% for c in snap.chores_today %}{{ chore(c) }}{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+    {% if show_shopping %}
+    <section class="dash-col" aria-labelledby="dash-shopping-label">
+      <h2 class="dash-label" id="dash-shopping-label">{{ t("dashboard.home.shopping") }} · {{ snap.shopping_total }}</h2>
+      <ul class="dash-shopping">
+        {% for item in shopping_shown %}<li>{{ item.text }}</li>{% endfor %}
+      </ul>
+      {% if shopping_more %}<p class="dash-more">{{ t("dashboard.home.shopping_more", n=shopping_more) }}</p>{% endif %}
+    </section>
+    {% endif %}
+    {% if show_notes %}
+    <section class="dash-col" aria-labelledby="dash-notes-label">
+      <h2 class="dash-label" id="dash-notes-label">{{ t("dashboard.home.notes") }}</h2>
+      <ul class="dash-stickies">
+        {% for s in stickies %}<li class="dash-sticky {{ f.kc(s.color) }}">{{ s.content }}</li>{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

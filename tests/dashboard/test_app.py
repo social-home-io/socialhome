@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import aiohttp
@@ -19,7 +20,8 @@ from socialhome.dashboard.auth import COOKIE_NAME, RENEW_AFTER_S, DashboardAuth
 from socialhome.dashboard.render import DashboardRenderer
 from socialhome.i18n import Catalog
 
-from .conftest import PASSWORD
+from .conftest import PASSWORD, default_theme
+from .factories import FakeDashboardService
 
 RENDERER = DashboardRenderer(
     Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
@@ -48,6 +50,8 @@ async def client(aiohttp_client, settings_service, auth):
         renderer=RENDERER,
         household_name=_name,
         household_tz=_tz,
+        household_theme=default_theme,
+        snapshots=FakeDashboardService(),
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
 
@@ -280,7 +284,9 @@ async def test_security_headers_on_html(client, auth):
         await client.get("/login"),
         await client.get("/", headers=await _cookie(auth)),
     ):
-        assert resp.headers["Content-Security-Policy"] == build_dashboard_csp()
+        # A board page admits its one inline <style> by hash; nothing else.
+        styles = re.findall(r"<style>(.*?)</style>", await resp.text(), re.S)
+        assert resp.headers["Content-Security-Policy"] == build_dashboard_csp(styles)
         assert resp.headers["Cache-Control"] == "no-store"
         assert resp.headers["Referrer-Policy"] == "same-origin"
         assert resp.headers["X-Frame-Options"] == "DENY"
@@ -436,6 +442,8 @@ async def test_local_hostnames_param(aiohttp_client, settings_service, auth):
         renderer=RENDERER,
         household_name=_name,
         household_tz=_tz,
+        household_theme=default_theme,
+        snapshots=FakeDashboardService(),
         local_hostnames=frozenset({"Kitchen-Pi"}),
     )
     client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
@@ -467,6 +475,8 @@ async def test_extra_hosts(aiohttp_client, settings_service, auth, kind):
         renderer=RENDERER,
         household_name=_name,
         household_tz=_tz,
+        household_theme=default_theme,
+        snapshots=FakeDashboardService(),
         extra_hosts=extra if kind == "callable" else ["dash.example.com."],
     )
     client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())

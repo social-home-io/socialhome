@@ -22,13 +22,12 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 from urllib.parse import quote, urlsplit
 
 from aiohttp import web
 
-from ..csp import render_csp, style_hash
 from ..hardening import build_body_size_middleware, install_security_headers
 from ..services.dashboard_settings_service import DashboardSettingsService
 from .auth import COOKIE_NAME, REVOKED_LOCKED, REVOKED_SIGNED_OUT, DashboardAuth
@@ -36,12 +35,17 @@ from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
     HOUSEHOLD_NAME_KEY,
+    HOUSEHOLD_THEME_KEY,
     HOUSEHOLD_TZ_KEY,
     RENDERER_KEY,
     SETTINGS_KEY,
+    SNAPSHOTS_KEY,
+    DashboardSnapshots,
     HouseholdNameFn,
+    HouseholdThemeFn,
     HouseholdTzFn,
 )
+from .policy import DASHBOARD_CSP_DIRECTIVES, build_dashboard_csp
 from .render import DashboardRenderer
 from .views import (
     LOCKED_FRAGMENT,
@@ -90,22 +94,6 @@ _AVATAR_PREFIX = "/avatar/"
 #: The only non-public routes a privacy-locked tablet reaches.
 _LOCK_PATHS = frozenset({"/lock", "/unlock"})
 
-#: Same-origin only; no third-party host of any kind (no web fonts, no
-#: CDNs). Inline ``<style>`` blocks are admitted per page by hash
-#: (:func:`build_dashboard_csp`); there is no ``'unsafe-inline'``.
-DASHBOARD_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
-    "default-src": ("'self'",),
-    "script-src": ("'self'",),
-    "style-src": ("'self'",),
-    "img-src": ("'self'", "data:"),
-    "connect-src": ("'self'",),
-    "font-src": ("'self'",),
-    "object-src": ("'none'",),
-    "base-uri": ("'none'",),
-    "form-action": ("'self'",),
-    "frame-ancestors": ("'none'",),
-}
-
 _PAGE_HEADERS: dict[str, str] = {
     "X-Frame-Options": "DENY",
     # Not ``no-referrer``: under it browsers send ``Origin: null`` on our
@@ -119,14 +107,6 @@ _PAGE_HEADERS: dict[str, str] = {
 }
 
 
-def build_dashboard_csp(inline_styles: Iterable[str] = ()) -> str:
-    """The dashboard policy, admitting exactly ``inline_styles`` by hash."""
-    hashes = tuple(dict.fromkeys(style_hash(css) for css in inline_styles))
-    directives = dict(DASHBOARD_CSP_DIRECTIVES)
-    directives["style-src"] = (*directives["style-src"], *hashes)
-    return render_csp(directives)
-
-
 _DEFAULT_CSP = build_dashboard_csp()
 
 
@@ -136,10 +116,18 @@ async def _dashboard_headers(
     for name, value in _PAGE_HEADERS.items():
         response.headers[name] = value
     response.headers.setdefault("Content-Security-Policy", _DEFAULT_CSP)
-    if not request.path.startswith(_STATIC_PREFIX):
-        # Pages, redirects (which may carry Set-Cookie) and errors are
-        # per-session — never cache them; only the stylesheet may be.
-        response.headers["Cache-Control"] = "no-store"
+    if request.path.startswith(_STATIC_PREFIX):
+        return
+    if (
+        request.path.startswith(_AVATAR_PREFIX)
+        and response.status in (200, 304)
+        and "Cache-Control" in response.headers
+    ):
+        # A shown person's picture: the view set a short private cache.
+        return
+    # Pages, redirects (which may carry Set-Cookie) and errors are
+    # per-session — never cache them; only static files and avatars may be.
+    response.headers["Cache-Control"] = "no-store"
 
 
 def normalise_host(name: str) -> str:
@@ -321,6 +309,8 @@ def build_dashboard_app(
     renderer: DashboardRenderer,
     household_name: HouseholdNameFn,
     household_tz: HouseholdTzFn,
+    household_theme: HouseholdThemeFn,
+    snapshots: DashboardSnapshots,
     extra_hosts: ExtraHosts = (),
     local_hostnames: frozenset[str] = frozenset(),
 ) -> web.Application:
@@ -351,6 +341,8 @@ def build_dashboard_app(
     app[RENDERER_KEY] = renderer
     app[HOUSEHOLD_NAME_KEY] = household_name
     app[HOUSEHOLD_TZ_KEY] = household_tz
+    app[HOUSEHOLD_THEME_KEY] = household_theme
+    app[SNAPSHOTS_KEY] = snapshots
     install_security_headers(app)
     # After the shared hook (which only ``setdefault``s), so these win.
     app.on_response_prepare.append(_dashboard_headers)

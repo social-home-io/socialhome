@@ -365,6 +365,7 @@ from .services.app_service import AppService
 from .services.resync_on_upgrade import request_capability_resync_if_upgraded
 from .services.preferences_service import PreferencesService
 from .services.household_chat_service import HouseholdChatService
+from .services.household_dashboard_service import HouseholdDashboardService
 from .services.space_chat_outbound import SpaceChatAudience, SpaceChatOutbound
 from .services.space_chat_service import SpaceChatService
 from .services.system_chat_policy import (
@@ -2111,9 +2112,15 @@ def _build_household_dashboard(
     platform_adapter: PlatformAdapter,
     preferences_service: PreferencesService,
     catalog: Catalog,
+    *,
+    sources: SimpleNamespace,
 ) -> SimpleNamespace:
-    """Settings service, cookie auth and own-port listener of the
-    household dashboard (``socialhome/dashboard/``).
+    """Settings service, cookie auth, snapshot service and own-port
+    listener of the household dashboard (``socialhome/dashboard/``).
+
+    ``sources`` holds the services the read-only snapshots read
+    (``user``, ``presence``, ``calendar``, ``task``, ``shopping``,
+    ``timetable``, ``sticky``) plus ``theme`` for the accent colour.
 
     One :class:`DashboardAuth` and one :class:`DashboardRenderer` for the
     process: the login throttle must survive a listener restart (port
@@ -2128,6 +2135,17 @@ def _build_household_dashboard(
     auth = DashboardAuth(settings)
     renderer = DashboardRenderer(catalog)
     own_names = local_hostnames()
+    snapshots = HouseholdDashboardService(
+        user_service=sources.user,
+        presence_service=sources.presence,
+        calendar_service=sources.calendar,
+        task_service=sources.task,
+        shopping_service=sources.shopping,
+        timetable_service=sources.timetable,
+        sticky_service=sources.sticky,
+        preferences_service=preferences_service,
+        dashboard_settings=settings,
+    )
 
     async def household_name() -> str:
         prefs = await preferences_service.get_household()
@@ -2146,6 +2164,8 @@ def _build_household_dashboard(
             renderer=renderer,
             household_name=household_name,
             household_tz=household_tz,
+            household_theme=sources.theme.get_household_theme,
+            snapshots=snapshots,
             extra_hosts=extra_hosts,
             local_hostnames=own_names,
         )
@@ -2153,7 +2173,11 @@ def _build_household_dashboard(
     server = DashboardServer(build_app=build_app, host=config.listen_host)
     controller = DashboardController(settings, server, local_hostnames=own_names)
     return SimpleNamespace(
-        settings=settings, auth=auth, server=server, controller=controller
+        settings=settings,
+        auth=auth,
+        snapshots=snapshots,
+        server=server,
+        controller=controller,
     )
 
 
@@ -3009,7 +3033,21 @@ def create_app(config: Config | None = None) -> web.Application:
 
     # ── Household dashboard (wall tablet, own port) ──────────────────────
     dashboard = _build_household_dashboard(
-        config, repos, platform_adapter, preferences_service, i18n
+        config,
+        repos,
+        platform_adapter,
+        preferences_service,
+        i18n,
+        sources=SimpleNamespace(
+            user=user_service,
+            presence=presence_service,
+            calendar=calendar_service,
+            task=task_service,
+            shopping=shopping_service,
+            timetable=timetable_service,
+            sticky=sticky_service,
+            theme=theme_service,
+        ),
     )
 
     # Voice-note transcription depends on ``adapter.stt``; fail-silent

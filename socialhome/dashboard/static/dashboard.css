@@ -1,5 +1,9 @@
-/* Household dashboard — login + placeholder. System fonts only: the
-   dashboard never fetches from a third-party host. */
+/* Household dashboard — login, lock screen and the boards (Home, a person).
+   System fonts only: the dashboard never fetches from a third-party host.
+   No inline style attributes anywhere (the CSP forbids them): per-person /
+   per-item colours arrive as classes (.kN sets --kc / --kt) in the page's
+   one hash-admitted <style>; timeline geometry uses the .x-N / .w-N steps
+   at the end of this file. Logical properties throughout, so RTL flips. */
 
 :root {
   color-scheme: light dark;
@@ -444,3 +448,1238 @@ h1 {
   margin-block-end: 0;
   text-align: center;
 }
+
+/* ── Boards: shell + rail ─────────────────────────────────────────────── */
+
+/* Glanceable from across the kitchen: items ≥ 22 px, labels ≥ 16 px. */
+.dash-board {
+  font-size: 1.375rem;
+  line-height: 1.35;
+}
+
+.dash-shell {
+  display: flex;
+  min-block-size: 100vh;
+  min-block-size: 100dvh;
+}
+
+.dash-content {
+  flex: 1;
+  min-inline-size: 0;
+  padding-block: 24px;
+  padding-inline: 28px;
+}
+
+.dash-rail {
+  position: sticky;
+  inset-block-start: 0;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  inline-size: 7.5rem;
+  block-size: 100vh;
+  block-size: 100dvh;
+  padding-block: 12px;
+  background: var(--dash-surface);
+  border-inline-end: 1px solid var(--dash-border);
+}
+
+.dash-rail-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-block-size: 0;
+  margin: 0;
+  padding-block: 4px;
+  padding-inline: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.dash-rail-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-inline-size: 64px;
+  min-block-size: 64px;
+  max-inline-size: 7rem;
+  padding: 8px;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 16px;
+}
+
+.dash-rail-item[aria-current="page"] {
+  background: var(--dash-bg);
+}
+
+/* The current page: a thick ring round the face (and bold name). */
+.dash-rail-item[aria-current="page"] .dash-face {
+  box-shadow:
+    0 0 0 3px var(--dash-surface),
+    0 0 0 7px var(--dash-accent);
+}
+
+.dash-rail-item[aria-current="page"] .dash-rail-name,
+.dash-rail-item[aria-current="page"] .dash-face-name {
+  font-weight: 700;
+}
+
+.dash-rail-name,
+.dash-rail .dash-face-name {
+  max-inline-size: 6.5rem;
+  overflow: hidden;
+  font-size: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-rail-lock {
+  display: flex;
+  justify-content: center;
+  padding-block-start: 8px;
+}
+
+.dash-rail .dash-lock-form,
+.dash-corner .dash-lock-form {
+  margin: 0;
+}
+
+/* One person: no rail; the lock button sits in the corner. */
+.dash-corner {
+  position: fixed;
+  inset-block-end: 16px;
+  inset-inline-end: 16px;
+  z-index: 5;
+}
+
+/* ── Faces ────────────────────────────────────────────────────────────── */
+
+.dash-face {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  inline-size: 56px;
+  block-size: 56px;
+  overflow: hidden;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--kt, #ffffff);
+  background: var(--kc, var(--dash-muted));
+  border-radius: 50%;
+}
+
+.dash-face img {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+}
+
+.dash-face-xs {
+  inline-size: 32px;
+  block-size: 32px;
+  font-size: 0.8125rem;
+}
+
+.dash-face-sm {
+  inline-size: 44px;
+  block-size: 44px;
+  font-size: 1rem;
+}
+
+.dash-face-lg {
+  inline-size: 88px;
+  block-size: 88px;
+  font-size: 2rem;
+}
+
+.dash-face-rail {
+  inline-size: 72px;
+  block-size: 72px;
+  font-size: 1.625rem;
+}
+
+.dash-face-home {
+  font-size: 2.25rem;
+  color: var(--dash-text);
+  background: var(--dash-bg);
+  border: 1px solid var(--dash-border);
+}
+
+.dash-faces {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.dash-face-name {
+  min-inline-size: 0;
+}
+
+/* ── Shared type ──────────────────────────────────────────────────────── */
+
+.dash-label,
+.dash-sublabel {
+  margin-block: 0 8px;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dash-muted);
+}
+
+.dash-sublabel {
+  margin-inline-end: 8px;
+}
+
+h3.dash-sublabel {
+  margin-block: 16px 8px;
+}
+
+.dash-muted {
+  color: var(--dash-muted);
+}
+
+.dash-empty {
+  margin-block: 4px;
+  font-size: 1.5rem;
+  color: var(--dash-muted);
+}
+
+.dash-tag {
+  display: inline-block;
+  padding-inline: 8px;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+}
+
+.dash-tag-warn {
+  color: var(--dash-error-text);
+  background: var(--dash-error-bg);
+  border-color: var(--dash-error-text);
+}
+
+.dash-tag-now {
+  color: var(--dash-accent-text);
+  background: var(--dash-accent);
+  border-color: var(--dash-accent);
+}
+
+.dash-past {
+  opacity: 0.5;
+}
+
+/* ── Home: clock, next up, who's home ─────────────────────────────────── */
+
+.dash-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px 32px;
+}
+
+.dash-clock {
+  display: block;
+  font-size: clamp(4rem, 8vw, 6.5rem);
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.dash-date {
+  margin-block: 6px 0;
+  font-size: 1.375rem;
+  color: var(--dash-muted);
+}
+
+.dash-next {
+  flex: 1 1 20rem;
+  max-inline-size: 40rem;
+  padding-block: 14px;
+  padding-inline: 20px;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-inline-start: 8px solid var(--kc, var(--dash-accent));
+  border-radius: var(--dash-radius);
+}
+
+.dash-next-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.5ch;
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.dash-next-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-next-title {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.dash-next-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-block: 8px 0;
+  color: var(--dash-muted);
+}
+
+.dash-presence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 32px;
+  margin-block: 16px 0;
+}
+
+.dash-presence-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.dash-presence-icon {
+  font-size: 1.75rem;
+}
+
+.dash-away {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dash-zone {
+  font-size: 1.125rem;
+  color: var(--dash-muted);
+}
+
+/* ── Home: today ──────────────────────────────────────────────────────── */
+
+.dash-today,
+.dash-col {
+  min-inline-size: 0;
+  padding-block: 16px;
+  padding-inline: 20px;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius);
+}
+
+.dash-today {
+  margin-block: 20px 0;
+}
+
+.dash-timeline {
+  display: flex;
+  flex-direction: column;
+}
+
+.dash-lane {
+  display: grid;
+  grid-template-columns: minmax(6rem, 10rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding-block: 6px;
+  border-block-start: 1px solid var(--dash-border);
+}
+
+.dash-lane-ticks {
+  padding-block: 0;
+  border: 0;
+}
+
+.dash-lane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-inline-size: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.dash-lane-head .dash-face-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-lane-body {
+  min-inline-size: 0;
+}
+
+.dash-ticks {
+  position: relative;
+  block-size: 1.75rem;
+  margin-inline: 12px;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--dash-muted);
+}
+
+.dash-tick,
+.dash-tick-now {
+  position: absolute;
+  inset-block-start: 0;
+  inline-size: 2.5rem;
+  margin-inline-start: -1.25rem;
+  text-align: center;
+}
+
+.dash-tick-now {
+  inline-size: auto;
+  min-inline-size: 2.5rem;
+  padding-inline: 4px;
+  font-weight: 700;
+  color: var(--dash-accent-text);
+  background: var(--dash-accent);
+  border-radius: 6px;
+}
+
+.dash-track {
+  position: relative;
+  margin-block: 0;
+  margin-inline: 12px;
+  padding: 0;
+  list-style: none;
+  block-size: 44px;
+}
+
+.dash-rows-2 {
+  block-size: 92px;
+}
+
+.dash-rows-3 {
+  block-size: 140px;
+}
+
+.dash-block {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  block-size: 42px;
+  min-inline-size: 8px;
+  padding-inline: 8px;
+  overflow: hidden;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--kt, #ffffff);
+  white-space: nowrap;
+  background: var(--kc, var(--dash-muted));
+  border-radius: 8px;
+}
+
+.dash-block-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* School is striped, so it never reads as "an event" by colour alone. */
+.dash-block-school {
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgb(255 255 255 / 0.16) 0 8px,
+    transparent 8px 16px
+  );
+}
+
+.dash-r-0 {
+  inset-block-start: 0;
+}
+
+.dash-r-1 {
+  inset-block-start: 48px;
+}
+
+.dash-r-2 {
+  inset-block-start: 96px;
+}
+
+.dash-now-line {
+  position: absolute;
+  inset-block: -6px;
+  inline-size: 3px;
+  margin-inline-start: -1px;
+  background: var(--dash-accent);
+  border-radius: 2px;
+}
+
+.dash-allday {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-block: 0 4px;
+  margin-inline: 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-chip {
+  padding-inline: 10px;
+  font-size: 1rem;
+  background: var(--dash-bg);
+  border: 1px solid var(--dash-border);
+  border-radius: 999px;
+}
+
+.dash-school-now {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-block: 16px 0;
+  font-size: 1.25rem;
+}
+
+.dash-school-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dash-changes {
+  margin-block: 12px 0;
+}
+
+.dash-change-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin-block: 4px 0;
+  padding: 0;
+  font-size: 1.25rem;
+  list-style: none;
+}
+
+.dash-change {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.dash-change.dash-st-cancelled .dash-change-title {
+  text-decoration: line-through;
+}
+
+/* ── Day lists (person page, crowded Home) ────────────────────────────── */
+
+.dash-agenda {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px 16px;
+  padding-block: 8px;
+  padding-inline: 12px;
+  background: var(--dash-bg);
+  border-inline-start: 6px solid var(--kc, var(--dash-border));
+  border-radius: 8px;
+}
+
+.dash-row-time {
+  flex: none;
+  min-inline-size: 5.5ch;
+  font-size: 1.125rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--dash-muted);
+}
+
+.dash-row-main {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-inline-size: 0;
+}
+
+.dash-row-title {
+  overflow-wrap: anywhere;
+}
+
+.dash-row-meta {
+  flex-basis: 100%;
+  font-size: 1rem;
+  color: var(--dash-muted);
+}
+
+.dash-row .dash-faces {
+  align-self: center;
+  margin-inline-start: auto;
+}
+
+.dash-st-cancelled .dash-row-title {
+  text-decoration: line-through;
+  color: var(--dash-muted);
+}
+
+.dash-break {
+  font-size: 1.125rem;
+  color: var(--dash-muted);
+}
+
+/* "Now" in a list: a thick frame (plus the NOW tag — never colour alone). */
+.dash-current {
+  background: var(--dash-surface);
+  box-shadow: inset 0 0 0 3px var(--dash-accent);
+}
+
+/* ── Columns: chores, shopping, notes ─────────────────────────────────── */
+
+.dash-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  align-items: start;
+  gap: 20px;
+  margin-block: 20px 0;
+}
+
+.dash-chores,
+.dash-shopping,
+.dash-stickies {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-chore {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dash-glyph {
+  flex: none;
+  inline-size: 1.4em;
+  font-weight: 700;
+  text-align: center;
+}
+
+.dash-chore-text {
+  flex: 1;
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.dash-chore-done .dash-chore-title {
+  color: var(--dash-muted);
+  text-decoration: line-through;
+}
+
+.dash-chore-late .dash-glyph,
+.dash-chore-late-text {
+  color: var(--dash-error-text);
+}
+
+.dash-chore-late-text,
+.dash-chore-due {
+  font-size: 1.125rem;
+}
+
+.dash-chore-due {
+  color: var(--dash-muted);
+}
+
+.dash-shopping li {
+  position: relative;
+  padding-inline-start: 1.1em;
+  overflow-wrap: anywhere;
+}
+
+.dash-shopping li::before {
+  position: absolute;
+  inset-inline-start: 0;
+  content: "•";
+  color: var(--dash-muted);
+}
+
+.dash-more {
+  margin-block: 10px 0;
+  font-size: 1.125rem;
+  color: var(--dash-muted);
+}
+
+.dash-sticky {
+  padding-block: 12px;
+  padding-inline: 14px;
+  font-size: 1.25rem;
+  color: var(--kt, #1f1d1a);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  background: var(--kc, #fff3a8);
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+}
+
+/* ── Person page ──────────────────────────────────────────────────────── */
+
+.dash-person-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+
+.dash-person-id {
+  flex: 1 1 12rem;
+  min-inline-size: 0;
+}
+
+.dash-person-name {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 2.75rem);
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.dash-status-text {
+  margin: 0;
+  color: var(--dash-muted);
+}
+
+.dash-person-where {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.dash-clock-sm {
+  font-size: 4rem;
+}
+
+.dash-nownext {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 16px;
+  margin-block: 20px 0;
+}
+
+.dash-nn {
+  min-inline-size: 0;
+  padding-block: 14px;
+  padding-inline: 20px;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-inline-start: 8px solid var(--kc, var(--dash-border));
+  border-radius: var(--dash-radius);
+}
+
+.dash-nn-now {
+  box-shadow: inset 0 0 0 3px var(--dash-accent);
+}
+
+.dash-nn-title {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.dash-nn-meta {
+  font-size: 1.25rem;
+  font-weight: 400;
+  color: var(--dash-muted);
+}
+
+.dash-nn-when {
+  margin-block: 6px 0;
+  color: var(--dash-muted);
+}
+
+/* ── Offline / stale ──────────────────────────────────────────────────── */
+
+.dash-offline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-block: 0 16px;
+  padding-block: 8px;
+  padding-inline: 16px;
+  font-size: 1.25rem;
+  color: var(--dash-error-text);
+  background: var(--dash-error-bg);
+  border-radius: 12px;
+}
+
+.dash-offline[hidden] {
+  display: none;
+}
+
+.dash-offline-text {
+  flex: 1;
+}
+
+.dash-offline-retry {
+  flex: none;
+  min-inline-size: 56px;
+  min-block-size: 56px;
+  font: inherit;
+  font-size: 1.5rem;
+  color: inherit;
+  background: transparent;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+/* Stale data: no "in 28 min" that is no longer true, and "now" / where
+   people are greyed out. */
+.dash-stale [data-rel] {
+  visibility: hidden;
+}
+
+.dash-stale [data-live] {
+  opacity: 0.45;
+  filter: grayscale(1);
+}
+
+/* ── Night mode ───────────────────────────────────────────────────────── */
+
+.dash-night {
+  --dash-bg: #000000;
+  --dash-surface: #121110;
+  --dash-text: #a8a298;
+  --dash-muted: #7d786f;
+  --dash-border: #2a2825;
+  --dash-accent: #6cc3a8;
+  --dash-accent-text: #0f1a16;
+  --dash-error-bg: #3a1a16;
+  --dash-error-text: #ffb4a9;
+  --dash-focus: #8ab4ff;
+
+  color-scheme: dark;
+}
+
+.dash-night:not(.dash-woken) .dash-rail,
+.dash-night:not(.dash-woken) .dash-corner,
+.dash-night:not(.dash-woken) .dash-day,
+.dash-woken .dash-night-view {
+  display: none;
+}
+
+.dash-night-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-block-size: calc(100vh - 48px);
+  min-block-size: calc(100dvh - 48px);
+  text-align: center;
+  cursor: pointer;
+}
+
+.dash-night-clock {
+  display: block;
+  font-size: clamp(5rem, min(22vw, 30vh), 12rem);
+  font-weight: 200;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.dash-night-date {
+  margin-block: 8px 32px;
+  font-size: clamp(1.25rem, 3vw, 2rem);
+}
+
+.dash-night-next {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 0.5ch;
+  margin: 0;
+  font-size: clamp(1.375rem, 3vw, 2rem);
+}
+
+.dash-night-when {
+  font-weight: 700;
+}
+
+.dash-night-hint {
+  margin-block: 40px 0;
+  font-size: 1rem;
+  color: var(--dash-muted);
+}
+
+/* ── Burn-in: a 1–2 px drift every 10 minutes (dashboard.js) ──────────── */
+
+.dash-shift-1 .dash-view,
+.dash-shift-1 .dash-rail-list {
+  transform: translate(1px, 1px);
+}
+
+.dash-shift-2 .dash-view,
+.dash-shift-2 .dash-rail-list {
+  transform: translate(-1px, 2px);
+}
+
+.dash-shift-3 .dash-view,
+.dash-shift-3 .dash-rail-list {
+  transform: translate(2px, -1px);
+}
+
+.dash-shift-4 .dash-view,
+.dash-shift-4 .dash-rail-list {
+  transform: translate(-2px, -1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dash-view,
+  .dash-rail-list {
+    transform: none !important;
+  }
+}
+
+/* ── Focus ────────────────────────────────────────────────────────────── */
+
+.dash-rail-item:focus-visible,
+.dash-offline-retry:focus-visible,
+.dash-link-button:focus-visible {
+  outline: 3px solid var(--dash-focus);
+  outline-offset: 3px;
+}
+
+.dash-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+/* ── Portrait tablet / phone: the rail becomes a face strip on top ────── */
+
+@media (max-width: 900px), (orientation: portrait) {
+  .dash-shell {
+    flex-direction: column;
+  }
+
+  .dash-rail {
+    z-index: 5;
+    flex-direction: row;
+    align-items: center;
+    inline-size: auto;
+    block-size: auto;
+    padding-block: 6px;
+    padding-inline: 8px;
+    border-inline-end: 0;
+    border-block-end: 1px solid var(--dash-border);
+  }
+
+  .dash-rail-list {
+    flex-direction: row;
+    align-items: flex-start;
+    padding-block: 10px 4px;
+    padding-inline: 10px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+  }
+
+  .dash-rail-item {
+    min-inline-size: 72px;
+    max-inline-size: 6rem;
+    padding-block: 4px;
+  }
+
+  .dash-face-rail {
+    inline-size: 56px;
+    block-size: 56px;
+    font-size: 1.25rem;
+  }
+
+  .dash-face-home {
+    font-size: 1.75rem;
+  }
+
+  .dash-rail-lock {
+    padding-block: 0;
+    padding-inline: 8px 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .dash-content {
+    padding-block: 16px;
+    padding-inline: 16px;
+  }
+
+  .dash-board {
+    font-size: 1.25rem;
+  }
+
+  .dash-lane {
+    grid-template-columns: 2.75rem minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  /* On a phone the lane shows the face; the name is still spoken. */
+  .dash-lane-head .dash-face-name {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .dash-track,
+  .dash-ticks,
+  .dash-allday {
+    margin-inline: 4px;
+  }
+
+  .dash-tick-minor {
+    display: none;
+  }
+
+  .dash-next-line {
+    font-size: 1.625rem;
+  }
+
+  .dash-face-lg {
+    inline-size: 64px;
+    block-size: 64px;
+    font-size: 1.5rem;
+  }
+}
+
+/* ── Timeline steps (generated: whole percent of the day's span) ────── */
+
+.x-0 { inset-inline-start: 0%; }
+.x-1 { inset-inline-start: 1%; }
+.x-2 { inset-inline-start: 2%; }
+.x-3 { inset-inline-start: 3%; }
+.x-4 { inset-inline-start: 4%; }
+.x-5 { inset-inline-start: 5%; }
+.x-6 { inset-inline-start: 6%; }
+.x-7 { inset-inline-start: 7%; }
+.x-8 { inset-inline-start: 8%; }
+.x-9 { inset-inline-start: 9%; }
+.x-10 { inset-inline-start: 10%; }
+.x-11 { inset-inline-start: 11%; }
+.x-12 { inset-inline-start: 12%; }
+.x-13 { inset-inline-start: 13%; }
+.x-14 { inset-inline-start: 14%; }
+.x-15 { inset-inline-start: 15%; }
+.x-16 { inset-inline-start: 16%; }
+.x-17 { inset-inline-start: 17%; }
+.x-18 { inset-inline-start: 18%; }
+.x-19 { inset-inline-start: 19%; }
+.x-20 { inset-inline-start: 20%; }
+.x-21 { inset-inline-start: 21%; }
+.x-22 { inset-inline-start: 22%; }
+.x-23 { inset-inline-start: 23%; }
+.x-24 { inset-inline-start: 24%; }
+.x-25 { inset-inline-start: 25%; }
+.x-26 { inset-inline-start: 26%; }
+.x-27 { inset-inline-start: 27%; }
+.x-28 { inset-inline-start: 28%; }
+.x-29 { inset-inline-start: 29%; }
+.x-30 { inset-inline-start: 30%; }
+.x-31 { inset-inline-start: 31%; }
+.x-32 { inset-inline-start: 32%; }
+.x-33 { inset-inline-start: 33%; }
+.x-34 { inset-inline-start: 34%; }
+.x-35 { inset-inline-start: 35%; }
+.x-36 { inset-inline-start: 36%; }
+.x-37 { inset-inline-start: 37%; }
+.x-38 { inset-inline-start: 38%; }
+.x-39 { inset-inline-start: 39%; }
+.x-40 { inset-inline-start: 40%; }
+.x-41 { inset-inline-start: 41%; }
+.x-42 { inset-inline-start: 42%; }
+.x-43 { inset-inline-start: 43%; }
+.x-44 { inset-inline-start: 44%; }
+.x-45 { inset-inline-start: 45%; }
+.x-46 { inset-inline-start: 46%; }
+.x-47 { inset-inline-start: 47%; }
+.x-48 { inset-inline-start: 48%; }
+.x-49 { inset-inline-start: 49%; }
+.x-50 { inset-inline-start: 50%; }
+.x-51 { inset-inline-start: 51%; }
+.x-52 { inset-inline-start: 52%; }
+.x-53 { inset-inline-start: 53%; }
+.x-54 { inset-inline-start: 54%; }
+.x-55 { inset-inline-start: 55%; }
+.x-56 { inset-inline-start: 56%; }
+.x-57 { inset-inline-start: 57%; }
+.x-58 { inset-inline-start: 58%; }
+.x-59 { inset-inline-start: 59%; }
+.x-60 { inset-inline-start: 60%; }
+.x-61 { inset-inline-start: 61%; }
+.x-62 { inset-inline-start: 62%; }
+.x-63 { inset-inline-start: 63%; }
+.x-64 { inset-inline-start: 64%; }
+.x-65 { inset-inline-start: 65%; }
+.x-66 { inset-inline-start: 66%; }
+.x-67 { inset-inline-start: 67%; }
+.x-68 { inset-inline-start: 68%; }
+.x-69 { inset-inline-start: 69%; }
+.x-70 { inset-inline-start: 70%; }
+.x-71 { inset-inline-start: 71%; }
+.x-72 { inset-inline-start: 72%; }
+.x-73 { inset-inline-start: 73%; }
+.x-74 { inset-inline-start: 74%; }
+.x-75 { inset-inline-start: 75%; }
+.x-76 { inset-inline-start: 76%; }
+.x-77 { inset-inline-start: 77%; }
+.x-78 { inset-inline-start: 78%; }
+.x-79 { inset-inline-start: 79%; }
+.x-80 { inset-inline-start: 80%; }
+.x-81 { inset-inline-start: 81%; }
+.x-82 { inset-inline-start: 82%; }
+.x-83 { inset-inline-start: 83%; }
+.x-84 { inset-inline-start: 84%; }
+.x-85 { inset-inline-start: 85%; }
+.x-86 { inset-inline-start: 86%; }
+.x-87 { inset-inline-start: 87%; }
+.x-88 { inset-inline-start: 88%; }
+.x-89 { inset-inline-start: 89%; }
+.x-90 { inset-inline-start: 90%; }
+.x-91 { inset-inline-start: 91%; }
+.x-92 { inset-inline-start: 92%; }
+.x-93 { inset-inline-start: 93%; }
+.x-94 { inset-inline-start: 94%; }
+.x-95 { inset-inline-start: 95%; }
+.x-96 { inset-inline-start: 96%; }
+.x-97 { inset-inline-start: 97%; }
+.x-98 { inset-inline-start: 98%; }
+.x-99 { inset-inline-start: 99%; }
+.x-100 { inset-inline-start: 100%; }
+.w-1 { inline-size: 1%; }
+.w-2 { inline-size: 2%; }
+.w-3 { inline-size: 3%; }
+.w-4 { inline-size: 4%; }
+.w-5 { inline-size: 5%; }
+.w-6 { inline-size: 6%; }
+.w-7 { inline-size: 7%; }
+.w-8 { inline-size: 8%; }
+.w-9 { inline-size: 9%; }
+.w-10 { inline-size: 10%; }
+.w-11 { inline-size: 11%; }
+.w-12 { inline-size: 12%; }
+.w-13 { inline-size: 13%; }
+.w-14 { inline-size: 14%; }
+.w-15 { inline-size: 15%; }
+.w-16 { inline-size: 16%; }
+.w-17 { inline-size: 17%; }
+.w-18 { inline-size: 18%; }
+.w-19 { inline-size: 19%; }
+.w-20 { inline-size: 20%; }
+.w-21 { inline-size: 21%; }
+.w-22 { inline-size: 22%; }
+.w-23 { inline-size: 23%; }
+.w-24 { inline-size: 24%; }
+.w-25 { inline-size: 25%; }
+.w-26 { inline-size: 26%; }
+.w-27 { inline-size: 27%; }
+.w-28 { inline-size: 28%; }
+.w-29 { inline-size: 29%; }
+.w-30 { inline-size: 30%; }
+.w-31 { inline-size: 31%; }
+.w-32 { inline-size: 32%; }
+.w-33 { inline-size: 33%; }
+.w-34 { inline-size: 34%; }
+.w-35 { inline-size: 35%; }
+.w-36 { inline-size: 36%; }
+.w-37 { inline-size: 37%; }
+.w-38 { inline-size: 38%; }
+.w-39 { inline-size: 39%; }
+.w-40 { inline-size: 40%; }
+.w-41 { inline-size: 41%; }
+.w-42 { inline-size: 42%; }
+.w-43 { inline-size: 43%; }
+.w-44 { inline-size: 44%; }
+.w-45 { inline-size: 45%; }
+.w-46 { inline-size: 46%; }
+.w-47 { inline-size: 47%; }
+.w-48 { inline-size: 48%; }
+.w-49 { inline-size: 49%; }
+.w-50 { inline-size: 50%; }
+.w-51 { inline-size: 51%; }
+.w-52 { inline-size: 52%; }
+.w-53 { inline-size: 53%; }
+.w-54 { inline-size: 54%; }
+.w-55 { inline-size: 55%; }
+.w-56 { inline-size: 56%; }
+.w-57 { inline-size: 57%; }
+.w-58 { inline-size: 58%; }
+.w-59 { inline-size: 59%; }
+.w-60 { inline-size: 60%; }
+.w-61 { inline-size: 61%; }
+.w-62 { inline-size: 62%; }
+.w-63 { inline-size: 63%; }
+.w-64 { inline-size: 64%; }
+.w-65 { inline-size: 65%; }
+.w-66 { inline-size: 66%; }
+.w-67 { inline-size: 67%; }
+.w-68 { inline-size: 68%; }
+.w-69 { inline-size: 69%; }
+.w-70 { inline-size: 70%; }
+.w-71 { inline-size: 71%; }
+.w-72 { inline-size: 72%; }
+.w-73 { inline-size: 73%; }
+.w-74 { inline-size: 74%; }
+.w-75 { inline-size: 75%; }
+.w-76 { inline-size: 76%; }
+.w-77 { inline-size: 77%; }
+.w-78 { inline-size: 78%; }
+.w-79 { inline-size: 79%; }
+.w-80 { inline-size: 80%; }
+.w-81 { inline-size: 81%; }
+.w-82 { inline-size: 82%; }
+.w-83 { inline-size: 83%; }
+.w-84 { inline-size: 84%; }
+.w-85 { inline-size: 85%; }
+.w-86 { inline-size: 86%; }
+.w-87 { inline-size: 87%; }
+.w-88 { inline-size: 88%; }
+.w-89 { inline-size: 89%; }
+.w-90 { inline-size: 90%; }
+.w-91 { inline-size: 91%; }
+.w-92 { inline-size: 92%; }
+.w-93 { inline-size: 93%; }
+.w-94 { inline-size: 94%; }
+.w-95 { inline-size: 95%; }
+.w-96 { inline-size: 96%; }
+.w-97 { inline-size: 97%; }
+.w-98 { inline-size: 98%; }
+.w-99 { inline-size: 99%; }
+.w-100 { inline-size: 100%; }

@@ -1,0 +1,30 @@
+{#- A dashboard board page (Home or a person): the rail + <main>.
+    The one inline <style> holds only validated colours (presenter.py)
+    and is admitted by its hash in this response's CSP. dashboard.js
+    reads the data-* attributes on <body>; without JS the page simply
+    reloads every two minutes. -#}
+{% extends "base.html.j2" %}
+{% block style %}
+{% if style %}
+<style>{{ style|safe }}</style>
+{% endif %}
+{% endblock %}
+{% block head %}
+<noscript><meta http-equiv="refresh" content="120"></noscript>
+{% endblock %}
+{% block body_class %}dash-board{% if night %} dash-night{% endif %}{% endblock %}
+{% block body_attrs %} data-dash data-now="{{ clock.unix }}" data-tz="{{ clock.tz }}" data-day="{{ clock.day }}" data-fragment="{{ fragment_url }}" data-view-key="{{ view_key }}" data-idle-minutes="{{ idle_minutes }}" data-keep-awake="{{ 1 if keep_awake else 0 }}"{% endblock %}
+{% block body %}
+<div class="dash-shell{% if show_rail %} dash-with-rail{% endif %}" data-shell>
+  {% if show_rail %}
+  {% include "_rail.html.j2" %}
+  {% elif pin_set %}
+  <div class="dash-corner">
+    {% include "_lock_button.html.j2" %}
+  </div>
+  {% endif %}
+  <main class="dash-content" data-main>
+    {% include "_view.html.j2" %}
+  </main>
+</div>
+{% endblock %}

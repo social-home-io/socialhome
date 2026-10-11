@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
@@ -25,11 +26,27 @@ from socialhome.dashboard.auth import (
 )
 from socialhome.dashboard.keys import AUTH_KEY, CLAIMS_KEY
 from socialhome.dashboard.render import DashboardRenderer
-from socialhome.dashboard.views import _hostname, cookie_secure, safe_next
+from socialhome.dashboard.views import (
+    _hostname,
+    cookie_secure,
+    image_type,
+    safe_next,
+)
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
+from socialhome.domain.theme import HouseholdTheme
 from socialhome.i18n import Catalog
 
-from .conftest import PASSWORD
+from .conftest import PASSWORD, default_theme
+from .factories import (
+    LEO,
+    MIA_SCHOOL,
+    PASCAL,
+    TOMORROW,
+    FakeDashboardService,
+    at,
+    event,
+    person,
+)
 
 RENDERER = DashboardRenderer(
     Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
@@ -47,12 +64,19 @@ def household():
 
 
 @pytest.fixture
-async def bare_client(aiohttp_client, settings_service, auth, household):
+async def bare_client(aiohttp_client, settings_service, auth, household, snapshots):
     async def name() -> str:
         return household["name"]
 
     async def tz() -> str:
         return household.get("tz", "Europe/Berlin")
+
+    async def theme() -> HouseholdTheme:
+        if "theme" not in household:
+            return HouseholdTheme()
+        if isinstance(household["theme"], Exception):
+            raise household["theme"]
+        return HouseholdTheme(primary_color=household["theme"])
 
     app = build_dashboard_app(
         settings_service=settings_service,
@@ -60,6 +84,8 @@ async def bare_client(aiohttp_client, settings_service, auth, household):
         renderer=RENDERER,
         household_name=name,
         household_tz=tz,
+        household_theme=theme,
+        snapshots=snapshots,
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
 
@@ -417,7 +443,7 @@ async def test_logout_without_session_still_clears(client):
     assert resp.headers["Location"] == "/login"
 
 
-# ─── home placeholder ────────────────────────────────────────────────────
+# ─── home ────────────────────────────────────────────────────────────────
 
 
 async def test_home_escapes_household_name(client, auth, household):
@@ -427,8 +453,7 @@ async def test_home_escapes_household_name(client, auth, household):
     html = await resp.text()
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
-    assert "Your dashboard is ready" in html
-    assert 'action="/logout"' in html
+    assert 'class="dash-home"' in html
 
 
 async def test_parallel_guesses_cannot_outrun_the_throttle(client):
@@ -784,7 +809,7 @@ async def test_lock_then_reload_shows_only_the_lock_screen(pin_client, auth, hou
         assert "data-lock" in html
         assert "The Smiths" in html
         assert 'action="/unlock"' in html
-        assert "Your dashboard is ready" not in html
+        assert 'class="dash-home"' not in html
         assert 'action="/logout"' not in html
         assert 'action="/lock"' not in html
         _assert_nothing_personal(html)
@@ -850,6 +875,8 @@ async def race_client(aiohttp_client, settings_service, auth):
         renderer=RENDERER,
         household_name=name,
         household_tz=tz,
+        household_theme=default_theme,
+        snapshots=FakeDashboardService(),
     )
 
     async def race(request: web.Request) -> web.Response:
@@ -1015,7 +1042,7 @@ async def test_correct_pin_unlocks(pin_client, auth):
     claims = await _claims(auth, resp)
     assert claims is not None and claims.locked is False and claims.keep is True
     home = await pin_client.get("/", headers=_jar(resp))
-    assert "Your dashboard is ready" in await home.text()
+    assert 'class="dash-home"' in await home.text()
 
 
 async def test_wrong_pin_redirects_to_the_lock_screen_with_a_flag(pin_client, auth):
@@ -1045,7 +1072,7 @@ async def test_pin_flags_are_ignored_while_unlocked(pin_client, auth, flag):
     resp = await pin_client.get(f"/?pin={flag}", headers=await _cookie(auth))
     assert resp.status == 200
     html = await resp.text()
-    assert "Your dashboard is ready" in html
+    assert 'class="dash-home"' in html
     assert "Wrong PIN" not in html and "Too many tries" not in html
 
 
@@ -1141,6 +1168,8 @@ async def tiny_client(aiohttp_client, settings_service, clock):
         renderer=RENDERER,
         household_name=name,
         household_tz=tz,
+        household_theme=default_theme,
+        snapshots=FakeDashboardService(),
     )
     client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
     return client, auth
@@ -1263,7 +1292,7 @@ async def test_deleted_pin_treats_locked_tablets_as_unlocked(
         resp = await pin_client.get("/", headers=cookie)
         assert resp.status == 200
         html = await resp.text()
-        assert "Your dashboard is ready" in html
+        assert 'class="dash-home"' in html
         assert "data-lock" not in html
     # /unlock has nothing to check: straight home, not a guess.
     unlock = await _unlock(pin_client, headers, pin="000000")
@@ -1307,3 +1336,511 @@ async def test_login_signed_out_notice_is_localised(client, settings_service):
     await settings_service.update(actor_is_admin=True, patch={"locale": "nl"})
     html = await (await client.get("/login?signed_out=1")).text()
     assert "Afgemeld" in html
+
+
+# ─── Boards: Home, person pages, fragments, avatars ──────────────────────
+
+
+def _board_style(html: str) -> list[str]:
+    return re.findall(r"<style>(.*?)</style>", html, re.S)
+
+
+def _assert_board_csp(resp, html: str) -> None:
+    """A board page: exactly one inline <style>, admitted by its hash —
+    and otherwise the strict policy (no style attributes, no inline JS)."""
+    styles = _board_style(html)
+    assert len(styles) == 1
+    assert resp.headers["Content-Security-Policy"] == build_dashboard_csp(styles)
+    assert "'unsafe-inline'" not in resp.headers["Content-Security-Policy"]
+    assert re.search(r"\sstyle=", html) is None
+    assert re.search(r"\son[a-z]+=", html) is None
+    for tag in re.findall(r"<script\b[^>]*>", html):
+        assert 'src="/static/' in tag, tag
+    assert "javascript:" not in html
+    # Only validated colours reach the style block.
+    assert re.fullmatch(r"[.\w{}:;#\-()@ ]*", styles[0]), styles[0]
+
+
+def _attr(html: str, name: str) -> str:
+    match = re.search(rf'{name}="([^"]*)"', html)
+    assert match, name
+    return match.group(1)
+
+
+async def _get(client, auth, path: str, **kw):
+    return await client.get(path, headers=await _cookie(auth), **kw)
+
+
+async def test_home_board(client, auth, snapshots):
+    resp = await _get(client, auth, "/")
+    assert resp.status == 200
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    assert snapshots.calls == ["home"]
+    # Clock, date, next up with a relative time the script can hide.
+    assert "data-clock>14:32</time>" in html
+    assert "Monday, October 12" in html
+    assert "Swimming" in html
+    assert '<span class="dash-rel" data-rel>in 28 min</span>' in html
+    # Who's home (no coordinates, no addresses).
+    assert "dash-presence" in html and ">Work<" in html
+    # Today: lanes with blocks, the school block and today's changes.
+    assert "dash-timeline" in html and "dash-block-school" in html
+    assert 'title="10:00–11:00 Dentist"' in html
+    assert "Cancelled" in html and "Added" in html and "Room B7" in html
+    assert "At school now" in html
+    # Columns: chores with glyphs + words, shopping capped, a sticky.
+    assert "Chores today · 2 open" in html
+    assert "⚠" in html and "2 days late" in html and "✓" in html
+    assert ">Overdue:<" in html and ">Done:<" in html
+    assert "Shopping · 11" in html and "+ 5 more" in html
+    assert "Tea" in html and "Oats" not in html
+    assert "Plumber Tue 9am" in html
+    # Page wiring for dashboard.js.
+    assert 'data-fragment="/fragment/home"' in html
+    assert 'data-idle-minutes="0"' in html  # Home never "returns home"
+    assert 'data-keep-awake="1"' in html
+    assert '<noscript><meta http-equiv="refresh" content="120"></noscript>' in html
+
+
+async def test_home_rail(client, auth):
+    html = await (await _get(client, auth, "/")).text()
+    nav = html[html.index("<nav") : html.index("</nav>")]
+    assert 'aria-label="People"' in nav
+    assert 'href="/" aria-current="page"' in nav
+    links = re.findall(r'href="(/p/[^"]+)"', nav)
+    assert links == ["/p/u-pascal", "/p/u-anna", "/p/u-mia", "/p/u-leo"]
+    # A picture when there is one, initials always (the fallback).
+    assert '<img src="/avatar/u-anna?v=pic1" alt=""' in nav
+    assert "/avatar/u-pascal" not in html
+    assert '<span class="dash-initials">P</span>' in nav
+    assert "dash-rail-many" not in nav
+    assert 'action="/lock"' not in html  # no PIN set
+
+
+async def test_nothing_private_on_any_board(client, auth, snapshots):
+    """No addresses / coordinates: the event location never renders."""
+    for path in ("/", "/p/u-anna", "/p/u-mia", "/fragment/home"):
+        html = await (await _get(client, auth, path)).text()
+        assert "Secret Street" not in html
+        assert "latitude" not in html and "52.52" not in html
+
+
+async def test_only_the_snapshots_people_appear(client, auth, snapshots):
+    """The service drops hidden people; the views add nobody back."""
+    snap = snapshots.home_snapshot
+    snapshots.home_snapshot = replace(
+        snap,
+        people=snap.people[:2],
+        events_today=(),
+        school=(),
+        chores_today=(),
+        next_up=None,
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "/p/u-mia" not in html and "/p/u-leo" not in html
+    assert ">Mia<" not in html and ">Leo<" not in html
+    assert "/p/u-pascal" in html and "/p/u-anna" in html
+
+
+async def test_board_colours_are_classes_in_the_hashed_style(client, auth):
+    html = await (await _get(client, auth, "/")).text()
+    style = _board_style(html)[0]
+    assert ".k0{--kc:#357bbb;--kt:" in style  # Pascal's colour
+    assert "#ffee88" in style  # the sticky
+    assert "body" not in style  # the bad sticky colour never lands
+    assert re.search(r'class="dash-face dash-face-rail k\d+"', html)
+
+
+async def test_household_theme_colour_becomes_the_accent(client, auth, household):
+    household["theme"] = "#2F6F5E"
+    resp = await _get(client, auth, "/")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    assert "--dash-accent:#2f6f5e" in _board_style(html)[0]
+
+
+async def test_unreadable_theme_colour_keeps_the_built_in_accent(
+    client, auth, household
+):
+    household["theme"] = "#FFEE88"  # 1.2:1 on white
+    html = await (await _get(client, auth, "/")).text()
+    assert "prefers-color-scheme:light" not in _board_style(html)[0]
+
+
+async def test_a_failing_theme_read_still_renders(client, auth, household, caplog):
+    household["theme"] = RuntimeError("theme db gone")
+    resp = await _get(client, auth, "/")
+    assert resp.status == 200
+    assert "--dash-accent" not in _board_style(await resp.text())[0]
+    assert "theme read failed" in caplog.text
+
+
+async def test_person_page_reader(client, auth, snapshots, settings_service):
+    await settings_service.update(
+        actor_is_admin=True,
+        patch={"idle_return_minutes": 10, "keep_screen_on": False},
+    )
+    resp = await _get(client, auth, "/p/u-anna")
+    assert resp.status == 200
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    assert snapshots.calls == ["person:u-anna"]
+    assert (
+        '<h1 class="dash-person-name">Anna <span class="dash-status">😴</span>' in html
+    )
+    assert "📍</span> Work" in html  # a zone name, no coordinates
+    assert "Now" in html and "until 17:00" in html
+    assert "Dinner with Gran" in html and "<span data-rel> · in 3 h</span>" in html
+    assert "Tomorrow" in html and "Mia&#39;s birthday" in html and "All day" in html
+    assert "Laundry" in html  # her chore, done today
+    assert 'href="/p/u-anna" aria-current="page"' in html
+    assert 'data-fragment="/fragment/p/u-anna"' in html
+    assert 'data-idle-minutes="10"' in html
+    assert 'data-keep-awake="0"' in html
+    assert "data-picture-view" not in html
+
+
+async def test_person_page_school_day(client, auth):
+    html = await (await _get(client, auth, "/p/u-mia")).text()
+    assert "School today" in html
+    # Cancelled: struck through (class) AND labelled.
+    assert re.search(r'class="dash-row k\d+ dash-st-cancelled"', html)
+    assert "✕</span> Cancelled" in html
+    assert "🔁</span> Changed" in html and "+</span> Added" in html
+    assert "Room B12 · Keller" in html
+    assert "dash-current" in html and ">now</span>" in html
+    assert "First lesson" in html
+    # Lessons sit in the school column only; today's list has the events.
+    assert html.count("Maths</span>") == 1  # the school list (NOW card: <p>)
+    assert "Dinner with Gran" in html
+
+
+async def test_tomorrow_lists_events_and_the_first_lesson_in_time_order(
+    client, auth, snapshots
+):
+    page = snapshots.pages["u-mia"]
+    gym = event("g", "Gym", at(7, day=TOMORROW), at(7, 20, day=TOMORROW), "u-mia")
+    late = event("l", "Party", at(19, day=TOMORROW), at(21, day=TOMORROW), "u-mia")
+    snapshots.pages["u-mia"] = replace(page, tomorrow_items=(late, gym))
+    html = await (await _get(client, auth, "/p/u-mia")).text()
+    tomorrow = html[html.index("dash-agenda-tomorrow") :]
+    assert (
+        tomorrow.index("Gym") < tomorrow.index("First lesson") < tomorrow.index("Party")
+    )
+
+
+async def test_picture_view_person_gets_the_reader_page_behind_the_seam(
+    client, auth, snapshots
+):
+    snapshots.pages["u-leo"] = person(LEO)
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert 'class="dash-picture-seam" data-picture-view' in html
+    assert "dash-person-name" in html  # the reader page, for now
+
+
+@pytest.mark.parametrize("path", ["/p/u-nobody", "/p/u-hidden"])
+async def test_unknown_or_hidden_person_is_404(client, auth, path):
+    resp = await _get(client, auth, path)
+    assert resp.status == 404
+    html = await resp.text()
+    assert "This page isn&#39;t on the dashboard." in html
+    assert 'href="/"' in html
+    assert "<nav" not in html and "u-anna" not in html
+    assert resp.headers["Cache-Control"] == "no-store"
+
+
+async def test_home_fragment_is_main_only(client, auth):
+    page = await (await _get(client, auth, "/")).text()
+    resp = await _get(client, auth, "/fragment/home")
+    assert resp.status == 200
+    frag = await resp.text()
+    assert frag.lstrip().startswith('<div class="dash-view" data-view-key=')
+    assert "<html" not in frag and "<nav" not in frag and "<style" not in frag
+    assert "Swimming" in frag and "data-offline" in frag
+    assert _attr(frag, "data-view-key") == _attr(page, "data-view-key")
+    assert resp.headers["Cache-Control"] == "no-store"
+
+
+async def test_person_fragment(client, auth):
+    page = await (await _get(client, auth, "/p/u-anna")).text()
+    frag = await (await _get(client, auth, "/fragment/p/u-anna")).text()
+    assert "<nav" not in frag and "Dinner with Gran" in frag
+    assert _attr(frag, "data-view-key") == _attr(page, "data-view-key")
+    # The view key differs between pages (a swap never crosses pages).
+    home = await (await _get(client, auth, "/fragment/home")).text()
+    assert _attr(home, "data-view-key") != _attr(frag, "data-view-key")
+
+
+async def test_person_fragment_for_a_hidden_person_is_404(client, auth):
+    resp = await _get(client, auth, "/fragment/p/u-hidden")
+    assert resp.status == 404
+    assert "<" not in await resp.text()
+
+
+async def test_view_key_changes_with_the_colours(client, auth, snapshots):
+    frag = await (await _get(client, auth, "/fragment/home")).text()
+    before = _attr(frag, "data-view-key")
+    snap = snapshots.home_snapshot
+    snapshots.home_snapshot = replace(
+        snap, people=(replace(snap.people[0], color="#000000"), *snap.people[1:])
+    )
+    frag = await (await _get(client, auth, "/fragment/home")).text()
+    assert _attr(frag, "data-view-key") != before
+
+
+async def test_fragment_without_a_session_is_401(client):
+    for path in ("/fragment/home", "/fragment/p/u-anna"):
+        resp = await client.get(path, allow_redirects=False)
+        assert resp.status == 401
+
+
+async def test_offline_banner_is_rendered_hidden_with_the_snapshot_time(client, auth):
+    html = await (await _get(client, auth, "/")).text()
+    assert '<div class="dash-offline" data-offline role="status" hidden>' in html
+    assert "Can&#39;t reach Social Home — showing info from 14:32" in html
+    assert 'data-reload aria-label="Try again"' in html
+
+
+# Lock wins over every board route — and the snapshot is never read.
+
+
+@pytest.mark.parametrize(
+    "path", ["/", "/p/u-anna", "/p/u-nobody", "/fragment/home", "/fragment/p/u-anna"]
+)
+async def test_locked_tablet_never_reads_a_snapshot(pin_client, auth, snapshots, path):
+    resp = await pin_client.get(path, headers=await _locked(auth))
+    assert resp.status == 200
+    html = await resp.text()
+    assert "Anna" not in html and "Swimming" not in html
+    if path.startswith("/fragment/"):
+        assert resp.headers["X-Dashboard-Locked"] == "1"
+    else:
+        assert "data-lock" in html
+    assert snapshots.calls == []
+
+
+async def test_locked_real_avatar_is_423(pin_client, auth, snapshots):
+    snapshots.pictures["u-anna"] = (b"RIFF\0\0\0\0WEBPVP8 ", "pic1")
+    resp = await pin_client.get("/avatar/u-anna", headers=await _locked(auth))
+    assert resp.status == 423
+    assert snapshots.calls == []
+
+
+async def test_lock_button_in_the_rail_with_a_pin(pin_client, auth):
+    html = await (await _get(pin_client, auth, "/")).text()
+    rail = html[html.index("<nav") : html.index("</nav>")]
+    assert 'class="dash-rail-lock"' in rail and 'action="/lock"' in rail
+    assert 'aria-label="Lock screen"' in rail
+
+
+# States: one person, many people, empty, sections off.
+
+
+async def test_one_person_has_no_rail_but_keeps_the_lock(pin_client, auth, snapshots):
+    snap = snapshots.home_snapshot
+    snapshots.home_snapshot = replace(snap, people=(snap.people[0],))
+    html = await (await _get(pin_client, auth, "/")).text()
+    assert "<nav" not in html
+    assert 'class="dash-corner"' in html and 'action="/lock"' in html
+    assert "dash-presence" not in html  # no "who's home" for one person
+
+
+async def test_one_person_without_a_pin_has_no_corner(client, auth, snapshots):
+    snap = snapshots.home_snapshot
+    snapshots.home_snapshot = replace(snap, people=(snap.people[0],))
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-corner" not in html and "<nav" not in html
+
+
+async def test_more_than_six_people_scroll_and_list(client, auth, snapshots):
+    many = tuple(
+        replace(PASCAL, user_id=f"u-{i}", display_name=f"Person {i}") for i in range(7)
+    )
+    ev = event("x", "Picnic", at(16), at(18), "u-0", "u-3")
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot,
+        people=many,
+        events_today=(ev,),
+        school=(replace(MIA_SCHOOL, person_id="u-2"),),
+        next_up=None,
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-rail dash-rail-many" in html
+    assert "dash-timeline" not in html
+    assert '<ol class="dash-agenda">' in html
+    assert "Picnic" in html and "16:00–18:00" in html
+    assert "08:20–15:50" in html and "School" in html
+
+
+async def test_empty_day_and_empty_columns(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot,
+        events_today=(),
+        school=(),
+        next_up=None,
+        chores_today=(),
+        shopping=(),
+        shopping_total=0,
+        stickies=(),
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "Nothing planned today" in html and "🎈" in html
+    assert "dash-columns" not in html
+    assert "dash-next" not in html
+    assert "At school now" not in html
+
+
+async def test_many_people_with_an_empty_day(client, auth, snapshots):
+    many = tuple(replace(PASCAL, user_id=f"u-{i}") for i in range(8))
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, people=many, events_today=(), school=()
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "Nothing planned today" in html
+
+
+async def test_sections_off_leave_their_parts_out(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, sections=frozenset({"shopping"})
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-today" not in html
+    assert "Chores today" not in html and "Notes" not in html
+    assert "dash-presence" not in html
+    assert "Shopping · 11" in html
+
+
+async def test_person_page_sections_off_and_empty(client, auth, snapshots):
+    snapshots.pages["u-anna"] = person(
+        sections=frozenset({"calendar"}),
+        now_item=None,
+        next_item=None,
+        today_items=(),
+        tomorrow_items=(),
+    )
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    assert "Nothing planned today" in html
+    assert "dash-nownext" not in html
+    assert "Chores" not in html
+    assert "dash-person-where" not in html
+    assert "Tomorrow" not in html
+
+
+# Night mode.
+
+
+async def test_night_mode_home(client, auth, snapshots):
+    day = _attr(await (await _get(client, auth, "/")).text(), "data-view-key")
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, is_night=True, now=at(22, 47)
+    )
+    resp = await _get(client, auth, "/")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    assert '<body class="dash-board dash-night"' in html
+    night = html[html.index("dash-night-view") : html.index("data-day-view")]
+    assert "data-clock>22:47</time>" in night
+    assert "Tomorrow" in night and "07:30" in night and "School" in night
+    assert "Swimming" not in night and "Dentist" not in night
+    assert "data-wake-hint hidden" in night
+    # The day view is there for a tap, hidden by CSS.
+    assert '<div class="dash-day" data-day-view>' in html
+    assert _attr(html, "data-view-key") != day
+
+
+async def test_night_mode_without_a_morning_item(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, is_night=True, now=at(22, 47), tomorrow_first=None
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-night-next" not in html
+
+
+async def test_night_mode_person_with_an_event(client, auth, snapshots):
+    gym = event("g", "Gym", at(7, day=TOMORROW), at(8, day=TOMORROW), "u-anna")
+    snapshots.pages["u-anna"] = person(is_night=True, now=at(23), tomorrow_items=(gym,))
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    night = html[html.index("dash-night-view") : html.index("data-day-view")]
+    assert "Tomorrow" in night and "07:00" in night and "Gym" in night
+    assert "dash-faces" not in night  # her own page: no face needed
+
+
+# Localised.
+
+
+async def test_board_in_german(client, auth, settings_service):
+    await settings_service.update(actor_is_admin=True, patch={"locale": "de"})
+    html = await (await _get(client, auth, "/")).text()
+    assert '<html lang="de"' in html
+    assert "Montag, 12. Oktober" in html
+    assert "in 28 Min." in html
+    assert "Aufgaben heute · 2 offen" in html
+    assert "2 Tage überfällig" in html
+    assert "Fällt aus" in html
+    page = await (await _get(client, auth, "/p/u-anna")).text()
+    assert "bis 17:00" in page and "Ganztägig" in page
+
+
+# Avatars.
+
+
+async def test_avatar_of_a_shown_person(client, auth, snapshots):
+    body = b"RIFF\0\0\0\0WEBPVP8 data"
+    snapshots.pictures["u-anna"] = (body, "pic1")
+    resp = await _get(client, auth, "/avatar/u-anna")
+    assert resp.status == 200
+    assert await resp.read() == body
+    assert resp.content_type == "image/webp"
+    assert resp.headers["ETag"] == '"pic1"'
+    assert resp.headers["Cache-Control"] == "private, max-age=300"
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    again = await client.get(
+        "/avatar/u-anna",
+        headers={**await _cookie(auth), "If-None-Match": '"pic1"'},
+    )
+    assert again.status == 304
+    assert again.headers["Cache-Control"] == "private, max-age=300"
+
+
+async def test_avatar_hidden_unknown_or_without_picture_is_404(client, auth, snapshots):
+    for uid in ("u-hidden", "u-nobody", "u-pascal"):
+        resp = await _get(client, auth, f"/avatar/{uid}")
+        assert resp.status == 404
+        assert resp.headers["Cache-Control"] == "no-store"
+    assert snapshots.calls == [
+        "avatar:u-hidden",
+        "avatar:u-nobody",
+        "avatar:u-pascal",
+    ]
+
+
+async def test_avatar_etag_never_echoes_an_odd_hash(client, auth, snapshots):
+    body = b"\x89PNG\r\n\x1a\n...."
+    snapshots.pictures["u-anna"] = (body, 'x"\r\nSet-Cookie: a=b')
+    resp = await _get(client, auth, "/avatar/u-anna")
+    assert resp.status == 200
+    assert re.fullmatch(r'"[0-9a-f]{32}"', resp.headers["ETag"])
+    assert resp.content_type == "image/png"
+
+
+async def test_avatar_without_a_session_redirects_to_login(client):
+    resp = await client.get("/avatar/u-anna", allow_redirects=False)
+    assert resp.status == 302
+    assert resp.headers["Location"].startswith("/login?next=")
+
+
+@pytest.mark.parametrize(
+    ("body", "kind"),
+    [
+        (b"RIFF\0\0\0\0WEBPVP8 ", "image/webp"),
+        (b"\x89PNG\r\n\x1a\nrest", "image/png"),
+        (b"\xff\xd8\xff\xe0rest", "image/jpeg"),
+        (b"GIF89arest", "image/gif"),
+        (b"GIF87arest", "image/gif"),
+        (b"<svg onload=alert(1)>", "application/octet-stream"),
+        (b"", "application/octet-stream"),
+    ],
+)
+def test_image_type(body, kind):
+    assert image_type(body) == kind

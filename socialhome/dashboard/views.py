@@ -1,20 +1,38 @@
-"""Household dashboard pages — login, setup link, logout, home, lock.
+"""Household dashboard pages — login, setup link, logout, lock, and the
+boards: Home, a person, their ``/fragment/…`` refreshes and avatars.
 
 Every view is server-rendered HTML; the session guard in
 :mod:`socialhome.dashboard.app` has already decided whether the request
 may reach a non-public view (and answers every content route of a
 privacy-locked tablet with :func:`render_lock_screen` itself).
+
+A board page carries one inline ``<style>`` — the validated colours of
+:mod:`.presenter` — admitted by hash in that response's CSP. A fragment
+can't add style rules to the page it lands in, so it carries the page's
+*view key* (style, night mode, rail); ``dashboard.js`` reloads the whole
+page when a fragment's key differs.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
-from urllib.parse import urlsplit
+import re
+from dataclasses import dataclass
+from urllib.parse import quote, urlsplit
 
 from aiohttp import web
 
+from ..domain.household_dashboard import (
+    SECTION_TIMETABLE,
+    DashboardAgendaItem,
+    DashboardEvent,
+    DashboardPerson,
+    HomeSnapshot,
+    PersonSnapshot,
+)
 from ..rate_limiter import client_bucket
 from ..services.dashboard_settings_service import DashboardSettingsService
 from .auth import (
@@ -30,31 +48,57 @@ from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
     HOUSEHOLD_NAME_KEY,
+    HOUSEHOLD_THEME_KEY,
     HOUSEHOLD_TZ_KEY,
     RENDERER_KEY,
     SETTINGS_KEY,
+    SNAPSHOTS_KEY,
+)
+from .policy import build_dashboard_csp
+from .presenter import (
+    MAX_LANES,
+    SHOPPING_SHOWN,
+    STICKIES_SHOWN,
+    ColorBook,
+    Fmt,
+    build_timeline,
+    home_colors,
+    night_item,
+    person_colors,
+    presence_groups,
+    school_changes,
+    school_now,
+    theme_css,
+    view_key,
 )
 from .render import DashboardRenderer
 
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "AVATAR_MAX_AGE_S",
+    "HOME_FRAGMENT",
     "LOCKED_FRAGMENT",
     "LOCKED_HEADER",
     "PIN_WAIT",
     "PIN_WRONG",
     "SIGNED_OUT_PATH",
+    "AvatarView",
     "EnterView",
     "HealthView",
+    "HomeFragmentView",
     "HomeView",
     "LockView",
     "LoginView",
     "LogoutView",
+    "PersonFragmentView",
+    "PersonView",
     "StaticView",
     "UnlockView",
     "clear_session_cookie",
     "cookie_secure",
     "html_response",
+    "image_type",
     "redirect",
     "register_routes",
     "render_lock_screen",
@@ -384,14 +428,259 @@ class LogoutView(_DashboardView):
         return response
 
 
-class HomeView(_DashboardView):
-    """``GET /`` — placeholder until the real overview ships."""
+#: A shown person's picture may sit in the tablet's cache this long — short,
+#: so hiding someone (or changing their picture) shows within minutes.
+AVATAR_MAX_AGE_S = 300
+
+#: Events listed under "Tomorrow" on a person page.
+TOMORROW_SHOWN = 3
+
+#: ``/fragment/…`` paths for live refresh (``dashboard.js``).
+HOME_FRAGMENT = "/fragment/home"
+
+_SAFE_ETAG = re.compile(r"[A-Za-z0-9_.-]{1,128}")
+
+
+def image_type(body: bytes) -> str:
+    """The image MIME type of stored picture bytes (profile pictures are
+    stored as WebP; older rows may be PNG / JPEG / GIF)."""
+    if body[:4] == b"RIFF" and body[8:12] == b"WEBP":
+        return "image/webp"
+    if body.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if body.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if body[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "application/octet-stream"
+
+
+async def _theme_primary(app: web.Application) -> str | None:
+    """The household theme colour, or ``None`` when it can't be read —
+    the dashboard then keeps its built-in accent."""
+    try:
+        return (await app[HOUSEHOLD_THEME_KEY]()).primary_color
+    except Exception:
+        log.warning("household dashboard: theme read failed", exc_info=True)
+        return None
+
+
+@dataclass(slots=True, frozen=True)
+class _Board:
+    """A rendered-to-be board: its locale, template context and the
+    inline style text the page's CSP must admit."""
+
+    locale: str
+    context: dict[str, object]
+    style: str
+
+
+async def _board(
+    request: web.Request,
+    *,
+    snapshot: HomeSnapshot | PersonSnapshot,
+    people: tuple[DashboardPerson, ...],
+    colors: ColorBook,
+    current: str | None,
+    fragment_url: str,
+    template: str,
+    extra: dict[str, object],
+) -> _Board:
+    """The context every dashboard board (Home, a person) shares: rail,
+    clock, night mode, the inline colour style and its view key."""
+    app = request.app
+    settings = await app[SETTINGS_KEY].get()
+    t = app[RENDERER_KEY].translator(settings.locale)
+    style = colors.css() + theme_css(await _theme_primary(app))
+    night = snapshot.is_night
+    rail_ids = ",".join(p.user_id for p in people)
+    fmt = Fmt(now=snapshot.now, today=snapshot.today, t=t, people=people, colors=colors)
+    zone = snapshot.now.tzinfo
+    assert zone is not None
+    context: dict[str, object] = {
+        "household": await app[HOUSEHOLD_NAME_KEY](),
+        "f": fmt,
+        "people": people,
+        "current": current,
+        "show_rail": len(people) > 1,
+        "rail_many": len(people) > MAX_LANES,
+        "pin_set": settings.pin_set,
+        "clock": household_clock(snapshot.now.timestamp(), zone, t),
+        "night": night,
+        "night_item": night_item(snapshot) if night else None,
+        "style": style,
+        "view_key": view_key(style, night, rail_ids, current),
+        "fragment_url": fragment_url,
+        "idle_minutes": settings.idle_return_minutes if current else 0,
+        "keep_awake": settings.keep_screen_on,
+        "view_template": template,
+        **extra,
+    }
+    return _Board(locale=settings.locale, context=context, style=style)
+
+
+async def _home_board(request: web.Request) -> _Board:
+    snap = await request.app[SNAPSHOTS_KEY].home()
+    colors = home_colors(snap)
+    board = await _board(
+        request,
+        snapshot=snap,
+        people=snap.people,
+        colors=colors,
+        current=None,
+        fragment_url=HOME_FRAGMENT,
+        template="_home.html.j2",
+        extra={},
+    )
+    fmt = board.context["f"]
+    assert isinstance(fmt, Fmt)
+    board.context.update(
+        snap=snap,
+        timeline=build_timeline(snap, fmt),
+        presence=presence_groups(snap),
+        at_school=(
+            school_now(snap.school, snap.now)
+            if SECTION_TIMETABLE in snap.sections
+            else []
+        ),
+        changes=(
+            school_changes(snap.school) if SECTION_TIMETABLE in snap.sections else []
+        ),
+        shopping_shown=snap.shopping[:SHOPPING_SHOWN],
+        shopping_more=max(0, snap.shopping_total - SHOPPING_SHOWN),
+        stickies=snap.stickies[:STICKIES_SHOWN],
+        open_chores=sum(1 for c in snap.chores_today if not c.done),
+    )
+    return board
+
+
+async def _person_board(request: web.Request) -> _Board | None:
+    user_id = request.match_info["user_id"]
+    page = await request.app[SNAPSHOTS_KEY].person(user_id)
+    if page is None:
+        return None
+    people = page.people or (page.person,)
+    school_lessons = page.school.lessons if page.school is not None else ()
+    events_today = (
+        tuple(i for i in page.today_items if isinstance(i, DashboardEvent))
+        if page.school is not None
+        else page.today_items
+    )
+    return await _board(
+        request,
+        snapshot=page,
+        people=people,
+        colors=person_colors(page),
+        current=page.person.user_id,
+        fragment_url=f"/fragment/p/{quote(page.person.user_id, safe='')}",
+        template="_person.html.j2",
+        extra={
+            "page": page,
+            "school_lessons": school_lessons,
+            "today_list": events_today,
+            "tomorrow_list": _tomorrow(page),
+        },
+    )
+
+
+def _tomorrow(page: PersonSnapshot) -> list[DashboardAgendaItem]:
+    """Tomorrow on a person page: the first few events, plus the first
+    lesson (school is said once, not lesson by lesson), in time order."""
+    events = [i for i in page.tomorrow_items if isinstance(i, DashboardEvent)]
+    items: list[DashboardAgendaItem] = list(events[:TOMORROW_SHOWN])
+    if page.school_tomorrow_first is not None:
+        items.append(page.school_tomorrow_first)
+    items.sort(
+        key=lambda i: (
+            0 if isinstance(i, DashboardEvent) and i.all_day else 1,
+            i.start,
+        )
+    )
+    return items
+
+
+class _BoardView(_DashboardView):
+    async def page(self, board: _Board) -> web.Response:
+        text = self.renderer.render(
+            "board.html.j2", locale=board.locale, **board.context
+        )
+        return html_response(
+            text,
+            headers={"Content-Security-Policy": build_dashboard_csp([board.style])},
+        )
+
+    async def fragment(self, board: _Board) -> web.Response:
+        text = self.renderer.render(
+            "fragment.html.j2", locale=board.locale, **board.context
+        )
+        return html_response(text)
+
+
+class HomeView(_BoardView):
+    """``GET /`` — the household overview (or night mode)."""
 
     async def get(self) -> web.Response:
-        settings = await self.settings.get()
-        return await self.render(
-            "placeholder.html.j2", locale=settings.locale, pin_set=settings.pin_set
+        return await self.page(await _home_board(self.request))
+
+
+class HomeFragmentView(_BoardView):
+    """``GET /fragment/home`` — Home's ``<main>`` content, for live refresh."""
+
+    async def get(self) -> web.Response:
+        return await self.fragment(await _home_board(self.request))
+
+
+class PersonView(_BoardView):
+    """``GET /p/{user_id}`` — one shown person's page; ``404`` for anyone
+    unknown, inactive or hidden (the same page either way)."""
+
+    async def get(self) -> web.Response:
+        board = await _person_board(self.request)
+        if board is None:
+            locale = (await self.settings.get()).locale
+            return await self.render("not_found.html.j2", locale=locale, status=404)
+        return await self.page(board)
+
+
+class PersonFragmentView(_BoardView):
+    """``GET /fragment/p/{user_id}`` — the person page's ``<main>``
+    content; a plain ``404`` once they are hidden (the script goes Home)."""
+
+    async def get(self) -> web.Response:
+        board = await _person_board(self.request)
+        if board is None:
+            return web.Response(status=404, text="Not Found")
+        return await self.fragment(board)
+
+
+class AvatarView(_DashboardView):
+    """``GET /avatar/{user_id}`` — a shown person's profile picture.
+
+    ``404`` for anyone hidden, inactive or unknown, and for a person
+    without a picture (the page shows initials). Cached privately for a
+    few minutes and revalidated by ``ETag`` (the picture hash).
+    """
+
+    async def get(self) -> web.Response:
+        found = await self.request.app[SNAPSHOTS_KEY].avatar(
+            self.request.match_info["user_id"]
         )
+        if found is None:
+            raise web.HTTPNotFound()
+        body, picture_hash = found
+        tag = (
+            picture_hash
+            if _SAFE_ETAG.fullmatch(picture_hash)
+            else hashlib.sha256(body).hexdigest()[:32]
+        )
+        etag = f'"{tag}"'
+        headers = {
+            "ETag": etag,
+            "Cache-Control": f"private, max-age={AVATAR_MAX_AGE_S}",
+        }
+        if self.request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers=headers)
+        return web.Response(body=body, content_type=image_type(body), headers=headers)
 
 
 class _GoHomeOnGet(_DashboardView):
@@ -510,6 +799,10 @@ class StaticView(_DashboardView):
 
 def register_routes(app: web.Application) -> None:
     app.router.add_view("/", HomeView)
+    app.router.add_view("/p/{user_id}", PersonView)
+    app.router.add_view("/fragment/home", HomeFragmentView)
+    app.router.add_view("/fragment/p/{user_id}", PersonFragmentView)
+    app.router.add_view("/avatar/{user_id}", AvatarView)
     app.router.add_view("/login", LoginView)
     app.router.add_view("/enter", EnterView)
     app.router.add_view("/logout", LogoutView)
