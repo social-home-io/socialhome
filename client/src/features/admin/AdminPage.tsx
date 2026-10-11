@@ -5,6 +5,7 @@
  *   * Members      — household roster + admin toggle.
  *   * Moderation   — content reports + the per-space moderation queue.
  *   * Sessions     — active API tokens + login attempts (security audit).
+ *   * Dashboard    — the household wall-tablet dashboard (DashboardTab).
  *   * Settings     — short-cuts to features / theme / connections.
  *
  * Each tab is a thin shell — the real heavy lifting lives in
@@ -23,6 +24,7 @@ import { showToast } from '@/components/Toast'
 import { HouseholdToggles, loadToggles } from '@/components/HouseholdToggles'
 import { HomeNameSettings } from '@/components/HomeNameSettings'
 import { HaUsersPanel } from './HaUsersPanel'
+import { DashboardTab } from './DashboardTab'
 import { managesLocalUsers, usesHaUserDirectory } from '@/platform'
 import CpAdminPanel from '@/features/child-protection/CpAdminPanel'
 import type { User } from '@/types'
@@ -32,7 +34,7 @@ import { formatLocale, t } from '@/i18n/i18n'
 
 type TabId =
   | 'members' | 'ha-users' | 'spaces' | 'moderation'
-  | 'sessions' | 'child-protection' | 'storage' | 'backup'
+  | 'sessions' | 'child-protection' | 'storage' | 'dashboard' | 'backup'
   | 'settings'
 
 /** One row of ``GET /api/admin/reports`` — mirrors ``_report_dict`` in
@@ -98,7 +100,7 @@ export default function AdminPage() {
     'members',
     ...(hasHaPersonDirectory ? (['ha-users'] as const) : []),
     'spaces', 'moderation', 'sessions', 'child-protection',
-    'storage', 'backup', 'settings',
+    'storage', 'dashboard', 'backup', 'settings',
   ]
   if (tab.value === 'ha-users' && !hasHaPersonDirectory) {
     tab.value = 'members'
@@ -129,6 +131,7 @@ export default function AdminPage() {
       {tab.value === 'sessions' && <SessionsTab />}
       {tab.value === 'child-protection' && <CpAdminPanel />}
       {tab.value === 'storage' && <StorageTab />}
+      {tab.value === 'dashboard' && <DashboardTab />}
       {tab.value === 'backup' && <BackupTab />}
       {tab.value === 'settings' && <SettingsTab />}
     </div>
@@ -144,6 +147,7 @@ function _tabLabel(id: TabId): string {
     case 'sessions':         return t('admin.tab.sessions')
     case 'child-protection': return t('admin.tab.child_protection')
     case 'storage':          return t('admin.tab.storage')
+    case 'dashboard':        return t('admin.tab.dashboard')
     case 'backup':           return t('admin.tab.backup')
     case 'settings':         return t('admin.tab.settings')
   }
