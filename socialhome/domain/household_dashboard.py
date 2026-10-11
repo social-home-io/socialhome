@@ -34,7 +34,9 @@ __all__ = [
     "DEFAULT_DASHBOARD_PORT",
     "IDLE_RETURN_CHOICES",
     "MAX_ADDRESS_LENGTH",
+    "MAX_PIN_LENGTH",
     "MIN_PASSWORD_LENGTH",
+    "MIN_PIN_LENGTH",
     "PERSON_PALETTE",
     "SECTION_CALENDAR",
     "SECTION_PRESENCE",
@@ -53,6 +55,7 @@ __all__ = [
     "DashboardPasswordTooShortError",
     "DashboardPerson",
     "DashboardPersonSettings",
+    "DashboardPinInvalidError",
     "DashboardPortFixedError",
     "DashboardPortInUseError",
     "DashboardSchoolDay",
@@ -85,6 +88,10 @@ IDLE_RETURN_CHOICES = frozenset({0, 1, 3, 10})
 SUPPORTED_DASHBOARD_LOCALES = frozenset({"en", "de", "es", "fr", "nl"})
 
 MIN_PASSWORD_LENGTH = 8
+
+#: The privacy-lock PIN is this many ASCII digits (inclusive).
+MIN_PIN_LENGTH = 4
+MAX_PIN_LENGTH = 6
 
 #: Longest admin-set dashboard address (``DashboardSettings.address``).
 MAX_ADDRESS_LENGTH = 200
@@ -129,6 +136,9 @@ class DashboardSettings:
     address: str | None = None
     people: tuple[tuple[str, DashboardPersonSettings], ...] = ()
     password_set_at: str | None = None
+    #: A privacy-lock PIN exists (tablets show the lock button and a
+    #: locked tablet asks for it). Never the PIN or its hash.
+    pin_set: bool = False
 
     def person(self, user_id: str) -> DashboardPersonSettings:
         """The stored settings for ``user_id``, or the defaults."""
@@ -557,3 +567,14 @@ class PersonSnapshot:
     chores: tuple[DashboardTask, ...] = ()
     school: DashboardSchoolDay | None = None
     school_tomorrow_first: DashboardLesson | None = None
+
+
+class DashboardPinInvalidError(CodedError, ValueError):
+    """The privacy-lock PIN is not 4–6 ASCII digits."""
+
+    status = 422
+    code = "DASHBOARD_PIN_INVALID"
+    detail = "The dashboard PIN must be 4 to 6 digits."
+
+    def __init__(self) -> None:
+        super().__init__(params={"min": MIN_PIN_LENGTH, "max": MAX_PIN_LENGTH})
