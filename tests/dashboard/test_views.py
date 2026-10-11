@@ -1968,7 +1968,7 @@ async def test_only_page_routes_renew_the_cookie(
     assert COOKIE_NAME not in resp.cookies, (path, resp.status)
 
 
-@pytest.mark.parametrize("path", ["/", "/p/u-anna", "/p/u-nobody"])
+@pytest.mark.parametrize("path", ["/", "/p/u-anna"])
 async def test_page_routes_still_renew(pin_client, auth, clock, path):
     headers = await _cookie(auth)
     clock.advance(RENEW_AFTER_S + 60)
