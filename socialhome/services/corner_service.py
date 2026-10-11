@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import orjson
@@ -169,7 +169,7 @@ class CornerService:
         unread_conversations = await self._count_unread_dms(username)
         upcoming_events = await self._upcoming_events(username, now)
         presence = await self._presence_list()
-        tasks_due = await self._tasks_due_today(user_id)
+        tasks_due = await self._tasks_due_today(user_id, now)
         bazaar_summary = await self._bazaar_summary(user_id)
         followed_ids, followed_feed = await self._followed_spaces_feed(
             username, user_id
@@ -177,9 +177,8 @@ class CornerService:
         # Two different "todays", on purpose: each timetable's lessons are
         # for today in *that timetable's* tz (a Berlin school plan seen
         # from a UTC household is still Monday's plan at 00:30 Berlin),
-        # while ``today_events`` is today in the *household* tz — the
-        # same local day the calendar views use. ``tasks_due_today``
-        # predates both and still uses the server's ``date.today()``.
+        # while ``today_events`` and ``tasks_due_today`` are today in the
+        # *household* tz — the same local day the calendar views use.
         today_timetable = await self._today_timetable(user_id, now)
         today_events = await self._today_events(username, now)
         return CornerBundle(
@@ -312,7 +311,8 @@ class CornerService:
             return ()
         return tuple(rows)
 
-    async def _tasks_due_today(self, user_id: str) -> tuple[Task, ...]:
+    async def _tasks_due_today(self, user_id: str, now: datetime) -> tuple[Task, ...]:
+        """Open tasks due on or before today in the household tz."""
         if self._tasks is None:
             return ()
         try:
@@ -320,7 +320,7 @@ class CornerService:
         except Exception as exc:  # pragma: no cover — defensive
             log.debug("corner: tasks failed: %s", exc)
             return ()
-        today = date.today()
+        today = local_date(now, await self._household_tz())
         relevant = [
             t
             for t in tasks
