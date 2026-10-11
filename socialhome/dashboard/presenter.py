@@ -22,7 +22,6 @@ Pure: no I/O, so it is tested without a server.
 from __future__ import annotations
 
 import hashlib
-import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import ClassVar
@@ -40,6 +39,7 @@ from ..domain.household_dashboard import (
     DashboardSchoolDay,
     HomeSnapshot,
     PersonSnapshot,
+    leading_emoji,
 )
 from .clock import days_late, due_label, hhmm, relative_in, until
 from .contrast import hex_color, ink_on, readable_on
@@ -179,33 +179,6 @@ def theme_css(primary: object) -> str:
     if readable_on(color, DARK_SURFACES):
         out.append(f"@media (prefers-color-scheme:dark){{{rule}}}")
     return "".join(out)
-
-
-def leading_emoji(text: str) -> str | None:
-    """The emoji a title starts with ("🏊 Swimming" → "🏊"), with its
-    modifiers (variation selectors, skin tones, ZWJ parts, flags);
-    ``None`` when the title doesn't start with one."""
-    if not text or unicodedata.category(text[0]) != "So":
-        return None
-    end = 1
-    if len(text) > 1 and _is_flag_half(text[0]) and _is_flag_half(text[1]):
-        end = 2  # a flag is two regional-indicator letters
-    while end < len(text):
-        ch = text[end]
-        modifier = ch in _JOINERS or 0x1F3FB <= ord(ch) <= 0x1F3FF
-        if not (modifier or text[end - 1] == _ZWJ):
-            break
-        end += 1
-    return text[:end]
-
-
-_ZWJ = "\u200d"
-#: Zero-width joiner + variation selector 16 (emoji presentation).
-_JOINERS = frozenset({_ZWJ, "\ufe0f"})
-
-
-def _is_flag_half(ch: str) -> bool:
-    return 0x1F1E6 <= ord(ch) <= 0x1F1FF
 
 
 def view_key(*parts: object) -> str:

@@ -860,8 +860,8 @@ async def test_no_renewal_on_a_post(client, auth, clock):
 
 @pytest.fixture
 async def race_client(aiohttp_client, settings_service, auth):
-    """A dashboard with a page whose handler revokes the very cookie that
-    reached it — what a ``/lock`` racing a slow page load does."""
+    """A dashboard whose Home render revokes the very cookie that reached
+    it — what a ``/lock`` racing a slow page load does."""
     await settings_service.set_password(actor_is_admin=True, password=PASSWORD)
     await settings_service.set_pin(actor_is_admin=True, pin=PIN)
 
@@ -871,6 +871,15 @@ async def race_client(aiohttp_client, settings_service, auth):
     async def tz() -> str:
         return "UTC"
 
+    class RacingSnapshots(FakeDashboardService):
+        why: str = ""
+
+        async def home(self, *, now=None):
+            request = self.request
+            request.app[AUTH_KEY].revoke(request[CLAIMS_KEY], self.why)
+            return await super().home(now=now)
+
+    snaps = RacingSnapshots()
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
@@ -878,31 +887,37 @@ async def race_client(aiohttp_client, settings_service, auth):
         household_name=name,
         household_tz=tz,
         household_theme=default_theme,
-        snapshots=FakeDashboardService(),
+        snapshots=snaps,
     )
 
-    async def race(request: web.Request) -> web.Response:
-        request.app[AUTH_KEY].revoke(request[CLAIMS_KEY], request.query["why"])
-        return web.Response(text="slow page")
+    @web.middleware
+    async def remember(request: web.Request, handler):
+        snaps.request = request
+        return await handler(request)
 
-    app.router.add_get("/race", race)
-    return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+    app.middlewares.append(remember)
+    client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+    return client, snaps
 
 
 async def test_renewal_after_a_racing_lock_issues_a_locked_cookie(
     race_client, auth, clock
 ):
+    client, snaps = race_client
+    snaps.why = REVOKED_LOCKED
     headers = await _cookie(auth)
     clock.advance(RENEW_AFTER_S + 1)
-    resp = await race_client.get(f"/race?why={REVOKED_LOCKED}", headers=headers)
+    resp = await client.get("/", headers=headers)
     assert resp.status == 200
     assert (await _claims(auth, resp)).locked is True
 
 
 async def test_renewal_after_a_racing_sign_out_issues_nothing(race_client, auth, clock):
+    client, snaps = race_client
+    snaps.why = REVOKED_SIGNED_OUT
     headers = await _cookie(auth)
     clock.advance(RENEW_AFTER_S + 1)
-    resp = await race_client.get(f"/race?why={REVOKED_SIGNED_OUT}", headers=headers)
+    resp = await client.get("/", headers=headers)
     assert COOKIE_NAME not in resp.cookies
 
 
@@ -1799,14 +1814,14 @@ async def test_avatar_of_a_shown_person(client, auth, snapshots):
     assert await resp.read() == body
     assert resp.content_type == "image/webp"
     assert resp.headers["ETag"] == '"pic1"'
-    assert resp.headers["Cache-Control"] == "private, max-age=300"
+    assert resp.headers["Cache-Control"] == "private, no-cache"
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     again = await client.get(
         "/avatar/u-anna",
         headers={**await _cookie(auth), "If-None-Match": '"pic1"'},
     )
     assert again.status == 304
-    assert again.headers["Cache-Control"] == "private, max-age=300"
+    assert again.headers["Cache-Control"] == "private, no-cache"
 
 
 async def test_avatar_hidden_unknown_or_without_picture_is_404(client, auth, snapshots):
@@ -1912,3 +1927,57 @@ async def test_person_page_paints_events_in_the_persons_colour(client, auth, sna
     assert rows and set(rows) == {anna_cls}
     assert f'class="dash-nn {anna_cls}"' in html
     assert f'class="dash-row {pascal}' not in html
+
+
+# Review round: security.
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/avatar/u-anna",
+        "/static/dashboard.css",
+        "/fragment/home",
+        "/fragment/p/u-anna",
+        "/p/u-anna/extra",
+        "/nowhere",
+    ],
+)
+async def test_only_page_routes_renew_the_cookie(
+    pin_client, auth, clock, snapshots, path
+):
+    """S1: an avatar / static / fragment response never sets a cookie — a
+    late one, sent with the pre-lock cookie, could overwrite the lock."""
+    snapshots.pictures["u-anna"] = (b"RIFF\0\0\0\0WEBPVP8 ", "pic1")
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 60)
+    resp = await pin_client.get(path, headers=headers, allow_redirects=False)
+    assert COOKIE_NAME not in resp.cookies, (path, resp.status)
+
+
+@pytest.mark.parametrize("path", ["/", "/p/u-anna", "/p/u-nobody"])
+async def test_page_routes_still_renew(pin_client, auth, clock, path):
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 60)
+    resp = await pin_client.get(path, headers=headers, allow_redirects=False)
+    assert COOKIE_NAME in resp.cookies
+
+
+async def test_late_avatar_response_cannot_lift_the_lock(
+    pin_client, auth, clock, snapshots
+):
+    """S1 repro: avatars fetched with an old cookie, a /lock in between, a
+    late avatar response — the tablet stays locked."""
+    snapshots.pictures["u-anna"] = (b"RIFF\0\0\0\0WEBPVP8 ", "pic1")
+    snapshots.pictures["u-mia"] = (b"RIFF\0\0\0\0WEBPVP8 ", "pic2")
+    before = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 60)
+    first = await pin_client.get("/avatar/u-anna", headers=before)
+    assert COOKIE_NAME not in first.cookies
+    lock = await _lock(pin_client, before)
+    late = await pin_client.get("/avatar/u-mia", headers=before)
+    assert COOKIE_NAME not in late.cookies
+    page = await pin_client.get("/", headers=_jar(lock), allow_redirects=False)
+    assert "data-lock" in await page.text()
+    again = await pin_client.get("/", headers=before, allow_redirects=False)
+    assert "data-lock" in await again.text()

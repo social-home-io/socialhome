@@ -77,7 +77,7 @@ from .render import DashboardRenderer
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "AVATAR_MAX_AGE_S",
+    "AVATAR_CACHE",
     "HOME_FRAGMENT",
     "LOCKED_FRAGMENT",
     "LOCKED_HEADER",
@@ -429,9 +429,9 @@ class LogoutView(_DashboardView):
         return response
 
 
-#: A shown person's picture may sit in the tablet's cache this long — short,
-#: so hiding someone (or changing their picture) shows within minutes.
-AVATAR_MAX_AGE_S = 300
+#: Avatars may be stored but must be revalidated on every use, so each
+#: load passes the session guard again (423 locked, 404 once hidden).
+AVATAR_CACHE = "private, no-cache"
 
 #: Events listed under "Tomorrow" on a person page.
 TOMORROW_SHOWN = 3
@@ -687,7 +687,7 @@ class AvatarView(_DashboardView):
         etag = f'"{tag}"'
         headers = {
             "ETag": etag,
-            "Cache-Control": f"private, max-age={AVATAR_MAX_AGE_S}",
+            "Cache-Control": AVATAR_CACHE,
         }
         if self.request.headers.get("If-None-Match") == etag:
             return web.Response(status=304, headers=headers)

@@ -69,6 +69,8 @@ __all__ = [
     "hash_color",
     "in_night_window",
     "initials",
+    "is_pure_emoji",
+    "leading_emoji",
     "lesson_color_token",
     "normalize_token_key",
     "picture_effective",
@@ -344,6 +346,38 @@ def initials(display_name: str) -> str:
     if not words:
         return "?"
     return "".join(w[0] for w in words[:2]).upper()
+
+
+def leading_emoji(text: str) -> str | None:
+    """The emoji a title starts with ("🏊 Swimming" → "🏊"), with its
+    modifiers (variation selectors, skin tones, ZWJ parts, flags);
+    ``None`` when the title doesn't start with one."""
+    if not text or unicodedata.category(text[0]) != "So":
+        return None
+    end = 1
+    if len(text) > 1 and _is_flag_half(text[0]) and _is_flag_half(text[1]):
+        end = 2  # a flag is two regional-indicator letters
+    while end < len(text):
+        ch = text[end]
+        modifier = ch in _JOINERS or 0x1F3FB <= ord(ch) <= 0x1F3FF
+        if not (modifier or text[end - 1] == _ZWJ):
+            break
+        end += 1
+    return text[:end]
+
+
+def is_pure_emoji(text: str) -> bool:
+    """Is ``text`` exactly one emoji (with its modifiers) and nothing else?"""
+    return bool(text) and leading_emoji(text) == text
+
+
+_ZWJ = "\u200d"
+#: Zero-width joiner + variation selector 16 (emoji presentation).
+_JOINERS = frozenset({_ZWJ, "\ufe0f"})
+
+
+def _is_flag_half(ch: str) -> bool:
+    return 0x1F1E6 <= ord(ch) <= 0x1F1FF
 
 
 def _parse_hhmm(value: str) -> time | None:

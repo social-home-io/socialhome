@@ -10,6 +10,7 @@ import pytest
 
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
+    is_pure_emoji,
     DEFAULT_DASHBOARD_PORT,
     IDLE_RETURN_CHOICES,
     MIN_PASSWORD_LENGTH,
@@ -345,3 +346,21 @@ def test_pin_invalid_error():
 
 def test_settings_pin_set_defaults_off():
     assert DashboardSettings().pin_set is False
+
+
+@pytest.mark.parametrize(
+    ("text", "pure"),
+    [
+        ("🎉", True),
+        ("👍🏽", True),
+        ("🇩🇪", True),
+        ("❤️", True),
+        ("👩‍👧", True),
+        ("", False),
+        ("Ärzt·Termin", False),
+        ("🎉🎉", False),
+        ("🎉 x", False),
+    ],
+)
+def test_is_pure_emoji(text, pure):
+    assert is_pure_emoji(text) is pure

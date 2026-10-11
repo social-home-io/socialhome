@@ -274,13 +274,19 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
     return response
 
 
+#: The page routes whose loads renew the cookie (an allow-list).
+_RENEWING_PATH = re.compile(r"/(?:p/[^/]+)?")
+
+
 def _may_renew(request: web.Request, response: web.StreamResponse) -> bool:
-    """Only page loads renew the cookie: never a ``/fragment/`` fetch or a
-    form ``POST`` — a slow one landing after ``/lock`` must not overwrite
-    the locked cookie — and never over a cookie the view set itself."""
+    """Only page loads (``GET`` / ``HEAD`` of ``/`` or ``/p/{id}``) renew
+    the cookie — an allow-list. Never a ``/fragment/`` fetch, an avatar,
+    a static file or a form ``POST``: such a response can land after a
+    ``/lock`` (sent with the pre-lock cookie) and must not overwrite the
+    locked cookie. And never over a cookie the view set itself."""
     return (
         request.method in ("GET", "HEAD")
-        and not request.path.startswith(_FRAGMENT_PREFIX)
+        and _RENEWING_PATH.fullmatch(request.path) is not None
         and COOKIE_NAME not in response.cookies
     )
 

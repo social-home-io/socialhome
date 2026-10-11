@@ -655,7 +655,7 @@ async def test_home_people_are_household_safe():
     assert ben.picture_view is True  # child-protected minor default
     assert ben.color == "#445566"
     assert dora.presence == "unknown"
-    assert dora.color == PERSON_PALETTE[3]  # no calendar → palette by position
+    assert dora.color == PERSON_PALETTE[2]  # no calendar → palette by position
     assert dora.status_emoji is None  # expired status
 
 
@@ -949,7 +949,7 @@ async def test_disabled_sections_are_empty_and_not_read():
     assert [p.color for p in snap.people] == [
         PERSON_PALETTE[0],
         PERSON_PALETTE[1],
-        PERSON_PALETTE[3],
+        PERSON_PALETTE[2],
     ]
     assert h.calendar.calls == []
     assert h.tasks.calls == []
@@ -1356,13 +1356,13 @@ async def test_a_timetable_resolves_in_its_own_zone():
 
 async def test_person_colours_follow_calendars_only_while_the_calendar_is_on():
     on = await Harness().home(at(MONDAY, 15, 30))
-    assert [p.color for p in on.people] == ["#112233", "#445566", PERSON_PALETTE[3]]
+    assert [p.color for p in on.people] == ["#112233", "#445566", PERSON_PALETTE[2]]
     h = Harness(prefs=HouseholdPreferences(tz=BERLIN, feat_calendar=False))
     off = await h.home(at(MONDAY, 15, 30))
     assert [p.color for p in off.people] == [
         PERSON_PALETTE[0],
         PERSON_PALETTE[1],
-        PERSON_PALETTE[3],
+        PERSON_PALETTE[2],
     ]
     assert off.events_today == ()
     assert h.calendar.calls == []
@@ -1397,3 +1397,43 @@ async def test_avatar_fails_soft():
     h = Harness()
     h.users.fail.add("get_picture")
     assert await h.service.avatar("u-anna") is None
+
+
+# ─── Review round ────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("emoji", "shown"),
+    [
+        ("🎉", "🎉"),
+        ("👍🏽", "👍🏽"),
+        ("👩‍👧", "👩‍👧"),
+        ("Ärzt·Termin", None),  # text in the emoji field never reaches the wall
+        ("🎉 party", None),
+        ("", None),
+    ],
+)
+async def test_status_emoji_only_when_purely_emoji(emoji, shown):
+    anna = dataclasses.replace(ANNA, status=UserStatus(emoji=emoji, text="x"))
+    h = Harness(users=[anna])
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert snap.people[0].status_emoji == shown
+
+
+async def test_avatar_reads_the_directory_for_hidden_people_too():
+    """Uniform work for hidden vs unknown: no timing tells them apart."""
+    h = Harness()
+    h.users.pictures = {"u-carl": (b"RIFF0000WEBPVP8 ", "def")}
+    assert await h.service.avatar("u-carl") is None
+    assert h.users.calls == ["list_active"]
+    h.users.calls.clear()
+    assert await h.service.avatar("u-nobody") is None
+    assert h.users.calls == ["list_active"]
+
+
+async def test_palette_colours_follow_the_shown_order():
+    """Hiding someone doesn't leave a gap in the fallback palette."""
+    h = Harness(prefs=HouseholdPreferences(household_name="V", tz=BERLIN))
+    h.calendar.calendars = []
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert [p.color for p in snap.people] == list(PERSON_PALETTE[:3])

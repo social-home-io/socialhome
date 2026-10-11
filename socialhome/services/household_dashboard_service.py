@@ -72,6 +72,7 @@ from ..domain.household_dashboard import (
     PersonSnapshot,
     in_night_window,
     initials,
+    is_pure_emoji,
     lesson_color_token,
     picture_effective,
     subject_color_tokens,
@@ -133,7 +134,7 @@ class _Context:
     settings: DashboardSettings
     sections: frozenset[str]
     #: Every active member (hidden ones too), in directory order — the
-    #: palette index and the calendar-owner lookup use it.
+    #: calendar-owner lookup uses it.
     members: tuple[User, ...]
     #: The shown members.
     shown: tuple[User, ...]
@@ -386,9 +387,11 @@ class HouseholdDashboardService:
         (whose picture is never read) or one without a picture. Fails soft
         like a slice."""
         settings = await self._settings.get()
+        # The directory is read either way, so a hidden member and an
+        # unknown id take the same work (no timing tells them apart).
+        members = await _safe("users", self._users.list_active(), list[User]())
         if not settings.person(user_id).show:
             return None
-        members = await _safe("users", self._users.list_active(), list[User]())
         if not any(u.user_id == user_id for u in members):
             return None
         return await _safe("picture", self._users.get_picture(user_id), None)
@@ -451,7 +454,7 @@ class HouseholdDashboardService:
     def _person_colors(ctx: _Context, calendars: Sequence[Calendar]) -> dict[str, str]:
         """Each shown member's colour: their first personal calendar's
         (only while the calendar section is on — otherwise ``calendars`` is
-        empty), else a palette colour by their position in the household."""
+        empty), else a palette colour by their position among the shown members."""
         from_calendars: dict[str, str] = {}
         for c in calendars:
             from_calendars.setdefault(ctx.by_username[c.owner_username], c.color)
@@ -459,8 +462,7 @@ class HouseholdDashboardService:
             user.user_id: from_calendars.get(
                 user.user_id, PERSON_PALETTE[index % len(PERSON_PALETTE)]
             )
-            for index, user in enumerate(ctx.members)
-            if user.user_id in ctx.shown_ids
+            for index, user in enumerate(ctx.shown)
         }
 
     async def _presence_rows(self, ctx: _Context) -> dict[str, PersonPresence]:
@@ -493,7 +495,13 @@ class HouseholdDashboardService:
                     ),
                     presence=state,
                     zone_name=row.zone_name if row and state == "zone" else None,
-                    status_emoji=(status.emoji or None) if live else None,
+                    # Only a real emoji: the field accepts short text too,
+                    # which the wall shows as an icon, never as words.
+                    status_emoji=(
+                        status.emoji
+                        if live and is_pure_emoji(status.emoji or "")
+                        else None
+                    ),
                     status_text=(
                         (status.text or None)
                         if live and ctx.settings.show_status_text
