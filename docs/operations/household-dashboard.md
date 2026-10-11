@@ -84,6 +84,43 @@ must open.
   `.home.arpa`) or the configured address are refused (421) — protection
   against DNS rebinding.
 
+## What the tablet shows
+
+- **Home** (`/`): the time and date, the next thing coming up today
+  (with whose it is and "in 28 min"), who's home and who's away (a zone
+  name like "Work" at most — never a map or coordinates), then **Today**:
+  one lane per person from 08:00 to 22:00 (stretched for earlier / later
+  plans) with their calendar events, a striped school block from their
+  timetable and a "now" line; under it who is at school right now and
+  today's timetable changes (⚠ cancelled, 🔁 changed, + added). Last, the
+  chores due today (✓ done, ☐ to do, ⚠ "2 days late"), the shopping list
+  (the first six and "+ 5 more") and the household sticky notes. Empty
+  columns are left out; a day with nothing on it says "Nothing planned
+  today 🎈". With more than six people the lanes become one list in time
+  order; with one person there is no rail and no "who's home".
+- **A person** (tap their face in the rail): what they're doing now and
+  next, their school day with rooms and teachers (a cancelled lesson is
+  struck through *and* says "Cancelled"), today's and tomorrow's plans
+  and their chores. After the "Back to Home after" time without a touch
+  (setting `idle_return_minutes`, default 3, `0` = never) the tablet goes
+  back to Home. People set to picture view see the same page for now.
+- **Night** (between `night_start` and `night_end`, default 22:00–06:00):
+  only a dim clock, the date and the first thing of the morning. Tap the
+  screen to see everything (and the 🔒 button) for a minute.
+- **When Social Home can't be reached** the last page stays up with a
+  banner "Can't reach Social Home — showing info from 14:02" and the
+  "in 28 min"-style times hidden; it recovers on its own (↻ reloads now).
+- With **Keep screen on** (`keep_screen_on`) the browser is asked to keep
+  the screen awake; some kiosk browsers also need their own setting.
+
+**Privacy reminders.** Everything on these pages is visible to anyone
+standing in front of the tablet: event titles, chores, the shopping list,
+sticky notes, who is home and timetables. Hide a person who shouldn't be
+on the wall (`people: {"<id>": {"show": false}}`) — they then have no
+page and their presence, events, chores and timetables are left out of
+Home. DMs, notifications, chat, event locations and coordinates are never
+shown. Use the privacy lock below when visitors are around.
+
 ## Privacy lock (guests, cleaners)
 
 When someone who shouldn't see the household's people is around, tap

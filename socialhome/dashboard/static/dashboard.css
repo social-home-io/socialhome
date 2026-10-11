@@ -218,7 +218,7 @@ h1 {
 
 /* ── Privacy lock ─────────────────────────────────────────────────────── */
 
-/* The lock button (placeholder home now, the rail later). */
+/* The lock button (bottom of the rail, or the corner with one person). */
 .dash-lock-form {
   display: flex;
   justify-content: center;

@@ -1520,6 +1520,46 @@ at WARNING, empty — so one broken service never blanks the tablet. The
 picture-view default (on for child-protected minors) is one shared rule,
 `picture_effective`, used by the admin API too.
 
+**How it is rendered.** The views (`dashboard/views.py`) fetch a snapshot
+per request and render Jinja templates (`dashboard/templates/`); the pure
+`dashboard/presenter.py` decides the look — swim-lane geometry, the
+night-mode item, time phrases (`dashboard/clock.py`: 24-hour times in the
+household zone, localised "in 28 min" / "2 days late"). The CSP has no
+`'unsafe-inline'` and pages carry no `style=` attribute, so every colour
+(person, calendar, timetable, sticky, household theme) is validated as a
+plain hex (`dashboard/contrast.py`) and lands only as a class (`.kN` sets
+`--kc` / `--kt`, the ink picked for WCAG contrast) in **one** inline
+`<style>` admitted by its sha256 in that response's CSP
+(`dashboard/policy.py`). The household theme colour becomes the accent
+only per colour scheme where it reaches 4.5:1 on the page backgrounds;
+otherwise the built-in high-contrast accent stays. Timeline positions are
+whole-percent classes (`.x-N` / `.w-N`) in the static stylesheet.
+
+**Live refresh, offline, idle, night.** `dashboard.js` (CSP
+`script-src 'self'`) ticks the clock every second from the server's time
+(`data-now`; the tablet's own clock is never trusted) and reloads at the
+household's midnight. Every 30 s it fetches the page's `/fragment/…`
+(the `<main>` content only) and swaps it in; a fragment carries a *view
+key* — a digest of the inline style, night mode, the rail and the page —
+and a different key reloads the whole page, because a fragment can't add
+CSS the page's CSP never admitted. The lock marker reloads into the lock
+screen, 401 goes to `/login?next=…`, 404 (person hidden) goes Home. Two
+failed refreshes in a row show the offline banner (rendered hidden in
+every fragment, with that snapshot's time), hide relative times
+(`data-rel`) and grey "now" / presence (`data-live`) until a refresh works.
+A person page returns Home after `idle_return_minutes` without a touch.
+With `keep_screen_on` the Screen Wake Lock is requested and re-acquired
+when the page becomes visible again. Every 10 minutes the content drifts
+1–2 px against burn-in (not under `prefers-reduced-motion`). Night mode is
+decided on the server (`is_night`, the household's night window): the
+page shows only a dim clock, the date and the first item of the morning
+(today's next before noon, tomorrow's first from noon on); the day view is
+rendered too but hidden, and a tap shows it — rail and lock button
+included — for 60 s. Without JS the page reloads every two minutes
+(`<noscript>` refresh). A person in picture view gets the reader page
+behind a template seam (`_person_picture.html.j2`) until the picture view
+lands.
+
 ## Where things live
 
 | Concern | Path |

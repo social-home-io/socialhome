@@ -100,7 +100,7 @@ _PAGE_HEADERS: dict[str, str] = {
     # own form POSTs, which the same-origin check must refuse. Nothing
     # leaves the origin either way — the dashboard links nowhere else.
     "Referrer-Policy": "same-origin",
-    # Wake lock is for keeping the wall tablet's screen on (later PR).
+    # Wake lock keeps the wall tablet's screen on (dashboard.js).
     "Permissions-Policy": (
         "camera=(), microphone=(), geolocation=(), screen-wake-lock=(self)"
     ),
