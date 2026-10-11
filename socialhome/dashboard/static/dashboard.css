@@ -899,6 +899,50 @@ h3.dash-sublabel {
   text-overflow: ellipsis;
 }
 
+/* Too narrow for a word: just the item's icon, centred (the full label
+   is in the visually hidden text). Forced below 10 % of the day; else
+   decided by the bar's real width (container query — a browser without
+   them shows the clipped title). */
+.dash-block {
+  container: dash-block / inline-size;
+}
+
+.dash-block-icon {
+  display: none;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.dash-block-narrow {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.dash-block-narrow .dash-block-icon {
+  display: inline;
+}
+
+.dash-block-narrow .dash-block-title {
+  display: none;
+}
+
+@container dash-block (max-width: 72px) {
+  .dash-block-icon {
+    display: block;
+    margin-inline: auto;
+  }
+
+  .dash-block-title {
+    display: none;
+  }
+}
+
+/* The phone variant of Today (a list); shown instead of the lanes on
+   narrow screens only. */
+.dash-agenda.dash-agenda-narrow {
+  display: none;
+}
+
 /* School is striped, so it never reads as "an event" by colour alone. */
 .dash-block-school {
   background-image: repeating-linear-gradient(
@@ -1000,6 +1044,7 @@ h3.dash-sublabel {
 
 .dash-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 8px 16px;
   padding-block: 8px;
@@ -1023,7 +1068,8 @@ h3.dash-sublabel {
   flex-wrap: wrap;
   align-items: baseline;
   gap: 4px 10px;
-  min-inline-size: 0;
+  /* Room for a few words before the faces wrap to their own line. */
+  min-inline-size: min(9rem, 100%);
 }
 
 .dash-row-title {
@@ -1402,9 +1448,12 @@ h3.dash-sublabel {
     border-block-end: 1px solid var(--dash-border);
   }
 
+  /* The faces scroll sideways; the lock button is the strip's own last
+     item beside them (never on top of a face). */
   .dash-rail-list {
     flex-direction: row;
     align-items: flex-start;
+    min-inline-size: 0;
     padding-block: 10px 4px;
     padding-inline: 10px;
     overflow-x: auto;
@@ -1429,8 +1478,10 @@ h3.dash-sublabel {
   }
 
   .dash-rail-lock {
+    flex: none;
     padding-block: 0;
     padding-inline: 8px 0;
+    border-inline-start: 1px solid var(--dash-border);
   }
 }
 
@@ -1467,6 +1518,15 @@ h3.dash-sublabel {
 
   .dash-tick-minor {
     display: none;
+  }
+
+  /* Lanes that narrow are unreadable: the day is a list on a phone. */
+  .dash-timeline {
+    display: none;
+  }
+
+  .dash-agenda.dash-agenda-narrow {
+    display: flex;
   }
 
   .dash-next-line {

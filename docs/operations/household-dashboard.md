@@ -96,8 +96,10 @@ must open.
   chores due today (✓ done, ☐ to do, ⚠ "2 days late"), the shopping list
   (the first six and "+ 5 more") and the household sticky notes. Empty
   columns are left out; a day with nothing on it says "Nothing planned
-  today 🎈". With more than six people the lanes become one list in time
-  order; with one person there is no rail and no "who's home".
+  today 🎈". With more than six people — and on a phone — the lanes become
+  one list in time order; with one person there is no rail and no "who's
+  home". A bar too short for its title shows just an icon. When nothing is
+  left today, the "Next" box shows tomorrow's first item instead.
 - **A person** (tap their face in the rail): what they're doing now and
   next, their school day with rooms and teachers (a cancelled lesson is
   struck through *and* says "Cancelled"), today's and tomorrow's plans

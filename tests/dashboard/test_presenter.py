@@ -15,8 +15,11 @@ from socialhome.dashboard.presenter import (
     ColorBook,
     Fmt,
     avatar_url,
+    SchoolSpan,
     build_timeline,
+    day_list,
     home_colors,
+    leading_emoji,
     night_item,
     person_colors,
     presence_groups,
@@ -405,3 +408,90 @@ def test_fmt_icon_and_lesson_meta():
     assert f.lesson_meta(lesson("X", at(9), at(10), teacher="Ms Q")) == "Ms Q"
     assert f.lesson_meta(BREAK) == ""
     assert f.lesson_meta(WORK) == ""
+
+
+# ─── UX round: narrow blocks, own colour, emoji ──────────────────────────
+
+
+def test_narrow_blocks_show_an_icon_instead_of_text():
+    tl = build_timeline(home(), _fmt())
+    assert tl is not None
+    lanes = {lane.person.user_id: lane for lane in tl.lanes}
+    dentist = lanes["u-pascal"].blocks[0]  # 1 h of 14 → 7 %
+    assert dentist.narrow is True and dentist.icon == "•"
+    work = lanes["u-anna"].blocks[0]
+    assert work.narrow is False
+    school = next(b for b in lanes["u-mia"].blocks if b.kind == "school")
+    assert school.icon == "🎒"
+
+
+def test_narrow_event_uses_its_leading_emoji():
+    snap = home(
+        events_today=(event("s", "🏊 Swimming", at(15), at(16), "u-leo"),), school=()
+    )
+    tl = build_timeline(snap, _fmt(snap))
+    assert tl is not None
+    block = next(lane for lane in tl.lanes if lane.person == LEO).blocks[0]
+    assert block.narrow and block.icon == "🏊"
+
+
+@pytest.mark.parametrize(
+    ("title", "emoji"),
+    [
+        ("🏊 Swimming", "🏊"),
+        ("🇬🇧 English", "🇬🇧"),
+        ("Swim 🏊", None),
+        ("", None),
+        ("1 Meeting", None),
+        ("❤️ Date", "❤️"),
+    ],
+)
+def test_leading_emoji(title, emoji):
+    assert leading_emoji(title) == emoji
+
+
+def test_fmt_own_colour_paints_events_in_the_page_persons_colour():
+    colors = ColorBook()
+    f = Fmt(
+        now=at(12),
+        today=TODAY,
+        t=_t(),
+        people=PEOPLE,
+        colors=colors,
+        own_color=ANNA.color,
+    )
+    assert f.item_color(DINNER) == ANNA.color  # not the merged copy's colour
+    assert f.item_color(MATHS) == "#5462C4"  # lessons keep the timetable's
+    assert _fmt().item_color(DINNER) == DINNER.color
+
+
+@pytest.mark.parametrize(
+    ("title", "emoji"),
+    [("👩‍👧 Kids", "👩‍👧"), ("👍🏽 ok", "👍🏽"), ("🇩🇪", "🇩🇪")],
+)
+def test_leading_emoji_sequences(title, emoji):
+    assert leading_emoji(title) == emoji
+
+
+def test_day_list_is_chronological_with_school_spans():
+    rows = day_list(home())
+    assert [getattr(r, "title", "school") for r in rows] == [
+        "Mia's birthday",  # all-day first
+        "school",  # 08:20
+        "Work",  # 09:00
+        "Dentist",
+        "Swimming",
+        "Dinner with Gran",
+    ]
+    span = rows[1]
+    assert isinstance(span, SchoolSpan)
+    assert (span.person_id, span.start, span.end) == ("u-mia", at(8, 20), at(15, 50))
+    assert span.item_type == "school"
+
+
+def test_day_list_respects_sections_and_cancelled_days():
+    assert day_list(home(sections=frozenset({"tasks"}))) == []
+    no_school = home(school=(replace(MIA_SCHOOL, first_start=None, last_end=None),))
+    assert not any(isinstance(r, SchoolSpan) for r in day_list(no_school))
+    events_only = day_list(home(sections=frozenset({"calendar"})))
+    assert not any(isinstance(r, SchoolSpan) for r in events_only)

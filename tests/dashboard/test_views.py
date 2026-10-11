@@ -39,9 +39,11 @@ from socialhome.i18n import Catalog
 from .conftest import PASSWORD, default_theme
 from .factories import (
     LEO,
+    DINNER,
     MIA_SCHOOL,
     PASCAL,
     TOMORROW,
+    WORK,
     FakeDashboardService,
     at,
     event,
@@ -1386,7 +1388,10 @@ async def test_home_board(client, auth, snapshots):
     assert "dash-presence" in html and ">Work<" in html
     # Today: lanes with blocks, the school block and today's changes.
     assert "dash-timeline" in html and "dash-block-school" in html
-    assert 'title="10:00–11:00 Dentist"' in html
+    # A bar too narrow for its title shows an icon; the label is spoken.
+    assert '<span class="dash-visually-hidden">10:00–11:00 Dentist</span>' in html
+    assert "dash-block-narrow" in html and "dash-block-icon" in html
+    assert 'title="10:00' not in html  # no hover tooltips on a tablet
     assert "Cancelled" in html and "Added" in html and "Room B7" in html
     assert "At school now" in html
     # Columns: chores with glyphs + words, shopping capped, a sticky.
@@ -1679,6 +1684,7 @@ async def test_empty_day_and_empty_columns(client, auth, snapshots):
         events_today=(),
         school=(),
         next_up=None,
+        tomorrow_first=None,
         chores_today=(),
         shopping=(),
         shopping_total=0,
@@ -1844,3 +1850,65 @@ async def test_avatar_without_a_session_redirects_to_login(client):
 )
 def test_image_type(body, kind):
     assert image_type(body) == kind
+
+
+# UX round.
+
+
+async def test_next_band_falls_back_to_tomorrow_when_today_is_done(
+    client, auth, snapshots
+):
+    gym = event("g", "Gym", at(7, day=TOMORROW), at(8, day=TOMORROW), "u-pascal")
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, now=at(21), next_up=None, tomorrow_first=gym
+    )
+    html = await (await _get(client, auth, "/")).text()
+    band = html[html.index("dash-next") : html.index("</section>")]
+    assert "dash-next-tomorrow" in band
+    assert ">Tomorrow</h2>" in band
+    assert '<span class="dash-next-time">07:00</span>' in band
+    assert "Gym" in band
+    assert "dash-face" in band and "Pascal" in band
+    assert "data-rel" not in band  # no "in 10 h"
+
+
+async def test_next_band_tomorrow_lesson_says_school(client, auth, snapshots):
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, next_up=None)
+    html = await (await _get(client, auth, "/")).text()
+    band = html[html.index("dash-next") : html.index("</section>")]
+    assert "🎒</span> School" in band and "07:30" in band
+
+
+async def test_home_has_the_phone_list_next_to_the_lanes(client, auth):
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-timeline" in html
+    narrow = html[html.index('class="dash-agenda dash-agenda-narrow"') :]
+    narrow = narrow[: narrow.index("</ol>")]
+    # In time order, school as one row, with whose it is.
+    order = ["Mia&#39;s birthday", "08:20–15:50", "Work", "Dentist", "Swimming"]
+    positions = [narrow.index(text) for text in order]
+    assert positions == sorted(positions)
+    assert "dash-row-school" in narrow and "dash-faces" in narrow
+
+
+async def test_no_phone_list_without_lanes(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, events_today=(), school=()
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-agenda-narrow" not in html
+
+
+async def test_person_page_paints_events_in_the_persons_colour(client, auth, snapshots):
+    """A shared event keeps whichever member's calendar colour won the
+    merge — on Anna's page it is painted in Anna's colour instead."""
+    shared = replace(DINNER, color=PASCAL.color)
+    snapshots.pages["u-anna"] = person(next_item=shared, today_items=(WORK, shared))
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    style = _board_style(html)[0]
+    anna_cls = re.search(r"\.(k\d+)\{--kc:#c44d72", style).group(1)
+    pascal = re.search(r"\.(k\d+)\{--kc:#357bbb", style).group(1)
+    rows = re.findall(r'<li class="dash-row (k\d+)', html)
+    assert rows and set(rows) == {anna_cls}
+    assert f'class="dash-nn {anna_cls}"' in html
+    assert f'class="dash-row {pascal}' not in html

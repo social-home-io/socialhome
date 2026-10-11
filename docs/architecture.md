@@ -1533,7 +1533,13 @@ plain hex (`dashboard/contrast.py`) and lands only as a class (`.kN` sets
 (`dashboard/policy.py`). The household theme colour becomes the accent
 only per colour scheme where it reaches 4.5:1 on the page backgrounds;
 otherwise the built-in high-contrast accent stays. Timeline positions are
-whole-percent classes (`.x-N` / `.w-N`) in the static stylesheet.
+whole-percent classes (`.x-N` / `.w-N`) in the static stylesheet; a bar
+too narrow for its title shows an icon (forced below 10 % of the day, else
+by a container query on its real width). Home also renders the day as a
+chronological list, which a media query swaps in for the lanes under
+600 px (the server can't know the width). On a person page events are
+painted in that person's colour, not the colour of whichever calendar copy
+of a shared event won the merge.
 
 **Live refresh, offline, idle, night.** `dashboard.js` (CSP
 `script-src 'self'`) ticks the clock every second from the server's time

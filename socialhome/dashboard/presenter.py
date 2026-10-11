@@ -22,8 +22,10 @@ Pure: no I/O, so it is tested without a server.
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import ClassVar
 from datetime import date, datetime
 from urllib.parse import quote
 
@@ -49,6 +51,7 @@ __all__ = [
     "SHOPPING_SHOWN",
     "STICKIES_SHOWN",
     "ColorBook",
+    "SchoolSpan",
     "Fmt",
     "Lane",
     "LaneBlock",
@@ -56,7 +59,9 @@ __all__ = [
     "Timeline",
     "avatar_url",
     "build_timeline",
+    "day_list",
     "home_colors",
+    "leading_emoji",
     "night_item",
     "person_colors",
     "presence_groups",
@@ -83,6 +88,12 @@ DAY_END_HOUR = 22
 #: Hour labels closer than this (percent) to "now" are left out — the now
 #: label sits there.
 NOW_LABEL_CLEARANCE = 12
+#: A lane bar narrower than this (percent of the day) shows an icon, not
+#: a cut-off word ("D…").
+NARROW_BLOCK = 10
+#: The icon of a narrow event bar without a leading emoji.
+NEUTRAL_ICON = "•"
+SCHOOL_ICON = "🎒"
 SHOPPING_SHOWN = 6
 STICKIES_SHOWN = 4
 
@@ -170,6 +181,33 @@ def theme_css(primary: object) -> str:
     return "".join(out)
 
 
+def leading_emoji(text: str) -> str | None:
+    """The emoji a title starts with ("🏊 Swimming" → "🏊"), with its
+    modifiers (variation selectors, skin tones, ZWJ parts, flags);
+    ``None`` when the title doesn't start with one."""
+    if not text or unicodedata.category(text[0]) != "So":
+        return None
+    end = 1
+    if len(text) > 1 and _is_flag_half(text[0]) and _is_flag_half(text[1]):
+        end = 2  # a flag is two regional-indicator letters
+    while end < len(text):
+        ch = text[end]
+        modifier = ch in _JOINERS or 0x1F3FB <= ord(ch) <= 0x1F3FF
+        if not (modifier or text[end - 1] == _ZWJ):
+            break
+        end += 1
+    return text[:end]
+
+
+_ZWJ = "\u200d"
+#: Zero-width joiner + variation selector 16 (emoji presentation).
+_JOINERS = frozenset({_ZWJ, "\ufe0f"})
+
+
+def _is_flag_half(ch: str) -> bool:
+    return 0x1F1E6 <= ord(ch) <= 0x1F1FF
+
+
 def view_key(*parts: object) -> str:
     """A short digest of what a ``/fragment/…`` swap can't change — the
     inline style, night mode, the rail. When a fresh fragment's key
@@ -192,7 +230,7 @@ def avatar_url(person: DashboardPerson) -> str | None:
 class Fmt:
     """What templates call to spell times, titles and people."""
 
-    __slots__ = ("now", "today", "t", "colors", "_people")
+    __slots__ = ("now", "today", "t", "colors", "own_color", "_people")
 
     def __init__(
         self,
@@ -202,11 +240,16 @@ class Fmt:
         t: Callable[..., str],
         people: Sequence[DashboardPerson],
         colors: ColorBook,
+        own_color: str | None = None,
     ) -> None:
         self.now = now
         self.today = today
         self.t = t
         self.colors = colors
+        #: On a person page: events are painted in *their* colour — a
+        #: shared event's own colour is whichever member's calendar copy
+        #: won the merge, which says nothing on someone else's page.
+        self.own_color = own_color
         self._people: Mapping[str, DashboardPerson] = {p.user_id: p for p in people}
 
     def hhmm(self, value: datetime) -> str:
@@ -258,7 +301,9 @@ class Fmt:
         return self.colors.cls(color)
 
     def item_color(self, item: DashboardAgendaItem) -> object:
-        return item.color if isinstance(item, DashboardEvent) else item.color_hex
+        if isinstance(item, DashboardEvent):
+            return self.own_color or item.color
+        return item.color_hex
 
     def is_past(self, item: DashboardAgendaItem) -> bool:
         """Over already (all-day events never are, today)."""
@@ -337,6 +382,44 @@ def school_changes(days: Iterable[DashboardSchoolDay]) -> list[DashboardLesson]:
     )
 
 
+# ─── Home: the day as a list (phones, crowded households) ────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class SchoolSpan:
+    """A child's school day as one row: first to last lesson that takes
+    place."""
+
+    item_type: ClassVar[str] = "school"
+
+    person_id: str
+    start: datetime
+    end: datetime
+
+
+def day_list(snapshot: HomeSnapshot) -> list[DashboardEvent | SchoolSpan]:
+    """Today in time order — all-day events first, then timed events and
+    school days by start. What Home shows instead of lanes on a phone
+    (CSS) or with more than :data:`MAX_LANES` people."""
+    rows: list[DashboardEvent | SchoolSpan] = []
+    if SECTION_CALENDAR in snapshot.sections:
+        rows.extend(snapshot.events_today)
+    if SECTION_TIMETABLE in snapshot.sections:
+        rows.extend(
+            SchoolSpan(person_id=d.person_id, start=d.first_start, end=d.last_end)
+            for d in snapshot.school
+            if d.first_start is not None and d.last_end is not None
+        )
+    rows.sort(
+        key=lambda r: (
+            0 if isinstance(r, DashboardEvent) and r.all_day else 1,
+            r.start,
+            r.end,
+        )
+    )
+    return rows
+
+
 # ─── Home: swim-lane timeline ────────────────────────────────────────────
 
 
@@ -353,6 +436,10 @@ class LaneBlock:
     color: str
     kind: str  # "event" | "school"
     past: bool
+    #: Too narrow for words: the bar shows just ``icon`` (the full label
+    #: stays for screen readers).
+    narrow: bool = False
+    icon: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -482,6 +569,12 @@ def build_timeline(snapshot: HomeSnapshot, fmt: Fmt) -> Timeline | None:
                     color=fmt.kc(by_id[uid].color),
                     kind=kind,
                     past=e <= now_minute if e > s else s < now_minute,
+                    narrow=w < NARROW_BLOCK,
+                    icon=(
+                        SCHOOL_ICON
+                        if kind == "school"
+                        else leading_emoji(title) or NEUTRAL_ICON
+                    ),
                 )
             )
         lanes.append(

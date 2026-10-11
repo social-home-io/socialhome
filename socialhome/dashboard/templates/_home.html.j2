@@ -2,6 +2,22 @@
     chores / shopping / notes columns. Empty columns are left out. -#}
 {% from "_macros.html.j2" import face, faces, agenda_row, chore with context %}
 {% set day_on = "calendar" in snap.sections or "timetable" in snap.sections %}
+{#- Today in time order (crowded households; phones instead of lanes). -#}
+{% macro day_list_ol(extra="") -%}
+<ol class="dash-agenda{% if extra %} {{ extra }}{% endif %}">
+  {% for row in day_rows %}
+  {% if row.item_type == "school" %}
+  <li class="dash-row dash-row-school">
+    <span class="dash-row-time">{{ f.hhmm(row.start) }}–{{ f.hhmm(row.end) }}</span>
+    <span class="dash-row-main"><span class="dash-row-title"><span aria-hidden="true">🎒</span> {{ t("dashboard.school") }}</span></span>
+    {{ faces([row.person_id]) }}
+  </li>
+  {% else %}
+  {{ agenda_row(row, with_people=True) }}
+  {% endif %}
+  {% endfor %}
+</ol>
+{%- endmacro %}
 <div class="dash-home">
   <h1 class="dash-visually-hidden">{{ household }}</h1>
   <header class="dash-top">
@@ -22,6 +38,22 @@
         {{ faces(nx) }}
         <span class="dash-rel" data-rel>{{ f.rel(nx.start) }}</span>
       </p>
+    </section>
+    {% elif snap.tomorrow_first %}
+    {#- Nothing left today: the band shows tomorrow's first item (the
+        same one night mode shows), so it is never empty in the evening. -#}
+    {% set nx = snap.tomorrow_first %}
+    <section class="dash-next dash-next-tomorrow {{ f.kc(f.item_color(nx)) }}" aria-labelledby="dash-next-label">
+      <h2 class="dash-label" id="dash-next-label">{{ t("dashboard.person.tomorrow") }}</h2>
+      <p class="dash-next-line">
+        <span class="dash-next-time">{{ f.hhmm(nx.start) }}</span>
+        {% if nx.item_type == "lesson" %}
+        <span class="dash-next-title"><span aria-hidden="true">🎒</span> {{ t("dashboard.school") }}</span>
+        {% else %}
+        <span class="dash-next-title">{{ f.title(nx) }}</span>
+        {% endif %}
+      </p>
+      <p class="dash-next-meta">{{ faces(nx) }}</p>
     </section>
     {% endif %}
   </header>
@@ -71,8 +103,12 @@
           {% endif %}
           <ul class="dash-track dash-rows-{{ lane.rows }}">
             {% for b in lane.blocks %}
-            <li class="dash-block dash-block-{{ b.kind }} x-{{ b.x }} w-{{ b.w }} dash-r-{{ b.row }} {{ b.color }}{% if b.past %} dash-past{% endif %}" title="{{ b.label }}">
+            <li class="dash-block dash-block-{{ b.kind }} x-{{ b.x }} w-{{ b.w }} dash-r-{{ b.row }} {{ b.color }}{% if b.past %} dash-past{% endif %}{% if b.narrow %} dash-block-narrow{% endif %}">
               <span class="dash-visually-hidden">{{ b.label }}</span>
+              {#- Both are rendered: the CSS shows the icon when the bar is
+                  too narrow for a word (always below 10 % of the day, and
+                  by its real width via a container query). -#}
+              <span class="dash-block-icon" aria-hidden="true">{{ b.icon }}</span>
               <span class="dash-block-title" aria-hidden="true">{% if b.kind == "school" %}🎒 {% endif %}{{ b.title }}</span>
             </li>
             {% endfor %}
@@ -82,19 +118,11 @@
       </div>
       {% endfor %}
     </div>
-    {% elif rail_many and (snap.events_today or snap.school) %}
-    <ol class="dash-agenda">
-      {% for ev in snap.events_today %}
-      {{ agenda_row(ev, with_people=True) }}
-      {% endfor %}
-      {% for day in snap.school if day.first_start %}
-      <li class="dash-row dash-row-school">
-        <span class="dash-row-time">{{ f.hhmm(day.first_start) }}–{{ f.hhmm(day.last_end) }}</span>
-        <span class="dash-row-main"><span class="dash-row-title"><span aria-hidden="true">🎒</span> {{ t("dashboard.school") }}</span></span>
-        {{ faces([day.person_id]) }}
-      </li>
-      {% endfor %}
-    </ol>
+    {#- Phones get the same day as a list (CSS swaps it in under 600 px —
+        lanes that narrow are unreadable). -#}
+    {% if day_rows %}{{ day_list_ol("dash-agenda-narrow") }}{% endif %}
+    {% elif rail_many and day_rows %}
+    {{ day_list_ol() }}
     {% else %}
     <p class="dash-empty">{{ t("dashboard.empty_day") }} <span aria-hidden="true">🎈</span></p>
     {% endif %}

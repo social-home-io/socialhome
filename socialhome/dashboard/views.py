@@ -62,6 +62,7 @@ from .presenter import (
     ColorBook,
     Fmt,
     build_timeline,
+    day_list,
     home_colors,
     night_item,
     person_colors,
@@ -485,6 +486,7 @@ async def _board(
     fragment_url: str,
     template: str,
     extra: dict[str, object],
+    own_color: str | None = None,
 ) -> _Board:
     """The context every dashboard board (Home, a person) shares: rail,
     clock, night mode, the inline colour style and its view key."""
@@ -494,7 +496,14 @@ async def _board(
     style = colors.css() + theme_css(await _theme_primary(app))
     night = snapshot.is_night
     rail_ids = ",".join(p.user_id for p in people)
-    fmt = Fmt(now=snapshot.now, today=snapshot.today, t=t, people=people, colors=colors)
+    fmt = Fmt(
+        now=snapshot.now,
+        today=snapshot.today,
+        t=t,
+        people=people,
+        colors=colors,
+        own_color=own_color,
+    )
     zone = snapshot.now.tzinfo
     assert zone is not None
     context: dict[str, object] = {
@@ -537,6 +546,7 @@ async def _home_board(request: web.Request) -> _Board:
     board.context.update(
         snap=snap,
         timeline=build_timeline(snap, fmt),
+        day_rows=day_list(snap),
         presence=presence_groups(snap),
         at_school=(
             school_now(snap.school, snap.now)
@@ -572,6 +582,7 @@ async def _person_board(request: web.Request) -> _Board | None:
         people=people,
         colors=person_colors(page),
         current=page.person.user_id,
+        own_color=page.person.color,
         fragment_url=f"/fragment/p/{quote(page.person.user_id, safe='')}",
         template="_person.html.j2",
         extra={
