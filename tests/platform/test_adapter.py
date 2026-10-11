@@ -225,6 +225,21 @@ def test_provides_ice_servers_is_not_a_spa_capability():
     assert not any("ice" in str(c).lower() for c in Capability)
 
 
+# ── fixed_dashboard_port (ABC default) ───────────────────────────────────────
+
+
+def test_fixed_dashboard_port_defaults_to_none():
+    """A platform that says nothing lets the admin choose the dashboard
+    port, so the settings API must not report it as fixed."""
+    assert _MinimalAdapter().fixed_dashboard_port is None
+
+
+def test_fixed_dashboard_port_is_not_a_spa_capability():
+    """Backend fact surfaced by the admin API as ``port_fixed`` — never
+    a :class:`Capability`."""
+    assert not any("dashboard" in str(c).lower() for c in Capability)
+
+
 # ── get_public_base_url (ABC default) ────────────────────────────────────────
 
 

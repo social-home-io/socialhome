@@ -4,12 +4,12 @@ Prevents secrets from leaking into operator log files, log shippers, or
 log-aggregation services. The WebSocket endpoint uses ``?token=<raw>``
 for browser auth (aiohttp can't set custom headers on WS), so the
 default aiohttp access log would write that token verbatim. We strip
-``token``, ``api_key``, ``access_token`` and ``password`` values from
-every formatted access-log field — the request line (``%r``), request
-headers such as ``%{Referer}i``, and the matching ``extra`` attributes
-aiohttp attaches to the log record. Bearer tokens that ride in the URL
-*path* — the GFS's ``/join/{token}`` invite links and
-``/highlight/…/{token}`` share links — are redacted too
+``token``, ``api_key``, ``access_token``, ``password`` and the household
+dashboard's setup token ``t`` from every formatted access-log field — the
+request line (``%r``), request headers such as ``%{Referer}i``, and the
+matching ``extra`` attributes aiohttp attaches to the log record. Bearer
+tokens that ride in the URL *path* — the GFS's ``/join/{token}`` invite
+links and ``/highlight/…/{token}`` share links — are redacted too
 (:func:`redact_secrets`).
 
 Wired in via ``web.run_app(..., access_log_class=RedactingAccessLogger)``
@@ -35,6 +35,9 @@ _SENSITIVE_PARAMS: frozenset[str] = frozenset(
         "api_key",
         "access_token",
         "password",
+        # The household dashboard's single-use tablet setup link
+        # (``/enter?t=<token>``) — exact name only, ``tz=`` / ``at=`` untouched.
+        "t",
     }
 )
 

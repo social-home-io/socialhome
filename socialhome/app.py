@@ -118,7 +118,14 @@ from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
 from .infrastructure.moment_retention_scheduler import MomentRetentionScheduler
 from .infrastructure.highlight_retention_scheduler import HighlightRetentionScheduler
 from .platform import build_platform_adapter
-from .platform.adapter import Capability
+from .platform.adapter import Capability, PlatformAdapter
+from .dashboard.app import build_dashboard_app
+from .dashboard.controller import DashboardController, address_hosts, local_hostnames
+from .dashboard.auth import DashboardAuth
+from .dashboard.render import DashboardRenderer
+from .dashboard.server import DashboardServer
+from .repositories.instance_config_repo import SqliteInstanceConfigRepo
+from .services.dashboard_settings_service import DashboardSettingsService
 from .rate_limiter import RateLimiter, build_rate_limit_middleware
 from .webrtc_ice import build_ice_servers, warn_if_no_turn, warn_if_turn_unusable
 from .repositories import (
@@ -1169,6 +1176,7 @@ def _build_repos(db: AsyncDatabase):
         password_reset=SqlitePasswordResetRepo(db),
         auth_audit_log=SqliteAuthAuditLogRepo(db),
         peer_user_visibility=SqlitePeerUserVisibilityRepo(db),
+        instance_config=SqliteInstanceConfigRepo(db),
     )
 
 
@@ -2096,6 +2104,54 @@ def _build_link_previews(
     )
 
 
+def _build_household_dashboard(
+    config: Config,
+    repos: SimpleNamespace,
+    platform_adapter: PlatformAdapter,
+    preferences_service: PreferencesService,
+    catalog: Catalog,
+) -> SimpleNamespace:
+    """Settings service, cookie auth and own-port listener of the
+    household dashboard (``socialhome/dashboard/``).
+
+    One :class:`DashboardAuth` and one :class:`DashboardRenderer` for the
+    process: the login throttle must survive a listener restart (port
+    change), and the renderer reads templates + static files from disk —
+    done here, at wiring time, never in the server's async start path.
+    """
+    settings = DashboardSettingsService(
+        repos.instance_config,
+        fixed_port=platform_adapter.fixed_dashboard_port,
+        main_port=config.listen_port,
+    )
+    auth = DashboardAuth(settings)
+    renderer = DashboardRenderer(catalog)
+    own_names = local_hostnames()
+
+    async def household_name() -> str:
+        prefs = await preferences_service.get_household()
+        return prefs.household_name or "Home"
+
+    async def extra_hosts() -> frozenset[str]:
+        return address_hosts(await settings.get())
+
+    def build_app() -> web.Application:
+        return build_dashboard_app(
+            settings_service=settings,
+            auth=auth,
+            renderer=renderer,
+            household_name=household_name,
+            extra_hosts=extra_hosts,
+            local_hostnames=own_names,
+        )
+
+    server = DashboardServer(build_app=build_app, host=config.listen_host)
+    controller = DashboardController(settings, server, local_hostnames=own_names)
+    return SimpleNamespace(
+        settings=settings, auth=auth, server=server, controller=controller
+    )
+
+
 def _build_space_moderation(
     *,
     space_repo,
@@ -2944,6 +3000,11 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Platform adapter (HA vs standalone) ──────────────────────────────
     platform_adapter = build_platform_adapter(config.mode, db, config)
 
+    # ── Household dashboard (wall tablet, own port) ──────────────────────
+    dashboard = _build_household_dashboard(
+        config, repos, platform_adapter, preferences_service, i18n
+    )
+
     # Voice-note transcription depends on ``adapter.stt``; fail-silent
     # when the platform doesn't expose one (standalone v1, HA without
     # ``stt_entity_id``). Wired into DmService via the late-binder
@@ -3111,6 +3172,10 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.data_export_service_key] = data_export_service
     app[K.i18n_key] = i18n
     app[K.platform_adapter_key] = platform_adapter
+    app[K.dashboard_settings_service_key] = dashboard.settings
+    app[K.dashboard_auth_key] = dashboard.auth
+    app[K.dashboard_server_key] = dashboard.server
+    app[K.dashboard_controller_key] = dashboard.controller
     app[K.calendar_import_service_key] = calendar_import_service
     app[K.stt_service_key] = stt_service
     app[K.setup_service_key] = setup_service
@@ -3238,6 +3303,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # The user repo unwraps each user's Ed25519 identity seed under the
         # same KEK (proto-v_25 per-user identity binding) — same late-wiring.
         user_repo.attach_key_manager(key_manager)
+        # The dashboard's tablet-cookie key is stored wrapped under it too.
+        dashboard.settings.attach_key_manager(key_manager)
 
         # 2. Identity bootstrap — generates row on first start, returns
         #    decrypted seed + public key + derived instance_id. When the
@@ -4634,6 +4701,11 @@ def create_app(config: Config | None = None) -> web.Application:
         except Exception as exc:  # pragma: no cover
             log.warning("capability-resync on upgrade failed: %s", exc)
 
+        # 10. Household dashboard listener — last, once everything it reads
+        #     is up. A taken port must not stop the main app: the admin UI
+        #     shows ``running: false`` and the admin can pick another port.
+        await dashboard.controller.start()
+
     async def _on_shutdown(app: web.Application) -> None:  # noqa: RUF029
         """Tell every connected WebSocket client we're going away.
 
@@ -4648,6 +4720,8 @@ def create_app(config: Config | None = None) -> web.Application:
 
     async def _on_cleanup(app: web.Application) -> None:  # noqa: RUF029
         log.info("socialhome: shutting down")
+        # First: the dashboard listener reads the database.
+        await dashboard.controller.stop()
         await platform_adapter.on_cleanup(app)
         if outbox_processor is not None:
             await outbox_processor.stop()

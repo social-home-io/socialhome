@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import socket
 import tempfile
 from pathlib import Path
 
@@ -35,7 +37,9 @@ from socialhome.domain.federation import (
     InstanceSource,
     RemoteInstance,
 )
+from socialhome.platform.local_credentials import hash_password
 from socialhome.repositories.federation_repo import SqliteFederationRepo
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.services.gfs_relay_inbound import GfsRelayInbound
 from socialhome.services.gfs_route_discovery_service import GfsRouteDiscoveryService
@@ -674,3 +678,78 @@ async def test_pairing_gfs_reach_is_wired_with_our_keywrap_key(cfg):
         assert fields["keywrap_pk"] == app[K.instance_keywrap_public_key_key].hex()
         assert fields["keywrap_sig"] == app[K.instance_keywrap_sig_key]
         assert reach._probe_peer == app[K.gfs_route_discovery_key].probe_peer  # noqa: SLF001
+
+
+# ── Household dashboard listener (own port) ─────────────────────────────
+
+
+def _free_dashboard_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+async def _seed_enabled_dashboard(db_path: str, port: int) -> None:
+    """Store dashboard settings as enabled (password set) before startup."""
+    db = AsyncDatabase(db_path)
+    await db.startup()
+    try:
+        repo = SqliteInstanceConfigRepo(db)
+        await repo.set("dashboard.password_hash", hash_password("correct horse"))
+        await repo.set(
+            "dashboard.settings", json.dumps({"enabled": True, "port": port})
+        )
+    finally:
+        await db.shutdown()
+
+
+def _dashboard_cfg(tmp_dir) -> Config:
+    return Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+        listen_host="127.0.0.1",
+    )
+
+
+async def test_enabled_dashboard_listens_after_startup_and_stops_on_cleanup(
+    tmp_dir,
+):
+    port = _free_dashboard_port()
+    cfg = _dashboard_cfg(tmp_dir)
+    await _seed_enabled_dashboard(cfg.db_path, port)
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)):
+        assert app[K.dashboard_server_key].running_port == port
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{port}/healthz") as resp:
+                assert resp.status == 200
+                assert await resp.text() == "ok"
+    assert app[K.dashboard_server_key].running_port is None
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(aiohttp.ClientConnectionError):
+            await session.get(f"http://127.0.0.1:{port}/healthz")
+
+
+async def test_disabled_dashboard_does_not_listen(tmp_dir):
+    app = create_app(_dashboard_cfg(tmp_dir))
+    async with TestClient(TestServer(app)):
+        assert app[K.dashboard_server_key].running_port is None
+
+
+async def test_busy_dashboard_port_does_not_stop_the_main_app(tmp_dir, caplog):
+    cfg = _dashboard_cfg(tmp_dir)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen()
+        port = blocker.getsockname()[1]
+        await _seed_enabled_dashboard(cfg.db_path, port)
+        app = create_app(cfg)
+        with caplog.at_level(logging.WARNING):
+            async with TestClient(TestServer(app)) as tc:
+                resp = await tc.get("/healthz")
+                assert resp.status == 200
+                assert app[K.dashboard_server_key].running_port is None
+    assert "household dashboard" in caplog.text

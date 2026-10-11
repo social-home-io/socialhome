@@ -32,6 +32,9 @@ Reference material for running and understanding Social Home.
   for deploying a TURN server (coturn) so two households behind
   symmetric NAT / strict firewalls can establish the federation
   WebRTC channel instead of staying on HTTPS-inbox fallback.
+- **[operations/household-dashboard.md](./operations/household-dashboard.md)**
+  — Enabling the wall-tablet household dashboard (own port `8100`), the
+  Home Assistant App port mapping, and keeping it on the home network.
 
 ## Glossary
 

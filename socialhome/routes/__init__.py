@@ -342,6 +342,12 @@ from .moments_public import (
     MomentPublicRegistrationCollectionView,
     MomentPublicRegistrationDetailView,
 )
+from .admin_dashboard import (
+    AdminDashboardPasswordView,
+    AdminDashboardSessionsView,
+    AdminDashboardSetupLinkView,
+    AdminDashboardView,
+)
 from .admin_diagnostics import AdminDiagnosticsView
 from .admin_federation import (
     AdminFederationCompatView,
@@ -508,6 +514,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     )
     app.router.add_view("/api/admin/diagnostics", AdminDiagnosticsView)
     app.router.add_view("/api/admin/instance", AdminInstanceView)
+    app.router.add_view("/api/admin/dashboard", AdminDashboardView)
+    app.router.add_view("/api/admin/dashboard/password", AdminDashboardPasswordView)
+    app.router.add_view("/api/admin/dashboard/setup-link", AdminDashboardSetupLinkView)
+    app.router.add_view("/api/admin/dashboard/sessions", AdminDashboardSessionsView)
     app.router.add_view("/api/me/export", MeExportView)
     app.router.add_view("/api/users", UserCollectionView)
     app.router.add_view("/api/users/{user_id}", UserDetailView)

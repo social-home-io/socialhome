@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="{{ lang }}" dir="{{ dir }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}{{ household }}{% endblock %}</title>
+<link rel="stylesheet" href="/static/dashboard.css" referrerpolicy="no-referrer">
+</head>
+<body class="{% block body_class %}{% endblock %}">
+<main class="dash-main">
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

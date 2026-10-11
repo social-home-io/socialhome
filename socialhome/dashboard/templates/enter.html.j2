@@ -1,0 +1,12 @@
+{% extends "base.html.j2" %}
+{% block body_class %}dash-login{% endblock %}
+{% block content %}
+<section class="dash-card">
+  <h1>{{ household }}</h1>
+  <p class="dash-explain">{{ t("dashboard.enter.explain") }}</p>
+  <form class="dash-form" method="post" action="/enter">
+    <input type="hidden" name="t" value="{{ token }}">
+    <button type="submit" class="dash-button">{{ t("dashboard.enter.confirm") }}</button>
+  </form>
+</section>
+{% endblock %}
