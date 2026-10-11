@@ -45,6 +45,9 @@
       </ol>
     </section>
     {% endif %}
+    {#- On a school day with no events and nothing tomorrow the card would
+        be empty: leave it out. -#}
+    {% if today_list or tomorrow_list or not school_lessons %}
     <section class="dash-col" aria-labelledby="dash-day-label">
       <h2 class="dash-label" id="dash-day-label">{{ t("dashboard.person.today") }}</h2>
       {% if today_list %}
@@ -70,6 +73,7 @@
       </ol>
       {% endif %}
     </section>
+    {% endif %}
     {% if "tasks" in page.sections and page.chores %}
     <section class="dash-col" aria-labelledby="dash-mychores-label">
       <h2 class="dash-label" id="dash-mychores-label">{{ t("dashboard.person.chores") }}</h2>

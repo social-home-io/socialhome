@@ -1041,6 +1041,18 @@ async def test_dashboard_js_reloads_bfcache_restores(pin_client):
     assert "pageshow" in js and "persisted" in js and "reload" in js
 
 
+def test_dashboard_js_never_leaves_the_page_while_offline():
+    """Q4: the midnight reload and the idle return probe the server first
+    (offline they'd swap the last page for the browser's error page)."""
+    js = RENDERER.static_asset("dashboard.js").body.decode()
+    assert "goWhenReachable(window.location.pathname, fragmentUrl)" in js
+    assert 'goWhenReachable("/", HOME_PROBE)' in js
+    tick = js[js.index("function tick()") : js.index("tick();")]
+    assert "location.reload" not in tick and "go(" not in tick
+    idle = js[js.index("var idleDue") : js.index("var armIdle")]
+    assert 'go("/")' not in idle
+
+
 @pytest.mark.parametrize("locked", [False, True])
 async def test_pages_load_dashboard_js(pin_client, auth, locked):
     html = await (
@@ -1764,7 +1776,8 @@ async def test_night_mode_home(client, auth, snapshots):
     assert "data-clock>22:47</time>" in night
     assert "Tomorrow" in night and "07:30" in night and "School" in night
     assert "Swimming" not in night and "Dentist" not in night
-    assert "data-wake-hint hidden" in night
+    # Shown by CSS once dashboard.js runs (html.dash-js) — survives swaps.
+    assert '<p class="dash-night-hint" data-wake-hint>' in night
     # The day view is there for a tap, hidden by CSS.
     assert '<div class="dash-day" data-day-view>' in html
     assert _attr(html, "data-view-key") != day
@@ -1981,3 +1994,75 @@ async def test_late_avatar_response_cannot_lift_the_lock(
     assert "data-lock" in await page.text()
     again = await pin_client.get("/", headers=before, allow_redirects=False)
     assert "data-lock" in await again.text()
+
+
+# Review round: quality.
+
+
+async def _home_key(client, auth) -> str:
+    return _attr(
+        await (await _get(client, auth, "/fragment/home")).text(), "data-view-key"
+    )
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"locale": "de"},
+        {"idle_return_minutes": 10},
+        {"keep_screen_on": False},
+    ],
+)
+async def test_view_key_follows_page_settings(client, auth, settings_service, patch):
+    """Q7: what lives outside <main> (lang, data-*) reloads the page."""
+    before = await _home_key(client, auth)
+    await settings_service.update(actor_is_admin=True, patch=patch)
+    assert await _home_key(client, auth) != before
+
+
+async def test_view_key_follows_the_pin(client, auth, settings_service):
+    before = await _home_key(client, auth)
+    await settings_service.set_pin(actor_is_admin=True, pin=PIN)
+    assert await _home_key(client, auth) != before
+
+
+@pytest.mark.parametrize(
+    "change", [{"display_name": "Pascal B."}, {"picture_hash": "new"}]
+)
+async def test_view_key_follows_the_rail_faces(client, auth, snapshots, change):
+    before = await _home_key(client, auth)
+    snap = snapshots.home_snapshot
+    snapshots.home_snapshot = replace(
+        snap, people=(replace(snap.people[0], **change), *snap.people[1:])
+    )
+    assert await _home_key(client, auth) != before
+
+
+async def test_overflowing_bars_show_plus_n(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot,
+        events_today=tuple(
+            event(f"o{n}", f"Thing {n}", at(10), at(14), "u-anna") for n in range(5)
+        ),
+        school=(),
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert '<span class="dash-block-more" aria-hidden="true">+2</span>' in html
+    assert "10:00–14:00 Thing 2; 10:00–14:00 Thing 3; 10:00–14:00 Thing 4" in html
+
+
+async def test_school_day_without_events_has_no_empty_today_card(
+    client, auth, snapshots
+):
+    """Q13: lessons only, nothing tomorrow → no empty "Today" card."""
+    page = snapshots.pages["u-mia"]
+    snapshots.pages["u-mia"] = replace(
+        page,
+        today_items=tuple(i for i in page.today_items if i.item_type == "lesson"),
+        tomorrow_items=(),
+        school_tomorrow_first=None,
+    )
+    html = await (await _get(client, auth, "/p/u-mia")).text()
+    assert "School today" in html
+    assert 'id="dash-day-label"' not in html
+    assert "Nothing planned today" not in html

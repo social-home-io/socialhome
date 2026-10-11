@@ -11,6 +11,7 @@ import pytest
 import socialhome.i18n as i18n_pkg
 from socialhome.dashboard.contrast import contrast_ratio
 from socialhome.dashboard.presenter import (
+    MAX_LANE_ROWS,
     MAX_LANES,
     ColorBook,
     Fmt,
@@ -28,6 +29,7 @@ from socialhome.dashboard.presenter import (
     theme_css,
     view_key,
 )
+from socialhome.dashboard.render import STATIC_DIR
 from socialhome.i18n import Catalog
 
 from .factories import (
@@ -261,8 +263,42 @@ def test_timeline_overlaps_stack_into_rows():
     tl = build_timeline(snap, _fmt(snap))
     assert tl is not None
     anna = next(lane for lane in tl.lanes if lane.person == ANNA)
-    assert [b.row for b in anna.blocks] == [0, 1, 2, 2, 0]
+    # D doesn't fit any row: it folds into C as "+1" (and C's spoken label
+    # names it), instead of being drawn on top of C.
+    assert [b.title for b in anna.blocks] == ["A", "B", "C", "E"]
+    assert [b.row for b in anna.blocks] == [0, 1, 2, 0]
+    assert [b.more for b in anna.blocks] == [0, 0, 1, 0]
+    assert anna.blocks[2].label == "10:00–11:00 C; 10:00–11:00 D"
     assert anna.rows == 3
+
+
+def test_timeline_overflow_counts_every_hidden_block():
+    snap = home(
+        events_today=tuple(
+            event(f"e{n}", f"E{n}", at(10), at(11), "u-anna") for n in range(6)
+        ),
+        school=(),
+    )
+    tl = build_timeline(snap, _fmt(snap))
+    assert tl is not None
+    anna = next(lane for lane in tl.lanes if lane.person == ANNA)
+    assert [b.more for b in anna.blocks] == [0, 0, 3]
+
+
+def test_timeline_ignores_the_small_hours():
+    """An item over before 06:00 doesn't stretch the day to midnight."""
+    snap = home(
+        events_today=(
+            event("n", "Night feed", at(1), at(2), "u-anna"),
+            event("w", "Work", at(9), at(17), "u-anna"),
+        ),
+        school=(),
+    )
+    tl = build_timeline(snap, _fmt(snap))
+    assert tl is not None
+    assert (tl.start_hour, tl.end_hour) == (8, 22)
+    anna = next(lane for lane in tl.lanes if lane.person == ANNA)
+    assert [b.title for b in anna.blocks] == ["Work"]
 
 
 def test_timeline_stretches_for_early_and_late_items():
@@ -275,7 +311,7 @@ def test_timeline_stretches_for_early_and_late_items():
     )
     tl = build_timeline(snap, _fmt(snap))
     assert tl is not None
-    assert (tl.start_hour, tl.end_hour) == (5, 24)
+    assert (tl.start_hour, tl.end_hour) == (6, 24)
 
 
 def test_timeline_clamps_items_from_other_days():
@@ -291,11 +327,11 @@ def test_timeline_clamps_items_from_other_days():
     )
     tl = build_timeline(snap, _fmt(snap))
     assert tl is not None
-    assert (tl.start_hour, tl.end_hour) == (0, 24)
+    assert (tl.start_hour, tl.end_hour) == (6, 24)
     anna = next(lane for lane in tl.lanes if lane.person == ANNA)
     assert anna.blocks[0].x == 0
     assert anna.blocks[1].x + anna.blocks[1].w == 100
-    assert tl.now_x == 98
+    assert tl.now_x == 97
 
 
 def test_timeline_point_events_have_a_width():
@@ -495,3 +531,16 @@ def test_day_list_respects_sections_and_cancelled_days():
     assert not any(isinstance(r, SchoolSpan) for r in day_list(no_school))
     events_only = day_list(home(sections=frozenset({"calendar"})))
     assert not any(isinstance(r, SchoolSpan) for r in events_only)
+
+
+def test_stylesheet_has_every_step_the_presenter_can_emit():
+    """Q10: an .x-N / .w-N class without a rule would put a bar at 0."""
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    for n in range(101):
+        assert f".x-{n} {{ inset-inline-start: {n}%; }}" in css, n
+    for n in range(1, 101):
+        assert f".w-{n} {{ inline-size: {n}%; }}" in css, n
+    for row in range(MAX_LANE_ROWS):
+        assert f".dash-r-{row} {{" in css
+    for rows in range(2, MAX_LANE_ROWS + 1):
+        assert f".dash-rows-{rows} {{" in css

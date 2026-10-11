@@ -495,7 +495,9 @@ async def _board(
     t = app[RENDERER_KEY].translator(settings.locale)
     style = colors.css() + theme_css(await _theme_primary(app))
     night = snapshot.is_night
-    rail_ids = ",".join(p.user_id for p in people)
+    # Everything outside <main> a fragment swap can't change: the rail's
+    # faces, <html lang>, the lock button, the data-* the script reads.
+    rail = [(p.user_id, p.display_name, p.initials, p.picture_hash) for p in people]
     fmt = Fmt(
         now=snapshot.now,
         today=snapshot.today,
@@ -518,7 +520,16 @@ async def _board(
         "night": night,
         "night_item": night_item(snapshot) if night else None,
         "style": style,
-        "view_key": view_key(style, night, rail_ids, current),
+        "view_key": view_key(
+            style,
+            night,
+            rail,
+            current,
+            settings.locale,
+            settings.pin_set,
+            settings.idle_return_minutes,
+            settings.keep_screen_on,
+        ),
         "fragment_url": fragment_url,
         "idle_minutes": settings.idle_return_minutes if current else 0,
         "keep_awake": settings.keep_screen_on,

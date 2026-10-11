@@ -34,6 +34,7 @@
   }
 
   var REFRESH_MS = 30000;
+  var HOME_PROBE = "/fragment/home";
   var STALE_AFTER = 2;
   var NIGHT_WAKE_MS = 60000;
   var SHIFT_MS = 600000;
@@ -51,8 +52,60 @@
     window.matchMedia &&
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  // Marks a running script for the CSS (e.g. the night "tap" hint); a
+  // class on <html> survives every fragment swap.
+  document.documentElement.classList.add("dash-js");
+
   function go(path) {
     window.location.replace(path);
+  }
+
+  // ── Offline state (shared by refresh, midnight and idle return) ──────
+  var failures = 0;
+
+  function setStale(stale) {
+    body.classList.toggle("dash-stale", stale);
+    document.querySelectorAll("[data-offline]").forEach(function (el) {
+      el.hidden = !stale;
+    });
+  }
+
+  function failed() {
+    failures += 1;
+    if (failures >= STALE_AFTER) {
+      setStale(true);
+    }
+  }
+
+  // Leave this page only when the server answers: offline, a navigation
+  // would trade the last good page (and the ticking clock) for the
+  // browser's error page. Unreachable → counted as a failed refresh and
+  // tried again on a later call (at most every REFRESH_MS).
+  var probing = false;
+  var lastProbe = 0;
+  function goWhenReachable(path, probe) {
+    var now = Date.now();
+    if (probing || now - lastProbe < REFRESH_MS) {
+      return;
+    }
+    probing = true;
+    lastProbe = now;
+    fetch(probe, {
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+    })
+      .then(function (res) {
+        if (res.ok || res.status === 401 || res.status === 404) {
+          go(path);
+        } else {
+          failed();
+        }
+      })
+      .catch(failed)
+      .then(function () {
+        probing = false;
+      });
   }
 
   // A picture that can't load (gone meanwhile): show the initials
@@ -108,9 +161,9 @@
       parts[p.type] = p.value;
     });
     if (day && parts.year + "-" + parts.month + "-" + parts.day !== day) {
-      // Midnight: the server spells the new day (and resets the lists).
-      window.location.reload();
-      return;
+      // Midnight: the server spells the new day (and resets the lists) —
+      // once it can be reached; the clock keeps ticking meanwhile.
+      goWhenReachable(window.location.pathname, fragmentUrl);
     }
     var text = parts.hour + ":" + parts.minute;
     document.querySelectorAll("[data-clock]").forEach(function (el) {
@@ -124,22 +177,7 @@
   window.setInterval(tick, 1000);
 
   // ── Live refresh + offline banner ────────────────────────────────────
-  var failures = 0;
   var busy = false;
-
-  function setStale(stale) {
-    body.classList.toggle("dash-stale", stale);
-    document.querySelectorAll("[data-offline]").forEach(function (el) {
-      el.hidden = !stale;
-    });
-  }
-
-  function failed() {
-    failures += 1;
-    if (failures >= STALE_AFTER) {
-      setStale(true);
-    }
-  }
 
   function swap(html) {
     var tpl = document.createElement("template");
@@ -216,9 +254,6 @@
   // ── Night mode: a tap shows the normal page for a minute ─────────────
   var wakeTimer = null;
   if (body.classList.contains("dash-night")) {
-    document.querySelectorAll("[data-wake-hint]").forEach(function (el) {
-      el.hidden = false;
-    });
     document.addEventListener(
       "pointerdown",
       function () {
@@ -235,11 +270,14 @@
   // ── Idle return to Home (person pages) ───────────────────────────────
   if (idleMinutes > 0) {
     var idleTimer = null;
+    var idleDue = function () {
+      goWhenReachable("/", HOME_PROBE);
+      // Still here (offline)? Try again shortly.
+      idleTimer = window.setTimeout(idleDue, REFRESH_MS);
+    };
     var armIdle = function () {
       window.clearTimeout(idleTimer);
-      idleTimer = window.setTimeout(function () {
-        go("/");
-      }, idleMinutes * 60000);
+      idleTimer = window.setTimeout(idleDue, idleMinutes * 60000);
     };
     ["pointerdown", "keydown", "touchstart", "wheel"].forEach(function (name) {
       document.addEventListener(name, armIdle, { passive: true });

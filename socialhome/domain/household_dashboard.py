@@ -585,6 +585,8 @@ class PersonSnapshot:
     ``today_items`` merges the person's events and timetable slots in time
     order (all-day events first); ``now_item`` / ``next_item`` are the
     timed event or lesson running now / starting next today.
+    ``tomorrow_items`` holds tomorrow's first few events and first few
+    lessons that take place (capped apart, then merged in time order).
     ``chores`` are tasks assigned to the person: open ones due within a
     week (overdue included) and those completed today. ``people`` is
     every shown member (``person`` among them), in household order — the

@@ -1439,8 +1439,9 @@ and is then served by a **separate aiohttp application on its own port**
   marker / 423), so no view has to remember to check. Deleting the PIN
   makes locked cookies count as unlocked (nothing could unlock them
   otherwise).
-  - **Races.** Only page loads renew the cookie (never `/fragment/…` or
-    a `POST`), and `POST /lock` revokes the incoming unlocked cookie as
+  - **Races.** Only page loads renew the cookie — an allow-list of `GET` /
+    `HEAD` `/` and `/p/{id}`; never `/fragment/…`, `/avatar/…`, static files or
+    a `POST` — and `POST /lock` revokes the incoming unlocked cookie as
     *locked* — by session id, so every renewed copy of it too: if a
     slow response still lands one, it shows the lock screen (not a
     sign-out). Renewal re-checks revocation just before
@@ -1546,7 +1547,9 @@ of a shared event won the merge.
 (`data-now`; the tablet's own clock is never trusted) and reloads at the
 household's midnight. Every 30 s it fetches the page's `/fragment/…`
 (the `<main>` content only) and swaps it in; a fragment carries a *view
-key* — a digest of the inline style, night mode, the rail and the page —
+key* — a digest of everything outside `<main>`: the inline style, night
+mode, the rail (names, pictures), the page, locale, PIN, idle and wake
+settings —
 and a different key reloads the whole page, because a fragment can't add
 CSS the page's CSP never admitted. The lock marker reloads into the lock
 screen, 401 goes to `/login?next=…`, 404 (person hidden) goes Home. Two
@@ -1554,6 +1557,8 @@ failed refreshes in a row show the offline banner (rendered hidden in
 every fragment, with that snapshot's time), hide relative times
 (`data-rel`) and grey "now" / presence (`data-live`) until a refresh works.
 A person page returns Home after `idle_return_minutes` without a touch.
+That return and the midnight reload first probe the server and, while it
+can't be reached, keep the last page and the ticking clock (retrying).
 With `keep_screen_on` the Screen Wake Lock is requested and re-acquired
 when the page becomes visible again. Every 10 minutes the content drifts
 1–2 px against burn-in (not under `prefers-reduced-motion`). Night mode is

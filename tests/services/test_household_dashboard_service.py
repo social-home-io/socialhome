@@ -1104,6 +1104,36 @@ async def test_person_tomorrow_items_are_capped():
     assert titles(page.tomorrow_items) == ["E0", "E1", "E2", "E3", "E4"]
 
 
+async def test_many_lessons_tomorrow_never_hide_an_after_school_event():
+    """Regression (mockup D2): six lessons tomorrow used to fill the cap,
+    dropping the 15:00 piano lesson. Events and lessons are capped apart."""
+    h = Harness()
+    tt = ben_timetable()
+    lessons = tuple(
+        entry(f"x{n}", 1, time(8 + n, 0), time(8 + n, 45), f"L{n}") for n in range(6)
+    )
+    h.timetables = SpyTimetables([dataclasses.replace(tt, entries=lessons)])
+    h.calendar.events = [
+        event("piano", "c-ben", "Piano", at(TUESDAY, 15), at(TUESDAY, 16)),
+    ]
+    h.service = HouseholdDashboardService(
+        user_service=h.users,  # type: ignore[arg-type]
+        presence_service=h.presence,  # type: ignore[arg-type]
+        calendar_service=h.calendar,  # type: ignore[arg-type]
+        task_service=h.tasks,  # type: ignore[arg-type]
+        shopping_service=h.shopping,  # type: ignore[arg-type]
+        timetable_service=h.timetables,
+        sticky_service=h.stickies,  # type: ignore[arg-type]
+        preferences_service=h.prefs,  # type: ignore[arg-type]
+        dashboard_settings=h.settings,  # type: ignore[arg-type]
+    )
+    page = await h.person("u-ben", at(MONDAY, 15, 30))
+    assert page is not None
+    assert "Piano" in titles(page.tomorrow_items)
+    lessons_tomorrow = [i for i in page.tomorrow_items if i.item_type == "lesson"]
+    assert len(lessons_tomorrow) == 5  # lessons are capped on their own
+
+
 # ─── Privacy ─────────────────────────────────────────────────────────────
 
 

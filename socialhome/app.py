@@ -2113,14 +2113,20 @@ def _build_household_dashboard(
     preferences_service: PreferencesService,
     catalog: Catalog,
     *,
-    sources: SimpleNamespace,
+    user_service: UserService,
+    presence_service: PresenceService,
+    calendar_service: CalendarService,
+    task_service: TaskService,
+    shopping_service: ShoppingService,
+    timetable_service: TimetableService,
+    sticky_service: StickyService,
+    theme_service: ThemeService,
 ) -> SimpleNamespace:
     """Settings service, cookie auth, snapshot service and own-port
     listener of the household dashboard (``socialhome/dashboard/``).
 
-    ``sources`` holds the services the read-only snapshots read
-    (``user``, ``presence``, ``calendar``, ``task``, ``shopping``,
-    ``timetable``, ``sticky``) plus ``theme`` for the accent colour.
+    The keyword services are what the read-only snapshots read; the
+    theme service gives the accent colour.
 
     One :class:`DashboardAuth` and one :class:`DashboardRenderer` for the
     process: the login throttle must survive a listener restart (port
@@ -2136,13 +2142,13 @@ def _build_household_dashboard(
     renderer = DashboardRenderer(catalog)
     own_names = local_hostnames()
     snapshots = HouseholdDashboardService(
-        user_service=sources.user,
-        presence_service=sources.presence,
-        calendar_service=sources.calendar,
-        task_service=sources.task,
-        shopping_service=sources.shopping,
-        timetable_service=sources.timetable,
-        sticky_service=sources.sticky,
+        user_service=user_service,
+        presence_service=presence_service,
+        calendar_service=calendar_service,
+        task_service=task_service,
+        shopping_service=shopping_service,
+        timetable_service=timetable_service,
+        sticky_service=sticky_service,
         preferences_service=preferences_service,
         dashboard_settings=settings,
     )
@@ -2164,7 +2170,7 @@ def _build_household_dashboard(
             renderer=renderer,
             household_name=household_name,
             household_tz=household_tz,
-            household_theme=sources.theme.get_household_theme,
+            household_theme=theme_service.get_household_theme,
             snapshots=snapshots,
             extra_hosts=extra_hosts,
             local_hostnames=own_names,
@@ -3038,16 +3044,14 @@ def create_app(config: Config | None = None) -> web.Application:
         platform_adapter,
         preferences_service,
         i18n,
-        sources=SimpleNamespace(
-            user=user_service,
-            presence=presence_service,
-            calendar=calendar_service,
-            task=task_service,
-            shopping=shopping_service,
-            timetable=timetable_service,
-            sticky=sticky_service,
-            theme=theme_service,
-        ),
+        user_service=user_service,
+        presence_service=presence_service,
+        calendar_service=calendar_service,
+        task_service=task_service,
+        shopping_service=shopping_service,
+        timetable_service=timetable_service,
+        sticky_service=sticky_service,
+        theme_service=theme_service,
     )
 
     # Voice-note transcription depends on ``adapter.stt``; fail-silent

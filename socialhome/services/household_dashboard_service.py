@@ -359,10 +359,16 @@ class HouseholdDashboardService:
         if school.today is not None:
             today_items.extend(school.today.lessons)
         today_items.sort(key=_agenda_key)
-        tomorrow_items: list[DashboardAgendaItem] = [*mine(tomorrow)]
+        # Events and lessons are capped apart: a full school day must not
+        # push the after-school events (piano at 15:00) off the list.
+        tomorrow_items: list[DashboardAgendaItem] = [
+            *sorted(mine(tomorrow), key=_agenda_key)[:MAX_TOMORROW_ITEMS]
+        ]
         if school.tomorrow is not None:
             tomorrow_items.extend(
-                ls for ls in school.tomorrow.lessons if ls.takes_place
+                [ls for ls in school.tomorrow.lessons if ls.takes_place][
+                    :MAX_TOMORROW_ITEMS
+                ]
             )
         tomorrow_items.sort(key=_agenda_key)
         return PersonSnapshot(
@@ -374,7 +380,7 @@ class HouseholdDashboardService:
             now_item=_running_at(ctx.now, today_items),
             next_item=_next_after(ctx.now, today_items),
             today_items=tuple(today_items),
-            tomorrow_items=tuple(tomorrow_items[:MAX_TOMORROW_ITEMS]),
+            tomorrow_items=tuple(tomorrow_items),
             chores=chores,
             school=school.today,
             school_tomorrow_first=_first_lesson(school.tomorrow),

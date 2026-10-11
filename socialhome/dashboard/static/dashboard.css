@@ -537,6 +537,19 @@ h1 {
   white-space: nowrap;
 }
 
+/* More than six people: the rail scrolls; tighter spacing fits more
+   faces in view, and they snap so none stops half cut off. */
+.dash-rail-many .dash-rail-list {
+  gap: 2px;
+  scroll-snap-type: both proximity;
+}
+
+.dash-rail-many .dash-rail-item {
+  gap: 6px;
+  padding-block: 4px;
+  scroll-snap-align: start;
+}
+
 .dash-rail-lock {
   display: flex;
   justify-content: center;
@@ -886,7 +899,7 @@ h3.dash-sublabel {
   min-inline-size: 8px;
   padding-inline: 8px;
   overflow: hidden;
-  font-size: 1.125rem;
+  font-size: 1.375rem;
   font-weight: 600;
   color: var(--kt, #ffffff);
   white-space: nowrap;
@@ -905,6 +918,17 @@ h3.dash-sublabel {
    them shows the clipped title). */
 .dash-block {
   container: dash-block / inline-size;
+}
+
+/* "+2": bars that fit no row, folded into this one. */
+.dash-block-more {
+  flex: none;
+  margin-inline-start: auto;
+  padding-inline: 6px;
+  font-size: 1rem;
+  font-weight: 700;
+  background: rgb(0 0 0 / 0.25);
+  border-radius: 6px;
 }
 
 .dash-block-icon {
@@ -997,7 +1021,7 @@ h3.dash-sublabel {
   align-items: center;
   gap: 8px 12px;
   margin-block: 16px 0;
-  font-size: 1.25rem;
+  font-size: 1.375rem;
 }
 
 .dash-school-item {
@@ -1016,7 +1040,7 @@ h3.dash-sublabel {
   gap: 8px 24px;
   margin-block: 4px 0;
   padding: 0;
-  font-size: 1.25rem;
+  font-size: 1.375rem;
   list-style: none;
 }
 
@@ -1057,7 +1081,7 @@ h3.dash-sublabel {
 .dash-row-time {
   flex: none;
   min-inline-size: 5.5ch;
-  font-size: 1.125rem;
+  font-size: 1.375rem;
   font-variant-numeric: tabular-nums;
   color: var(--dash-muted);
 }
@@ -1155,7 +1179,7 @@ h3.dash-sublabel {
 
 .dash-chore-late-text,
 .dash-chore-due {
-  font-size: 1.125rem;
+  font-size: 1.375rem;
 }
 
 .dash-chore-due {
@@ -1184,7 +1208,7 @@ h3.dash-sublabel {
 .dash-sticky {
   padding-block: 12px;
   padding-inline: 14px;
-  font-size: 1.25rem;
+  font-size: 1.375rem;
   color: var(--kt, #1f1d1a);
   white-space: pre-line;
   overflow-wrap: anywhere;
@@ -1378,10 +1402,18 @@ h3.dash-sublabel {
   font-weight: 700;
 }
 
+/* "Tap to show the dashboard" only means something with the script
+   (dashboard.js marks <html> with .dash-js) — and a class on <html>
+   survives every fragment swap. */
 .dash-night-hint {
+  display: none;
   margin-block: 40px 0;
   font-size: 1rem;
   color: var(--dash-muted);
+}
+
+.dash-js .dash-night-hint {
+  display: block;
 }
 
 /* ── Burn-in: a 1–2 px drift every 10 minutes (dashboard.js) ──────────── */
@@ -1467,16 +1499,6 @@ h3.dash-sublabel {
     padding-block: 4px;
   }
 
-  .dash-face-rail {
-    inline-size: 56px;
-    block-size: 56px;
-    font-size: 1.25rem;
-  }
-
-  .dash-face-home {
-    font-size: 1.75rem;
-  }
-
   .dash-rail-lock {
     flex: none;
     padding-block: 0;
@@ -1492,6 +1514,30 @@ h3.dash-sublabel {
   }
 
   .dash-board {
+    font-size: 1.25rem;
+  }
+
+  /* Phones are held close: faces in the strip and the secondary text
+     step down a size. Portrait tablets keep the 72 px faces. */
+  .dash-face-rail {
+    inline-size: 56px;
+    block-size: 56px;
+    font-size: 1.25rem;
+  }
+
+  .dash-face-home {
+    font-size: 1.75rem;
+  }
+
+  .dash-row-time,
+  .dash-chore-late-text,
+  .dash-chore-due {
+    font-size: 1.125rem;
+  }
+
+  .dash-sticky,
+  .dash-school-now,
+  .dash-change-list {
     font-size: 1.25rem;
   }
 

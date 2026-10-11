@@ -24,8 +24,8 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import ClassVar
 from datetime import date, datetime
+from typing import ClassVar
 from urllib.parse import quote
 
 from ..domain.household_dashboard import (
@@ -84,6 +84,8 @@ MAX_LANE_ROWS = 3
 #: The timeline's default span (hours); stretched to fit earlier / later
 #: items.
 DAY_START_HOUR = 8
+#: …but never earlier than this: the small hours don't stretch the day.
+EARLIEST_HOUR = 6
 DAY_END_HOUR = 22
 #: Hour labels closer than this (percent) to "now" are left out — the now
 #: label sits there.
@@ -413,6 +415,8 @@ class LaneBlock:
     #: stays for screen readers).
     narrow: bool = False
     icon: str = ""
+    #: Overlapping bars that fit no row, folded into this one ("+N").
+    more: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -451,11 +455,12 @@ def _minute_of_day(value: datetime, today: date) -> int:
     return value.hour * 60 + value.minute
 
 
-def _rows(spans: Sequence[tuple[int, int]]) -> list[int]:
+def _rows(spans: Sequence[tuple[int, int]]) -> list[int | None]:
     """Greedy rows for ``spans`` (sorted by start): each goes into the
-    first row whose last bar has ended; at most :data:`MAX_LANE_ROWS`."""
+    first row whose last bar has ended; at most :data:`MAX_LANE_ROWS`.
+    A span that fits no row gets ``None`` (it folds into a "+N")."""
     ends: list[int] = []
-    out: list[int] = []
+    out: list[int | None] = []
     for start, end in spans:
         for i, last in enumerate(ends):
             if last <= start:
@@ -467,14 +472,32 @@ def _rows(spans: Sequence[tuple[int, int]]) -> list[int]:
                 ends.append(end)
                 out.append(len(ends) - 1)
             else:
-                out.append(MAX_LANE_ROWS - 1)
+                out.append(None)
     return out
+
+
+@dataclass(slots=True)
+class _Span:
+    """One bar being laid out (presenter-internal)."""
+
+    start: int
+    end: int
+    title: str
+    label: str
+    kind: str
+    more: int = 0
 
 
 def build_timeline(snapshot: HomeSnapshot, fmt: Fmt) -> Timeline | None:
     """Home's TODAY swim-lanes: one lane per person, their timed events
     and their school block (first to last lesson that takes place) laid
-    on 08–22, stretched to cover earlier or later items.
+    on 08–22, stretched to cover earlier or later items — but never to
+    before :data:`EARLIEST_HOUR`; anything over by then is left out of
+    the lanes (it is still in the phone list).
+
+    Overlaps stack into at most :data:`MAX_LANE_ROWS` rows; a bar that
+    fits none folds into the last-row bar it overlaps, which then shows
+    "+N" and names it in its spoken label.
 
     ``None`` when lanes don't fit: more than :data:`MAX_LANES` people
     (Home lists the day instead), or nothing timed or all-day today.
@@ -483,9 +506,8 @@ def build_timeline(snapshot: HomeSnapshot, fmt: Fmt) -> Timeline | None:
     if not people or len(people) > MAX_LANES:
         return None
     today = snapshot.today
-    spans: dict[str, list[tuple[int, int, str, str, str, str]]] = {
-        p.user_id: [] for p in people
-    }
+    earliest = EARLIEST_HOUR * 60
+    spans: dict[str, list[_Span]] = {p.user_id: [] for p in people}
     all_day: dict[str, list[str]] = {p.user_id: [] for p in people}
     if SECTION_CALENDAR in snapshot.sections:
         for ev in snapshot.events_today:
@@ -497,25 +519,30 @@ def build_timeline(snapshot: HomeSnapshot, fmt: Fmt) -> Timeline | None:
                     continue
                 s = _minute_of_day(ev.start, today)
                 e = max(_minute_of_day(ev.end, today), s)
-                spans[uid].append(
-                    (s, e, ev.title, f"{fmt.span(ev)} {ev.title}", "event", uid)
-                )
+                label = f"{fmt.span(ev)} {ev.title}"
+                spans[uid].append(_Span(s, e, ev.title, label, "event"))
     if SECTION_TIMETABLE in snapshot.sections:
         school = fmt.t("dashboard.school")
         for day in snapshot.school:
-            if day.person_id not in spans or day.first_start is None:
+            if (
+                day.person_id not in spans
+                or day.first_start is None
+                or day.last_end is None
+            ):
                 continue
-            assert day.last_end is not None
             s = _minute_of_day(day.first_start, today)
             e = _minute_of_day(day.last_end, today)
             label = f"{hhmm(day.first_start)}–{hhmm(day.last_end)} {school}"
-            spans[day.person_id].append((s, e, school, label, "school", day.person_id))
-    timed = [x for rows in spans.values() for x in rows]
+            spans[day.person_id].append(_Span(s, e, school, label, "school"))
+    for uid, mine in spans.items():
+        spans[uid] = [sp for sp in mine if sp.end > earliest or sp.start > earliest]
+    timed = [sp for mine in spans.values() for sp in mine]
     if not timed and not any(all_day.values()):
         return None
-    start_h = min([DAY_START_HOUR, *(s // 60 for s, *_ in timed)])
-    end_h = max([DAY_END_HOUR, *(-(-e // 60) for _, e, *_ in timed)])
-    end_h = min(end_h, 24)
+    start_h = max(
+        EARLIEST_HOUR, min([DAY_START_HOUR, *(sp.start // 60 for sp in timed)])
+    )
+    end_h = min(24, max([DAY_END_HOUR, *(-(-sp.end // 60) for sp in timed)]))
     lo, total = start_h * 60, (end_h - start_h) * 60
 
     def pct(minute: int) -> int:
@@ -523,41 +550,10 @@ def build_timeline(snapshot: HomeSnapshot, fmt: Fmt) -> Timeline | None:
 
     now_minute = _minute_of_day(snapshot.now, today)
     now_x = pct(now_minute) if lo <= now_minute <= end_h * 60 else None
-    by_id = {p.user_id: p for p in people}
-    lanes: list[Lane] = []
-    for p in people:
-        mine = sorted(spans[p.user_id], key=lambda x: (x[0], x[1]))
-        rows = _rows([(s, e) for s, e, *_ in mine])
-        blocks = []
-        for (s, e, title, label, kind, uid), row in zip(mine, rows, strict=True):
-            x = min(pct(s), 99)
-            w = max(1, min(pct(e) - x, 100 - x))
-            blocks.append(
-                LaneBlock(
-                    title=title,
-                    label=label,
-                    x=x,
-                    w=w,
-                    row=row,
-                    color=fmt.kc(by_id[uid].color),
-                    kind=kind,
-                    past=e <= now_minute if e > s else s < now_minute,
-                    narrow=w < NARROW_BLOCK,
-                    icon=(
-                        SCHOOL_ICON
-                        if kind == "school"
-                        else leading_emoji(title) or NEUTRAL_ICON
-                    ),
-                )
-            )
-        lanes.append(
-            Lane(
-                person=p,
-                blocks=tuple(blocks),
-                all_day=tuple(all_day[p.user_id]),
-                rows=max([0, *rows]) + 1,
-            )
-        )
+    lanes = [
+        _lane(p, spans[p.user_id], all_day[p.user_id], fmt, pct, now_minute)
+        for p in people
+    ]
     # Every second hour — except right under the "now" label.
     ticks = tuple(
         Tick(label=f"{h:02d}", x=pct(h * 60), minor=(h - start_h) % 4 == 2)
@@ -571,6 +567,61 @@ def build_timeline(snapshot: HomeSnapshot, fmt: Fmt) -> Timeline | None:
         ticks=ticks,
         now_x=now_x,
         lanes=tuple(lanes),
+    )
+
+
+def _lane(
+    person: DashboardPerson,
+    spans: list[_Span],
+    all_day: list[str],
+    fmt: Fmt,
+    pct: Callable[[int], int],
+    now_minute: int,
+) -> Lane:
+    mine = sorted(spans, key=lambda sp: (sp.start, sp.end))
+    placed: list[tuple[_Span, int]] = []
+    for sp, row in zip(mine, _rows([(sp.start, sp.end) for sp in mine]), strict=True):
+        if row is not None:
+            placed.append((sp, row))
+            continue
+        # Fold into the last-row bar it overlaps (the latest-starting one).
+        host = next(
+            h
+            for h, r in reversed(placed)
+            if r == MAX_LANE_ROWS - 1 and h.end > sp.start
+        )
+        host.more += 1
+        host.label = f"{host.label}; {sp.label}"
+    blocks = []
+    for sp, row in placed:
+        x = min(pct(sp.start), 99)
+        w = max(1, min(pct(sp.end) - x, 100 - x))
+        blocks.append(
+            LaneBlock(
+                title=sp.title,
+                label=sp.label,
+                x=x,
+                w=w,
+                row=row,
+                color=fmt.kc(person.color),
+                kind=sp.kind,
+                past=(
+                    sp.end <= now_minute if sp.end > sp.start else sp.start < now_minute
+                ),
+                narrow=w < NARROW_BLOCK,
+                icon=(
+                    SCHOOL_ICON
+                    if sp.kind == "school"
+                    else leading_emoji(sp.title) or NEUTRAL_ICON
+                ),
+                more=sp.more,
+            )
+        )
+    return Lane(
+        person=person,
+        blocks=tuple(blocks),
+        all_day=tuple(all_day),
+        rows=max([0, *(row for _, row in placed)]) + 1,
     )
 
 
