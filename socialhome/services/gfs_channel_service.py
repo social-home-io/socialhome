@@ -207,6 +207,11 @@ ANON_TS_JITTER_S: int = 60
 #: asks for the catch-up sync (the host drains its relay queue first).
 HOST_RETURN_SYNC_DELAY_S: float = 15.0
 
+#: Tries of the background unregister on a GFS being disconnected, and the
+#: wait between them (best effort: nothing is left to retry it afterwards).
+DISCONNECT_UNREGISTER_ATTEMPTS: int = 3
+DISCONNECT_RETRY_DELAY_S: float = 10.0
+
 #: Background tasks (subscribe / unsubscribe / channel creation) in flight.
 MAX_PENDING_TASKS: int = 64
 
@@ -247,6 +252,7 @@ class GfsChannelService:
     """Create, announce and use opaque private-space channels."""
 
     __slots__ = (
+        "_capability_hook",
         "_catching_up",
         "_conn_repo",
         "_crypto",
@@ -319,6 +325,9 @@ class GfsChannelService:
         #: Spaces with a host-return catch-up sync pending.
         self._catching_up: set[str] = set()
         self._tasks: set[asyncio.Task[None]] = set()
+        #: Told each connection's capability once a reconnect read it
+        #: (:meth:`GfsServerSelectionService.capability_known`).
+        self._capability_hook: Callable[..., Awaitable[object]] | None = None
         self._stopping = False
         self._stop = asyncio.Event()
 
@@ -332,6 +341,10 @@ class GfsChannelService:
         """The roster-snapshot sender that distributes a new channel's
         grants (``send_roster_snapshot``)."""
         self._space_service = space_service
+
+    def attach_capability_hook(self, hook: Callable[..., Awaitable[object]]) -> None:
+        """Wire the settling of provisionally adopted channel servers."""
+        self._capability_hook = hook
 
     def attach_inbound(self, inbound: "SpacePublicInbound") -> None:
         """Where a decrypted-later channel item goes (the same checks as a
@@ -401,7 +414,8 @@ class GfsChannelService:
         for *space* (its signed list). No list stored yet means NONE — never
         "every server": the turn-on default / the upgrade step records a
         choice first (:mod:`socialhome.services.gfs_server_selection_service`)."""
-        if space.gfs_servers is None:
+        if space.gfs_servers is None or space.gfs_servers.servers_json == "[]":
+            # No server chosen: nothing to probe either.
             return []
         capable = await self._capable()
         chosen = {c.id for c in connections_on_list(space.gfs_servers, capable)}
@@ -644,7 +658,13 @@ class GfsChannelService:
             # registered on in this process — never a server the owner did
             # not choose.
             registered = self._registered.get(channel_id, set())
-            chosen = {c.id for c in await self._chosen_capable(space)}
+            # A space that left the private tier keeps a listing list, not a
+            # channel list: never read it as where the channel lives.
+            chosen = (
+                {c.id for c in await self._chosen_capable(space)}
+                if space.space_type is SpaceType.PRIVATE
+                else set()
+            )
             await self._unregister_on(
                 channel_id,
                 derive_channel_seed(seed, space.id, channel_id),
@@ -797,11 +817,28 @@ class GfsChannelService:
     async def _withdraw_from(
         self, conn: GfsConnection, targets: list[tuple[str, str]]
     ) -> None:
+        """Best effort: up to :data:`DISCONNECT_UNREGISTER_ATTEMPTS` tries per
+        channel (the connection row — and its pending rows — are gone, so
+        nothing retries later; the server's idle sweep is the backstop)."""
         for space_id, channel_id in targets:
-            try:
-                await self._unregister_one(space_id, channel_id, conn)
-            except Exception:
-                log.exception("gfs.channel: unregister on a disconnecting GFS failed")
+            for attempt in range(DISCONNECT_UNREGISTER_ATTEMPTS):
+                try:
+                    outcome = await self._unregister_one(space_id, channel_id, conn)
+                except Exception:
+                    log.exception(
+                        "gfs.channel: unregister on a disconnecting GFS failed"
+                    )
+                    outcome = None
+                if outcome is None or outcome.kind != "transient":
+                    break
+                if attempt + 1 < DISCONNECT_UNREGISTER_ATTEMPTS:
+                    try:
+                        await asyncio.wait_for(
+                            self._stop.wait(), timeout=DISCONNECT_RETRY_DELAY_S
+                        )
+                        return  # stopping
+                    except TimeoutError:
+                        pass
 
     def follow_later(self, space_id: str) -> None:
         """:meth:`on_servers_changed` in the background (after a GFS
@@ -821,7 +858,14 @@ class GfsChannelService:
             if space is None or space.owner_instance_id != self._own_instance_id:
                 return set()
             if space.space_type is not SpaceType.PRIVATE:
-                await self.withdraw_pending(space_id=space_id)
+                # Left the private tier: take the channel down (pending
+                # withdrawals + this process's registrations, never the new
+                # tier's listing list) and forget it.
+                stored = await self._spaces.get_gfs_channel(space_id)
+                if stored is not None:
+                    await self._retire(space, stored[0])
+                else:
+                    await self.withdraw_pending(space_id=space_id)
                 return set()
             chosen = await self._chosen_capable(space)
             # The servers the list dropped (recorded durably before it was
@@ -1025,7 +1069,15 @@ class GfsChannelService:
         self._connected_at[conn.id] = _monotonic()
         # Withdrawals this server still owes us (it was down, or suspended).
         await self.withdraw_pending(gfs_id=conn.id)
-        if not await self._gfs.private_channels_supported(conn):
+        supported = await self._gfs.private_channels_supported(conn)
+        if self._capability_hook is not None and (
+            supported or not self._gfs.capability_unknown(conn)
+        ):
+            try:
+                await self._capability_hook(conn, capable=supported)
+            except Exception:
+                log.exception("gfs.channel: capability follow-up failed")
+        if not supported:
             return 0
         done = 0
         for space in await self._spaces.list_all():

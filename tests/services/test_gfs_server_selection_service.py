@@ -1623,3 +1623,95 @@ async def test_a_disconnect_re_signs_in_the_background(owner_env):
     assert await env.svc.on_connection_removed(conn) == 1
     assert later == ["sp-1"]
     assert calls == ["sp-1"]  # only the PUT's inline follow-up
+
+
+# ── Round 2: tier moves, re-chosen servers, provisional adoption ─────────
+
+
+@pytest.mark.parametrize("tier", [SpaceType.GLOBAL, SpaceType.HOUSEHOLD])
+async def test_leaving_the_private_tier_records_every_channel_server(owner_env, tier):
+    """PRIVATE → GLOBAL / HOUSEHOLD: the stored channel must come down from
+    every server of the old CHANNEL list, and the channel follow-up runs
+    (it is keyed on the stored channel, not on the tier)."""
+    env = owner_env
+    await _channel_space(env)
+    await env.spaces.set_gfs_channel("sp-1", _CH, "pk")
+    await _connected(env, "g1", "g2")
+    calls = _hooked(env)
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1", "g2"])
+    calls.clear()
+    space = await env.spaces.get("sp-1")
+    await env.spaces.save(dataclasses.replace(space, space_type=tier))
+    assert await env.svc.sync_snapshot("sp-1") is True
+    assert sorted(await env.gfs.list_channel_withdrawals(space_id="sp-1")) == [
+        ("sp-1", "g1", _CH),
+        ("sp-1", "g2", _CH),
+    ]
+    assert calls == ["sp-1"]
+
+
+async def test_a_global_space_without_a_channel_records_nothing(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=[])
+    assert await env.gfs.list_channel_withdrawals() == []
+
+
+async def test_re_choosing_a_server_drops_its_pending_withdrawal(owner_env):
+    env = owner_env
+    await _channel_space(env)
+    await env.spaces.set_gfs_channel("sp-1", _CH, "pk")
+    await _connected(env, "g1", "g2")
+    _hooked(env)
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1", "g2"])
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    assert await env.gfs.list_channel_withdrawals() == [("sp-1", "g2", _CH)]
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1", "g2"])
+    assert await env.gfs.list_channel_withdrawals() == []
+
+
+async def test_a_provisional_adoption_is_settled_on_reconnect(owner_env):
+    """Unreadable at startup → adopted provisionally; on its reconnect a
+    GFS that can't carry channels is dropped from the list WITHOUT a
+    withdrawal, one that can is kept."""
+    env = owner_env
+    await _channel_space(env)
+    await env.spaces.set_gfs_channel("sp-1", _CH, "pk")
+    await _connected(env, "g1", "g2", "g3")
+    env.publisher.incapable = {"g2", "g3"}
+    env.publisher.unknown = {"g2", "g3"}  # a boot-time outage
+    assert await env.svc.reconcile_on_startup() == 1
+    assert await _chosen_ids(env) == ["inst-g1", "inst-g2", "inst-g3"]
+    g2, g3 = await env.gfs.get("g2"), await env.gfs.get("g3")
+    assert await env.svc.capability_known(g2, capable=False) == 1
+    assert await env.svc.capability_known(g3, capable=True) == 0
+    assert await _chosen_ids(env) == ["inst-g1", "inst-g3"]
+    assert await env.gfs.list_channel_withdrawals() == []
+    # Settled once: later reconnects change nothing.
+    assert await env.svc.capability_known(g3, capable=False) == 0
+    assert await _chosen_ids(env) == ["inst-g1", "inst-g3"]
+
+
+async def test_the_default_does_not_overwrite_a_pick_made_meanwhile(
+    owner_env, monkeypatch
+):
+    """L4: the guard is re-checked under the change lock — an owner's PUT
+    that landed while the default was being worked out wins."""
+    env = owner_env
+    await _channel_space(env)
+    await _connected(env, "g1", "g2")
+    _hooked(env)
+    real = GfsServerSelectionService._capable_connections
+
+    async def _slow_capable(self):
+        capable = await real(self)
+        await self.set_servers("sp-1", actor_username="anna", gfs_ids=["g2"])
+        return capable
+
+    monkeypatch.setattr(
+        GfsServerSelectionService, "_capable_connections", _slow_capable
+    )
+    assert await env.svc.default_channels("sp-1") is False
+    assert await _chosen_ids(env) == ["inst-g2"]

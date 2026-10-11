@@ -1764,3 +1764,104 @@ async def test_no_list_means_no_channel_server(env):
     )
     assert await env.owner.svc.reconcile(SPACE_ID) == "none"
     assert SPACE_ID not in env.owner.spaces.channels
+
+
+# ── Round 2: tier moves, capability settling, disconnect retries ─────────
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("tier", [SpaceType.GLOBAL, SpaceType.HOUSEHOLD])
+async def test_leaving_the_private_tier_retires_without_reading_the_new_list(env, tier):
+    """PRIVATE → GLOBAL / HOUSEHOLD: the channel comes down from the servers
+    it lived on (pending rows + this process's registrations) and is
+    forgotten — the new tier's list is never read as channel servers, so a
+    GFS that never had the channel never hears its id."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    # The new tier's list names a GFS the channel never lived on.
+    env.owner.spaces.spaces[SPACE_ID] = replace(
+        env.owner.spaces.spaces[SPACE_ID], space_type=tier
+    )
+    _choose(env, env.owner, _server("gfs-elsewhere", "https://x.example", "e3" * 32))
+    env.owner.svc._registered.clear()  # nothing in memory either
+    conns = env.owner.svc._conn_repo
+    conns.withdrawals.append((SPACE_ID, "conn-1", channel_id))
+    env.owner.gfs.targets = []
+    assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
+    assert SPACE_ID not in env.owner.spaces.channels
+    assert conns.withdrawals == []
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+async def test_retire_of_a_non_private_space_ignores_its_list(env, monkeypatch):
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    env.owner.svc._registered.clear()
+    env.owner.spaces.spaces[SPACE_ID] = replace(
+        env.owner.spaces.spaces[SPACE_ID], space_type=SpaceType.GLOBAL
+    )
+    asked: list[list[str]] = []
+    real = GfsChannelService._unregister_on
+
+    async def spy(self, cid, seed, conns):
+        asked.append([c.id for c in conns])
+        return await real(self, cid, seed, conns)
+
+    monkeypatch.setattr(GfsChannelService, "_unregister_on", spy)
+    assert await env.owner.svc.retire(SPACE_ID) is True
+    # The list still names conn-1, but a global space's list is no channel
+    # list: nothing to unregister on beyond the (empty) registrations.
+    assert asked == [[]]
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is not None
+
+
+async def test_a_reconnect_reports_the_capability_it_read(env):
+    seen: list[tuple[str, bool]] = []
+
+    async def hook(conn, *, capable):
+        seen.append((conn.id, capable))
+
+    env.owner.svc.attach_capability_hook(hook)
+    await env.owner.svc.heal("conn-1")
+    assert seen == [("conn-1", True)]
+    # Unknown (no answer): no verdict, nothing reported.
+    env.owner.gfs.capable = False
+    env.owner.gfs.unknown = {"conn-1"}
+    await env.owner.svc.heal("conn-1")
+    assert seen == [("conn-1", True)]
+    # A verdict of "no": reported.
+    env.owner.gfs.unknown = set()
+    await env.owner.svc.heal("conn-1")
+    assert seen == [("conn-1", True), ("conn-1", False)]
+
+
+async def test_an_empty_choice_probes_no_server(env):
+    calls: list[str] = []
+
+    async def probe(conn):
+        calls.append(conn.id)
+        return True
+
+    env.owner.gfs.private_channels_supported = probe  # type: ignore[method-assign]
+    _choose(env, env.owner)
+    assert await env.owner.svc._chosen_capable(env.owner.spaces.spaces[SPACE_ID]) == []
+    assert calls == []
+
+
+async def test_the_disconnect_unregister_retries_a_transient_failure(env, monkeypatch):
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    monkeypatch.setattr(chan_mod, "DISCONNECT_RETRY_DELAY_S", 0.01)
+    real = GfsChannelService._post
+    answers = [chan_mod.PublishOutcome.transient()]
+
+    async def flaky(self, client, url, body, conn):
+        if url.endswith("/unregister") and answers:
+            return answers.pop()
+        return await real(self, client, url, body, conn)
+
+    monkeypatch.setattr(GfsChannelService, "_post", flaky)
+    await env.owner.svc.on_gfs_disconnect(env.owner.svc._conn_repo.conn)
+    await env.owner.svc.wait_idle()
+    assert answers == []
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None

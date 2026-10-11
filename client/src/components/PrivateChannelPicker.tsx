@@ -18,7 +18,7 @@ import type { JSX } from 'preact'
 import { api } from '@/api'
 import { t } from '@/i18n/i18n'
 import { Button } from './Button'
-import { GfsChecklist, defaultGfsSelection, type GfsChoice } from './GfsChecklist'
+import { GfsChecklist, defaultGfsSelection, gfsHost, type GfsChoice } from './GfsChecklist'
 import type { SpaceGfsServersView } from '@/types'
 
 /** What the parent needs to save a change: the choices on offer, the
@@ -49,12 +49,16 @@ export function channelChoices(
         : (!c.channel_capable ? t('space.private_gfs.channel_unsupported') : undefined),
     }))
   const chosenIds = new Set(chosen.map(c => c.id))
+  // One stable order (name, then host) — a row never jumps when its server
+  // gets suspended or comes back.
   const choices = [
     ...chosen,
     ...(view?.available ?? [])
       .filter(a => a.channel_capable !== false && !chosenIds.has(a.gfs_id))
       .map(a => ({ id: a.gfs_id, display_name: a.display_name, inbox_url: a.inbox_url })),
-  ]
+  ].sort((x, y) =>
+    x.display_name.localeCompare(y.display_name)
+    || gfsHost(x.inbox_url).localeCompare(gfsHost(y.inbox_url)))
   const saved = view?.mode === 'channel' ? (view.gfs_ids ?? []) : []
   const initial = saved.length > 0 ? saved : defaultGfsSelection(choices)
   return { choices, saved, initial, max: view?.max ?? 8 }

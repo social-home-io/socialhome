@@ -2318,14 +2318,26 @@ servers the owner's list names; no list (or an empty one) means no channel.
   link was parked on.
 - **Upgrade:** a household whose private space already ran a channel
   records, once at startup, the servers that channel lived on (an older
-  build registered it on every connection proving `private_channels`; one
-  that can't be read at startup is kept). A space without a channel gets
-  the turn-on default (`GfsServerSelectionService.reconcile_on_startup`).
+  build registered it on every connection proving `private_channels`). One
+  whose capability can't be read at startup is adopted provisionally and
+  settled on its first reconnect: kept if it carries channels, else dropped
+  from the list without a withdrawal (it never held the channel). A space
+  without a channel gets the turn-on default
+  (`GfsServerSelectionService.reconcile_on_startup` / `capability_known`).
 - **Disconnect:** the owner unregisters the channel on a GFS it disconnects
   — in the background, from the connection it was handed, before the row
   goes — and that GFS leaves every channel list (the members are told and
-  re-granted in the background; the DELETE route waits on no server). A
-  suspended connection stays chosen.
+  re-granted in the background; the DELETE route waits on no server). This
+  unregister is **best effort**: up to three tries ten seconds apart, then
+  nothing retries it (the connection and its pending rows are gone); the
+  GFS's idle sweep of unused channels is the backstop. A suspended
+  connection stays chosen.
+- **Leaving the private tier** (to household / public / global): the stored
+  channel's withdrawals are recorded from the old channel list, the channel
+  is retired from those servers and this process's registrations — never
+  from the new tier's list — and forgotten.
+- **Re-choosing** a server that still had a pending withdrawal drops that
+  row: no unregister / re-register churn.
 - **Option off:** the list is re-signed empty and the channel retires as
   before.
 - **Withdrawal survives a restart or crash:** the servers to unregister the

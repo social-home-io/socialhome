@@ -3496,6 +3496,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # withdrawals, migration 0095) go.
         gfs_server_selection.attach_follow_later(gfs_channels.follow_later)
         gfs_connection_service.attach_on_disconnect(gfs_channels.on_gfs_disconnect)
+        # A reconnect read a GFS's capability: settle a provisional upgrade
+        # adoption of it (kept, or dropped from the channel list).
+        gfs_channels.attach_capability_hook(gfs_server_selection.capability_known)
         space_public_outbound = SpacePublicOutbound(
             bus=bus,
             space_repo=space_repo,

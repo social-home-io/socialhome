@@ -144,11 +144,21 @@ describe('channelChoices — chosen servers that cannot be used right now', () =
         },
       ],
     }))
+    // A stable order by name: a suspended row never jumps to the top.
     expect(c.choices.map(x => [x.id, x.note])).toEqual([
       ['g-club', 'space.private_gfs.channel_unsupported'],
       ['g-old', 'space.private_gfs.channel_suspended'],
       ['g-town', undefined],
     ])
+    const later = channelChoices(view({
+      gfs_ids: ['g-town'],
+      available: [
+        { ...TOWN, listed: true, listing_status: null, channel_capable: true },
+        { ...CLUB, listed: false, listing_status: null, channel_capable: true },
+      ],
+      chosen: [{ ...TOWN, connection_status: 'suspended', channel_capable: false }],
+    }))
+    expect(later.choices.map(x => x.id)).toEqual(['g-club', 'g-town'])
     expect(c.initial).toEqual(['g-club', 'g-old'])
   })
 
