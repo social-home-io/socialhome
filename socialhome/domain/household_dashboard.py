@@ -15,6 +15,7 @@ from .errors import CodedError
 __all__ = [
     "DEFAULT_DASHBOARD_PORT",
     "IDLE_RETURN_CHOICES",
+    "MAX_ADDRESS_LENGTH",
     "MIN_PASSWORD_LENGTH",
     "SETUP_TOKEN_TTL_SECONDS",
     "SUPPORTED_DASHBOARD_LOCALES",
@@ -39,6 +40,9 @@ IDLE_RETURN_CHOICES = frozenset({0, 1, 3, 10})
 SUPPORTED_DASHBOARD_LOCALES = frozenset({"en", "de", "es", "fr", "nl"})
 
 MIN_PASSWORD_LENGTH = 8
+
+#: Longest admin-set dashboard address (``DashboardSettings.address``).
+MAX_ADDRESS_LENGTH = 200
 
 #: Lifetime of a one-time tablet setup token (QR / link pairing).
 SETUP_TOKEN_TTL_SECONDS = 600
@@ -75,6 +79,9 @@ class DashboardSettings:
     night_end: str = "06:00"
     keep_screen_on: bool = True
     show_status_text: bool = False
+    #: Admin-set base URL tablets use (``http(s)://host[:port]``), shown
+    #: in the admin UI and setup links instead of a guessed address.
+    address: str | None = None
     people: tuple[tuple[str, DashboardPersonSettings], ...] = ()
     password_set_at: str | None = None
 

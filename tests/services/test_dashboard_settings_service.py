@@ -703,3 +703,118 @@ async def test_cookie_secret_concurrent_first_use_mints_one_key():
     svc.attach_key_manager(_km())
     secrets_ = await asyncio.gather(*(svc.cookie_secret() for _ in range(5)))
     assert len(set(secrets_)) == 1
+
+
+# ── Admin-set address ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "stored"),
+    [
+        ("http://dash.local:8100", "http://dash.local:8100"),
+        ("http://dash.local:8100/", "http://dash.local:8100"),
+        ("HTTPS://Dash.Example.COM", "https://dash.example.com"),
+        ("http://192.168.1.5", "http://192.168.1.5"),
+        ("http://[fd00::1]:8100/", "http://[fd00::1]:8100"),
+    ],
+)
+async def test_address_accepted_and_normalised(svc, raw, stored):
+    s = await svc.update(actor_is_admin=True, patch={"address": raw})
+    assert s.address == stored
+    assert (await svc.get()).address == stored
+
+
+@pytest.mark.parametrize("cleared", [None, ""])
+async def test_address_cleared(svc, cleared):
+    await svc.update(actor_is_admin=True, patch={"address": "http://dash.local"})
+    s = await svc.update(actor_is_admin=True, patch={"address": cleared})
+    assert s.address is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        5,
+        True,
+        ["http://dash.local"],
+        "dash.local:8100",
+        "ftp://dash.local",
+        "javascript:alert(1)",
+        "http://",
+        "http:///path",
+        "http://dash.local/path",
+        "http://dash.local/?",
+        "http://dash.local?a=1",
+        "http://dash.local#top",
+        "http://dash.local?",
+        "http://user:pw@dash.local",
+        "http://user@dash.local",
+        "http://dash.local:99999",
+        "http://dash.local:0",
+        "http://dash.local:abc",
+        "http://dash.local:",
+        "http://dash local",
+        "http://dash.local\\x",
+        "http://dash.local\n",
+        " http://dash.local",
+        "http://[fd00::1",
+        "http://[not-ip]",
+        "http://-dash.local",
+        "http://dash..local",
+    ],
+)
+async def test_address_rejected(svc, raw):
+    with pytest.raises(DashboardSettingsInvalidError) as exc:
+        await svc.update(actor_is_admin=True, patch={"address": raw})
+    assert exc.value.params == {"field": "address"}
+
+
+def _address_of_length(n: int) -> str:
+    # "http://" + three 60-char labels + "." + tail + ".lan"
+    tail = "d" * (n - 194)
+    return "http://" + ".".join(["a" * 60, "b" * 60, "c" * 60, tail]) + ".lan"
+
+
+async def test_address_max_length(svc):
+    ok = _address_of_length(200)
+    assert len(ok) == 200
+    s = await svc.update(actor_is_admin=True, patch={"address": ok})
+    assert s.address == ok
+    with pytest.raises(DashboardSettingsInvalidError):
+        await svc.update(
+            actor_is_admin=True, patch={"address": _address_of_length(201)}
+        )
+
+
+async def test_address_label_too_long_rejected(svc):
+    with pytest.raises(DashboardSettingsInvalidError):
+        await svc.update(
+            actor_is_admin=True, patch={"address": "http://" + "a" * 64 + ".lan"}
+        )
+
+
+async def test_stored_invalid_address_falls_back(svc, repo):
+    repo.rows["dashboard.settings"] = json.dumps({"address": "ftp://x"})
+    assert (await svc.get()).address is None
+
+
+# ── Restore (undo a settings change the listener could not follow) ──────
+
+
+async def test_restore_requires_admin(svc):
+    with pytest.raises(PermissionError):
+        await svc.restore(actor_is_admin=False, previous=DashboardSettings())
+
+
+async def test_restore_puts_back_previous_settings(svc):
+    await _with_password(svc)
+    previous = await svc.update(
+        actor_is_admin=True,
+        patch={"locale": "de", "address": "http://dash.local", "port": 9001},
+    )
+    await svc.update(actor_is_admin=True, patch={"enabled": True, "port": 9002})
+    await svc.restore(actor_is_admin=True, previous=previous)
+    restored = await svc.get()
+    assert restored == previous
+    assert restored.enabled is False
+    assert restored.port == 9001

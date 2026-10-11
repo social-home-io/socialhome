@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
@@ -29,9 +30,11 @@ import time
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from ..domain.household_dashboard import (
     IDLE_RETURN_CHOICES,
+    MAX_ADDRESS_LENGTH,
     MIN_PASSWORD_LENGTH,
     SETUP_TOKEN_TTL_SECONDS,
     SUPPORTED_DASHBOARD_LOCALES,
@@ -63,6 +66,11 @@ _MAX_PORT = 65535
 _HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 _BOOL_FIELDS = frozenset({"enabled", "keep_screen_on", "show_status_text"})
 _PERSON_KEYS = frozenset({"show", "picture"})
+_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# Printable ASCII without space, ``\\``, ``?``, ``#`` and ``@`` — no query,
+# fragment or userinfo can hide in an accepted address.
+_ADDRESS_CHARS = re.compile(r"[!-~]+")
+_ADDRESS_FORBIDDEN = frozenset("\\?#@")
 
 
 class _Invalid(Exception):
@@ -76,6 +84,45 @@ def _require_admin(actor_is_admin: bool) -> None:
 
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _check_address(value: object) -> str | None:
+    """Normalise an admin-set dashboard address; raise :class:`_Invalid`.
+
+    ``None`` / ``""`` clear it. Otherwise ``http(s)://host[:port]`` with an
+    optional trailing ``/`` (stripped) — no path, query, fragment or
+    userinfo. Scheme and host are lower-cased.
+    """
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or len(value) > MAX_ADDRESS_LENGTH:
+        raise _Invalid
+    if _ADDRESS_CHARS.fullmatch(value) is None or not _ADDRESS_FORBIDDEN.isdisjoint(
+        value
+    ):
+        raise _Invalid
+    try:
+        parts = urlsplit(value)
+        # ``.port`` raises on a non-numeric or out-of-range port.
+        if parts.port == 0:
+            raise _Invalid
+    except ValueError:
+        raise _Invalid from None
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or parts.path not in ("", "/"):
+        raise _Invalid
+    netloc = parts.netloc.lower()
+    host = parts.hostname
+    if not host or netloc.endswith(":"):
+        raise _Invalid
+    if netloc.startswith("["):
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            raise _Invalid from None
+    elif not all(_HOST_LABEL.fullmatch(label) for label in host.split(".")):
+        raise _Invalid
+    return f"{scheme}://{netloc}"
 
 
 def _check_scalar(field: str, value: object) -> object:
@@ -99,6 +146,8 @@ def _check_scalar(field: str, value: object) -> object:
     elif field in ("night_start", "night_end"):
         if not isinstance(value, str) or _HHMM.fullmatch(value) is None:
             raise _Invalid
+    elif field == "address":
+        return _check_address(value)
     else:
         raise _Invalid
     return value
@@ -113,6 +162,7 @@ _SCALAR_FIELDS = (
     "night_end",
     "keep_screen_on",
     "show_status_text",
+    "address",
 )
 
 
@@ -294,7 +344,7 @@ class DashboardSettingsService:
             if key not in _SCALAR_FIELDS:
                 raise DashboardSettingsInvalidError("unknown")
             try:
-                _check_scalar(key, value)
+                value = _check_scalar(key, value)
             except _Invalid:
                 raise DashboardSettingsInvalidError(key) from None
             if key == "port":
@@ -317,6 +367,16 @@ class DashboardSettingsService:
             # default) port that clashes with the main app is refused too.
             raise DashboardSettingsInvalidError("port")
         await self._repo.set(KEY_SETTINGS, _settings_to_json(updated))
+
+    async def restore(
+        self, *, actor_is_admin: bool, previous: DashboardSettings
+    ) -> None:
+        """Put ``previous`` (a value from :meth:`get`) back as the stored
+        settings — undoes a change the dashboard listener couldn't follow
+        (port taken). The password timestamp is not part of it."""
+        _require_admin(actor_is_admin)
+        async with self._lock:
+            await self._repo.set(KEY_SETTINGS, _settings_to_json(previous))
 
     # ── Password ────────────────────────────────────────────────────────
 

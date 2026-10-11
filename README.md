@@ -91,6 +91,9 @@ Run the test suite with `pytest` (backend) and `pnpm exec vitest run`
 - [`docs/crypto.md`](docs/crypto.md) — cryptographic design.
 - [`docs/protocol/`](docs/protocol/) — federation protocol,
   feature-by-feature.
+- [`docs/operations/household-dashboard.md`](docs/operations/household-dashboard.md)
+  — the wall-tablet household dashboard: enabling it, ports, LAN-only
+  guidance.
 - [`spec_work.md`](../../spec_work.md) — authoritative specification.
   When code and spec disagree, the spec wins.
 - [`CLAUDE.md`](CLAUDE.md), [`AGENTS.md`](AGENTS.md) — guidance for

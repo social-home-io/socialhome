@@ -1156,6 +1156,36 @@ selected transparently by the server.  See [protocol/apps.md](./protocol/apps.md
 | GET | `/api/apps/{app_id}/pending-sessions` | Any member | Drain (return + clear) the caller's replayable session invites for the app — invites that arrived while the app was closed. Read-and-clear: each invite is returned at most once, scoped to the authed user. Returns `{sessions: [{session_id, from_instance, from_user, payload}]}`. |
 | POST | `/api/apps/{app_id}/messages` | Any member | Send an app-layer message to a person. Body: `{session_id, target: {instance_id, user_ref, is_local}, payload}` where `payload` is any JSON dict. The payload is AES-256-GCM-sealed inside the signed federation envelope — never sent in plaintext. 403 (`APP_CONTACT_NOT_FOUND`) when target is not a contact. Back-compat: `{session_id, peer_instance_id, payload}` still accepted. |
 
+## HFS — Household dashboard
+
+A wall-tablet view of the household, served by its **own aiohttp app on
+its own port** (default `8100`, fixed at `8100` on the Home Assistant App)
+and unlocked with a household-wide dashboard password — see
+[architecture.md](./architecture.md#household-dashboard-own-port) and
+[operations/household-dashboard.md](./operations/household-dashboard.md).
+The admin manages it through these main-app endpoints (admin-only; 403
+`FORBIDDEN` for anyone else):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/admin/dashboard` | Settings + listener status: `{enabled, running, running_port, port, port_fixed, password_set, password_set_at, address, url, locale, idle_return_minutes, night_start, night_end, keep_screen_on, show_status_text, last_seen_at, people}`. `running` / `running_port` are the live listener (an enabled dashboard whose port was taken at startup reads `running: false`). `port_fixed` is `true` when the platform owns the port (Home Assistant App). `url` is `address` when the admin set one, else a guess: `http://<host the admin reached Social Home under>:<port>`. `last_seen_at` (ISO UTC or `null`) is when a signed-in tablet last made a request since this process started. `people` lists every active household member as `{user_id, username, display_name, picture_url, show, picture, picture_effective}` — `picture` is the stored choice (`true` / `false` / `null` = default), `picture_effective` the resolved one (on by default for child-protected minors; the age or minor flag itself never leaves). |
+| PUT | `/api/admin/dashboard` | Partial settings patch: `enabled`, `port` (1024–65535, not the main port; 422 `DASHBOARD_PORT_FIXED` on the Home Assistant App), `address` (`http(s)://host[:port]`, optional trailing `/`, no path / query / fragment / userinfo, ≤200 chars; `null` or `""` clears it), `locale` (`en` / `de` / `es` / `fr` / `nl`), `idle_return_minutes` (0 / 1 / 3 / 10), `night_start` / `night_end` (`HH:MM`), `keep_screen_on`, `show_status_text`, `people` (`{user_id: {show?, picture?} \| null}`, merged per person; `null` drops the entry). The listener then follows (starts, stops or moves port). 422 `DASHBOARD_SETTINGS_INVALID` (`params.field` names the setting; nothing is saved), 422 `DASHBOARD_PASSWORD_REQUIRED` when enabling without a password, 409 `DASHBOARD_PORT_IN_USE` (`params.port`) when the new port can't be bound — the previous settings are put back and the listener keeps its old state. Returns the `GET` shape. |
+| PUT | `/api/admin/dashboard/password` | Body `{password}` (≥8 chars; 422 `DASHBOARD_PASSWORD_TOO_SHORT`). Stores a scrypt hash and **signs out every tablet**. 204. |
+| POST | `/api/admin/dashboard/setup-link` | A one-time tablet sign-in link (for a QR code): `{url: "<base>/enter?t=<token>", expires_at}` — `<base>` as `url` above, valid 10 minutes, single use; issuing one replaces any pending link. 422 `DASHBOARD_PASSWORD_REQUIRED` before a password is set. |
+| DELETE | `/api/admin/dashboard/sessions` | Sign out every tablet (bumps the session epoch). 204. |
+
+Pages on the **dashboard port** (not under `/api/*`, no bearer token, no
+HA ingress — the only credential is the dashboard's signed session cookie):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET / POST | `/login` | Password form; `POST` (same-origin only) sets the session cookie. Throttled per client (5 failures / 15 min) and globally (30 failures / 15 min). |
+| GET / POST | `/enter?t=<token>` | Setup link: `GET` shows a confirm button only (link previewers can't spend the token); `POST` spends it and sets a one-year cookie. |
+| POST | `/logout` | Clear this tablet's cookie. |
+| GET | `/` | The dashboard (signed-in only; otherwise a redirect to `/login`). |
+| GET / HEAD | `/static/{name}` | Preloaded stylesheet / assets (public). |
+| GET | `/healthz` | Liveness (public). |
+
 ## HFS — Storage, backup, misc
 
 | Method | Path | Purpose |
@@ -1387,6 +1417,7 @@ These pages are server-rendered HTML and require no auth.
 | `POST /api/spaces/{id}/invite-tokens`, `POST /api/spaces/{id}/remote-invites` | 30 / min / user each |
 | `POST /api/spaces/{id}/ban` | 5 / min / user |
 | `POST /api/link-preview` | 30 / min / user — on top, the service caps **fresh page fetches** (cache misses, including the ones a post create causes) at 20 / 5 min per member and 60 / 5 min per household; over budget the answer is simply "no card". |
+| `POST /login`, `POST /enter` (household dashboard port) | 5 failed attempts / 15 min per client address (socket peer, never `X-Forwarded-For`); `/login` also 30 failures / 15 min across all clients — the global brake (a valid setup token neither feeds nor obeys it). Counted in memory by `DashboardAuth` (survives a port change, not a restart); one password check at a time. Behind a reverse proxy every tablet shares one client bucket. |
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
 | `POST /cluster/sync` | 60 / min per **verified** peer node — counted only after the frame verified under the key this GFS holds for that node (its pin, or the GFS's own key for a shared-seed node), never on the `from` a request claims, so forged traffic naming a real peer cannot lock it out. Every request that proves no member — malformed body, unknown suite, stale timestamp, unknown or unapproved sender, key mismatch, bad signature, or a replay — spends a separate 30 / min per **source address** budget instead (wrong recipient included). Once that is spent the address is shed: its frames are still parsed and matched against the roster (no crypto), anything not naming an approved node gets 429, and a frame naming one is verified — accepted if it verifies, else it spends that node's 30 / min **failed-verify** budget, after which further such frames get 429 without a verify. Verify CPU on forgeries is therefore bounded per address, then per approved node, and the node's own budget is never spent by a forgery. Genuine peers never touch the address budget. Behind a shared reverse proxy configure `trusted_proxies` (below) so the budget keys on the real client. |
 | `POST /cluster/signaling-session{,/release}` (legacy) | 60 / min / paired instance |
