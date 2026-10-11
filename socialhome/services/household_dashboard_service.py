@@ -30,9 +30,9 @@ House rules:
   are the exception that proves the rule: like My Corner, each one shows
   its lessons for "today" in *its own* zone (then converted for display).
 * **Toggles.** A section whose household ``feat_*`` toggle is off is
-  empty and its service is not called (shopping has no toggle). The
-  calendar list is still read once for person colours, so colours don't
-  change when the calendar toggle flips.
+  empty and its service is not called (shopping has no toggle). Person
+  colours follow members' calendar colours only while the calendar
+  section is on; when it's off they fall back to the palette.
 * **Fail soft.** Each slice — and each calendar / task list inside one —
   that fails is logged at WARNING and comes back empty; one broken slice
   never breaks the page. The settings and household preferences are not
@@ -416,10 +416,12 @@ class HouseholdDashboardService:
     # ── People ───────────────────────────────────────────────────────────
 
     async def _calendars(self, ctx: _Context) -> list[Calendar]:
-        """Every member's personal calendar. Read even when the calendar
-        section is off — person colours come from it and must not change
-        with the toggle (events are only read when it's on). The username
-        is ignored for ``scope="household"``."""
+        """Every member's personal calendar — ``[]`` without calling the
+        calendar service when the calendar section is off (person colours
+        then fall back to the palette). The username is ignored for
+        ``scope="household"``."""
+        if not ctx.on(SECTION_CALENDAR):
+            return []
         rows = await _safe(
             "calendars",
             self._calendar.list_calendars("", scope="household"),
@@ -433,8 +435,9 @@ class HouseholdDashboardService:
 
     @staticmethod
     def _person_colors(ctx: _Context, calendars: Sequence[Calendar]) -> dict[str, str]:
-        """Each shown member's colour: their first personal calendar's,
-        else a palette colour by their position in the household."""
+        """Each shown member's colour: their first personal calendar's
+        (only while the calendar section is on — otherwise ``calendars`` is
+        empty), else a palette colour by their position in the household."""
         from_calendars: dict[str, str] = {}
         for c in calendars:
             from_calendars.setdefault(ctx.by_username[c.owner_username], c.color)
@@ -505,7 +508,7 @@ class HouseholdDashboardService:
         shown member is just an attendee), the event gets a derived id and
         the first shown person's colour, never the hidden calendar's.
         """
-        if not ctx.on(SECTION_CALENDAR) or not calendars:
+        if not calendars:  # calendar section off, or no member calendars
             return {}
         days = (ctx.today, ctx.today + timedelta(days=1))
         start = local_day_bounds(days[0], ctx.tz)[0]
@@ -703,10 +706,16 @@ class HouseholdDashboardService:
         *,
         offset: int,
     ) -> DashboardSchoolDay | None:
-        """The lessons ``offset`` days after "today" — today in each
-        timetable's own zone, like :meth:`TimetableService.today_for_user`
-        (a Berlin plan seen from New York at 20:00 already shows Berlin's
-        tomorrow morning). ``date`` on the result is the household day."""
+        """The lessons ``offset`` days after "today".
+
+        Each plan's lessons come from *its own* local day
+        (``local_date(now, tt.tz) + offset``), consistent with
+        :meth:`TimetableService.today_for_user` — a Berlin plan seen from
+        New York at 20:00 already shows Berlin's tomorrow morning. Lesson
+        times are converted to household time for display, and ``date`` on
+        the result is the household day (``today + offset``), so when a
+        plan's zone differs from the household's, ``date`` and the
+        lessons' own date can differ by one."""
         zone = zone_of(ctx.tz)
         names: list[str] = []
         lessons: list[DashboardLesson] = []

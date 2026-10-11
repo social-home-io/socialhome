@@ -391,6 +391,10 @@ class DashboardEvent:
     calendar) appears once, with every shown member in ``person_ids``
     (calendar owners and attendees; hidden people removed).
     ``start`` / ``end`` are in the household zone.
+
+    ``id`` is for de-duplication only: an event known solely from a hidden
+    member's copy gets a hashed ``event-…`` id that matches no stored row,
+    so views must never link to or look up an event by ``id``.
     """
 
     item_type: ClassVar[str] = "event"
@@ -450,6 +454,12 @@ class DashboardSchoolDay:
     ``first_start`` / ``last_end`` span the lessons that take place
     (``None`` when all are cancelled); ``changes`` are the slots whose
     status isn't ``"normal"``.
+
+    ``date`` is the *household* day. Each plan's lessons come from the
+    plan's own local day (consistent with
+    ``TimetableService.today_for_user``), with times shown in household
+    time — so when a plan's zone differs from the household's, the
+    lessons may belong to the plan's next or previous day.
     """
 
     person_id: str
