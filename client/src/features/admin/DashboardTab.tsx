@@ -14,11 +14,10 @@
  * different origin/port, so it is shown and linked as-is.
  */
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
-import { api, ApiError } from '@/api'
+import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { FormError } from '@/components/FormError'
-import { QrCodeImg } from '@/components/QrCodeImg'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
@@ -26,55 +25,16 @@ import { t } from '@/i18n/i18n'
 import localeMeta from '@/i18n/locales/_meta.json'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { DashboardPasswordDialog, DashboardPinDialog } from './DashboardDialogs'
+import { TabletStep } from './DashboardTabletStep'
+import type { DashboardPerson, DashboardState, Patch, SaveFn, SaveOpts } from './dashboardTypes'
 
-/** One household member as ``GET /api/admin/dashboard`` lists them. */
-export interface DashboardPerson {
-  user_id: string
-  username: string
-  display_name: string
-  picture_url: string | null
-  show: boolean
-  /** Stored choice; ``null`` = the default (on for child-protected minors). */
-  picture: boolean | null
-  picture_effective: boolean
-}
-
-/** ``GET /api/admin/dashboard``. */
-export interface DashboardState {
-  enabled: boolean
-  running: boolean
-  running_port: number | null
-  port: number
-  port_fixed: boolean
-  password_set: boolean
-  password_set_at: number | null
-  pin_set: boolean
-  address: string | null
-  url: string
-  url_host_allowed: boolean
-  locale: string
-  idle_return_minutes: number
-  night_start: string
-  night_end: string
-  keep_screen_on: boolean
-  show_status_text: boolean
-  last_seen_at: string | null
-  people: DashboardPerson[]
-}
-
-interface SetupLink { url: string, expires_at: string }
-
-type Patch = Partial<Omit<DashboardState, 'people'>> & {
-  people?: Record<string, { show: boolean, picture: boolean | null }>
-}
+export type { DashboardPerson, DashboardState } from './dashboardTypes'
 
 const ENDPOINT = '/api/admin/dashboard'
 /** ``SUPPORTED_DASHBOARD_LOCALES`` on the server. */
 const DASHBOARD_LOCALES = ['en', 'de', 'es', 'fr', 'nl'] as const
 /** ``IDLE_RETURN_CHOICES`` on the server (0 = off). */
 const IDLE_CHOICES = [0, 1, 3, 10] as const
-const MIN_PORT = 1024
-const MAX_PORT = 65535
 
 function nativeName(code: string): string {
   const info = (localeMeta.locales as Record<string, { native_name: string }>)[code]
@@ -98,43 +58,64 @@ function applyPatch(state: DashboardState, patch: Patch): DashboardState {
   return next
 }
 
+/** An optimistic patch still waiting for the server. */
+interface Pending { seq: number, patch: Patch }
+
 export function DashboardTab() {
   const [state, setState] = useState<DashboardState | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
-  // The last state the server confirmed — what an error reverts to.
-  const confirmed = useRef<DashboardState | null>(null)
-  const inFlight = useRef(0)
+  // Every request gets a monotonic id. ``confirmed`` is the newest server
+  // answer (by request id, not arrival order); what the tab shows is that
+  // answer with every still-pending optimistic patch replayed on top — so
+  // an older save failing (or answering late) never undoes a newer one.
+  const seq = useRef(0)
+  const confirmed = useRef<{ seq: number, state: DashboardState } | null>(null)
+  const pending = useRef<Pending[]>([])
 
-  // Only touches setters and a ref, so one instance serves every render.
+  const render = useCallback(() => {
+    const base = confirmed.current?.state
+    if (base) setState(pending.current.reduce((s, p) => applyPatch(s, p.patch), base))
+  }, [])
+
+  /** Adopt a server answer to request ``id`` unless a newer one landed. */
+  const adopt = useCallback((id: number, fresh: DashboardState) => {
+    if (!confirmed.current || id > confirmed.current.seq) {
+      confirmed.current = { seq: id, state: fresh }
+    }
+  }, [])
+
   const load = useCallback(async () => {
+    const id = ++seq.current
     setLoadFailed(false)
     try {
-      const fresh = await api.get<DashboardState>(ENDPOINT)
-      confirmed.current = fresh
-      setState(fresh)
+      adopt(id, await api.get<DashboardState>(ENDPOINT))
+      render()
     } catch {
       setLoadFailed(true)
     }
-  }, [])
+  }, [adopt, render])
   useEffect(() => { void load() }, [load])
 
   /** Save a settings patch (optimistically unless told otherwise); revert
    *  + toast on failure. Returns the error so a caller can show it inline. */
-  const save = async (patch: Patch, opts: SaveOpts = {}): Promise<Error | null> => {
-    if (opts.optimistic !== false) setState((s) => (s ? applyPatch(s, patch) : s))
-    inFlight.current += 1
+  const save: SaveFn = async (patch: Patch, opts: SaveOpts = {}) => {
+    const id = ++seq.current
+    if (opts.optimistic !== false) {
+      pending.current = [...pending.current, { seq: id, patch }]
+      render()
+    }
+    const done = () => { pending.current = pending.current.filter((p) => p.seq !== id) }
     try {
       const fresh = await api.put<DashboardState>(ENDPOINT, patch)
-      confirmed.current = fresh
-      // A later save is still on its way: keep its optimistic value.
-      if (inFlight.current === 1) setState(fresh)
+      done()
+      adopt(id, fresh)
+      render()
       return null
     } catch (e: unknown) {
-      setState(confirmed.current)
+      done()
+      render()
       if (opts.toast !== false) showToast((e as Error).message, 'error')
       return e as Error
-    } finally {
-      inFlight.current -= 1
     }
   }
 
@@ -155,7 +136,7 @@ export function DashboardTab() {
     <div class="sh-dashboard-admin">
       <HeaderSection state={state} save={save} />
       <PasswordStep state={state} reload={load} />
-      <TabletStep state={state} save={save} />
+      <TabletStep state={state} save={save} reload={load} />
       <PinStep state={state} reload={load} />
       <DisplaySection state={state} save={save} />
       <PeopleSection state={state} save={save} />
@@ -163,14 +144,6 @@ export function DashboardTab() {
   )
 }
 
-interface SaveOpts {
-  /** ``false``: report the error to the caller (shown inline) instead. */
-  toast?: boolean
-  /** ``false``: wait for the server — for changes that move the listener
-   *  (on/off, port) or the URL, where a guess would mislead. */
-  optimistic?: boolean
-}
-type SaveFn = (patch: Patch, opts?: SaveOpts) => Promise<Error | null>
 
 // ─── Header: on/off + listener state ───────────────────────────────────────
 
@@ -260,245 +233,6 @@ function PasswordStep({ state, reload }: { state: DashboardState, reload: () => 
   )
 }
 
-// ─── Step 2: open on the tablet ────────────────────────────────────────────
-
-function TabletStep({ state, save }: { state: DashboardState, save: SaveFn }) {
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(state.url)
-      showToast(t('admin.dashboard.tablet.copied'), 'success')
-    } catch {
-      showToast(state.url, 'info')
-    }
-  }
-  return (
-    <section class="sh-admin-section sh-dashboard-step" aria-labelledby="sh-dash-step2">
-      <h3 id="sh-dash-step2">
-        <span class="sh-dashboard-step__num" aria-hidden="true">2</span>
-        {t('admin.dashboard.tablet.heading')}
-      </h3>
-      <div class="sh-dashboard-url">
-        <code class="sh-dashboard-url__text">{state.url}</code>
-        <div class="sh-dashboard-url__actions">
-          <Button variant="secondary" onClick={() => void copy()}>{t('admin.dashboard.tablet.copy')}</Button>
-          <a class="sh-btn sh-btn--secondary" href={state.url} target="_blank" rel="noopener noreferrer">
-            {t('admin.dashboard.tablet.open')}
-          </a>
-        </div>
-      </div>
-      <AddressEditor state={state} save={save} />
-      <SetupLinkPanel running={state.running} />
-      {/* Keyed on the saved port: a new port starts a fresh, clean field. */}
-      <PortField key={state.port} state={state} save={save} />
-    </section>
-  )
-}
-
-function AddressEditor({ state, save }: { state: DashboardState, save: SaveFn }) {
-  const [editing, setEditing] = useState(false)
-  const [value, setValue] = useState(state.address ?? '')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  // A host the dashboard would refuse keeps the editor open until fixed.
-  const open = editing || !state.url_host_allowed
-
-  const submit = async (address: string | null) => {
-    setBusy(true)
-    setError(null)
-    const err = await save({ address }, { toast: false, optimistic: false })
-    setBusy(false)
-    if (err) {
-      setError(err instanceof ApiError && err.code === 'DASHBOARD_SETTINGS_INVALID'
-        ? t('admin.dashboard.tablet.address_invalid')
-        : err.message)
-      return
-    }
-    setValue(address ?? '')
-    setEditing(false)
-  }
-
-  return (
-    <div class="sh-dashboard-address">
-      {!state.url_host_allowed && (
-        <p class="sh-dashboard-admin__warn" role="note">⚠ {t('admin.dashboard.tablet.host_refused')}</p>
-      )}
-      {state.url_host_allowed && state.address === null && (
-        <p class="sh-muted">
-          {state.port_fixed ? t('admin.dashboard.tablet.guess_app') : t('admin.dashboard.tablet.guess')}
-        </p>
-      )}
-      {open ? (
-        <form class="sh-dashboard-address__form" onSubmit={(e) => { e.preventDefault(); void submit(value.trim() || null) }}>
-          <label for="sh-dash-address">{t('admin.dashboard.tablet.address_label')}</label>
-          <div class="sh-dashboard-inline">
-            <input
-              id="sh-dash-address"
-              type="url"
-              inputMode="url"
-              placeholder="http://192.168.1.20:8100"
-              value={value}
-              disabled={busy}
-              aria-describedby="sh-dash-address-hint sh-dash-address-error"
-              onInput={(e) => setValue((e.target as HTMLInputElement).value)}
-            />
-            <Button type="submit" disabled={busy}>{t('common.save')}</Button>
-          </div>
-          <span id="sh-dash-address-hint" class="sh-form-hint">{t('admin.dashboard.tablet.address_hint')}</span>
-          <FormError id="sh-dash-address-error" message={error} />
-          <div class="sh-admin-actions">
-            {state.address !== null && (
-              <Button type="button" variant="ghost" disabled={busy} onClick={() => void submit(null)}>
-                {t('admin.dashboard.tablet.address_reset')}
-              </Button>
-            )}
-            {state.url_host_allowed && (
-              <Button type="button" variant="ghost" disabled={busy}
-                onClick={() => { setValue(state.address ?? ''); setError(null); setEditing(false) }}>
-                {t('common.cancel')}
-              </Button>
-            )}
-          </div>
-        </form>
-      ) : (
-        <div class="sh-admin-actions">
-          <Button variant="ghost" onClick={() => { setValue(state.address ?? ''); setEditing(true) }}>
-            {t('admin.dashboard.tablet.edit_address')}
-          </Button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-/** Seconds left until ``expiresAt`` (ISO), ticking once a second. */
-function useSecondsLeft(expiresAt: string | null): number {
-  // Read the clock while rendering (a fresh link is never shown as expired
-  // for a frame); the interval only asks for the next render.
-  const [, setTick] = useState(0)
-  useEffect(() => {
-    if (!expiresAt) return
-    const id = setInterval(() => setTick((n) => n + 1), 1000)
-    return () => clearInterval(id)
-  }, [expiresAt])
-  if (!expiresAt) return 0
-  return Math.max(0, Math.round((Date.parse(expiresAt) - Date.now()) / 1000))
-}
-
-function SetupLinkPanel({ running }: { running: boolean }) {
-  const [link, setLink] = useState<SetupLink | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const secs = useSecondsLeft(link?.expires_at ?? null)
-  const expired = link !== null && secs <= 0
-
-  // A link for a listener that stopped would only fail on the tablet.
-  useEffect(() => { if (!running) setLink(null) }, [running])
-
-  const issue = async () => {
-    setBusy(true)
-    setError(null)
-    try {
-      setLink(await api.post<SetupLink>('/api/admin/dashboard/setup-link'))
-    } catch (e: unknown) {
-      setLink(null)
-      setError((e as Error).message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const mmss = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
-  return (
-    <div class="sh-dashboard-qr">
-      {link && !expired ? (
-        <>
-          <QrCodeImg data={link.url} size={180} alt={t('admin.dashboard.qr.alt')} />
-          <div class="sh-dashboard-qr__text">
-            <p>{t('admin.dashboard.qr.scan')}</p>
-            <p class="sh-muted" aria-live="off">{t('admin.dashboard.qr.valid_for', { time: mmss })}</p>
-            <Button variant="secondary" disabled={busy || !running} onClick={() => void issue()}>
-              {t('admin.dashboard.qr.new')}
-            </Button>
-          </div>
-        </>
-      ) : (
-        <div class="sh-dashboard-qr__text">
-          <p class="sh-muted">
-            {expired ? t('admin.dashboard.qr.expired') : t('admin.dashboard.qr.intro')}
-          </p>
-          {!running && <p class="sh-muted">{t('admin.dashboard.qr.needs_running')}</p>}
-          <Button variant={expired ? 'secondary' : 'primary'} disabled={busy || !running}
-            aria-describedby="sh-dash-qr-error" onClick={() => void issue()}>
-            {expired ? t('admin.dashboard.qr.new') : t('admin.dashboard.qr.show')}
-          </Button>
-        </div>
-      )}
-      <FormError id="sh-dash-qr-error" message={error} />
-    </div>
-  )
-}
-
-function PortField({ state, save }: { state: DashboardState, save: SaveFn }) {
-  const [value, setValue] = useState(String(state.port))
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  if (state.port_fixed) {
-    return (
-      <div class="sh-dashboard-port">
-        <label for="sh-dash-port">{t('admin.dashboard.port.label')}</label>
-        <input id="sh-dash-port" type="number" value={state.port} readOnly
-          aria-describedby="sh-dash-port-hint" class="sh-dashboard-port__input" />
-        <span id="sh-dash-port-hint" class="sh-form-hint">{t('admin.dashboard.port.fixed')}</span>
-      </div>
-    )
-  }
-
-  const dirty = value.trim() !== String(state.port)
-  const submit = async (ev: Event) => {
-    ev.preventDefault()
-    const n = Number(value)
-    if (!Number.isInteger(n) || n < MIN_PORT || n > MAX_PORT) {
-      setError(t('admin.dashboard.port.range', { min: String(MIN_PORT), max: String(MAX_PORT) }))
-      return
-    }
-    setBusy(true)
-    setError(null)
-    const err = await save({ port: n }, { toast: false, optimistic: false })
-    setBusy(false)
-    if (err) {
-      setError(err instanceof ApiError && err.code === 'DASHBOARD_SETTINGS_INVALID'
-        ? t('admin.dashboard.port.invalid')
-        : err.message)
-    }
-  }
-  return (
-    <form class="sh-dashboard-port" onSubmit={(e) => void submit(e)} noValidate>
-      <label for="sh-dash-port">{t('admin.dashboard.port.label')}</label>
-      <div class="sh-dashboard-inline">
-        <input
-          id="sh-dash-port"
-          class="sh-dashboard-port__input"
-          type="number"
-          inputMode="numeric"
-          min={MIN_PORT}
-          max={MAX_PORT}
-          value={value}
-          disabled={busy}
-          aria-describedby="sh-dash-port-hint sh-dash-port-error"
-          onInput={(e) => setValue((e.target as HTMLInputElement).value)}
-        />
-        {dirty && <Button type="submit" disabled={busy}>{t('admin.dashboard.port.save')}</Button>}
-      </div>
-      <span id="sh-dash-port-hint" class="sh-form-hint">
-        {t('admin.dashboard.port.hint', { min: String(MIN_PORT), max: String(MAX_PORT) })}
-      </span>
-      <FormError id="sh-dash-port-error" message={error} />
-    </form>
-  )
-}
-
 // ─── Step 3: privacy lock PIN ──────────────────────────────────────────────
 
 function PinStep({ state, reload }: { state: DashboardState, reload: () => Promise<void> }) {
@@ -561,15 +295,17 @@ function SwitchRow({ id, label, hint, checked, disabled, onChange }: {
   id: string, label: string, hint?: string, checked: boolean, disabled?: boolean,
   onChange: (next: boolean) => void
 }) {
+  // The hint is a description, not part of the switch's name.
+  const hintId = hint ? `${id}-hint` : undefined
   return (
     <div class="sh-dashboard-row">
-      <label for={id} class="sh-dashboard-row__label">
-        {label}
-        {hint && <span class="sh-form-hint">{hint}</span>}
-      </label>
+      <div class="sh-dashboard-row__label">
+        <label for={id}>{label}</label>
+        {hint && <span id={hintId} class="sh-form-hint">{hint}</span>}
+      </div>
       <span class="sh-switch">
         <input id={id} type="checkbox" role="switch" checked={checked} disabled={disabled}
-          onChange={() => onChange(!checked)} />
+          aria-describedby={hintId} onChange={() => onChange(!checked)} />
         <span class="sh-switch-track" />
       </span>
     </div>
@@ -577,17 +313,29 @@ function SwitchRow({ id, label, hint, checked, disabled, onChange }: {
 }
 
 function DisplaySection({ state, save }: { state: DashboardState, save: SaveFn }) {
+  const [signingOut, setSigningOut] = useState(false)
+  // A ref, not just the state: a second click can land before the
+  // re-render that disables the button.
+  const busy = useRef(false)
   const signOutAll = async () => {
-    if (!await confirmDialog(t('admin.dashboard.sessions.confirm'), {
-      title: t('admin.dashboard.sessions.confirm_title'),
-      confirmLabel: t('admin.dashboard.sessions.sign_out'),
-      destructive: true,
-    })) return
+    if (busy.current) return
+    // Busy from the first click, so a double click can't open two confirms
+    // or send the DELETE twice.
+    busy.current = true
+    setSigningOut(true)
     try {
+      if (!await confirmDialog(t('admin.dashboard.sessions.confirm'), {
+        title: t('admin.dashboard.sessions.confirm_title'),
+        confirmLabel: t('admin.dashboard.sessions.sign_out'),
+        destructive: true,
+      })) return
       await api.delete('/api/admin/dashboard/sessions')
       showToast(t('admin.dashboard.sessions.done'), 'success')
     } catch (e: unknown) {
       showToast((e as Error).message, 'error')
+    } finally {
+      busy.current = false
+      setSigningOut(false)
     }
   }
   const onTime = (field: 'night_start' | 'night_end') => (e: Event) => {
@@ -610,11 +358,12 @@ function DisplaySection({ state, save }: { state: DashboardState, save: SaveFn }
         </select>
       </div>
       <div class="sh-dashboard-row sh-dashboard-row--select">
-        <label for="sh-dash-idle" class="sh-dashboard-row__label">
-          {t('admin.dashboard.display.idle')}
-          <span class="sh-form-hint">{t('admin.dashboard.display.idle_hint')}</span>
-        </label>
+        <div class="sh-dashboard-row__label">
+          <label for="sh-dash-idle">{t('admin.dashboard.display.idle')}</label>
+          <span id="sh-dash-idle-hint" class="sh-form-hint">{t('admin.dashboard.display.idle_hint')}</span>
+        </div>
         <select id="sh-dash-idle" class="sh-dashboard-row__control" value={String(state.idle_return_minutes)}
+          aria-describedby="sh-dash-idle-hint"
           onChange={(e) => void save({ idle_return_minutes: Number((e.target as HTMLSelectElement).value) })}>
           {IDLE_CHOICES.map((n) => (
             <option key={n} value={String(n)}>
@@ -649,7 +398,8 @@ function DisplaySection({ state, save }: { state: DashboardState, save: SaveFn }
             ? t('admin.dashboard.sessions.last_seen', { when: relativeDocsTime(state.last_seen_at) })
             : t('admin.dashboard.sessions.never')}
         </p>
-        <Button variant="danger" disabled={!state.password_set} onClick={() => void signOutAll()}>
+        <Button variant="danger" disabled={!state.password_set || signingOut}
+          onClick={() => void signOutAll()}>
           {t('admin.dashboard.sessions.sign_out')}
         </Button>
       </div>

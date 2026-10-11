@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, fireEvent, waitFor, screen } from '@testing-library/preact'
+import { render, fireEvent, waitFor, screen, act } from '@testing-library/preact'
 import type { DashboardState } from './DashboardTab'
 
 vi.mock('@/api', async (importOriginal) => {
@@ -45,7 +45,7 @@ function state(over: Partial<DashboardState> = {}): DashboardState {
     port: 8100,
     port_fixed: false,
     password_set: true,
-    password_set_at: 1_700_000_000,
+    password_set_at: '2026-10-11T08:00:00+00:00',
     pin_set: false,
     address: null,
     url: 'http://homeassistant.local:8100',
@@ -243,27 +243,73 @@ describe('DashboardTab — open on the tablet', () => {
     expect(screen.getByRole('button', { name: 'New sign-in link' })).toBeTruthy()
   })
 
-  it('hides an expired sign-in QR and offers a new link', async () => {
+  it('counts down from when the link arrived, not the server clock', async () => {
     await mount(running())
+    // The server's clock runs 5 minutes ahead: its expires_at is already
+    // "past" for us, yet the link is fresh.
     mPost.mockResolvedValueOnce({
-      url: 'http://homeassistant.local:8100/enter?t=old',
+      url: 'http://homeassistant.local:8100/enter?t=skew',
       expires_at: new Date(Date.now() - 1000).toISOString(),
     })
     fireEvent.click(screen.getByRole('button', { name: 'Show sign-in QR' }))
-    expect(await screen.findByText('The sign-in link has expired.')).toBeTruthy()
-    expect(screen.queryByTestId('qr')).toBeNull()
-    expect(screen.getByRole('button', { name: 'New sign-in link' })).toBeTruthy()
+    expect(await screen.findByTestId('qr')).toBeTruthy()
+    expect(screen.getByText(/Valid for 10:00 · works once/)).toBeTruthy()
   })
 
-  it('explains a 409 when the dashboard is not running', async () => {
+  it('drops the QR at 0 and stops ticking', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      await mount(running())
+      mPost.mockResolvedValueOnce({
+        url: 'http://homeassistant.local:8100/enter?t=abc',
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Show sign-in QR' }))
+      await screen.findByTestId('qr')
+      const cleared = vi.spyOn(globalThis, 'clearInterval')
+      await act(async () => { vi.advanceTimersByTime(601_000) })
+      expect(screen.getByText('The sign-in link has expired.')).toBeTruthy()
+      expect(screen.queryByTestId('qr')).toBeNull()
+      expect(screen.getByRole('button', { name: 'New sign-in link' })).toBeTruthy()
+      expect(cleared).toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops the QR when the port changes', async () => {
+    await mount(running())
+    mPost.mockResolvedValueOnce({
+      url: 'http://homeassistant.local:8100/enter?t=abc',
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Show sign-in QR' }))
+    await screen.findByTestId('qr')
+    mPut.mockResolvedValueOnce({
+      ...running(), port: 9000, running_port: 9000, url: 'http://homeassistant.local:9000',
+    })
+    fireEvent.input(screen.getByLabelText('Port'), { target: { value: '9000' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save port' }))
+    await screen.findByText('Running on port 9000')
+    expect(screen.queryByTestId('qr')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Show sign-in QR' })).toBeTruthy()
+  })
+
+  it('explains a 409 when the dashboard is not running and refreshes the tab', async () => {
     await mount(running())
     mPost.mockRejectedValueOnce(new ApiError(409, '/api/admin/dashboard/setup-link', {
       code: 'DASHBOARD_NOT_RUNNING', detail: 'x',
     }))
+    // The listener stopped behind the tab's back.
+    mGet.mockResolvedValueOnce(state({ enabled: true, running: false }))
     fireEvent.click(screen.getByRole('button', { name: 'Show sign-in QR' }))
     expect((await screen.findByRole('alert')).textContent)
       .toBe('Turn the dashboard on before creating a sign-in link.')
     expect(screen.queryByTestId('qr')).toBeNull()
+    await waitFor(() => expect(mGet).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText(/Switched on, but not running/)).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Show sign-in QR' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('disables the QR button while the dashboard is off', async () => {
@@ -371,7 +417,78 @@ describe('DashboardTab — display settings', () => {
   })
 })
 
+describe('DashboardTab — overlapping saves', () => {
+  /** A PUT the test resolves or rejects by hand. */
+  function deferredPut() {
+    let resolve!: (v: DashboardState) => void
+    let reject!: (e: Error) => void
+    mPut.mockImplementationOnce(() => new Promise((res, rej) => { resolve = res; reject = rej }))
+    return { resolve: (v: DashboardState) => resolve(v), reject: (e: Error) => reject(e) }
+  }
+  const keepOn = () => screen.getByRole('switch', { name: /Keep screen on/ }) as HTMLInputElement
+
+  it('an older save failing does not undo a newer one', async () => {
+    await mount(state())
+    const first = deferredPut()
+    fireEvent.click(keepOn())           // → off
+    await waitFor(() => expect(keepOn().checked).toBe(false))
+    const second = deferredPut()
+    fireEvent.click(keepOn())           // → on again
+    await waitFor(() => expect(keepOn().checked).toBe(true))
+
+    await act(async () => { second.resolve(state({ keep_screen_on: true })) })
+    await act(async () => { first.reject(new Error('Network down')) })
+    expect(keepOn().checked).toBe(true)
+  })
+
+  it("an older save's late answer does not overwrite a newer one", async () => {
+    await mount(state())
+    const first = deferredPut()
+    fireEvent.click(keepOn())           // → off
+    const second = deferredPut()
+    await waitFor(() => expect(keepOn().checked).toBe(false))
+    fireEvent.click(keepOn())           // → on again
+    await act(async () => { second.resolve(state({ keep_screen_on: true })) })
+    await act(async () => { first.resolve(state({ keep_screen_on: false })) })
+    expect(keepOn().checked).toBe(true)
+  })
+
+  it('a newer save failing keeps an older pending value until it answers', async () => {
+    await mount(state())
+    const first = deferredPut()
+    fireEvent.click(screen.getByRole('switch', { name: /Show status text/ }))   // status text on
+    const second = deferredPut()
+    fireEvent.click(keepOn())                                                   // keep screen off
+    await act(async () => { second.reject(new Error('nope')) })
+    expect(keepOn().checked).toBe(true)
+    expect((screen.getByRole('switch', { name: /Show status text/ }) as HTMLInputElement).checked).toBe(true)
+    await act(async () => { first.resolve(state({ show_status_text: true })) })
+    expect((screen.getByRole('switch', { name: /Show status text/ }) as HTMLInputElement).checked).toBe(true)
+  })
+})
+
 describe('DashboardTab — sessions', () => {
+  it('a double click sends one sign-out', async () => {
+    let confirm!: (ok: boolean) => void
+    vi.mocked(confirmDialog).mockImplementationOnce(() => new Promise((res) => { confirm = res }))
+    await mount(state())
+    const btn = screen.getByRole('button', { name: 'Sign out all tablets' }) as HTMLButtonElement
+    fireEvent.click(btn)
+    fireEvent.click(btn)
+    await waitFor(() => expect(btn.disabled).toBe(true))
+    await act(async () => { confirm(true) })
+    await waitFor(() => expect(btn.disabled).toBe(false))
+    expect(confirmDialog).toHaveBeenCalledTimes(1)
+    expect(mDelete).toHaveBeenCalledTimes(1)
+  })
+
+  it('describes switches with their hint, outside the name', async () => {
+    await mount(state())
+    const sw = screen.getByRole('switch', { name: 'Keep screen on' })
+    expect(document.getElementById(sw.getAttribute('aria-describedby')!)?.textContent)
+      .toMatch(/going to sleep/)
+  })
+
   it('shows when a tablet last opened it', async () => {
     await mount(state({ last_seen_at: new Date(Date.now() - 5 * 60_000).toISOString() }))
     expect(screen.getByText(/Last opened on a tablet: 5 min ago/)).toBeTruthy()
