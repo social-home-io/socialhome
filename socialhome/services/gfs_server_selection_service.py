@@ -124,6 +124,8 @@ class GfsServerSelectionService:
         "_locks",
         "_change_locks",
         "_channel_hook",
+        "_withdraw_hook",
+        "_dropped",
     )
 
     def __init__(
@@ -157,11 +159,37 @@ class GfsServerSelectionService:
         #: (:meth:`GfsChannelService.on_servers_changed`). Returns the
         #: connection ids a channel could not be registered on.
         self._channel_hook: Callable[[str], Awaitable[set[str]]] | None = None
+        #: Called with the connection ids a private space's channel servers
+        #: just LOST (dropped from the owner's choice, or the option turned
+        #: off): the channel service unregisters the channel there. Taken
+        #: from the stored list itself — not from memory — so it holds
+        #: across a restart (:meth:`GfsChannelService.withdraw`).
+        self._withdraw_hook: Callable[[str, list[str]], Awaitable[object]] | None = None
+        #: space id → connection ids dropped by the last stored list, until
+        #: the withdrawal ran (:meth:`_flush_withdrawals`).
+        self._dropped: dict[str, list[str]] = {}
 
     def attach_channel_hook(self, hook: Callable[[str], Awaitable[set[str]]]) -> None:
         """Wire the private-channel follow-up of a change of the owner's
         channel servers."""
         self._channel_hook = hook
+
+    def attach_withdraw_hook(
+        self, hook: Callable[[str, list[str]], Awaitable[object]]
+    ) -> None:
+        """Wire the channel withdrawal from servers a private space lost."""
+        self._withdraw_hook = hook
+
+    async def _flush_withdrawals(self, space_id: str) -> None:
+        """Run the withdrawal for the servers *space_id*'s last stored list
+        dropped, fail-soft."""
+        dropped = self._dropped.pop(space_id, [])
+        if not dropped or self._withdraw_hook is None:
+            return
+        try:
+            await self._withdraw_hook(space_id, dropped)
+        except Exception:
+            log.exception("space %s: channel withdrawal failed", space_id)
 
     def attach_identity(self, *, own_instance_id: str, own_signing_key: bytes) -> None:
         """The household's instance id and Ed25519 identity seed — the key
@@ -190,6 +218,7 @@ class GfsServerSelectionService:
         async with _space_lock(self._locks, space_id):
             changed = await self._sync_locked(space_id)
         if changed:
+            await self._flush_withdrawals(space_id)
             space = await self._spaces.get(space_id)
             if space is not None and is_channel_space(space):
                 await self._channels_changed(space_id)
@@ -263,6 +292,7 @@ class GfsServerSelectionService:
         servers_json = canonical_json(gfs_servers_to_wire(servers))
         if current is not None and current.servers_json == servers_json:
             return False
+        await self._note_dropped(space_id, current, servers)
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         issued_at = max(now_ms, current.issued_at + 1 if current else 0)
         if issued_at > now_ms + MAX_STATEMENT_FUTURE_SKEW_MS:
@@ -324,6 +354,32 @@ class GfsServerSelectionService:
                 dropped - overflow,
             )
         return servers or ()
+
+    async def _note_dropped(
+        self,
+        space_id: str,
+        current: SignedGfsServerList | None,
+        servers: tuple[GfsServer, ...],
+    ) -> None:
+        """For a PRIVATE space: remember which of our connections the old
+        list named and the new one does not, so the channel is withdrawn
+        there once the new list is stored. Read from the signed list itself,
+        never from memory, so a restart in between loses nothing."""
+        if current is None:
+            return
+        space = await self._spaces.get(space_id)
+        if space is None or space.space_type is not SpaceType.PRIVATE:
+            return
+        kept = {s.public_key.lower() for s in servers}
+        dropped = [
+            c.id
+            for c in connections_on_list(
+                current, await self._gfs.list_all(), include_inactive=True
+            )
+            if c.public_key.lower() not in kept
+        ]
+        if dropped:
+            self._dropped[space_id] = dropped
 
     def _entries_of(
         self, space_id: str, conns: list[GfsConnection]
@@ -465,6 +521,7 @@ class GfsServerSelectionService:
             await self._store_locked(
                 space.id, current.gfs_servers, self._entries_of(space.id, conns)
             )
+        await self._flush_withdrawals(space.id)
         failed = await self._channels_changed(space.id)
         return GfsSelectionOutcome(
             listed=tuple(g for g in gfs_ids if g not in failed),

@@ -1940,3 +1940,67 @@ async def test_handle_direct_failed_defers_only_a_capacity_answer_from_our_provi
         ),
     )
     svc._bus.publish.assert_not_awaited()
+
+
+def _refusing_manager(reason: str) -> MagicMock:
+    manager = MagicMock()
+    manager.begin_session = AsyncMock(
+        return_value=SimpleNamespace(
+            accepted=False,
+            next_event=FederationEventType.SPACE_SYNC_DIRECT_FAILED,
+            next_payload={"sync_id": "s", "reason": reason},
+        ),
+    )
+    return manager
+
+
+@pytest.mark.parametrize(
+    "reason", ["rate_limited", "too_many_sessions", "node_capacity"]
+)
+async def test_a_refused_begin_sends_no_signalling_to_an_invite_link_household(
+    svc, reason
+):
+    """A household seated from an invite link refuses every direct-sync
+    signalling event by design (``SPACE_SESSION_ALLOWED_EVENT_TYPES``) — a
+    capacity refusal sent as ``SPACE_SYNC_DIRECT_FAILED`` only bounced off its
+    peer-class step (a WARNING on its side, nothing learned). Not sent: it
+    asks again on its next sync."""
+    svc._sync_manager = _refusing_manager(reason)
+    with (
+        patch.object(
+            FederationService,
+            "is_space_session_peer",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch.object(
+            FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+        ) as send,
+    ):
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN", {"sync_id": "s", "space_id": "sp"}, space_id="sp"
+            )
+        )
+    send.assert_not_awaited()
+
+
+async def test_a_refused_begin_still_reaches_a_paired_household(svc):
+    svc._sync_manager = _refusing_manager("rate_limited")
+    with (
+        patch.object(
+            FederationService,
+            "is_space_session_peer",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch.object(
+            FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+        ) as send,
+    ):
+        await svc._handle_space_sync_begin(
+            _event(
+                "SPACE_SYNC_BEGIN", {"sync_id": "s", "space_id": "sp"}, space_id="sp"
+            )
+        )
+    send.assert_awaited_once()

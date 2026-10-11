@@ -3424,6 +3424,23 @@ class FederationService:
                 # to the S-1 silent drop (the member still reconciles via the
                 # normal SPACE_DISSOLVED broadcast / outbox).
                 return
+            if (
+                decision.next_event is FederationEventType.SPACE_SYNC_DIRECT_FAILED
+                and await self.is_space_session_peer(event.from_instance)
+            ):
+                # A household seated from an invite link refuses every
+                # direct-sync signalling event by design (§D2b: the pair
+                # never negotiates a direct connection), so this refusal
+                # would only bounce off its peer-class step. Nothing is sent;
+                # it asks again on its next sync.
+                log.info(
+                    "sync %s: BEGIN from invite-link household %s refused (%s) — "
+                    "no DIRECT_FAILED sent (closed to it); it asks again later",
+                    sync_id,
+                    event.from_instance,
+                    (decision.next_payload or {}).get("reason") or "refused",
+                )
+                return
             # A mesh-only requester is not a CONFIRMED peer, so a bare
             # ``send_event`` here is silence — and silence is exactly what
             # makes a requester retry into the rate limit forever. Route

@@ -918,8 +918,15 @@ only) posts; e receives it over B. Asserts B saw only anonymous
 ``/gfs/channels/publish-anon`` requests (never the identified route), holds
 no ``client_instances`` row for d, and its log and database never name the
 space (id, name, authority key hex / base64url), d or the text. Clean-up: a
-and d restart normally, e reconnects to A. ``verify`` checks d's two-server
+and d restart normally — e back on A first (its relay route to a runs
+through A), then a until it caught d's post up, then d once its own
+host-return catch-up settled, so no sync is cut off mid-way. A
+failed run brings a and d back up, puts e back on A and dissolves the space it
+created, so the next run starts clean. ``verify`` checks d's two-server
 list, e's copy of the post and that B's database never names the space.
+``gfs-multi-listing`` waits out a full ``/api/pairing/*`` bucket (HTTP 429,
+``Retry-After`` or a bounded backoff) when it pairs a ↔ d soon after
+``pair``, and waits for e's socket after re-pairing it with A.
 
 ### ``gfs-fallback-switch`` — the GFS fallback for an existing pair (v_54)
 

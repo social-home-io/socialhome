@@ -1460,3 +1460,79 @@ async def test_channels_hook_failure_is_soft(owner_env):
     env.svc.attach_channel_hook(_boom)
     outcome = await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
     assert outcome.listed == ("g1",)
+
+
+def _withdrawals(env: _Env) -> list[tuple[str, list[str]]]:
+    calls: list[tuple[str, list[str]]] = []
+
+    async def _hook(space_id: str, gfs_ids: list[str]) -> None:
+        calls.append((space_id, list(gfs_ids)))
+        env.log.append(f"withdraw:{','.join(gfs_ids)}")
+
+    env.svc.attach_withdraw_hook(_hook)
+    return calls
+
+
+async def test_dropping_a_channel_server_withdraws_the_channel_there_first(owner_env):
+    env = owner_env
+    await _channel_space(env)
+    await _connected(env, "g1", "g2")
+    _hooked(env)
+    calls = _withdrawals(env)
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1", "g2"])
+    assert calls == []
+    env.log.clear()
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    assert calls == [("sp-1", ["g2"])]
+    # Withdrawn before the channel follows the new choice.
+    assert env.log == ["event:gfs_servers_changed", "withdraw:g2", "channels:sp-1"]
+
+
+async def test_turning_the_option_off_withdraws_from_every_listed_server(owner_env):
+    """After a restart nothing is in memory: the servers to withdraw from
+    come from the stored signed list, read before it is signed empty."""
+    env = owner_env
+    await _channel_space(env)
+    await _connected(env, "g1", "g2")
+    _hooked(env)
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1", "g2"])
+    # "Restart": a fresh service over the same database.
+    env.svc = GfsServerSelectionService(
+        space_repo=env.spaces,
+        gfs_repo=env.gfs,
+        bus=env.bus,
+        user_repo=env.users,
+        gfs_connection_service=env.publisher,
+    )
+    env.svc.attach_identity(own_instance_id=OWN, own_signing_key=_KP.private_key)
+    calls = _withdrawals(env)
+    space = await env.spaces.get("sp-1")
+    await env.spaces.save(dataclasses.replace(space, features=SpaceFeatures()))
+    assert await env.svc.sync_snapshot("sp-1") is True
+    assert calls == [("sp-1", ["g1", "g2"])]
+    assert await _chosen_ids(env) == []
+
+
+async def test_a_global_listing_change_never_withdraws_a_channel(owner_env):
+    env = owner_env
+    await _owned_space(env)
+    await _connected(env, "g1")
+    calls = _withdrawals(env)
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=[])
+    assert calls == []
+
+
+async def test_a_failing_withdrawal_is_soft(owner_env):
+    env = owner_env
+    await _channel_space(env)
+    await _connected(env, "g1", "g2")
+    _hooked(env)
+
+    async def _boom(space_id, gfs_ids):
+        raise RuntimeError("down")
+
+    env.svc.attach_withdraw_hook(_boom)
+    await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1", "g2"])
+    outcome = await env.svc.set_servers("sp-1", actor_username="anna", gfs_ids=["g1"])
+    assert outcome.listed == ("g1",)

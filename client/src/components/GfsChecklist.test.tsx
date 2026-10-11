@@ -49,6 +49,18 @@ describe('GfsChecklist', () => {
     expect(legend).not.toContain('space.gfs_choice.legend')
   })
 
+  it('composes two clicks that land before the parent re-renders', () => {
+    // Both clicks fire in one tick: the second must build on the first's
+    // result, not on the stale ``selected`` prop, or a choice is dropped.
+    const onChange = vi.fn()
+    const { getByLabelText } = render(
+      <GfsChecklist name="t" choices={[A, B]} selected={['a', 'b']} onChange={onChange} />,
+    )
+    fireEvent.click(getByLabelText(/Town GFS/))
+    fireEvent.click(getByLabelText(/Club GFS/))
+    expect(onChange.mock.calls).toEqual([[['b']], [[]]])
+  })
+
   it('adds and removes ids through onChange', () => {
     const onChange = vi.fn()
     const { getByLabelText, rerender } = render(

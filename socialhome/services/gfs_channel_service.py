@@ -687,6 +687,34 @@ class GfsChannelService:
 
             await self._keyed(conn, _unregister)
 
+    async def withdraw(self, space_id: str, gfs_ids: list[str]) -> int:
+        """The owner's stored channel list just dropped these connections
+        (taken from the signed list, so it holds across a restart): unregister
+        the space's channel on each one that is still an active connection —
+        before the option-off retire, which by then sees an empty choice.
+        Owner only, seed matching; returns how many were asked. Never
+        raises."""
+        try:
+            space = await self._spaces.get(space_id)
+            if space is None or space.owner_instance_id != self._own_instance_id:
+                return 0
+            found = await self._channel_seed(space)
+            if found is None:
+                return 0
+            conns = [
+                c for c in await self._conn_repo.list_active() if c.id in set(gfs_ids)
+            ]
+            if not conns:
+                return 0
+            await self._unregister_on(found[0], found[1], conns)
+            self._registered.get(found[0], set()).difference_update(
+                c.gfs_instance_id for c in conns
+            )
+            return len(conns)
+        except Exception:
+            log.exception("gfs.channel: withdrawing the channel failed")
+            return 0
+
     async def on_servers_changed(self, space_id: str) -> set[str]:
         """The owner changed a private space's channel servers (its signed
         list — already stored and on its way to the members): withdraw the
@@ -977,11 +1005,40 @@ class GfsChannelService:
                     if c.gfs_instance_id in confirmed
                 )
             )
-        latest = await self._keys.get_latest(space.id)
-        if latest is None:
-            return ()
-        grant = await self.own_grant(space.id, latest.epoch)
+        grant = await self._delegate_grant(space.id)
         return grant.gfs_ids if grant is not None else ()
+
+    async def _delegate_grant(self, space_id: str) -> GfsChannelGrant | None:
+        """A delegated admin's newest grant for the space's channel: the one
+        for our latest epoch, else the newest stored below it — a seed
+        holder never grants itself, so right after its OWN rotation it holds
+        no grant for the new epoch, yet must still announce it to the
+        channel's servers."""
+        latest = await self._keys.get_latest(space_id)
+        if latest is None:
+            return None
+        grant = await self.own_grant(space_id, latest.epoch)
+        if grant is not None:
+            return grant
+        found = await self._keys.latest_gfs_channel_before(space_id, latest.epoch)
+        if found is None:
+            return None
+        return await self.own_grant(space_id, found[0])
+
+    async def _notice_targets(self, space: "Space") -> list[GfsConnection]:
+        """Where an epoch notice goes. The OWNER: its own registered
+        connections the channel lives on. A delegated admin (v_57): every
+        chosen channel server its grant names, including ones it never
+        connected to (a listing target, proof-checked) — the notice is
+        channel-key signed and names no household, so it may go anywhere a
+        member's anonymous item goes; otherwise, while the owner is offline,
+        a server the admin never joined would refuse the new epoch."""
+        if space.owner_instance_id == self._own_instance_id:
+            return await self._capable_in(await self._channel_gfs_ids(space))
+        grant = await self._delegate_grant(space.id)
+        if grant is None:
+            return []
+        return await self._anon_targets(space.id, grant)
 
     async def announce_epoch(self, space_id: str, *, only: str | None = None) -> int:
         """Tell the channel's servers the current content epoch (and mode,
@@ -1000,7 +1057,7 @@ class GfsChannelService:
             space_id=space_id, event_type=_KIND_NOTICE, payload={"epoch": epoch}
         )
         done = 0
-        for conn in await self._capable_in(await self._channel_gfs_ids(space)):
+        for conn in await self._notice_targets(space):
             if only is not None and conn.id != only:
                 continue
             if await self._first_attempt(conn, item):
@@ -1015,8 +1072,7 @@ class GfsChannelService:
             return PublishOutcome.permanent()
         seed = await self._matching_seed(space)
         found = await self._channel_seed(space)
-        client = self._gfs.publish_client()
-        if seed is None or found is None or client is None:
+        if seed is None or found is None:
             return PublishOutcome.permanent()
         channel_id, channel_seed = found
         # The wire epoch: content epoch + the channel's secret offset.
@@ -1039,9 +1095,17 @@ class GfsChannelService:
             publish_mode=space.features.gfs_publish_mode,
             writer_key_cert=wkc,
         ).to_wire()
-        outcome, held = await self._post_reading(
-            client, f"{conn.inbox_url}{CHANNEL_EPOCH_ROUTE}", body, conn
-        )
+        try:
+            # Anonymous: the shared cookie-less session, or a listing
+            # target's own pinned one (a delegated admin's notice, v_57).
+            async with self._gfs.anon_session(conn) as client:
+                if client is None:
+                    return PublishOutcome.permanent()
+                outcome, held = await self._post_reading(
+                    client, f"{conn.inbox_url}{CHANNEL_EPOCH_ROUTE}", body, conn
+                )
+        except OutboundFetchRefused as exc:
+            return refusal_outcome(exc)
         if (
             held is None
             or space.owner_instance_id != self._own_instance_id
@@ -1810,13 +1874,20 @@ class GfsChannelService:
         return await self._send(conn, item)
 
     async def _retry_listing(self, conn_id: str, item: GfsPublish) -> PublishOutcome:
-        """One retry to a LISTING target (v_57): only an anonymous item, only
-        while the owner's list still names that server and the item's grant
-        still names it — re-resolved now, so a server the owner dropped gets
-        nothing more. Capability unknown waits; a verdict of "no" drops."""
-        if item.event_type != _KIND_ANON:
+        """One retry to a LISTING target (v_57): only an anonymous item or a
+        delegated admin's notice, only while the owner's list still names
+        that server and the grant still names it — re-resolved now, so a
+        server the owner dropped gets nothing more. Capability unknown
+        waits; a verdict of "no" drops."""
+        if item.event_type == _KIND_NOTICE:
+            space = await self._spaces.get(item.space_id)
+            if space is None or space.owner_instance_id == self._own_instance_id:
+                return PublishOutcome.permanent()
+            grant = await self._delegate_grant(item.space_id)
+        elif item.event_type == _KIND_ANON:
+            grant = await self.own_grant(item.space_id, int(item.payload["epoch"]))
+        else:
             return PublishOutcome.permanent()
-        grant = await self.own_grant(item.space_id, int(item.payload["epoch"]))
         if grant is None:
             return PublishOutcome.permanent()
         candidates = await self._anon_candidates(item.space_id, grant) or []

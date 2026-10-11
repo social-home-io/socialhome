@@ -1543,3 +1543,113 @@ async def test_a_refused_listing_address_is_classified(env):
         unconnected, SPACE_ID, {"epoch": 3, "payload": "eA"}, anon=True
     )
     assert outcome.kind == "permanent"
+
+
+# ── v_57: a delegated admin's notices reach every chosen channel server ──
+
+
+async def _delegated_admin(env) -> GfsConnection:
+    """The member ``other`` is a delegated admin (holds the space seed) with
+    a grant; returns a chosen channel server it never connected to."""
+    await _channel_ready(env)
+    await _hand_grants(env, env.other)
+    env.other.spaces.seeds[SPACE_ID] = env.space_seed
+    unconnected = _unconnected(env, env.other)
+    env.other.gfs.targets = [env.other.svc._conn_repo.conn, unconnected]
+    env.other.gfs.sent = []
+    return unconnected
+
+
+@pytest.mark.security
+async def test_a_delegated_admins_notice_reaches_unconnected_channel_servers(env):
+    unconnected = await _delegated_admin(env)
+    assert await env.other.svc.announce_epoch(SPACE_ID) == 2
+    assert len(env.other.gfs.sent) == 1
+    url, body = env.other.gfs.sent[0]
+    assert url.endswith("/gfs/channels/epoch")
+    # Channel-key signed — nothing names the admin's household or the space.
+    for field_name in ("instance_id", "signature", "space_id"):
+        assert field_name not in body
+    assert env.other.h.instance_id not in str(body)
+    assert SPACE_ID not in str(body)
+    # Only to servers the grant names.
+    env.other.gfs.sent = []
+    stranger = _unconnected(env, env.other, gfs_instance_id="gfs-not-named")
+    env.other.gfs.targets = [env.other.svc._conn_repo.conn, stranger]
+    assert await env.other.svc.announce_epoch(SPACE_ID) == 1
+    assert env.other.gfs.sent == []
+    assert unconnected.id
+
+
+async def test_a_delegated_admin_announces_after_its_own_rotation(env):
+    """A seed holder never grants itself: right after its own rotation it
+    holds no grant for the new epoch, and still announces it — using the
+    channel servers its newest grant names."""
+    await _delegated_admin(env)
+    env.other.keys.epoch = 4
+    grant = await env.other.svc._delegate_grant(SPACE_ID)
+    assert grant is not None and grant.epoch == 3
+    space = env.other.spaces.spaces[SPACE_ID]
+    assert await env.other.svc._channel_gfs_ids(space)
+    # Both servers are told (the GFS answers 429 to a second epoch within a
+    # minute; the retry queue lands it later).
+    assert len(await env.other.svc._notice_targets(space)) == 2
+
+
+async def test_the_owners_notice_stays_on_its_registered_servers(env):
+    await _channel_ready(env)
+    env.owner.gfs.targets = [
+        env.owner.svc._conn_repo.conn,
+        _unconnected(env, env.owner),
+    ]
+    env.owner.gfs.sent = []
+    assert await env.owner.svc.announce_epoch(SPACE_ID) == 1
+    assert env.owner.gfs.sent == []
+
+
+async def test_a_delegated_admins_notice_retry_to_an_unconnected_server(env):
+    unconnected = await _delegated_admin(env)
+    item = chan_mod.GfsPublish(
+        space_id=SPACE_ID, event_type=chan_mod._KIND_NOTICE, payload={"epoch": 3}
+    )
+    svc, gfs = env.other.svc, env.other.gfs
+    assert (await svc._retry_send(unconnected.id, item)).kind == "delivered"
+    gfs.targets = [svc._conn_repo.conn]
+    assert (await svc._retry_send(unconnected.id, item)).kind == "permanent"
+    # The owner's notice never goes to a listing target.
+    owner_unconnected = _unconnected(env, env.owner)
+    env.owner.gfs.targets = [env.owner.svc._conn_repo.conn, owner_unconnected]
+    assert (
+        await env.owner.svc._retry_send(owner_unconnected.id, item)
+    ).kind == "permanent"
+
+
+async def test_a_refused_notice_address_is_classified(env):
+    unconnected = await _delegated_admin(env)
+
+    @asynccontextmanager
+    async def refused(conn):
+        raise OutboundFetchRefused("dns")
+        yield  # pragma: no cover
+
+    env.other.gfs.anon_session = refused  # type: ignore[method-assign]
+    outcome = await env.other.svc._post_notice(unconnected, SPACE_ID, {"epoch": 3})
+    assert outcome.kind == "transient"
+
+
+async def test_withdraw_unregisters_after_a_restart(env):
+    """Option off after a restart: no registration is in memory and the
+    owner's list is already signed empty — the ids the selection service
+    read from the stored list still reach the server."""
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    env.owner.svc._registered.clear()  # a restart forgets every confirmation
+    _choose(env, env.owner)  # the list is signed empty
+    repo = env.app[gfs_channel_repo_key]
+    assert await env.owner.svc.withdraw(SPACE_ID, ["conn-elsewhere"]) == 0
+    assert await repo.get(channel_id) is not None
+    assert await env.owner.svc.withdraw(SPACE_ID, ["conn-1"]) == 1
+    assert await repo.get(channel_id) is None
+    # Members and spaces we do not own: nothing.
+    assert await env.member.svc.withdraw(SPACE_ID, ["conn-1"]) == 0
+    assert await env.owner.svc.withdraw("nope", ["conn-1"]) == 0

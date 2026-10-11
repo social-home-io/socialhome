@@ -262,3 +262,78 @@ def test_private_channel_multi_check_flags_what_went_missing(
     failures.clear()
     harness._check_private_channel_multi(state, failures)
     assert failures == ["GFS B: its database names the private space"]
+
+
+def test_retry_after_honours_the_header_else_the_fallback(harness):
+    assert harness._retry_after_s({"Retry-After": "7"}, 10.0) == 7.0
+    assert harness._retry_after_s({"retry-after": "0"}, 10.0) == 1.0
+    assert harness._retry_after_s({"Retry-After": "soon"}, 10.0) == 10.0
+    assert harness._retry_after_s({}, 12.0) == 12.0
+
+
+def test_as_patient_retries_the_same_call_on_429(harness, monkeypatch):
+    answers = [
+        (429, {"error": "x"}, {"Retry-After": "3"}),
+        (429, {"error": "x"}, {}),
+        (200, {"ok": True}, {}),
+    ]
+    calls: list[tuple[str, object]] = []
+    slept: list[float] = []
+
+    def fake(url, *, token=None, method="GET", body=None, timeout=15.0):
+        calls.append((method, body))
+        return answers.pop(0)
+
+    monkeypatch.setattr(harness, "_request_with_headers", fake)
+    monkeypatch.setattr(harness.time, "sleep", slept.append)
+    state = {"instances": {"a": {"port": 1, "token": "t"}}}
+    st, body = harness._as_patient(state, "a", "POST", "/api/pairing/confirm", {"k": 1})
+    assert (st, body) == (200, {"ok": True})
+    assert calls == [("POST", {"k": 1})] * 3
+    assert slept == [3.0, 20.0]  # Retry-After, then the doubled backoff
+
+
+def test_as_patient_gives_up_within_its_budget(harness, monkeypatch):
+    monkeypatch.setattr(
+        harness,
+        "_request_with_headers",
+        lambda *a, **k: (429, {"error": "x"}, {"Retry-After": "60"}),
+    )
+    monkeypatch.setattr(harness.time, "sleep", lambda s: None)
+    state = {"instances": {"a": {"port": 1, "token": "t"}}}
+    st, _ = harness._as_patient(state, "a", "POST", "/x", budget_s=30.0)
+    assert st == 429
+
+
+def test_a_failed_private_channel_multi_run_cleans_up(harness, monkeypatch):
+    state = {
+        "instances": {
+            "a": {"pid": 1, "port": 1, "token": "t"},
+            "d": {"pid": 2, "port": 2, "token": "t"},
+        },
+        "gfs": {"pairings": {}},
+    }
+    monkeypatch.setattr(harness, "_alive", lambda pid: pid == 2)
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        harness, "_spawn", lambda label, port: spawned.append(label) or 99
+    )
+    monkeypatch.setattr(harness, "_wait_ready", lambda port: {})
+    monkeypatch.setattr(harness, "_save", lambda s: None)
+    monkeypatch.setattr(
+        harness,
+        "_gfs_connection_to",
+        lambda st, label, url: {"id": "c", "gfs_instance_id": "g", "status": "active"},
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        harness,
+        "_as",
+        lambda st, label, method, path, body=None: (
+            deleted.append(f"{method} {path}") or (200, {})
+        ),
+    )
+    harness._undo_private_channel_multi(state, {"space_id": "sp-9"})
+    assert spawned == ["a"]  # d was still running
+    assert deleted == ["DELETE /api/spaces/sp-9"]
+    assert state["gfs"]["pairings"]["e"]["id"] == "c"

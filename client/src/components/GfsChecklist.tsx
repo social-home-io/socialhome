@@ -8,6 +8,7 @@
  * screen-reader use come for free. Controlled: ``selected`` + ``onChange``.
  */
 import type { JSX } from 'preact'
+import { useRef } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 
 /** One active GFS connection the owner can list the space on. */
@@ -73,10 +74,17 @@ export function GfsChecklist({
 }): JSX.Element {
   const errorId = `${name}-error`
   const atMax = selected.length >= max
+  // The newest selection, ahead of the parent's re-render: two clicks in
+  // one tick each build on the previous one's result (a functional update)
+  // instead of on the stale ``selected`` prop, so neither is dropped.
+  const latest = useRef(selected)
+  latest.current = selected
   const toggle = (id: string, on: boolean) => {
+    const prev = latest.current
     const next = on
-      ? [...selected.filter(s => s !== id), id]
-      : selected.filter(s => s !== id)
+      ? [...prev.filter(s => s !== id), id]
+      : prev.filter(s => s !== id)
+    latest.current = next
     onChange(next)
   }
   return (

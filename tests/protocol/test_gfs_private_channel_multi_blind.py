@@ -515,3 +515,22 @@ async def test_dropping_a_server_withdraws_the_channel_there(world):
     raw = await world.owner.channels.grant_for_peer(SPACE_ID, world.a.h.instance_id)
     assert raw["gfs_ids"] == ["gfs-a"]
     assert _to(world, "c") == []
+
+
+async def test_a_delegated_admins_notice_reaches_b_anonymously(world):
+    """A delegated admin (seed holder) connected to A only announces the
+    epoch to B too — channel-key signed, over the anonymous session; B
+    still never learns the admin's household or the space, and C nothing."""
+    await _setup(world)
+    world.a.spaces.seed = SPACE_SEED
+    world.log.clear()
+    assert await world.a.channels.announce_epoch(SPACE_ID) == 2
+    to_b = _to(world, "b")
+    assert [u.rsplit("/", 1)[-1] for _m, u, _b, _k in to_b] == ["epoch"]
+    for _method, _url, body, kind in to_b:
+        assert kind == "anonymous"
+        text = json.dumps(body, sort_keys=True)
+        assert world.a.h.instance_id not in text
+        assert SPACE_ID not in text
+        assert "instance_id" not in body
+    assert _to(world, "c") == []

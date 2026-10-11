@@ -2315,6 +2315,12 @@ prove `private_channels` is refused (`422 GFS_SELECTION_INVALID`, reason
   suspended connection stays chosen.
 - **Option off:** the list is re-signed empty and the channel retires as
   before.
+- **Withdrawal survives a restart:** the servers to unregister the channel
+  from are read from the stored signed list as it is replaced (old list
+  minus new, or every listed server when the option goes off) — never
+  from in-memory registrations — so an owner that restarted in between
+  still withdraws everywhere the channel lived
+  (`GfsChannelService.withdraw`).
 
 **Members send to every chosen server.** The members get the list in the
 encrypted `space_meta` like any owner list. A member holding the channel
@@ -2331,6 +2337,15 @@ offline. The identified channel publish (an older member, trusted mode,
 channel cert) and the seat subscribe go only to servers the household is
 registered on. A retry to a listing target is re-resolved first: a server
 the owner dropped, or the grant no longer names, gets nothing more.
+
+**Delegated admins announce everywhere too.** A delegated admin's channel
+epoch notice is channel-key signed and names no household, so (v_57) it goes
+to every chosen channel server its grant names — its own connections and,
+over the same proof-checked pinned session, the ones it never connected to —
+so a rotation it makes while the owner is offline reaches a server it never
+joined. Right after its own rotation it holds no grant for the new epoch (a
+seed holder never grants itself) and uses its newest stored grant. The
+owner's notices stay on its own registered connections.
 
 **The writer key is pinned in every mode.** Since v_57 the owner's channel
 notice carries `writer_key_cert` in trusted mode too, so the anonymous path
