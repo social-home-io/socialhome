@@ -21,8 +21,9 @@
  *   - night mode: a tap shows the normal page for 60 s;
  *   - household messages ([data-say]): a tap reads one aloud with the
  *     browser's speech synthesis in the page language — never on its
- *     own, one at a time, a second tap stops it; without a voice for the
- *     language there is no 🔊 and a tap does nothing.
+ *     own, one at a time, a second tap stops it; only an on-device voice
+ *     for the language is used (the text never leaves the tablet) —
+ *     without one there is no 🔊 and a tap does nothing.
  */
 (function () {
   "use strict";
@@ -296,6 +297,11 @@
     var exact = null;
     var near = null;
     voices.forEach(function (v) {
+      // On-device voices only: a remote one (Chrome's "Google …") would
+      // send the message text off the tablet.
+      if (!v || v.localService !== true) {
+        return;
+      }
       var code = String(v.lang || "").toLowerCase().replace("_", "-");
       if (!exact && code === lang) {
         exact = v;
@@ -350,12 +356,18 @@
 
   if (synth) {
     updateVoice();
-    // Voices often load after the page does.
+    // Voices often load after the page does (older engines only know the
+    // handler property); look once more after a second either way.
     if (synth.addEventListener) {
       synth.addEventListener("voiceschanged", updateVoice);
+    } else {
+      synth.onvoiceschanged = updateVoice;
     }
+    window.setTimeout(updateVoice, 1000);
+    // Leaving the page stops it — and forgets it, so a page restored
+    // from the back/forward cache shows no stale 🔊.
     window.addEventListener("pagehide", function () {
-      synth.cancel();
+      stopSpeaking();
     });
   }
 
@@ -375,7 +387,14 @@
     try {
       utterance.voice = voice;
     } catch (e) {
-      // Not a SpeechSynthesisVoice (an odd engine): lang picks one.
+      // Can't pin the on-device voice: the engine might pick a remote
+      // default — don't speak at all.
+      stopSpeaking();
+      return;
+    }
+    if (utterance.voice !== voice) {
+      stopSpeaking();
+      return;
     }
     // A cancelled utterance reports its end late: only the current one
     // may clear the 🔊.

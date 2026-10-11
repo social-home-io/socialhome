@@ -3425,7 +3425,7 @@
   "admin.dashboard.display.status_text": "Statustext anzeigen",
   "admin.dashboard.display.status_text_hint": "Wenn aus, wird nur das Status-Emoji jeder Person angezeigt.",
   "admin.dashboard.display.messages": "Haushaltsnachrichten anzeigen",
-  "admin.dashboard.display.messages_hint": "Zeigt die letzten 3 Nachrichten aus dem Haushaltschat (bis 6 Std. alt) auf der Startseite. Alle am Tablet können sie sehen. Das Tablet kann nicht bestätigen, dass eine Nachricht gelesen wurde – ruf an, wenn es dringend ist.",
+  "admin.dashboard.display.messages_hint": "Zeigt die letzten 3 Nachrichten aus dem Haushaltschat (bis 6 Std. alt) auf der Startseite und auf Seiten in Bilderansicht. Alle am Tablet können sie sehen. Das Tablet kann nicht bestätigen, dass eine Nachricht gelesen wurde – ruf an, wenn es dringend ist.",
   "admin.dashboard.display.messages_chat_off": "Schalte zuerst den Haushaltschat ein.",
   "admin.dashboard.sessions.last_seen": "Zuletzt auf einem Tablet geöffnet: {when}",
   "admin.dashboard.sessions.never": "Seit dem letzten Start von Social Home hat es kein Tablet geöffnet.",

@@ -108,11 +108,16 @@ class HouseholdChatService:
         return chat
 
     async def recent_messages(
-        self, *, since: datetime, senders: Collection[str], limit: int
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        senders: Collection[str],
+        limit: int,
     ) -> list[ConversationMessage]:
-        """The household chat's newest messages since ``since`` (newest
-        first, at most ``limit``) — only :data:`GLANCE_MESSAGE_TYPES`, only
-        from ``senders``, never a deleted one.
+        """The household chat's newest messages from ``since`` to ``until``
+        (newest first, at most ``limit``) — only :data:`GLANCE_MESSAGE_TYPES`,
+        only from ``senders``, never a deleted or blank one.
 
         Read-only on purpose (the household dashboard calls it): ``[]``
         while ``feat_household_chat`` is off or before the chat exists —
@@ -126,6 +131,7 @@ class HouseholdChatService:
         return await self._convos.list_recent_messages(
             chat.id,
             since=since,
+            until=until,
             types=GLANCE_MESSAGE_TYPES,
             senders=senders,
             limit=limit,

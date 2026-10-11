@@ -1542,9 +1542,18 @@ never moves anyone's read watermark — the tablet can't mark anything read
 (never the `summary` path, which reconciles). Only what a person writes or
 records counts: text (typed or dictated), photo, video, file and voice
 notes; location pins (no coordinates on the wall), call entries, deleted
-messages and anything from a hidden person stay out (filtered in SQL, then
-again in the snapshot). An edit shows its latest text; reactions, mentions
-and links are plain text. `dashboard/messages.py` turns each into a row —
+or blank messages, anything stamped more than two minutes ahead (shown
+only once it isn't in the future) and anything from a hidden person stay
+out (filtered in SQL, then again in the snapshot; a coarse `created_at`
+bound lets the `(conversation_id, created_at)` index narrow the scan
+before the exact `julianday` compare). Guardian blocks (§CP.F2) hold on
+the shared screen and fail closed: for every protected member (hidden
+ones too) the people a block separates them from never appear, and
+neither does the protected member while one of those people is shown —
+the chat already hides them from each other, and either could be the
+one standing at the wall; if the blocks can't be read, no message shows.
+An edit shows its latest text; captions of media aren't shown;
+reactions, mentions and links are plain text. `dashboard/messages.py` turns each into a row —
 media as "📷 Photo" / "🎬 Video" / "📎 File", a voice note as its
 transcript or "🎤 Voice message", "new" + "4 min ago" for one under 15
 minutes, else its clock time — and the sentence tap-to-speak reads
@@ -1594,10 +1603,16 @@ A person page returns Home after `idle_return_minutes` without a touch.
 A household message is a `<button>`: a tap reads its `data-say` with the
 browser's `speechSynthesis` in the page language — only on a tap, one
 utterance at a time, a second tap stops it, a swap that drops the message
-(deleted) stops it too; a static 🔊 badge shows while it speaks (on a picture tile only then — the tile itself is the affordance). Only
-where the browser has a voice for the language does the script add the
-"Read aloud" description and the 🔊 affordance; elsewhere the message is
-still shown and a tap does nothing.
+(deleted, pushed out or aged out) stops it too, and so does leaving the
+page; a static 🔊 badge shows while it speaks (on a picture tile only
+then — the tile itself is the affordance). Speech never leaves the
+tablet: only an on-device voice (`localService`) for the page language
+is used — never a remote one such as Chrome's "Google …" voices — and an
+utterance whose voice can't be pinned isn't spoken (the engine could
+fall back to a remote default). Only where such a voice exists (checked
+again when voices load late) does the script add the "Read aloud"
+description and the 🔊 affordance; elsewhere the message is still shown
+and a tap does nothing.
 That return and the midnight reload first probe the server and, while it
 can't be reached, keep the last page and the ticking clock (retrying).
 With `keep_screen_on` the Screen Wake Lock is requested and re-acquired

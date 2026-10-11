@@ -3461,7 +3461,7 @@
   "admin.dashboard.display.status_text": "Show status text",
   "admin.dashboard.display.status_text_hint": "When off, only each person's status emoji is shown.",
   "admin.dashboard.display.messages": "Show household messages",
-  "admin.dashboard.display.messages_hint": "Shows the last 3 household-chat messages (up to 6 h) on Home. Anyone at the tablet can see them. The tablet can't confirm a message was read — call if it's urgent.",
+  "admin.dashboard.display.messages_hint": "Shows the last 3 household-chat messages (up to 6 h) on Home and on picture-view pages. Anyone at the tablet can see them. The tablet can't confirm a message was read — call if it's urgent.",
   "admin.dashboard.display.messages_chat_off": "Turn on household chat first.",
   "admin.dashboard.sessions.last_seen": "Last opened on a tablet: {when}",
   "admin.dashboard.sessions.never": "No tablet has opened it since Social Home last started.",

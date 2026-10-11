@@ -1059,9 +1059,33 @@ def test_dashboard_js_speaks_only_on_a_tap():
     assert "synth.speak(utterance)" in click and "synth.cancel()" in click
     assert "voice === null" in click  # no voice → a tap does nothing
     assert 'getAttribute("data-say")' in click
-    # Leaving the page stops it; a swap that drops the message stops it.
-    assert 'addEventListener("pagehide"' in js
+    # Leaving the page stops it (and forgets it, for a back/forward
+    # restore); a swap that drops the message stops it.
+    hide = js[js.index('addEventListener("pagehide"') :]
+    assert "stopSpeaking()" in hide[: hide.index("});")]
     assert "sayAfterSwap();" in js[js.index("function swap(") :]
+
+
+def test_dashboard_js_speaks_only_with_an_on_device_voice():
+    """Message text never leaves the tablet: only a local voice for the
+    page language counts (Chrome's "Google …" voices are remote); none →
+    voice stays null → no 🔊, no description, a tap does nothing. A voice
+    that can't be assigned means not speaking (the engine could otherwise
+    pick a remote default)."""
+    js = RENDERER.static_asset("dashboard.js").body.decode()
+    find = js[js.index("function findVoice()") :]
+    find = find[: find.index("\n  }\n")]
+    assert "v.localService !== true" in find
+    assert "return null" in find
+    click = js[js.index('addEventListener("click", function (event) {\n    var el') :]
+    click = click[: click.index("\n  });")]
+    assign = click[click.index("utterance.voice = voice") :]
+    assert "catch" in assign and "return;" in assign[: assign.index("synth.speak(")]
+    assert "utterance.voice !== voice" in click
+    # Voices that load late are picked up without addEventListener too,
+    # and once more after a second.
+    assert "synth.onvoiceschanged = updateVoice" in js
+    assert "window.setTimeout(updateVoice, 1000)" in js
 
 
 def test_dashboard_js_never_leaves_the_page_while_offline():

@@ -3425,7 +3425,7 @@
   "admin.dashboard.display.status_text": "Statustekst tonen",
   "admin.dashboard.display.status_text_hint": "Als dit uit staat, zie je alleen de status-emoji van iedereen.",
   "admin.dashboard.display.messages": "Huishoudberichten tonen",
-  "admin.dashboard.display.messages_hint": "Toont de laatste 3 berichten uit de huishoudchat (tot 6 uur oud) op Home. Iedereen bij de tablet kan ze zien. De tablet kan niet bevestigen dat een bericht is gelezen — bel als het dringend is.",
+  "admin.dashboard.display.messages_hint": "Toont de laatste 3 berichten uit de huishoudchat (tot 6 uur oud) op Home en op pagina's in plaatjesweergave. Iedereen bij de tablet kan ze zien. De tablet kan niet bevestigen dat een bericht is gelezen — bel als het dringend is.",
   "admin.dashboard.display.messages_chat_off": "Zet eerst de huishoudchat aan.",
   "admin.dashboard.sessions.last_seen": "Laatst geopend op een tablet: {when}",
   "admin.dashboard.sessions.never": "Geen tablet heeft het geopend sinds Social Home voor het laatst is gestart.",

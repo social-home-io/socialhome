@@ -40,6 +40,7 @@ from .base import (
     rows_to_dicts,
     sync_page_cursor,
 )
+from ..utils.datetime import as_utc
 from .cp_repo import guardian_block_counterparts_sql
 
 
@@ -154,6 +155,7 @@ class AbstractConversationRepo(Protocol):
         conversation_id: str,
         *,
         since: datetime,
+        until: datetime,
         types: Collection[str],
         senders: Collection[str],
         limit: int,
@@ -1029,19 +1031,23 @@ class SqliteConversationRepo:
         conversation_id: str,
         *,
         since: datetime,
+        until: datetime,
         types: Collection[str],
         senders: Collection[str],
         limit: int,
     ) -> list[ConversationMessage]:
-        """The newest messages of ``conversation_id`` created at or after
-        ``since``, newest first: only ``types``, only from ``senders``,
-        never a deleted one. A plain read — no seat, read watermark or
-        conversation row is touched.
+        """The newest messages of ``conversation_id`` created between
+        ``since`` and ``until`` (both inclusive), newest first: only
+        ``types``, only from ``senders``, never a deleted one, never a
+        ``text`` / ``transcript`` with blank content. A plain read — no
+        seat, read watermark or conversation row is touched.
 
         Times compare as instants (``julianday``), so a naive
         ``datetime('now')`` stamp and a tz-aware ISO one order correctly
-        against each other. Empty ``types`` / ``senders`` (or ``limit``
-        below one) read nothing.
+        against each other; a coarse ``created_at`` bound a day before
+        ``since`` (true for both stamp shapes) lets the
+        ``(conversation_id, created_at)`` index narrow the scan first.
+        Empty ``types`` / ``senders`` (or ``limit`` below one) read nothing.
         """
         type_list = sorted(set(types))
         sender_list = sorted(set(senders))
@@ -1053,14 +1059,19 @@ class SqliteConversationRepo:
              WHERE conversation_id=? AND deleted=0
                AND type IN ({",".join("?" * len(type_list))})
                AND sender_user_id IN ({",".join("?" * len(sender_list))})
+               AND NOT (type IN ('text', 'transcript') AND trim(content) = '')
+               AND created_at >= ?
                AND julianday(created_at) >= julianday(?)
+               AND julianday(created_at) <= julianday(?)
              ORDER BY julianday(created_at) DESC, id DESC LIMIT ?
             """,
             (
                 conversation_id,
                 *type_list,
                 *sender_list,
-                _aware_utc(since).isoformat(),
+                (as_utc(since) - timedelta(days=1)).date().isoformat(),
+                as_utc(since).isoformat(),
+                as_utc(until).isoformat(),
                 int(limit),
             ),
         )
@@ -1632,13 +1643,6 @@ def _iso(value) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
-
-
-def _aware_utc(value: datetime) -> datetime:
-    """``value`` in UTC (a naive one is taken as UTC already)."""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _parse(value: str | None) -> datetime | None:

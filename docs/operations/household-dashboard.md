@@ -167,14 +167,19 @@ dashboard **address** — it always wins over the guess.
   "Next": the last three messages of the household chat from the past six
   hours — the sender's face, the text (two lines at most) and when; one
   under 15 minutes old is marked "new" with "4 min ago". A photo, video
-  or file says "📷 Photo" / "🎬 Video" / "📎 File", a voice note shows its
-  transcript (or "🎤 Voice message"). Only the household chat — never
-  DMs, space chats or the feed — and never a shared location. A picture-view
+  or file says "📷 Photo" / "🎬 Video" / "📎 File" (its caption isn't
+  shown), a voice note shows its transcript (or "🎤 Voice message"). Only
+  the household chat — never DMs, space chats or the feed — never a
+  shared location, and never messages between a child and someone a
+  guardian blocked for them: the blocked person's messages don't show,
+  and neither do the child's while that person is in the household. A picture-view
   page shows up to three message faces with a 💬 next to NOW ➜ NEXT
   (a new one's 💬 sits on a coloured circle), no words. Tap a message to have it
   read aloud ("Anna says: …") — only on a tap, never on its own, a second
-  tap stops it; on a tablet without a voice for the dashboard's language
-  there is no 🔊 and a tap does nothing. Nothing is shown at night, on a
+  tap stops it. Speech never leaves the tablet: only a voice installed
+  on the tablet itself is used, never an online one — a tablet without an
+  on-device voice for the dashboard's language shows no 🔊, and a tap does
+  nothing. Nothing is shown at night, on a
   locked tablet or on a reader person page, and the card disappears when
   there's nothing new.
 

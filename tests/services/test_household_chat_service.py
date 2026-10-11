@@ -460,6 +460,7 @@ async def test_recent_messages_reads_without_writing(stack):
 
     rows = await stack.chat.recent_messages(
         since=datetime.now(timezone.utc) - timedelta(hours=6),
+        until=datetime.now(timezone.utc) + timedelta(minutes=2),
         senders={anna.user_id, bob.user_id},
         limit=10,
     )
@@ -486,6 +487,7 @@ async def test_recent_messages_only_from_the_given_senders(stack):
     await stack.convos.save_message(_glance_msg(chat.id, "b", bob.user_id, 2))
     rows = await stack.chat.recent_messages(
         since=datetime.now(timezone.utc) - timedelta(hours=6),
+        until=datetime.now(timezone.utc) + timedelta(minutes=2),
         senders={anna.user_id},
         limit=3,
     )
@@ -496,6 +498,7 @@ async def test_recent_messages_never_creates_the_chat(stack):
     anna = await stack.provision("anna")
     rows = await stack.chat.recent_messages(
         since=datetime.now(timezone.utc) - timedelta(hours=6),
+        until=datetime.now(timezone.utc) + timedelta(minutes=2),
         senders={anna.user_id},
         limit=3,
     )
@@ -510,6 +513,7 @@ async def test_recent_messages_feature_off_reads_nothing(stack):
     await stack.feature(False)
     rows = await stack.chat.recent_messages(
         since=datetime.now(timezone.utc) - timedelta(hours=6),
+        until=datetime.now(timezone.utc) + timedelta(minutes=2),
         senders={anna.user_id},
         limit=3,
     )

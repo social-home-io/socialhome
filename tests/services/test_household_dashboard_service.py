@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import Calendar, CalendarEvent
 from socialhome.domain.conversation import ConversationMessage
 from socialhome.domain.household_dashboard import (
@@ -38,11 +39,15 @@ from socialhome.domain.timetable import (
     TimetableOverride,
 )
 from socialhome.domain.user import User, UserStatus
+from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import _expand_window
+from socialhome.repositories.cp_repo import SqliteCpRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import household_dashboard_service as dashboard_module
 from socialhome.services.household_dashboard_service import (
     HouseholdDashboardService,
 )
+from socialhome.services.child_protection_service import ChildProtectionService
 from socialhome.services.timetable_service import TimetableService
 from socialhome.utils.timezones import local_instant, zone_of
 
@@ -229,10 +234,28 @@ class FakeChat(Recorder):
         self.rows: list[ConversationMessage] = []
         self.args: dict[str, Any] = {}
 
-    async def recent_messages(self, *, since, senders, limit):
+    async def recent_messages(self, *, since, until, senders, limit):
         self.hit("recent_messages")
-        self.args = {"since": since, "senders": frozenset(senders), "limit": limit}
+        self.args = {
+            "since": since,
+            "until": until,
+            "senders": frozenset(senders),
+            "limit": limit,
+        }
         return list(self.rows)
+
+
+class FakeChildProtection(Recorder):
+    """§CP.F2 guardian blocks: ``counterparts[user_id]``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.counterparts: dict[str, frozenset[str]] = {}
+
+    async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        self.hit("guardian_block_counterparts")
+        self.calls[-1] = user_id
+        return self.counterparts.get(user_id, frozenset())
 
 
 class FakeSettings(Recorder):
@@ -539,6 +562,7 @@ class Harness:
         prefs: HouseholdPreferences | None = None,
         settings: DashboardSettings | None = None,
         users: list[User] | None = None,
+        child_protection: Any = None,
     ) -> None:
         self.users = FakeUsers(users if users is not None else [ANNA, BEN, CARL, DORA])
         self.presence = FakePresence(presence())
@@ -611,6 +635,7 @@ class Harness:
             )
         )
         self.chat = FakeChat()
+        self.cp = FakeChildProtection()
         self.service = HouseholdDashboardService(
             user_service=self.users,  # type: ignore[arg-type]
             presence_service=self.presence,  # type: ignore[arg-type]
@@ -622,6 +647,7 @@ class Harness:
             preferences_service=self.prefs,  # type: ignore[arg-type]
             dashboard_settings=self.settings,  # type: ignore[arg-type]
             household_chat=self.chat,  # type: ignore[arg-type]
+            child_protection=child_protection or self.cp,
         )
 
     async def home(self, now: datetime) -> HomeSnapshot:
@@ -1141,6 +1167,7 @@ async def test_many_lessons_tomorrow_never_hide_an_after_school_event():
         preferences_service=h.prefs,  # type: ignore[arg-type]
         dashboard_settings=h.settings,  # type: ignore[arg-type]
         household_chat=h.chat,  # type: ignore[arg-type]
+        child_protection=h.cp,  # type: ignore[arg-type]
     )
     page = await h.person("u-ben", at(MONDAY, 15, 30))
     assert page is not None
@@ -1608,3 +1635,130 @@ async def test_messages_only_on_picture_view_pages():
     assert pupil is not None and pupil.person.picture_view
     assert [m.id for m in pupil.messages] == ["m1"]
     assert h.chat.calls == ["recent_messages"]
+
+
+# ─── Household chat: guardian blocks, future stamps ──────────────────────
+
+
+async def test_messages_never_from_the_future():
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.rows = [
+        chat_msg("ahead", "u-anna", now + timedelta(minutes=1)),
+        chat_msg("ok", "u-anna", now - timedelta(minutes=1)),
+    ]
+    snap = await h.home(now)
+    # The read stops two minutes ahead (a little clock skew) …
+    assert h.chat.args["until"] == now + timedelta(minutes=2)
+    # … and nothing stamped after "now" is shown.
+    assert [m.id for m in snap.messages] == ["ok"]
+
+
+async def test_guardian_blocked_pair_is_never_on_the_wall():
+    """§CP.F2 on a shared screen, fail closed: Ben (protected) has a
+    guardian block against Anna, who is shown — neither's messages."""
+    h = Harness(settings=messages_on())
+    h.cp.counterparts = {"u-ben": frozenset({"u-anna"})}
+    now = at(MONDAY, 15, 30)
+    h.chat.rows = [
+        chat_msg("from-anna", "u-anna", now - timedelta(minutes=1)),
+        chat_msg("from-ben", "u-ben", now - timedelta(minutes=2)),
+        chat_msg("from-dora", "u-dora", now - timedelta(minutes=3)),
+    ]
+    snap = await h.home(now)
+    assert h.chat.args["senders"] == frozenset({"u-dora"})
+    # Re-checked after the read too.
+    assert [m.id for m in snap.messages] == ["from-dora"]
+    # Every protected member is looked up — hidden ones too (Carl isn't
+    # protected; Ben is).
+    assert h.cp.calls == ["u-ben"]
+    # Ben's own picture page doesn't show them either.
+    page = await h.person("u-ben", now)
+    assert page is not None and [m.id for m in page.messages] == ["from-dora"]
+
+
+async def test_a_minor_blocked_only_from_someone_not_shown_still_shows():
+    h = Harness(settings=messages_on())
+    h.cp.counterparts = {"u-ben": frozenset({"u-carl"})}  # Carl is hidden
+    now = at(MONDAY, 15, 30)
+    h.chat.rows = [chat_msg("from-ben", "u-ben", now - timedelta(minutes=1))]
+    snap = await h.home(now)
+    assert h.chat.args["senders"] == frozenset({"u-anna", "u-ben", "u-dora"})
+    assert [m.id for m in snap.messages] == ["from-ben"]
+
+
+async def test_a_failing_guardian_block_read_shows_no_message(caplog):
+    h = Harness(settings=messages_on())
+    h.cp.fail.add("guardian_block_counterparts")
+    with caplog.at_level(logging.WARNING):
+        snap = await h.home(at(MONDAY, 15, 30))
+    assert "guardian blocks failed" in caplog.text
+    assert snap.messages == () and h.chat.calls == []
+
+
+@pytest.fixture
+async def cp_db(tmp_dir):
+    db = AsyncDatabase(tmp_dir / "cp.db", batch_timeout_ms=10)
+    await db.startup()
+    for user in (ANNA, BEN, CARL, DORA):
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name,"
+            " child_protection_enabled) VALUES(?,?,?,?)",
+            (
+                user.username,
+                user.user_id,
+                user.display_name,
+                int(user.child_protection_enabled),
+            ),
+        )
+    yield db
+    await db.shutdown()
+
+
+async def _block(db, minor: str, blocked: str) -> None:
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?,?,?)",
+        (minor, blocked, "u-anna"),
+    )
+
+
+def _real_cp(db) -> ChildProtectionService:
+    return ChildProtectionService(SqliteCpRepo(db), SqliteUserRepo(db), EventBus())
+
+
+async def test_guardian_blocks_from_the_database_both_ways(cp_db):
+    """Real ``cp_minor_blocks`` rows: the minor's block hides the blocked
+    adult's messages AND the minor's own, on Home and on their page."""
+    await _block(cp_db, "u-ben", "u-anna")
+    h = Harness(settings=messages_on(), child_protection=_real_cp(cp_db))
+    now = at(MONDAY, 15, 30)
+    h.chat.rows = [
+        chat_msg("from-anna", "u-anna", now - timedelta(minutes=1)),
+        chat_msg("from-ben", "u-ben", now - timedelta(minutes=2)),
+        chat_msg("from-dora", "u-dora", now - timedelta(minutes=3)),
+    ]
+    snap = await h.home(now)
+    assert h.chat.args["senders"] == frozenset({"u-dora"})
+    assert [m.id for m in snap.messages] == ["from-dora"]
+
+
+async def test_guardian_block_against_a_hidden_person_from_the_database(cp_db):
+    await _block(cp_db, "u-ben", "u-carl")
+    h = Harness(settings=messages_on(), child_protection=_real_cp(cp_db))
+    now = at(MONDAY, 15, 30)
+    h.chat.rows = [chat_msg("from-ben", "u-ben", now - timedelta(minutes=1))]
+    snap = await h.home(now)
+    assert "u-ben" in h.chat.args["senders"]
+    assert [m.id for m in snap.messages] == ["from-ben"]
+
+
+async def test_a_lifted_protection_lifts_the_block_from_the_database(cp_db):
+    await _block(cp_db, "u-ben", "u-anna")
+    await cp_db.enqueue(
+        "UPDATE users SET child_protection_enabled=0 WHERE user_id='u-ben'"
+    )
+    h = Harness(settings=messages_on(), child_protection=_real_cp(cp_db))
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert h.chat.args["senders"] == frozenset({"u-anna", "u-ben", "u-dora"})
+    assert snap.messages == ()

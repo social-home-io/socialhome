@@ -3425,7 +3425,7 @@
   "admin.dashboard.display.status_text": "Afficher le texte du statut",
   "admin.dashboard.display.status_text_hint": "Désactivé, seul l'emoji de statut de chaque personne s'affiche.",
   "admin.dashboard.display.messages": "Afficher les messages du foyer",
-  "admin.dashboard.display.messages_hint": "Affiche sur l'accueil les 3 derniers messages du chat du foyer (jusqu'à 6 h). Toute personne devant la tablette peut les voir. La tablette ne peut pas confirmer qu'un message a été lu — appelez si c'est urgent.",
+  "admin.dashboard.display.messages_hint": "Affiche sur l'accueil et sur les pages en vue en images les 3 derniers messages du chat du foyer (jusqu'à 6 h). Toute personne devant la tablette peut les voir. La tablette ne peut pas confirmer qu'un message a été lu — appelez si c'est urgent.",
   "admin.dashboard.display.messages_chat_off": "Activez d'abord le chat du foyer.",
   "admin.dashboard.sessions.last_seen": "Dernière ouverture sur une tablette : {when}",
   "admin.dashboard.sessions.never": "Aucune tablette ne l'a ouvert depuis le dernier démarrage de Social Home.",

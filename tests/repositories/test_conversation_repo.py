@@ -1062,31 +1062,35 @@ async def test_list_messages_sync_page_since_a_stamp(env):
 
 # ── Recent messages (the household dashboard's read-only glance) ──────────
 
+_NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+_UNTIL = _NOW + timedelta(minutes=2)
+
+
+def _glance(mid, minutes_ago, **kw):
+    kw.setdefault("sender_user_id", "uid-alice")
+    kw.setdefault("conversation_id", "c1")
+    return ConversationMessage(
+        id=mid,
+        content=kw.pop("content", mid),
+        created_at=_NOW - timedelta(minutes=minutes_ago),
+        **kw,
+    )
+
 
 async def test_list_recent_messages_filters_and_orders(env):
     await env.repo.create(_conv("c1", ConversationType.GROUP_DM))
     await env.repo.create(_conv("c2", ConversationType.GROUP_DM))
-    now = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
-
-    def msg(mid, minutes_ago, **kw):
-        kw.setdefault("sender_user_id", "uid-alice")
-        kw.setdefault("conversation_id", "c1")
-        return ConversationMessage(
-            id=mid,
-            content=kw.pop("content", mid),
-            created_at=now - timedelta(minutes=minutes_ago),
-            **kw,
-        )
-
     for m in (
-        msg("old", 7 * 60),
-        msg("a", 30),
-        msg("b", 20, type="image"),
-        msg("c", 10, sender_user_id="uid-bob"),
-        msg("loc", 5, type="location"),
-        msg("gone", 4, deleted=True),
-        msg("other-chat", 3, conversation_id="c2"),
-        msg("d", 2),
+        _glance("old", 7 * 60),
+        _glance("a", 30),
+        _glance("b", 20, type="image"),
+        _glance("c", 10, sender_user_id="uid-bob"),
+        _glance("loc", 5, type="location"),
+        _glance("gone", 4, deleted=True),
+        _glance("other-chat", 3, conversation_id="c2"),
+        _glance("d", 2),
+        _glance("future", -10),  # a sender clock far ahead
+        _glance("skew", -1),  # a little ahead: still fine
     ):
         await env.repo.save_message(m)
     # A naive ``datetime('now')``-shaped stamp still compares as an instant.
@@ -1098,28 +1102,84 @@ async def test_list_recent_messages_filters_and_orders(env):
     def ids(rows):
         return [m.id for m in rows]
 
-    since = now - timedelta(hours=6)
+    since = _NOW - timedelta(hours=6)
     rows = await env.repo.list_recent_messages(
         "c1",
         since=since,
+        until=_UNTIL,
         types={"text", "image"},
         senders={"uid-alice", "uid-bob"},
         limit=10,
     )
-    assert ids(rows) == ["d", "c", "b", "a"]
+    assert ids(rows) == ["skew", "d", "c", "b", "a"]
     rows = await env.repo.list_recent_messages(
-        "c1", since=since, types={"text", "image"}, senders={"uid-alice"}, limit=2
+        "c1",
+        since=since,
+        until=_UNTIL,
+        types={"text", "image"},
+        senders={"uid-alice"},
+        limit=3,
     )
-    assert ids(rows) == ["d", "b"]
-    # A naive ``since`` is UTC.
+    assert ids(rows) == ["skew", "d", "b"]
+    # A naive ``since`` / ``until`` is UTC.
     rows = await env.repo.list_recent_messages(
         "c1",
         since=datetime(2026, 10, 11, 11, 45),
+        until=datetime(2026, 10, 11, 12, 0),
         types={"text"},
         senders={"uid-alice", "uid-bob"},
         limit=10,
     )
     assert ids(rows) == ["d", "c"]
+
+
+async def test_list_recent_messages_skips_blank_text(env):
+    """A blank text or dictated message never eats one of the few slots."""
+    await env.repo.create(_conv("c1", ConversationType.GROUP_DM))
+    for m in (
+        _glance("words", 10),
+        _glance("blank", 3, content="   "),
+        _glance("dictated-blank", 2, type="transcript", content=""),
+        _glance("photo", 1, type="image", content=""),  # media need no text
+    ):
+        await env.repo.save_message(m)
+    rows = await env.repo.list_recent_messages(
+        "c1",
+        since=_NOW - timedelta(hours=6),
+        until=_UNTIL,
+        types={"text", "transcript", "image"},
+        senders={"uid-alice"},
+        limit=2,
+    )
+    assert [m.id for m in rows] == ["photo", "words"]
+
+
+async def test_list_recent_messages_uses_the_created_at_index(env):
+    await env.repo.create(_conv("c1", ConversationType.GROUP_DM))
+    seen: list[tuple[str, tuple]] = []
+    real = env.db.fetchall
+
+    async def spy(sql, params=()):
+        seen.append((sql, params))
+        return await real(sql, params)
+
+    env.db.fetchall = spy
+    await env.repo.list_recent_messages(
+        "c1",
+        since=_NOW - timedelta(hours=6),
+        until=_UNTIL,
+        types={"text"},
+        senders={"uid-alice"},
+        limit=3,
+    )
+    env.db.fetchall = real
+    (sql, params) = seen[-1]
+    plan = " ".join(
+        str(tuple(r))
+        for r in await env.db.fetchall("EXPLAIN QUERY PLAN " + sql, params)
+    )
+    assert "idx_conversation_messages_conv_created" in plan
+    assert "created_at>?" in plan.replace(" ", "")
 
 
 @pytest.mark.parametrize(
@@ -1134,6 +1194,7 @@ async def test_list_recent_messages_reads_nothing_for_empty_filters(
     rows = await env.repo.list_recent_messages(
         "c1",
         since=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        until=datetime(2100, 1, 1, tzinfo=timezone.utc),
         types=types,
         senders=senders,
         limit=limit,

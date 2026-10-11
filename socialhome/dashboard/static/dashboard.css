@@ -950,16 +950,19 @@ h3.dash-sublabel {
   display: none;
 }
 
+/* Small and pushed out past the face's edge, like the 💬 — the
+   initials stay readable. */
 .dash-pv-msg.dash-speaking .dash-pv-msg-speaker {
   position: absolute;
-  inset-block-start: -8px;
-  inset-inline-end: -8px;
+  inset-block-start: -12px;
+  inset-inline-end: -14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  inline-size: 40px;
-  block-size: 40px;
-  font-size: 1.25rem;
+  inline-size: 34px;
+  block-size: 34px;
+  font-size: 1.0625rem;
+  border: 3px solid var(--dash-bg);
   line-height: 1;
   background: var(--dash-accent);
   border-radius: 50%;

@@ -419,7 +419,7 @@ describe('DashboardTab — display settings', () => {
     expect(sw.disabled).toBe(false)
     expect(sw.checked).toBe(false)
     expect(document.getElementById(sw.getAttribute('aria-describedby')!)?.textContent).toBe(
-      'Shows the last 3 household-chat messages (up to 6 h) on Home. Anyone at the tablet can see them. '
+      'Shows the last 3 household-chat messages (up to 6 h) on Home and on picture-view pages. Anyone at the tablet can see them. '
       + "The tablet can't confirm a message was read — call if it's urgent.")
     mPut.mockResolvedValueOnce(state({ show_household_messages: true }))
     fireEvent.click(sw)
