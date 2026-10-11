@@ -16,6 +16,9 @@ export interface GfsChoice {
   id: string
   display_name: string
   inbox_url: string
+  /** A warning shown under the row (e.g. a chosen server that can't be used
+   *  right now — the owner can still untick it). */
+  note?: string
 }
 
 /** The host part of a GFS URL — enough to tell two servers with the same
@@ -113,6 +116,12 @@ export function GfsChecklist({
             <span class="sh-toggle-row__text">
               <span>{c.display_name}</span>
               <span class="sh-toggle-row__sub">{gfsHost(c.inbox_url)}</span>
+              {c.note && (
+                <span class="sh-toggle-row__sub sh-text-warning"
+                      data-testid={`${name}-note-${c.id}`}>
+                  {c.note}
+                </span>
+              )}
             </span>
           </label>
         )

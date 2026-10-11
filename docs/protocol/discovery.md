@@ -2300,27 +2300,42 @@ dropped from the choice, registered on the chosen ones, the epoch announced
 there, every member household re-granted (the grants' `gfs_ids` name the
 chosen servers that confirmed the registration). A server the channel could
 not be registered on is reported (`failed: [{gfs_id, reason:
-"channel_failed"}]`) and retried on its next reconnect. A server that does not
-prove `private_channels` is refused (`422 GFS_SELECTION_INVALID`, reason
-`unsupported`).
+"channel_failed"}]`) and retried on its next reconnect. A NEWLY added server
+that does not prove `private_channels` (or is not active) is refused (`422
+GFS_SELECTION_INVALID`, reason `unsupported` / `unknown`); one already chosen
+stays choosable whatever its state, so the owner can always keep or drop it
+(the picker shows it with a note).
+
+**A missing choice never means "every server".** The channel lives only on
+servers the owner's list names; no list (or an empty one) means no channel.
 
 - **Default:** when the owner turns `private_gfs` on with no choice yet, its
-  single capable connection is chosen (with several, the owner picks; the
-  SPA pre-ticks the single one and requires at least one).
-- **Upgrade:** a household that already ran private channels records every
-  active connection once at startup, so existing channels stay where they
-  are (`GfsServerSelectionService.reconcile_on_startup`).
-- **Disconnect:** a GFS the owner disconnects leaves every channel list it
-  was on (the members are told, the channel re-granted without it). A
+  single capable connection is chosen; with several (or none) an explicit
+  EMPTY list is signed and the channel stays off until the owner picks (the
+  SPA pre-ticks the single one, requires at least one and saves the pick
+  right after the option, so no unchosen server is ever used in between). A
+  grandfathered invite link that turns the option on prefers the GFS the
+  link was parked on.
+- **Upgrade:** a household whose private space already ran a channel
+  records, once at startup, the servers that channel lived on (an older
+  build registered it on every connection proving `private_channels`; one
+  that can't be read at startup is kept). A space without a channel gets
+  the turn-on default (`GfsServerSelectionService.reconcile_on_startup`).
+- **Disconnect:** the owner unregisters the channel on a GFS it disconnects
+  — in the background, from the connection it was handed, before the row
+  goes — and that GFS leaves every channel list (the members are told and
+  re-granted in the background; the DELETE route waits on no server). A
   suspended connection stays chosen.
 - **Option off:** the list is re-signed empty and the channel retires as
   before.
-- **Withdrawal survives a restart:** the servers to unregister the channel
-  from are read from the stored signed list as it is replaced (old list
-  minus new, or every listed server when the option goes off) — never
-  from in-memory registrations — so an owner that restarted in between
-  still withdraws everywhere the channel lived
-  (`GfsChannelService.withdraw`).
+- **Withdrawal survives a restart or crash:** the servers to unregister the
+  channel from are read from the stored signed list as it is replaced (old
+  list minus new, or every listed server when the option goes off) and
+  recorded in `gfs_channel_withdrawals` (migration 0095) BEFORE the new
+  list is stored; each row goes once the server confirmed (or can never
+  confirm), and is retried on every reconnect of that server — a
+  suspended connection when it comes back
+  (`GfsChannelService.withdraw_pending`).
 
 **Members send to every chosen server.** The members get the list in the
 encrypted `space_meta` like any owner list. A member holding the channel
@@ -2346,6 +2361,12 @@ so a rotation it makes while the owner is offline reaches a server it never
 joined. Right after its own rotation it holds no grant for the new epoch (a
 seed holder never grants itself) and uses its newest stored grant. The
 owner's notices stay on its own registered connections.
+
+**Liveness limit.** A delegated admin knows the channel's servers only from
+its own newest grant. A server the owner added AFTER that grant's epoch is
+not in it, so the admin's notices miss it until the owner is back online
+and re-grants (or announces itself); members' items still reach that server
+only from members holding a newer grant.
 
 **The writer key is pinned in every mode.** Since v_57 the owner's channel
 notice carries `writer_key_cert` in trusted mode too, so the anonymous path

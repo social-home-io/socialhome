@@ -620,6 +620,11 @@ prove `private_channels`), and members send each item to every one of them.
   pairing, no `client_instances` row. Everything in the "Sign-off: a member
   publishes to GFSs it never connected to" section above applies to these
   targets as it does to a global space's listing targets.
+- **It also gets a delegated admin's epoch notice.** A seed-holding
+  admin's channel notice is anonymous (channel-key signed) and goes to every
+  chosen server its grant names, so such a server also learns that some
+  address announcing that channel's epochs holds the space seed — still
+  never which household, and never the space.
 - **A GFS the owner did not choose never hears of the channel** — no
   register, notice, unregister, grant or seat, even when the owner holds an
   active, capable connection to it (pinned by

@@ -2705,7 +2705,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             except Exception:
                 log.exception("gfs publish mode: GFS notice failed for %s", space.id)
 
-    async def enable_private_gfs_for_legacy_link(self, space_id: str) -> bool:
+    async def enable_private_gfs_for_legacy_link(
+        self, space_id: str, *, gfs_id: str | None = None
+    ) -> bool:
         """A grandfathered (``gfs_legacy``, pre-migration-0079) invite link
         just seated a household through the connection-server relay into a
         PRIVATE space we host whose ``private_gfs`` is OFF: turn the option
@@ -2713,7 +2715,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         clicking it does (config federation, channel, grants). Owner
         decision 2026-10-04: the first such join opts the space in. Called
         only by the redeem coordinator after the relay redeem committed.
-        ``True`` when it switched."""
+        ``gfs_id`` — the connection the link was parked on: the channel's
+        first server (never "every server"; without it the usual turn-on
+        default applies). ``True`` when it switched."""
         space = await self._spaces.get(space_id)
         if (
             space is None
@@ -2732,6 +2736,15 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             actor_username=space.owner_username,
             features=replace(space.features, private_gfs=True),
         )
+        if gfs_id and self._gfs_selection is not None:
+            # The turn-on default found no single server: the link's own
+            # GFS — the one this household just came through — is the pick.
+            try:
+                if await self._gfs_selection.default_channels(space_id, prefer=gfs_id):
+                    if self._member_gfs is not None:
+                        await self._member_gfs.enable_channel(space_id)
+            except Exception:
+                log.exception("private gfs: the link's GFS as channel server failed")
         return True
 
     async def _link_joined_households(self, space_id: str) -> list[dict]:

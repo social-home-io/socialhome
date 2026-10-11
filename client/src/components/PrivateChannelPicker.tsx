@@ -30,15 +30,31 @@ export interface PrivateChannelChoices {
   max: number
 }
 
-/** The channel-capable choices and the starting selection of a view. A
- *  connection without a ``channel_capable`` flag (the option isn't on yet,
- *  so the server didn't check) is offered — the save checks it. */
+/** The choices and the starting selection of a view: every server already
+ *  chosen — whatever its state, with a note when it can't be used right now,
+ *  so the owner can always keep or untick it — then every other connection
+ *  that can carry a channel. A connection without a ``channel_capable`` flag
+ *  (the option isn't on yet, so the server didn't check) is offered — the
+ *  save checks it. */
 export function channelChoices(
   view: SpaceGfsServersView | null | undefined,
 ): PrivateChannelChoices {
-  const choices = (view?.available ?? [])
-    .filter(a => a.channel_capable !== false)
-    .map(a => ({ id: a.gfs_id, display_name: a.display_name, inbox_url: a.inbox_url }))
+  const chosen: GfsChoice[] = (view?.mode === 'channel' ? (view.chosen ?? []) : [])
+    .map(c => ({
+      id: c.gfs_id,
+      display_name: c.display_name,
+      inbox_url: c.inbox_url,
+      note: c.connection_status !== 'active'
+        ? t('space.private_gfs.channel_suspended')
+        : (!c.channel_capable ? t('space.private_gfs.channel_unsupported') : undefined),
+    }))
+  const chosenIds = new Set(chosen.map(c => c.id))
+  const choices = [
+    ...chosen,
+    ...(view?.available ?? [])
+      .filter(a => a.channel_capable !== false && !chosenIds.has(a.gfs_id))
+      .map(a => ({ id: a.gfs_id, display_name: a.display_name, inbox_url: a.inbox_url })),
+  ]
   const saved = view?.mode === 'channel' ? (view.gfs_ids ?? []) : []
   const initial = saved.length > 0 ? saved : defaultGfsSelection(choices)
   return { choices, saved, initial, max: view?.max ?? 8 }

@@ -49,10 +49,14 @@ the list IS the owner's choice (not derived from publications).
 :meth:`GfsServerSelectionService.set_servers` stores it and has the channel
 service register the channel there (and nowhere else);
 :meth:`sync_snapshot` re-signs it without a server the owner disconnected
-from. The default when the owner first turns ``private_gfs`` on is its single
-capable connection (:meth:`default_channels`); an upgraded household keeps
-the channels it had (:meth:`reconcile_on_startup`). One lock per space keeps
-two concurrent snapshots from signing out of order.
+from. A missing or empty list means NO channel server — never "every
+server". The default when the owner first turns ``private_gfs`` on is its
+single capable connection, else an explicit empty list the owner fills
+(:meth:`default_channels`); an upgraded household records the servers an
+existing channel lived on (:meth:`reconcile_on_startup`). Every server a
+list drops is recorded for withdrawal (migration 0095) before the new list
+is stored. One lock per space keeps two concurrent snapshots from signing
+out of order.
 
 :meth:`GfsServerSelectionService.member_servers` is the read side: the
 servers of a space THIS household may contact, with private-host entries
@@ -124,8 +128,7 @@ class GfsServerSelectionService:
         "_locks",
         "_change_locks",
         "_channel_hook",
-        "_withdraw_hook",
-        "_dropped",
+        "_follow_later",
     )
 
     def __init__(
@@ -159,37 +162,18 @@ class GfsServerSelectionService:
         #: (:meth:`GfsChannelService.on_servers_changed`). Returns the
         #: connection ids a channel could not be registered on.
         self._channel_hook: Callable[[str], Awaitable[set[str]]] | None = None
-        #: Called with the connection ids a private space's channel servers
-        #: just LOST (dropped from the owner's choice, or the option turned
-        #: off): the channel service unregisters the channel there. Taken
-        #: from the stored list itself — not from memory — so it holds
-        #: across a restart (:meth:`GfsChannelService.withdraw`).
-        self._withdraw_hook: Callable[[str, list[str]], Awaitable[object]] | None = None
-        #: space id → connection ids dropped by the last stored list, until
-        #: the withdrawal ran (:meth:`_flush_withdrawals`).
-        self._dropped: dict[str, list[str]] = {}
+        #: Schedules that same follow-up in the BACKGROUND (a GFS disconnect:
+        #: the DELETE route must not wait on network work).
+        self._follow_later: Callable[[str], None] | None = None
 
     def attach_channel_hook(self, hook: Callable[[str], Awaitable[set[str]]]) -> None:
         """Wire the private-channel follow-up of a change of the owner's
         channel servers."""
         self._channel_hook = hook
 
-    def attach_withdraw_hook(
-        self, hook: Callable[[str, list[str]], Awaitable[object]]
-    ) -> None:
-        """Wire the channel withdrawal from servers a private space lost."""
-        self._withdraw_hook = hook
-
-    async def _flush_withdrawals(self, space_id: str) -> None:
-        """Run the withdrawal for the servers *space_id*'s last stored list
-        dropped, fail-soft."""
-        dropped = self._dropped.pop(space_id, [])
-        if not dropped or self._withdraw_hook is None:
-            return
-        try:
-            await self._withdraw_hook(space_id, dropped)
-        except Exception:
-            log.exception("space %s: channel withdrawal failed", space_id)
+    def attach_follow_later(self, schedule: Callable[[str], None]) -> None:
+        """Wire the background form of the channel follow-up."""
+        self._follow_later = schedule
 
     def attach_identity(self, *, own_instance_id: str, own_signing_key: bytes) -> None:
         """The household's instance id and Ed25519 identity seed — the key
@@ -210,18 +194,22 @@ class GfsServerSelectionService:
         except Exception:
             log.exception("GFS list snapshot failed for space %s", event.space_id)
 
-    async def sync_snapshot(self, space_id: str) -> bool:
+    async def sync_snapshot(self, space_id: str, *, background: bool = False) -> bool:
         """Re-derive the owner's GFS list for *space_id*; ``True`` when it
-        changed (signed, stored, sequence raised, members told). A private
-        channel space whose servers changed (a disconnect dropped one) then
-        has its channel follow (:meth:`_channels_changed`)."""
+        changed (signed, stored, sequence raised, members told). A PRIVATE
+        space whose list changed then has its channel follow
+        (:meth:`_channels_changed`: pending withdrawals, re-registration,
+        re-grants — or the retirement once the option went off); with
+        ``background`` that runs as a background task."""
         async with _space_lock(self._locks, space_id):
             changed = await self._sync_locked(space_id)
         if changed:
-            await self._flush_withdrawals(space_id)
             space = await self._spaces.get(space_id)
-            if space is not None and is_channel_space(space):
-                await self._channels_changed(space_id)
+            if space is not None and space.space_type is SpaceType.PRIVATE:
+                if background and self._follow_later is not None:
+                    self._follow_later(space_id)
+                else:
+                    await self._channels_changed(space_id)
         return changed
 
     async def _channels_changed(self, space_id: str) -> set[str]:
@@ -361,14 +349,19 @@ class GfsServerSelectionService:
         current: SignedGfsServerList | None,
         servers: tuple[GfsServer, ...],
     ) -> None:
-        """For a PRIVATE space: remember which of our connections the old
-        list named and the new one does not, so the channel is withdrawn
-        there once the new list is stored. Read from the signed list itself,
-        never from memory, so a restart in between loses nothing."""
+        """For a PRIVATE space with a channel: record (durably, migration
+        0095) a pending withdrawal on every connection the old list named
+        and the new one does not — BEFORE the new list is stored, so neither
+        a crash nor a restart loses it. The channel service sends them
+        (:meth:`GfsChannelService.withdraw_pending`) and retries on every
+        reconnect until each server confirmed."""
         if current is None:
             return
         space = await self._spaces.get(space_id)
         if space is None or space.space_type is not SpaceType.PRIVATE:
+            return
+        channel = await self._spaces.get_gfs_channel(space_id)
+        if channel is None:
             return
         kept = {s.public_key.lower() for s in servers}
         dropped = [
@@ -379,7 +372,7 @@ class GfsServerSelectionService:
             if c.public_key.lower() not in kept
         ]
         if dropped:
-            self._dropped[space_id] = dropped
+            await self._gfs.add_channel_withdrawals(space_id, channel[0], dropped)
 
     def _entries_of(
         self, space_id: str, conns: list[GfsConnection]
@@ -485,35 +478,75 @@ class GfsServerSelectionService:
             # ``None`` here would read as "no servers" and unlist the space
             # everywhere: a replacement set must be spelled out.
             raise GfsSelectionInvalidError("malformed")
-        ids = await self.check_selection(gfs_ids)
+        owned = await self._require_owned(space_id)
+        ids = (
+            # A channel space checks its own: a server already chosen stays
+            # choosable even while suspended or not answering.
+            await self.check_selection(gfs_ids) if not is_channel_space(owned) else ()
+        )
         async with self.changing(space_id):
             # Re-read under the lock: a tier / option change may have landed.
             space = await self._require_owned(space_id)
             if is_channel_space(space):
-                return await self._set_channels_locked(space, ids)
+                return await self._set_channels_locked(space, gfs_ids)
+            if not ids and gfs_ids:
+                ids = await self.check_selection(gfs_ids)
             if ids:
                 _require_global(space)
             return await self._apply_locked(space_id, ids)
 
-    async def _set_channels_locked(
-        self, space: Space, gfs_ids: tuple[str, ...]
-    ) -> GfsSelectionOutcome:
-        """Make *gfs_ids* (ACTIVE connections proving ``private_channels``)
-        a private space's channel servers: sign and store the choice (the
-        members' list), then let the channel service register the channel
-        on exactly those servers, withdraw it from the others and re-grant
-        the members. A server the channel could not be registered on is
-        reported in ``failed`` (``channel_failed``) and retried on the next
-        reconnect. Nothing is ever LISTED for a private space."""
+    async def _check_channel_selection(
+        self, space: Space, gfs_ids: object
+    ) -> list[GfsConnection]:
+        """Validate a private space's channel servers: a list of at most
+        :data:`MAX_GFS_SERVERS` connection ids. A server ALREADY chosen may
+        stay whatever its state (suspended, not answering, no longer proving
+        ``private_channels``) — so the owner can always keep or drop it; a
+        NEWLY added one must be an ACTIVE connection proving
+        ``private_channels`` (``unknown`` / ``unsupported`` otherwise)."""
+        if not isinstance(gfs_ids, (list, tuple)) or not all(
+            isinstance(g, str) and g for g in gfs_ids
+        ):
+            raise GfsSelectionInvalidError("malformed")
+        ids = tuple(dict.fromkeys(gfs_ids))
+        if len(ids) > MAX_GFS_SERVERS:
+            raise GfsSelectionInvalidError("too_many", max_servers=MAX_GFS_SERVERS)
         publisher = self._require_publisher()
-        conns = []
-        for gfs_id in gfs_ids:
+        chosen = (
+            {
+                c.id
+                for c in connections_on_list(
+                    space.gfs_servers, await self._gfs.list_all(), include_inactive=True
+                )
+            }
+            if space.gfs_servers is not None
+            else set()
+        )
+        conns: list[GfsConnection] = []
+        for gfs_id in ids:
             conn = await self._gfs.get(gfs_id)
-            if conn is None or conn.status != "active":
+            if conn is None:
                 raise GfsSelectionInvalidError("unknown")
-            if not await publisher.private_channels_supported(conn):
-                raise GfsSelectionInvalidError("unsupported")
+            if gfs_id not in chosen:
+                if conn.status != "active":
+                    raise GfsSelectionInvalidError("unknown")
+                if not await publisher.private_channels_supported(conn):
+                    raise GfsSelectionInvalidError("unsupported")
             conns.append(conn)
+        return conns
+
+    async def _set_channels_locked(
+        self, space: Space, raw_ids: object
+    ) -> GfsSelectionOutcome:
+        """Make *raw_ids* a private space's channel servers
+        (:meth:`_check_channel_selection`): sign and store the choice (the
+        members' list), then let the channel service withdraw the channel
+        from the servers dropped, register it on exactly the chosen ones and
+        re-grant the members. A server the channel could not be registered
+        on is reported in ``failed`` (``channel_failed``) and retried on the
+        next reconnect. Nothing is ever LISTED for a private space."""
+        conns = await self._check_channel_selection(space, raw_ids)
+        gfs_ids = tuple(c.id for c in conns)
         async with _space_lock(self._locks, space.id):
             current = await self._spaces.get(space.id)
             if current is None:
@@ -521,18 +554,23 @@ class GfsServerSelectionService:
             await self._store_locked(
                 space.id, current.gfs_servers, self._entries_of(space.id, conns)
             )
-        await self._flush_withdrawals(space.id)
         failed = await self._channels_changed(space.id)
         return GfsSelectionOutcome(
             listed=tuple(g for g in gfs_ids if g not in failed),
             failed=tuple((g, "channel_failed") for g in gfs_ids if g in failed),
         )
 
-    async def default_channels(self, space_id: str) -> bool:
-        """The owner just turned ``private_gfs`` ON: when no channel server is
-        chosen yet (never, or the option was off), choose its single capable
-        connection — the 90% case, nothing to decide. With several the owner
-        picks (``PUT /gfs-servers``). ``True`` when a default was stored."""
+    async def default_channels(
+        self, space_id: str, *, prefer: str | None = None
+    ) -> bool:
+        """The owner just turned ``private_gfs`` ON with no channel server
+        chosen yet (never, or the option was off): choose *prefer* (a
+        grandfathered link's GFS) when it is an active capable connection,
+        else the single capable connection — the 90% case, nothing to
+        decide. With several (or none) an explicit EMPTY list is signed: the
+        channel stays off until the owner picks (``PUT /gfs-servers``) — a
+        missing choice never means "every server". ``True`` when a server
+        was chosen."""
         if self._publisher is None or not self._own_signing_key:
             return False
         space = await self._spaces.get(space_id)
@@ -546,15 +584,16 @@ class GfsServerSelectionService:
         ):
             return False
         capable = await self._capable_connections()
-        if len(capable) != 1:
-            return False
+        preferred = [c for c in capable if prefer is not None and c.id == prefer]
+        chosen = preferred or (capable if len(capable) == 1 else [])
         async with _space_lock(self._locks, space_id):
             current = await self._spaces.get(space_id)
             if current is None:
                 return False
-            return await self._store_locked(
-                space_id, current.gfs_servers, self._entries_of(space_id, capable)
+            await self._store_locked(
+                space_id, current.gfs_servers, self._entries_of(space_id, chosen)
             )
+        return bool(chosen)
 
     async def on_connection_removed(self, conn: GfsConnection) -> int:
         """A connection was deleted (the household disconnected a GFS): every
@@ -573,7 +612,8 @@ class GfsServerSelectionService:
                 or key not in space.gfs_servers.public_keys()
             ):
                 continue
-            if await self.sync_snapshot(space.id):
+            # Background: the DELETE route must not wait on the re-grants.
+            if await self.sync_snapshot(space.id, background=True):
                 changed += 1
         return changed
 
@@ -875,16 +915,40 @@ class GfsServerSelectionService:
         whether its server can run private channels (``channel_capable``).
         ``mode = "channel"`` — never any listing."""
         active = await self._gfs.list_active()
-        chosen = (
-            [c.id for c in connections_on_list(space.gfs_servers, active)]
+        chosen = [
+            c.id
+            for c in (
+                connections_on_list(
+                    space.gfs_servers, await self._gfs.list_all(), include_inactive=True
+                )
+                if space.gfs_servers is not None
+                else []
+            )
+        ]
+        servers, _ = await self.describe(space)
+        capable = {c.id for c in await self._capable_connections()}
+        chosen_rows = (
+            connections_on_list(
+                space.gfs_servers, await self._gfs.list_all(), include_inactive=True
+            )
             if space.gfs_servers is not None
             else []
         )
-        servers, _ = await self.describe(space)
-        capable = {c.id for c in await self._capable_connections()}
         return {
             "space_type": space.space_type.value,
             "mode": "channel",
+            # Every chosen server, whatever its state — so the owner can see
+            # (and drop) one that is suspended or no longer carries channels.
+            "chosen": [
+                {
+                    "gfs_id": c.id,
+                    "display_name": c.display_name,
+                    "inbox_url": c.inbox_url,
+                    "connection_status": c.status,
+                    "channel_capable": c.id in capable,
+                }
+                for c in chosen_rows
+            ],
             "gfs_ids": chosen,
             "max": MAX_GFS_SERVERS,
             "unlisted": False,
@@ -945,13 +1009,18 @@ class GfsServerSelectionService:
         return changed
 
     async def _adopt_existing_channels(self, space: Space) -> bool:
-        """Upgrade, once: an owned private space with ``private_gfs`` on and no
-        channel list yet used every capable connection — record every ACTIVE
-        connection (at most :data:`MAX_GFS_SERVERS`; the channel service
-        registers only on the capable ones, as before), so its channels stay
-        where they are. No capability round-trip here: a GFS that does not
-        answer at startup must not lose its channel. Never again once a list
-        (even an empty one) is stored."""
+        """Upgrade, once, for an owned private space with ``private_gfs`` on
+        and no channel list yet (a missing list never means "every server"):
+
+        * it already runs a channel (an older build registered it on every
+          capable connection): record the servers that channel lives on —
+          the active connections proving ``private_channels``, plus any
+          whose capability can't be read right now (it may be down at
+          startup, and must not lose its channel);
+        * no channel yet: the turn-on default — the single capable
+          connection, else an explicit empty list the owner fills.
+
+        Never again once a list (even an empty one) is stored."""
         if (
             space.dissolved
             or not is_channel_space(space)
@@ -960,13 +1029,22 @@ class GfsServerSelectionService:
             or await self._spaces.has_gfs_servers(space.id)
         ):
             return False
-        active = await self._gfs.list_active()
+        if await self._spaces.get_gfs_channel(space.id) is None:
+            await self.default_channels(space.id)
+            return True
+        publisher = self._require_publisher()
+        lived_on = [
+            c
+            for c in await self._gfs.list_active()
+            if await publisher.private_channels_supported(c)
+            or publisher.capability_unknown(c)
+        ]
         async with _space_lock(self._locks, space.id):
             current = await self._spaces.get(space.id)
             if current is None or current.gfs_servers is not None:
                 return False
             return await self._store_locked(
-                space.id, None, self._entries_of(space.id, active)
+                space.id, None, self._entries_of(space.id, lived_on)
             )
 
     async def _promotion_candidate(self, space: Space) -> bool:

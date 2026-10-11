@@ -205,3 +205,27 @@ async def test_save_persists_a_proof_stamp(repo):
         replace(_conn("gfs-1"), proof_required_at="2026-10-10T01:00:00+00:00")
     )
     assert (await repo.get("gfs-1")).proof_required_at == "2026-10-10T01:00:00+00:00"
+
+
+async def test_channel_withdrawals_round_trip(repo):
+    await repo.save(_conn("gfs-1"))
+    await repo.save(_conn("gfs-2"))
+    ch = "ab" * 16
+    await repo.add_channel_withdrawals("sp", ch, ["gfs-1", "gfs-2", "gfs-1", "nope"])
+    await repo.add_channel_withdrawals("sp-2", ch, ["gfs-2"])
+    assert await repo.list_channel_withdrawals(space_id="sp") == [
+        ("sp", "gfs-1", ch),
+        ("sp", "gfs-2", ch),
+    ]
+    assert await repo.list_channel_withdrawals(gfs_id="gfs-2") == [
+        ("sp", "gfs-2", ch),
+        ("sp-2", "gfs-2", ch),
+    ]
+    assert await repo.list_channel_withdrawals(space_id="sp", gfs_id="gfs-1") == [
+        ("sp", "gfs-1", ch)
+    ]
+    await repo.delete_channel_withdrawal("sp", "gfs-1", ch)
+    assert len(await repo.list_channel_withdrawals()) == 2
+    # Disconnecting a GFS drops its pending withdrawals.
+    await repo.delete("gfs-2")
+    assert await repo.list_channel_withdrawals() == []

@@ -131,3 +131,40 @@ describe('PrivateChannelPicker', () => {
       .toBe('space.private_gfs.channels_none')
   })
 })
+
+describe('channelChoices — chosen servers that cannot be used right now', () => {
+  it('keeps every chosen server as a row with a note, so it can be unticked', () => {
+    const c = channelChoices(view({
+      gfs_ids: ['g-club', 'g-old'],
+      chosen: [
+        { ...CLUB, connection_status: 'active', channel_capable: false },
+        {
+          gfs_id: 'g-old', display_name: 'Old GFS', inbox_url: 'https://old.example',
+          connection_status: 'suspended', channel_capable: false,
+        },
+      ],
+    }))
+    expect(c.choices.map(x => [x.id, x.note])).toEqual([
+      ['g-club', 'space.private_gfs.channel_unsupported'],
+      ['g-old', 'space.private_gfs.channel_suspended'],
+      ['g-town', undefined],
+    ])
+    expect(c.initial).toEqual(['g-club', 'g-old'])
+  })
+
+  it('renders the note, and unticking drops the id from the next save', async () => {
+    apiMock.get.mockResolvedValue(view({
+      gfs_ids: ['g-club'],
+      chosen: [{ ...CLUB, connection_status: 'active', channel_capable: false }],
+    }))
+    const onChange = vi.fn()
+    const { findByTestId } = render(
+      <PrivateChannelPicker spaceId="s-1" selected={null} onChange={onChange} onLoaded={() => {}} />,
+    )
+    const list = await findByTestId('private-channel-checklist')
+    expect((await findByTestId('private-channel-note-g-club')).textContent)
+      .toBe('space.private_gfs.channel_unsupported')
+    fireEvent.click(list.querySelector('input[value="g-club"]') as HTMLInputElement)
+    expect(onChange).toHaveBeenCalledWith([])
+  })
+})

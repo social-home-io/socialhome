@@ -411,6 +411,15 @@ export interface SpaceGfsServersView {
     /** ``channel`` mode: whether the server can carry a private channel. */
     channel_capable?: boolean
   }[]
+  /** ``channel`` mode: every chosen server, whatever its state (so the owner
+   *  can see and drop one that is suspended or no longer carries channels). */
+  chosen?: {
+    gfs_id: string
+    display_name: string
+    inbox_url: string
+    connection_status: GfsConnection['status']
+    channel_capable: boolean
+  }[]
 }
 
 /** A space feature's access level (``SpaceFeatureAccess`` server-side). */

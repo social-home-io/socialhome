@@ -3490,10 +3490,12 @@ def create_app(config: Config | None = None) -> web.Application:
         # The owner changed a private space's channel servers: register the
         # channel there (only there) and re-grant the members.
         gfs_server_selection.attach_channel_hook(gfs_channels.on_servers_changed)
-        # ...and withdraw it from every server the owner's stored list lost
-        # (the option turned off included), read from the list so a restart
-        # in between loses nothing.
-        gfs_server_selection.attach_withdraw_hook(gfs_channels.withdraw)
+        # ...or the same in the background (a GFS disconnect re-signed the
+        # list), and take the channel down on a GFS being disconnected —
+        # from the connection handed in, before its row (and its pending
+        # withdrawals, migration 0095) go.
+        gfs_server_selection.attach_follow_later(gfs_channels.follow_later)
+        gfs_connection_service.attach_on_disconnect(gfs_channels.on_gfs_disconnect)
         space_public_outbound = SpacePublicOutbound(
             bus=bus,
             space_repo=space_repo,

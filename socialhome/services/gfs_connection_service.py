@@ -482,7 +482,10 @@ class GfsConnectionService:
         self._change_lock: Callable[[str], AbstractAsyncContextManager[object]] = (
             lambda _space_id: nullcontext()
         )
-        self._on_disconnect: Callable[[GfsConnection], Awaitable[object]] | None = None
+        #: Run in order with the connection BEFORE its row is deleted: the
+        #: seat keeper, the private-channel owner (each only records state
+        #: and schedules its requests in the background).
+        self._on_disconnect: list[Callable[[GfsConnection], Awaitable[object]]] = []
         #: Called with the removed connection AFTER its row is gone — the
         #: owner's private-channel lists drop that server
         #: (:meth:`GfsServerSelectionService.on_connection_removed`).
@@ -720,9 +723,10 @@ class GfsConnectionService:
     def attach_on_disconnect(
         self, hook: Callable[[GfsConnection], Awaitable[object]]
     ) -> None:
-        """Wire the seat keeper's unpair handling (local bookkeeping; any
-        request it needs runs in the background, never in the route)."""
-        self._on_disconnect = hook
+        """Add an unpair hook — run in the order attached, before the row is
+        deleted (local bookkeeping; any request a hook needs runs in the
+        background, never in the route). One failing never skips the next."""
+        self._on_disconnect.append(hook)
 
     def attach_on_removed(
         self, hook: Callable[[GfsConnection], Awaitable[object]]
@@ -2225,9 +2229,9 @@ class GfsConnectionService:
         conn = await self._repo.get(gfs_id)
         if conn is None:
             raise GfsConnectionError(f"GFS connection {gfs_id} not found")
-        if self._on_disconnect is not None:
+        for hook in self._on_disconnect:
             try:
-                await self._on_disconnect(conn)
+                await hook(conn)
             except Exception:
                 log.exception("gfs: on-disconnect hook failed for %s", gfs_id)
         # ``repo.delete`` removes this connection's publication rows itself,

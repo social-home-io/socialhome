@@ -398,12 +398,12 @@ class GfsChannelService:
 
     async def _chosen_capable(self, space: "Space") -> list[GfsConnection]:
         """The OWNER's capable connections among the channel servers it chose
-        for *space* (its signed list). With no list stored yet — an upgraded
-        household before its startup step recorded one — every capable
-        connection, as before the owner chose."""
-        capable = await self._capable()
+        for *space* (its signed list). No list stored yet means NONE — never
+        "every server": the turn-on default / the upgrade step records a
+        choice first (:mod:`socialhome.services.gfs_server_selection_service`)."""
         if space.gfs_servers is None:
-            return capable
+            return []
+        capable = await self._capable()
         chosen = {c.id for c in connections_on_list(space.gfs_servers, capable)}
         return [c for c in capable if c.id in chosen]
 
@@ -636,6 +636,8 @@ class GfsChannelService:
     async def _retire(self, space: "Space", channel_id: str) -> None:
         """Unregister the channel everywhere we can sign for it, and forget
         it. Members get no grant for the next epoch."""
+        # The servers the owner's list already dropped (recorded durably).
+        await self.withdraw_pending(space_id=space.id)
         seed = await self._matching_seed(space)
         if seed is not None:
             # Only where the channel lives: the chosen servers and any it was
@@ -687,33 +689,124 @@ class GfsChannelService:
 
             await self._keyed(conn, _unregister)
 
-    async def withdraw(self, space_id: str, gfs_ids: list[str]) -> int:
-        """The owner's stored channel list just dropped these connections
-        (taken from the signed list, so it holds across a restart): unregister
-        the space's channel on each one that is still an active connection —
-        before the option-off retire, which by then sees an empty choice.
-        Owner only, seed matching; returns how many were asked. Never
-        raises."""
+    async def withdraw_pending(
+        self, *, space_id: str | None = None, gfs_id: str | None = None
+    ) -> int:
+        """Send the pending channel withdrawals (migration 0095, recorded by
+        the owner's list change BEFORE it was stored), optionally for one
+        space / one connection: an anonymous, channel-key-signed unregister
+        each. A row is forgotten once the server confirmed, or can never
+        confirm (the space or its seed is gone — a new authority seed can't
+        sign for the old channel; a permanent refusal). A connection that is
+        not active right now keeps its rows: retried when it reconnects
+        (:meth:`heal`). Returns how many were confirmed. Never raises."""
         try:
-            space = await self._spaces.get(space_id)
-            if space is None or space.owner_instance_id != self._own_instance_id:
-                return 0
-            found = await self._channel_seed(space)
-            if found is None:
-                return 0
-            conns = [
-                c for c in await self._conn_repo.list_active() if c.id in set(gfs_ids)
-            ]
-            if not conns:
-                return 0
-            await self._unregister_on(found[0], found[1], conns)
-            self._registered.get(found[0], set()).difference_update(
-                c.gfs_instance_id for c in conns
+            rows = await self._conn_repo.list_channel_withdrawals(
+                space_id=space_id, gfs_id=gfs_id
             )
-            return len(conns)
         except Exception:
-            log.exception("gfs.channel: withdrawing the channel failed")
+            log.exception("gfs.channel: pending withdrawals unreadable")
             return 0
+        done = 0
+        for row_space, conn_id, channel_id in rows:
+            try:
+                conn = await self._conn_repo.get(conn_id)
+                if conn is not None and conn.status != "active":
+                    continue
+                outcome = (
+                    await self._unregister_one(row_space, channel_id, conn)
+                    if conn is not None
+                    else None
+                )
+                if outcome is not None and outcome.kind == "transient":
+                    continue
+                await self._conn_repo.delete_channel_withdrawal(
+                    row_space, conn_id, channel_id
+                )
+                if outcome is not None and outcome.kind == "delivered":
+                    done += 1
+            except Exception:
+                log.exception("gfs.channel: a pending withdrawal failed")
+        return done
+
+    async def _unregister_one(
+        self, space_id: str, channel_id: str, conn: GfsConnection
+    ) -> PublishOutcome | None:
+        """One anonymous unregister of *channel_id* at *conn*; ``None`` when
+        it can never be signed (space gone, seed not ours or changed)."""
+        space = await self._spaces.get(space_id)
+        if space is None:
+            return None
+        seed = await self._matching_seed(space)
+        if seed is None:
+            return None
+        client = self._gfs.publish_client()
+        if client is None:
+            return PublishOutcome.transient()
+        channel_seed = derive_channel_seed(seed, space_id, channel_id)
+
+        async def _unregister() -> PublishOutcome:
+            body = sign_unregister(
+                channel_seed=channel_seed,
+                channel_id=channel_id,
+                gfs_instance_id=conn.gfs_instance_id,
+                gfs_key=self._gfs.addressee_key_for(conn),
+                ts=_anon_ts(),
+            ).to_wire()
+            return await self._post(
+                client, f"{conn.inbox_url}{CHANNEL_UNREGISTER_ROUTE}", body, conn
+            )
+
+        outcome = await self._keyed(conn, _unregister)
+        if outcome.kind == "delivered":
+            self._registered.get(channel_id, set()).discard(conn.gfs_instance_id)
+        return outcome
+
+    async def on_gfs_disconnect(self, conn: GfsConnection) -> None:
+        """The household is disconnecting *conn* (its row is about to go,
+        and its pending withdrawals with it): unregister every channel of
+        ours that may live there — its pending withdrawals, and each owned
+        private space whose list names it and has a channel — from the
+        connection object handed in, in the BACKGROUND (the DELETE route
+        never waits on a server)."""
+        try:
+            targets = {
+                (row_space, channel_id)
+                for row_space, _c, channel_id in await self._conn_repo.list_channel_withdrawals(
+                    gfs_id=conn.id
+                )
+            }
+            key = conn.public_key.lower()
+            for space in await self._spaces.list_all():
+                if (
+                    space.space_type is not SpaceType.PRIVATE
+                    or space.owner_instance_id != self._own_instance_id
+                    or space.gfs_servers is None
+                    or key not in space.gfs_servers.public_keys()
+                ):
+                    continue
+                stored = await self._spaces.get_gfs_channel(space.id)
+                if stored is not None:
+                    targets.add((space.id, stored[0]))
+        except Exception:
+            log.exception("gfs.channel: reading channels on a disconnecting GFS failed")
+            return
+        if targets:
+            self._spawn(self._withdraw_from(conn, sorted(targets)), "disconnect")
+
+    async def _withdraw_from(
+        self, conn: GfsConnection, targets: list[tuple[str, str]]
+    ) -> None:
+        for space_id, channel_id in targets:
+            try:
+                await self._unregister_one(space_id, channel_id, conn)
+            except Exception:
+                log.exception("gfs.channel: unregister on a disconnecting GFS failed")
+
+    def follow_later(self, space_id: str) -> None:
+        """:meth:`on_servers_changed` in the background (after a GFS
+        disconnect re-signed the owner's list)."""
+        self._spawn(self.on_servers_changed(space_id), "follow")
 
     async def on_servers_changed(self, space_id: str) -> set[str]:
         """The owner changed a private space's channel servers (its signed
@@ -725,26 +818,15 @@ class GfsChannelService:
         when the space needs no channel yet). Owner only; never raises."""
         try:
             space = await self._spaces.get(space_id)
-            if (
-                space is None
-                or space.space_type is not SpaceType.PRIVATE
-                or space.owner_instance_id != self._own_instance_id
-            ):
+            if space is None or space.owner_instance_id != self._own_instance_id:
+                return set()
+            if space.space_type is not SpaceType.PRIVATE:
+                await self.withdraw_pending(space_id=space_id)
                 return set()
             chosen = await self._chosen_capable(space)
-            stored = await self._spaces.get_gfs_channel(space_id)
-            found = await self._channel_seed(space) if stored is not None else None
-            if found is not None:
-                keep = {c.gfs_instance_id for c in chosen}
-                registered = self._registered.get(found[0], set())
-                dropped = [
-                    c
-                    for c in await self._capable()
-                    if c.gfs_instance_id in registered and c.gfs_instance_id not in keep
-                ]
-                if dropped:
-                    await self._unregister_on(found[0], found[1], dropped)
-                    registered.difference_update(c.gfs_instance_id for c in dropped)
+            # The servers the list dropped (recorded durably before it was
+            # stored): withdrawn first.
+            await self.withdraw_pending(space_id=space_id)
             result = await self.reconcile(space_id)
             if result not in ("created", "kept"):
                 if result == "retired":
@@ -941,6 +1023,8 @@ class GfsChannelService:
         # A (re)connect restarts this server's take-over grace: what it
         # answers before we caught up is never evidence.
         self._connected_at[conn.id] = _monotonic()
+        # Withdrawals this server still owes us (it was down, or suspended).
+        await self.withdraw_pending(gfs_id=conn.id)
         if not await self._gfs.private_channels_supported(conn):
             return 0
         done = 0

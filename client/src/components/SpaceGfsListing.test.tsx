@@ -444,12 +444,12 @@ describe('SpaceGfsListing — a private space on its channel GFSs', () => {
     ...over,
   })
 
-  it('shows "Private channel on" read-only — never "listed", never a public link', () => {
+  it('shows where the private channel runs, read-only — never "listed", never a public link', () => {
     const { getByTestId, container, getByText, queryByTestId } = render(
       <SpaceGfsListing space={channelSpace()} isOwner={false} isRemoteSpace />,
     )
     const box = getByTestId('gfs-channel-servers')
-    expect(getByText('space.private_gfs.channels_legend')).toBeTruthy()
+    expect(getByText('space.gfs_listing.channel_label')).toBeTruthy()
     expect(box.textContent).toContain('Town GFS')
     expect(box.textContent).toContain('club.example')
     // The section is "GFS", not "GFS listing".

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -255,6 +256,19 @@ class _Federation:
 class _Conns:
     def __init__(self, conns: list[GfsConnection]) -> None:
         self.conns = conns
+        #: Pending channel withdrawals (migration 0095).
+        self.withdrawals: list[tuple[str, str, str]] = []
+
+    async def list_channel_withdrawals(self, *, space_id=None, gfs_id=None):
+        return [
+            w
+            for w in self.withdrawals
+            if (space_id is None or w[0] == space_id)
+            and (gfs_id is None or w[1] == gfs_id)
+        ]
+
+    async def delete_channel_withdrawal(self, space_id, gfs_id, channel_id):
+        self.withdrawals.remove((space_id, gfs_id, channel_id))
 
     async def list_active(self):
         return list(self.conns)
@@ -406,6 +420,8 @@ async def world(tmp_dir):
             await node.channels.start()
             await node.member.start()
         yield SimpleNamespace(
+            session=tca.session,
+            owner_conns=[conn_a, conn_b, conn_c],
             apps=apps,
             urls={
                 "a": conn_a.inbox_url,
@@ -509,6 +525,8 @@ async def test_dropping_a_server_withdraws_the_channel_there(world):
         if c.id == "conn-a"
     )
     world.owner.spaces.space = _space([conn_a])
+    # The selection service recorded the withdrawal before storing the list.
+    world.owner.channels._conn_repo.withdrawals.append((SPACE_ID, "conn-b", channel_id))
     assert await world.owner.channels.on_servers_changed(SPACE_ID) == set()
     assert await world.apps["b"][gfs_channel_repo_key].get(channel_id) is None
     assert await world.apps["a"][gfs_channel_repo_key].get(channel_id)
@@ -534,3 +552,43 @@ async def test_a_delegated_admins_notice_reaches_b_anonymously(world):
         assert SPACE_ID not in text
         assert "instance_id" not in body
     assert _to(world, "c") == []
+
+
+@pytest.mark.parametrize("stored", ["none", "empty"])
+async def test_no_choice_means_no_channel_server_even_after_a_restart(world, stored):
+    """The owner turned the option on with several capable connections and
+    never picked (no PUT): its list is missing or signed empty. Nothing —
+    not the turn-on, not a seat going live, not a rotation, not a restart's
+    reconnect heal on each server — contacts ANY GFS for the space."""
+    space = world.owner.spaces.space
+    signed_empty = sign_gfs_server_list(
+        space_id=SPACE_ID, servers=(), issued_at=2, owner_seed=OWNER_SEED
+    )
+    world.owner.spaces.space = replace(
+        space, gfs_servers=None if stored == "none" else signed_empty
+    )
+    world.log.clear()
+    assert await world.owner.channels.enable(SPACE_ID) == "none"
+    assert (
+        await world.owner.channels.reconcile(SPACE_ID, joining=world.a.h.instance_id)
+        == "none"
+    )
+    assert await world.owner.channels.on_rotation(SPACE_ID) == 0
+    # "Restart": a fresh channel service over the same state, every GFS
+    # reconnecting.
+    owner2 = _node(
+        world.owner.h,
+        seed=SPACE_SEED,
+        session=world.session,
+        log=world.log,
+        conns=world.owner_conns,
+        space=world.owner.spaces.space,
+        peers={},
+        seats={world.a.h.instance_id, world.b.h.instance_id},
+    )
+    owner2.spaces.instances = list(world.owner.spaces.instances)
+    for conn in world.owner_conns:
+        assert await owner2.channels.heal(conn.id) == 0
+    await owner2.channels.wait_idle()
+    assert world.log == []
+    assert world.owner.spaces.channel is None and owner2.spaces.channel is None

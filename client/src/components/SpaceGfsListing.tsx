@@ -388,7 +388,7 @@ export function SpaceChannelServers({
   return (
     <div class="sh-gfs-listing" data-testid="gfs-channel-servers">
       <p class="sh-gfs-listing__label">
-        <span aria-hidden="true">🛰️</span> {t('space.private_gfs.channels_legend')}
+        <span aria-hidden="true">🛰️</span> {t('space.gfs_listing.channel_label')}
       </p>
       <p class="sh-muted" style={{ marginTop: 0 }}>{t('space.gfs_listing.channel_intro')}</p>
       <ul class="sh-federation-list sh-gfs-listing__list">

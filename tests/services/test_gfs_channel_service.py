@@ -53,6 +53,8 @@ from socialhome.services.gfs_channel_service import GfsChannelService
 from socialhome.services.gfs_server_targets import listing_target
 
 GFS_ID = "gfs-node-a"
+#: The pinned key of the test connection (the owner's list names it).
+_FIXTURE_KEY = "c1" * 32
 SPACE_ID = "sp-private-7c1"
 SPACE_NAME = "The Bakers"
 
@@ -240,12 +242,25 @@ class _Recording:
 class _Conns:
     def __init__(self, conn: GfsConnection) -> None:
         self.conn = conn
+        #: Pending channel withdrawals (migration 0095).
+        self.withdrawals: list[tuple[str, str, str]] = []
 
     async def list_active(self):
-        return [self.conn]
+        return [self.conn] if self.conn.status == "active" else []
 
     async def get(self, gfs_id):
         return self.conn if gfs_id == self.conn.id else None
+
+    async def list_channel_withdrawals(self, *, space_id=None, gfs_id=None):
+        return [
+            w
+            for w in self.withdrawals
+            if (space_id is None or w[0] == space_id)
+            and (gfs_id is None or w[1] == gfs_id)
+        ]
+
+    async def delete_channel_withdrawal(self, space_id, gfs_id, channel_id):
+        self.withdrawals.remove((space_id, gfs_id, channel_id))
 
 
 class _Inbound:
@@ -335,7 +350,7 @@ async def env(tmp_dir, request):
             id="conn-1",
             gfs_instance_id=GFS_ID,
             display_name="GFS",
-            public_key="",
+            public_key=_FIXTURE_KEY,
             inbox_url=str(tc.make_url("")).rstrip("/"),
             status="active",
             paired_at="2026-10-04T00:00:00+00:00",
@@ -357,6 +372,22 @@ async def env(tmp_dir, request):
         space = replace(
             _space(owner_h.instance_id),
             identity_public_key=ed25519_public_key(space_seed).hex(),
+            # The owner chose this connection as the channel's server (a
+            # missing list means "none", never "every server").
+            gfs_servers=sign_gfs_server_list(
+                space_id=SPACE_ID,
+                servers=(
+                    GfsServer(
+                        gfs_instance_id=GFS_ID,
+                        inbox_url=conn.inbox_url,
+                        public_key=_FIXTURE_KEY,
+                        gfs_key_suite="ed25519",
+                        display_name="GFS",
+                    ),
+                ),
+                issued_at=1,
+                owner_seed=os.urandom(32),
+            ),
         )
         owner = _Node(owner_h, session, conn)
         member = _Node(member_h, session, conn)
@@ -1371,10 +1402,14 @@ async def test_servers_changed_withdraws_where_dropped(env):
     # Unchanged choice: kept, announced, every member re-granted.
     assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
     assert len(env.owner.space_service.snapshots) == 2
-    # The owner drops the server: the channel is unregistered there.
+    # The owner drops the server: the selection service recorded the
+    # withdrawal (durably) before storing the list; it is sent first.
     _choose(env, env.owner, _server("gfs-elsewhere", "https://x.example", "e3" * 32))
+    conns = env.owner.svc._conn_repo
+    conns.withdrawals.append((SPACE_ID, "conn-1", channel_id))
     assert await env.owner.svc.on_servers_changed(SPACE_ID) == set()
     assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+    assert conns.withdrawals == []
     assert await env.owner.svc.grant_for_peer(SPACE_ID, env.other.h.instance_id) is None
 
 
@@ -1637,19 +1672,95 @@ async def test_a_refused_notice_address_is_classified(env):
     assert outcome.kind == "transient"
 
 
-async def test_withdraw_unregisters_after_a_restart(env):
+async def test_a_pending_withdrawal_survives_a_restart(env):
     """Option off after a restart: no registration is in memory and the
-    owner's list is already signed empty — the ids the selection service
-    read from the stored list still reach the server."""
+    owner's list is already signed empty — the durable pending row still
+    reaches the server, and is forgotten once it confirmed."""
     _choose(env, env.owner, _own(env, env.owner))
     channel_id = await _channel_ready(env)
     env.owner.svc._registered.clear()  # a restart forgets every confirmation
     _choose(env, env.owner)  # the list is signed empty
+    conns = env.owner.svc._conn_repo
+    conns.withdrawals.append((SPACE_ID, "conn-1", channel_id))
     repo = env.app[gfs_channel_repo_key]
-    assert await env.owner.svc.withdraw(SPACE_ID, ["conn-elsewhere"]) == 0
+    assert await env.owner.svc.withdraw_pending(space_id="nope") == 0
     assert await repo.get(channel_id) is not None
-    assert await env.owner.svc.withdraw(SPACE_ID, ["conn-1"]) == 1
+    assert await env.owner.svc.withdraw_pending(space_id=SPACE_ID) == 1
     assert await repo.get(channel_id) is None
-    # Members and spaces we do not own: nothing.
-    assert await env.member.svc.withdraw(SPACE_ID, ["conn-1"]) == 0
-    assert await env.owner.svc.withdraw("nope", ["conn-1"]) == 0
+    assert conns.withdrawals == []
+
+
+async def test_a_pending_withdrawal_waits_for_its_server(env, monkeypatch):
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conns = env.owner.svc._conn_repo
+    conns.withdrawals.append((SPACE_ID, "conn-1", channel_id))
+    # Suspended: kept for the reconnect.
+    conns.conn = replace(conns.conn, status="suspended")
+    assert await env.owner.svc.withdraw_pending() == 0
+    assert conns.withdrawals != []
+    # Back, but the server does not answer: kept.
+    conns.conn = replace(conns.conn, status="active")
+
+    async def down(*_a, **_k):
+        return chan_mod.PublishOutcome.transient()
+
+    monkeypatch.setattr(GfsChannelService, "_post", down)
+    assert await env.owner.svc.withdraw_pending(gfs_id="conn-1") == 0
+    assert conns.withdrawals != []
+    monkeypatch.undo()
+    # The reconnect heal retries it (the owner had dropped this server).
+    _choose(env, env.owner, _server("gfs-elsewhere", "https://x.example", "e3" * 32))
+    await env.owner.svc.heal("conn-1")
+    assert conns.withdrawals == []
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+async def test_a_withdrawal_that_can_never_be_signed_is_forgotten(env):
+    conns = env.member.svc._conn_repo
+    # A member (no seed) and an unknown space: nothing to sign with.
+    conns.withdrawals.extend(
+        [(SPACE_ID, "conn-1", "ab" * 16), ("gone", "conn-1", "cd" * 16)]
+    )
+    assert await env.member.svc.withdraw_pending() == 0
+    assert conns.withdrawals == []
+
+
+async def test_a_disconnecting_gfs_gets_the_unregister_in_the_background(env):
+    _choose(env, env.owner, _own(env, env.owner))
+    channel_id = await _channel_ready(env)
+    conn = env.owner.svc._conn_repo.conn
+    await env.owner.svc.on_gfs_disconnect(conn)
+    # Nothing inline: the DELETE route never waits on the server.
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is not None
+    await env.owner.svc.wait_idle()
+    assert await env.app[gfs_channel_repo_key].get(channel_id) is None
+
+
+async def test_a_disconnect_of_a_gfs_no_list_names_sends_nothing(env):
+    _choose(env, env.owner, _own(env, env.owner))
+    await _channel_ready(env)
+    other = replace(env.owner.svc._conn_repo.conn, id="conn-x", public_key="ee" * 32)
+    env.owner.gfs.sent = []
+    await env.owner.svc.on_gfs_disconnect(other)
+    await env.owner.svc.wait_idle()
+    assert env.owner.svc._tasks == set()
+
+
+async def test_follow_later_runs_the_follow_up_in_the_background(env):
+    _choose(env, env.owner, _own(env, env.owner))
+    env.owner.space_service.snapshots.clear()
+    env.owner.svc.follow_later(SPACE_ID)
+    await env.owner.svc.wait_idle()
+    assert SPACE_ID in env.owner.spaces.channels
+    assert len(env.owner.space_service.snapshots) == 2
+
+
+@pytest.mark.security
+async def test_no_list_means_no_channel_server(env):
+    """A missing owner list never means "every capable server"."""
+    env.owner.spaces.spaces[SPACE_ID] = replace(
+        env.owner.spaces.spaces[SPACE_ID], gfs_servers=None
+    )
+    assert await env.owner.svc.reconcile(SPACE_ID) == "none"
+    assert SPACE_ID not in env.owner.spaces.channels

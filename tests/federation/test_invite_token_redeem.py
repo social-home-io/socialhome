@@ -195,6 +195,8 @@ class _FakeSpaceRepo:
             "role": row.get("role", SpaceRole.MEMBER.value),
             # Migration 0079 — the link's type.
             "via": row.get("via", "gfs"),
+            # The GFS connection the link was parked on, if any.
+            "gfs_id": row.get("gfs_id"),
         }
 
     async def release_invite_token_use(self, token):
@@ -2431,8 +2433,9 @@ class _RecordingSpaceService:
         self.revoked.append((instance_id, notify))
         return True
 
-    async def enable_private_gfs_for_legacy_link(self, space_id):
+    async def enable_private_gfs_for_legacy_link(self, space_id, *, gfs_id=None):
         self.unlocked.append(space_id)
+        self.unlocked_via = [*getattr(self, "unlocked_via", []), gfs_id]
         return True
 
 
@@ -3095,6 +3098,8 @@ async def test_a_grandfathered_link_still_redeems_over_the_relay_and_turns_it_on
     env = _bootstrap_pair()
     _set_space(env, private_gfs=False)
     env.issuer_spaces.tokens["tok-1"]["via"] = "gfs_legacy"
+    # The link was parked on this GFS connection: the channel's first server.
+    env.issuer_spaces.tokens["tok-1"]["gfs_id"] = "gfs-park"
     recorder = _RecordingSpaceService()
     env.issuer.attach_space_service(recorder)
     result = await env.redeemer.request_redeem(
@@ -3105,6 +3110,7 @@ async def test_a_grandfathered_link_still_redeems_over_the_relay_and_turns_it_on
     )
     assert result["space_id"] == "space-1"
     assert recorder.unlocked == ["space-1"]
+    assert recorder.unlocked_via == ["gfs-park"]
     # Unlocked only once the joiner is a fan-out target (its grants follow).
     assert ("space-1", env.redeemer_party.instance_id) in (
         env.issuer_spaces.space_instances
