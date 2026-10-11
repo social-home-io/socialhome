@@ -10,7 +10,9 @@ vi.mock('@/api', async (importOriginal) => ({
 }))
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 
-import { SpaceGfsListing, hasGfsServersToShow, publicSpaceUrl } from './SpaceGfsListing'
+import {
+  SpaceGfsListing, hasChannelServersToShow, hasGfsServersToShow, publicSpaceUrl,
+} from './SpaceGfsListing'
 import { api, ApiError as RealApiError } from '@/api'
 import { showToast } from './Toast'
 import { currentUser } from '@/store/auth'
@@ -427,5 +429,63 @@ describe('SpaceGfsListing — links under the HA ingress prefix', () => {
     )
     expect(getByTestId('gfs-connect-hint').querySelector('a')!.getAttribute('href'))
       .toBe('/api/hassio_ingress/tok/connections')
+  })
+})
+
+describe('SpaceGfsListing — a private space on its channel GFSs', () => {
+  const channelSpace = (over: Partial<Space> = {}) => space({
+    space_type: 'private',
+    features: { private_gfs: true } as Space['features'],
+    gfs_servers: [
+      { display_name: 'Town GFS', inbox_url: 'https://town.example', connected: true },
+      { display_name: 'Club GFS', inbox_url: 'https://club.example', connected: false },
+    ],
+    gfs_unlisted: false,
+    ...over,
+  })
+
+  it('shows where the private channel runs, read-only — never "listed", never a public link', () => {
+    const { getByTestId, container, getByText, queryByTestId } = render(
+      <SpaceGfsListing space={channelSpace()} isOwner={false} isRemoteSpace />,
+    )
+    const box = getByTestId('gfs-channel-servers')
+    expect(getByText('space.gfs_listing.channel_label')).toBeTruthy()
+    expect(box.textContent).toContain('Town GFS')
+    expect(box.textContent).toContain('club.example')
+    // The section is "GFS", not "GFS listing".
+    expect(container.querySelector('h3')!.textContent).toBe('space.private_gfs.legend')
+    expect(container.textContent).not.toContain('space.gfs_listing.listed')
+    expect(container.textContent).not.toContain('space.gfs.public_link')
+    expect(container.querySelectorAll('button')).toHaveLength(0)
+    // The GFS this household isn't connected to gets the connect hint.
+    expect(getByTestId('gfs-connect-hint')).toBeTruthy()
+    expect(queryByTestId('gfs-channel-owner-hint')).toBeNull()
+    // Nothing fetched: the signed list rides the space detail.
+    expect(apiMock.get).not.toHaveBeenCalled()
+  })
+
+  it('points the owner at the picker under the GFS toggle', () => {
+    const { getByTestId } = render(
+      <SpaceGfsListing space={channelSpace()} isOwner isRemoteSpace={false} />,
+    )
+    expect(getByTestId('gfs-channel-owner-hint').textContent)
+      .toBe('space.gfs_listing.channel_owner_hint')
+  })
+
+  it('renders nothing until the channel GFSs are known', () => {
+    const { container } = render(
+      <SpaceGfsListing
+        space={channelSpace({ gfs_servers: null })}
+        isOwner={false}
+        isRemoteSpace
+      />,
+    )
+    expect(container.innerHTML).toBe('')
+    expect(hasChannelServersToShow(channelSpace({ gfs_servers: [] }))).toBe(false)
+    expect(hasChannelServersToShow(channelSpace())).toBe(true)
+    expect(hasChannelServersToShow(space({
+      space_type: 'private',
+      gfs_servers: [{ display_name: 'X', inbox_url: 'https://x.example', connected: true }],
+    }))).toBe(false)
   })
 })

@@ -18,6 +18,11 @@ import {
   GfsChecklist, defaultGfsSelection, revealGfsChecklist, type GfsChoice,
 } from './GfsChecklist'
 import { SpaceGfsListing } from './SpaceGfsListing'
+import {
+  PrivateChannelPicker,
+  sameGfsSet,
+  type PrivateChannelChoices,
+} from './PrivateChannelPicker'
 import { joinOptionsForVisibility } from './spaceModeOptions'
 import { showToast } from './Toast'
 import { t } from '@/i18n/i18n'
@@ -200,6 +205,14 @@ export function SpaceSettings({
   // A 409 PRIVATE_GFS_LINK_MEMBERS: the households that joined through a
   // connection-server link and must be removed before it can go off.
   const linkMembers = useSignal<LinkMemberHousehold[] | null>(null)
+  // The GFSs carrying the private channel (owner, owner household): the
+  // choices the server offers, the owner's pending pick (``null`` = the
+  // starting one) and a "choose one" error. Saved with the settings.
+  const channelChoices = useSignal<PrivateChannelChoices | null>(null)
+  const channelPick = useSignal<string[] | null>(null)
+  const channelError = useSignal<string | null>(null)
+  const channelReload = useSignal(0)
+  const showChannelPicker = showPrivateGfs && !isRemoteSpace && privateGfs.value
   // Shown only where members actually publish over a connection server.
   // A public / global space: when followers may read its posts (the
   // backend's ``_publicly_readable``) — the live followers switch counts,
@@ -299,8 +312,56 @@ export function SpaceSettings({
     if (!isRemoteSpace) loadTierGfs()
   }, [space.id, isRemoteSpace])
 
+  /** The channel GFSs to save, or ``null`` when nothing changed (the
+   *  option is off, the choices aren't loaded, or the pick is the saved
+   *  one). */
+  const channelChange = (): string[] | null => {
+    const loaded = channelChoices.value
+    if (!showChannelPicker || loaded === null) return null
+    const pick = channelPick.value ?? loaded.initial
+    return sameGfsSet(pick, loaded.saved) ? null : pick
+  }
+
+  /** ``PUT /gfs-servers`` for the private channel; reports a server the
+   *  channel couldn't be set up on. ``true`` when the server took it. */
+  const saveChannels = async (ids: string[]): Promise<boolean> => {
+    try {
+      const res = await api.put<{
+        listed: string[]
+        failed: { gfs_id: string; reason: string }[]
+      }>(`/api/spaces/${space.id}/gfs-servers`, { gfs_ids: ids })
+      const failedNames = (res?.failed ?? []).map(f =>
+        channelChoices.value?.choices.find(c => c.id === f.gfs_id)?.display_name
+          ?? f.gfs_id)
+      if (failedNames.length > 0) {
+        showToast(
+          t('space.private_gfs.channels_failed', { names: failedNames.join(', ') }),
+          'info',
+        )
+      }
+      channelPick.value = null
+      channelReload.value += 1
+      return true
+    } catch (e: any) {
+      showToast(e.message || t('space.settings.save_failed'), 'error')
+      return false
+    }
+  }
+
   const save = async () => {
     const previousMode = space.features?.location_mode ?? 'gps'
+    // The private channel needs a GFS whenever one can carry it.
+    const loadedChannels = channelChoices.value
+    if (
+      showChannelPicker && loadedChannels !== null
+      && loadedChannels.choices.length > 0
+      && (channelPick.value ?? loadedChannels.initial).length === 0
+    ) {
+      channelError.value = t('space.private_gfs.channels_required')
+      revealGfsChecklist('private-channel')
+      return
+    }
+    const channels = channelChange()
     const modeChanged = locationEnabled.value
       && locationMode.value !== previousMode
     // Rebuild allowed_post_types from the checkboxes, but PRESERVE any
@@ -419,16 +480,30 @@ export function SpaceSettings({
     if (Object.keys(features).length > 0) body.features = features
 
     if (Object.keys(body).length === 0) {
-      showToast(t('space.settings.no_changes'), 'info')
+      if (channels === null) {
+        showToast(t('space.settings.no_changes'), 'info')
+        return
+      }
+      if (await saveChannels(channels)) {
+        showToast(t('space.private_gfs.channels_saved'), 'success')
+        onUpdate()
+      }
       return
     }
-    await sendPatch(body, modeChanged)
+    // The option goes on first (the server keeps a channel choice only for
+    // a space using the GFS), then the channel servers.
+    if (await sendPatch(body, modeChanged) && channels !== null) {
+      await saveChannels(channels)
+    }
   }
 
   /** PATCH the config. A 409 ``PEERS_TOO_OLD`` (a raised access level some
    *  member household can't enforce yet) opens the apply-anyway prompt
    *  instead of an error toast. */
-  const sendPatch = async (body: Record<string, unknown>, modeChanged = false) => {
+  const sendPatch = async (
+    body: Record<string, unknown>,
+    modeChanged = false,
+  ): Promise<boolean> => {
     try {
       const res = await api.patch<{ forwarded?: boolean }>(`/api/spaces/${space.id}`, body)
       if (res?.forwarded) {
@@ -446,7 +521,7 @@ export function SpaceSettings({
           'info',
         )
         onUpdate()
-        return
+        return false
       }
       if (modeChanged) {
         showToast(
@@ -459,11 +534,12 @@ export function SpaceSettings({
         showToast(t('space.settings.saved'), 'success')
       }
       onUpdate()
+      return true
     } catch (e: any) {
       const households = body.force === true ? null : peersTooOldHouseholds(e)
       if (households) {
         peersTooOld.value = { body, households }
-        return
+        return false
       }
       const stranded = privateGfsLinkMembers(e)
       if (stranded) {
@@ -472,9 +548,10 @@ export function SpaceSettings({
         privateGfs.value = true
         linkMembers.value = stranded
         showToast(t('space.private_gfs.link_members_toast'), 'error')
-        return
+        return false
       }
       showToast(e.message || t('space.settings.save_failed'), 'error')
+      return false
     }
   }
 
@@ -907,6 +984,19 @@ export function SpaceSettings({
               <dt>{t('space.private_gfs.off')}</dt>
               <dd>{t('space.private_gfs.off_help')}</dd>
             </dl>
+            {showChannelPicker && (
+              <PrivateChannelPicker
+                spaceId={space.id}
+                selected={channelPick.value}
+                reloadKey={channelReload.value}
+                error={channelError.value}
+                onLoaded={(c) => { channelChoices.value = c }}
+                onChange={(ids) => {
+                  channelPick.value = ids
+                  channelError.value = null
+                }}
+              />
+            )}
             <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-xs)' }}>
               {t('space.private_gfs.owner_only')}
             </p>

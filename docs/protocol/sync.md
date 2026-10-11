@@ -694,6 +694,13 @@ spawns a 15-second `wait_ready` watcher (`SyncRtcSession.wait_ready`):
   decided by the originating direction of DIRECT_FAILED (see
   `_handle_space_sync_direct_failed`); the provider only owns the retry when
   it was the one that sent DIRECT_FAILED (e.g. rate-limited).
+- A provider that refuses a BEGIN from a household seated from an invite
+  link sends it **no** `SPACE_SYNC_DIRECT_FAILED` — whatever the reason:
+  that household refuses every direct-sync signalling event by design
+  (`SPACE_SESSION_ALLOWED_EVENT_TYPES`), so the event was always dropped on
+  arrival. Behaviour-neutral: the requester never acted on it and asks
+  again on its next sync; only the bounced envelope (and its WARNING) is
+  gone.
 
 **Freeing the session.** When the end-of-stream sentinel lands, the
 requester sends `SPACE_SYNC_COMPLETE {sync_id, space_id, clean}` to the provider

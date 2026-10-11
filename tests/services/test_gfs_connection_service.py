@@ -4498,6 +4498,29 @@ async def test_disconnect_runs_the_listing_hook_for_each_listed_space(env):
     assert sorted(seen) == ["space-a", "space-b"]
 
 
+async def test_disconnect_runs_the_removed_hook_after_the_row_is_gone(env):
+    _, repo = env
+    await repo.save(_make_conn("hk-rm"))
+    svc = GfsConnectionService(repo, http_client=_StubSession())  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    async def _hook(conn) -> None:
+        assert await repo.get("hk-rm") is None
+        seen.append(conn.id)
+
+    svc.attach_on_removed(_hook)
+    await svc.disconnect("hk-rm")
+    assert seen == ["hk-rm"]
+
+    async def _boom(conn) -> None:
+        raise RuntimeError("x")
+
+    await repo.save(_make_conn("hk-rm2"))
+    svc.attach_on_removed(_boom)
+    await svc.disconnect("hk-rm2")  # fail-soft
+    assert await repo.get("hk-rm2") is None
+
+
 async def test_publish_body_never_names_the_other_listing_servers(env):
     """The owner's GFS list is for members only: no GFS learns which other
     servers list the space."""

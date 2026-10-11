@@ -8,6 +8,7 @@
  * screen-reader use come for free. Controlled: ``selected`` + ``onChange``.
  */
 import type { JSX } from 'preact'
+import { useRef } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 
 /** One active GFS connection the owner can list the space on. */
@@ -15,6 +16,9 @@ export interface GfsChoice {
   id: string
   display_name: string
   inbox_url: string
+  /** A warning shown under the row (e.g. a chosen server that can't be used
+   *  right now — the owner can still untick it). */
+  note?: string
 }
 
 /** The host part of a GFS URL — enough to tell two servers with the same
@@ -53,6 +57,8 @@ export function GfsChecklist({
   max = 8,
   error = null,
   intro,
+  legend,
+  icon = '🌐',
 }: {
   /** Prefix for element ids (two checklists may share a page). */
   name: string
@@ -64,13 +70,24 @@ export function GfsChecklist({
   /** Shown under the list (e.g. "choose at least one"). */
   error?: string | null
   intro?: string
+  /** Replaces the default "List it on" legend (a private channel). */
+  legend?: string
+  /** The legend's icon (a private channel isn't the public globe). */
+  icon?: string
 }): JSX.Element {
   const errorId = `${name}-error`
   const atMax = selected.length >= max
+  // The newest selection, ahead of the parent's re-render: two clicks in
+  // one tick each build on the previous one's result (a functional update)
+  // instead of on the stale ``selected`` prop, so neither is dropped.
+  const latest = useRef(selected)
+  latest.current = selected
   const toggle = (id: string, on: boolean) => {
+    const prev = latest.current
     const next = on
-      ? [...selected.filter(s => s !== id), id]
-      : selected.filter(s => s !== id)
+      ? [...prev.filter(s => s !== id), id]
+      : prev.filter(s => s !== id)
+    latest.current = next
     onChange(next)
   }
   return (
@@ -79,7 +96,7 @@ export function GfsChecklist({
       data-testid={`${name}-checklist`}
       aria-describedby={error ? errorId : undefined}
     >
-      <legend><span aria-hidden="true">🌐</span> {t('space.gfs_choice.legend')}</legend>
+      <legend><span aria-hidden="true">{icon}</span> {legend ?? t('space.gfs_choice.legend')}</legend>
       <p class="sh-muted sh-gfs-checklist__intro">
         {intro ?? t('space.gfs_choice.intro')}
       </p>
@@ -99,6 +116,12 @@ export function GfsChecklist({
             <span class="sh-toggle-row__text">
               <span>{c.display_name}</span>
               <span class="sh-toggle-row__sub">{gfsHost(c.inbox_url)}</span>
+              {c.note && (
+                <span class="sh-toggle-row__sub sh-text-warning"
+                      data-testid={`${name}-note-${c.id}`}>
+                  {c.note}
+                </span>
+              )}
             </span>
           </label>
         )

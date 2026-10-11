@@ -953,6 +953,9 @@ def _build_gfs_server_selection(
     # v_57 — every send to a space's GFSs (member publish, delegated-admin
     # notices, the host relay) reaches every server on the owner's list.
     gfs_connection_service.attach_member_servers(selection.member_servers)
+    # A disconnected GFS leaves the owner's private-channel lists too (the
+    # FK cascade that removes its rows bypasses every service).
+    gfs_connection_service.attach_on_removed(selection.on_connection_removed)
     selection.wire()
     return selection
 
@@ -3484,6 +3487,18 @@ def create_app(config: Config | None = None) -> web.Application:
         # A connection adopted its server's new public id: re-register the
         # owner's channels there and re-issue grants naming the new id.
         gfs_connection_service.attach_on_rebound(gfs_channels.on_gfs_rebound)
+        # The owner changed a private space's channel servers: register the
+        # channel there (only there) and re-grant the members.
+        gfs_server_selection.attach_channel_hook(gfs_channels.on_servers_changed)
+        # ...or the same in the background (a GFS disconnect re-signed the
+        # list), and take the channel down on a GFS being disconnected —
+        # from the connection handed in, before its row (and its pending
+        # withdrawals, migration 0095) go.
+        gfs_server_selection.attach_follow_later(gfs_channels.follow_later)
+        gfs_connection_service.attach_on_disconnect(gfs_channels.on_gfs_disconnect)
+        # A reconnect read a GFS's capability: settle a provisional upgrade
+        # adoption of it (kept, or dropped from the channel list).
+        gfs_channels.attach_capability_hook(gfs_server_selection.capability_known)
         space_public_outbound = SpacePublicOutbound(
             bus=bus,
             space_repo=space_repo,

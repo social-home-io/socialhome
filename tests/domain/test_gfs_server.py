@@ -293,6 +293,20 @@ def test_signed_column_garbage_reads_as_unknown(text) -> None:
     assert signed_gfs_server_list_from_column(text) is None
 
 
+def test_signed_public_keys_in_list_order_including_private_hosts() -> None:
+    private = {**_n(3), "inbox_url": "http://192.168.1.5:8765"}
+    upper = {**_n(10), "public_key": _n(10)["public_key"].upper()}
+    wire = _signed(
+        servers=[_n(2), private, "junk", {**_n(5), "public_key": "short"}, upper, _n(2)]
+    )
+    keys = SignedGfsServerList.from_wire(wire).public_keys()
+    assert keys == (
+        _n(2)["public_key"],
+        private["public_key"],
+        _n(10)["public_key"].lower(),
+    )
+
+
 def test_selection_outcome_wire_shape():
     outcome = GfsSelectionOutcome(listed=("g1",), failed=(("g2", "publish_failed"),))
     assert outcome.to_dict() == {

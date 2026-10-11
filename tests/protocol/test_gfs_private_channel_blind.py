@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -35,6 +36,7 @@ from socialhome.crypto import (
 )
 from socialhome.domain.federation import GfsConnection, InstanceSource
 from socialhome.domain.gfs_channel import CHANNEL_FRAME_KEYS, CHANNEL_ROUTES
+from socialhome.domain.gfs_server import GfsServer
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
 from socialhome.domain.writer_cert import WriterEntitlement
 from socialhome.global_server.app_keys import (
@@ -45,6 +47,7 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
 from socialhome.global_server.server import create_gfs_app
+from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.gfs_channel_service import GfsChannelService
 from socialhome.services.gfs_member_publish_service import (
@@ -120,6 +123,13 @@ class _Gfs:
 
     async def server_targets(self, space_id):
         return None
+
+    @asynccontextmanager
+    async def anon_session(self, conn):
+        yield self._s
+
+    def capability_unknown(self, conn):
+        return False
 
 
 class _Spaces:
@@ -251,8 +261,28 @@ class _Conns:
         return []
 
 
+#: The owner chose the test connection (key ``00…``) as the channel's
+#: server — a missing list means "none", never "every server". Matched on
+#: the key, so the URL here is only a label.
+_CHOSEN = sign_gfs_server_list(
+    space_id=SPACE_ID,
+    servers=(
+        GfsServer(
+            gfs_instance_id=GFS_ID,
+            inbox_url="https://gfs.example",
+            public_key="00" * 32,
+            gfs_key_suite="ed25519",
+            display_name="GFS",
+        ),
+    ),
+    issued_at=1,
+    owner_seed=os.urandom(32),
+)
+
+
 def _space(owner: str, *, strict: bool = False) -> Space:
     return Space(
+        gfs_servers=_CHOSEN,
         id=SPACE_ID,
         name=SPACE_NAME,
         owner_instance_id=owner,

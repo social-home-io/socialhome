@@ -23309,6 +23309,7 @@ button.sh-page-editor-status {
 /* Status label and Remove sit on one line, centred on each other. */
 .sh-gfs-listing .sh-federation-actions { align-items: center; gap: var(--sh-space-sm); }
 .sh-gfs-listing__hint { flex: 1 1 100%; margin: 0; }
+.sh-gfs-listing__label { font-weight: 600; margin: 0 0 var(--sh-space-xs); }
 .sh-gfs-listing__hint a {
   display: inline-flex;
   align-items: center;

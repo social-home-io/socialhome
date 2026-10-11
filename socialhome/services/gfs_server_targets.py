@@ -43,7 +43,7 @@ import logging
 from collections.abc import Callable, Iterable
 
 from ..domain.federation import GfsConnection
-from ..domain.gfs_server import GfsServer
+from ..domain.gfs_server import GfsServer, SignedGfsServerList
 from ..gfs_proof import normalize_gfs_base_url
 from ..outbound_fetch import OutboundFetchRefused
 from .gfs_publish_retry import PublishOutcome
@@ -149,6 +149,32 @@ def resolve_server_targets(
             continue
         seen.add(target.id)
         out.append(target)
+    return out
+
+
+def connections_on_list(
+    signed: SignedGfsServerList,
+    connections: Iterable[GfsConnection],
+    *,
+    include_inactive: bool = False,
+) -> list[GfsConnection]:
+    """The OWNER's own ACTIVE connections its signed list names, in list
+    order, matched on the pinned key alone (the trust anchor — the server's
+    id or URL may have moved since the owner chose it). For a private
+    space's channel servers (the owner's choice IS the list), so a
+    private-network GFS the owner holds is matched too. With
+    ``include_inactive`` a pending / suspended connection matches as well
+    (it stays chosen while the owner still holds it)."""
+    conns = [
+        c
+        for c in connections
+        if c.registered and (include_inactive or c.status == "active")
+    ]
+    out: list[GfsConnection] = []
+    for key in signed.public_keys():
+        match = next((c for c in conns if c.public_key.lower() == key), None)
+        if match is not None and match not in out:
+            out.append(match)
     return out
 
 

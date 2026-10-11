@@ -173,7 +173,9 @@ class GfsSelectionInvalidError(CodedError, ValueError):
     * ``unknown`` — not one of this household's ACTIVE GFS connections;
     * ``too_many`` — more than ``params.max`` servers;
     * ``not_global`` — servers were chosen for a space that isn't global;
-    * ``malformed`` — ``gfs_ids`` is not a list of connection ids.
+    * ``malformed`` — ``gfs_ids`` is not a list of connection ids;
+    * ``unsupported`` — a private space's channel server that does not
+      prove ``private_channels``.
     """
 
     status = 422

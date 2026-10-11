@@ -250,6 +250,9 @@ class _SeatReservation:
     #: relay into a private space whose ``private_gfs`` is OFF: the commit
     #: turns the option ON (the owner's normal ON path).
     unlock_private_gfs: bool = False
+    #: The GFS connection the unlocking link was parked on (``None`` for an
+    #: unpublished one) — preferred as the space's first channel server.
+    via_gfs_id: str | None = None
 
 
 class SpaceInviteTokenRedeemCoordinator:
@@ -1253,6 +1256,7 @@ class SpaceInviteTokenRedeemCoordinator:
             seat=seat,
             pending_admin=pending_admin,
             unlock_private_gfs=unlock,
+            via_gfs_id=(str(row["gfs_id"]) if unlock and row.get("gfs_id") else None),
         )
 
         # An ADMIN seat gets the ROLE and nothing else. NO signing-seed
@@ -1486,7 +1490,9 @@ class SpaceInviteTokenRedeemCoordinator:
         if not res.unlock_private_gfs or self._space_service is None:
             return
         try:
-            await self._space_service.enable_private_gfs_for_legacy_link(res.space_id)
+            await self._space_service.enable_private_gfs_for_legacy_link(
+                res.space_id, gfs_id=res.via_gfs_id
+            )
         except Exception:
             log.exception(
                 "invite redeem: turning private_gfs on after a grandfathered "

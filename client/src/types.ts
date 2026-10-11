@@ -381,7 +381,10 @@ export interface SpaceGfsServer {
 /** ``GET /api/spaces/{id}/gfs-servers`` — the owner's picker. */
 export interface SpaceGfsServersView {
   space_type: Space['space_type']
-  /** Connection ids that list the space. */
+  /** ``listing`` — a global space's listings; ``channel`` — a private
+   *  space's channel servers (never listed anywhere). */
+  mode?: 'listing' | 'channel'
+  /** Connection ids that list the space (``channel``: its channel servers). */
   gfs_ids: string[]
   /** The server's cap on GFSs per space. */
   max: number
@@ -405,6 +408,17 @@ export interface SpaceGfsServersView {
     inbox_url: string
     listed: boolean
     listing_status: GfsSpacePublication['status'] | null
+    /** ``channel`` mode: whether the server can carry a private channel. */
+    channel_capable?: boolean
+  }[]
+  /** ``channel`` mode: every chosen server, whatever its state (so the owner
+   *  can see and drop one that is suspended or no longer carries channels). */
+  chosen?: {
+    gfs_id: string
+    display_name: string
+    inbox_url: string
+    connection_status: GfsConnection['status']
+    channel_capable: boolean
   }[]
 }
 

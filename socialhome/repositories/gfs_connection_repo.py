@@ -39,6 +39,15 @@ class AbstractGfsConnectionRepo(Protocol):
     ) -> list[GfsConnection]: ...
     async def count_published_spaces(self, gfs_id: str) -> int: ...
     async def list_publications_all(self) -> list[dict]: ...
+    async def add_channel_withdrawals(
+        self, space_id: str, channel_id: str, gfs_ids: list[str]
+    ) -> None: ...
+    async def list_channel_withdrawals(
+        self, *, space_id: str | None = None, gfs_id: str | None = None
+    ) -> list[tuple[str, str, str]]: ...
+    async def delete_channel_withdrawal(
+        self, space_id: str, gfs_id: str, channel_id: str
+    ) -> None: ...
 
 
 class SqliteGfsConnectionRepo:
@@ -160,6 +169,10 @@ class SqliteGfsConnectionRepo:
             (gfs_id,),
         )
         await self._db.enqueue(
+            "DELETE FROM gfs_channel_withdrawals WHERE gfs_connection_id=?",
+            (gfs_id,),
+        )
+        await self._db.enqueue(
             "DELETE FROM gfs_connections WHERE id=?",
             (gfs_id,),
         )
@@ -271,6 +284,55 @@ class SqliteGfsConnectionRepo:
             """,
         )
         return rows_to_dicts(rows)
+
+    # ── Pending channel withdrawals (migration 0095) ─────────────────────
+
+    async def add_channel_withdrawals(
+        self, space_id: str, channel_id: str, gfs_ids: list[str]
+    ) -> None:
+        """Record that *channel_id* of *space_id* must still be unregistered
+        on each connection in *gfs_ids* (idempotent; an id that is no
+        connection any more is skipped)."""
+        for gfs_id in dict.fromkeys(gfs_ids):
+            await self._db.enqueue(
+                "INSERT OR IGNORE INTO gfs_channel_withdrawals"
+                "(space_id, gfs_connection_id, channel_id)"
+                " SELECT ?, id, ? FROM gfs_connections WHERE id=?",
+                (space_id, channel_id, gfs_id),
+            )
+
+    async def list_channel_withdrawals(
+        self, *, space_id: str | None = None, gfs_id: str | None = None
+    ) -> list[tuple[str, str, str]]:
+        """Pending ``(space_id, gfs_connection_id, channel_id)``, oldest
+        first, optionally for one space and / or one connection."""
+        where: list[str] = []
+        params: list[str] = []
+        if space_id is not None:
+            where.append("space_id=?")
+            params.append(space_id)
+        if gfs_id is not None:
+            where.append("gfs_connection_id=?")
+            params.append(gfs_id)
+        sql = (
+            "SELECT space_id, gfs_connection_id, channel_id"
+            " FROM gfs_channel_withdrawals"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        rows = await self._db.fetchall(
+            sql + " ORDER BY created_at, rowid", tuple(params)
+        )
+        return [(r["space_id"], r["gfs_connection_id"], r["channel_id"]) for r in rows]
+
+    async def delete_channel_withdrawal(
+        self, space_id: str, gfs_id: str, channel_id: str
+    ) -> None:
+        await self._db.enqueue(
+            "DELETE FROM gfs_channel_withdrawals"
+            " WHERE space_id=? AND gfs_connection_id=? AND channel_id=?",
+            (space_id, gfs_id, channel_id),
+        )
 
 
 def _row_to_publication(r: dict) -> GfsSpacePublication:

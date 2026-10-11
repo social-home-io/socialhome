@@ -697,7 +697,10 @@ holder derives them and nobody stores them:
   bytes)`;
 - `channel_writer_seed = HKDF-SHA256(ikm = space seed, salt =
   b"socialhome-gfs-channel-writer-key:v1", info =
-  b"<space_id>:<channel_id>:<channel epoch>", 32 bytes)` (strict mode);
+  b"<space_id>:<channel_id>:<channel epoch>", 32 bytes)` (strict mode;
+  since v_57 in every mode — pinned by every notice and handed to v_57
+  writers in trusted spaces too, so they publish anonymously to every
+  channel server the owner chose, including ones they never connected to);
 - `epoch_offset = int(HKDF-SHA256(ikm = space seed, salt =
   b"socialhome-gfs-channel-epoch-offset:v1", info =
   b"<space_id>:<channel_id>", 5 bytes))` — every epoch on the wire is

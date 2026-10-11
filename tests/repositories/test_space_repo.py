@@ -645,6 +645,16 @@ async def test_create_and_consume_invite_token(env):
     result = await env.repo.consume_invite_token(token)
     assert result is not None
     assert result["space_id"] == "sp-tok"
+    assert result["gfs_id"] is None
+
+
+async def test_consume_reports_the_gfs_a_link_was_parked_on(env):
+    await env.repo.save(_space("sp-tok2"))
+    token = await env.repo.create_invite_token(
+        "sp-tok2", "uid-alice", uses=1, gfs_id="gfs-park", gfs_token="t"
+    )
+    result = await env.repo.consume_invite_token(token)
+    assert result is not None and result["gfs_id"] == "gfs-park"
 
 
 async def test_consume_exhausted_token_returns_none(env):

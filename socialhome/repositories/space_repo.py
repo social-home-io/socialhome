@@ -2236,7 +2236,7 @@ class SqliteSpaceRepo:
             row = conn.execute(
                 """
                 SELECT space_id, created_by, uses_remaining, expires_at, role,
-                       via
+                       via, gfs_id
                   FROM space_invite_tokens WHERE token=?
                 """,
                 (token,),
@@ -2256,6 +2256,10 @@ class SqliteSpaceRepo:
                 # connection-server relay is refused for an ``internal``
                 # link — read here, never from the redeem request.
                 "via": row[5] or INVITE_VIA_GFS,
+                # The GFS connection the link was parked on, if any — a
+                # grandfathered link that unlocks ``private_gfs`` makes it
+                # the space's channel server.
+                "gfs_id": row[6],
             }
 
         return await self._db.transact(_run)

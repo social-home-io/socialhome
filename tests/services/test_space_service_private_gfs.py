@@ -179,6 +179,33 @@ async def test_turning_it_on_starts_the_channel(stack):
     assert stack.rotations == []
 
 
+async def test_turning_it_on_picks_the_default_channel_server_first(stack):
+    """The owner's default channel server (its single capable connection)
+    is chosen BEFORE the channel starts, so the channel lands there."""
+
+    class _Selection:
+        async def default_channels(self, space_id):
+            stack.member_gfs.calls.append(("default", space_id))
+            return True
+
+    stack.svc.attach_gfs_server_selection(_Selection())
+    await _set(stack, "anna", on=True)
+    assert stack.member_gfs.calls == [
+        ("default", stack.space.id),
+        ("enable", stack.space.id),
+    ]
+
+
+async def test_a_failing_default_never_blocks_the_channel(stack):
+    class _Selection:
+        async def default_channels(self, space_id):
+            raise RuntimeError("down")
+
+    stack.svc.attach_gfs_server_selection(_Selection())
+    await _set(stack, "anna", on=True)
+    assert stack.member_gfs.calls == [("enable", stack.space.id)]
+
+
 @pytest.mark.security
 async def test_turning_it_off_is_refused_while_link_joined_members_remain(stack):
     await _set(stack, "anna", on=True)

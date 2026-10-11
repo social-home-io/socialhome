@@ -866,7 +866,12 @@ from __future__ import annotations
 #:   event type. **Gated, degraded fallback**: a member household below v_57
 #:   is sent no writer key in a trusted space, so it keeps publishing
 #:   identified to the servers it is registered on (today's behaviour); an
-#:   older owner sends no list, and members fall back the same way.
+#:   older owner sends no list, and members fall back the same way. Private
+#:   channels follow the same model with no further bump: the owner picks a
+#:   private space's channel servers (the same signed list), the channel
+#:   writer key is pinned in every mode and handed to v_57 writers in
+#:   trusted spaces too, and key holders send ``publish-anon`` to every
+#:   chosen server their grant names.
 OURS: int = 57
 
 

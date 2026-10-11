@@ -1969,8 +1969,9 @@ that omit the field read OFF.
 **Which spaces get a channel — automatically, and only these.** A PRIVATE
 space with `private_gfs` ON, whose owner household holds the seed (matching
 the pin), that has at least one live remote member household, while at
-least one active connection server proves `private_channels` in its signed
-`/gfs/info` block. The owner checks this (`GfsChannelService.reconcile`)
+least one of the connection servers **the owner chose for it** proves
+`private_channels` in its signed `/gfs/info` block (v_57 — see
+[Owner-chosen channel servers](#owner-chosen-channel-servers-v_57) below). The owner checks this (`GfsChannelService.reconcile`)
 when the owner turns the option on (`GfsChannelService.enable`: reconcile,
 announce, hand every member its grant by roster snapshot), when a remote
 seat goes live (`SpaceRemoteSeatLive`), at every content-key rotation
@@ -2091,7 +2092,8 @@ epoch, a seed holder whose seed matches the pin issues `gfs_channel:
 {channel_suite, space_id, channel_id, channel_pk, epoch, gfs_ids,
 epoch_offset, binding_sig_suite, binding_sig, channel_pass?, channel_cert?,
 writer_key?}` — a channel cert for a household with a writer scope in a
-trusted space, the channel writer key (and no cert) in a strict space, and
+trusted space (plus, since v_57, the channel writer key for a v_57
+household), the channel writer key (and no cert) in a strict space, and
 a `channel_pass` for **every member household** of a space with
 `private_gfs` ON (a reader gets a pass-only grant). The wire shape is
 unchanged from v_51; only who gets a pass changed. (A v_51 owner — no
@@ -2163,6 +2165,10 @@ whose space writer cert lets this author publish this item type:
   under the channel writer key pinned for that epoch; fanned out to every
   open seat (the publisher drops its own echo). A strict space without the
   channel writer key sends nothing — never the identified path.
+- **v_57 — any member holding the channel writer key** (strict, or a v_57
+  member in a trusted space) publishes anonymously like strict, to **every**
+  channel server on the owner's list the grant names, including the ones its
+  household never connected to (below).
 
 Both carry the same `payload` as a strict public-space item: the real type
 and the author-signed inner with the **space** writer cert inside the
@@ -2276,6 +2282,142 @@ under the server-wide cap).
    a grant, a seat or a `gfs`-type invite link.
 6. **The owner replaces a channel another key holder moved past it**
    (self-heal above).
+
+### Owner-chosen channel servers (v_57)
+
+**The owner picks.** A private space with `private_gfs` ON lives on the
+connection servers its OWNER chooses (at most 8), among its own active
+connections that prove `private_channels` — never "every active GFS". The
+choice is the space's owner-signed GFS list (`spaces.gfs_servers`, the same
+column and wire shape as a global space's listings, see
+[below](#the-owners-gfs-list-in-space-metadata)); for a private space the list
+**is** the owner's choice rather than something derived from listings, and a
+private space is never LISTED anywhere — its servers carry an opaque channel,
+nothing else. `PUT /api/spaces/{id}/gfs-servers {gfs_ids}` (space owner, on
+the owner household) stores and signs it, then the channel follows
+(`GfsChannelService.on_servers_changed`): unregistered on every server
+dropped from the choice, registered on the chosen ones, the epoch announced
+there, every member household re-granted (the grants' `gfs_ids` name the
+chosen servers that confirmed the registration). A server the channel could
+not be registered on is reported (`failed: [{gfs_id, reason:
+"channel_failed"}]`) and retried on its next reconnect. A NEWLY added server
+that does not prove `private_channels` (or is not active) is refused (`422
+GFS_SELECTION_INVALID`, reason `unsupported` / `unknown`); one already chosen
+stays choosable whatever its state, so the owner can always keep or drop it
+(the picker shows it with a note).
+
+**A missing choice never means "every server".** The channel lives only on
+servers the owner's list names; no list (or an empty one) means no channel.
+
+- **Default:** when the owner turns `private_gfs` on with no choice yet, its
+  single capable connection is chosen; with several (or none) an explicit
+  EMPTY list is signed and the channel stays off until the owner picks (the
+  SPA pre-ticks the single one, requires at least one and saves the pick
+  right after the option, so no unchosen server is ever used in between). A
+  grandfathered invite link that turns the option on prefers the GFS the
+  link was parked on.
+- **Upgrade:** a household whose private space already ran a channel
+  records, once at startup, the servers that channel lived on (an older
+  build registered it on every connection proving `private_channels`). One
+  whose capability can't be read at startup is adopted provisionally and
+  settled on its first reconnect: kept if it carries channels, else dropped
+  from the list without a withdrawal (it never held the channel). A space
+  without a channel gets the turn-on default
+  (`GfsServerSelectionService.reconcile_on_startup` / `capability_known`).
+- **Disconnect:** the owner unregisters the channel on a GFS it disconnects
+  — in the background, from the connection it was handed, before the row
+  goes — and that GFS leaves every channel list (the members are told and
+  re-granted in the background; the DELETE route waits on no server). This
+  unregister is **best effort**: up to three tries ten seconds apart, then
+  nothing retries it (the connection and its pending rows are gone); the
+  GFS's idle sweep of unused channels is the backstop. A suspended
+  connection stays chosen.
+- **Leaving the private tier** (to household / public / global): the stored
+  channel's withdrawals are recorded from the old channel list, the channel
+  is retired from those servers and this process's registrations — never
+  from the new tier's list — and forgotten.
+- **Re-choosing** a server that still had a pending withdrawal drops that
+  row: no unregister / re-register churn.
+- **Option off:** the list is re-signed empty and the channel retires as
+  before.
+- **Withdrawal survives a restart or crash:** the servers to unregister the
+  channel from are read from the stored signed list as it is replaced (old
+  list minus new, or every listed server when the option goes off) and
+  recorded in `gfs_channel_withdrawals` (migration 0095) BEFORE the new
+  list is stored; each row goes once the server confirmed (or can never
+  confirm), and is retried on every reconnect of that server — a
+  suspended connection when it comes back
+  (`GfsChannelService.withdraw_pending`).
+
+**Members send to every chosen server.** The members get the list in the
+encrypted `space_meta` like any owner list. A member holding the channel
+writer key — strict spaces since v_51, and since v_57 every space for a v_57
+member — sends each item with `POST /gfs/channels/publish-anon` to **every**
+server on the list that its current grant names: its own connections over
+the cookie-less publish session, and the servers it never connected to as
+in-memory listing targets over a cookie-less session pinned to the listed
+address, only after that server proved possession of the listed key (the
+same machinery as [members publishing to every listed
+GFS](#members-publish-to-every-listed-gfs-v_57)). So a member who uses only
+server B receives an item a member published through A while the host is
+offline. The identified channel publish (an older member, trusted mode,
+channel cert) and the seat subscribe go only to servers the household is
+registered on. A retry to a listing target is re-resolved first: a server
+the owner dropped, or the grant no longer names, gets nothing more.
+
+**Delegated admins announce everywhere too.** A delegated admin's channel
+epoch notice is channel-key signed and names no household, so (v_57) it goes
+to every chosen channel server its grant names — its own connections and,
+over the same proof-checked pinned session, the ones it never connected to —
+so a rotation it makes while the owner is offline reaches a server it never
+joined. Right after its own rotation it holds no grant for the new epoch (a
+seed holder never grants itself) and uses its newest stored grant. The
+owner's notices stay on its own registered connections.
+
+**Liveness limit.** A delegated admin knows the channel's servers only from
+its own newest grant. A server the owner added AFTER that grant's epoch is
+not in it, so the admin's notices miss it until the owner is back online
+and re-grants (or announces itself); members' items still reach that server
+only from members holding a newer grant.
+
+**The writer key is pinned in every mode.** Since v_57 the owner's channel
+notice carries `writer_key_cert` in trusted mode too, so the anonymous path
+works there. No new wire field and no protocol bump: the grant shape is
+unchanged since v_51, the notice field already existed (the GFS pins it in
+any mode), and handing the channel writer key to a trusted-mode member is
+gated on v_57 (`FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH`); an older
+member keeps publishing identified to its own servers.
+
+**What a channel server learns.** A server the owner did NOT choose never
+hears of the channel — no register, notice, unregister, grant or seat. A
+chosen server a member never connected to sees that member's address and
+publish timing, never its household identity and never the space (the
+request names only the opaque channel id). See
+[`principles.md`](../principles.md#sign-off-private-channels-on-owner-chosen-gfss-v_57).
+
+```mermaid
+sequenceDiagram
+    participant O as Owner (host)
+    participant A as GFS A (chosen)
+    participant B as GFS B (chosen)
+    participant C as GFS C (not chosen)
+    participant M as Member on A only
+    participant N as Member on B only
+    O->>O: PUT /gfs-servers {A, B} — sign the list
+    O-->>M: SPACE_CONFIG_CHANGED (list A+B)
+    O-->>N: SPACE_CONFIG_CHANGED (list A+B)
+    O->>A: POST /gfs/channels/register + epoch {writer_key_cert}
+    O->>B: POST /gfs/channels/register + epoch {writer_key_cert}
+    O-->>M: roster snapshot: grant {gfs_ids: A, B, writer_key}
+    O-->>N: roster snapshot: grant {gfs_ids: A, B, writer_key}
+    N->>B: POST /gfs/channels/subscribe (identified, N is registered on B)
+    Note over O: host goes offline
+    M->>A: POST /gfs/channels/publish-anon {channel_id, payload, writer_sig}
+    M->>B: POST /gfs/channels/publish-anon (pinned cookie-less session, after /gfs/proof)
+    B-->>N: WS {type:relay, channel_id, space_item, epoch, payload}
+    Note over B: sees M's address and timing — never M's id, never the space
+    Note over C: never hears of the channel
+```
 
 ### The owner's GFS list in space metadata
 

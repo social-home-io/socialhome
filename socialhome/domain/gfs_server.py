@@ -330,6 +330,19 @@ class SignedGfsServerList:
         )
         return servers or (), dropped
 
+    def public_keys(self) -> tuple[str, ...]:
+        """The (lower-case) keys the list names, in list order — every
+        entry with a well-formed key, private-host ones included. For the
+        OWNER matching its own choice back to its connections (the key is
+        the trust anchor; an id or URL may have moved since)."""
+        keys: list[str] = []
+        for entry in json.loads(self.servers_json)[:MAX_GFS_SERVERS]:
+            key = entry.get("public_key") if isinstance(entry, dict) else None
+            if isinstance(key, str) and _ED25519_HEX.fullmatch(key.lower()):
+                if key.lower() not in keys:
+                    keys.append(key.lower())
+        return tuple(keys)
+
 
 def signed_gfs_server_list_to_column(value: SignedGfsServerList | None) -> str | None:
     """The ``spaces.gfs_servers`` text (a JSON object) — ``None`` → NULL."""
