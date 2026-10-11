@@ -122,5 +122,21 @@
   "dashboard.not_found": "Diese Seite gibt es auf dem Dashboard nicht.",
   "dashboard.not_found.back": "Zurück zur Übersicht",
   "dashboard.timeline.now": "jetzt",
-  "dashboard.timeline.label": "Zeitleiste für heute"
+  "dashboard.timeline.label": "Zeitleiste für heute",
+  "dashboard.picture.clock": "Es ist {time}",
+  "dashboard.picture.now": "Jetzt: {title}",
+  "dashboard.picture.next": "Als Nächstes: {title}, {when}",
+  "dashboard.picture.now_next": "Jetzt und als Nächstes",
+  "dashboard.picture.free": "Freie Zeit",
+  "dashboard.picture.item": "{when} {title}",
+  "dashboard.picture.cancelled": "{when} {title}, fällt aus",
+  "dashboard.picture.day": "Mein Tag",
+  "dashboard.picture.part.morning": "Morgen",
+  "dashboard.picture.part.afternoon": "Nachmittag",
+  "dashboard.picture.part.evening": "Abend",
+  "dashboard.picture.part.night": "Nacht",
+  "dashboard.picture.jobs": "Meine Aufgaben",
+  "dashboard.picture.job": "{state}: {title}",
+  "dashboard.picture.sleeps": "Noch so oft schlafen: {n}",
+  "dashboard.picture.night": "{when} {time}: {title}"
 }

@@ -5,11 +5,11 @@
 <div class="dash-view" data-view-key="{{ view_key }}">
   <div class="dash-offline" data-offline role="status" hidden>
     <span aria-hidden="true">⚠</span>
-    <span class="dash-offline-text">{{ t("dashboard.offline", time=clock.time) }}</span>
+    <span class="dash-offline-text{% if picture %} dash-visually-hidden{% endif %}">{{ t("dashboard.offline", time=clock.time) }}</span>
     <button type="button" class="dash-offline-retry" data-reload aria-label="{{ t("dashboard.offline.retry") }}" title="{{ t("dashboard.offline.retry") }}"><span aria-hidden="true">↻</span></button>
   </div>
   {% if night %}
-  {% include "_night.html.j2" %}
+  {% include "_night_picture.html.j2" if picture else "_night.html.j2" %}
   <div class="dash-day" data-day-view>
     {% include view_template %}
   </div>

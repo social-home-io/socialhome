@@ -60,3 +60,33 @@
   {%- if show_people %} {{ faces(c.person_ids) }}{% endif %}
 </li>
 {%- endmacro %}
+
+{#- ── Picture view (no words except names, no digits) ───────────────── -#}
+
+{#- The analog clock: hands set from the household time (dashboard.js
+    turns them each minute through their transform attribute) and the
+    time-timer wedge until NEXT. SVG attributes only — never style=. -#}
+{% macro analog_clock(c, cls="", wedge=True) -%}
+<svg class="dash-pv-clock{% if cls %} {{ cls }}{% endif %}" viewBox="0 0 200 200" role="img" aria-label="{{ c.label }}" focusable="false">
+<circle class="dash-pv-dial" cx="100" cy="100" r="96"/>
+{%- if c.wedge and wedge %}
+<g class="dash-pv-wedge {{ c.color }}" data-rel>
+{%- if c.wedge.full %}<circle cx="100" cy="100" r="88"/>{% else %}<path d="{{ c.wedge.path }}"/>{% endif -%}
+</g>
+{%- endif %}
+{%- for i in range(12) %}
+<line class="dash-pv-tick{% if i % 3 == 0 %} dash-pv-tick-major{% endif %}" x1="100" y1="10" x2="100" y2="{{ 28 if i % 3 == 0 else 22 }}" transform="rotate({{ i * 30 }} 100 100)"/>
+{%- endfor %}
+<line class="dash-pv-hand dash-pv-hand-h" x1="100" y1="100" x2="100" y2="54" transform="{{ c.hour }}" data-hand="hour"/>
+<line class="dash-pv-hand dash-pv-hand-m" x1="100" y1="100" x2="100" y2="24" transform="{{ c.minute }}" data-hand="minute"/>
+<circle class="dash-pv-hub" cx="100" cy="100" r="7"/>
+</svg>
+{%- endmacro %}
+
+{#- An emoji tile; the real title is spoken, never shown. -#}
+{% macro pv_tile(tile) -%}
+<li class="dash-pv-tile {{ tile.color }}{% if tile.past %} dash-pv-past{% endif %}{% if tile.current %} dash-pv-current{% endif %}{% if tile.cancelled %} dash-pv-cancelled{% endif %}"{% if tile.current %} data-live{% endif %}>
+<span class="dash-pv-emoji" role="img" aria-label="{{ tile.label }}">{{ tile.icon }}</span>
+{%- if tile.cancelled %}<span class="dash-pv-x" aria-hidden="true">✕</span>{% endif -%}
+</li>
+{%- endmacro %}

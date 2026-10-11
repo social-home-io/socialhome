@@ -132,5 +132,21 @@
   "dashboard.not_found": "This page isn't on the dashboard.",
   "dashboard.not_found.back": "Back to Home",
   "dashboard.timeline.now": "now",
-  "dashboard.timeline.label": "Today's timeline"
+  "dashboard.timeline.label": "Today's timeline",
+  "dashboard.picture.clock": "It's {time}",
+  "dashboard.picture.now": "Now: {title}",
+  "dashboard.picture.next": "Next: {title}, {when}",
+  "dashboard.picture.now_next": "Now and next",
+  "dashboard.picture.free": "Free time",
+  "dashboard.picture.item": "{when} {title}",
+  "dashboard.picture.cancelled": "{when} {title}, cancelled",
+  "dashboard.picture.day": "My day",
+  "dashboard.picture.part.morning": "Morning",
+  "dashboard.picture.part.afternoon": "Afternoon",
+  "dashboard.picture.part.evening": "Evening",
+  "dashboard.picture.part.night": "Night",
+  "dashboard.picture.jobs": "My jobs",
+  "dashboard.picture.job": "{state}: {title}",
+  "dashboard.picture.sleeps": "Sleeps until then: {n}",
+  "dashboard.picture.night": "{when} {time}: {title}"
 }

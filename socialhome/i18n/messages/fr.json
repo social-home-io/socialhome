@@ -122,5 +122,21 @@
   "dashboard.not_found": "Cette page n'est pas sur le tableau de bord.",
   "dashboard.not_found.back": "Retour à l'accueil",
   "dashboard.timeline.now": "maintenant",
-  "dashboard.timeline.label": "Chronologie du jour"
+  "dashboard.timeline.label": "Chronologie du jour",
+  "dashboard.picture.clock": "Il est {time}",
+  "dashboard.picture.now": "Maintenant : {title}",
+  "dashboard.picture.next": "Ensuite : {title}, {when}",
+  "dashboard.picture.now_next": "Maintenant et ensuite",
+  "dashboard.picture.free": "Temps libre",
+  "dashboard.picture.item": "{when} {title}",
+  "dashboard.picture.cancelled": "{when} {title}, annulé",
+  "dashboard.picture.day": "Ma journée",
+  "dashboard.picture.part.morning": "Matin",
+  "dashboard.picture.part.afternoon": "Après-midi",
+  "dashboard.picture.part.evening": "Soir",
+  "dashboard.picture.part.night": "Nuit",
+  "dashboard.picture.jobs": "Mes tâches",
+  "dashboard.picture.job": "{state} : {title}",
+  "dashboard.picture.sleeps": "Dodos avant : {n}",
+  "dashboard.picture.night": "{when} {time} : {title}"
 }

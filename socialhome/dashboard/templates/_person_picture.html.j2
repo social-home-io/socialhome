@@ -1,7 +1,101 @@
-{#- SEAM — picture view (mockup D: analog clock, time wedge, icon tiles,
-    no words except names). Not built yet: it lands in a later PR, which
-    replaces the include below. Until then a picture-view person gets
-    the reader page, inside this marked wrapper. -#}
-<div class="dash-picture-seam" data-picture-view>
-{% include "_person_reader.html.j2" %}
+{#- The picture view (mockup D) for people who can't read yet: an analog
+    clock, NOW → NEXT with a time-timer wedge, the day as emoji tiles
+    under 🌅 ☀️ 🌇 🌙, tomorrow's sleeps, jobs and who's home. The only
+    words on screen are names; every tile speaks its real title through
+    aria-label (presenter: picture.py). -#}
+{% from "_macros.html.j2" import face, analog_clock, pv_tile with context %}
+{% set p = page.person %}
+{% set pv = picture %}
+<div class="dash-pv" data-picture-view>
+  <header class="dash-pv-head">
+    <div class="dash-pv-who">
+      {{ face(p, "pv") }}
+      <h1 class="dash-pv-name">{{ p.display_name }}{% if p.status_emoji %} <span class="dash-status" aria-hidden="true">{{ p.status_emoji }}</span>{% endif %}</h1>
+    </div>
+    <div class="dash-pv-time">
+      {{ analog_clock(pv.clock) }}
+      <span class="dash-pv-part-now" role="img" aria-label="{{ t("dashboard.picture.part." ~ pv.part_now.key) }}">{{ pv.part_now.icon }}</span>
+    </div>
+    {% if pv.now or pv.next %}
+    <section class="dash-pv-nownext" aria-label="{{ t("dashboard.picture.now_next") }}">
+      {% if pv.now %}
+      <div class="dash-pv-card dash-pv-card-now {{ pv.now.color }}" data-live>
+        <span class="dash-pv-card-emoji" role="img" aria-label="{{ pv.now.label }}">{{ pv.now.icon }}</span>
+      </div>
+      {% endif %}
+      {% if pv.now and pv.next %}<span class="dash-pv-arrow" aria-hidden="true">➜</span>{% endif %}
+      {% if pv.next %}
+      <div class="dash-pv-card dash-pv-card-next {{ pv.next.color }}">
+        <span class="dash-pv-card-emoji" role="img" aria-label="{{ pv.next.label }}">{{ pv.next.icon }}</span>
+        {% if pv.next_pie %}
+        <svg class="dash-pv-pie" viewBox="0 0 100 100" aria-hidden="true" focusable="false" data-rel>
+          <circle class="dash-pv-pie-dial" cx="50" cy="50" r="46"/>
+          {% if pv.next_pie.full %}<circle class="dash-pv-pie-fill" cx="50" cy="50" r="46"/>{% else %}<path class="dash-pv-pie-fill" d="{{ pv.next_pie.path }}"/>{% endif %}
+        </svg>
+        {% endif %}
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+  </header>
+
+  <section class="dash-pv-day" aria-label="{{ t("dashboard.picture.day") }}">
+    {% if pv.empty %}
+    <p class="dash-pv-empty"><span role="img" aria-label="{{ t("dashboard.empty_day") }}">🎈</span></p>
+    {% else %}
+    <ol class="dash-pv-parts">
+      {% for part in pv.parts %}
+      <li class="dash-pv-part dash-pv-part-{{ part.state }}">
+        <span class="dash-pv-part-icon" role="img" aria-label="{{ part.label }}">{{ part.icon }}</span>
+        {% if part.tiles %}
+        <ol class="dash-pv-tiles">
+          {% for tile in part.tiles %}{{ pv_tile(tile) }}{% endfor %}
+        </ol>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+  </section>
+
+  {% if pv.tomorrow or pv.jobs or pv.home or pv.away %}
+  <div class="dash-pv-more">
+    {% if pv.tomorrow %}
+    <section class="dash-pv-row dash-pv-tomorrow" aria-label="{{ t("dashboard.person.tomorrow") }}">
+      <span class="dash-pv-sleeps" role="img" aria-label="{{ t("dashboard.picture.sleeps", n=pv.sleeps) }}">{% for _ in range(pv.sleeps) %}🌙{% endfor %}</span>
+      <ol class="dash-pv-tiles">
+        {% for tile in pv.tomorrow %}{{ pv_tile(tile) }}{% endfor %}
+      </ol>
+    </section>
+    {% endif %}
+    {% if pv.jobs %}
+    <section class="dash-pv-row dash-pv-jobs" aria-label="{{ t("dashboard.picture.jobs") }}">
+      <ul class="dash-pv-tiles">
+        {% for job in pv.jobs %}
+        <li class="dash-pv-tile dash-pv-job{% if job.done %} dash-pv-done{% endif %}">
+          <span class="dash-pv-emoji" role="img" aria-label="{{ job.label }}">{{ job.icon }}</span>
+          <span class="dash-pv-check" aria-hidden="true">{% if job.done %}✓{% else %}☐{% endif %}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+    {% if pv.home or pv.away %}
+    <section class="dash-pv-row dash-pv-where" aria-label="{{ t("dashboard.home.whos_home") }}" data-live>
+      {% if pv.home %}
+      <div class="dash-pv-group" role="group" aria-label="{{ t("dashboard.presence.home") }}">
+        <span class="dash-pv-label" aria-hidden="true">🏠</span>
+        {% for q in pv.home %}<span class="dash-pv-person">{{ face(q, "md", named=True) }}</span>{% endfor %}
+      </div>
+      {% endif %}
+      {% if pv.away %}
+      <div class="dash-pv-group" role="group" aria-label="{{ t("dashboard.presence.away") }}">
+        <span class="dash-pv-label" aria-hidden="true">🚗</span>
+        {% for q in pv.away %}<span class="dash-pv-person">{{ face(q, "md", named=True) }}</span>{% endfor %}
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+  </div>
+  {% endif %}
 </div>

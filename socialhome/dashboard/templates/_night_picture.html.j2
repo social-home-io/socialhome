@@ -1,0 +1,15 @@
+{#- Night mode for a picture-view person: the analog clock, 🌙 (or 🌅 in
+    the small hours) and the icon of the morning's first thing — no
+    digits, no words. -#}
+{% from "_macros.html.j2" import analog_clock with context %}
+{% set pv = picture %}
+<section class="dash-night-view dash-pv-night" aria-label="{{ pv.clock.label }}">
+  {{ analog_clock(pv.clock, "dash-pv-clock-night", wedge=False) }}
+  {% if pv.night %}
+  <p class="dash-pv-night-next">
+    <span aria-hidden="true">{{ "🌙" if pv.night.when == "tomorrow" else "🌅" }}</span>
+    <span role="img" aria-label="{{ pv.night.label }}">{{ pv.night.icon }}</span>
+  </p>
+  {% endif %}
+  <p class="dash-night-hint" data-wake-hint><span aria-hidden="true">👆</span><span class="dash-visually-hidden">{{ t("dashboard.night.wake") }}</span></p>
+</section>

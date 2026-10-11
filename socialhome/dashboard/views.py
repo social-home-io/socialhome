@@ -55,6 +55,7 @@ from .keys import (
     SNAPSHOTS_KEY,
 )
 from .policy import build_dashboard_csp
+from .picture import picture_view
 from .presenter import (
     MAX_LANES,
     SHOPPING_SHOWN,
@@ -487,9 +488,12 @@ async def _board(
     template: str,
     extra: dict[str, object],
     own_color: str | None = None,
+    picture: bool = False,
 ) -> _Board:
     """The context every dashboard board (Home, a person) shares: rail,
-    clock, night mode, the inline colour style and its view key."""
+    clock, night mode, the inline colour style and its view key.
+    ``picture`` (a picture-view person) is part of the key too: it
+    changes the rail and the night view, which a swap can't."""
     app = request.app
     settings = await app[SETTINGS_KEY].get()
     t = app[RENDERER_KEY].translator(settings.locale)
@@ -529,11 +533,15 @@ async def _board(
             settings.pin_set,
             settings.idle_return_minutes,
             settings.keep_screen_on,
+            picture,
         ),
         "fragment_url": fragment_url,
         "idle_minutes": settings.idle_return_minutes if current else 0,
         "keep_awake": settings.keep_screen_on,
         "view_template": template,
+        # The picture view's model (``picture.py``), set by the person
+        # board for a picture-view person.
+        "picture": None,
         **extra,
     }
     return _Board(locale=settings.locale, context=context, style=style)
@@ -587,7 +595,8 @@ async def _person_board(request: web.Request) -> _Board | None:
         if page.school is not None
         else page.today_items
     )
-    return await _board(
+    tomorrow = _tomorrow(page)
+    board = await _board(
         request,
         snapshot=page,
         people=people,
@@ -596,13 +605,19 @@ async def _person_board(request: web.Request) -> _Board | None:
         own_color=page.person.color,
         fragment_url=f"/fragment/p/{quote(page.person.user_id, safe='')}",
         template="_person.html.j2",
+        picture=page.person.picture_view,
         extra={
             "page": page,
             "school_lessons": school_lessons,
             "today_list": events_today,
-            "tomorrow_list": _tomorrow(page),
+            "tomorrow_list": tomorrow,
         },
     )
+    if page.person.picture_view:
+        fmt = board.context["f"]
+        assert isinstance(fmt, Fmt)
+        board.context["picture"] = picture_view(page, fmt, tomorrow=tomorrow)
+    return board
 
 
 def _tomorrow(page: PersonSnapshot) -> list[DashboardAgendaItem]:

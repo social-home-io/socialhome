@@ -1573,6 +1573,463 @@ h3.dash-sublabel {
   }
 }
 
+/* ── Picture view (people who can't read yet) ─────────────────────────── */
+
+/* No words but names, no digits: an analog clock, big emoji cards and
+   tiles. Past things fade to 40 %, the running one gets a thick frame,
+   a cancelled lesson is grey with a big ✕ — never colour alone. */
+.dash-pv {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Who + NOW ➜ NEXT on the start side, the clock on the end side. */
+.dash-pv-head {
+  display: grid;
+  grid-template-areas:
+    "who time"
+    "nn time";
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px 24px;
+}
+
+.dash-pv-nownext {
+  grid-area: nn;
+}
+
+.dash-pv-who {
+  grid-area: who;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-inline-size: 0;
+}
+
+/* The page owner's face: 88 px with the thick ring of the current page. */
+.dash-face-pv {
+  inline-size: 88px;
+  block-size: 88px;
+  font-size: 2rem;
+  box-shadow:
+    0 0 0 4px var(--dash-bg),
+    0 0 0 9px var(--dash-accent);
+}
+
+.dash-pv-name {
+  margin: 0;
+  font-size: clamp(2.25rem, 5vw, 3.25rem);
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.dash-pv-time {
+  grid-area: time;
+  align-self: start;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dash-pv-part-now {
+  font-size: 3.5rem;
+  line-height: 1;
+}
+
+/* The analog clock (inline SVG; the hands turn via their transform
+   attribute — CSS must never set `transform` on them). */
+.dash-pv-clock {
+  display: block;
+  inline-size: clamp(150px, 20vw, 210px);
+  block-size: auto;
+  aspect-ratio: 1;
+}
+
+.dash-pv-dial {
+  fill: var(--dash-surface);
+  stroke: var(--dash-text);
+  stroke-width: 4;
+}
+
+/* The time-timer wedge: the minutes until NEXT, in NEXT's colour. */
+.dash-pv-wedge {
+  fill: var(--kc, var(--dash-accent));
+  opacity: 0.5;
+}
+
+.dash-pv-tick {
+  stroke: var(--dash-muted);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.dash-pv-tick-major {
+  stroke: var(--dash-text);
+  stroke-width: 6;
+}
+
+.dash-pv-hand {
+  stroke: var(--dash-text);
+  stroke-linecap: round;
+}
+
+.dash-pv-hand-h {
+  stroke-width: 12;
+}
+
+.dash-pv-hand-m {
+  stroke-width: 7;
+}
+
+.dash-pv-hub {
+  fill: var(--dash-text);
+}
+
+/* NOW ➜ NEXT */
+.dash-pv-nownext {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 24px;
+}
+
+.dash-pv-card {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  inline-size: 176px;
+  block-size: 144px;
+  background: var(--dash-surface);
+  border: 3px solid var(--kc, var(--dash-border));
+  border-radius: 24px;
+}
+
+/* NOW: the thick frame. */
+.dash-pv-card-now {
+  border-width: 9px;
+}
+
+.dash-pv-card-emoji {
+  font-size: 5rem;
+  line-height: 1;
+}
+
+.dash-pv-arrow {
+  font-size: 3rem;
+  line-height: 1;
+  color: var(--dash-muted);
+}
+
+[dir="rtl"] .dash-pv-arrow {
+  display: inline-block;
+  transform: scaleX(-1);
+}
+
+/* NEXT's own little time-timer, from twelve o'clock. */
+.dash-pv-pie {
+  position: absolute;
+  inset-block-end: 8px;
+  inset-inline-end: 8px;
+  inline-size: 44px;
+  block-size: 44px;
+}
+
+.dash-pv-pie-dial {
+  fill: var(--dash-bg);
+  stroke: var(--dash-border);
+  stroke-width: 4;
+}
+
+.dash-pv-pie-fill {
+  fill: var(--kc, var(--dash-accent));
+}
+
+/* MY DAY: four day parts, the tiles under each. */
+.dash-pv-parts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-pv-part {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-inline-size: 0;
+  padding-block: 12px;
+  padding-inline: 8px;
+  background: var(--dash-surface);
+  border: 3px solid transparent;
+  border-radius: 20px;
+}
+
+.dash-pv-part-now {
+  border-color: var(--dash-accent);
+}
+
+.dash-pv-part-icon {
+  font-size: 2.5rem;
+  line-height: 1;
+}
+
+.dash-pv-part-past .dash-pv-part-icon {
+  opacity: 0.4;
+}
+
+.dash-pv-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-pv-tile {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  inline-size: 72px;
+  block-size: 72px;
+  background: var(--dash-bg);
+  border: 2px solid var(--dash-border);
+  border-block-end: 6px solid var(--kc, var(--dash-border));
+  border-radius: 18px;
+}
+
+.dash-pv-emoji {
+  font-size: 2.75rem;
+  line-height: 1;
+}
+
+.dash-pv-past {
+  opacity: 0.4;
+}
+
+.dash-pv-current {
+  outline: 6px solid var(--dash-accent);
+  outline-offset: 3px;
+}
+
+.dash-pv-cancelled .dash-pv-emoji {
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+
+.dash-pv-x {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 3.75rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--dash-error-text);
+}
+
+/* An empty day: one big balloon. */
+.dash-pv-empty {
+  margin: 0;
+  font-size: clamp(6rem, 18vw, 10rem);
+  line-height: 1.1;
+  text-align: center;
+}
+
+/* Tomorrow, my jobs, who's home. */
+.dash-pv-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 16px;
+}
+
+.dash-pv-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  padding-block: 12px;
+  padding-inline: 16px;
+  background: var(--dash-surface);
+  border-radius: 20px;
+}
+
+.dash-pv-label,
+.dash-pv-sleeps {
+  font-size: 2.25rem;
+  line-height: 1;
+}
+
+.dash-pv-check {
+  position: absolute;
+  inset-block-end: -10px;
+  inset-inline-end: -10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 34px;
+  block-size: 34px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+  background: var(--dash-surface);
+  border: 2px solid var(--dash-border);
+  border-radius: 50%;
+}
+
+.dash-pv-done .dash-pv-check {
+  color: var(--dash-accent-text);
+  background: var(--dash-accent);
+  border-color: var(--dash-accent);
+}
+
+.dash-pv-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+/* Home | away: a clear break between the two groups (side by side;
+   on a phone they wrap onto two lines instead). */
+@media (min-width: 601px) {
+  .dash-pv-group + .dash-pv-group {
+    padding-inline-start: 16px;
+    border-inline-start: 2px solid var(--dash-border);
+  }
+}
+
+.dash-pv-person {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  max-inline-size: 6rem;
+  font-size: 1rem;
+}
+
+.dash-pv-person .dash-face-name {
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Night: the big analog clock, 🌙 and tomorrow's first icon. */
+.dash-pv-night .dash-pv-clock-night {
+  inline-size: min(60vw, 50vh, 360px);
+}
+
+.dash-pv-night-next {
+  display: flex;
+  gap: 24px;
+  margin-block: 32px 0;
+  font-size: clamp(3.5rem, 10vw, 5rem);
+  line-height: 1;
+}
+
+/* Emoji keep their own bright colours: dim them for the dark room. */
+.dash-pv-night-next,
+.dash-pv-night .dash-night-hint {
+  opacity: 0.7;
+}
+
+.dash-pv-night .dash-night-hint {
+  font-size: 2rem;
+}
+
+/* Portrait tablet / phone: the day parts become rows, read top to
+   bottom (four columns that narrow hold one tile each). */
+@media (max-width: 900px), (orientation: portrait) {
+  .dash-pv-parts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .dash-pv-part {
+    flex-direction: row;
+    align-items: center;
+    gap: 16px;
+    padding-inline: 16px;
+  }
+
+  .dash-pv-part .dash-pv-tiles {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 600px) {
+  .dash-pv {
+    gap: 16px;
+  }
+
+  .dash-pv-head {
+    grid-template-areas:
+      "who time"
+      "nn nn";
+  }
+
+  .dash-pv-who {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .dash-pv-name {
+    font-size: 1.75rem;
+  }
+
+  .dash-pv-part {
+    gap: 12px;
+    padding-inline: 10px;
+  }
+
+  .dash-pv-clock {
+    inline-size: 132px;
+  }
+
+  .dash-pv-part-now {
+    font-size: 2.5rem;
+  }
+
+  .dash-pv-card {
+    inline-size: 132px;
+    block-size: 116px;
+  }
+
+  .dash-pv-card-emoji {
+    font-size: 4rem;
+  }
+
+  .dash-pv-arrow {
+    font-size: 2rem;
+  }
+
+  .dash-pv-tile {
+    inline-size: 64px;
+    block-size: 64px;
+  }
+
+  .dash-pv-emoji {
+    font-size: 2.25rem;
+  }
+
+  .dash-pv-x {
+    font-size: 3rem;
+  }
+}
+
 /* ── Timeline steps (generated: whole percent of the day's span) ────── */
 
 .x-0 { inset-inline-start: 0%; }

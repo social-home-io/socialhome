@@ -6,6 +6,7 @@ import pytest
 
 from socialhome.dashboard.icons import (
     FALLBACK_ICON,
+    _needle,
     GENERAL_KEYWORDS,
     LESSON_KEYWORDS,
     normalized_words,
@@ -176,3 +177,24 @@ def test_every_table_icon_is_one_emoji(table):
             assert word == word.strip() and word, k
             # Keywords are normalised already (what they're matched against).
             assert " ".join(normalized_words(word)) == word, k
+
+
+@pytest.mark.parametrize(
+    ("keyword", "needle"),
+    [
+        ("=bed", " bed "),
+        ("^shop", " shop"),
+        ("*mull", "mull"),
+        ("art", " art "),  # ≤ 3 letters: a whole word
+        ("swim", " swim"),  # 4 letters: the start of a word
+        ("schwimm", "schwimm"),  # 5+: anywhere in a word
+        ("tisch decken", " tisch decken"),  # a phrase starts on a word
+    ],
+)
+def test_keyword_forms(keyword, needle):
+    assert _needle(keyword, by_length=True) == needle
+
+
+def test_spa_keyword_forms_never_match_inside_a_word():
+    assert _needle("art", by_length=False) == " art "
+    assert _needle("schwimm", by_length=False) == " schwimm"

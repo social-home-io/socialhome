@@ -266,3 +266,56 @@ class FakeDashboardService:
     async def avatar(self, user_id: str) -> tuple[bytes, str] | None:
         self.calls.append(f"avatar:{user_id}")
         return self.pictures.get(user_id)
+
+
+LEO_READING = lesson("Lesen", at(8), at(8, 45), person="u-leo")
+LEO_BREAK = lesson(None, at(8, 45), at(9), person="u-leo", kind="break", label="Pause")
+LEO_GYM = lesson("Turnen", at(9), at(9, 45), person="u-leo", status="cancelled")
+LEO_ART = lesson("Kunst", at(10), at(11), person="u-leo", icon="🎨")
+LEO_SCHOOL = DashboardSchoolDay(
+    person_id="u-leo",
+    date=TODAY,
+    timetable_name="1a",
+    lessons=(LEO_READING, LEO_BREAK, LEO_GYM, LEO_ART),
+    first_start=at(8),
+    last_end=at(11),
+    changes=(LEO_GYM,),
+)
+LEO_CHORES = (
+    DashboardTask(
+        id="t-cat",
+        title="Katze füttern",
+        due=TODAY,
+        overdue_days=0,
+        done=False,
+        person_ids=("u-leo",),
+    ),
+    DashboardTask(
+        id="t-teeth",
+        title="Zähneputzen",
+        due=TODAY,
+        overdue_days=0,
+        done=True,
+        person_ids=("u-leo",),
+    ),
+)
+
+
+def leo_page(**kw) -> PersonSnapshot:
+    """Leo (picture view) at 10:30 on a school day: Art runs, gym was
+    cancelled, swimming is next."""
+    first = lesson(
+        "Lesen", at(8, day=TOMORROW), at(8, 45, day=TOMORROW), person="u-leo"
+    )
+    base = person(
+        LEO,
+        now=at(10, 30),
+        now_item=LEO_ART,
+        next_item=SWIM,
+        today_items=(LEO_READING, LEO_BREAK, LEO_GYM, LEO_ART, SWIM, DINNER),
+        tomorrow_items=(first,),
+        chores=LEO_CHORES,
+        school=LEO_SCHOOL,
+        school_tomorrow_first=first,
+    )
+    return replace(base, **kw)
