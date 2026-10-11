@@ -40,6 +40,10 @@ export interface DashboardState {
   night_end: string
   keep_screen_on: boolean
   show_status_text: boolean
+  /** Home shows the last few household-chat messages (admin opt-in). */
+  show_household_messages: boolean
+  /** ``feat_household_chat`` is on — the messages switch needs it. */
+  household_chat_enabled: boolean
   last_seen_at: string | null
   people: DashboardPerson[]
 }

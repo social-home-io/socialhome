@@ -15654,6 +15654,7 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-dashboard-night__times { display: flex; align-items: center; gap: var(--sh-space-xs); flex: 0 0 auto; }
 .sh-dashboard-night__times input { width: 7.5rem; }
 .sh-dashboard-row > .sh-switch { flex: 0 0 auto; }
+.sh-dashboard-row--disabled > .sh-dashboard-row__label > label { color: var(--sh-text-muted); }
 .sh-dashboard-sessions {
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--sh-space-md); flex-wrap: wrap; margin-top: var(--sh-space-md);
