@@ -180,3 +180,126 @@ def test_redact_dashboard_setup_token_param():
         "GET /enter?t=*** HTTP/1.1"
     )
     assert redact_query_string("/x?at=1&tz=UTC") == "/x?at=1&tz=UTC"
+
+
+# ─── Household path-carried bearer tokens ─────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        # Public invite-link → pasteable code lookup (the token IS the link).
+        (
+            "GET /api/invite-links/tok123/code HTTP/1.1",
+            "GET /api/invite-links/***/code HTTP/1.1",
+        ),
+        # Remote space invite accept / decline.
+        (
+            "POST /api/remote_invites/tok123/accept HTTP/1.1",
+            "POST /api/remote_invites/***/accept HTTP/1.1",
+        ),
+        (
+            "POST /api/remote_invites/tok123/decline HTTP/1.1",
+            "POST /api/remote_invites/***/decline HTTP/1.1",
+        ),
+        # Admin revoking a space invite link.
+        (
+            "DELETE /api/spaces/sp-1/invite-tokens/tok123 HTTP/1.1",
+            "DELETE /api/spaces/sp-1/invite-tokens/*** HTTP/1.1",
+        ),
+        # Owner revoking one highlight share token.
+        (
+            "DELETE /api/highlights/hl-1/publish/tok123 HTTP/1.1",
+            "DELETE /api/highlights/hl-1/publish/*** HTTP/1.1",
+        ),
+        # A mistyped / unknown suffix still carries the credential.
+        (
+            "POST /api/remote_invites/tok123/bogus?x=1 HTTP/1.1",
+            "POST /api/remote_invites/***/bogus?x=1 HTTP/1.1",
+        ),
+        ("/api/invite-links/tok123", "/api/invite-links/***"),
+        # Referer (absolute URL) form.
+        (
+            "https://home.example/api/invite-links/tok123/code",
+            "https://home.example/api/invite-links/***/code",
+        ),
+    ],
+)
+def test_redact_household_path_bearer_tokens(line, expected):
+    assert redact_secrets(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Collection endpoints — no token segment.
+        "GET /api/remote_invites HTTP/1.1",
+        "GET /api/remote_invites/ HTTP/1.1",
+        "POST /api/spaces/sp-1/invite-tokens HTTP/1.1",
+        "POST /api/highlights/hl-1/publish HTTP/1.1",
+        "GET /api/invite-links HTTP/1.1",
+        # Lookalikes: plain-id siblings must stay readable.
+        "POST /api/local_invites/inv-1/accept HTTP/1.1",
+        "GET /api/highlights/hl-1/share HTTP/1.1",
+        "GET /api/highlights/hl-1 HTTP/1.1",
+        "GET /api/spaces/sp-1/invite-tokensx/abc HTTP/1.1",
+        "GET /api/me/tokens/tok-id-1 HTTP/1.1",
+        "GET /api/spaces/sp-1/members/u-1 HTTP/1.1",
+        # Non-root position — not the household API shape.
+        "GET /static/api/invite-links/abc/code HTTP/1.1",
+        "GET /federation/inbox/inbox-1 HTTP/1.1",
+    ],
+)
+def test_redact_household_paths_leaves_non_token_paths_alone(line):
+    assert redact_secrets(line) == line
+
+
+def test_redact_signed_media_sig_param():
+    """A signed media / app-bundle URL's ``sig`` is a bearer for its TTL.
+
+    ``exp`` stays readable (an operator debugging a 403 needs it); only
+    the HMAC that grants access is replaced.
+    """
+    line = "GET /api/media/a.webp?exp=1760000000&sig=AbC-_123 HTTP/1.1"
+    assert redact_query_string(line) == (
+        "GET /api/media/a.webp?exp=1760000000&sig=*** HTTP/1.1"
+    )
+    assert redact_query_string("/api/apps/chess/bundle/index.html?sig=x&exp=1") == (
+        "/api/apps/chess/bundle/index.html?sig=***&exp=1"
+    )
+    # Lookalikes stay put.
+    line = "/x?signal=1&sig_suite=ed25519&design=2"
+    assert redact_query_string(line) == line
+
+
+async def test_running_server_never_logs_household_path_tokens(caplog):
+    """Path-carried household tokens + ``sig`` never reach the access log."""
+    app = web.Application()
+    runner = web.AppRunner(app, access_log_class=RedactingAccessLogger)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    caplog.set_level(logging.INFO, logger="aiohttp.access")
+    try:
+        async with aiohttp.ClientSession() as session:
+            for path in (
+                "/api/invite-links/SECRETPATH1/code",
+                "/api/media/a.webp?exp=1&sig=SECRETSIG",
+            ):
+                async with session.get(
+                    f"http://127.0.0.1:{port}{path}",
+                    headers={
+                        "Referer": "http://h/api/remote_invites/SECRETREF2/accept",
+                    },
+                ) as resp:
+                    assert resp.status == 404
+    finally:
+        await runner.cleanup()
+
+    records = [r for r in caplog.records if r.name == "aiohttp.access"]
+    assert len(records) == 2
+    for record in records:
+        blob = record.getMessage() + repr(vars(record))
+        for secret in ("SECRETPATH1", "SECRETSIG", "SECRETREF2"):
+            assert secret not in blob

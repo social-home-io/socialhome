@@ -32,6 +32,7 @@ import orjson
 from aiohttp import web
 
 from . import app_keys as K
+from .access_log import RedactingAccessLogger
 from .auth import (
     BearerTokenStrategy,
     ChainedStrategy,
@@ -4843,8 +4844,6 @@ def create_app(config: Config | None = None) -> web.Application:
 
 
 if __name__ == "__main__":
-    from .access_log import RedactingAccessLogger
-
     cfg = Config.from_env()
     web.run_app(
         create_app(cfg),
