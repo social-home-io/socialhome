@@ -72,7 +72,12 @@ from socialhome.domain.space_item import (
     AuthorityRemoval,
     pad_json_object,
 )
-from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
+from socialhome.federation.owner_bound_id import (
+    SPACE_COMMENT_KIND,
+    SPACE_POST_KIND,
+    mint_owner_bound_id,
+)
+from socialhome.federation.pending_parent_buffer import PendingParentBuffer
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.repositories import SqliteGfsFederationRepo
@@ -270,13 +275,18 @@ async def world(tmp_dir):
     assert exported is not None
     await fcrypto.import_key(SPACE_ID, exported[0], exported[1])
     fposts = SqliteSpacePostRepo(fdb)
+    fbus = EventBus()
     inbound = SpacePublicInbound(
-        bus=EventBus(),
+        bus=fbus,
         space_repo=fspaces,
         space_crypto=fcrypto,
         space_post_repo=fposts,
     )
     inbound.attach_identity(own_instance_id=FOLLOWER)
+    # An item (a removal included) that overtakes its post waits for it.
+    pending = PendingParentBuffer()
+    pending.attach_bus(fbus)
+    inbound.attach_pending_parents(pending)
 
     yield SimpleNamespace(
         space_kp=space_kp,
@@ -290,6 +300,7 @@ async def world(tmp_dir):
         inbound=inbound,
         posts=fposts,
         crypto=hcrypto,
+        pending=pending,
     )
     for db in (hdb, gdb, fdb):
         await db.shutdown()
@@ -404,6 +415,50 @@ async def test_a_comment_removal_reaches_the_follower(world):
     frame = await _deliver_last(world)
     _assert_blind(frame, "comment-distinctive-1", MODERATOR_ID, world.member_user)
     assert (await world.posts.get_comment("comment-distinctive-1")).deleted
+
+
+async def test_a_comment_removal_that_overtakes_its_post_still_removes(world):
+    """The removal is held until the post lands, then leaves the tombstone —
+    so the comment, arriving after both, never shows."""
+    late = mint_owner_bound_id(
+        SPACE_POST_KIND, space_id=SPACE_ID, owner_user_id=world.host_user
+    )
+    cid = mint_owner_bound_id(
+        SPACE_COMMENT_KIND, space_id=SPACE_ID, owner_user_id=world.member_user
+    )
+    await world.host_bus.publish(
+        SpacePostCreated(post=_host_post(world, late), space_id=SPACE_ID)
+    )
+    create_frame = world.ws.sent[-1][1]
+    await world.host_bus.publish(
+        CommentDeleted(
+            post_id=late,
+            comment_id=cid,
+            space_id=SPACE_ID,
+            actor_user_id=MODERATOR_ID,
+            author_user_id=world.member_user,
+        )
+    )
+    await _deliver_last(world)  # the comment removal first
+    assert len(world.pending) == 1
+    assert await world.posts.get_comment(cid) is None
+    await world.inbound.handle(create_frame)  # then the post
+    assert len(world.pending) == 0
+    tombstone = await world.posts.get_comment(cid)
+    assert tombstone is not None and tombstone.deleted
+    # The comment itself, arriving last, is a duplicate of the tombstone.
+    assert not await world.posts.add_comment(
+        Comment(
+            id=cid,
+            post_id=late,
+            author=world.member_user,
+            type=CommentType.TEXT,
+            content="back?",
+            created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+        ),
+        space_id=SPACE_ID,
+    )
+    assert (await world.posts.get_comment(cid)).deleted
 
 
 async def _forged_envelope(world, inner: dict, *, seed: bytes) -> dict:

@@ -23,9 +23,9 @@ not qualify is refused then, or held once more until it expires.
 
 In memory and bounded on purpose: a household with no seat may fill it,
 so it is capped in entries, entries per sending household, entries per
-key and bytes, and every entry expires. The per-household cap is checked
-before the shared one, so no single household can take every slot. A restart loses it — the same outcome as before it existed, not a
-new failure mode. Media bytes are never held (they are large and name
+key and bytes, and every entry expires — the shared bookkeeping of
+:class:`~socialhome.federation.bounded_hold.BoundedHold`. A restart loses it
+— the same outcome as before it existed, not a new failure mode. Media bytes are never held (they are large and name
 nobody).
 """
 
@@ -34,11 +34,11 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 
 import orjson
 
 from ..domain.federation import FederationEvent, FederationEventType
+from .bounded_hold import BoundedHold, HoldKey
 
 log = logging.getLogger(__name__)
 
@@ -54,28 +54,10 @@ _NEVER_HELD: frozenset[FederationEventType] = frozenset(
 )
 
 
-@dataclass(slots=True, frozen=True)
-class _Held:
-    """Buffer-local record (never leaves this module)."""
-
-    event: FederationEvent
-    size: int
-    expires_at: float
-
-
 class PendingSeatBuffer:
     """Bounded, expiring hold for writes waiting on a roster seat."""
 
-    __slots__ = (
-        "_by_key",
-        "_ttl",
-        "_max_entries",
-        "_max_per_key",
-        "_max_per_sender",
-        "_max_bytes",
-        "_bytes",
-        "_clock",
-    )
+    __slots__ = ("_hold",)
 
     def __init__(
         self,
@@ -87,35 +69,17 @@ class PendingSeatBuffer:
         max_bytes: int = DEFAULT_MAX_BYTES,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._by_key: dict[tuple[str, str, str], list[_Held]] = {}
-        self._ttl = ttl_seconds
-        self._max_entries = max_entries
-        self._max_per_key = max_per_key
-        self._max_per_sender = max_per_sender
-        self._max_bytes = max_bytes
-        self._bytes = 0
-        self._clock = clock
-
-    def __len__(self) -> int:
-        return sum(len(v) for v in self._by_key.values())
-
-    def _held_from(self, sender: str) -> int:
-        return sum(
-            1
-            for bucket in self._by_key.values()
-            for h in bucket
-            if h.event.from_instance == sender
+        self._hold: BoundedHold[FederationEvent] = BoundedHold(
+            ttl_seconds=ttl_seconds,
+            max_entries=max_entries,
+            max_per_key=max_per_key,
+            max_per_sender=max_per_sender,
+            max_bytes=max_bytes,
+            clock=clock,
         )
 
-    def _purge(self) -> None:
-        now = self._clock()
-        for key in list(self._by_key):
-            live = [h for h in self._by_key[key] if h.expires_at > now]
-            self._bytes -= sum(h.size for h in self._by_key[key] if h.expires_at <= now)
-            if live:
-                self._by_key[key] = live
-            else:
-                del self._by_key[key]
+    def __len__(self) -> int:
+        return len(self._hold)
 
     def hold(
         self,
@@ -130,33 +94,29 @@ class PendingSeatBuffer:
         cannot be held — no key, a type never held, or a bound is hit."""
         if event.event_type in _NEVER_HELD or not space_id:
             return False
+        key: HoldKey
         if user_id:
             key = (space_id, "user", user_id)
         elif instance_id:
             key = (space_id, "instance", instance_id)
         else:
             return False
-        self._purge()
-        bucket = self._by_key.get(key, [])
-        if any(h.event is event for h in bucket):
-            return True
-        size = len(orjson.dumps(event.payload or {}))
-        if (
-            self._held_from(event.from_instance) >= self._max_per_sender
-            or len(self) >= self._max_entries
-            or len(bucket) >= self._max_per_key
-            or self._bytes + size > self._max_bytes
+        # The held event is alive while it waits, so its id is unique among
+        # the entries: a re-hold of the same object takes no second slot.
+        if self._hold.hold(
+            key,
+            event,
+            token=id(event),
+            sender=event.from_instance,
+            size=len(orjson.dumps(event.payload or {})),
         ):
-            log.warning(
-                "%s from %s: seat-wait buffer is full — not holding the write",
-                event.event_type,
-                event.from_instance,
-            )
-            return False
-        bucket.append(_Held(event, size, self._clock() + self._ttl))
-        self._by_key[key] = bucket
-        self._bytes += size
-        return True
+            return True
+        log.warning(
+            "%s from %s: seat-wait buffer is full — not holding the write",
+            event.event_type,
+            event.from_instance,
+        )
+        return False
 
     def release(
         self,
@@ -167,13 +127,7 @@ class PendingSeatBuffer:
     ) -> list[FederationEvent]:
         """A seat ``(space_id, instance_id, user_id)`` just went live: hand
         back every write held for that user or that household, oldest first."""
-        self._purge()
-        out: list[_Held] = []
-        for key in (
+        return self._hold.release(
             (space_id, "user", user_id),
             (space_id, "instance", instance_id),
-        ):
-            out.extend(self._by_key.pop(key, []))
-        self._bytes -= sum(h.size for h in out)
-        out.sort(key=lambda h: h.expires_at)
-        return [h.event for h in out]
+        )

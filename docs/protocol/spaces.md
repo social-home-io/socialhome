@@ -455,6 +455,23 @@ member household, not only on the host:
   when the seat lands (`SpaceRemoteSeatLive`). A user seated on *another*
   household, or one who was removed, is known, so that is always a
   refusal, never held.
+- **Items held for their parent.** A space's items travel several paths at
+  once (direct federation, `SPACE_ROUTED`, the host's relay, the v_49
+  member publish over one or more GFSs, §25.6 sync), so a
+  `SPACE_COMMENT_CREATED` often beats its post — or a reply its parent
+  comment, a `SPACE_COMMENT_UPDATED` / `_DELETED` its comment, a
+  `SPACE_POST_UPDATED` / `_DELETED` its post. When that parent is **absent**
+  here (no row at all), the write — once its author is bound to the sender —
+  is held in a second bounded, expiring buffer
+  (`socialhome/federation/pending_parent_buffer.py`: 512 entries, at most
+  128 from any one sending household, 64 per parent, 4 MiB, 10 min; both
+  buffers share `socialhome/federation/bounded_hold.py`) and replayed
+  through the same post-decrypt gates and handlers
+  (`FederationService.replay_held`) when the parent lands
+  (`SpacePostCreated`, `SpacePostSynced`, `CommentAdded`). A parent held
+  here deleted (a tombstone) or in another space is a refusal, never held —
+  a comment on a deleted post is refused outright; a parent that never
+  arrives drops the write when its entry expires (DEBUG, not WARNING).
 
 Known edges of the snapshot, all self-limiting:
 

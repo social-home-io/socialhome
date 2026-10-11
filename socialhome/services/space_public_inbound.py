@@ -69,6 +69,7 @@ household relayed); a frame from an older GFS may still carry an outer
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -104,6 +105,11 @@ from ..domain.space_item import (
 )
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..writer_cert import verify_writer_users
+from ..federation.pending_parent_buffer import (
+    AwaitingParent,
+    PendingParentBuffer,
+    Replay,
+)
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
@@ -149,6 +155,7 @@ class SpacePublicInbound:
         "_writer_certs",
         "_authorship",
         "_items",
+        "_pending_parents",
     )
 
     def __init__(
@@ -183,6 +190,13 @@ class SpacePublicInbound:
             space_post_repo=space_post_repo,
             mention_resolver=mention_resolver,
         )
+        #: Holds an item whose post (or parent comment) has not landed here
+        #: yet and re-runs its frame when it does. ``None`` drops instead.
+        self._pending_parents: PendingParentBuffer | None = None
+
+    def attach_pending_parents(self, buffer: PendingParentBuffer) -> None:
+        """Wire the parent-wait buffer (shared with the federated path)."""
+        self._pending_parents = buffer
 
     def attach_authorship(self, authorship: "SpaceAuthorship") -> None:
         """Wire the access-level / seat check for ``space_item``."""
@@ -317,7 +331,20 @@ class SpacePublicInbound:
         # the envelope's authority signature verified above. An inner WITH an
         # author signature is always a post, whatever else it claims.
         if is_authority_inner(inner):
-            await self._on_authority_inner(space, inner)
+            try:
+                await self._on_authority_inner(space, inner)
+            except AwaitingParent as wait:
+                self._hold_for_parent(
+                    wait,
+                    space_id=space_id,
+                    token=f"relay:{ciphertext}",
+                    # The relay frame names no household: the notice is
+                    # charged to the space's host, its only signer.
+                    sender=space.owner_instance_id or space_id,
+                    size=len(ciphertext),
+                    replay=functools.partial(self._on_relay, envelope),
+                    label=f"space_public removal in space {space_id}",
+                )
             return
 
         post_id = str(inner.get("post_id") or "")
@@ -627,15 +654,28 @@ class SpacePublicInbound:
             return
         member_household = await self._holds_writer_seat(item.space_id)
         if not post_shaped:
-            await self._items.apply(
-                space=space,
-                item_type=item_type,
-                inner=inner,
-                origin_instance_id=origin_instance_id,
-                cert_scope=inner_cert.scope,
-                member_household=member_household,
-                authorship=self._authorship,
-            )
+            try:
+                await self._items.apply(
+                    space=space,
+                    item_type=item_type,
+                    inner=inner,
+                    origin_instance_id=origin_instance_id,
+                    cert_scope=inner_cert.scope,
+                    member_household=member_household,
+                    authorship=self._authorship,
+                )
+            except AwaitingParent as wait:
+                # Re-run the whole frame when the parent lands: decrypt,
+                # writer cert, epoch, author signature and roster again.
+                self._hold_for_parent(
+                    wait,
+                    space_id=item.space_id,
+                    token=f"item:{item.payload}",
+                    sender=origin_instance_id,
+                    size=len(item.payload),
+                    replay=functools.partial(self._on_space_item, frame),
+                    label=f"space_item {item_type} {item_id} from {origin_instance_id}",
+                )
             return
         # Defence in depth on a member household, which holds the roster and
         # the access levels: the author's own seat must let them post here
@@ -767,6 +807,33 @@ class SpacePublicInbound:
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────
+
+    def _hold_for_parent(
+        self,
+        wait: AwaitingParent,
+        *,
+        space_id: str,
+        token: str,
+        sender: str,
+        size: int,
+        replay: Replay,
+        label: str,
+    ) -> None:
+        """Hold a frame whose parent is not here yet; dropped (logged at
+        INFO — by the buffer when it is full) when it cannot be held."""
+        if self._pending_parents is None:
+            log.info("%s: %s — dropped", label, wait)
+            return
+        self._pending_parents.hold(
+            space_id=space_id,
+            kind=wait.kind,
+            parent_id=wait.parent_id,
+            token=token,
+            sender=sender,
+            size=size,
+            replay=replay,
+            label=label,
+        )
 
     async def _holds_writer_seat(self, space_id: str) -> bool:
         """We are a member household here (a local non-follower seat), so we

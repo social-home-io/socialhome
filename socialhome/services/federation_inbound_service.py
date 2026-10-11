@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
 import logging
 import pathlib
 from dataclasses import replace
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING
 
 import aiofiles
 import aiofiles.os
+import orjson
 
 from ..domain.conversation import (
     Conversation,
@@ -101,6 +103,11 @@ from ..federation.owner_bound_id import (
     SPACE_POST_KIND,
     is_owner_bound,
     owner_bound_id_refused,
+)
+from ..federation.pending_parent_buffer import (
+    PARENT_COMMENT,
+    PARENT_POST,
+    PendingParentBuffer,
 )
 from ..federation.space_authorship import SpaceAuthorship, payload_actor
 from ..federation.space_scope import (
@@ -349,6 +356,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_authorship",
         "_dm_scope",
         "_pending",
+        "_pending_parents",
         "_federation_service",
         "_space_cover_repo",
         "_space_icon_repo",
@@ -379,6 +387,7 @@ class FederationInboundService(ProtectionGateMixin):
         gallery_repo: "AbstractGalleryRepo | None" = None,
         bazaar_repo: "AbstractBazaarRepo | None" = None,
         pending_seat_buffer: "PendingSeatBuffer | None" = None,
+        pending_parent_buffer: PendingParentBuffer | None = None,
         authorship_federation_repo: "AbstractFederationRepo | None" = None,
         space_cover_repo: "AbstractSpaceCoverRepo | None" = None,
         space_icon_repo: "AbstractSpaceIconRepo | None" = None,
@@ -448,6 +457,11 @@ class FederationInboundService(ProtectionGateMixin):
         #: (the sender's profile sync trails their first message); released
         #: when that user syncs. ``None`` refuses instead.
         self._pending = pending_seat_buffer
+        #: Holds a space comment / edit / delete whose post (or parent
+        #: comment) has not landed here yet — it overtook its parent on
+        #: another path — and replays it when the parent lands. ``None``
+        #: refuses instead.
+        self._pending_parents = pending_parent_buffer
         self._federation_service = None
         #: Where a member stores the cover / icon a host's
         #: ``SPACE_CONFIG_CHANGED`` ships. Optional so unit-test stacks can
@@ -2247,6 +2261,36 @@ class FederationInboundService(ProtectionGateMixin):
                 event, what="comment", row_id=comment_id, reason="already held"
             )
             return
+        # The comment overtook its post (or a reply its parent comment) on
+        # another delivery path: wait for it rather than lose the comment.
+        # A post held as a tombstone stays refused — nobody comments on it.
+        parent_id = p.get("parent_id")
+        held_post = await self._space_post_repo.get(post_id)
+        if held_post is None:
+            if self._hold_for_parent(
+                event, space_id, PARENT_POST, post_id, what="comment", row_id=comment_id
+            ):
+                return
+        elif held_post[0] == space_id and held_post[1].deleted:
+            log_not_applied(
+                event, what="comment", row_id=comment_id, reason="post deleted"
+            )
+            return
+        elif (
+            held_post[0] == space_id
+            and isinstance(parent_id, str)
+            and parent_id
+            and await self._space_post_repo.get_comment(parent_id) is None
+            and self._hold_for_parent(
+                event,
+                space_id,
+                PARENT_COMMENT,
+                parent_id,
+                what="comment",
+                row_id=comment_id,
+            )
+        ):
+            return
         comment_type_str = str(p.get("type") or "text")
         try:
             comment_type = CommentType(comment_type_str)
@@ -2409,6 +2453,38 @@ class FederationInboundService(ProtectionGateMixin):
             return ()
         return await self._mentions.added(space_id, before, after, author_id=author_id)
 
+    def _hold_for_parent(
+        self,
+        event: "FederationEvent",
+        space_id: str,
+        kind: str,
+        parent_id: str,
+        *,
+        what: str,
+        row_id: str,
+    ) -> bool:
+        """Hold ``event`` until ``kind`` ``parent_id`` lands in ``space_id``,
+        then replay it through the §24.11 post-decrypt gates and this
+        handler again (:meth:`FederationService.replay_held`). ``False``
+        when it cannot be held — the caller refuses as before. Only for a
+        parent that is absent here: a tombstoned or foreign parent is the
+        caller's refusal."""
+        buffer = self._pending_parents
+        federation = self._federation_service
+        if buffer is None or federation is None:
+            return False
+        reason = f"{kind} {parent_id} landed"
+        return buffer.hold(
+            space_id=space_id,
+            kind=kind,
+            parent_id=parent_id,
+            token=f"{event.event_type}:{row_id}:{event.from_instance}:{event.msg_id}",
+            sender=event.from_instance,
+            size=len(orjson.dumps(event.payload or {})),
+            replay=functools.partial(federation.replay_held, event, reason=reason),
+            label=f"{event.event_type} from {event.from_instance} ({what} {row_id})",
+        )
+
     async def _owned_post_mutation_allowed(
         self,
         event: "FederationEvent",
@@ -2431,7 +2507,12 @@ class FederationInboundService(ProtectionGateMixin):
             return False
         got = await self._space_post_repo.get(post_id)
         if got is None:
-            log_not_applied(event, what="post", row_id=post_id, reason="unknown here")
+            if not self._hold_for_parent(
+                event, space_id, PARENT_POST, post_id, what="post", row_id=post_id
+            ):
+                log_not_applied(
+                    event, what="post", row_id=post_id, reason="unknown here"
+                )
             return False
         row_space, post = got
         if row_space != space_id:
@@ -2475,9 +2556,17 @@ class FederationInboundService(ProtectionGateMixin):
             return False
         comment = await self._space_post_repo.get_comment(comment_id)
         if comment is None:
-            log_not_applied(
-                event, what="comment", row_id=comment_id, reason="unknown here"
-            )
+            if not self._hold_for_parent(
+                event,
+                space_id,
+                PARENT_COMMENT,
+                comment_id,
+                what="comment",
+                row_id=comment_id,
+            ):
+                log_not_applied(
+                    event, what="comment", row_id=comment_id, reason="unknown here"
+                )
             return False
         parent = await self._space_post_repo.get(comment.post_id)
         if parent is None or parent[0] != space_id:
