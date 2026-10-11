@@ -17,7 +17,10 @@ from socialhome.domain.child_protection import (
 from socialhome.domain.space import SpacePermissionError
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.security import SENSITIVE_FIELDS
+import logging
 from datetime import datetime, timezone
+
+from socialhome.domain.preferences import HouseholdPreferences
 
 from socialhome.domain.conversation import Conversation, ConversationType
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -25,6 +28,7 @@ from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.child_protection_service import (
     ChildProtectionService,
+    _age_on,
     GuardianRequiredError,
     ProtectionIncompleteError,
     UserNotFoundError,
@@ -128,6 +132,125 @@ async def test_enable_protection_invalid_dob_format(env):
             actor_user_id="admin-id",
             date_of_birth="not-a-date",
         )
+
+
+# ─── DOB consistency follows the household date ──────────────────────────
+#
+# Lila turns 13 on 2026-10-12. ``declared_age=11`` is within ±1 of 12 but
+# two off 13, so the check flips exactly on the household's birthday —
+# not the server's (UTC) date, and not a ``days // 365`` approximation
+# that drifts a day per leap year.
+
+_DOB_13TH = "2013-10-12"
+
+
+class _Prefs:
+    def __init__(self, tz: str) -> None:
+        self.tz = tz
+
+    async def get_household(self) -> HouseholdPreferences:
+        return HouseholdPreferences(tz=self.tz)
+
+
+class _BrokenPrefs:
+    async def get_household(self) -> HouseholdPreferences:
+        raise RuntimeError("prefs db gone")
+
+
+async def test_dob_check_uses_household_date_east_of_utc(env):
+    """12:00 UTC on 10-11 is already 10-12 (the birthday) in Auckland."""
+    svc, _ = env
+    svc.attach_household_features(_Prefs("Pacific/Auckland"))
+    with pytest.raises(ValueError, match="computed 13"):
+        await svc.enable_protection(
+            minor_username="lila",
+            declared_age=11,
+            actor_user_id="admin-id",
+            date_of_birth=_DOB_13TH,
+            now=datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc),
+        )
+
+
+async def test_dob_check_same_instant_in_utc_household_is_day_before(env):
+    """The same instant in a UTC household is still 10-11 → age 12."""
+    svc, db = env
+    svc.attach_household_features(_Prefs("UTC"))
+    await svc.enable_protection(
+        minor_username="lila",
+        declared_age=11,
+        actor_user_id="admin-id",
+        date_of_birth=_DOB_13TH,
+        now=datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc),
+    )
+    row = await db.fetchone("SELECT declared_age FROM users WHERE username='lila'")
+    assert row["declared_age"] == 11
+
+
+async def test_dob_check_uses_household_date_west_of_utc(env):
+    """03:00 UTC on 10-12 (the birthday in UTC) is still 10-11 in LA."""
+    svc, db = env
+    svc.attach_household_features(_Prefs("America/Los_Angeles"))
+    await svc.enable_protection(
+        minor_username="lila",
+        declared_age=11,
+        actor_user_id="admin-id",
+        date_of_birth=_DOB_13TH,
+        now=datetime(2026, 10, 12, 3, 0, tzinfo=timezone.utc),
+    )
+    row = await db.fetchone("SELECT declared_age FROM users WHERE username='lila'")
+    assert row["declared_age"] == 11
+
+
+async def test_dob_check_day_before_birthday_counts_previous_age(env):
+    """No ``days // 365`` drift: three leap days must not age her early."""
+    svc, _ = env
+    svc.attach_household_features(_Prefs("UTC"))
+    # 2026-10-11 is the day before her 13th → 12; declared 14 is 2 off.
+    with pytest.raises(ValueError, match="computed 12"):
+        await svc.enable_protection(
+            minor_username="lila",
+            declared_age=14,
+            actor_user_id="admin-id",
+            date_of_birth=_DOB_13TH,
+            now=datetime(2026, 10, 11, 23, 0, tzinfo=timezone.utc),
+        )
+
+
+def test_age_on_leap_day_birthday_ages_up_on_march_first():
+    dob = datetime(2012, 2, 29).date()
+    assert _age_on(dob, datetime(2025, 2, 28).date()) == 12
+    assert _age_on(dob, datetime(2025, 3, 1).date()) == 13
+    assert _age_on(dob, datetime(2024, 2, 29).date()) == 12
+
+
+async def test_dob_check_without_preferences_uses_utc(env):
+    svc, _ = env
+    with pytest.raises(ValueError, match="computed 13"):
+        await svc.enable_protection(
+            minor_username="lila",
+            declared_age=11,
+            actor_user_id="admin-id",
+            date_of_birth=_DOB_13TH,
+            now=datetime(2026, 10, 12, 3, 0, tzinfo=timezone.utc),
+        )
+
+
+async def test_dob_check_prefs_failure_falls_back_to_utc_with_warning(env, caplog):
+    svc, _ = env
+    svc.attach_household_features(_BrokenPrefs())
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ValueError, match="computed 13"):
+            await svc.enable_protection(
+                minor_username="lila",
+                declared_age=11,
+                actor_user_id="admin-id",
+                date_of_birth=_DOB_13TH,
+                now=datetime(2026, 10, 12, 3, 0, tzinfo=timezone.utc),
+            )
+    assert any(
+        r.levelno == logging.WARNING and "household tz" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 async def test_disable_protection(env):

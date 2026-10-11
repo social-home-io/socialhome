@@ -2779,6 +2779,8 @@ def create_app(config: Config | None = None) -> web.Application:
     task_service.attach_household_features(preferences_service)
     timetable_service.attach_household_features(preferences_service)
     calendar_service.attach_household_features(preferences_service)
+    # Age-from-birthday checks count in the household's tz.
+    child_protection_service.attach_household_features(preferences_service)
     # Space-calendar event creation walks the same tz resolution chain
     # as personal events. Wire the helpers it needs: the household
     # service (final UTC fallback) and the space repo (per-space tz).
