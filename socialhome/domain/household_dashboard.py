@@ -469,7 +469,6 @@ class DashboardLesson:
     item_type: ClassVar[str] = "lesson"
 
     person_id: str
-    timetable_name: str
     start: datetime
     end: datetime
     kind: str
@@ -528,7 +527,6 @@ class DashboardTask:
 
     id: str
     title: str
-    list_name: str
     due: date | None
     overdue_days: int
     done: bool
@@ -559,9 +557,8 @@ class HomeSnapshot:
 
     ``sections`` names the enabled sections (``SECTION_*``); a slice whose
     section is off is empty. ``next_up`` is the soonest timed event or
-    lesson still to start today. ``school_tomorrow`` holds each person's
-    first lesson tomorrow and ``tomorrow_first`` the earliest timed item
-    tomorrow — for night mode.
+    lesson still to start today. ``tomorrow_first`` is the earliest timed
+    event or first lesson tomorrow — for night mode.
     """
 
     now: datetime
@@ -577,7 +574,6 @@ class HomeSnapshot:
     shopping_total: int = 0
     stickies: tuple[DashboardSticky, ...] = ()
     school: tuple[DashboardSchoolDay, ...] = ()
-    school_tomorrow: tuple[DashboardLesson, ...] = ()
     tomorrow_first: DashboardAgendaItem | None = None
 
 

@@ -106,7 +106,6 @@ def lesson(
 ) -> DashboardLesson:
     return DashboardLesson(
         person_id=person,
-        timetable_name="5b",
         start=start,
         end=end,
         kind=kind,
@@ -147,7 +146,6 @@ CHORES = (
     DashboardTask(
         id="t1",
         title="Empty dishwasher",
-        list_name="Chores",
         due=TODAY,
         overdue_days=0,
         done=False,
@@ -156,7 +154,6 @@ CHORES = (
     DashboardTask(
         id="t2",
         title="Taxes",
-        list_name="Chores",
         due=TODAY - timedelta(days=2),
         overdue_days=2,
         done=False,
@@ -165,7 +162,6 @@ CHORES = (
     DashboardTask(
         id="t3",
         title="Laundry",
-        list_name="Chores",
         due=TODAY,
         overdue_days=0,
         done=True,
@@ -199,7 +195,6 @@ def home(**kw) -> HomeSnapshot:
         shopping_total=11,
         stickies=STICKIES,
         school=(MIA_SCHOOL,),
-        school_tomorrow=(lesson("Maths", at(7, 30, TOMORROW), at(8, 15, TOMORROW)),),
         tomorrow_first=lesson("Maths", at(7, 30, TOMORROW), at(8, 15, TOMORROW)),
     )
     return replace(base, **kw)
