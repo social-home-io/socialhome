@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date as _date
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..domain.child_protection import (
@@ -50,8 +51,10 @@ from ..domain.space import AgeRestrictedError, SpacePermissionError
 from ..infrastructure.event_bus import EventBus
 from ..repositories.cp_repo import AbstractCpRepo
 from ..repositories.user_repo import AbstractUserRepo
+from ..utils.timezones import DEFAULT_TZ, local_date
 
 if TYPE_CHECKING:
+    from .preferences_service import PreferencesService
     from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
@@ -91,6 +94,15 @@ class UserNotFoundError(ChildProtectionError):
 # ─── Service ─────────────────────────────────────────────────────────────
 
 
+def _age_on(dob: _date, today: _date) -> int:
+    """Whole years from *dob* to *today* — ages up on the birthday.
+
+    A 29 February birthday ages up on 1 March in non-leap years.
+    """
+    had_birthday = (today.month, today.day) >= (dob.month, dob.day)
+    return today.year - dob.year - (0 if had_birthday else 1)
+
+
 @runtime_checkable
 class _PublishesEvents(Protocol):
     async def publish(self, event) -> None: ...
@@ -99,7 +111,15 @@ class _PublishesEvents(Protocol):
 class ChildProtectionService:
     """V1 child-protection coordinator."""
 
-    __slots__ = ("_repo", "_users", "_bus", "_space_repo", "_conv_repo", "_gates")
+    __slots__ = (
+        "_repo",
+        "_users",
+        "_bus",
+        "_space_repo",
+        "_conv_repo",
+        "_gates",
+        "_household",
+    )
 
     def __init__(
         self,
@@ -118,6 +138,7 @@ class ChildProtectionService:
         #: :class:`~socialhome.services.protection_gate.ProtectionGateMixin`
         #: hooks, so what was set up *before* reacts too (§CP.R retroactive).
         self._gates: dict[type, "ProtectionGateMixin"] = {}
+        self._household: "PreferencesService | None" = None
 
     def register_gate(self, gate: "ProtectionGateMixin") -> None:
         """Called by :meth:`ProtectionGateMixin.attach_child_protection`."""
@@ -128,6 +149,23 @@ class ChildProtectionService:
         remove a minor directly (bypassing the usual admin-or-self check
         while still emitting ``SpaceMemberLeft`` via the bus)."""
         self._space_repo = space_repo
+
+    def attach_household_features(self, svc: "PreferencesService") -> None:
+        """Wire :class:`PreferencesService` so age-from-birthday checks
+        count in the household's time zone (``HouseholdPreferences.tz``),
+        not the server's clock.
+        """
+        self._household = svc
+
+    async def _household_tz(self) -> str:
+        """The household's IANA zone — UTC when it can't be read."""
+        if self._household is None:
+            return DEFAULT_TZ
+        try:
+            return (await self._household.get_household()).tz
+        except Exception as exc:  # defensive — fall back to UTC
+            log.warning("child protection: household tz failed: %s", exc)
+            return DEFAULT_TZ
 
     def attach_conversation_repo(self, conv_repo) -> None:
         """Wire :class:`AbstractConversationRepo` so the Parent Dashboard
@@ -144,11 +182,15 @@ class ChildProtectionService:
         declared_age: int,
         actor_user_id: str,
         date_of_birth: str | None = None,
+        now: datetime | None = None,
     ) -> None:
         """Mark *minor_username* as a protected minor.
 
         ``declared_age`` must be 0–17. When ``date_of_birth`` is supplied
-        it must agree with ``declared_age`` within ±1 year.
+        it must agree with ``declared_age`` within ±1 year, counting
+        whole years up to the household-local date (``now`` in
+        ``HouseholdPreferences.tz``) — a birthday arrives at the
+        household's midnight, not the server's.
         """
         await self._require_admin(actor_user_id)
         if await self._users.get(minor_username) is None:
@@ -164,7 +206,9 @@ class ChildProtectionService:
                 dob = _date.fromisoformat(date_of_birth)
             except ValueError as exc:
                 raise ValueError(f"Invalid date_of_birth format: {exc}") from exc
-            age_from_dob = (_date.today() - dob).days // 365
+            instant = now or datetime.now(timezone.utc)
+            today = local_date(instant, await self._household_tz())
+            age_from_dob = _age_on(dob, today)
             if abs(age_from_dob - declared_age) > 1:
                 raise ValueError(
                     f"declared_age ({declared_age}) inconsistent with "
