@@ -75,6 +75,22 @@ class InstanceConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class DashboardHostPort:
+    """Where the platform publishes the household dashboard on the host.
+
+    ``port`` is the host port tablets dial, or ``None`` when the platform
+    knows the dashboard is NOT published (e.g. the Home Assistant App's
+    port left unset under the App's Network settings).
+    """
+
+    port: int | None
+
+    @property
+    def mapped(self) -> bool:
+        return self.port is not None
+
+
+@dataclass(slots=True, frozen=True)
 class ExternalUser:
     """A user as seen by the platform layer.
 
@@ -518,6 +534,18 @@ class PlatformAdapter(abc.ABC):
 
         Deliberately NOT a :class:`Capability` — it is a backend fact;
         the dashboard admin API surfaces it as ``port_fixed``.
+        """
+        return None
+
+    async def dashboard_host_port(self) -> DashboardHostPort | None:
+        """The host port the dashboard's listen port is published on.
+
+        ``None`` (the default) means "not applicable or unknown": the
+        dashboard is reached on the port it listens on. The Home Assistant
+        App returns the port HA Supervisor maps to the container port —
+        ``DashboardHostPort(None)`` when the user hasn't mapped one — and
+        degrades to ``None`` (logged at WARNING) when Supervisor can't be
+        asked. The dashboard admin API surfaces it as ``host_port_mapped``.
         """
         return None
 

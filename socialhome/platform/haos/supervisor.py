@@ -28,7 +28,9 @@ add-on environment.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 import aiohttp
 
@@ -41,13 +43,39 @@ class AddonInfo:
 
     The Supervisor response carries 40+ fields; we only need the
     DNS hostname and the ingress port to build the discovery
-    payload. Modelling just those keeps the surface easy to type
+    payload, plus the published-port map for the household dashboard's
+    tablet URL. Modelling just those keeps the surface easy to type
     and easy to fake in tests without re-creating the whole
     upstream schema.
+
+    Supervisor contract for ``network`` / ``host_network`` (verified
+    against home-assistant/supervisor ``main`` @ 8f21f7a3, 2026-10-11):
+
+    * ``supervisor/api/__init__.py`` routes ``GET /addons/{app}/info`` (the
+      legacy alias of ``/apps/{app}/info``) to ``APIApps.info_data_v1`` →
+      ``supervisor/api/apps.py`` ``APIApps.info_data``, which sets
+      ``ATTR_NETWORK`` (``"network"``) to ``app.ports`` and
+      ``ATTR_HOST_NETWORK`` (``"host_network"``) to ``app.host_network``.
+    * ``supervisor/apps/app.py`` ``App.ports`` is ``dict[str, int | None] |
+      None``: keys are the manifest's container ports (``"8100/tcp"``),
+      values the user's host-port override merged over the manifest
+      default — ``None`` means "not published" (a manifest default of
+      ``null`` the user never set). The whole field is ``None`` when the
+      manifest declares no ports.
+    * ``supervisor/docker/app.py`` ``DockerApp.ports`` drops falsy host
+      ports when the container is created (``DockerApp.run``) and publishes
+      nothing under ``host_network`` — there the container port *is* the
+      host port.
+    * ``supervisor/api/apps.py`` ``APIApps.options`` only persists a new
+      ``network`` map; it does not restart the App. The container's
+      published ports change when the App is next started (HA's frontend
+      asks the user to restart it after a network change).
     """
 
     hostname: str
     ingress_port: int
+    network: Mapping[str, int | None] | None = None
+    host_network: bool = False
 
     @classmethod
     def from_response(cls, data: dict | None) -> AddonInfo | None:
@@ -59,7 +87,34 @@ class AddonInfo:
         port = data.get("ingress_port")
         if not hostname or port is None:
             return None
-        return cls(hostname=str(hostname), ingress_port=int(port))
+        return cls(
+            hostname=str(hostname),
+            ingress_port=int(port),
+            network=_parse_network(data.get("network")),
+            host_network=data.get("host_network") is True,
+        )
+
+    def host_port(self, container_port: str) -> int | None:
+        """The host port ``container_port`` (e.g. ``"8100/tcp"``) is
+        published on, or ``None`` when it isn't published."""
+        if self.host_network:
+            number, _, _ = container_port.partition("/")
+            return int(number) if number.isdigit() else None
+        if self.network is None:
+            return None
+        return self.network.get(container_port)
+
+
+def _parse_network(raw: object) -> Mapping[str, int | None] | None:
+    """The ``network`` map with anything but a positive int host port read
+    as "not published" — a malformed entry must not invent a port."""
+    if not isinstance(raw, dict):
+        return None
+    parsed: dict[str, int | None] = {}
+    for key, value in raw.items():
+        ok = isinstance(value, int) and not isinstance(value, bool) and value > 0
+        parsed[str(key)] = value if ok else None
+    return MappingProxyType(parsed)
 
 
 class SupervisorClient:
@@ -104,10 +159,18 @@ class SupervisorClient:
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            # ValueError covers a body that isn't JSON.
             log.warning("supervisor: /addons/self/info failed: %s", exc)
             return None
-        return AddonInfo.from_response(data.get("data"))
+        if not isinstance(data, dict) or not isinstance(data.get("data"), dict):
+            log.warning("supervisor: /addons/self/info returned no data object")
+            return None
+        try:
+            return AddonInfo.from_response(data["data"])
+        except (TypeError, ValueError) as exc:
+            log.warning("supervisor: /addons/self/info is malformed: %s", exc)
+            return None
 
     async def push_discovery(self, payload: dict) -> bool:
         """POST ``/discovery`` — returns ``True`` on 2xx.

@@ -45,11 +45,19 @@ dashboard's `Host` allow-list.
 
 Inside the Home Assistant App the dashboard always listens on container
 port `8100` (the port can't be changed there; HA Supervisor owns the host
-port mapping). The App's manifest must declare `8100/tcp` so Supervisor
-publishes it — that lives in the separate Home Assistant App repository
-and is a follow-up there. Until the mapping exists, or when you map it to
-a different host port, set the dashboard **address** to what the tablet
-must open.
+port mapping). The port is off until you turn it on:
+
+1. In Home Assistant go to **Settings › Apps › Social Home › Network**.
+2. Enter a host port for the dashboard (for example `8100`) and save.
+3. Restart the App when Home Assistant asks — Supervisor only publishes a
+   changed port when it starts the App.
+
+Social Home reads the mapped port from Supervisor and shows the right
+address automatically (for example `http://homeassistant.local:8100`, or
+your own host port if you picked another). Until a port is mapped the
+admin view reports `host_port_mapped: false` and asks you to turn it on.
+If tablets must use a different name or a reverse proxy, set the
+dashboard **address** — it always wins over the guess.
 
 ## Keep it on the home network
 

@@ -31,6 +31,7 @@ from ...domain.household_dashboard import DEFAULT_DASHBOARD_PORT
 from ...services.ha_bridge_service import HaBridgeService
 from ..adapter import (
     Capability,
+    DashboardHostPort,
     ExternalUser,
     InstanceConfig,
     PlatformAdapter,
@@ -124,6 +125,7 @@ class HaosAdapter(PlatformAdapter):
         "_ice_sync",
         "_db",
         "_instance_config",
+        "_dashboard_host_port",
         "auth",
         "users",
         "push",
@@ -152,6 +154,7 @@ class HaosAdapter(PlatformAdapter):
         self._ice_sync: HaIceServerSync | None = None
         self._db: Any | None = None
         self._instance_config: "AbstractInstanceConfigRepo | None" = None
+        self._dashboard_host_port: DashboardHostPort | None = None
 
         # HAOS-specific auth — ingress header trust, no bearer fallback.
         self.auth = HaIngressAuthProvider(self)
@@ -197,6 +200,47 @@ class HaosAdapter(PlatformAdapter):
         """The container port — HA Supervisor maps the host port, so the
         dashboard port is not the admin's to change here."""
         return DEFAULT_DASHBOARD_PORT
+
+    async def dashboard_host_port(self) -> DashboardHostPort | None:
+        """The host port HA Supervisor publishes the dashboard on.
+
+        Read from ``GET /addons/self/info`` → ``network["8100/tcp"]`` (see
+        :class:`~socialhome.platform.haos.supervisor.AddonInfo` for the
+        verified Supervisor contract): an int is the mapped host port,
+        ``null`` / a missing key means the user hasn't turned the port on.
+
+        Cached after the first successful read: Supervisor only applies a
+        changed mapping when it next starts the App (``APIApps.options``
+        persists it without restarting), and a restart gives us a fresh
+        process — so the first answer stays the live mapping for this
+        process's lifetime. A failed read isn't cached (the next admin
+        page load asks again) and degrades to ``None`` — "unknown", the
+        URL falls back to the container port — logged at WARNING.
+        """
+        if self._dashboard_host_port is not None:
+            return self._dashboard_host_port
+        if self._supervisor_client is None:
+            log.warning(
+                "haos_adapter: dashboard host port asked before on_startup"
+                " — no Supervisor client",
+            )
+            return None
+        try:
+            info = await self._supervisor_client.get_self_info()
+        except Exception as exc:  # defensive — never break the admin page
+            log.warning("haos_adapter: dashboard host port lookup failed: %s", exc)
+            return None
+        if info is None:
+            log.warning(
+                "haos_adapter: no App info from Supervisor — dashboard URL"
+                " falls back to the container port %d",
+                DEFAULT_DASHBOARD_PORT,
+            )
+            return None
+        self._dashboard_host_port = DashboardHostPort(
+            info.host_port(f"{DEFAULT_DASHBOARD_PORT}/tcp")
+        )
+        return self._dashboard_host_port
 
     @property
     def _client(self) -> HaClient:

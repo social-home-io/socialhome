@@ -121,3 +121,81 @@ def test_addon_info_from_response_rejects_partial_payloads():
     # Both present -> parses.
     info = AddonInfo.from_response({"hostname": "h", "ingress_port": "8099"})
     assert info == AddonInfo(hostname="h", ingress_port=8099)
+
+
+# ── network map (household dashboard host port) ─────────────────────────
+# Shapes from supervisor/api/apps.py ``APIApps.info_data`` (``network`` =
+# ``App.ports``: container port → host port int, or null when unpublished).
+
+
+def _info(**extra) -> AddonInfo:
+    info = AddonInfo.from_response({"hostname": "h", "ingress_port": 8099, **extra})
+    assert info is not None
+    return info
+
+
+def test_addon_info_reads_a_mapped_host_port():
+    assert _info(network={"8100/tcp": 18100}).host_port("8100/tcp") == 18100
+
+
+def test_addon_info_null_host_port_is_unpublished():
+    assert _info(network={"8100/tcp": None}).host_port("8100/tcp") is None
+
+
+def test_addon_info_missing_network_or_key_is_unpublished():
+    assert _info().network is None
+    assert _info().host_port("8100/tcp") is None
+    assert _info(network={"1883/tcp": 1883}).host_port("8100/tcp") is None
+    assert _info(network="junk").host_port("8100/tcp") is None
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "8100", 1.5])
+def test_addon_info_malformed_host_port_is_unpublished(value):
+    assert _info(network={"8100/tcp": value}).host_port("8100/tcp") is None
+
+
+def test_addon_info_host_network_publishes_the_container_port():
+    info = _info(host_network=True, network=None)
+    assert info.host_port("8100/tcp") == 8100
+    assert info.host_port("nonsense") is None
+
+
+async def test_get_self_info_parses_the_network_map(client, sv_server):
+    _, captured = sv_server
+    captured["self_info_response"] = {
+        "result": "ok",
+        "data": {
+            "hostname": "local-social-home",
+            "ingress_port": 8099,
+            "network": {"8100/tcp": 8200},
+            "host_network": False,
+        },
+    }
+    info = await client.get_self_info()
+    assert info is not None
+    assert info.host_port("8100/tcp") == 8200
+
+
+@pytest.mark.parametrize(
+    "body", [{"result": "ok"}, {"result": "ok", "data": "x"}, {"data": []}]
+)
+async def test_get_self_info_none_without_a_data_object(
+    client, sv_server, body, caplog
+):
+    _, captured = sv_server
+    captured["self_info_response"] = body
+    with caplog.at_level("WARNING"):
+        assert await client.get_self_info() is None
+    assert "no data object" in caplog.text
+
+
+async def test_get_self_info_none_on_a_malformed_ingress_port(
+    client, sv_server, caplog
+):
+    _, captured = sv_server
+    captured["self_info_response"] = {
+        "data": {"hostname": "h", "ingress_port": "eighty"}
+    }
+    with caplog.at_level("WARNING"):
+        assert await client.get_self_info() is None
+    assert "malformed" in caplog.text

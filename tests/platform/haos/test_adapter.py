@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 
 from socialhome.domain.household_dashboard import DEFAULT_DASHBOARD_PORT
-from socialhome.platform.adapter import Capability
+from socialhome.platform.adapter import Capability, DashboardHostPort
 from socialhome.platform.haos.adapter import HaosAdapter
+from socialhome.platform.haos.supervisor import AddonInfo
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
 
@@ -70,14 +71,35 @@ class _FakeRequest:
         self.query = query or {}
 
 
-def _build_haos_adapter(*, ha_client=None, options=None):
+def _build_haos_adapter(*, ha_client=None, options=None, supervisor_client=None):
     return HaosAdapter(
         supervisor_url="http://supervisor",
         supervisor_token="t",
         data_dir="/tmp/x",
         options=options,
         ha_client=ha_client or _FakeHaClient(),
+        supervisor_client=supervisor_client,
     )
+
+
+class _FakeSupervisor:
+    """``get_self_info`` answers in turn from ``infos`` (an exception
+    instance is raised)."""
+
+    def __init__(self, *infos):
+        self._infos = list(infos)
+        self.calls = 0
+
+    async def get_self_info(self):
+        self.calls += 1
+        item = self._infos.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _addon_info(**data):
+    return AddonInfo.from_response({"hostname": "h", "ingress_port": 8099, **data})
 
 
 # ─── Capabilities + provider wiring ────────────────────────────────────────
@@ -354,6 +376,59 @@ def test_fixed_dashboard_port_is_the_container_port():
     """HA Supervisor owns the host port mapping in the Home Assistant App,
     so the dashboard always listens on the default container port."""
     assert _build_haos_adapter().fixed_dashboard_port == DEFAULT_DASHBOARD_PORT
+
+
+# ─── dashboard_host_port (Supervisor ``network`` map) ───────────────────────
+
+
+async def test_dashboard_host_port_reads_the_mapped_port():
+    sv = _FakeSupervisor(_addon_info(network={"8100/tcp": 18100}))
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    assert await adapter.dashboard_host_port() == DashboardHostPort(18100)
+    # Cached: a new mapping only applies after Supervisor restarts the App.
+    assert await adapter.dashboard_host_port() == DashboardHostPort(18100)
+    assert sv.calls == 1
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{"network": {"8100/tcp": None}}, {"network": {"8099/tcp": 8099}}, {}],
+    ids=["null", "missing-key", "no-network"],
+)
+async def test_dashboard_host_port_not_mapped(data):
+    adapter = _build_haos_adapter(
+        supervisor_client=_FakeSupervisor(_addon_info(**data))
+    )
+    result = await adapter.dashboard_host_port()
+    assert result == DashboardHostPort(None)
+    assert result.mapped is False
+
+
+async def test_dashboard_host_port_supervisor_failure_degrades(caplog):
+    """``get_self_info`` returns ``None`` on an HTTP error (it logs that
+    itself); the adapter warns, answers "unknown" and asks again later."""
+    sv = _FakeSupervisor(None, _addon_info(network={"8100/tcp": 8100}))
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    with caplog.at_level("WARNING"):
+        assert await adapter.dashboard_host_port() is None
+    assert "falls back to the container port" in caplog.text
+    assert await adapter.dashboard_host_port() == DashboardHostPort(8100)
+    assert sv.calls == 2
+
+
+async def test_dashboard_host_port_unexpected_error_degrades(caplog):
+    adapter = _build_haos_adapter(
+        supervisor_client=_FakeSupervisor(RuntimeError("boom"))
+    )
+    with caplog.at_level("WARNING"):
+        assert await adapter.dashboard_host_port() is None
+    assert "boom" in caplog.text
+
+
+async def test_dashboard_host_port_before_startup_is_unknown(caplog):
+    with caplog.at_level("WARNING"):
+        assert await _build_haos_adapter().dashboard_host_port() is None
+    assert "before on_startup" in caplog.text
 
 
 def test_does_not_honour_a_manual_federation_base():
