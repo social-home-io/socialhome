@@ -29,13 +29,18 @@ fallback) and browser history. **Operators must redact tokens from
 log aggregation.** Code must never log the full query string of
 `/api/ws`. Both the household server and the GFS run aiohttp with
 `RedactingAccessLogger` (`socialhome/access_log.py`), which writes
-`token` / `api_key` / `access_token` / `password` query values — and the
-bearer token segment of the GFS's `/join/{token}`,
-`/highlight/{instance_id}/{highlight_id}/{token}`,
+`token` / `api_key` / `access_token` / `password` query values, the
+household dashboard's `/enter?t=` setup token and the `sig` of a signed
+media / map-tile / app-bundle URL (a bearer credential for its TTL; `exp`
+stays readable) — and the bearer token segment of the GFS's
+`/join/{token}`, `/highlight/{instance_id}/{highlight_id}/{token}`,
 `/gfs/highlight_tokens/{token}/revoke` and
-`/gfs/spaces/{space_id}/invite/{gfs_token}` paths — as `***`, in the
-request line and the `Referer` alike. A reverse proxy in front keeps its
-own log and needs the same treatment.
+`/gfs/spaces/{space_id}/invite/{gfs_token}` paths and of the household's
+`/api/invite-links/{token}/code`, `/api/remote_invites/{token}/{decision}`,
+`/api/spaces/{id}/invite-tokens/{token}` and
+`/api/highlights/{id}/publish/{token}` paths — as `***`, in the request
+line and the `Referer` alike. A reverse proxy in front keeps its own log
+and needs the same treatment.
 
 ## Conventions
 

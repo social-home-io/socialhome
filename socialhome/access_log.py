@@ -4,12 +4,15 @@ Prevents secrets from leaking into operator log files, log shippers, or
 log-aggregation services. The WebSocket endpoint uses ``?token=<raw>``
 for browser auth (aiohttp can't set custom headers on WS), so the
 default aiohttp access log would write that token verbatim. We strip
-``token``, ``api_key``, ``access_token``, ``password`` and the household
-dashboard's setup token ``t`` from every formatted access-log field — the
-request line (``%r``), request headers such as ``%{Referer}i``, and the
-matching ``extra`` attributes aiohttp attaches to the log record. Bearer
-tokens that ride in the URL *path* — the GFS's ``/join/{token}`` invite
-links and ``/highlight/…/{token}`` share links — are redacted too
+``token``, ``api_key``, ``access_token``, ``password``, the household
+dashboard's setup token ``t`` and a signed media URL's ``sig`` from every
+formatted access-log field — the request line (``%r``), request headers
+such as ``%{Referer}i``, and the matching ``extra`` attributes aiohttp
+attaches to the log record. Bearer tokens that ride in the URL *path* —
+the GFS's ``/join/{token}`` invite links and ``/highlight/…/{token}``
+share links, and the household's ``/api/invite-links/{token}/code``,
+``/api/remote_invites/{token}/…``, ``/api/spaces/{id}/invite-tokens/{token}``
+and ``/api/highlights/{id}/publish/{token}`` — are redacted too
 (:func:`redact_secrets`).
 
 Wired in via ``web.run_app(..., access_log_class=RedactingAccessLogger)``
@@ -38,6 +41,10 @@ _SENSITIVE_PARAMS: frozenset[str] = frozenset(
         # The household dashboard's single-use tablet setup link
         # (``/enter?t=<token>``) — exact name only, ``tz=`` / ``at=`` untouched.
         "t",
+        # The HMAC of a signed media / map-tile / app-bundle URL
+        # (``?exp=…&sig=…``, :mod:`socialhome.media_signer`) — a bearer
+        # credential for its TTL. ``exp`` stays readable for debugging.
+        "sig",
     }
 )
 
@@ -79,6 +86,10 @@ _SEG = r"[^/?#\s]+"
 _PATH_START = r"(^|\s|//[^/?#\s]*)"
 #: The end of the token segment: end of value, query, fragment or space.
 _SEG_END = r"(?=$|[?#\s])"
+#: The end of a token segment that may be followed by more path
+#: (``/{token}/code``). Any suffix is accepted on purpose: a request with
+#: a mistyped or unknown suffix still carries the credential.
+_SEG_BOUNDARY = r"(?=$|[/?#\s])"
 
 #: URL paths whose segment IS a bearer credential — anyone holding the
 #: string can use it. Each pattern captures ``(start, prefix, token)``;
@@ -91,6 +102,18 @@ _SEG_END = r"(?=$|[?#\s])"
 #: * ``/gfs/highlight_tokens/{token}/revoke`` and
 #:   ``/gfs/spaces/{space_id}/invite/{gfs_token}`` — the owner's signed
 #:   revoke calls name the same tokens.
+#:
+#: Household shapes (all under ``/api/``):
+#:
+#: * ``/api/invite-links/{token}/code`` — unauthenticated by design; the
+#:   invite-link token is the credential that redeems the link.
+#: * ``/api/remote_invites/{token}/{accept|decline}`` — the remote space
+#:   invitation's token.
+#: * ``/api/spaces/{id}/invite-tokens/{token}`` — an admin revoking a
+#:   space invite link names the live link token.
+#: * ``/api/highlights/{id}/publish/{token}`` — revoking one public
+#:   highlight share token (the same token the GFS ``/highlight/…`` link
+#:   carries).
 _PATH_TOKEN_RES: tuple[re.Pattern[str], ...] = (
     re.compile(rf"{_PATH_START}(/join/)({_SEG}){_SEG_END}"),
     re.compile(rf"{_PATH_START}(/highlight/{_SEG}/{_SEG}/)({_SEG}){_SEG_END}"),
@@ -98,6 +121,14 @@ _PATH_TOKEN_RES: tuple[re.Pattern[str], ...] = (
         rf"{_PATH_START}(/gfs/highlight_tokens/)({_SEG})(?=/revoke(?:$|[?#\s]))"
     ),
     re.compile(rf"{_PATH_START}(/gfs/spaces/{_SEG}/invite/)({_SEG}){_SEG_END}"),
+    re.compile(rf"{_PATH_START}(/api/invite-links/)({_SEG}){_SEG_BOUNDARY}"),
+    re.compile(rf"{_PATH_START}(/api/remote_invites/)({_SEG}){_SEG_BOUNDARY}"),
+    re.compile(
+        rf"{_PATH_START}(/api/spaces/{_SEG}/invite-tokens/)({_SEG}){_SEG_BOUNDARY}"
+    ),
+    re.compile(
+        rf"{_PATH_START}(/api/highlights/{_SEG}/publish/)({_SEG}){_SEG_BOUNDARY}"
+    ),
 )
 
 
