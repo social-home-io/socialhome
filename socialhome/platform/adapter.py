@@ -484,6 +484,21 @@ class PlatformAdapter(abc.ABC):
         """
         return False
 
+    @property
+    def fixed_dashboard_port(self) -> int | None:
+        """The port the household dashboard must listen on, or ``None``
+        when the admin may choose it.
+
+        The Home Assistant App returns the container port: HA Supervisor
+        owns the host port mapping, so changing the port inside the
+        container would only break the mapping. Standalone and ``ha``
+        installs leave this ``None``.
+
+        Deliberately NOT a :class:`Capability` — it is a backend fact;
+        the dashboard admin API surfaces it as ``port_fixed``.
+        """
+        return None
+
 
 # ── Back-compat alias ────────────────────────────────────────────────────────
 

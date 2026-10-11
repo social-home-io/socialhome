@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.domain.household_dashboard import DEFAULT_DASHBOARD_PORT
 from socialhome.platform.adapter import Capability
 from socialhome.platform.haos.adapter import HaosAdapter
 
@@ -346,6 +347,12 @@ def test_provides_ice_servers_is_true():
     federation transport should hold its first handshake briefly rather
     than building a STUN-only peer that can never relay."""
     assert _build_haos_adapter().provides_ice_servers is True
+
+
+def test_fixed_dashboard_port_is_the_container_port():
+    """HA Supervisor owns the host port mapping in the Home Assistant App,
+    so the dashboard always listens on the default container port."""
+    assert _build_haos_adapter().fixed_dashboard_port == DEFAULT_DASHBOARD_PORT
 
 
 class _IceHaClient(_FakeHaClient):

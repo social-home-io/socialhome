@@ -27,6 +27,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ... import app_keys as K
+from ...domain.household_dashboard import DEFAULT_DASHBOARD_PORT
 from ...services.ha_bridge_service import HaBridgeService
 from ..adapter import (
     Capability,
@@ -178,6 +179,12 @@ class HaosAdapter(PlatformAdapter):
         holds its first handshake until that list lands rather than
         building a STUN-only peer that can never relay."""
         return True
+
+    @property
+    def fixed_dashboard_port(self) -> int | None:
+        """The container port — HA Supervisor maps the host port, so the
+        dashboard port is not the admin's to change here."""
+        return DEFAULT_DASHBOARD_PORT
 
     @property
     def _client(self) -> HaClient:
