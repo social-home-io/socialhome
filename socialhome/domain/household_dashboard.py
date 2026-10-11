@@ -360,7 +360,10 @@ def leading_emoji(text: str) -> str | None:
     while end < len(text):
         ch = text[end]
         modifier = ch in _JOINERS or 0x1F3FB <= ord(ch) <= 0x1F3FF
-        if not (modifier or text[end - 1] == _ZWJ):
+        # A zero-width joiner joins another emoji (👨‍👩‍👧), never letters —
+        # "🏥‍K‍l‍i‍n‍i‍k" must not pass as one emoji.
+        joined = text[end - 1] == _ZWJ and unicodedata.category(ch) == "So"
+        if not (modifier or joined):
             break
         end += 1
     return text[:end]

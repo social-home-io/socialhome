@@ -360,6 +360,12 @@ def test_settings_pin_set_defaults_off():
         ("Ärzt·Termin", False),
         ("🎉🎉", False),
         ("🎉 x", False),
+        # A zero-width joiner may only join another emoji — never letters:
+        # "🏥‍K‍l‍i‍n‍i‍k" would read "🏥Klinik" on the wall.
+        ("🏥\u200dK\u200dl\u200di\u200dn\u200di\u200dk", False),
+        ("🏥\u200dK", False),
+        ("👨\u200d👩\u200d👧\u200d👦", True),
+        ("🧑\u200d🚒", True),
     ],
 )
 def test_is_pure_emoji(text, pure):

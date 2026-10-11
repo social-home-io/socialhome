@@ -156,6 +156,16 @@ async def test_renewed_cookie_secure_behind_https_address(
     assert resp.cookies[COOKIE_NAME]["secure"] is True
 
 
+async def test_not_found_person_page_never_renews(client, auth, clock):
+    """Only a page that actually rendered renews: a 404 for an unknown or
+    hidden person sets no cookie."""
+    headers = await _cookie(auth, keep=True)
+    clock.advance(RENEW_AFTER_S + 1)
+    resp = await client.get("/p/nobody", headers=headers, allow_redirects=False)
+    assert resp.status == 404
+    assert COOKIE_NAME not in resp.cookies
+
+
 async def test_fresh_cookie_not_renewed(client, auth, clock):
     headers = await _cookie(auth, keep=True)
     clock.advance(RENEW_AFTER_S)

@@ -283,9 +283,12 @@ def _may_renew(request: web.Request, response: web.StreamResponse) -> bool:
     the cookie — an allow-list. Never a ``/fragment/`` fetch, an avatar,
     a static file or a form ``POST``: such a response can land after a
     ``/lock`` (sent with the pre-lock cookie) and must not overwrite the
-    locked cookie. And never over a cookie the view set itself."""
+    locked cookie. Never on a page that didn't render (a 404 for an
+    unknown or hidden person). And never over a cookie the view set
+    itself."""
     return (
         request.method in ("GET", "HEAD")
+        and response.status == 200
         and _RENEWING_PATH.fullmatch(request.path) is not None
         and COOKIE_NAME not in response.cookies
     )
