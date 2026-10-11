@@ -552,7 +552,9 @@ class PersonSnapshot:
     order (all-day events first); ``now_item`` / ``next_item`` are the
     timed event or lesson running now / starting next today.
     ``chores`` are tasks assigned to the person: open ones due within a
-    week (overdue included) and those completed today.
+    week (overdue included) and those completed today. ``people`` is
+    every shown member (``person`` among them), in household order — the
+    dashboard's rail.
     """
 
     person: DashboardPerson
@@ -567,6 +569,7 @@ class PersonSnapshot:
     chores: tuple[DashboardTask, ...] = ()
     school: DashboardSchoolDay | None = None
     school_tomorrow_first: DashboardLesson | None = None
+    people: tuple[DashboardPerson, ...] = ()
 
 
 class DashboardPinInvalidError(CodedError, ValueError):

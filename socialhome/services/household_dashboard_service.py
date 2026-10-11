@@ -377,7 +377,21 @@ class HouseholdDashboardService:
             chores=chores,
             school=school.today,
             school_tomorrow_first=_first_lesson(school.tomorrow),
+            people=people,
         )
+
+    async def avatar(self, user_id: str) -> tuple[bytes, str] | None:
+        """``(image bytes, picture hash)`` of a *shown*, active member's
+        profile picture — ``None`` for a hidden, inactive or unknown member
+        (whose picture is never read) or one without a picture. Fails soft
+        like a slice."""
+        settings = await self._settings.get()
+        if not settings.person(user_id).show:
+            return None
+        members = await _safe("users", self._users.list_active(), list[User]())
+        if not any(u.user_id == user_id for u in members):
+            return None
+        return await _safe("picture", self._users.get_picture(user_id), None)
 
     # ── Context ──────────────────────────────────────────────────────────
 

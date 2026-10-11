@@ -74,10 +74,15 @@ class FakeUsers(Recorder):
     def __init__(self, users: list[User]) -> None:
         super().__init__()
         self.users = users
+        self.pictures: dict[str, tuple[bytes, str]] = {}
 
     async def list_active(self) -> list[User]:
         self.hit("list_active")
         return list(self.users)
+
+    async def get_picture(self, user_id: str) -> tuple[bytes, str] | None:
+        self.hit("get_picture")
+        return self.pictures.get(user_id)
 
 
 class FakePresence(Recorder):
@@ -1361,3 +1366,34 @@ async def test_person_colours_follow_calendars_only_while_the_calendar_is_on():
     ]
     assert off.events_today == ()
     assert h.calendar.calls == []
+
+
+# ─── Rail + avatars ──────────────────────────────────────────────────────
+
+
+async def test_person_page_carries_every_shown_person_for_the_rail():
+    h = Harness()
+    page = await h.person("u-ben", at(MONDAY, 8, 10))
+    assert page is not None
+    assert [p.user_id for p in page.people] == ["u-anna", "u-ben", "u-dora"]
+    assert page.person in page.people
+
+
+async def test_avatar_only_for_shown_active_members():
+    h = Harness()
+    h.users.pictures = {
+        "u-anna": (b"RIFF0000WEBPVP8 ", "abc"),
+        "u-carl": (b"RIFF0000WEBPVP8 ", "def"),
+    }
+    assert await h.service.avatar("u-anna") == (b"RIFF0000WEBPVP8 ", "abc")
+    assert await h.service.avatar("u-carl") is None  # hidden
+    assert await h.service.avatar("u-nobody") is None  # unknown / inactive
+    assert await h.service.avatar("u-ben") is None  # shown, no picture
+    # Hidden and unknown people never reach the picture store.
+    assert h.users.calls.count("get_picture") == 2
+
+
+async def test_avatar_fails_soft():
+    h = Harness()
+    h.users.fail.add("get_picture")
+    assert await h.service.avatar("u-anna") is None
