@@ -139,6 +139,21 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   // Server-side outages the user can act on or wait out.
   GFS_UNAVAILABLE: () => t('error.gfs_unavailable'),
   STORAGE_FULL: () => t('error.storage_full'),
+  // Household dashboard (Admin › Dashboard). ``params`` carry the port /
+  // length limits (``domain/household_dashboard.py``).
+  DASHBOARD_PASSWORD_REQUIRED: () => t('error.dashboard_password_required'),
+  DASHBOARD_PORT_FIXED: () => t('error.dashboard_port_fixed'),
+  DASHBOARD_PORT_IN_USE: (_b, p) => p.port === undefined
+    ? null
+    : t('error.dashboard_port_in_use', { port: str(p, 'port') }),
+  DASHBOARD_SETTINGS_INVALID: () => t('error.dashboard_settings_invalid'),
+  DASHBOARD_PASSWORD_TOO_SHORT: (_b, p) => t('error.dashboard_password_too_short', {
+    min: str(p, 'min') || '8',
+  }),
+  DASHBOARD_PIN_INVALID: (_b, p) => t('error.dashboard_pin_invalid', {
+    min: str(p, 'min') || '4', max: str(p, 'max') || '6',
+  }),
+  DASHBOARD_NOT_RUNNING: () => t('error.dashboard_not_running'),
   AI_AGENT_UNAVAILABLE: () => t('error.ai_unavailable'),
 }
 

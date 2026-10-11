@@ -122,5 +122,21 @@
   "dashboard.not_found": "Deze pagina staat niet op het dashboard.",
   "dashboard.not_found.back": "Terug naar het overzicht",
   "dashboard.timeline.now": "nu",
-  "dashboard.timeline.label": "Tijdlijn van vandaag"
+  "dashboard.timeline.label": "Tijdlijn van vandaag",
+  "dashboard.picture.clock": "Het is {time}",
+  "dashboard.picture.now": "Nu: {title}",
+  "dashboard.picture.next": "Hierna: {title}, {when}",
+  "dashboard.picture.now_next": "Nu en hierna",
+  "dashboard.picture.free": "Vrije tijd",
+  "dashboard.picture.item": "{when} {title}",
+  "dashboard.picture.cancelled": "{when} {title}, vervalt",
+  "dashboard.picture.day": "Mijn dag",
+  "dashboard.picture.part.morning": "Ochtend",
+  "dashboard.picture.part.afternoon": "Middag",
+  "dashboard.picture.part.evening": "Avond",
+  "dashboard.picture.part.night": "Nacht",
+  "dashboard.picture.jobs": "Mijn klusjes",
+  "dashboard.picture.job": "{state}: {title}",
+  "dashboard.picture.sleeps": "Nachtjes slapen: {n}",
+  "dashboard.picture.night": "{when} {time}: {title}"
 }

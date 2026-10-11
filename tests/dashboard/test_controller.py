@@ -78,6 +78,14 @@ def test_address_hosts():
     ) == frozenset({"dash.example.com"})
 
 
+def test_controller_exposes_settings_and_the_running_port(settings_service, server):
+    ctl = DashboardController(settings_service, server, local_hostnames=frozenset())
+    assert ctl.settings is settings_service
+    assert ctl.running_port is None
+    server.running_port = 8100
+    assert ctl.running_port == 8100
+
+
 # ── update ──────────────────────────────────────────────────────────────
 
 

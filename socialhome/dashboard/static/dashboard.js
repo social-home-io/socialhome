@@ -6,7 +6,8 @@
  *
  * On a board page (<body data-dash>, Home or a person):
  *   - the clock ticks every second from the server's time (data-now), not
- *     the tablet's own clock; the household day changing reloads the page;
+ *     the tablet's own clock (the picture view's analog hands too); the
+ *     household day changing reloads the page;
  *   - every 30 s the matching /fragment/… is fetched and swapped into
  *     <main>. A locked marker reloads (the server shows the lock screen),
  *     401 goes to the login form, 404 (person hidden) goes Home, a new
@@ -173,6 +174,21 @@
     document.querySelectorAll("[data-clock]").forEach(function (el) {
       if (el.textContent !== text) {
         el.textContent = text;
+      }
+    });
+    // The picture view's analog clock: turn the hands (an SVG transform
+    // attribute — not a style, so the CSP has nothing to say) with the
+    // server's formula (picture.py hand_angles).
+    var minute = Number(parts.minute);
+    var angles = {
+      hour: (Number(parts.hour) % 12) * 30 + minute * 0.5,
+      minute: minute * 6,
+    };
+    document.querySelectorAll("[data-hand]").forEach(function (el) {
+      var deg = angles[el.getAttribute("data-hand")];
+      var value = "rotate(" + deg + " 100 100)";
+      if (deg !== undefined && el.getAttribute("transform") !== value) {
+        el.setAttribute("transform", value);
       }
     });
   }

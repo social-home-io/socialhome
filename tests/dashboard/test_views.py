@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import replace
+from html import unescape
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
@@ -42,11 +43,14 @@ from .factories import (
     DINNER,
     MIA_SCHOOL,
     PASCAL,
+    PEOPLE,
+    SWIM,
     TOMORROW,
     WORK,
     FakeDashboardService,
     at,
     event,
+    leo_page,
     person,
 )
 
@@ -1564,13 +1568,203 @@ async def test_tomorrow_lists_events_and_the_first_lesson_in_time_order(
     )
 
 
-async def test_picture_view_person_gets_the_reader_page_behind_the_seam(
+# ─── Picture view ────────────────────────────────────────────────────────
+
+
+def _visible_text(html: str) -> str:
+    """What a sighted viewer can read: no <head>, style or script, no
+    visually-hidden text, no tags (so no attributes — aria-label text is
+    for screen readers)."""
+    html = re.sub(r"<head>.*?</head>", "", html, flags=re.S)
+    html = re.sub(r"<(style|script)\b.*?</\1>", "", html, flags=re.S)
+    html = re.sub(
+        r'<span class="[^"]*\bdash-visually-hidden\b[^"]*">[^<]*</span>', "", html
+    )
+    return unescape(re.sub(r"<[^>]+>", " ", html))
+
+
+def _assert_only_names_and_icons(html: str, people) -> None:
+    text = _visible_text(html)
+    assert re.search(r"\d", text) is None, re.findall(r"\S*\d\S*", text)
+    allowed = {w for p in people for w in (*p.display_name.split(), p.initials)}
+    words = set(re.findall(r"[^\W\d_]+", text))
+    assert words <= allowed, words - allowed
+
+
+async def test_picture_page(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page()
+    resp = await _get(client, auth, "/p/u-leo")
+    assert resp.status == 200
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    assert "data-picture-view" in html and "dash-person-name" not in html
+    _assert_only_names_and_icons(html, PEOPLE)
+    # No title, no time, no "Now"/"Next" label on screen …
+    text = _visible_text(html)
+    for word in ("Kunst", "Swimming", "Now", "Next", "Home", "Katze", "10:30"):
+        assert word not in text, word
+    # … but every tile speaks its real title.
+    for label in (
+        'aria-label="It&#39;s 10:30"',
+        'aria-label="Now: Kunst"',
+        'aria-label="Next: Swimming, in 4 h"',
+        'aria-label="08:00–08:45 Lesen"',
+        'aria-label="09:00–09:45 Turnen, cancelled"',
+        'aria-label="15:00–16:00 Swimming"',
+        'aria-label="To do: Katze füttern"',
+        'aria-label="Done: Zähneputzen"',
+        'aria-label="08:00 School"',
+        'aria-label="Sleeps until then: 1"',
+        'aria-label="Morning"',
+    ):
+        assert label in html, label
+    # The analog clock: hands from the household time (10:30).
+    assert 'transform="rotate(315 100 100)" data-hand="hour"' in html
+    assert 'transform="rotate(180 100 100)" data-hand="minute"' in html
+    # Swimming is hours away: the wedge is a full disc, the pie too.
+    assert re.search(r'<g class="dash-pv-wedge k\d+" data-rel><circle', html)
+    assert 'class="dash-pv-pie" viewBox="0 0 100 100"' in html
+    # MY DAY: icons, the cancelled lesson with ✕, the running one framed.
+    assert ">📖</span>" in html and ">🧸</span>" in html and ">🏊</span>" in html
+    assert re.search(r'dash-pv-tile k\d+ dash-pv-past dash-pv-cancelled"', html)
+    assert 'aria-hidden="true">✕</span>' in html
+    assert re.search(r'dash-pv-tile k\d+ dash-pv-current" data-live>', html)
+    # Jobs (☐ / ✓) and who's home (faces, not the page owner).
+    assert ">🐱</span>" in html and ">🦷</span>" in html
+    assert '<span class="dash-pv-check" aria-hidden="true">✓</span>' in html
+    where = html[html.index("dash-pv-where") :]
+    assert "Pascal" in where and "Anna" in where and "Leo" not in where
+    # The rail's "Home" is spoken only; the 88 px face is there.
+    assert '<span class="dash-rail-name dash-visually-hidden">Home</span>' in html
+    assert "dash-face dash-face-pv" in html
+    assert "🎈" not in html
+
+
+async def test_picture_page_without_now_shows_free_time(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(now=at(12), now_item=None)
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert 'aria-label="Free time">🧸</span>' in html  # Leo is away
+    assert "dash-pv-arrow" in html
+    _assert_only_names_and_icons(html, PEOPLE)
+
+
+async def test_picture_page_empty_day_is_a_balloon(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(
+        now_item=None,
+        next_item=None,
+        today_items=(),
+        tomorrow_items=(),
+        school=None,
+        school_tomorrow_first=None,
+        chores=(),
+        people=(LEO,),
+    )
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert 'aria-label="Nothing planned today">🎈</span>' in html
+    assert "dash-pv-nownext" not in html and "dash-pv-parts" not in html
+    assert "dash-pv-more" not in html and "dash-pv-wedge" not in html
+    _assert_only_names_and_icons(html, (LEO,))
+
+
+async def test_picture_page_offline_banner_is_wordless(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page()
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert (
+        '<span class="dash-offline-text dash-visually-hidden">'
+        "Can&#39;t reach Social Home — showing info from 10:30</span>"
+    ) in html
+
+
+async def test_picture_page_never_shows_hidden_people(client, auth, snapshots):
+    # The snapshot service leaves hidden people out; nothing re-adds them.
+    snapshots.pages["u-leo"] = leo_page(people=(PASCAL, LEO))
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    for name in ("Anna", "Mia", "u-anna", "u-mia"):
+        assert name not in html, name
+    assert (await _get(client, auth, "/p/u-hidden")).status == 404
+
+
+async def test_picture_page_is_locked_like_any_other(pin_client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page()
+    page = await pin_client.get("/p/u-leo", headers=await _locked(auth))
+    frag = await pin_client.get("/fragment/p/u-leo", headers=await _locked(auth))
+    assert frag.headers["X-Dashboard-Locked"] == "1"
+    for html in (await page.text(), await frag.text()):
+        assert "Leo" not in html and "data-picture-view" not in html
+        assert "Kunst" not in html and "🎨" not in html
+    assert snapshots.calls == []
+
+
+async def test_picture_fragment_matches_the_page(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page()
+    page = await (await _get(client, auth, "/p/u-leo")).text()
+    frag = await (await _get(client, auth, "/fragment/p/u-leo")).text()
+    assert "data-picture-view" in frag and "<nav" not in frag
+    assert _attr(frag, "data-view-key") == _attr(page, "data-view-key")
+
+
+async def test_turning_the_picture_view_on_changes_the_view_key(
     client, auth, snapshots
 ):
-    snapshots.pages["u-leo"] = person(LEO)
+    snapshots.pages["u-leo"] = leo_page()
+    picture = _attr(
+        await (await _get(client, auth, "/p/u-leo")).text(), "data-view-key"
+    )
+    snapshots.pages["u-leo"] = leo_page(person=replace(LEO, picture_view=False))
+    reader = await (await _get(client, auth, "/fragment/p/u-leo")).text()
+    assert "dash-person-name" in reader
+    assert _attr(reader, "data-view-key") != picture
+
+
+async def test_picture_night_mode(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(
+        now=at(22, 47), is_night=True, now_item=None, next_item=None
+    )
+    resp = await _get(client, auth, "/p/u-leo")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    night = html[
+        html.index('<section class="dash-night-view') : html.index(
+            '<div class="dash-day"'
+        )
+    ]
+    assert "dash-pv-clock-night" in night
+    assert 'transform="rotate(323.5 100 100)" data-hand="hour"' in night
+    assert "dash-pv-wedge" not in night
+    assert '<span aria-hidden="true">🌙</span>' in night
+    assert 'aria-label="Tomorrow 08:00: School">🎒</span>' in night
+    _assert_only_names_and_icons(night, PEOPLE)
+    assert "dash-night-date" not in night
+    # The day view underneath is the picture view too.
+    assert "data-picture-view" in html[html.index("data-day-view") :]
+
+
+async def test_picture_night_mode_small_hours(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(
+        now=at(5), is_night=True, now_item=None, next_item=SWIM
+    )
     html = await (await _get(client, auth, "/p/u-leo")).text()
-    assert 'class="dash-picture-seam" data-picture-view' in html
-    assert "dash-person-name" in html  # the reader page, for now
+    night = html[
+        html.index('<section class="dash-night-view') : html.index(
+            '<div class="dash-day"'
+        )
+    ]
+    assert '<span aria-hidden="true">🌅</span>' in night
+    assert 'aria-label="Today 15:00: Swimming">🏊</span>' in night
+
+
+async def test_picture_night_mode_with_nothing_ahead(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(
+        now=at(23),
+        is_night=True,
+        now_item=None,
+        next_item=None,
+        tomorrow_items=(),
+        school_tomorrow_first=None,
+    )
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert "dash-pv-night-next" not in html
+    assert "dash-pv-clock-night" in html
 
 
 @pytest.mark.parametrize("path", ["/p/u-nobody", "/p/u-hidden"])

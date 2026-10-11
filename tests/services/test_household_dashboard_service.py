@@ -749,10 +749,8 @@ async def test_home_chores():
     assert ids(snap.chores_today) == ["trash", "groceries", "cat"]
     trash, groceries, cat = snap.chores_today
     assert trash.overdue_days == 2 and trash.done is False
-    assert trash.list_name == "Chores"
     assert trash.person_ids == ("u-anna",)
     assert groceries.overdue_days == 0 and groceries.person_ids == ()
-    assert groceries.list_name == "Errands"
     assert cat.done is True and cat.overdue_days == 0
 
 
@@ -801,7 +799,6 @@ async def test_home_school():
     assert sport.status == "changed" and sport.room == "Gym 2" and sport.icon == "⚽"
     assert kunst.status == "added"
     assert kunst.color == hash_color("Kunst")  # not a subject of the plan
-    assert kunst.timetable_name == "5b"
     assert [c.title for c in day.changes] == ["Deutsch", "Sport", "Kunst"]
     assert day.first_start == at(MONDAY, 8)
     assert day.last_end == at(MONDAY, 11, 45)
@@ -816,7 +813,6 @@ async def test_two_assigned_timetables_merge_into_one_school_day():
     day = snap.school[0]
     assert day.timetable_name == "5b · Music school"
     assert titles(day.lessons)[-1] == "Choir"
-    assert day.lessons[-1].timetable_name == "Music school"
     assert day.last_end == at(MONDAY, 15)
 
 
@@ -824,11 +820,12 @@ async def test_home_school_tomorrow_for_night_mode():
     h = Harness()
     snap = await h.home(at(MONDAY, 22, 30))
     assert snap.is_night is True
-    assert [(ls.person_id, ls.title) for ls in snap.school_tomorrow] == [
-        ("u-ben", "Englisch")
-    ]
-    assert snap.school_tomorrow[0].start == at(TUESDAY, 7, 45)
-    assert snap.school_tomorrow[0].teacher == "Ms. K"
+    page = await h.person("u-ben", at(MONDAY, 22, 30))
+    assert page is not None and page.school_tomorrow_first is not None
+    first = page.school_tomorrow_first
+    assert (first.person_id, first.title) == ("u-ben", "Englisch")
+    assert first.start == at(TUESDAY, 7, 45)
+    assert first.teacher == "Ms. K"
     # Gym at 07:00 beats Ben's 07:45 lesson.
     assert snap.tomorrow_first is not None
     assert snap.tomorrow_first.title == "Gym"
@@ -846,7 +843,7 @@ async def test_no_school_on_the_weekend():
     h = Harness()
     snap = await h.home(at(SATURDAY, 9))
     assert snap.school == ()
-    assert snap.school_tomorrow == ()
+    assert not isinstance(snap.tomorrow_first, DashboardLesson)
     page = await h.person("u-ben", at(SATURDAY, 9))
     assert page is not None
     assert page.school is None
@@ -941,7 +938,7 @@ async def test_disabled_sections_are_empty_and_not_read():
     assert snap.events_today == () and snap.next_up is None
     assert snap.chores_today == ()
     assert snap.stickies == ()
-    assert snap.school == () and snap.school_tomorrow == ()
+    assert snap.school == ()
     assert snap.tomorrow_first is None
     assert all(p.presence == "unknown" for p in snap.people)
     # Calendar off → the calendar service isn't called at all, so person

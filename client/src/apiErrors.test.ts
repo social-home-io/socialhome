@@ -109,6 +109,33 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('Only admins can add or edit pages here.')
   })
 
+  it('translates the household dashboard codes, with their params', () => {
+    expect(apiErrorMessage(409, '/api/admin/dashboard', {
+      code: 'DASHBOARD_PORT_IN_USE', detail: 'x', params: { port: 8100 },
+    })).toBe('Port 8100 is in use by another program.')
+    expect(apiErrorMessage(409, '/api/admin/dashboard/setup-link', {
+      code: 'DASHBOARD_NOT_RUNNING', detail: 'x',
+    })).toBe('Turn the dashboard on before creating a sign-in link.')
+    expect(apiErrorMessage(422, '/api/admin/dashboard/pin', {
+      code: 'DASHBOARD_PIN_INVALID', detail: 'x', params: { min: 4, max: 6 },
+    })).toBe('The PIN must be 4 to 6 digits.')
+    expect(apiErrorMessage(422, '/api/admin/dashboard/password', {
+      code: 'DASHBOARD_PASSWORD_TOO_SHORT', detail: 'x', params: { min: 8 },
+    })).toBe('The dashboard password needs at least 8 characters.')
+    expect(apiErrorMessage(422, '/api/admin/dashboard', {
+      code: 'DASHBOARD_PASSWORD_REQUIRED', detail: 'x',
+    })).toBe('Set a dashboard password before switching the dashboard on.')
+    expect(apiErrorMessage(422, '/api/admin/dashboard', {
+      code: 'DASHBOARD_PORT_FIXED', detail: 'x',
+    })).toContain('Home Assistant App')
+    expect(apiErrorMessage(422, '/api/admin/dashboard', {
+      code: 'DASHBOARD_SETTINGS_INVALID', detail: 'x', params: { field: 'port' },
+    })).toBe("That dashboard setting isn't valid.")
+    // Without the port param the server's sentence stays.
+    expect(apiErrorMessage(409, '/x', { code: 'DASHBOARD_PORT_IN_USE', detail: 'busy' }))
+      .toBe('busy')
+  })
+
   it('renders German in German', async () => {
     await setLocale('de')
     expect(apiErrorMessage(422, '/x', { code: 'DM_SELF', detail: 'cannot DM yourself' }))

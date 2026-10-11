@@ -122,5 +122,21 @@
   "dashboard.not_found": "Esta página no está en el panel.",
   "dashboard.not_found.back": "Volver al inicio",
   "dashboard.timeline.now": "ahora",
-  "dashboard.timeline.label": "Cronología de hoy"
+  "dashboard.timeline.label": "Cronología de hoy",
+  "dashboard.picture.clock": "Son las {time}",
+  "dashboard.picture.now": "Ahora: {title}",
+  "dashboard.picture.next": "Después: {title}, {when}",
+  "dashboard.picture.now_next": "Ahora y después",
+  "dashboard.picture.free": "Tiempo libre",
+  "dashboard.picture.item": "{when} {title}",
+  "dashboard.picture.cancelled": "{when} {title}, cancelada",
+  "dashboard.picture.day": "Mi día",
+  "dashboard.picture.part.morning": "Mañana",
+  "dashboard.picture.part.afternoon": "Tarde",
+  "dashboard.picture.part.evening": "Atardecer",
+  "dashboard.picture.part.night": "Noche",
+  "dashboard.picture.jobs": "Mis tareas",
+  "dashboard.picture.job": "{state}: {title}",
+  "dashboard.picture.sleeps": "Noches que faltan: {n}",
+  "dashboard.picture.night": "{when} {time}: {title}"
 }

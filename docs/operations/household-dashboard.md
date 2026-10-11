@@ -10,42 +10,56 @@ It is **off by default**. Design notes:
 [architecture.md](../architecture.md#household-dashboard-own-port); API:
 [api.md](../api.md#hfs--household-dashboard).
 
+Everything below is set up in the app under **Admin › Dashboard** (household
+admins only). Each task also names the admin API call it makes — a
+*headless / scripting* reference for setting a dashboard up without the
+app.
+
 ## Enabling it
 
-1. As a household admin, set a dashboard password (at least 8
-   characters) — `PUT /api/admin/dashboard/password`.
-2. Enable the dashboard — `PUT /api/admin/dashboard` with
-   `{"enabled": true}` (and, outside the Home Assistant App, optionally a
-   `port`). The listener starts at once; `GET /api/admin/dashboard`
-   reports `running: true` and the `url` tablets should open.
-3. On the tablet, either open that `url` and type the password, or —
-   while the dashboard is running — create a one-time setup link (`POST /api/admin/dashboard/setup-link`,
-   valid 10 minutes, shown as a QR code) and open it on the tablet — it
-   signs the tablet in for a year without typing the password.
+1. Open **Admin › Dashboard** and, under **Password**, choose **Set
+   password** (at least 8 characters). *Headless:*
+   `PUT /api/admin/dashboard/password`.
+2. Flip the **Household dashboard** switch on. Outside the Home Assistant
+   App you can change the **Port** (default `8100`) and **Save port**.
+   The listener starts at once; the tab shows "Running on port 8100" and,
+   under **Open on the tablet**, the address tablets should open.
+   *Headless:* `PUT /api/admin/dashboard` with `{"enabled": true}` (and
+   optionally a `port`); `GET /api/admin/dashboard` reports
+   `running: true` and the `url`.
+3. On the tablet, either open that address and type the password, or —
+   while the dashboard is running — choose **Show sign-in QR** and scan
+   the code with the tablet's camera: it signs the tablet in for a year
+   without typing the password (the code works once and is valid for 10
+   minutes; **New sign-in link** makes another). *Headless:*
+   `POST /api/admin/dashboard/setup-link`.
 
 If the port is already taken by another program, enabling (or changing
-the port) is refused with 409 `DASHBOARD_PORT_IN_USE` and nothing changes.
-If the port is taken at startup, Social Home starts anyway and logs a
-warning; the admin view shows `running: false`.
+the port) is refused — the tab says so (*headless:* 409
+`DASHBOARD_PORT_IN_USE`) and nothing changes. If the port is taken at
+startup, Social Home starts anyway and logs a warning; the tab shows
+"Switched on, but not running" (`running: false`).
 
 ## The address tablets use
 
 Social Home guesses the address from the host name you reached it under
 plus the dashboard port (for example `http://homeassistant.local:8100`).
 (Under the Home Assistant App the host name comes from the
-`X-Forwarded-Host` header HA's ingress proxy sets.) When the admin view
-reports `url_host_allowed: false` — the dashboard would refuse that host
-name — or the guess is otherwise wrong (a reverse proxy, a different host
-name, TLS in front), set the real one as the dashboard **address**
-(`{"address": "https://dashboard.example.lan"}`); it is then used for the
-displayed URL and for setup links, and its host name is added to the
-dashboard's `Host` allow-list.
+`X-Forwarded-Host` header HA's ingress proxy sets.) When the tab warns
+"This address won't open the dashboard" (*headless:*
+`url_host_allowed: false`) or the guess is otherwise wrong (a reverse
+proxy, a different host name, TLS in front), choose **Edit address**
+under **Open on the tablet** and enter the real one (for example
+`https://dashboard.example.lan`; **Use the best guess** goes back). It is
+then used for the displayed address and for sign-in QR codes, and its
+host name is added to the dashboard's `Host` allow-list. *Headless:*
+`PUT /api/admin/dashboard` with `{"address": "https://dashboard.example.lan"}`.
 
 ## Home Assistant App
 
 Inside the Home Assistant App the dashboard always listens on container
-port `8100` (the port can't be changed there; HA Supervisor owns the host
-port mapping). The port is off until you turn it on:
+port `8100` (the **Port** field in **Admin › Dashboard** is read-only there;
+HA Supervisor owns the host port mapping). The port is off until you turn it on:
 
 1. In Home Assistant go to **Settings › Apps › Social Home › Network**.
 2. Enter a host port for the dashboard (for example `8100`) and save.
@@ -54,8 +68,8 @@ port mapping). The port is off until you turn it on:
 
 Social Home reads the mapped port from Supervisor and shows the right
 address automatically (for example `http://homeassistant.local:8100`, or
-your own host port if you picked another). Until a port is mapped the
-admin view reports `host_port_mapped: false` and asks you to turn it on.
+your own host port if you picked another). Until a port is mapped **Admin › Dashboard** asks you to turn it on
+(the API reports `host_port_mapped: false`).
 App releases that don't offer the dashboard port yet have no such entry
 under **Network**: the admin view then reports `host_port_mapped: null`
 and the address uses `8100` — update the App, or set the dashboard
@@ -110,14 +124,43 @@ dashboard **address** — it always wins over the guess.
   columns are left out; a day with nothing on it says "Nothing planned
   today 🎈". With more than six people — and on a phone — the lanes become
   one list in time order; with one person there is no rail and no "who's
-  home". A bar too short for its title shows just an icon. When nothing is
+  home". A bar too short for its title shows just an icon (its leading
+  emoji, a guess from its words, else 🔹). When nothing is
   left today, the "Next" box shows tomorrow's first item instead.
 - **A person** (tap their face in the rail): what they're doing now and
   next, their school day with rooms and teachers (a cancelled lesson is
   struck through *and* says "Cancelled"), today's and tomorrow's plans
   and their chores. After the "Back to Home after" time without a touch
   (setting `idle_return_minutes`, default 3, `0` = never) the tablet goes
-  back to Home. People set to picture view see the same page for now.
+  back to Home.
+- **A person in picture view** — for children who can't read yet. The
+  page has no words except names and no digits: a big analog clock with
+  the real time; a **NOW** card (thick frame) ➜ a **NEXT** card, each one
+  big emoji; a coloured wedge on the clock (and a small pie on the NEXT
+  card) shows the time left until NEXT starts — like a kitchen "time
+  timer", it shrinks as the minute hand eats it and is a full disc from
+  an hour out. Under it **my day**: every event and lesson as an emoji
+  tile under 🌅 morning, ☀️ afternoon, 🌇 evening and 🌙 night — past ones
+  faded, the running one framed, a cancelled lesson grey with a big ✕.
+  Then tomorrow (one 🌙 per sleep, then tomorrow's first things — 🎒 for
+  school), today's jobs (emoji with ☐ / ✓) and who's home (faces under
+  🏠 and 🚗). An empty day is one big 🎈. At night it shows the analog
+  clock, 🌙 and the icon of the morning's first thing. The icon is the
+  lesson's own timetable icon, else the emoji a title starts with
+  ("🏊 Swimming"), else a guess from the title's words in English,
+  German, Spanish, French or Dutch ("Zähneputzen" → 🦷), else a neutral
+  🔹 — start a title with an emoji to pick it yourself. Every tile still
+  tells a screen reader its real title and time.
+
+  Picture view is **on by default for child-protected minors** and off
+  for everyone else ("Default (child account)" next to the switch). An
+  admin turns it on or off per person with the **Picture view** switch
+  under **People on the dashboard** in **Admin › Dashboard**; **Reset to
+  default** goes back to the default. An open tablet switches on its next
+  refresh. *Headless:* `PUT /api/admin/dashboard` with
+  `{"people": {"<user_id>": {"picture": true}}}` (`false` = reader page,
+  `null` = back to the default); `GET /api/admin/dashboard` lists each
+  person's stored `picture` and the resolved `picture_effective`.
 - **Night** (between `night_start` and `night_end`, default 22:00–06:00):
   only a dim clock, the date and the first thing of the morning. Tap the
   screen to see everything (and the 🔒 button) for a minute.
@@ -127,11 +170,18 @@ dashboard **address** — it always wins over the guess.
 - With **Keep screen on** (`keep_screen_on`) the browser is asked to keep
   the screen awake; some kiosk browsers also need their own setting.
 
+**Display settings.** Under **Display** in **Admin › Dashboard**: the
+tablet's **Language**, **Back to Home after** (`idle_return_minutes`),
+**Night mode** with its start and end, **Keep screen on**
+(`keep_screen_on`) and **Show status text**. *Headless:*
+`PUT /api/admin/dashboard` with those fields.
+
 **Privacy reminders.** Everything on these pages is visible to anyone
 standing in front of the tablet: event titles, chores, the shopping list,
 sticky notes, who is home and timetables. Hide a person who shouldn't be
-on the wall (`people: {"<id>": {"show": false}}`) — they then have no
-page and their presence, events, chores and timetables are left out of
+on the wall — switch **On dashboard** off for them under **People on the
+dashboard** in **Admin › Dashboard** (*headless:*
+`people: {"<id>": {"show": false}}`) — they then have no page and their presence, events, chores and timetables are left out of
 Home. DMs, notifications, chat, event locations and coordinates are never
 shown. Use the privacy lock below when visitors are around.
 
@@ -147,8 +197,9 @@ tablet: locking the hallway tablet doesn't lock the kitchen one).
 To unlock, tap **🔒 PIN** and type the PIN on the keypad.
 
 - **Set a PIN first.** The 🔒 button only appears once a household
-  admin has set a PIN — `PUT /api/admin/dashboard/pin` with
-  `{"pin": "4829"}` (4 to 6 digits).
+  admin has set a PIN — **Set PIN** under **Privacy lock** in
+  **Admin › Dashboard** (4 to 6 digits). *Headless:*
+  `PUT /api/admin/dashboard/pin` with `{"pin": "4829"}`.
 - **The PIN is not the dashboard password.** It's a short code for the
   people who live there; the password stays with whoever sets tablets
   up. Setting or changing the PIN signs no tablet out.
@@ -160,18 +211,20 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
   tablet nor changing network address starts the count over.
 - **That sign-out is remembered in memory only.** The signed-out cookie
   (and any copy of it) stays refused until Social Home restarts. To be
-  sure a lost or copied tablet cookie is dead for good, use **"Sign out
-  all tablets"** (`DELETE /api/admin/dashboard/sessions`) — that one
-  survives restarts.
-- **Removing the PIN** (`DELETE /api/admin/dashboard/pin`) unlocks every
-  locked tablet and hides the 🔒 button.
+  sure a lost or copied tablet cookie is dead for good, use **Sign out
+  all tablets** in **Admin › Dashboard** (*headless:*
+  `DELETE /api/admin/dashboard/sessions`) — that one survives restarts.
+- **Remove PIN** in **Admin › Dashboard** (*headless:*
+  `DELETE /api/admin/dashboard/pin`) unlocks every locked tablet and hides
+  the 🔒 button.
 - It is a privacy screen, not a safe: anyone who knows the dashboard
   password can still sign a tablet in.
 
 ## Signing tablets out
 
-- **"Sign out all tablets"** (`DELETE /api/admin/dashboard/sessions`)
-  ends every tablet session at once.
-- **Changing the dashboard password** does the same.
+- **Sign out all tablets** in **Admin › Dashboard** ends every tablet
+  session at once. *Headless:* `DELETE /api/admin/dashboard/sessions`.
+- **Change password** under **Password** does the same. *Headless:*
+  `PUT /api/admin/dashboard/password`.
 - A lost or stolen tablet: do either of the above, then sign the
   remaining tablets in again (password or a fresh setup link).

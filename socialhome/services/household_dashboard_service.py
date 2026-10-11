@@ -321,7 +321,6 @@ class HouseholdDashboardService:
             shopping_total=shopping_total,
             stickies=stickies,
             school=school_today,
-            school_tomorrow=school_tomorrow,
             tomorrow_first=_next_after(
                 ctx.now, [*events.get(tomorrow, []), *school_tomorrow]
             ),
@@ -651,13 +650,13 @@ class HouseholdDashboardService:
         )
         out: list[DashboardTask] = []
         for t in (*open_, *done):
-            chore = self._chore(ctx, t, lst.name)
+            chore = self._chore(ctx, t)
             if chore is not None:
                 out.append(chore)
         return out
 
     @staticmethod
-    def _chore(ctx: _Context, t: Task, list_name: str) -> DashboardTask | None:
+    def _chore(ctx: _Context, t: Task) -> DashboardTask | None:
         if t.archived_at is not None or t.due_date is None:
             return None
         done = t.status == TaskStatus.DONE
@@ -669,7 +668,6 @@ class HouseholdDashboardService:
         return DashboardTask(
             id=t.id,
             title=t.title,
-            list_name=list_name,
             due=t.due_date,
             overdue_days=0 if done else max(0, (ctx.today - t.due_date).days),
             done=done,
@@ -772,7 +770,6 @@ class HouseholdDashboardService:
                 lessons.append(
                     DashboardLesson(
                         person_id=user_id,
-                        timetable_name=tt.name,
                         start=tl.start_at.astimezone(zone),
                         end=tl.end_at.astimezone(zone),
                         kind=ls.kind.value,

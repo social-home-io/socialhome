@@ -64,6 +64,10 @@ export function presetFor(emoji: string | null | undefined): IconPreset | undefi
  * not "Homework", "hause$" — not "Hausaufgaben") only match a whole
  * word; the rest match the start of a word ("math" → "Mathe",
  * "Mathematik", "Maths").
+ *
+ * Keep in sync with ``LESSON_KEYWORDS`` in socialhome/dashboard/icons.py
+ * (the wall-tablet dashboard's copy) — tests/dashboard/test_icons.py
+ * fails when the two drift apart.
  */
 const KEYWORDS: readonly (readonly [string, readonly string[]])[] = [
   ['maths', ['math', 'rechnen', 'matematica', 'wiskunde']],

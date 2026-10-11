@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from string import Formatter
 from unittest.mock import patch
@@ -245,3 +246,16 @@ def test_load_static_assets_skips_dotfiles_and_dirs(tmp_path):
     assets = load_static_assets(tmp_path)
     assert set(assets) == {"a.css", "blob.unknownext"}
     assert assets["blob.unknownext"].content_type == "application/octet-stream"
+
+
+def test_picture_clock_hands_turn_by_attribute_never_by_style(renderer):
+    """The CSP forbids style attributes: the analog clock's hands turn
+    through their SVG ``transform`` attribute, and no CSS rule may set a
+    ``transform`` property on them (it would override the attribute)."""
+    js = renderer.static_asset("dashboard.js").body.decode()
+    assert 'el.setAttribute("transform", value)' in js
+    assert ".style" not in js
+    css = renderer.static_asset("dashboard.css").body.decode()
+    for selector, body in re.findall(r"([^{}]+)\{([^}]*)\}", css):
+        if "dash-pv-hand" in selector:
+            assert "transform" not in body, selector

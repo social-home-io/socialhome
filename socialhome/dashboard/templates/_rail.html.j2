@@ -7,7 +7,7 @@
     <li>
       <a class="dash-rail-item" href="/"{% if current is none %} aria-current="page"{% endif %}>
         <span class="dash-face dash-face-rail dash-face-home" aria-hidden="true">🏠</span>
-        <span class="dash-rail-name">{{ t("dashboard.nav.home") }}</span>
+        <span class="dash-rail-name{% if picture %} dash-visually-hidden{% endif %}">{{ t("dashboard.nav.home") }}</span>
       </a>
     </li>
     {% for p in people %}

@@ -351,18 +351,27 @@ def initials(display_name: str) -> str:
 def leading_emoji(text: str) -> str | None:
     """The emoji a title starts with ("🏊 Swimming" → "🏊"), with its
     modifiers (variation selectors, skin tones, ZWJ parts, flags);
-    ``None`` when the title doesn't start with one."""
-    if not text or unicodedata.category(text[0]) != "So":
+    ``None`` when the title doesn't start with one.
+
+    Only *pictures* count (:func:`_is_picture`): letterlike and enclosed
+    alphanumeric symbols (©, ™, Ⓜ️, 🅰️, 🔟, 🈁 …) show letters or digits,
+    which the picture view must not; half a flag is a boxed letter."""
+    if not text:
         return None
-    end = 1
-    if len(text) > 1 and _is_flag_half(text[0]) and _is_flag_half(text[1]):
+    if _is_flag_half(text[0]):
+        if len(text) < 2 or not _is_flag_half(text[1]):
+            return None
         end = 2  # a flag is two regional-indicator letters
+    elif _is_picture(text[0]):
+        end = 1
+    else:
+        return None
     while end < len(text):
         ch = text[end]
         modifier = ch in _JOINERS or 0x1F3FB <= ord(ch) <= 0x1F3FF
-        # A zero-width joiner joins another emoji (👨‍👩‍👧), never letters —
+        # A zero-width joiner joins another picture (👨‍👩‍👧), never letters —
         # "🏥‍K‍l‍i‍n‍i‍k" must not pass as one emoji.
-        joined = text[end - 1] == _ZWJ and unicodedata.category(ch) == "So"
+        joined = text[end - 1] == _ZWJ and _is_picture(ch)
         if not (modifier or joined):
             break
         end += 1
@@ -377,6 +386,42 @@ def is_pure_emoji(text: str) -> bool:
 _ZWJ = "\u200d"
 #: Zero-width joiner + variation selector 16 (emoji presentation).
 _JOINERS = frozenset({_ZWJ, "\ufe0f"})
+
+#: Code point ranges of pictographic emoji (an approximation of Unicode's
+#: ``Extended_Pictographic``, which Python's ``unicodedata`` doesn't
+#: expose): watches / hourglasses / media keys, misc symbols + dingbats,
+#: a few arrows and shapes, mahjong + cards, and the big pictograph
+#: blocks. Left out on purpose: letterlike symbols (©, ®, ™), enclosed
+#: alphanumerics (Ⓜ️, 🅰️, 🅿️) and enclosed ideographs (🈁, ㊗️).
+_PICTURE_RANGES: Final[tuple[tuple[int, int], ...]] = (
+    (0x231A, 0x231B),
+    (0x2328, 0x2328),
+    (0x23CF, 0x23CF),
+    (0x23E9, 0x23F3),
+    (0x23F8, 0x23FA),
+    (0x25AA, 0x25AB),
+    (0x25B6, 0x25B6),
+    (0x25C0, 0x25C0),
+    (0x25FB, 0x25FE),
+    (0x2600, 0x27BF),
+    (0x2934, 0x2935),
+    (0x2B05, 0x2B07),
+    (0x2B1B, 0x2B1C),
+    (0x2B50, 0x2B50),
+    (0x2B55, 0x2B55),
+    (0x1F000, 0x1F0FF),
+    (0x1F300, 0x1FAFF),
+)
+#: Inside those blocks, pictures of letters and digits: 🔟 (keycap ten),
+#: 🔠 🔡 🔤 (Latin letters).
+_LETTER_PICTURES: Final = frozenset({0x1F51F, 0x1F520, 0x1F521, 0x1F524})
+
+
+def _is_picture(ch: str) -> bool:
+    cp = ord(ch)
+    if cp in _LETTER_PICTURES or unicodedata.category(ch) != "So":
+        return False
+    return any(lo <= cp <= hi for lo, hi in _PICTURE_RANGES)
 
 
 def _is_flag_half(ch: str) -> bool:
@@ -469,7 +514,6 @@ class DashboardLesson:
     item_type: ClassVar[str] = "lesson"
 
     person_id: str
-    timetable_name: str
     start: datetime
     end: datetime
     kind: str
@@ -528,7 +572,6 @@ class DashboardTask:
 
     id: str
     title: str
-    list_name: str
     due: date | None
     overdue_days: int
     done: bool
@@ -559,9 +602,8 @@ class HomeSnapshot:
 
     ``sections`` names the enabled sections (``SECTION_*``); a slice whose
     section is off is empty. ``next_up`` is the soonest timed event or
-    lesson still to start today. ``school_tomorrow`` holds each person's
-    first lesson tomorrow and ``tomorrow_first`` the earliest timed item
-    tomorrow — for night mode.
+    lesson still to start today. ``tomorrow_first`` is the earliest timed
+    event or first lesson tomorrow — for night mode.
     """
 
     now: datetime
@@ -577,7 +619,6 @@ class HomeSnapshot:
     shopping_total: int = 0
     stickies: tuple[DashboardSticky, ...] = ()
     school: tuple[DashboardSchoolDay, ...] = ()
-    school_tomorrow: tuple[DashboardLesson, ...] = ()
     tomorrow_first: DashboardAgendaItem | None = None
 
 

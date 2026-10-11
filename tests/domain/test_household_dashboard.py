@@ -11,6 +11,7 @@ import pytest
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
     is_pure_emoji,
+    leading_emoji,
     DEFAULT_DASHBOARD_PORT,
     IDLE_RETURN_CHOICES,
     MIN_PASSWORD_LENGTH,
@@ -366,7 +367,47 @@ def test_settings_pin_set_defaults_off():
         ("🏥\u200dK", False),
         ("👨\u200d👩\u200d👧\u200d👦", True),
         ("🧑\u200d🚒", True),
+        ("⚽", True),
+        ("☀️", True),
+        ("⭐", True),
+        ("⌚", True),
+        ("🀄", True),
+        # Letterlike / enclosed alphanumerics show letters or digits — on
+        # a page with no words or digits they are not pictures.
+        ("©", False),
+        ("®", False),
+        ("™", False),
+        ("Ⓜ️", False),
+        ("🅰️", False),
+        ("🅿️", False),
+        ("🔟", False),
+        ("🔠", False),
+        ("🔡", False),
+        ("🔤", False),
+        ("🈁", False),
+        ("㊗️", False),
+        ("#️⃣", False),
+        ("1️⃣", False),
+        # Half a flag is a letter in a box.
+        ("🇩", False),
+        # A joiner may only join a picture.
+        ("👩\u200d©", False),
     ],
 )
 def test_is_pure_emoji(text, pure):
     assert is_pure_emoji(text) is pure
+
+
+@pytest.mark.parametrize(
+    ("text", "lead"),
+    [
+        ("© 2026 Concert", None),
+        ("🅰️ Team", None),
+        ("🔟 Uhr", None),
+        ("🇩 x", None),
+        ("🇩🇪 Deutsch", "🇩🇪"),
+        ("⚽️ Training", "⚽️"),
+    ],
+)
+def test_leading_emoji_only_takes_pictures(text, lead):
+    assert leading_emoji(text) == lead
