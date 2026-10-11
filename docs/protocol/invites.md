@@ -350,18 +350,19 @@ feature rests on.
 **The access log is the honest residual, and it is not nothing.** The
 statement above is about what the *application* persists; it is not a
 statement about the socket. `GET /join/{token}` is an ordinary HTTP
-request, and aiohttp's access log records the request line — token and
-all — next to the visitor's IP and the timestamp. An operator willing to
-read their own access log can therefore recover *visitor IP → token →
-time*, which for a link shared with a handful of people is close to the
-record the database deliberately refuses to keep. This is the same shape
-of concession `POST /gfs/envelope` and `POST /gfs/publish` already make
-and has the same answer: closing it needs a mix/onion egress and is out
-of scope. It is signed off in
-[`../principles.md`](../principles.md) alongside those. **Operator
-note:** if this matters for your deployment, redact the path component
-of `/join/` lines at the front end (or drop them entirely) and keep
-access-log retention short — Social Home itself never needs them.
+request, and the access log records it next to the visitor's IP and the
+timestamp. The GFS's own aiohttp access log writes the token segment as
+`/join/***` (`RedactingAccessLogger`, `socialhome/access_log.py` — the
+same for the owner's `DELETE /gfs/spaces/{space_id}/invite/{gfs_token}`),
+so it keeps *visitor IP → time* for "someone opened an invite link", not
+which link. That residual is the same shape of concession
+`POST /gfs/envelope` and `POST /gfs/publish` already make and has the
+same answer: closing it needs a mix/onion egress and is out of scope. It
+is signed off in [`../principles.md`](../principles.md) alongside those.
+**Operator note:** a reverse proxy in front of the GFS keeps its own
+access log, which this redaction does not reach — redact the path
+component of `/join/` lines there too (or drop them entirely) and keep
+access-log retention short; Social Home itself never needs them.
 
 **Nor may the blob carry an address.** The page is served to anyone with
 the link, so the payload holds public keys and ids only — the redeem

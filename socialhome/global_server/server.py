@@ -35,6 +35,7 @@ from aiohttp import web
 from cryptography.hazmat.primitives import serialization as _ser
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from ..access_log import RedactingAccessLogger
 from ..db import AsyncDatabase
 from ..hardening import install_security_headers
 from . import app_keys as K
@@ -640,4 +641,12 @@ def main() -> None:
         config.port,
         config.base_url,
     )
-    web.run_app(create_gfs_app(config), host=config.host, port=config.port)
+    # Redacting access log: the highlight relay's ``?token=`` and the
+    # ``/join/{token}`` / ``/highlight/…/{token}`` share links are bearer
+    # credentials and must never land in an operator's log verbatim.
+    web.run_app(
+        create_gfs_app(config),
+        host=config.host,
+        port=config.port,
+        access_log_class=RedactingAccessLogger,
+    )

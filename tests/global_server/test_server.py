@@ -6,6 +6,7 @@ import hashlib
 import logging
 import stat
 
+import aiohttp
 import pytest
 from aiohttp import web
 from cryptography.hazmat.primitives import serialization
@@ -903,7 +904,7 @@ def test_main_binds_config_host_port_without_env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         server.web,
         "run_app",
-        lambda app, host=None, port=None: captured.update(host=host, port=port),
+        lambda app, host=None, port=None, **_kw: captured.update(host=host, port=port),
     )
     server.main()
     assert captured == {"host": "127.0.0.1", "port": 7654}
@@ -923,7 +924,7 @@ def test_main_env_overrides_config_host_port(tmp_path, monkeypatch):
     monkeypatch.setattr(
         server.web,
         "run_app",
-        lambda app, host=None, port=None: captured.update(host=host, port=port),
+        lambda app, host=None, port=None, **_kw: captured.update(host=host, port=port),
     )
     server.main()
     assert captured == {"host": "127.0.0.1", "port": 5555}
@@ -1066,3 +1067,89 @@ def test_cluster_service_advertises_the_cluster_self_url(tmp_path):
     )
     app = create_gfs_app(cfg)
     assert app[gfs_cluster_key]._self_url == "http://10.0.0.5:28467"
+
+
+# ─── Access log: the GFS's own ``run_app`` redacts bearer secrets ─────────
+
+
+async def test_gfs_run_app_access_log_never_records_secrets(
+    tmp_path, monkeypatch, caplog
+):
+    """``main()`` hands ``run_app`` a redacting access logger, and that
+    logger — driving the real GFS app — keeps every bearer secret the GFS
+    receives out of the log: the highlight relay's ``?token=``, the
+    ``/join/{token}`` invite link, the ``/highlight/…/{token}`` share link
+    (also as the ``Referer`` its viewer's static asset sends), and the two
+    owner-signed revoke paths that name a token.
+    """
+    config = GfsConfig(
+        host="127.0.0.1",
+        port=0,
+        base_url="http://gfs.test",
+        data_dir=str(tmp_path),
+        instance_id="gfs-test",
+    )
+    captured: dict = {}
+
+    def _fake_run_app(app, **kwargs):
+        captured["app"] = app
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(server.GfsConfig, "load", lambda *_a, **_k: config)
+    monkeypatch.setattr(server.web, "run_app", _fake_run_app)
+    monkeypatch.setattr(server.sys, "argv", ["socialhome-global-server"])
+    server.main()
+
+    kwargs = captured["kwargs"]
+    assert "access_log_class" in kwargs, "GFS run_app logs secrets verbatim"
+    runner = web.AppRunner(captured["app"], access_log_class=kwargs["access_log_class"])
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    base = f"http://127.0.0.1:{port}"
+    caplog.set_level(logging.INFO, logger="aiohttp.access")
+    requests = [
+        ("GET", "/gfs/highlight_rtc/relay/inst/hl?token=SECRETQUERY", None),
+        ("GET", "/join/SECRETJOIN", None),
+        ("GET", "/highlight/inst/hl/SECRETSHARE", None),
+        (
+            "GET",
+            "/static/highlight_public_viewer.js",
+            f"{base}/highlight/inst/hl/SECRETREFERER",
+        ),
+        ("POST", "/gfs/highlight_tokens/SECRETREVOKE/revoke", None),
+        ("DELETE", "/gfs/spaces/sp-1/invite/SECRETINVITE", None),
+    ]
+    try:
+        async with aiohttp.ClientSession() as session:
+            for method, path, referer in requests:
+                headers = {"Referer": referer} if referer else {}
+                async with session.request(
+                    method, f"{base}{path}", headers=headers
+                ) as resp:
+                    await resp.read()
+    finally:
+        await runner.cleanup()
+
+    records = [r for r in caplog.records if r.name == "aiohttp.access"]
+    assert len(records) == len(requests)
+    for record in records:
+        blob = record.getMessage() + repr(vars(record))
+        for secret in (
+            "SECRETQUERY",
+            "SECRETJOIN",
+            "SECRETSHARE",
+            "SECRETREFERER",
+            "SECRETREVOKE",
+            "SECRETINVITE",
+        ):
+            assert secret not in blob
+    lines = [r.first_request_line for r in records]
+    assert "GET /gfs/highlight_rtc/relay/inst/hl?token=*** HTTP/1.1" in lines
+    assert "GET /join/*** HTTP/1.1" in lines
+    assert "GET /highlight/inst/hl/*** HTTP/1.1" in lines
+    assert "POST /gfs/highlight_tokens/***/revoke HTTP/1.1" in lines
+    assert "DELETE /gfs/spaces/sp-1/invite/*** HTTP/1.1" in lines
+    referers = [r.request_header["Referer"] for r in records]
+    assert f"{base}/highlight/inst/hl/***" in referers

@@ -1285,14 +1285,15 @@ async def handle_invite_page(request: web.Request) -> web.Response:
     stay untouched (``migrations/0012_gfs_invite_tokens_blob.sql``).
 
     **The residual is the access log.** aiohttp records the request line
-    — ``GET /join/<token>`` — with the visitor's IP and a timestamp, so
-    an operator who keeps access logs can reconstruct
-    ``visitor IP → token → time`` for anyone who opened a link. That is
-    signed off in ``docs/principles.md`` alongside the relay's own
-    IP residual, and it is the reason this handler adds nothing further:
-    the accepted cost is one line the HTTP server writes anyway, not a
-    licence to record more. Operators who care should redact the
-    ``/join/`` path at their front end and keep retention short.
+    with the visitor's IP and a timestamp; the GFS's
+    :class:`~socialhome.access_log.RedactingAccessLogger` writes it as
+    ``GET /join/***``, so the log keeps ``visitor IP → time`` but not
+    which token. That is signed off in ``docs/principles.md`` alongside
+    the relay's own IP residual, and it is the reason this handler adds
+    nothing further: the accepted cost is one line the HTTP server writes
+    anyway, not a licence to record more. A reverse proxy in front keeps
+    its own log — operators should redact ``/join/`` there too and keep
+    retention short.
 
     404 — rendering the same styled "expired or revoked" page — when the
     token is unknown, expired, or its space is no longer publicly listed
