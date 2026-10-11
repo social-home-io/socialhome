@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 
@@ -12,6 +12,7 @@ from socialhome.utils.timezones import (
     coerce_tz,
     is_valid_tz,
     local_date,
+    local_day_bounds,
     local_instant,
     zone_of,
 )
@@ -93,6 +94,21 @@ class TestLocalInstant:
         # lands on 03:30 CEST, i.e. 01:30 UTC.
         got = local_instant(date(2026, 3, 29), hm("02:30"), "Europe/Berlin")
         assert got == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+
+    def test_day_bounds_are_local_midnights(self):
+        lo, hi = local_day_bounds(date(2026, 9, 28), "Europe/Berlin")
+        assert lo == datetime(2026, 9, 27, 22, 0, tzinfo=timezone.utc)
+        assert hi == datetime(2026, 9, 28, 22, 0, tzinfo=timezone.utc)
+
+    def test_day_bounds_follow_dst(self):
+        # 2026-10-25 is a 25-hour day in Berlin (CEST → CET).
+        lo, hi = local_day_bounds(date(2026, 10, 25), "Europe/Berlin")
+        assert hi - lo == timedelta(hours=25)
+
+    def test_day_bounds_unknown_zone_is_utc(self):
+        lo, hi = local_day_bounds(date(2026, 9, 28), "Mars/Base")
+        assert lo == datetime(2026, 9, 28, tzinfo=timezone.utc)
+        assert hi == datetime(2026, 9, 29, tzinfo=timezone.utc)
 
     def test_ambiguous_time_takes_first_occurrence(self):
         # 2026-10-25 02:30 happens twice in Berlin; fold=0 → CEST (+2).

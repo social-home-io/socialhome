@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import orjson
@@ -24,7 +24,7 @@ from ..domain.post import BazaarStatus
 from ..domain.presence import PersonPresence
 from ..domain.task import Task
 from ..domain.timetable import Timetable, TodayTimetable
-from ..utils.timezones import DEFAULT_TZ, local_date, local_instant
+from ..utils.timezones import DEFAULT_TZ, local_date, local_day_bounds
 from .user_preferences import parse_timetable_home_pins
 
 if TYPE_CHECKING:
@@ -287,8 +287,7 @@ class CornerService:
         """
         tz = await self._household_tz()
         today = local_date(now, tz)
-        start = local_instant(today, time(0, 0), tz)
-        end = local_instant(today + timedelta(days=1), time(0, 0), tz)
+        start, end = local_day_bounds(today, tz)
         try:
             events = await self._calendar.list_events_for_user_in_range(
                 username,

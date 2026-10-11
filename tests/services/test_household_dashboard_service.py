@@ -125,6 +125,7 @@ class FakeTasks(Recorder):
         super().__init__()
         self.lists = lists
         self.tasks = tasks
+        self.bad_lists: set[str] = set()
 
     async def list_lists(self) -> list[TaskList]:
         self.hit("list_lists")
@@ -141,6 +142,8 @@ class FakeTasks(Recorder):
         **_: Any,
     ) -> list[Task]:
         self.hit("list_tasks")
+        if list_id in self.bad_lists:
+            raise RuntimeError("bad list")
         out = []
         for t in self.tasks:
             if t.list_id != list_id:
@@ -197,9 +200,9 @@ class SpyTimetables(TimetableService):
         super().__init__(FakeTimetableRepo(tts))  # type: ignore[arg-type]
         self.rec = Recorder()
 
-    async def active_for_user(self, user_id: str, on: date) -> list[Timetable]:
-        self.rec.hit("active_for_user")
-        return await super().active_for_user(user_id, on)
+    async def list_all(self) -> list[Timetable]:
+        self.rec.hit("list_all")
+        return await super().list_all()
 
 
 class FakePreferences(Recorder):
@@ -936,12 +939,10 @@ async def test_disabled_sections_are_empty_and_not_read():
     assert snap.school == () and snap.school_tomorrow == ()
     assert snap.tomorrow_first is None
     assert all(p.presence == "unknown" for p in snap.people)
-    assert [p.color for p in snap.people] == [
-        PERSON_PALETTE[0],
-        PERSON_PALETTE[1],
-        PERSON_PALETTE[3],
-    ]
-    assert h.calendar.calls == []
+    # Colours don't follow the calendar toggle: calendars are still read
+    # (once) for them, but no events are.
+    assert [p.color for p in snap.people] == ["#112233", "#445566", PERSON_PALETTE[3]]
+    assert h.calendar.calls == ["list_calendars"]
     assert h.tasks.calls == []
     assert h.stickies.calls == []
     assert h.presence.calls == []
@@ -951,7 +952,8 @@ async def test_disabled_sections_are_empty_and_not_read():
     page = await h.person("u-ben", at(MONDAY, 8, 10))
     assert page is not None
     assert page.today_items == () and page.chores == () and page.school is None
-    assert h.calendar.calls == [] and h.timetables.rec.calls == []
+    assert "list_events_in_range" not in h.calendar.calls
+    assert h.timetables.rec.calls == []
 
 
 # ─── Degradation ─────────────────────────────────────────────────────────
@@ -998,7 +1000,7 @@ async def test_failing_slices_leave_the_rest():
 
 async def test_a_failing_timetable_read_empties_only_school():
     h = Harness()
-    h.timetables.rec.fail.add("active_for_user")
+    h.timetables.rec.fail.add("list_all")
     snap = await h.home(at(MONDAY, 8, 10))
     assert snap.school == ()
     assert snap.events_today
@@ -1166,3 +1168,187 @@ async def test_pinned_space_timetables_never_count_as_school():
     assert page is not None
     assert page.school is not None and page.school.timetable_name == "5b"
     assert "Choir" not in titles(page.today_items)
+
+
+# ─── Review follow-ups ───────────────────────────────────────────────────
+
+
+async def test_hidden_owner_copy_never_lends_its_colour_or_id():
+    """Carl (hidden) owns the only copy of "Zoo"; Ben attends. The event
+    shows for Ben in Ben's colour and without Carl's row id."""
+    h = Harness()
+    snap = await h.home(at(MONDAY, 15, 30))
+    zoo = next(e for e in snap.events_today if e.title == "Zoo")
+    assert zoo.person_ids == ("u-ben",)
+    assert zoo.color == "#445566"  # Ben's colour, not Carl's #778899
+    assert zoo.id != "zoo"
+    assert "#778899" not in _values(dataclasses.asdict(snap))
+
+
+async def test_hidden_copy_listed_first_never_wins_the_merge():
+    h = Harness()
+    h.calendar.calendars = [cal("c-carl", "carl", "#778899"), *calendars()]
+    h.calendar.events = [
+        event(
+            "trip-c",
+            "c-carl",
+            "Trip",
+            at(MONDAY, 10),
+            at(MONDAY, 12),
+            client_event_uuid="trip",
+            location="Carl's copy",
+        ),
+        event(
+            "trip-b",
+            "c-ben",
+            "Trip",
+            at(MONDAY, 10),
+            at(MONDAY, 12),
+            client_event_uuid="trip",
+            location="Ben's copy",
+        ),
+    ]
+    snap = await h.home(at(MONDAY, 8))
+    (trip,) = snap.events_today
+    assert trip.id == "trip-b"
+    assert trip.color == "#445566"
+    assert trip.location == "Ben's copy"
+    assert trip.person_ids == ("u-ben",)
+
+
+async def test_the_creators_shown_copy_is_preferred():
+    h = Harness()
+    # Ben's calendar is read first, so his copy is seen first.
+    h.calendar.calendars = [cal("c-ben", "ben", "#445566"), *calendars()]
+    h.calendar.events = [
+        event(
+            f"party-{owner}",
+            f"c-{owner}",
+            "Party",
+            at(MONDAY, 19),
+            at(MONDAY, 22),
+            client_event_uuid="party",
+        )
+        for owner in ("ben", "anna")  # Anna (the creator) listed second
+    ]
+    snap = await h.home(at(MONDAY, 8))
+    (party,) = snap.events_today
+    assert party.id == "party-anna" and party.color == "#112233"
+    assert party.person_ids == ("u-ben", "u-anna")
+
+
+async def test_shared_event_without_uuid_merges_by_content():
+    h = Harness()
+    h.calendar.events = [
+        event(
+            f"legacy-{owner}",
+            f"c-{owner}",
+            "Legacy",
+            at(MONDAY, 19),
+            at(MONDAY, 20),
+            description="same",
+            location="Home",
+        )
+        for owner in ("anna", "ben")
+    ] + [
+        # Same title and time but another description → a different event.
+        event("other", "c-ben", "Legacy", at(MONDAY, 19), at(MONDAY, 20)),
+    ]
+    snap = await h.home(at(MONDAY, 8))
+    assert len(snap.events_today) == 2
+    merged = next(e for e in snap.events_today if e.id == "legacy-anna")
+    assert merged.person_ids == ("u-anna", "u-ben")
+
+
+async def test_next_up_looks_past_the_display_cap():
+    h = Harness()
+    h.calendar.events = [
+        event(
+            f"d{n}",
+            "c-anna",
+            f"Day {n:02d}",
+            at(MONDAY, 0),
+            at(TUESDAY, 0),
+            all_day=True,
+        )
+        for n in range(31)
+    ] + [event("later", "c-anna", "Later", at(MONDAY, 17), at(MONDAY, 18))]
+    h.timetables = SpyTimetables([])
+    h.service._timetables = h.timetables  # type: ignore[attr-defined]
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert len(snap.events_today) == 30
+    assert "Later" not in titles(snap.events_today)
+    assert snap.next_up is not None and snap.next_up.title == "Later"
+
+
+async def test_person_chores_are_not_lost_to_the_home_cap():
+    h = Harness()
+    h.tasks.tasks = [
+        task(f"a{n}", f"Anna {n:02d}", date(2026, 10, 1), assignees=("u-anna",))
+        for n in range(35)
+    ] + [task("bens", "Ben's chore", MONDAY, assignees=("u-ben",))]
+    page = await h.person("u-ben", at(MONDAY, 15, 30))
+    assert page is not None
+    assert ids(page.chores) == ["bens"]
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert len(snap.chores_today) == 30  # home stays capped
+
+
+async def test_chore_due_tomorrow_but_done_today_counts_as_done_today():
+    h = Harness()
+    h.tasks.tasks = [
+        task(
+            "early",
+            "Done early",
+            TUESDAY,
+            status=TaskStatus.DONE,
+            updated_at=at(MONDAY, 9),
+        ),
+        task("open-tomorrow", "Not yet", TUESDAY),
+    ]
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert ids(snap.chores_today) == ["early"]
+    assert snap.chores_today[0].done is True
+
+
+async def test_one_bad_task_list_is_skipped(caplog):
+    h = Harness()
+    h.tasks.bad_lists.add("l2")
+    with caplog.at_level(logging.WARNING):
+        snap = await h.home(at(MONDAY, 15, 30))
+    assert ids(snap.chores_today) == ["trash", "cat"]
+    assert "bad list" in caplog.text
+
+
+async def test_timetables_are_read_once_per_snapshot():
+    h = Harness()
+    h.timetables._repo.tts.append(  # type: ignore[attr-defined]
+        dataclasses.replace(ben_timetable(), id="tt-anna", assignees=("u-anna",))
+    )
+    await h.home(at(MONDAY, 8, 10))
+    assert h.timetables.rec.calls == ["list_all"]
+    h.timetables.rec.calls.clear()
+    await h.person("u-ben", at(MONDAY, 8, 10))
+    assert h.timetables.rec.calls == ["list_all"]
+
+
+async def test_a_timetable_resolves_in_its_own_zone():
+    """Like My Corner: Monday 20:00 in New York is already Tuesday 02:00
+    in Berlin, so Ben's Berlin plan shows Tuesday's lessons."""
+    ny = "America/New_York"
+    h = Harness(prefs=HouseholdPreferences(tz=ny))
+    snap = await h.home(at(MONDAY, 20, tz=ny))
+    assert snap.today == MONDAY
+    (day,) = snap.school
+    assert titles(day.lessons) == ["Englisch", "Mathe"]
+    assert day.lessons[0].start == at(TUESDAY, 7, 45)
+    assert day.lessons[0].start.utcoffset() == timedelta(hours=-4)  # NY zone
+
+
+async def test_person_colours_dont_follow_the_calendar_toggle():
+    on = await Harness().home(at(MONDAY, 15, 30))
+    off = await Harness(
+        prefs=HouseholdPreferences(tz=BERLIN, feat_calendar=False)
+    ).home(at(MONDAY, 15, 30))
+    assert [p.color for p in on.people] == [p.color for p in off.people]
+    assert off.events_today == ()
