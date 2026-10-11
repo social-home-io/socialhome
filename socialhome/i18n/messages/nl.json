@@ -138,5 +138,20 @@
   "dashboard.picture.jobs": "Mijn klusjes",
   "dashboard.picture.job": "{state}: {title}",
   "dashboard.picture.sleeps": "Nachtjes slapen: {n}",
-  "dashboard.picture.night": "{when} {time}: {title}"
+  "dashboard.picture.night": "{when} {time}: {title}",
+  "dashboard.rel.just_now": "zojuist",
+  "dashboard.rel.minutes_ago": "{n} min geleden",
+  "dashboard.messages.heading": "Berichten",
+  "dashboard.messages.new": "nieuw",
+  "dashboard.messages.from": "Bericht van {name}",
+  "dashboard.messages.read_aloud": "Voorlezen",
+  "dashboard.messages.photo": "Foto",
+  "dashboard.messages.video": "Video",
+  "dashboard.messages.file": "Bestand",
+  "dashboard.messages.voice": "Spraakbericht",
+  "dashboard.messages.say.text": "{name} zegt: {text}",
+  "dashboard.messages.say.photo": "{name} heeft een foto gestuurd.",
+  "dashboard.messages.say.video": "{name} heeft een video gestuurd.",
+  "dashboard.messages.say.file": "{name} heeft een bestand gestuurd.",
+  "dashboard.messages.say.voice": "{name} heeft een spraakbericht gestuurd."
 }

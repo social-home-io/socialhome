@@ -6,7 +6,7 @@ anything. The date is spelled from the backend i18n catalog
 (``dashboard.date.*``) in the dashboard locale; the time is always the
 24-hour ``HH:MM`` (``lock.js`` / ``dashboard.js`` keep it ticking with
 the same format). Relative phrases ("in 28 min", "2 days late") come
-from ``dashboard.rel.*`` / ``dashboard.chore.*``.
+from ``dashboard.rel.*`` / ``dashboard.chore.*`` ("4 min ago" too).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "WallClock",
+    "ago",
     "days_late",
     "due_label",
     "hhmm",
@@ -108,6 +109,16 @@ def relative_in(now: datetime, then: datetime, t: Callable[..., str]) -> str:
     if m == 0 or h >= 3:
         return t("dashboard.rel.in_hours", h=h)
     return t("dashboard.rel.in_hours_minutes", h=h, m=m)
+
+
+def ago(now: datetime, then: datetime, t: Callable[..., str]) -> str:
+    """ "just now" / "4 min ago" — how long since ``then`` (whole minutes,
+    rounded down; ``then`` under a minute ago, or ahead of ``now``, is
+    "just now")."""
+    minutes = math.floor((now - then).total_seconds() / 60)
+    if minutes < 1:
+        return t("dashboard.rel.just_now")
+    return t("dashboard.rel.minutes_ago", n=minutes)
 
 
 def until(end: datetime, t: Callable[..., str]) -> str:

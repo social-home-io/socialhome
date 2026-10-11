@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from socialhome.domain.household_dashboard import (
     DashboardEvent,
     DashboardLesson,
+    DashboardMessage,
     DashboardPerson,
     DashboardSchoolDay,
     DashboardShoppingItem,
@@ -177,6 +178,27 @@ SHOPPING = tuple(
 STICKIES = (
     DashboardSticky(id="n1", content="Plumber Tue 9am", color="#FFEE88"),
     DashboardSticky(id="n2", content="Bad colour", color="red;}body{x:y"),
+)
+
+
+def message(
+    mid: str, sender: str, minutes_ago: float, kind: str = "text", text: str = ""
+) -> DashboardMessage:
+    return DashboardMessage(
+        id=mid,
+        sender_id=sender,
+        kind=kind,
+        text=text,
+        sent_at=NOW - timedelta(minutes=minutes_ago),
+    )
+
+
+#: Anna 4 min ago (new), a photo from Pascal 40 min ago, a voice note
+#: from Mia with its transcript two hours ago.
+MESSAGES = (
+    message("m1", "u-anna", 4, text='Dinner at 7 <b>"sharp"</b> @Pascal'),
+    message("m2", "u-pascal", 40, kind="photo"),
+    message("m3", "u-mia", 125, kind="voice", text="Can I go to Lena's?"),
 )
 
 

@@ -138,5 +138,20 @@
   "dashboard.picture.jobs": "Meine Aufgaben",
   "dashboard.picture.job": "{state}: {title}",
   "dashboard.picture.sleeps": "Noch so oft schlafen: {n}",
-  "dashboard.picture.night": "{when} {time}: {title}"
+  "dashboard.picture.night": "{when} {time}: {title}",
+  "dashboard.rel.just_now": "gerade eben",
+  "dashboard.rel.minutes_ago": "vor {n} Min.",
+  "dashboard.messages.heading": "Nachrichten",
+  "dashboard.messages.new": "neu",
+  "dashboard.messages.from": "Nachricht von {name}",
+  "dashboard.messages.read_aloud": "Vorlesen",
+  "dashboard.messages.photo": "Foto",
+  "dashboard.messages.video": "Video",
+  "dashboard.messages.file": "Datei",
+  "dashboard.messages.voice": "Sprachnachricht",
+  "dashboard.messages.say.text": "{name} sagt: {text}",
+  "dashboard.messages.say.photo": "{name} hat ein Foto geschickt.",
+  "dashboard.messages.say.video": "{name} hat ein Video geschickt.",
+  "dashboard.messages.say.file": "{name} hat eine Datei geschickt.",
+  "dashboard.messages.say.voice": "{name} hat eine Sprachnachricht geschickt."
 }

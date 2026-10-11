@@ -708,9 +708,18 @@ h3.dash-sublabel {
   color: var(--dash-muted);
 }
 
-.dash-next {
+/* The header's end side: NEXT, then the household messages under it
+   (below the clock once the header wraps — portrait, phone). */
+.dash-top-side {
+  display: flex;
   flex: 1 1 20rem;
+  flex-direction: column;
+  gap: 12px;
+  min-inline-size: 0;
   max-inline-size: 40rem;
+}
+
+.dash-next {
   padding-block: 14px;
   padding-inline: 20px;
   background: var(--dash-surface);
@@ -746,6 +755,191 @@ h3.dash-sublabel {
   gap: 8px 12px;
   margin-block: 8px 0;
   color: var(--dash-muted);
+}
+
+/* ── Household messages (Home: rows; picture view: face tiles) ──────── */
+
+/* Calm on purpose: no sound, no flashing. A new message (under 15 min)
+   gets the accent bar and a "new" chip; tapping a row reads it aloud
+   where the browser has a voice (html.dash-can-speak shows the 🔊). */
+.dash-msgs {
+  padding-block: 12px 8px;
+  padding-inline: 12px;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius);
+}
+
+.dash-msgs .dash-label {
+  margin-inline: 8px;
+}
+
+.dash-msg-list,
+.dash-pv-msg-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-msg {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  inline-size: 100%;
+  min-block-size: 56px;
+  padding-block: 6px;
+  padding-inline: 8px;
+  font: inherit;
+  color: inherit;
+  text-align: start;
+  background: transparent;
+  border: 0;
+  border-inline-start: 6px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.dash-msg-new {
+  border-inline-start-color: var(--dash-accent);
+}
+
+.dash-face-msg {
+  inline-size: 40px;
+  block-size: 40px;
+  font-size: 0.9375rem;
+}
+
+.dash-msg-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  min-inline-size: 0;
+}
+
+.dash-msg-text {
+  display: -webkit-box;
+  flex: 1 1 12rem;
+  min-inline-size: 0;
+  overflow: hidden;
+  font-size: 1.375rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.dash-msg-when {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  font-size: 1rem;
+  color: var(--dash-muted);
+  white-space: nowrap;
+}
+
+.dash-msg-when .dash-tag {
+  font-size: 0.8125rem;
+}
+
+/* The 🔊: only where speaking works; a static badge while it speaks. */
+.dash-msg-speaker {
+  display: none;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  inline-size: 36px;
+  block-size: 36px;
+  font-size: 1.125rem;
+  line-height: 1;
+  border-radius: 50%;
+  opacity: 0.6;
+}
+
+.dash-can-speak .dash-msg-speaker {
+  display: inline-flex;
+}
+
+.dash-speaking .dash-msg-speaker {
+  background: var(--dash-accent);
+  opacity: 1;
+}
+
+.dash-msg.dash-speaking {
+  box-shadow: inset 0 0 0 2px var(--dash-accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dash-speaking .dash-msg-speaker {
+    animation: dash-say 1.2s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes dash-say {
+  from {
+    transform: scale(1);
+  }
+  to {
+    transform: scale(1.15);
+  }
+}
+
+.dash-msg:focus-visible,
+.dash-pv-msg:focus-visible {
+  outline: 3px solid var(--dash-focus);
+  outline-offset: 3px;
+}
+
+/* Picture view: who wrote — a face with a 💬 — after NOW ➜ NEXT. */
+.dash-pv-top {
+  display: flex;
+  grid-area: nn;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 32px;
+  min-inline-size: 0;
+}
+
+.dash-pv-msg-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.dash-pv-msg {
+  position: relative;
+  display: flex;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.dash-pv-msg-badge {
+  position: absolute;
+  inset-block-end: -6px;
+  inset-inline-end: -8px;
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.dash-pv-msg .dash-msg-speaker {
+  position: absolute;
+  inset-block-start: -8px;
+  inset-inline-end: -8px;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+}
+
+.dash-pv-msg.dash-speaking .dash-msg-speaker {
+  background: var(--dash-accent);
+  border-color: var(--dash-accent);
 }
 
 .dash-presence {

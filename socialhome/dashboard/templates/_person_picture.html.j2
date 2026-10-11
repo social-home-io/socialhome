@@ -3,7 +3,7 @@
     under 🌅 ☀️ 🌇 🌙, tomorrow's sleeps, jobs and who's home. The only
     words on screen are names; every tile speaks its real title through
     aria-label (presenter: picture.py). -#}
-{% from "_macros.html.j2" import face, analog_clock, pv_tile with context %}
+{% from "_macros.html.j2" import face, analog_clock, pv_tile, say_hint, message_tile with context %}
 {% set p = page.person %}
 {% set pv = picture %}
 <div class="dash-pv" data-picture-view>
@@ -16,6 +16,8 @@
       {{ analog_clock(pv.clock) }}
       <span class="dash-pv-part-now" role="img" aria-label="{{ t("dashboard.picture.part." ~ pv.part_now.key) }}">{{ pv.part_now.icon }}</span>
     </div>
+    {% if pv.now or pv.next or messages %}
+    <div class="dash-pv-top">
     {% if pv.now or pv.next %}
     <section class="dash-pv-nownext" aria-label="{{ t("dashboard.picture.now_next") }}">
       {% if pv.now %}
@@ -36,6 +38,18 @@
       </div>
       {% endif %}
     </section>
+    {% endif %}
+    {% if messages %}
+    {#- Household-chat messages: who wrote (face + 💬), never what — a tap
+        reads it aloud. A new one wears the thick "now" ring. -#}
+    <section class="dash-pv-msgs" aria-label="{{ t("dashboard.messages.heading") }}">
+      {{ say_hint() }}
+      <ul class="dash-pv-msg-list">
+        {% for m in messages %}{{ message_tile(m) }}{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+    </div>
     {% endif %}
   </header>
 

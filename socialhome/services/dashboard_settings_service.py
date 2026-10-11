@@ -75,7 +75,9 @@ _MAX_PORT = 65535
 # ``[0-9]``, not ``\d`` — ``\d`` also matches other scripts' digits.
 _PIN = re.compile(rf"[0-9]{{{MIN_PIN_LENGTH},{MAX_PIN_LENGTH}}}")
 _HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
-_BOOL_FIELDS = frozenset({"enabled", "keep_screen_on", "show_status_text"})
+_BOOL_FIELDS = frozenset(
+    {"enabled", "keep_screen_on", "show_status_text", "show_household_messages"}
+)
 _PERSON_KEYS = frozenset({"show", "picture"})
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 # Printable ASCII without space, ``\\``, ``?``, ``#`` and ``@`` — no query,
@@ -174,6 +176,7 @@ _SCALAR_FIELDS = (
     "night_end",
     "keep_screen_on",
     "show_status_text",
+    "show_household_messages",
     "address",
 )
 

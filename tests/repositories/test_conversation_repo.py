@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1058,3 +1058,84 @@ async def test_list_messages_sync_page_since_a_stamp(env):
     assert [m.id for m in live] == ["i2"]
     gone, _ = await env.repo.list_messages_sync_page("c-inc", deleted=True, since=mark)
     assert [m.id for m in gone] == ["i1"]
+
+
+# ── Recent messages (the household dashboard's read-only glance) ──────────
+
+
+async def test_list_recent_messages_filters_and_orders(env):
+    await env.repo.create(_conv("c1", ConversationType.GROUP_DM))
+    await env.repo.create(_conv("c2", ConversationType.GROUP_DM))
+    now = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+
+    def msg(mid, minutes_ago, **kw):
+        kw.setdefault("sender_user_id", "uid-alice")
+        kw.setdefault("conversation_id", "c1")
+        return ConversationMessage(
+            id=mid,
+            content=kw.pop("content", mid),
+            created_at=now - timedelta(minutes=minutes_ago),
+            **kw,
+        )
+
+    for m in (
+        msg("old", 7 * 60),
+        msg("a", 30),
+        msg("b", 20, type="image"),
+        msg("c", 10, sender_user_id="uid-bob"),
+        msg("loc", 5, type="location"),
+        msg("gone", 4, deleted=True),
+        msg("other-chat", 3, conversation_id="c2"),
+        msg("d", 2),
+    ):
+        await env.repo.save_message(m)
+    # A naive ``datetime('now')``-shaped stamp still compares as an instant.
+    await env.db.enqueue(
+        "UPDATE conversation_messages SET created_at=? WHERE id='a'",
+        ("2026-10-11 11:30:00",),
+    )
+
+    def ids(rows):
+        return [m.id for m in rows]
+
+    since = now - timedelta(hours=6)
+    rows = await env.repo.list_recent_messages(
+        "c1",
+        since=since,
+        types={"text", "image"},
+        senders={"uid-alice", "uid-bob"},
+        limit=10,
+    )
+    assert ids(rows) == ["d", "c", "b", "a"]
+    rows = await env.repo.list_recent_messages(
+        "c1", since=since, types={"text", "image"}, senders={"uid-alice"}, limit=2
+    )
+    assert ids(rows) == ["d", "b"]
+    # A naive ``since`` is UTC.
+    rows = await env.repo.list_recent_messages(
+        "c1",
+        since=datetime(2026, 10, 11, 11, 45),
+        types={"text"},
+        senders={"uid-alice", "uid-bob"},
+        limit=10,
+    )
+    assert ids(rows) == ["d", "c"]
+
+
+@pytest.mark.parametrize(
+    ("types", "senders", "limit"),
+    [(set(), {"uid-alice"}, 3), ({"text"}, set(), 3), ({"text"}, {"uid-alice"}, 0)],
+)
+async def test_list_recent_messages_reads_nothing_for_empty_filters(
+    env, types, senders, limit
+):
+    await env.repo.create(_conv("c1", ConversationType.GROUP_DM))
+    await env.repo.save_message(_message("m1", "c1"))
+    rows = await env.repo.list_recent_messages(
+        "c1",
+        since=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        types=types,
+        senders=senders,
+        limit=limit,
+    )
+    assert rows == []

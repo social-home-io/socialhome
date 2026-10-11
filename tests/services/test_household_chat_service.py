@@ -3,12 +3,15 @@ chat end to end through DmService (policy-gated group-DM storage)."""
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import (
     MUTED_FOREVER,
+    ConversationMessage,
     RemoteConversationMember,
     SystemChatScope,
 )
@@ -409,3 +412,105 @@ async def test_reactions_skip_removed_seats_and_the_protected_member(stack):
     # nor does removed Dora; Carl's own tabs and Bob do.
     await stack.dm.add_reaction(from_bob.id, username="carl", emoji="👍")
     assert set(changes[-1].recipient_user_ids) == {bob.user_id, carl.user_id}
+
+
+# ── The dashboard's read-only glance ──────────────────────────────────────
+
+
+async def _table_rows(s) -> dict[str, list[tuple]]:
+    out = {}
+    for table in ("conversations", "conversation_members", "conversation_messages"):
+        rows = await s.db.fetchall(f"SELECT * FROM {table} ORDER BY 1, 2")
+        out[table] = [tuple(r) for r in rows]
+    return out
+
+
+def _glance_msg(chat_id, mid, sender, minutes_ago, **kw) -> ConversationMessage:
+    return ConversationMessage(
+        id=mid,
+        conversation_id=chat_id,
+        sender_user_id=sender,
+        content=kw.pop("content", mid),
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=minutes_ago),
+        **kw,
+    )
+
+
+async def test_recent_messages_reads_without_writing(stack):
+    anna = await stack.provision("anna")
+    bob = await stack.provision("bob")
+    chat = await stack.chat.reconcile()
+    for m in (
+        _glance_msg(chat.id, "old", anna.user_id, 7 * 60),
+        _glance_msg(chat.id, "text", anna.user_id, 50),
+        _glance_msg(chat.id, "dictated", bob.user_id, 45, type="transcript"),
+        _glance_msg(chat.id, "photo", bob.user_id, 40, type="image", content=""),
+        _glance_msg(chat.id, "clip", bob.user_id, 35, type="video", content=""),
+        _glance_msg(chat.id, "doc", bob.user_id, 30, type="file", content=""),
+        _glance_msg(chat.id, "voice", anna.user_id, 25, type="audio"),
+        _glance_msg(chat.id, "pin", anna.user_id, 20, type="location"),
+        _glance_msg(chat.id, "call", anna.user_id, 15, type="call_event"),
+        _glance_msg(chat.id, "gone", anna.user_id, 10, deleted=True),
+        _glance_msg(chat.id, "edited", anna.user_id, 5, content="first"),
+    ):
+        await stack.convos.save_message(m)
+    await stack.convos.edit_message("edited", "second")
+    await stack.convos.set_last_read(chat.id, "anna", at="2026-01-01 00:00:00")
+    before = await _table_rows(stack)
+
+    rows = await stack.chat.recent_messages(
+        since=datetime.now(timezone.utc) - timedelta(hours=6),
+        senders={anna.user_id, bob.user_id},
+        limit=10,
+    )
+
+    assert [m.id for m in rows] == [
+        "edited",
+        "voice",
+        "doc",
+        "clip",
+        "photo",
+        "dictated",
+        "text",
+    ]
+    assert rows[0].content == "second"
+    # Nothing moved: no seat, no read watermark, no message, no chat row.
+    assert await _table_rows(stack) == before
+
+
+async def test_recent_messages_only_from_the_given_senders(stack):
+    anna = await stack.provision("anna")
+    bob = await stack.provision("bob")
+    chat = await stack.chat.reconcile()
+    await stack.convos.save_message(_glance_msg(chat.id, "a", anna.user_id, 3))
+    await stack.convos.save_message(_glance_msg(chat.id, "b", bob.user_id, 2))
+    rows = await stack.chat.recent_messages(
+        since=datetime.now(timezone.utc) - timedelta(hours=6),
+        senders={anna.user_id},
+        limit=3,
+    )
+    assert [m.id for m in rows] == ["a"]
+
+
+async def test_recent_messages_never_creates_the_chat(stack):
+    anna = await stack.provision("anna")
+    rows = await stack.chat.recent_messages(
+        since=datetime.now(timezone.utc) - timedelta(hours=6),
+        senders={anna.user_id},
+        limit=3,
+    )
+    assert rows == []
+    assert await stack.convos.get_household_chat() is None
+
+
+async def test_recent_messages_feature_off_reads_nothing(stack):
+    anna = await stack.provision("anna")
+    chat = await stack.chat.reconcile()
+    await stack.convos.save_message(_glance_msg(chat.id, "a", anna.user_id, 3))
+    await stack.feature(False)
+    rows = await stack.chat.recent_messages(
+        since=datetime.now(timezone.utc) - timedelta(hours=6),
+        senders={anna.user_id},
+        limit=3,
+    )
+    assert rows == []

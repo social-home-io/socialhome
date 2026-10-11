@@ -12,7 +12,15 @@ House rules:
 * **Household-safe.** Presence is home / away / a zone name, never
   coordinates; calendar events come from members' personal calendars;
   chores, the shopping list, today's timetables and household stickies.
-  Never DMs, notifications, chat or polls.
+  Never DMs, notifications, space chats or polls.
+* **Household chat, only when asked.** With the admin's
+  ``show_household_messages`` on (and ``feat_household_chat`` on), Home
+  and picture-view pages carry the newest :data:`MESSAGES_SHOWN`
+  household-chat messages of the last :data:`MESSAGE_MAX_AGE` — never at
+  night, never on a reader page, never a location, a deleted message or
+  one from a hidden person. The read
+  (:meth:`HouseholdChatService.recent_messages`) never creates the chat
+  and never moves anyone's read watermark.
 * **Assigned timetables only.** School is the timetables a member is
   assigned to; space timetables pinned to someone's Home are ignored on
   purpose — a pin is a personal Home choice (a parent pinning a child's
@@ -51,7 +59,10 @@ from datetime import date, datetime, timedelta, timezone
 
 from ..domain import timetable as td
 from ..domain.calendar import Calendar, CalendarEvent, all_day_covers
+from ..domain.conversation import ConversationMessage
 from ..domain.household_dashboard import (
+    MESSAGE_MAX_AGE,
+    MESSAGES_SHOWN,
     PERSON_PALETTE,
     SECTION_CALENDAR,
     SECTION_PRESENCE,
@@ -62,6 +73,7 @@ from ..domain.household_dashboard import (
     DashboardAgendaItem,
     DashboardEvent,
     DashboardLesson,
+    DashboardMessage,
     DashboardPerson,
     DashboardSchoolDay,
     DashboardSettings,
@@ -86,10 +98,12 @@ from ..domain.user import User
 from ..utils.timezones import local_date, local_day_bounds, zone_of
 from .calendar_service import CalendarService
 from .dashboard_settings_service import DashboardSettingsService
+from .household_chat_service import HouseholdChatService
 from .preferences_service import PreferencesService
 from .presence_service import PresenceService
 from .shopping_service import ShoppingService
 from .sticky_service import StickyService
+from .system_chat_policy import HOUSEHOLD_CHAT_SECTION
 from .task_service import TaskService
 from .timetable_service import TimetableService
 from .user_service import UserService
@@ -110,6 +124,16 @@ CHORE_LOOKAHEAD_DAYS = 7
 #: Done chores are read back this far by due date; only those completed
 #: today are kept (bounds the read of a long, never-archived done list).
 DONE_LOOKBACK_DAYS = 14
+
+#: Household-chat message ``type`` → :attr:`DashboardMessage.kind`.
+_MESSAGE_KIND = {
+    "text": "text",
+    "transcript": "text",
+    "image": "photo",
+    "video": "video",
+    "file": "file",
+    "audio": "voice",
+}
 
 #: ``PersonPresence.state`` → the dashboard's presence word.
 _PRESENCE = {"home": "home", "away": "away", "zone": "zone"}
@@ -256,6 +280,7 @@ class HouseholdDashboardService:
         "_stickies",
         "_preferences",
         "_settings",
+        "_chat",
     )
 
     def __init__(
@@ -270,6 +295,7 @@ class HouseholdDashboardService:
         sticky_service: StickyService,
         preferences_service: PreferencesService,
         dashboard_settings: DashboardSettingsService,
+        household_chat: HouseholdChatService,
     ) -> None:
         self._users = user_service
         self._presence = presence_service
@@ -280,6 +306,7 @@ class HouseholdDashboardService:
         self._stickies = sticky_service
         self._preferences = preferences_service
         self._settings = dashboard_settings
+        self._chat = household_chat
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -291,12 +318,13 @@ class HouseholdDashboardService:
             self._calendars(ctx), self._timetable_rows(ctx)
         )
         colors = self._person_colors(ctx, calendars)
-        people, events, chores, shopping, stickies = await asyncio.gather(
+        people, events, chores, shopping, stickies, messages = await asyncio.gather(
             self._people(ctx, colors),
             self._events(ctx, calendars, colors),
             self._chores(ctx, due_to=ctx.today),
             self._shopping_slice(),
             self._sticky_slice(ctx),
+            self._messages(ctx),
         )
         school = [self._school(ctx, user.user_id, timetables) for user in ctx.shown]
         shopping_items, shopping_total = shopping
@@ -324,6 +352,7 @@ class HouseholdDashboardService:
             tomorrow_first=_next_after(
                 ctx.now, [*events.get(tomorrow, []), *school_tomorrow]
             ),
+            messages=messages,
         )
 
     async def person(
@@ -350,6 +379,8 @@ class HouseholdDashboardService:
         )
         school = self._school(ctx, user_id, timetables)
         person = next(p for p in people if p.user_id == user_id)
+        # Only the picture view shows messages; a reader page never reads them.
+        messages = await self._messages(ctx) if person.picture_view else ()
 
         def mine(day: date) -> list[DashboardEvent]:
             return [e for e in events.get(day, []) if user_id in e.person_ids]
@@ -384,6 +415,7 @@ class HouseholdDashboardService:
             school=school.today,
             school_tomorrow_first=_first_lesson(school.tomorrow),
             people=people,
+            messages=messages,
         )
 
     async def avatar(self, user_id: str) -> tuple[bytes, str] | None:
@@ -697,6 +729,49 @@ class HouseholdDashboardService:
             for n in notes
             if n.author not in ctx.hidden_ids
         )[:MAX_STICKIES]
+
+    # ── Household chat ───────────────────────────────────────────────────
+
+    async def _messages(self, ctx: _Context) -> tuple[DashboardMessage, ...]:
+        """The newest household-chat messages of the last
+        :data:`MESSAGE_MAX_AGE` from shown members — ``()`` without
+        reading anything while the admin hasn't turned them on, the
+        household chat is off, or it is night."""
+        if (
+            not ctx.settings.show_household_messages
+            or not ctx.prefs.is_enabled(HOUSEHOLD_CHAT_SECTION)
+            or self._is_night(ctx)
+            or not ctx.shown_ids
+        ):
+            return ()
+        rows = await _safe(
+            "household chat",
+            self._chat.recent_messages(
+                since=ctx.now - MESSAGE_MAX_AGE,
+                senders=ctx.shown_ids,
+                limit=MESSAGES_SHOWN,
+            ),
+            list[ConversationMessage](),
+        )
+        zone = zone_of(ctx.tz)
+        out: list[DashboardMessage] = []
+        for m in rows:
+            kind = _MESSAGE_KIND.get(m.type)
+            if kind is None or m.deleted or m.sender_user_id not in ctx.shown_ids:
+                continue  # the read filters these already; never trust it alone
+            text = m.content.strip() if kind in ("text", "voice") else ""
+            if kind == "text" and not text:
+                continue
+            out.append(
+                DashboardMessage(
+                    id=m.id,
+                    sender_id=m.sender_user_id,
+                    kind=kind,
+                    text=text,
+                    sent_at=_aware(m.created_at).astimezone(zone),
+                )
+            )
+        return tuple(out)
 
     # ── Timetables ───────────────────────────────────────────────────────
 

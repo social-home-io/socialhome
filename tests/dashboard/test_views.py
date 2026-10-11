@@ -41,7 +41,9 @@ from .conftest import PASSWORD, default_theme
 from .factories import (
     LEO,
     DINNER,
+    MESSAGES,
     MIA_SCHOOL,
+    NOW,
     PASCAL,
     PEOPLE,
     SWIM,
@@ -51,6 +53,7 @@ from .factories import (
     at,
     event,
     leo_page,
+    message,
     person,
 )
 
@@ -1045,6 +1048,22 @@ async def test_dashboard_js_reloads_bfcache_restores(pin_client):
     assert "pageshow" in js and "persisted" in js and "reload" in js
 
 
+def test_dashboard_js_speaks_only_on_a_tap():
+    """Messages are read aloud only from the click handler — never on
+    load, on a refresh or a timer — one at a time, and the affordance
+    depends on a voice for the page language."""
+    js = RENDERER.static_asset("dashboard.js").body.decode()
+    assert js.count(".speak(") == 1
+    click = js[js.index('addEventListener("click", function (event) {\n    var el') :]
+    click = click[: click.index("\n  });")]
+    assert "synth.speak(utterance)" in click and "synth.cancel()" in click
+    assert "voice === null" in click  # no voice → a tap does nothing
+    assert 'getAttribute("data-say")' in click
+    # Leaving the page stops it; a swap that drops the message stops it.
+    assert 'addEventListener("pagehide"' in js
+    assert "sayAfterSwap();" in js[js.index("function swap(") :]
+
+
 def test_dashboard_js_never_leaves_the_page_while_offline():
     """Q4: the midnight reload and the idle return probe the server first
     (offline they'd swap the last page for the browser's error page)."""
@@ -1573,9 +1592,10 @@ async def test_tomorrow_lists_events_and_the_first_lesson_in_time_order(
 
 def _visible_text(html: str) -> str:
     """What a sighted viewer can read: no <head>, style or script, no
-    visually-hidden text, no tags (so no attributes — aria-label text is
-    for screen readers)."""
+    visually-hidden or ``hidden`` text, no tags (so no attributes —
+    aria-label and data-say text is for screen readers and speech)."""
     html = re.sub(r"<head>.*?</head>", "", html, flags=re.S)
+    html = re.sub(r"<span\b[^>]*\shidden>[^<]*</span>", "", html)
     html = re.sub(r"<(style|script)\b.*?</\1>", "", html, flags=re.S)
     html = re.sub(
         r'<span class="[^"]*\bdash-visually-hidden\b[^"]*">[^<]*</span>', "", html
@@ -2262,3 +2282,147 @@ async def test_school_day_without_events_has_no_empty_today_card(
     assert "School today" in html
     assert 'id="dash-day-label"' not in html
     assert "Nothing planned today" not in html
+
+
+# ─── Household-chat messages ─────────────────────────────────────────────
+
+_SAY_ANNA = (
+    'data-say="Anna says: Dinner at 7 &lt;b&gt;&#34;sharp&#34;&lt;/b&gt; @Pascal"'
+)
+
+
+async def test_home_messages_card_under_next(client, auth, snapshots):
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, messages=MESSAGES)
+    resp = await _get(client, auth, "/")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    # In the header's side column, right under NEXT, before who's home.
+    head = html[html.index('<header class="dash-top">') : html.index("</header>")]
+    assert head.index('class="dash-next ') < head.index('class="dash-msgs"')
+    assert html.index("</header>") < html.index('class="dash-presence"')
+    assert '<h2 class="dash-label" id="dash-msgs-label">Messages</h2>' in head
+    # Real buttons; the sentence to speak is an escaped attribute — the
+    # message's markup is text, never HTML.
+    assert head.count('<button type="button" class="dash-msg') == 3
+    assert _SAY_ANNA in head and "<b>" not in html
+    assert 'data-say="Pascal sent a photo."' in head
+    assert 'data-say="Mia says: Can I go to Lena&#39;s?"' in head
+    assert '<span id="dash-say-hint" hidden>Read aloud</span>' in head
+    assert "aria-describedby" not in head  # added by the script with a voice
+    # The new one: accent, "new" chip, relative time (hidden when stale).
+    row = head[head.index('data-msg="m1"') : head.index('data-msg="m2"')]
+    assert 'class="dash-msg dash-msg-new"' in head
+    assert '<span class="dash-tag dash-tag-now">new</span>' in row
+    assert "data-rel>4 min ago</time>" in row
+    assert '<span class="dash-visually-hidden">Message from Anna:</span>' in row
+    # Older ones: clock time, an icon + word for media, the transcript.
+    row = head[head.index('data-msg="m2"') : head.index('data-msg="m3"')]
+    assert "dash-msg-new" not in row and ">new<" not in row
+    assert ">13:52</time>" in row
+    assert '<span aria-hidden="true">📷</span> Photo' in row
+    assert '<span aria-hidden="true">🎤</span> Can I go to Lena&#39;s?' in head
+    # The face is the 40 px one, named once (by the "Message from" text).
+    assert "dash-face dash-face-msg" in row
+    assert '<span class="dash-visually-hidden">Pascal</span>' not in row
+
+
+async def test_home_without_messages_has_no_card(client, auth):
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-msgs" not in html and "data-say" not in html
+    assert "dash-say-hint" not in html
+
+
+async def test_home_messages_without_a_next_band(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, next_up=None, tomorrow_first=None, messages=MESSAGES
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-next" not in html
+    assert '<div class="dash-top-side">' in html and 'class="dash-msgs"' in html
+
+
+async def test_home_without_next_or_messages_has_no_side_column(
+    client, auth, snapshots
+):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, next_up=None, tomorrow_first=None
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-top-side" not in html
+
+
+async def test_messages_of_people_not_shown_are_left_out(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot,
+        messages=(message("x", "u-hidden", 2, text="Secret plan"), *MESSAGES),
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "Secret plan" not in html and 'data-msg="x"' not in html
+    assert 'data-msg="m1"' in html
+
+
+async def test_messages_swap_in_without_a_reload(client, auth, snapshots):
+    page = await (await _get(client, auth, "/")).text()
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, messages=MESSAGES)
+    frag = await (await _get(client, auth, "/fragment/home")).text()
+    assert _SAY_ANNA in frag
+    # Same view key: a new (or deleted) message just swaps in.
+    assert _attr(frag, "data-view-key") == _attr(page, "data-view-key")
+
+
+async def test_no_messages_at_night(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, is_night=True, now=at(22, 47), messages=MESSAGES
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-night-view" in html
+    assert "data-say" not in html and "Dinner at 7" not in html
+    snapshots.pages["u-leo"] = leo_page(is_night=True, messages=MESSAGES)
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert "data-say" not in html and "dash-pv-msg" not in html
+
+
+@pytest.mark.parametrize("path", ["/", "/fragment/home", "/p/u-leo"])
+async def test_a_locked_tablet_shows_no_message(pin_client, auth, snapshots, path):
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, messages=MESSAGES)
+    snapshots.pages["u-leo"] = leo_page(messages=MESSAGES)
+    html = await (await pin_client.get(path, headers=await _locked(auth))).text()
+    assert "Dinner" not in html and "data-say" not in html
+    assert snapshots.calls == []
+
+
+async def test_picture_page_message_tiles(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(now=NOW, messages=MESSAGES)
+    resp = await _get(client, auth, "/p/u-leo")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    # Still nothing to read but names: faces, 💬, the sentence only in data-say.
+    _assert_only_names_and_icons(html, PEOPLE)
+    assert "Dinner" not in _visible_text(html) and "Photo" not in _visible_text(html)
+    # In the top row, after NOW ➜ NEXT.
+    head = html[html.index('<header class="dash-pv-head">') : html.index("</header>")]
+    assert head.index("dash-pv-nownext") < head.index('class="dash-pv-msgs"')
+    assert head.count('<button type="button" class="dash-pv-msg') == 3
+    assert 'aria-label="Message from Anna"' in head and _SAY_ANNA in head
+    assert 'aria-label="Message from Pascal"' in head
+    assert '<span class="dash-pv-msg-badge" aria-hidden="true">💬</span>' in head
+    assert "dash-face dash-face-lg" in head
+    # The new one wears the "now" ring; the older ones don't.
+    assert head.count("dash-pv-msg dash-pv-current") == 1
+    tile = head[head.index('data-msg="m1"') - 200 : head.index('data-msg="m1"')]
+    assert "dash-pv-current" in tile
+
+
+async def test_picture_page_messages_without_now_or_next(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(
+        now_item=None, next_item=None, messages=MESSAGES[:1]
+    )
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert "dash-pv-nownext" not in html
+    assert '<div class="dash-pv-top">' in html and 'data-msg="m1"' in html
+
+
+async def test_reader_page_never_shows_messages(client, auth, snapshots):
+    snapshots.pages["u-anna"] = person(messages=MESSAGES)
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    assert "data-say" not in html and "Dinner at 7" not in html

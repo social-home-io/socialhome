@@ -148,5 +148,20 @@
   "dashboard.picture.jobs": "My jobs",
   "dashboard.picture.job": "{state}: {title}",
   "dashboard.picture.sleeps": "Sleeps until then: {n}",
-  "dashboard.picture.night": "{when} {time}: {title}"
+  "dashboard.picture.night": "{when} {time}: {title}",
+  "dashboard.rel.just_now": "just now",
+  "dashboard.rel.minutes_ago": "{n} min ago",
+  "dashboard.messages.heading": "Messages",
+  "dashboard.messages.new": "new",
+  "dashboard.messages.from": "Message from {name}",
+  "dashboard.messages.read_aloud": "Read aloud",
+  "dashboard.messages.photo": "Photo",
+  "dashboard.messages.video": "Video",
+  "dashboard.messages.file": "File",
+  "dashboard.messages.voice": "Voice message",
+  "dashboard.messages.say.text": "{name} says: {text}",
+  "dashboard.messages.say.photo": "{name} sent a photo.",
+  "dashboard.messages.say.video": "{name} sent a video.",
+  "dashboard.messages.say.file": "{name} sent a file.",
+  "dashboard.messages.say.voice": "{name} sent a voice message."
 }

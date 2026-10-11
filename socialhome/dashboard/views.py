@@ -45,6 +45,7 @@ from .auth import (
     DashboardAuth,
 )
 from .clock import household_clock, resolve_zone
+from .messages import message_rows
 from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
@@ -543,6 +544,10 @@ async def _board(
         # The picture view's model (``picture.py``), set by the person
         # board for a picture-view person.
         "picture": None,
+        # Household-chat rows (``messages.py``): Home and the picture view,
+        # never at night. New ones just swap in with the fragment — every
+        # sender is a shown person, whose colour is in the style already.
+        "messages": [],
         **extra,
     }
     return _Board(locale=settings.locale, context=context, style=style)
@@ -579,6 +584,7 @@ async def _home_board(request: web.Request) -> _Board:
         shopping_more=max(0, snap.shopping_total - SHOPPING_SHOWN),
         stickies=snap.stickies[:STICKIES_SHOWN],
         open_chores=sum(1 for c in snap.chores_today if not c.done),
+        messages=[] if snap.is_night else message_rows(snap.messages, fmt),
     )
     return board
 
@@ -616,6 +622,8 @@ async def _person_board(request: web.Request) -> _Board | None:
     if page.person.picture_view:
         fmt = cast(Fmt, board.context["f"])
         board.context["picture"] = picture_view(page, fmt, tomorrow=tomorrow)
+        if not page.is_night:
+            board.context["messages"] = message_rows(page.messages, fmt)
     return board
 
 
