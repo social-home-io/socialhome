@@ -182,9 +182,7 @@ async def render_lock_screen(request: web.Request) -> web.Response:
     if flag == PIN_WRONG:
         error = t("dashboard.lock.wrong_pin")
     elif flag == PIN_WAIT:
-        key = DashboardAuth.pin_throttle_key(
-            client_bucket(request.remote), request[CLAIMS_KEY]
-        )
+        key = DashboardAuth.pin_throttle_key(request[CLAIMS_KEY])
         wait = auth.attempt_wait(key, count_global=False)
         if wait:
             status, headers = 429, {"Retry-After": str(wait)}
@@ -408,10 +406,13 @@ class LockView(_GoHomeOnGet):
     """``POST /lock`` — privacy-lock this tablet (needs a session).
 
     The lock is a claim in this tablet's signed cookie, so it is per
-    tablet and survives reloads and browser restarts. The incoming
-    (unlocked) cookie is revoked as ``locked``: a slow response still
-    carrying it can't lift the lock. ``409`` when no PIN is set: nothing
-    could unlock it (the button isn't shown then).
+    tablet and survives reloads and browser restarts. The locked cookie
+    starts a new session (its id keys the PIN throttle), and the incoming
+    unlocked session is revoked as ``locked``: a slow response still
+    carrying it can't lift the lock. An already-locked session changes
+    nothing — no new cookie, so no fresh PIN budget, and no revocation
+    entry. ``409`` when no PIN is set: nothing could unlock it (the
+    button isn't shown then).
     """
 
     async def post(self) -> web.Response:
@@ -419,6 +420,8 @@ class LockView(_GoHomeOnGet):
             return web.Response(status=409, text="No dashboard PIN is set")
         claims = self.request[CLAIMS_KEY]
         response = redirect("/")
+        if claims.locked:
+            return response
         await set_session_cookie(
             response,
             self.request,
@@ -446,7 +449,7 @@ class UnlockView(_GoHomeOnGet):
         if not claims.locked:
             return redirect("/")
         form = await self.request.post()
-        key = DashboardAuth.pin_throttle_key(self.client_key, claims)
+        key = DashboardAuth.pin_throttle_key(claims)
         # Counted before the slow scrypt check — see ``begin_attempt``.
         wait = self.auth.begin_attempt(key, count_global=False)
         if wait and self.auth.failure_count(key) >= THROTTLE_MAX_FAILURES:

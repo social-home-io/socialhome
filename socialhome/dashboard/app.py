@@ -276,7 +276,10 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
                 response,
                 request,
                 await auth.issue(
-                    claims.keep, locked=claims.locked or reason == REVOKED_LOCKED
+                    claims.keep,
+                    locked=claims.locked or reason == REVOKED_LOCKED,
+                    # Same session: same revocation entry, same PIN bucket.
+                    session_id=claims.session_id,
                 ),
                 keep=claims.keep,
             )

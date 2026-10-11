@@ -667,10 +667,111 @@ async def test_lock_reissues_a_locked_cookie(pin_client, auth, keep):
     assert morsel["max-age"] == ("31536000" if keep else "")
 
 
-async def test_lock_an_already_locked_tablet(pin_client, auth):
+async def test_lock_on_a_locked_session_changes_nothing(pin_client, auth):
+    """N1: no new cookie (so no new session id, no fresh PIN bucket) and
+    no revocation entry."""
     resp = await _lock(pin_client, await _locked(auth))
     assert resp.status == 303
-    assert (await _claims(auth, resp)).locked is True
+    assert resp.headers["Location"] == "/"
+    assert COOKIE_NAME not in resp.cookies
+    assert auth.revoked_count == 0
+
+
+async def test_lock_and_unlock_start_new_sessions(pin_client, auth):
+    unlocked = await auth.verify((await _cookie(auth))["Cookie"].split("=", 1)[1])
+    lock = await _lock(pin_client, await _cookie(auth))
+    locked = await _claims(auth, lock)
+    unlock = await _unlock(pin_client, _jar(lock))
+    after = await _claims(auth, unlock)
+    ids = {unlocked.session_id, locked.session_id, after.session_id}
+    assert len(ids) == 3
+
+
+async def test_renewal_keeps_the_session_id(pin_client, auth, clock):
+    for locked in (False, True):
+        raw = await auth.issue(True, locked=locked)
+        clock.advance(RENEW_AFTER_S + 1)
+        resp = await pin_client.get("/", headers={"Cookie": f"{COOKIE_NAME}={raw}"})
+        renewed = await _claims(auth, resp)
+        assert renewed.session_id == (await auth.verify(raw)).session_id
+        assert renewed.locked is locked
+
+
+async def test_lock_revokes_every_copy_of_the_unlocked_session(pin_client, auth, clock):
+    """Locking a renewed cookie also locks the older copy it came from."""
+    older = await auth.issue(True)
+    clock.advance(RENEW_AFTER_S + 1)
+    renewed = await pin_client.get("/", headers={"Cookie": f"{COOKIE_NAME}={older}"})
+    await _lock(pin_client, _jar(renewed))
+    resp = await pin_client.get("/", headers={"Cookie": f"{COOKIE_NAME}={older}"})
+    assert "data-lock" in await resp.text()
+
+
+async def test_chaining_lock_cannot_reset_the_pin_budget(pin_client, auth):
+    """N1 regression (attack harness): re-POSTing /lock every five guesses
+    used to mint a fresh cookie — and a fresh PIN bucket — forever."""
+    current = await _locked(auth)
+    for guess in range(THROTTLE_MAX_FAILURES * 3):
+        if guess and guess % THROTTLE_MAX_FAILURES == 0:
+            lock = await _lock(pin_client, current)
+            if COOKIE_NAME in lock.cookies:
+                current = _jar(lock)
+        resp = await _unlock(pin_client, current, pin=f"{guess:06d}")
+        if resp.status == 401 or "signed_out" in resp.headers.get("Location", ""):
+            break
+    assert guess == THROTTLE_MAX_FAILURES  # the sixth try signs it out
+    assert auth.throttle_key_count == 1
+
+
+async def test_a_locked_session_cannot_grow_the_maps(pin_client, auth):
+    """Only a password holder (an unlocked session) adds revocations, so
+    whoever holds just a locked cookie can't flood the revocation map
+    (evicting other sign-outs) or the throttle table."""
+    headers = await _locked(auth)
+    for _ in range(20):
+        lock = await _lock(pin_client, headers)
+        if COOKIE_NAME in lock.cookies:  # follow whatever it hands back
+            headers = _jar(lock)
+    for _ in range(THROTTLE_MAX_FAILURES + 3):
+        await _unlock(pin_client, headers, pin="000000")
+    for _ in range(5):
+        await _lock(pin_client, headers)
+    assert auth.revoked_count == 1  # its own sign-out
+    assert auth.throttle_key_count == 1
+
+
+async def test_renewed_lock_shares_its_pin_bucket_and_its_sign_out(
+    pin_client, auth, clock
+):
+    """N1b: renewing a locked cookie keeps the session id — same bucket,
+    and the sign-out kills both copies."""
+    first = await _locked(auth)
+    clock.advance(RENEW_AFTER_S + 1)  # still inside the one-year cookie
+    renewed = _jar(await pin_client.get("/", headers=first))
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        await _unlock(pin_client, first, pin="000000")
+    assert (await _unlock(pin_client, renewed, pin="000000")).headers[
+        "Location"
+    ] == WRONG
+    resp = await _unlock(pin_client, renewed)
+    assert resp.headers["Location"] == "/login?signed_out=1"
+    for copy in (first, renewed):
+        page = await pin_client.get("/", headers=copy, allow_redirects=False)
+        assert page.status == 302
+
+
+async def test_rotating_client_addresses_share_one_pin_bucket(pin_client, auth):
+    """N2: a fresh IPv6 /64 per guess doesn't buy a fresh bucket."""
+    headers = await _locked(auth)
+    addresses = iter(f"2001:db8:{n}::/64" for n in range(100))
+    with patch(
+        "socialhome.dashboard.views.client_bucket",
+        side_effect=lambda _remote: next(addresses),
+    ):
+        for _ in range(THROTTLE_MAX_FAILURES):
+            await _unlock(pin_client, headers, pin="000000")
+        resp = await _unlock(pin_client, headers)
+    assert resp.headers["Location"] == "/login?signed_out=1"
 
 
 async def test_lock_then_reload_shows_only_the_lock_screen(pin_client, auth, household):
