@@ -28,7 +28,11 @@ from ..app_keys import (
 )
 from ..dashboard.auth import DashboardAuth
 from ..dashboard.controller import DashboardController
-from ..domain.household_dashboard import SETUP_TOKEN_TTL_SECONDS, DashboardSettings
+from ..domain.household_dashboard import (
+    SETUP_TOKEN_TTL_SECONDS,
+    DashboardSettings,
+    picture_effective,
+)
 from ..domain.user import User, _picture_url
 from ..media_signer import sign_media_urls_in
 from ..services.dashboard_settings_service import DashboardSettingsService
@@ -84,15 +88,11 @@ def _iso(ts: float | None) -> str | None:
 def _person(user: User, settings: DashboardSettings) -> dict[str, Any]:
     """One household member as the admin UI sees them.
 
-    ``picture_effective`` resolves the "default" (``picture=None``):
-    pictures are on by default for child-protected minors. Only that
-    boolean leaves — never the age or minor flag behind it.
+    ``picture_effective`` resolves the "default" (``picture=None``) with
+    the shared :func:`~socialhome.domain.household_dashboard.picture_effective`
+    rule. Only that boolean leaves — never the age or minor flag behind it.
     """
     stored = settings.person(user.user_id)
-    if stored.picture is None:
-        effective = bool(user.is_minor and user.child_protection_enabled)
-    else:
-        effective = stored.picture
     return {
         "user_id": user.user_id,
         "username": user.username,
@@ -100,7 +100,7 @@ def _person(user: User, settings: DashboardSettings) -> dict[str, Any]:
         "picture_url": _picture_url(user.user_id, user.picture_hash),
         "show": stored.show,
         "picture": stored.picture,
-        "picture_effective": effective,
+        "picture_effective": picture_effective(stored, user),
     }
 
 
