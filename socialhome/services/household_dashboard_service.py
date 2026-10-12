@@ -7,8 +7,11 @@ overview) and :class:`~socialhome.domain.household_dashboard.PersonSnapshot`
 
 House rules:
 
-* **Read-only.** Only plain reads of the owning services — nothing that
-  reconciles or creates rows (so never the household-chat summary).
+* **Read-only, but for one write.** Only plain reads of the owning
+  services — nothing that reconciles or creates rows (so never the
+  household-chat summary). The one write is :meth:`acknowledge`: a
+  "Got it" tapped on a mention, which re-derives from scratch that the
+  wall shows that mention before it reacts ✅ to the chat message.
 * **Household-safe.** Presence is home / away / a zone name, never
   coordinates; calendar events come from members' personal calendars;
   chores, the shopping list, today's timetables and household stickies.
@@ -25,6 +28,12 @@ House rules:
   never show, nor do a protected member's own while anyone they are
   blocked from is shown — the chat hides them from each other, and
   either could be standing at the wall.
+* **Mentions, on the same opt-in.** Household-chat ``@here`` and
+  ``@name`` mentions of the last :data:`MENTION_MAX_AGE` that nobody has
+  acknowledged (a ✅ reaction) ride along on every page — ``@here`` from
+  anyone but its sender, ``@name`` from that person — under the same
+  rules as the messages (shown senders, guardian blocks, never at night);
+  a mention of a hidden person, or of the sender themself, is skipped.
 * **Assigned timetables only.** School is the timetables a member is
   assigned to; space timetables pinned to someone's Home are ignored on
   purpose — a pin is a personal Home choice (a parent pinning a child's
@@ -63,8 +72,12 @@ from datetime import date, datetime, timedelta, timezone
 
 from ..domain import timetable as td
 from ..domain.calendar import Calendar, CalendarEvent, all_day_covers
-from ..domain.conversation import ConversationMessage
+from ..domain.conversation import ConversationMessage, MentionGlance
 from ..domain.household_dashboard import (
+    MENTION_HERE,
+    MENTION_MAX_AGE,
+    MENTION_PERSON,
+    MENTIONS_SCANNED,
     MESSAGE_MAX_AGE,
     MESSAGES_SHOWN,
     PERSON_PALETTE,
@@ -77,6 +90,7 @@ from ..domain.household_dashboard import (
     DashboardAgendaItem,
     DashboardEvent,
     DashboardLesson,
+    DashboardMention,
     DashboardMessage,
     DashboardPerson,
     DashboardSchoolDay,
@@ -98,12 +112,14 @@ from ..domain.preferences import HouseholdPreferences
 from ..domain.presence import PersonPresence
 from ..domain.task import Task, TaskList, TaskStatus
 from ..domain.timetable import Timetable
-from ..domain.user import User
+from ..domain.user import DASHBOARD_AUTHOR, User
 from ..utils.datetime import as_utc
 from ..utils.timezones import local_date, local_day_bounds, zone_of
 from .calendar_service import CalendarService
 from .child_protection_service import ChildProtectionService
 from .dashboard_settings_service import DashboardSettingsService
+from .dm_mentions import MENTIONABLE_TYPES
+from .dm_service import DmService
 from .household_chat_service import HouseholdChatService
 from .preferences_service import PreferencesService
 from .presence_service import PresenceService
@@ -287,6 +303,7 @@ class HouseholdDashboardService:
         "_settings",
         "_chat",
         "_cp",
+        "_acks",
     )
 
     def __init__(
@@ -303,6 +320,7 @@ class HouseholdDashboardService:
         dashboard_settings: DashboardSettingsService,
         household_chat: HouseholdChatService,
         child_protection: ChildProtectionService,
+        acknowledgements: DmService,
     ) -> None:
         self._users = user_service
         self._presence = presence_service
@@ -315,6 +333,7 @@ class HouseholdDashboardService:
         self._settings = dashboard_settings
         self._chat = household_chat
         self._cp = child_protection
+        self._acks = acknowledgements
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -326,14 +345,16 @@ class HouseholdDashboardService:
             self._calendars(ctx), self._timetable_rows(ctx)
         )
         colors = self._person_colors(ctx, calendars)
-        people, events, chores, shopping, stickies, messages = await asyncio.gather(
+        senders = await self._chat_senders(ctx)
+        people, events, chores, shopping, stickies, chat = await asyncio.gather(
             self._people(ctx, colors),
             self._events(ctx, calendars, colors),
             self._chores(ctx, due_to=ctx.today),
             self._shopping_slice(),
             self._sticky_slice(ctx),
-            self._messages(ctx),
+            asyncio.gather(self._messages(ctx, senders), self._mentions(ctx, senders)),
         )
+        messages, mentions = chat
         school = [self._school(ctx, user.user_id, timetables) for user in ctx.shown]
         shopping_items, shopping_total = shopping
         all_today = events.get(ctx.today, [])
@@ -361,6 +382,7 @@ class HouseholdDashboardService:
                 ctx.now, [*events.get(tomorrow, []), *school_tomorrow]
             ),
             messages=messages,
+            mentions=mentions,
         )
 
     async def person(
@@ -376,7 +398,8 @@ class HouseholdDashboardService:
             self._calendars(ctx), self._timetable_rows(ctx)
         )
         colors = self._person_colors(ctx, calendars)
-        people, events, chores = await asyncio.gather(
+        senders = await self._chat_senders(ctx)
+        people, events, chores, mentions = await asyncio.gather(
             self._people(ctx, colors),
             self._events(ctx, calendars, colors),
             self._chores(
@@ -384,11 +407,13 @@ class HouseholdDashboardService:
                 due_to=ctx.today + timedelta(days=CHORE_LOOKAHEAD_DAYS),
                 user_id=user_id,
             ),
+            # Every page: the rail badges everyone with a mention waiting.
+            self._mentions(ctx, senders),
         )
         school = self._school(ctx, user_id, timetables)
         person = next(p for p in people if p.user_id == user_id)
         # Only the picture view shows messages; a reader page never reads them.
-        messages = await self._messages(ctx) if person.picture_view else ()
+        messages = await self._messages(ctx, senders) if person.picture_view else ()
 
         def mine(day: date) -> list[DashboardEvent]:
             return [e for e in events.get(day, []) if user_id in e.person_ids]
@@ -424,7 +449,55 @@ class HouseholdDashboardService:
             school_tomorrow_first=_first_lesson(school.tomorrow),
             people=people,
             messages=messages,
+            mentions=mentions,
         )
+
+    async def acknowledge(
+        self,
+        message_id: str,
+        *,
+        person_id: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """A "Got it" tapped on the wall: ``True`` once the mention is
+        acknowledged, ``False`` (nothing written) when the wall doesn't
+        show it — never saying why.
+
+        Nothing the tablet sends is trusted: the mentions are read again
+        under every rule of the read model (opt-in, chat on, not night,
+        shown and unblocked sender, within :data:`MENTION_MAX_AGE`), and
+        ``message_id`` must be one of them — an ``@here`` when no
+        ``person_id`` is given (written as
+        :data:`~socialhome.domain.user.DASHBOARD_AUTHOR`), else a mention of
+        that shown person (credited to them: it is their page). Already
+        acknowledged → ``True`` without a second write.
+        """
+        ctx = await self._context(now)
+        if person_id is not None and person_id not in ctx.shown_ids:
+            return False
+        senders = await self._chat_senders(ctx)
+        kind = MENTION_HERE if person_id is None else MENTION_PERSON
+        match = next(
+            (
+                (mention, seen)
+                for mention, seen in await self._mention_rows(ctx, senders)
+                if mention.message_id == message_id
+                and mention.kind == kind
+                and mention.person_id == person_id
+            ),
+            None,
+        )
+        if match is None:
+            return False
+        if match[1]:
+            return True
+        try:
+            await self._acks.acknowledge_on_dashboard(
+                message_id, as_user_id=person_id or DASHBOARD_AUTHOR
+            )
+        except KeyError:  # deleted (or gone) since the read
+            return False
+        return True
 
     async def avatar(self, user_id: str) -> tuple[bytes, str] | None:
         """``(image bytes, picture hash)`` of a *shown*, active member's
@@ -740,25 +813,32 @@ class HouseholdDashboardService:
 
     # ── Household chat ───────────────────────────────────────────────────
 
-    async def _messages(self, ctx: _Context) -> tuple[DashboardMessage, ...]:
-        """The newest household-chat messages of the last
-        :data:`MESSAGE_MAX_AGE` from shown members — ``()`` without
-        reading anything while the admin hasn't turned them on, the
-        household chat is off, or it is night."""
+    async def _chat_senders(self, ctx: _Context) -> frozenset[str]:
+        """Whose household-chat messages and mentions the wall may show:
+        the shown members no guardian block withholds — empty (nothing is
+        read) while the admin hasn't turned messages on, the household
+        chat is off, or it is night."""
         if (
             not ctx.settings.show_household_messages
             or not ctx.prefs.is_enabled(HOUSEHOLD_CHAT_SECTION)
             or self._is_night(ctx)
             or not ctx.shown_ids
         ):
-            return ()
+            return frozenset()
         try:
             withheld = await self._guardian_withheld(ctx)
         except Exception:
             # Fail closed: without the blocks nothing is safe to show.
             log.warning("household dashboard: guardian blocks failed", exc_info=True)
-            return ()
-        senders = ctx.shown_ids - withheld
+            return frozenset()
+        return ctx.shown_ids - withheld
+
+    async def _messages(
+        self, ctx: _Context, senders: frozenset[str]
+    ) -> tuple[DashboardMessage, ...]:
+        """The newest household-chat messages of the last
+        :data:`MESSAGE_MAX_AGE` from ``senders`` (:meth:`_chat_senders`) —
+        ``()`` without reading anything when there are none."""
         if not senders:
             return ()
         rows = await _safe(
@@ -795,6 +875,82 @@ class HouseholdDashboardService:
                 )
             )
         return tuple(out)
+
+    async def _mentions(
+        self, ctx: _Context, senders: frozenset[str]
+    ) -> tuple[DashboardMention, ...]:
+        """The unacknowledged ``@here`` / ``@name`` mentions, newest first."""
+        return tuple(
+            m for m, seen in await self._mention_rows(ctx, senders) if not seen
+        )
+
+    async def _mention_rows(
+        self, ctx: _Context, senders: frozenset[str]
+    ) -> list[tuple[DashboardMention, bool]]:
+        """Every mention the wall may show from ``senders`` in the last
+        :data:`MENTION_MAX_AGE`, each with whether it is acknowledged:
+        an ``@here`` by anyone but its sender, an ``@name`` by that
+        person. ``[]`` without reading anything when there are no
+        senders; a failed read fails soft like a slice."""
+        if not senders:
+            return []
+        rows = await _safe(
+            "household chat mentions",
+            self._chat.recent_mentions(
+                since=ctx.now - MENTION_MAX_AGE,
+                until=ctx.now + MESSAGE_CLOCK_SKEW,
+                senders=senders,
+                limit=MENTIONS_SCANNED,
+            ),
+            list[MentionGlance](),
+        )
+        zone = zone_of(ctx.tz)
+        oldest = ctx.now - MENTION_MAX_AGE
+        out: list[tuple[DashboardMention, bool]] = []
+        for row in rows:
+            m = row.message
+            sent = as_utc(m.created_at)
+            if (
+                m.deleted
+                or m.type not in MENTIONABLE_TYPES
+                or m.sender_user_id not in senders
+                or sent > ctx.now
+                or sent < oldest
+            ):
+                continue  # the read filters these already; never trust it alone
+            text = m.content.strip()
+            local = sent.astimezone(zone)
+            if row.here:
+                seen = bool(row.acked_by - {m.sender_user_id})
+                out.append(
+                    (
+                        DashboardMention(
+                            message_id=m.id,
+                            sender_id=m.sender_user_id,
+                            text=text,
+                            sent_at=local,
+                            kind=MENTION_HERE,
+                        ),
+                        seen,
+                    )
+                )
+            for uid in dict.fromkeys(row.user_ids):
+                if uid not in ctx.shown_ids or uid == m.sender_user_id:
+                    continue
+                out.append(
+                    (
+                        DashboardMention(
+                            message_id=m.id,
+                            sender_id=m.sender_user_id,
+                            text=text,
+                            sent_at=local,
+                            kind=MENTION_PERSON,
+                            person_id=uid,
+                        ),
+                        uid in row.acked_by,
+                    )
+                )
+        return out
 
     async def _guardian_withheld(self, ctx: _Context) -> frozenset[str]:
         """Whose messages a guardian block (§CP.F2) keeps off the wall.

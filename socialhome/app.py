@@ -2133,14 +2133,16 @@ def _build_household_dashboard(
     theme_service: ThemeService,
     household_chat_service: HouseholdChatService,
     child_protection_service: ChildProtectionService,
+    dm_service: DmService,
 ) -> SimpleNamespace:
     """Settings service, cookie auth, snapshot service and own-port
     listener of the household dashboard (``socialhome/dashboard/``).
 
     The keyword services are what the read-only snapshots read (the
-    household chat only through its read-only glance, filtered by the
+    household chat only through its read-only glances, filtered by the
     child-protection guardian blocks); the theme service gives the accent
-    colour.
+    colour. ``dm_service`` takes the one write: a "Got it" on a mention
+    (a ✅ reaction to the household-chat message).
 
     One :class:`DashboardAuth` and one :class:`DashboardRenderer` for the
     process: the login throttle must survive a listener restart (port
@@ -2167,6 +2169,7 @@ def _build_household_dashboard(
         dashboard_settings=settings,
         household_chat=household_chat_service,
         child_protection=child_protection_service,
+        acknowledgements=dm_service,
     )
 
     async def household_name() -> str:
@@ -3075,6 +3078,7 @@ def create_app(config: Config | None = None) -> web.Application:
         theme_service=theme_service,
         household_chat_service=household_chat_service,
         child_protection_service=child_protection_service,
+        dm_service=dm_service,
     )
 
     # Voice-note transcription depends on ``adapter.stt``; fail-silent
