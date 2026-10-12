@@ -77,6 +77,12 @@ def issuer() -> _Household:
     return _Household()
 
 
+#: A display name long enough that it can't turn up by chance inside the
+#: envelope's random base64 ciphertext. A 3-letter name ("Ada") did, about
+#: once in every few hundred runs, which made the identity-free check flaky.
+_PROBE_NAME = "Ada-Lovelace-probe-display-name"
+
+
 def _redeem_body(redeemer: _Household, **over) -> dict:
     body = {
         "kind": KIND_REDEEM,
@@ -91,7 +97,7 @@ def _redeem_body(redeemer: _Household, **over) -> dict:
         "display_name": "Redeemer household",
         "redeemer_user_id": "u-1",
         "redeemer_public_key": "cafe",
-        "redeemer_display_name": "Ada",
+        "redeemer_display_name": _PROBE_NAME,
     }
     body.update(over)
     return body
@@ -133,7 +139,7 @@ def test_outer_envelope_is_identity_free(redeemer, issuer):
     assert redeemer.identity_pk_hex not in flat
     assert "a" * 32 not in flat  # the token
     assert "space-1" not in flat
-    assert "Ada" not in flat
+    assert _PROBE_NAME not in flat
 
 
 def test_suite_constant_is_in_supported_set():
