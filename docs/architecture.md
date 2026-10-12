@@ -1580,7 +1580,8 @@ and the household chat are on (`HomeSnapshot.messages_on` — even with
 nothing to show: an empty state); Notes while the stickies section is
 on. With only Overview there is no tab bar; a tab that doesn't show is
 404. Every tab has the bar (with a badge counting messages under 15
-minutes old — time-based, a shared board has no read state — never on
+minutes old that the tab lists — time-based, a shared board has no read
+state; a bannered `@here` is not counted — never on
 the Messages tab itself) and one alert slot under it: the offline
 banner, then the `@here` banners, so "Got it" is in reach from any tab.
 While an `@here` is on a banner its message is left out of the Overview

@@ -14,7 +14,9 @@
     </ul>
   </section>
   {% endfor %}
-  {% else %}
+  {% elif not here_cards %}
+  {#- Nothing to list — unless an @here banner above shows the only
+      message: then no "No messages" claim under it. -#}
   {{ tab_empty("💬", t("dashboard.messages.empty"), t("dashboard.messages.empty_hint")) }}
   {% endif %}
 </div>

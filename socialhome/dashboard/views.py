@@ -610,9 +610,10 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
     """Home on ``tab`` — ``None`` when that tab doesn't show (:mod:`.tabs`).
 
     Every tab carries the tab bar (with the Messages badge: messages under
-    :data:`~.messages.NEW_FOR` old, never on the Messages tab itself) and
-    the ``@here`` banners; a message on a banner is left out of the
-    Overview card and the Messages list until someone taps "Got it"."""
+    :data:`~.messages.NEW_FOR` old that the Messages tab lists, never on the
+    Messages tab itself) and the ``@here`` banners; a message on a banner
+    is left out of the Overview card, the Messages list and the badge
+    until someone taps "Got it"."""
     snap = await request.app[SNAPSHOTS_KEY].home()
     tabs = home_tabs(snap)
     if tab not in {t.key for t in tabs}:
@@ -646,7 +647,7 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
         snap=snap,
         # Only Overview qualifying: no bar at all.
         tabs=tabs if len(tabs) > 1 else (),
-        tab_new=new_count(rows),
+        tab_new=new_count(listed),
         here_cards=here_cards,
     )
     _add_keys(board, here_cards)

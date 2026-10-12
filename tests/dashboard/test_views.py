@@ -3096,6 +3096,22 @@ async def test_messages_badge_counts_new_messages_off_its_tab(client, auth, snap
     assert "dash-tab-badge" not in bar and " new<" not in bar
 
 
+async def test_badge_never_counts_a_bannered_message(client, auth, snapshots):
+    """Review: a lone @here showed badge "1" next to an empty Messages
+    tab that said there were no messages."""
+    _tabs_on(snapshots, messages=(HERE_MSG,), mentions=(HERE,))
+    assert "dash-tab-badge" not in await (await _get(client, auth, "/")).text()
+    html = await (await _get(client, auth, "/messages")).text()
+    assert "Dinner is" in _banner(html)
+    # The banner shows the only message: no "No messages" claim under it.
+    assert "No messages in the last day" not in html
+    assert "dash-tab-empty" not in html
+    # With m1 too, only m1 counts.
+    _tabs_on(snapshots, messages=(HERE_MSG, *MESSAGES), mentions=(HERE,))
+    bar = _tab_bar(await (await _get(client, auth, "/notes")).text())
+    assert '<span class="dash-tab-badge" aria-hidden="true">1</span>' in bar
+
+
 async def test_no_badge_without_new_messages(client, auth, snapshots):
     _tabs_on(snapshots, messages=(EVENING_MSG,))
     assert "dash-tab-badge" not in await (await _get(client, auth, "/")).text()
