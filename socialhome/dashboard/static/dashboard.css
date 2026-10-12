@@ -981,9 +981,12 @@ h3.dash-sublabel {
 /* ── Mentions (@here banner on Home, @name card / tile on a person page,
    a dot on the rail face) ──────────────────────────────────────────── */
 
-.dash-alerts,
-.dash-for-you {
+.dash-alerts {
   margin-block: 0 20px;
+}
+
+.dash-for-you {
+  margin-block: 20px;
 }
 
 .dash-alert-list,
@@ -1097,10 +1100,17 @@ h3.dash-sublabel {
   gap: 20px 32px;
 }
 
+/* Framed like the reader's card, so "for you" never reads as one more
+   message face beside it. */
 .dash-pv-mention {
   display: flex;
   align-items: center;
   gap: 24px;
+  padding-block: 10px;
+  padding-inline: 12px 10px;
+  background: var(--dash-surface);
+  border: 3px solid var(--dash-accent);
+  border-radius: 999px;
 }
 
 /* The rail: a dot on the face of anyone with a mention waiting (the
