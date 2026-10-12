@@ -39,6 +39,10 @@ paired (`manual`) row — a GFS-reach pairing does.
   `CONFIRMED` only through this household's own verification step (the
   admin entering the code, the token-bound peer-confirm, or the vouched
   auto-pair finalisation); the event is logged at WARNING and ignored.
+- The first authenticated envelope from a household this admin approved
+  through a trust relay (a keyed `pending_sent` row) confirms that pairing
+  ([auto-pair](#flow--auto-pair-via-relay)); nothing a pending peer sends
+  ever confirms a pairing-code half-pair.
 - `PAIRING_ABORT` cancels a pending session only when the peer identity
   stored on it derives to the envelope's `from_instance` — a household
   can cancel its own handshake, never another's. It also drops the
@@ -339,11 +343,35 @@ sequenceDiagram
     participant C as HFS C<br/>(target)
     A->>B: PAIRING_INTRO_AUTO<br/>{target_id: C, a_dh_pk, a_inbox_url}
     B->>C: PAIRING_INTRO_AUTO<br/>{from_a_*, vouch_sig over A's identity}
-    Note over C: admin one-clicks "approve"<br/>(no QR scan, vouched by B)
+    Note over C: admin one-clicks "approve"<br/>(no QR scan, vouched by B)<br/>row for A stored pending_sent — not confirmed
     C->>B: PAIRING_INTRO_AUTO_ACK_VIA<br/>{to_a_id, c_pk, c_dh_pk, ack_sig}
     B->>A: PAIRING_INTRO_AUTO_ACK<br/>(forwarded — both hops over established trust)
-    Note over A,C: A↔C now CONFIRMED;<br/>federation envelopes flow normally.
+    Note over A: verify vouch + ack sigs;<br/>confirm only over its own still-pending row
+    A->>C: first envelope (INSTANCE_CAPABILITIES_UPDATED, …)<br/>signed + encrypted under the new session key
+    Note over C: verifies and decrypts → A completed the pairing<br/>→ C confirms its row before dispatch
+    Note over A,C: A↔C CONFIRMED on both sides;<br/>federation envelopes flow normally.
 ```
+
+C's approval is **not** a pairing yet: A may have cancelled its request
+meanwhile, and a one-sided confirmed row would be a pairing A never
+agreed to. C stores A's row `pending_sent` with the derived keys; the
+first envelope from A that passes the §24.11 signature check **and**
+decrypts under that session key (pipeline step 7b,
+`make_confirm_relay_approval`) proves A holds the DH secret B vouched for
+and confirmed on its side, so C confirms its row then — before the event
+is dispatched. A sends one on every new pairing anyway (its on-pair
+`INSTANCE_CAPABILITIES_UPDATED`), so there is no wire change. This applies
+only to a keyed `pending_sent` row (an approval); a pairing-code half-pair
+(`pending_received`) is never confirmed by anything the peer sends. A
+cancelled request never sends that envelope, so C's approval stays pending
+until C's admin cancels it.
+
+A request is answerable for 24 h (`AUTO_PAIR_REQUEST_TTL_SECONDS`): C's
+approval inbox forgets it, C refuses to approve it past A's signed `ts`
+(`410 REQUEST_EXPIRED`), and A forgets its own outstanding request. C
+refuses to approve for a household it is already paired with (`409
+PAIRING_CONFIRMED`). A's `target_instance_id` must be a derived household
+id (32 lowercase base32 characters, `is_instance_id`).
 
 The ack rides through `B` rather than directly C → A because A
 holds only a `PENDING_SENT` row for C (no identity key yet) — a
@@ -619,46 +647,50 @@ row takes the same path). Implemented by
 
 ### Pending states
 
-| Our state | Where it comes from | What we hold | What the peer holds | Cancel |
+| Our state (`pending_kind`) | Where it comes from | What we hold | What the peer holds | Cancel |
 |---|---|---|---|---|
 | Code shown, not scanned | `initiate` | `pending_pairings` session only — no row, not in the connections list | the code (if it was shared) | not listed; the session expires after 5 min, and a late scan's peer-accept is then refused (`404 No pending pairing`) |
-| `pending_received` — issuer | the scanner's signed peer-accept landed | session (token, SAS) + keyed row | session + keyed row (`pending_received`) | delete session, `PAIRING_ABORT` to the scanner, delete row |
-| `pending_received` — scanner | we scanned the code | session (token, SAS) + keyed row | session; plus our keyed row once our peer-accept reached it | delete session, `PAIRING_ABORT` to the code owner, delete row |
-| `pending_sent` — trust relay | we asked a confirmed peer to introduce us (§auto-pair) | provisional row **without a key** + in-memory request | the target holds the vouched request in its approval inbox; no row, no channel to us | forget the in-memory request, delete row — nothing is sent |
+| `pending_received` (`code`) — issuer | the scanner's signed peer-accept landed | session (token, SAS) + keyed row | session + keyed row (`pending_received`) | sessions + row in one transaction, then `PAIRING_ABORT` |
+| `pending_received` (`code`) — scanner | we scanned the code | session (token, SAS) + keyed row | session; plus our keyed row once our peer-accept reached it | sessions + row in one transaction, then `PAIRING_ABORT` |
+| `pending_sent` (`request`) — trust relay, we asked | we asked a confirmed peer to introduce us | provisional row **without a key** + in-memory request | the target holds the vouched request in its approval inbox (24 h); no row, no channel to us | row in one transaction, in-memory request forgotten — nothing is sent |
+| `pending_sent` (`approval`) — trust relay, we approved | our admin approved an introduction | keyed row, waiting for the requester's first envelope | it confirms when our ack reaches it | row in one transaction, then `PAIRING_ABORT` (its receiver drops only a non-confirmed half) |
 
 ### Order
 
-1. **Close every way to finish the handshake.** The `pending_pairings`
-   sessions behind the row (same `local_inbox_id`) are deleted, and the
-   trust-relay request is forgotten. Our own SAS entry, the peer's signed
-   `PAIRING_PEER_ACCEPT` / `PAIRING_PEER_CONFIRM` (direct or relayed through
-   a GFS) and a late `PAIRING_INTRO_AUTO_ACK` all start from that state, so
-   from here on each is refused (`404 No pending pairing` / ignored). An
-   inbox `PAIRING_CONFIRM` never confirmed anything to begin with.
-2. **Tell the peer — best effort, never a leak.** Only when the row holds
-   the peer's identity key and our session key (the peer has state about
-   us, and a signed, encrypted channel exists): one `PAIRING_ABORT`
-   `{token, reason: "cancelled"}` — the token is the one the peer already
-   holds. Its receiver drops only the **signer's** pending session and
-   half-pair (never a confirmed pairing) and pushes `pairing.aborted`.
-   Bounded to 5 s; not retried — an unreached peer's half expires with its
-   own session.
-3. **Forget the row** — atomically and only while it is still pending,
-   with its queued outbox envelopes, DM / space media and mesh hints
-   (`delete_pending_instance`), then `PeerUnpaired` →
-   `connection.removed`.
-
-A pairing confirmed in the meantime (the peer's confirm landed while the
-abort was in flight) is never torn down by a cancel: the dedicated endpoint
-answers `409 PAIRING_CONFIRMED` and the list shows it live. (The unpair
-endpoint unpairs it instead — the admin asked for the connection gone.)
+1. **Cancel, atomically** (`cancel_pending_instance`): one transaction
+   deletes the `pending_pairings` sessions behind the row (by its
+   `local_inbox_id`, and any naming the peer's identity key) and the row
+   itself — only while it is still pending — with its queued outbox
+   envelopes, DM / space media and mesh hints. Every way to finish the
+   handshake confirms through `promote_pending_instance`, which needs that
+   session (SAS entry, the peer's signed `PAIRING_PEER_CONFIRM`, direct or
+   relayed through a GFS) or that pending row (trust-relay ack, the
+   requester's first envelope) in **its** own transaction. Whichever
+   commits first wins; the loser changes nothing — a confirm after a cancel
+   is refused (`404 No pending pairing`) and never writes the row back, and
+   a cancel after a confirm answers `409 PAIRING_CONFIRMED` having removed
+   and sent nothing. The trust-relay request is then forgotten in memory
+   (a late ack is ignored).
+2. **Tell the peer — only now, best effort, never a leak.** Only when the
+   removed row held the peer's identity key and our session key (the peer
+   has state about us, and a signed, encrypted channel exists): one
+   `PAIRING_ABORT` `{token, reason: "cancelled"}` sealed with the captured
+   row (`send_event_once` — one attempt to its inbox, never queued, no
+   retry). The token is the one the peer already holds. Its receiver drops
+   only the **signer's** pending session and half-pair (never a confirmed
+   pairing) and pushes `pairing.aborted`. Bounded to 5 s.
+3. **Announce** `PeerUnpaired` → `connection.removed`, once; a second
+   cancel finds nothing and is a quiet `404`. The response carries
+   `peer_notified`, and the SPA says when the other household may not know
+   yet.
 
 Residual: a peer that missed our abort and whose admin enters the SAS before
 its session expires flips its own half to confirmed (a local step, as when
 our session had simply expired); its peer-confirm is refused, our inbox
-refuses everything it sends, and its admin can remove the connection.
-Likewise a trust-relay target that approves after we cancelled holds a
-one-sided row (its ack is ignored here).
+refuses everything it sends, and its admin can remove the connection. A
+trust-relay target that approves after we cancelled is **not** left
+confirmed — its approval waits for an envelope we never send, and its admin
+can cancel it.
 
 ```mermaid
 sequenceDiagram
@@ -666,18 +698,20 @@ sequenceDiagram
     participant A as Household A
     participant B as Household B (pending)
     AdminA->>A: DELETE /api/pairing/pending/B
-    A->>A: delete pending_pairings session(s), forget auto-pair request
-    opt row holds B's key (QR half-pair)
-        A->>B: PAIRING_ABORT {token, reason} (encrypted, signed; ≤ 5 s)
-        B->>B: drop session + half-pair of A (signer only), pairing.aborted
+    alt row still pending (one transaction)
+        A->>A: delete sessions + row + queued rows<br/>forget auto-pair request
+        opt removed row held B's key
+            A->>B: PAIRING_ABORT {token, reason} (encrypted, signed; one try, ≤ 5 s)
+            B->>B: drop session + half-pair of A (signer only), pairing.aborted
+        end
+        A->>A: PeerUnpaired (connection.removed)
+        A-->>AdminA: 200 {ok, peer_notified}
+    else confirmed first (SAS / peer-confirm committed)
+        A-->>AdminA: 409 PAIRING_CONFIRMED (nothing removed, nothing sent)
+    else already gone
+        A-->>AdminA: 404
     end
-    alt row still pending
-        A->>A: delete row + queued rows, PeerUnpaired
-        A-->>AdminA: 204
-    else confirmed meanwhile
-        A-->>AdminA: 409 PAIRING_CONFIRMED
-    end
-    Note over B,A: late peer-accept / peer-confirm / SAS → refused (no session)
+    Note over B,A: late peer-accept / peer-confirm / SAS / ack → refused (no session, no pending row)
 ```
 
 ## Unpairing
