@@ -35,6 +35,7 @@ from ..domain.conversation import (
     CONVERSATION_NOTIF_LEVELS,
     ConversationType,
     MESSAGE_TYPES,
+    MessageReaction,
     RemoteConversationMember,
     SystemChatScope,
     mute_until_for,
@@ -146,6 +147,17 @@ class MediaRequiresDirectPairingError(ValueError):
     a clear "this peer needs to be in your trusted households to
     share pictures" message.
     """
+
+
+def _visible_reactions(
+    reactions: list[MessageReaction], blocked: frozenset[str]
+) -> list[MessageReaction]:
+    """Drop the reactions by anyone in *blocked* — the reader's guardian-block
+    counterparts (§CP.F2), whom the live ``dm.message_reaction`` frame never
+    reaches the reader from."""
+    if not blocked:
+        return reactions
+    return [r for r in reactions if r.user_id not in blocked]
 
 
 class DmService(VisibilityMixin, ProtectionGateMixin):
@@ -1210,6 +1222,50 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         before: str | None = None,
         limit: int = 50,
     ) -> list[ConversationMessage]:
+        messages, _ = await self._readable_messages(
+            conversation_id, reader_username=reader_username, before=before, limit=limit
+        )
+        return messages
+
+    async def list_messages_with_reactions(
+        self,
+        conversation_id: str,
+        *,
+        reader_username: str,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[tuple[ConversationMessage, list[MessageReaction]]]:
+        """The reader's page of messages, each with the reactions the reader
+        is shown (none on a deleted message). One guardian-block read for
+        the whole page; a failing lookup raises — never an unfiltered page.
+        """
+        messages, blocked = await self._readable_messages(
+            conversation_id, reader_username=reader_username, before=before, limit=limit
+        )
+        # ``list_reactions`` is a small per-message read; the page is capped
+        # at 100, so the worst case is 100 cheap SQLite WAL reads.
+        return [
+            (
+                m,
+                []
+                if m.deleted
+                else _visible_reactions(
+                    await self._convos.list_reactions(m.id), blocked
+                ),
+            )
+            for m in messages
+        ]
+
+    async def _readable_messages(
+        self,
+        conversation_id: str,
+        *,
+        reader_username: str,
+        before: str | None,
+        limit: int,
+    ) -> tuple[list[ConversationMessage], frozenset[str]]:
+        """The page the reader is shown, and the reader's guardian-block
+        counterparts (§CP.F2) it was filtered by."""
         await self._require_membership(conversation_id, reader_username)
         limit = max(1, min(int(limit), 100))
         messages = await self._convos.list_messages(
@@ -1217,17 +1273,19 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             before=before,
             limit=limit,
         )
-        reader = await self._users.get(reader_username)
-        blocked = (
-            await self._guardian_block_counterparts(reader.user_id)
-            if reader is not None
-            else frozenset()
-        )
+        blocked = await self._reader_block_counterparts(reader_username)
         if not blocked:
-            return messages
+            return messages, blocked
         # §CP.F2: a group can still carry a blocked person's messages for the
         # others — never for the reader a guardian block separates them from.
-        return [m for m in messages if m.sender_user_id not in blocked]
+        return [m for m in messages if m.sender_user_id not in blocked], blocked
+
+    async def _reader_block_counterparts(self, reader_username: str) -> frozenset[str]:
+        """Everyone a guardian block separates from the reader (either way)."""
+        reader = await self._users.get(reader_username)
+        if reader is None:
+            return frozenset()
+        return await self._guardian_block_counterparts(reader.user_id)
 
     # ── Read tracking ──────────────────────────────────────────────────
 
@@ -1497,10 +1555,20 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         message_id: str,
         *,
         username: str,
-    ) -> list:
+    ) -> list[MessageReaction]:
+        """The message's reactions the reader is shown — the same set the
+        message list attaches and the live ``dm.message_reaction`` frame
+        reaches the reader with (§CP.F2): none on a message from someone a
+        guardian block separates from the reader, and never a reaction by
+        such a person. A failing guardian lookup raises (fail closed)."""
         msg = await self._require_message(message_id)
         await self._require_membership(msg.conversation_id, username)
-        return await self._convos.list_reactions(message_id)
+        blocked = await self._reader_block_counterparts(username)
+        if msg.sender_user_id in blocked:
+            return []
+        return _visible_reactions(
+            await self._convos.list_reactions(message_id), blocked
+        )
 
     async def _publish_reaction(
         self,

@@ -392,14 +392,16 @@ class ConversationMessageView(BaseView):
         conv_id = self.match("id")
         before = self.request.query.get("before")
         limit = min(max(int(self.request.query.get("limit", 50)), 1), 100)
-        msgs = await svc.list_messages(
+        # §CP.F2: the service leaves out messages and reactions by anyone a
+        # guardian block separates from the reader, like the live frames.
+        rows = await svc.list_messages_with_reactions(
             conv_id,
             reader_username=ctx.username,
             before=before,
             limit=limit,
         )
+        msgs = [m for m, _ in rows]
         signer = self.request.app.get(media_signer_key)
-        repo = self.svc(conversation_repo_key)
         # Video messages transcode in the background — surface a live
         # ``media_status`` so the SPA shows a "Processing…" placeholder
         # until the ``.webm`` exists. One batched repo read per request.
@@ -410,17 +412,12 @@ class ConversationMessageView(BaseView):
         ]
         statuses = await self.svc(media_transcode_repo_key).status_for(video_fns)
         payload = []
-        for m in msgs:
+        for m, rxs in rows:
             # Read-side gate for rows stored before ``send_message`` /
             # ``DM_MESSAGE`` inbound only accepted local uploads: a
             # ``javascript:`` or remote ``media_url`` is served as null,
             # never as a link target.
             media_url = local_media_ref(m.media_url)
-            # ``list_reactions`` is a small per-message read; the page
-            # size is capped at 100 so the worst case is 100 queries —
-            # cheap on SQLite WAL. A bulk-by-conversation read can come
-            # later if the cost shows up in profiling.
-            rxs = await repo.list_reactions(m.id) if not m.deleted else []
             reactions = [{"user_id": r.user_id, "emoji": r.emoji} for r in rxs]
             row = {
                 "id": m.id,

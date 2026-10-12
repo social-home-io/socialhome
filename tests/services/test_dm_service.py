@@ -1245,3 +1245,142 @@ async def test_dashboard_ack_refuses_anything_but_a_live_household_message(stack
     with pytest.raises(KeyError):
         await stack.dm_svc.acknowledge_on_dashboard(msg.id, as_user_id=DASHBOARD_AUTHOR)
     assert await convos.list_reactions(msg.id) == []
+
+
+# ── §CP.F2: reactions on the REST read paths ─────────────────────────────
+
+
+class _FakeGuardianBlocks:
+    """A ``ChildProtectionService`` stand-in: the given guardian-block
+    counterparts per user. Counts the counterpart reads."""
+
+    def __init__(self, pairs: dict[str, frozenset[str]], *, fail: bool = False):
+        self._pairs = pairs
+        self._fail = fail
+        self.reads = 0
+
+    def register_gate(self, gate) -> None:
+        pass
+
+    async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        self.reads += 1
+        if self._fail:
+            raise RuntimeError("cp lookup down")
+        return self._pairs.get(user_id, frozenset())
+
+
+def _kid_bob_block(ids: dict[str, str]) -> _FakeGuardianBlocks:
+    return _FakeGuardianBlocks(
+        {
+            ids["kid"]: frozenset({ids["bob"]}),
+            ids["bob"]: frozenset({ids["kid"]}),
+        }
+    )
+
+
+async def _group_with_reactions(stack):
+    """A group anna + bob + kid + carl seated before any block (as a remote
+    roster may), one message from anna with a 👍 from each of the four —
+    then a guardian block separates kid and bob."""
+    ids = {}
+    for name in ("anna", "bob", "kid", "carl"):
+        ids[name] = (await stack.provision_user(name)).user_id
+    gdm = await stack.dm_svc.create_group_dm(
+        creator_username="anna",
+        member_usernames=["bob", "kid", "carl"],
+        name="Crew",
+    )
+    msg = await stack.dm_svc.send_message(gdm.id, sender_username="anna", content="hi")
+    for name in ("anna", "bob", "kid", "carl"):
+        await stack.dm_svc.add_reaction(msg.id, username=name, emoji="👍")
+    cp = _kid_bob_block(ids)
+    stack.dm_svc.attach_child_protection(cp)
+    return gdm, msg, ids, cp
+
+
+def _reactors(reactions) -> set[str]:
+    return {r.user_id for r in reactions}
+
+
+_VIEWS = [("bob", "kid"), ("kid", "bob"), ("carl", None), ("anna", None)]
+
+
+@pytest.mark.parametrize(("viewer", "hidden"), _VIEWS)
+async def test_list_reactions_hides_a_guardian_blocked_reactor(stack, viewer, hidden):
+    """§CP.F2: the roster leaves out whoever a guardian block separates from
+    the viewer — the child's 👍 from the blocked adult and the reverse —
+    the way the live ``dm.message_reaction`` frame does."""
+    _, msg, ids, _ = await _group_with_reactions(stack)
+    got = _reactors(await stack.dm_svc.list_reactions(msg.id, username=viewer))
+    expected = set(ids.values()) - ({ids[hidden]} if hidden else set())
+    assert got == expected
+
+
+@pytest.mark.parametrize(("viewer", "hidden"), _VIEWS)
+async def test_message_list_reactions_match_the_roster(stack, viewer, hidden):
+    """The reactions attached to each listed message are the same set — and
+    count — the single-message roster returns for that viewer."""
+    gdm, msg, ids, _ = await _group_with_reactions(stack)
+    rows = await stack.dm_svc.list_messages_with_reactions(
+        gdm.id, reader_username=viewer
+    )
+    by_id = {m.id: rxs for m, rxs in rows}
+    roster = await stack.dm_svc.list_reactions(msg.id, username=viewer)
+    assert _reactors(by_id[msg.id]) == _reactors(roster)
+    assert len(by_id[msg.id]) == len(roster) == (3 if hidden else 4)
+    if hidden:
+        assert ids[hidden] not in _reactors(by_id[msg.id])
+
+
+async def test_message_list_reads_guardian_blocks_once_per_request(stack):
+    gdm, _, _, cp = await _group_with_reactions(stack)
+    stack.dm_svc._child_protection = None
+    for i in range(5):
+        await stack.dm_svc.send_message(gdm.id, sender_username="carl", content=f"{i}")
+    stack.dm_svc.attach_child_protection(cp)
+    cp.reads = 0
+    rows = await stack.dm_svc.list_messages_with_reactions(
+        gdm.id, reader_username="bob"
+    )
+    assert len(rows) == 6
+    assert cp.reads == 1
+
+
+async def test_message_list_hides_a_blocked_senders_message_and_its_reactions(
+    stack,
+):
+    """A message from someone the reader is separated from is not listed, so
+    neither are its reactions; its roster comes back empty for them."""
+    gdm, _, ids, cp = await _group_with_reactions(stack)
+    stack.dm_svc._child_protection = None
+    kid_msg = await stack.dm_svc.send_message(
+        gdm.id, sender_username="kid", content="from kid"
+    )
+    await stack.dm_svc.add_reaction(kid_msg.id, username="carl", emoji="🎉")
+    stack.dm_svc.attach_child_protection(cp)
+    rows = await stack.dm_svc.list_messages_with_reactions(
+        gdm.id, reader_username="bob"
+    )
+    assert kid_msg.id not in {m.id for m, _ in rows}
+    assert await stack.dm_svc.list_reactions(kid_msg.id, username="bob") == []
+    carl_view = await stack.dm_svc.list_reactions(kid_msg.id, username="carl")
+    assert _reactors(carl_view) == {ids["carl"]}
+
+
+async def test_deleted_message_lists_no_reactions(stack):
+    gdm, msg, _, _ = await _group_with_reactions(stack)
+    await stack.dm_svc.delete_message(msg.id, actor_username="anna")
+    rows = await stack.dm_svc.list_messages_with_reactions(
+        gdm.id, reader_username="carl"
+    )
+    assert [rxs for m, rxs in rows if m.id == msg.id] == [[]]
+
+
+async def test_reaction_reads_fail_closed_when_the_guardian_lookup_errors(stack):
+    """A broken guardian lookup never falls back to the unfiltered roster."""
+    gdm, msg, _, _ = await _group_with_reactions(stack)
+    stack.dm_svc.attach_child_protection(_FakeGuardianBlocks({}, fail=True))
+    with pytest.raises(RuntimeError):
+        await stack.dm_svc.list_reactions(msg.id, username="bob")
+    with pytest.raises(RuntimeError):
+        await stack.dm_svc.list_messages_with_reactions(gdm.id, reader_username="bob")
