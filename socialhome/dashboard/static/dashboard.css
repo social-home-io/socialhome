@@ -978,6 +978,152 @@ h3.dash-sublabel {
   }
 }
 
+/* ── Mentions (@here banner on Home, @name card / tile on a person page,
+   a dot on the rail face) ──────────────────────────────────────────── */
+
+.dash-alerts,
+.dash-for-you {
+  margin-block: 0 20px;
+}
+
+.dash-alert-list,
+.dash-pv-mention-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-alert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  padding-block: 14px;
+  padding-inline: 16px;
+  background: var(--dash-surface);
+  border: 2px solid var(--dash-accent);
+  border-inline-start-width: 8px;
+  border-radius: var(--dash-radius);
+}
+
+.dash-alert-body {
+  flex: 1 1 14rem;
+  min-inline-size: 0;
+}
+
+.dash-alert-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 1rem;
+  color: var(--dash-muted);
+}
+
+.dash-alert-label {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dash-accent);
+}
+
+.dash-alert-who {
+  font-weight: 700;
+  color: var(--dash-text);
+}
+
+.dash-alert-text {
+  display: -webkit-box;
+  margin-block: 4px 0;
+  overflow: hidden;
+  font-size: 1.5rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.dash-ack-form {
+  flex: none;
+  margin: 0;
+}
+
+/* "Got it": the biggest target on the card. */
+.dash-ack {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-block-size: 56px;
+  padding-block: 8px;
+  padding-inline: 24px;
+  font: inherit;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--dash-accent-text);
+  background: var(--dash-accent);
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.dash-ack:focus-visible {
+  outline: 3px solid var(--dash-focus);
+  outline-offset: 3px;
+}
+
+.dash-ack:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.dash-ack-round {
+  inline-size: 88px;
+  block-size: 88px;
+  padding: 0;
+  font-size: 2.75rem;
+  border-radius: 50%;
+}
+
+/* Picture view: who (face + 💬, tap to hear) beside a big ✓. */
+.dash-pv-mention-list {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 20px 32px;
+}
+
+.dash-pv-mention {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+/* The rail: a dot on the face of anyone with a mention waiting (the
+   face itself clips, so the dot sits on the item). */
+.dash-rail-item {
+  position: relative;
+}
+
+.dash-rail-badge {
+  position: absolute;
+  inset-block-start: 4px;
+  inset-inline-start: calc(50% + 16px);
+  inline-size: 24px;
+  block-size: 24px;
+  background: var(--dash-accent);
+  border: 4px solid var(--dash-surface);
+  border-radius: 50%;
+}
+
+.dash-rail-badge[hidden] {
+  display: none;
+}
+
 .dash-presence {
   display: flex;
   flex-wrap: wrap;
@@ -1740,6 +1886,22 @@ h3.dash-sublabel {
     inline-size: 56px;
     block-size: 56px;
     font-size: 1.25rem;
+  }
+
+  .dash-rail-badge {
+    inset-inline-start: calc(50% + 10px);
+  }
+
+  .dash-alert-text {
+    font-size: 1.25rem;
+  }
+
+  .dash-alert .dash-ack-form {
+    inline-size: 100%;
+  }
+
+  .dash-alert .dash-ack {
+    inline-size: 100%;
   }
 
   .dash-face-home {

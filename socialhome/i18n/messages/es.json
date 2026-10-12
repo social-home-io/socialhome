@@ -153,5 +153,10 @@
   "dashboard.messages.say.photo": "{name} envió una foto.",
   "dashboard.messages.say.video": "{name} envió un vídeo.",
   "dashboard.messages.say.file": "{name} envió un archivo.",
-  "dashboard.messages.say.voice": "{name} envió un mensaje de voz."
+  "dashboard.messages.say.voice": "{name} envió un mensaje de voz.",
+  "dashboard.mentions.everyone": "Mensaje para todos",
+  "dashboard.mentions.for_you": "Mensaje para ti",
+  "dashboard.mentions.got_it": "Entendido",
+  "dashboard.mentions.badge": "Mensaje nuevo para {name}",
+  "dashboard.mentions.from_for_you": "Mensaje de {name} para ti"
 }

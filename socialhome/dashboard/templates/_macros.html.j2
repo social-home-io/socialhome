@@ -134,3 +134,45 @@
 </button>
 </li>
 {%- endmacro %}
+
+{#- ── Household-chat mentions (messages.py MentionCard) ─────────────────
+    "Got it" is a real form (works without JS); dashboard.js posts it in
+    the background and refreshes. -#}
+
+{% macro ack_form(m, round=False) -%}
+<form class="dash-ack-form" method="post" action="/ack" data-ack>
+<input type="hidden" name="message_id" value="{{ m.id }}">
+{%- if m.person_id %}<input type="hidden" name="person_id" value="{{ m.person_id }}">{% endif %}
+{%- if round %}
+<button type="submit" class="dash-ack dash-ack-round" aria-label="{{ t("dashboard.mentions.got_it") }}"><span aria-hidden="true">✓</span></button>
+{%- else %}
+<button type="submit" class="dash-ack" aria-describedby="dash-mention-{{ m.key }}"><span aria-hidden="true">✓</span> {{ t("dashboard.mentions.got_it") }}</button>
+{%- endif %}
+</form>
+{%- endmacro %}
+
+{#- Home's @here banner and a reader page's own mention: label, sender
+    face + name, when, the text, a big "Got it". -#}
+{% macro mention_alert(m, label) -%}
+<li class="dash-alert">
+{{ face(m.person, "msg", spoken=False) }}
+<div class="dash-alert-body">
+<p class="dash-alert-head"><span class="dash-alert-label">{{ label }}</span> <span class="dash-alert-who">{{ m.person.display_name }}</span> <time datetime="{{ m.iso }}" data-rel>{{ m.when }}</time></p>
+<p class="dash-alert-text" id="dash-mention-{{ m.key }}">{{ m.text }}</p>
+</div>
+{{ ack_form(m) }}
+</li>
+{%- endmacro %}
+
+{#- Picture view: the sender's face + 💬 (a tap reads it aloud — no
+    words on screen) and a big ✓. -#}
+{% macro mention_tile(m) -%}
+<li class="dash-pv-mention">
+<button type="button" class="dash-pv-msg" aria-label="{{ t("dashboard.mentions.from_for_you", name=m.person.display_name) }}" data-say="{{ m.say }}" data-msg="mention-{{ m.id }}">
+{{ face(m.person, "lg", spoken=False) }}
+<span class="dash-pv-msg-badge dash-pv-msg-badge-new" aria-hidden="true">💬</span>
+<span class="dash-pv-msg-speaker" aria-hidden="true"></span>
+</button>
+{{ ack_form(m, round=True) }}
+</li>
+{%- endmacro %}

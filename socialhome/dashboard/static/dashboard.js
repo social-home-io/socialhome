@@ -24,6 +24,15 @@
  *     own, one at a time, a second tap stops it; only an on-device voice
  *     for the language is used (the text never leaves the tablet) —
  *     without one there is no 🔊 and a tap does nothing.
+ *   - mentions ([data-mention-state] in <main>): after every load and
+ *     swap the rail's badges ([data-badge]) follow the server, and a
+ *     mention this tablet hasn't seen yet plays one short, soft two-note
+ *     tone made on the device (WebAudio) — once per mention (remembered
+ *     in sessionStorage), never at night, never when the admin turned it
+ *     off, and silent where the browser blocks audio (the first tap
+ *     anywhere unlocks it);
+ *   - "Got it" ([data-ack] forms) posts in the background, takes the
+ *     card away and refreshes; without JS the form posts and comes back.
  */
 (function () {
   "use strict";
@@ -221,10 +230,19 @@
     setStale(false);
     tick();
     sayAfterSwap();
+    syncMentions();
   }
 
+  // A refresh asked for while one is in flight runs right after it (a
+  // "Got it" must not be undone by an older fragment landing).
+  var again = false;
+
   function refresh() {
-    if (busy || !main || !fragmentUrl || document.hidden) {
+    if (busy) {
+      again = true;
+      return;
+    }
+    if (!main || !fragmentUrl || document.hidden) {
       return;
     }
     busy = true;
@@ -261,6 +279,10 @@
       .catch(failed)
       .then(function () {
         busy = false;
+        if (again) {
+          again = false;
+          refresh();
+        }
       });
   }
 
@@ -411,6 +433,210 @@
     speakingId = id;
     markSay();
     synth.speak(utterance);
+  });
+
+  // ── Mentions: rail badges, a gentle tone for new ones, "Got it" ──────
+  var SEEN_KEY = "dash-mentions-seen";
+  var SEEN_MAX = 200;
+  // Wait no longer than this for a suspended audio context: a resume that
+  // only lands on a later tap must not play a stale tone.
+  var TONE_LATE_MS = 2000;
+  var AudioCtx = window.AudioContext || window.webkitAudioContext || null;
+  var audio = null; // one context, unlocked by the first tap, reused
+
+  function loadSeen() {
+    try {
+      var list = JSON.parse(window.sessionStorage.getItem(SEEN_KEY) || "[]");
+      return Array.isArray(list)
+        ? list.filter(function (k) {
+            return typeof k === "string";
+          })
+        : [];
+    } catch (e) {
+      return []; // storage blocked (private mode, a preview): memory only
+    }
+  }
+
+  var seen = loadSeen();
+
+  function saveSeen() {
+    try {
+      window.sessionStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+    } catch (e) {
+      // Remembered in memory for this page only.
+    }
+  }
+
+  function audioContext() {
+    if (!AudioCtx) {
+      return null;
+    }
+    if (!audio) {
+      try {
+        audio = new AudioCtx();
+      } catch (e) {
+        audio = null;
+      }
+    }
+    return audio;
+  }
+
+  // Two soft notes, once (the app's ringtone shape: sine, a short gain
+  // ramp that never passes 0.12) — synthesised here, nothing fetched.
+  function tone(ctx) {
+    var now = ctx.currentTime;
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.type = "sine";
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0, now);
+    osc.frequency.setValueAtTime(440, now);
+    gain.gain.linearRampToValueAtTime(0.1, now + 0.05);
+    gain.gain.linearRampToValueAtTime(0, now + 0.4);
+    osc.frequency.setValueAtTime(554, now + 0.45);
+    gain.gain.setValueAtTime(0, now + 0.45);
+    gain.gain.linearRampToValueAtTime(0.1, now + 0.5);
+    gain.gain.linearRampToValueAtTime(0, now + 0.95);
+    osc.onended = function () {
+      osc.disconnect();
+      gain.disconnect();
+    };
+    osc.start(now);
+    osc.stop(now + 1);
+  }
+
+  function chime() {
+    var ctx = audioContext();
+    if (!ctx) {
+      return;
+    }
+    try {
+      if (ctx.state === "running") {
+        tone(ctx);
+        return;
+      }
+      var asked = Date.now();
+      ctx.resume().then(
+        function () {
+          if (ctx.state === "running" && Date.now() - asked < TONE_LATE_MS) {
+            tone(ctx);
+          }
+        },
+        function () {
+          // Autoplay blocked: stay silent — the banner is enough.
+        }
+      );
+    } catch (e) {
+      // No audio on this device.
+    }
+  }
+
+  // The first tap anywhere unlocks audio (browsers only start sound
+  // after a user gesture).
+  document.addEventListener(
+    "pointerdown",
+    function unlock() {
+      document.removeEventListener("pointerdown", unlock, true);
+      var ctx = audioContext();
+      if (ctx && ctx.state === "suspended") {
+        ctx.resume().catch(function () {});
+      }
+    },
+    true
+  );
+  window.addEventListener("pagehide", function () {
+    if (audio) {
+      try {
+        audio.close();
+      } catch (e) {
+        // Already closed.
+      }
+      audio = null;
+    }
+  });
+
+  function syncMentions() {
+    var state = main && main.querySelector("[data-mention-state]");
+    if (!state) {
+      return;
+    }
+    var badges = (state.getAttribute("data-mention-badges") || "")
+      .split(" ")
+      .filter(Boolean);
+    document.querySelectorAll("[data-badge]").forEach(function (el) {
+      el.hidden = badges.indexOf(el.getAttribute("data-badge")) < 0;
+    });
+    var fresh = (state.getAttribute("data-mention-keys") || "")
+      .split(" ")
+      .filter(function (k) {
+        return k && seen.indexOf(k) < 0;
+      });
+    if (!fresh.length) {
+      return;
+    }
+    seen = seen.concat(fresh).slice(-SEEN_MAX);
+    saveSeen();
+    if (
+      state.getAttribute("data-mention-sound") === "1" &&
+      !body.classList.contains("dash-night")
+    ) {
+      chime();
+    }
+  }
+
+  syncMentions();
+
+  // "Got it": post in the background, take the card away, refresh. A
+  // 404 means it is gone anyway (seen on another tablet, deleted, too
+  // old); a 429 keeps the card for a later tap.
+  document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (
+      !form ||
+      !form.hasAttribute ||
+      !form.hasAttribute("data-ack") ||
+      typeof window.URLSearchParams !== "function"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    var button = form.querySelector("button");
+    if (button) {
+      button.disabled = true;
+    }
+    var data = new window.URLSearchParams();
+    form.querySelectorAll("input[name]").forEach(function (input) {
+      data.append(input.name, input.value);
+    });
+    fetch(form.getAttribute("action"), {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "manual",
+      body: data,
+    })
+      .then(function (res) {
+        if (res.status === 401) {
+          go("/login?next=" + encodeURIComponent(window.location.pathname));
+        } else if (res.status === 423) {
+          go("/");
+        } else if (res.type === "opaqueredirect" || res.ok || res.status === 404) {
+          var item = form.closest("li");
+          if (item) {
+            item.remove();
+          }
+        }
+      })
+      .catch(function () {
+        // Offline: the card stays; the refresh shows the banner.
+      })
+      .then(function () {
+        if (button) {
+          button.disabled = false;
+        }
+        refresh();
+      });
   });
 
   // ── Night mode: a tap shows the normal page for a minute ─────────────

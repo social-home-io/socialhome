@@ -1,6 +1,6 @@
 {#- Home (mockup B): clock + next up + who's home, then today, then the
     chores / shopping / notes columns. Empty columns are left out. -#}
-{% from "_macros.html.j2" import face, faces, agenda_row, chore, say_hint, message_row with context %}
+{% from "_macros.html.j2" import face, faces, agenda_row, chore, say_hint, message_row, mention_alert with context %}
 {% set day_on = "calendar" in snap.sections or "timetable" in snap.sections %}
 {#- Today in time order (crowded households; phones instead of lanes). -#}
 {% macro day_list_ol(extra="") -%}
@@ -20,6 +20,15 @@
 {%- endmacro %}
 <div class="dash-home">
   <h1 class="dash-visually-hidden">{{ household }}</h1>
+  {% if here_cards %}
+  {#- An @here in the household chat: on top until someone taps "Got it"
+      (on any tablet) or it is an hour old. -#}
+  <section class="dash-alerts" aria-label="{{ t("dashboard.mentions.everyone") }}">
+    <ul class="dash-alert-list">
+      {% for m in here_cards %}{{ mention_alert(m, t("dashboard.mentions.everyone")) }}{% endfor %}
+    </ul>
+  </section>
+  {% endif %}
   <header class="dash-top">
     <div class="dash-top-clock">
       <time class="dash-clock" datetime="{{ clock.iso }}" data-clock>{{ clock.time }}</time>

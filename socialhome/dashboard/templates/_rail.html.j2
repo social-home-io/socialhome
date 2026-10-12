@@ -1,5 +1,6 @@
 {#- The left rail: Home + one face per shown person, the current page
-    ringed; the lock button at the bottom while a PIN is set. On a
+    ringed, a badge on anyone with a mention waiting; the lock button at
+    the bottom while a PIN is set. On a
     portrait tablet or a phone it becomes a face strip on top (CSS). -#}
 {% from "_macros.html.j2" import face with context %}
 <nav class="dash-rail{% if rail_many %} dash-rail-many{% endif %}" aria-label="{{ t("dashboard.nav.label") }}">
@@ -14,6 +15,10 @@
     <li>
       <a class="dash-rail-item" href="/p/{{ p.user_id|urlencode }}"{% if current == p.user_id %} aria-current="page"{% endif %}>
         {{ face(p, "rail", named=True) }}
+        {#- A dot while someone @-mentioned them in the household chat;
+            dashboard.js shows / hides it after every refresh (the rail
+            isn't part of the swapped fragment). -#}
+        <span class="dash-rail-badge" data-badge="{{ p.user_id }}"{% if p.user_id not in badges %} hidden{% endif %}><span class="dash-visually-hidden">{{ t("dashboard.mentions.badge", name=p.display_name) }}</span></span>
       </a>
     </li>
     {% endfor %}
