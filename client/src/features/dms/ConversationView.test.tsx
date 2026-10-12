@@ -334,6 +334,36 @@ describe('ConversationView', () => {
   })
 })
 
+describe('ConversationView — reaction from the household dashboard', () => {
+  it('counts a ✅ by the dashboard pseudo-author (no user row) without crashing', async () => {
+    // A "Got it" tapped on the wall tablet reacts as ``household-dashboard``
+    // — a reactor id no member list knows. The strip only counts.
+    const wired = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/conversations/conv-a/messages')) {
+        return [{
+          ...msgRow('conv-a-bob', 'BOB-conv-a'),
+          reactions: [
+            { user_id: 'household-dashboard', emoji: '✅' },
+            { user_id: 'u-bob', emoji: '✅' },
+          ],
+        }]
+      }
+      return wired(url)
+    })
+    const { render, waitFor, ConversationView } = await setup()
+    const { container } = render(<ConversationView conversationId="conv-a" />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-reaction-chip')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    const chips = container.querySelectorAll('.sh-reaction-chip')
+    expect(chips.length).toBe(1)
+    expect(chips[0].textContent).toContain('✅')
+    expect(chips[0].querySelector('.sh-reaction-chip__count')!.textContent).toBe('2')
+    expect(chips[0].getAttribute('aria-pressed')).toBe('false')
+  })
+})
+
 describe('ConversationView — dm.active ownership', () => {
   const activeCalls = (send: ReturnType<typeof vi.fn>) =>
     send.mock.calls.filter(c => c[0] === 'dm.active').map(c => c[1])

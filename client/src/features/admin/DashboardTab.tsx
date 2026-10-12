@@ -397,6 +397,10 @@ function DisplaySection({ state, save }: { state: DashboardState, save: SaveFn }
           : `${t('admin.dashboard.display.messages_chat_off')} ${t('admin.dashboard.display.messages_hint')}`}
         checked={state.show_household_messages} disabled={!state.household_chat_enabled}
         onChange={(v) => void save({ show_household_messages: v })} />
+      <SwitchRow id="sh-dash-mention-sound" label={t('admin.dashboard.display.mention_sound')}
+        hint={t('admin.dashboard.display.mention_sound_hint')} checked={state.mention_sound}
+        disabled={!state.household_chat_enabled || !state.show_household_messages}
+        onChange={(v) => void save({ mention_sound: v })} />
 
       <div class="sh-dashboard-sessions">
         <p class="sh-muted">
