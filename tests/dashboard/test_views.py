@@ -1456,6 +1456,22 @@ async def test_old_locked_cookie_renews_locked(pin_client, auth, clock):
     assert claims.locked is True and claims.issued_at == int(clock.now)
 
 
+@pytest.mark.parametrize("path", ["/messages", "/notes", "/p/u-anna"])
+async def test_a_locked_page_load_renews_a_locked_cookie(
+    pin_client, auth, clock, snapshots, path
+):
+    """What ``_may_renew`` says: a locked tablet's page load shows the
+    lock screen (200) and renews — into a locked cookie, which is
+    harmless; the snapshot is never read."""
+    headers = await _locked(auth)
+    clock.advance(RENEW_AFTER_S + 1)
+    resp = await pin_client.get(path, headers=headers)
+    assert "data-lock" in await resp.text()
+    claims = await _claims(auth, resp)
+    assert claims.locked is True
+    assert snapshots.calls == []
+
+
 async def test_lock_on_an_old_cookie_is_not_undone_by_renewal(pin_client, auth, clock):
     headers = await _cookie(auth)
     clock.advance(RENEW_AFTER_S + 1)
