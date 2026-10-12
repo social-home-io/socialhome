@@ -644,3 +644,51 @@ async def test_media_after_a_refused_dm_is_refused_across_a_restart(
     await _dispatch(env._app, FET.DM_MEDIA_BLOB, _blob(conv_id, f"m-{conv_id}"))
     media = tmp_dir / "media"
     assert not media.exists() or not list(media.glob(f"m-{conv_id}*"))
+
+
+# ── Reactions on the REST read paths ─────────────────────────────────────
+
+
+async def _shared_group_with_reactions(env) -> None:
+    """A group a roster from another household can still seat kid, bob and
+    carol in: one message from carol, a 👍 from each of the three."""
+    db = env._db
+    await db.enqueue("INSERT INTO conversations(id, type) VALUES('g-kbc', 'group_dm')")
+    await _seat(db, "g-kbc", locals_=("kid", "bob", "carol"), rex=False)
+    await db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content) VALUES('m-carol', 'g-kbc', 'u-carol', 'hello')"
+    )
+    for name in ("kid", "bob", "carol"):
+        await db.enqueue(
+            "INSERT INTO message_reactions(message_id, user_id, emoji)"
+            " VALUES('m-carol', ?, '👍')",
+            (f"u-{name}",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("viewer", "expected"),
+    [
+        ("bob", {"u-bob", "u-carol"}),
+        ("kid", {"u-kid", "u-carol"}),
+        ("carol", {"u-kid", "u-bob", "u-carol"}),
+    ],
+)
+async def test_rest_reactions_hide_a_guardian_blocked_reactor(env, viewer, expected):
+    """The message list and the per-message roster leave out a reaction by
+    someone a guardian block separates from the viewer — either way — like
+    the live ``dm.message_reaction`` frame; others see every reaction, and
+    both endpoints agree on the count."""
+    await _shared_group_with_reactions(env)
+    r = await env.get("/api/conversations/g-kbc/messages", headers=_h(viewer))
+    assert r.status == 200, await r.text()
+    rows = {m["id"]: m for m in await r.json()}
+    listed = [rx["user_id"] for rx in rows["m-carol"]["reactions"]]
+    r = await env.get(
+        "/api/conversations/g-kbc/messages/m-carol/reactions", headers=_h(viewer)
+    )
+    assert r.status == 200, await r.text()
+    roster = [rx["user_id"] for rx in (await r.json())["reactions"]]
+    assert set(listed) == set(roster) == expected
+    assert len(listed) == len(roster) == len(expected)

@@ -146,7 +146,9 @@ the two share), react, or call — in either direction. The 403 the blocked
 person gets reads exactly like a personal block (`Recipient has you
 blocked.`). A roster from another household can still seat both; the
 protected account then can't post there and never sees the blocked person's
-messages, reactions or media.
+messages, reactions or media — and the blocked person never sees the
+protected account's reactions either, live (`dm.message_reaction`) or in
+`GET …/messages` / `GET …/messages/{mid}/reactions`.
 
 Implementation: `socialhome/federation/dm_scope.py` (`DmScope`),
 `socialhome/services/dm_group_service.py`; guardian blocks in
