@@ -9,6 +9,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -39,7 +40,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import FederationCapability
-from socialhome.domain.events import ConnectionReachable
+from socialhome.domain.events import ConnectionReachable, PairingConfirmed
 from socialhome.federation import FederationService
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation.invite_bootstrap import RELAY_THROTTLE_COOLDOWN_S
@@ -286,6 +287,19 @@ class InMemoryFederationRepo:
 
     async def delete_pairing(self, token: str) -> None:
         self._pairings.pop(token, None)
+
+    async def promote_pending_instance(self, inst, *, token=None):
+        """Mirrors the SQLite repo: needs the session (when named) AND a
+        still-pending row, else changes nothing."""
+        row = self._instances.get(inst.id)
+        if token is not None and token not in self._pairings:
+            return False
+        if row is None or row.status.value not in ("pending_sent", "pending_received"):
+            return False
+        if token is not None:
+            self._pairings.pop(token)
+        self._instances[inst.id] = inst
+        return True
 
     async def ban_instance_from_space(
         self,
@@ -5161,3 +5175,211 @@ async def test_broadcast_to_space_members_only_instances_narrows_never_widens(
     )
     assert sent == [writer.id]
     assert result.attempted == 1
+
+
+# ── send_event_once — one attempt to a row we no longer hold ───────────
+
+
+def _ok_http(status: int = 200):
+    resp = AsyncMock()
+    resp.status = status
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    resp.__aexit__ = AsyncMock(return_value=False)
+    http = MagicMock()
+    http.post = MagicMock(return_value=resp)
+    return http
+
+
+@pytest.mark.asyncio
+async def test_send_event_once_seals_with_the_given_row_not_the_repo():
+    """The pairing-cancel abort: the row is already gone from the repo, so
+    the envelope is sealed with the captured instance and POSTed to its
+    inbox — nothing is looked up, marked or queued."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()  # empty: the row was removed
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _key = _make_remote_instance(km, peer_kp=generate_identity_keypair())
+    http = _ok_http()
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=http,
+    )
+
+    result = await svc.send_event_once(
+        instance=inst,
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={"reason": "cancelled"},
+    )
+
+    assert result.ok is True
+    posted = http.post.call_args
+    assert posted.args[0] == inst.remote_inbox_url
+    envelope = posted.kwargs["json"]
+    assert envelope["event_type"] == FederationEventType.PAIRING_ABORT.value
+    assert envelope["to_instance"] == inst.id
+    assert "reason" not in str(envelope)  # encrypted, never plaintext
+    assert outbox_repo.enqueued == []
+    assert fed_repo.reachable_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["status", "raise"])
+async def test_send_event_once_failure_is_never_queued(failure):
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _key = _make_remote_instance(km, peer_kp=generate_identity_keypair())
+    if failure == "status":
+        http = _ok_http(503)
+    else:
+        http = MagicMock()
+        http.post = MagicMock(side_effect=Exception("connection refused"))
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=http,
+    )
+
+    result = await svc.send_event_once(
+        instance=inst,
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={},
+    )
+
+    assert result.ok is False
+    assert outbox_repo.enqueued == []
+    assert fed_repo.unreachable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_send_event_once_without_an_inbox_sends_nothing():
+    km = _make_kek_manager()
+    inst, _key = _make_remote_instance(km, peer_kp=generate_identity_keypair())
+    http = _ok_http()
+    svc, _ = _make_service(
+        federation_repo=InMemoryFederationRepo(),
+        outbox_repo=InMemoryOutboxRepo(),
+        key_manager=km,
+        http_client=http,
+    )
+    result = await svc.send_event_once(
+        instance=dataclasses.replace(inst, remote_inbox_url=""),
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={},
+    )
+    assert result.ok is False and result.error == "no_inbox_url"
+    http.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_event_once_with_an_unreadable_key_sends_nothing():
+    km = _make_kek_manager()
+    inst, _key = _make_remote_instance(km, peer_kp=generate_identity_keypair())
+    http = _ok_http()
+    svc, _ = _make_service(
+        federation_repo=InMemoryFederationRepo(),
+        outbox_repo=InMemoryOutboxRepo(),
+        key_manager=km,
+        http_client=http,
+    )
+    result = await svc.send_event_once(
+        instance=dataclasses.replace(inst, key_self_to_remote="garbage"),
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={},
+    )
+    assert result.ok is False and result.error == "key_decrypt_error"
+    http.post.assert_not_called()
+
+
+# ── An approved trust-relay pair confirms on the requester's first word ──
+
+
+async def _approval_row_service(status=PairingStatus.PENDING_SENT, *, keyed=True):
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    peer_kp = generate_identity_keypair()
+    session_key = os.urandom(32)
+    inst, _ = _make_remote_instance(km, peer_kp=peer_kp, session_key=session_key)
+    inst = dataclasses.replace(inst, status=status, relay_via="peer-b")
+    if not keyed:
+        inst = dataclasses.replace(inst, remote_identity_pk="", key_self_to_remote="")
+    await fed_repo.save_instance(inst)
+    bus = EventBus()
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km, bus=bus)
+    return svc, fed_repo, inst, peer_kp, session_key, km, confirmed
+
+
+@pytest.mark.asyncio
+async def test_first_envelope_from_an_approved_requester_confirms_the_pair():
+    svc, repo, inst, peer_kp, key, km, confirmed = await _approval_row_service()
+    seen_status: list[PairingStatus] = []
+
+    async def _handler(event):
+        seen_status.append((await repo.get_instance(inst.id)).status)
+
+    svc._event_registry.register(FederationEventType.USER_UPDATED, _handler)
+    raw = _make_valid_envelope(
+        svc=svc, peer_kp=peer_kp, session_key=key, km=km, peer_inst=inst
+    )
+
+    assert await svc.handle_inbound_envelope(
+        inbox_id=inst.local_inbox_id, raw_body=raw
+    ) == {"status": "ok"}
+
+    assert (await repo.get_instance(inst.id)).status is PairingStatus.CONFIRMED
+    assert [e.instance_id for e in confirmed] == [inst.id]
+    # Confirmed before the event reached its handler.
+    assert seen_status == [PairingStatus.CONFIRMED]
+
+
+@pytest.mark.asyncio
+async def test_a_forged_envelope_never_confirms_an_approval():
+    """Signed by someone else → refused before the step; row stays."""
+    svc, repo, inst, _peer_kp, key, km, confirmed = await _approval_row_service()
+    raw = _make_valid_envelope(
+        svc=svc,
+        peer_kp=generate_identity_keypair(),
+        session_key=key,
+        km=km,
+        peer_inst=inst,
+    )
+    with pytest.raises(ValueError):
+        await svc.handle_inbound_envelope(inbox_id=inst.local_inbox_id, raw_body=raw)
+    assert (await repo.get_instance(inst.id)).status is PairingStatus.PENDING_SENT
+    assert confirmed == []
+
+
+@pytest.mark.asyncio
+async def test_a_pairing_code_half_pair_is_never_confirmed_by_the_peer():
+    svc, repo, inst, peer_kp, key, km, confirmed = await _approval_row_service(
+        PairingStatus.PENDING_RECEIVED
+    )
+    raw = _make_valid_envelope(
+        svc=svc, peer_kp=peer_kp, session_key=key, km=km, peer_inst=inst
+    )
+    await svc.handle_inbound_envelope(inbox_id=inst.local_inbox_id, raw_body=raw)
+    assert (await repo.get_instance(inst.id)).status is PairingStatus.PENDING_RECEIVED
+    assert confirmed == []
+
+
+@pytest.mark.asyncio
+async def test_relay_approval_contact_ignores_a_request_row():
+    """Our own provisional request (no key) is confirmed only by the ack."""
+    svc, repo, inst, *_rest, confirmed = await _approval_row_service(keyed=False)
+    await svc._on_relay_approval_contact(inst.id)
+    assert (await repo.get_instance(inst.id)).status is PairingStatus.PENDING_SENT
+    assert confirmed == []
+
+
+@pytest.mark.asyncio
+async def test_relay_approval_contact_after_a_cancel_is_a_no_op():
+    svc, repo, inst, *_rest, confirmed = await _approval_row_service()
+    repo._instances.pop(inst.id)
+    await svc._on_relay_approval_contact(inst.id)
+    assert await repo.get_instance(inst.id) is None
+    assert confirmed == []

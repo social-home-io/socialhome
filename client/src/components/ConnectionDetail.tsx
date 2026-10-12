@@ -146,7 +146,7 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
     void (async () => {
       try {
         const body = await api.get(
-          `/api/pairing/connections/${conn.instance_id}/visible-users`,
+          `/api/pairing/connections/${encodeURIComponent(conn.instance_id)}/visible-users`,
         ) as { users: VisibleUser[] }
         if (!cancelled) setVisUsers(body.users)
       } catch {
@@ -162,7 +162,7 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
 
   useEffect(() => {
     let cancelled = false
-    api.get(`/api/pairing/connections/${conn.instance_id}/transport-detail`)
+    api.get(`/api/pairing/connections/${encodeURIComponent(conn.instance_id)}/transport-detail`)
       .then((body: unknown) => {
         const b = body as { last_relay: RelayDetail | null, inbox_url?: string | null }
         if (cancelled) return
@@ -182,7 +182,7 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
     setVisBusy(b => new Set(b).add(u.user_id))
     try {
       const body = await api.patch(
-        `/api/pairing/connections/${conn.instance_id}/visible-users`,
+        `/api/pairing/connections/${encodeURIComponent(conn.instance_id)}/visible-users`,
         { updates: [{ user_id: u.user_id, visible: next }] },
       ) as { users: VisibleUser[] }
       setVisUsers(body.users)
@@ -211,7 +211,7 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
     if ((next ?? '') === (conn.local_alias ?? '')) return
     setAliasBusy(true)
     try {
-      await api.patch(`/api/pairing/connections/${conn.instance_id}/alias`, {
+      await api.patch(`/api/pairing/connections/${encodeURIComponent(conn.instance_id)}/alias`, {
         alias: next,
       })
       showToast(
@@ -246,7 +246,7 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
 
   const revoke = async () => {
     try {
-      await api.delete(`/api/pairing/connections/${conn.instance_id}`)
+      await api.delete(`/api/pairing/connections/${encodeURIComponent(conn.instance_id)}`)
       showToast(t('connections.detail.removed'), 'info')
       showRevoke.value = false
       onRevoke()

@@ -289,6 +289,7 @@ from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_zone_outbound import SpaceZoneOutbound
 from .services.space_zone_service import SpaceZoneService
 from .services.page_federation_outbound import PageFederationOutbound
+from .services.pairing_cancel_service import PairingCancelService
 from .services.peer_unpair_service import PeerUnpairService
 from .services.task_federation_outbound import TaskFederationOutbound
 from .services.timetable_federation_outbound import TimetableFederationOutbound
@@ -1526,6 +1527,15 @@ def _wire_federation_stack(
     )
     app[K.auto_pair_coordinator_key] = auto_pair_coordinator
     app[K.auto_pair_inbox_key] = auto_pair_inbox
+    # Cancelling a pairing that was never confirmed (``DELETE
+    # /api/pairing/pending/{id}``): closes the handshake, tells the peer
+    # with a ``PAIRING_ABORT``, forgets the half-pair — no unpair tombstone.
+    app[K.pairing_cancel_service_key] = PairingCancelService(
+        bus=bus,
+        federation=federation_service,
+        federation_repo=federation_repo,
+        auto_pair=auto_pair_coordinator,
+    )
     space_membership_handlers = SpaceMembershipInboundHandlers(
         bus=bus,
         space_repo=space_repo,
@@ -2348,6 +2358,9 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # the 5/min handshake bucket below 429'd after two opens and a
             # toggle. The longest matching prefix wins.
             "/api/pairing/connections": (30, 60),
+            # Cancelling pending pairings — an admin clearing a few stale
+            # cards in a row; the same cadence as connection management.
+            "/api/pairing/pending": (30, 60),
             "/api/pairing": (5, 60),  # pairing handshakes
         },
     )

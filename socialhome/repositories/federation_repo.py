@@ -71,6 +71,13 @@ class AbstractFederationRepo(Protocol):
         self, instance_id: str
     ) -> tuple[int, str | None] | None: ...
     async def delete_instance(self, instance_id: str) -> None: ...
+    async def cancel_pending_instance(self, instance_id: str) -> list[str] | None: ...
+    async def promote_pending_instance(
+        self,
+        inst: RemoteInstance,
+        *,
+        token: str | None = None,
+    ) -> bool: ...
     async def mark_unpairing(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
     async def mark_unreachable(self, instance_id: str) -> None: ...
@@ -413,6 +420,87 @@ class SqliteFederationRepo:
             "DELETE FROM remote_instances WHERE id=?",
             (instance_id,),
         )
+
+    async def cancel_pending_instance(self, instance_id: str) -> list[str] | None:
+        """Cancel a pending pairing in ONE transaction; return the tokens of
+        the ``pending_pairings`` sessions it consumed, or ``None`` when there
+        is no pending row (unknown, confirmed, or an unpair tombstone).
+
+        Drops, all or nothing:
+
+        * every session behind the half-pair — the one that minted its
+          ``local_inbox_id`` and any naming the peer's identity key (a
+          re-scan mints a fresh inbox id, so the first match alone could
+          miss one). ``confirm``, ``handle_peer_accept`` and
+          ``handle_peer_confirm`` all start from a session, so none can
+          finish the handshake afterwards;
+        * the row, only while it is still pending (the race guard against
+          :meth:`promote_pending_instance` — whichever commits first wins);
+        * what was queued or learned for it, as ``PeerUnpairService.purge``
+          does (:func:`_purge_instance_side_rows`).
+        """
+
+        def _run(conn) -> list[str] | None:
+            row = conn.execute(
+                "SELECT local_inbox_id, remote_identity_pk FROM remote_instances"
+                " WHERE id=? AND status IN ('pending_sent', 'pending_received')",
+                (instance_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            inbox_id, peer_pk = str(row[0]), str(row[1] or "")
+            tokens = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT token FROM pending_pairings WHERE own_local_inbox_id=?"
+                    " OR (?<>'' AND lower(peer_identity_pk)=lower(?))",
+                    (inbox_id, peer_pk, peer_pk),
+                ).fetchall()
+            ]
+            conn.executemany(
+                "DELETE FROM pending_pairings WHERE token=?",
+                [(t,) for t in tokens],
+            )
+            conn.execute("DELETE FROM remote_instances WHERE id=?", (instance_id,))
+            _purge_instance_side_rows(conn, [instance_id])
+            return tokens
+
+        result = await self._db.transact(_run)
+        return None if result is None else list(result)
+
+    async def promote_pending_instance(
+        self,
+        inst: RemoteInstance,
+        *,
+        token: str | None = None,
+    ) -> bool:
+        """Write *inst* over a row that is still pending — and, with
+        *token*, consume that ``pending_pairings`` session — in ONE
+        transaction. Returns whether it happened.
+
+        The only way a handshake confirms a row (SAS entry, the peer's
+        signed peer-confirm, the trust-relay ack). Both conditions are the
+        race guard against :meth:`cancel_pending_instance`: a cancel that
+        committed first leaves no session and no pending row, so nothing is
+        written and nothing is resurrected; if either is missing the whole
+        step rolls back. ``local_inbox_id`` and the local opt-ins
+        (``share_home``, ``gfs_relay``, ``local_alias``) are kept.
+        """
+
+        def _run(conn) -> bool:
+            if token is not None:
+                if not conn.execute(
+                    "DELETE FROM pending_pairings WHERE token=?", (token,)
+                ).rowcount:
+                    raise _NotPending()
+            if not conn.execute(_PROMOTE_PENDING_SQL, _promote_params(inst)).rowcount:
+                raise _NotPending()
+            return True
+
+        try:
+            return bool(await self._db.transact(_run))
+        except _NotPending:
+            return False
 
     async def mark_unpairing(self, instance_id: str) -> None:
         """Turn a pairing into an unpair tombstone, atomically.
@@ -974,6 +1062,60 @@ def _instance_params(inst: RemoteInstance) -> tuple:
         inst.unreachable_since,
         int(inst.share_home),
         int(inst.gfs_relay),
+    )
+
+
+class _NotPending(Exception):
+    """Rolls back :meth:`SqliteFederationRepo.promote_pending_instance`."""
+
+
+_PROMOTE_PENDING_SQL = """
+UPDATE remote_instances SET
+    display_name=?,
+    remote_identity_pk=?,
+    key_self_to_remote=?,
+    key_remote_to_self=?,
+    remote_inbox_url=?,
+    status=?,
+    source=?,
+    proto_version=MAX(proto_version, ?),
+    remote_pq_algorithm=?,
+    remote_pq_identity_pk=?,
+    sig_suite=?,
+    intro_relay_enabled=?,
+    relay_via=?,
+    remote_keywrap_pk=COALESCE(?, remote_keywrap_pk),
+    home_lat=?,
+    home_lon=?,
+    paired_at=?,
+    last_reachable_at=?,
+    unreachable_since=?
+WHERE id=? AND status IN ('pending_sent', 'pending_received')
+"""
+
+
+def _promote_params(inst: RemoteInstance) -> tuple:
+    return (
+        inst.display_name,
+        inst.remote_identity_pk,
+        inst.key_self_to_remote,
+        inst.key_remote_to_self,
+        inst.remote_inbox_url,
+        inst.status.value,
+        inst.source.value,
+        inst.proto_version,
+        inst.remote_pq_algorithm,
+        inst.remote_pq_identity_pk,
+        inst.sig_suite,
+        int(inst.intro_relay_enabled),
+        inst.relay_via,
+        inst.remote_keywrap_pk,
+        inst.home_lat,
+        inst.home_lon,
+        inst.paired_at,
+        inst.last_reachable_at,
+        inst.unreachable_since,
+        inst.id,
     )
 
 

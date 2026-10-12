@@ -20,13 +20,31 @@ Wire protocol (3 parties: A=originator, B=vouching peer, C=target):
 
     C: queues the request in :class:`AutoPairInbox` + notifies admin.
        Admin clicks approve → coordinator.finalize_pending(request_id)
-       builds the ack and sends it back to A:
+       stores A's row as ``pending_sent`` (keyed, NOT confirmed) and
+       sends the ack back to A through B:
 
     C → A    PAIRING_INTRO_AUTO_ACK
                {a_id, c_id, c_pk, c_inbox_url, c_dh_pk,
                 via_b_id, vouch_sig, ack_sig, ts, nonce, token}
              where ack_sig = sign(C_seed,
                  a_id || a_dh_pk || c_id || c_dh_pk || ts || nonce)
+
+    A: verifies both signatures and confirms — only over its own
+       still-pending provisional row (a request A cancelled meanwhile is
+       not resurrected) — then announces itself to C as to any new peer:
+
+    A → C    first envelope (INSTANCE_CAPABILITIES_UPDATED, …)
+    C: the envelope verifies against A's vouched identity key and
+       decrypts under the session key — A completed the pairing — so C
+       confirms its row (``make_confirm_relay_approval``) before dispatch.
+
+C never holds a one-sided confirmed pairing: if A cancelled before C's
+admin approved, C's approval stays pending (its admin can cancel it).
+A request is answerable for
+:data:`~socialhome.services.auto_pair_inbox.AUTO_PAIR_REQUEST_TTL_SECONDS`
+on both sides (measured from A's signed ``ts`` on C); a target id must
+be a derived household id. No wire change: the confirming envelope is the
+one A already sent on every new pairing.
 
 Both sides verify every signature against identity public keys they
 already trust (via their own direct pairing with B). Session keys are
@@ -48,6 +66,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from ..crypto import (
     derive_instance_id,
     generate_x25519_keypair,
+    is_instance_id,
     random_token,
     sign_ed25519,
     verify_ed25519,
@@ -55,7 +74,9 @@ from ..crypto import (
 )
 from ..domain.events import AutoPairRequestIncoming, PairingConfirmed
 from ..domain.federation import (
+    AutoPairRequestExpiredError,
     FederationEventType,
+    PairingAlreadyConfirmedError,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
@@ -63,7 +84,8 @@ from ..domain.federation import (
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..repositories.federation_repo import AbstractFederationRepo
-from ..services.auto_pair_inbox import AutoPairInbox
+from ..services.auto_pair_inbox import AutoPairInbox, auto_pair_request_expired
+from .inbound_validator import TIMESTAMP_SKEW_SECONDS
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 
 if TYPE_CHECKING:
@@ -105,6 +127,17 @@ class _PendingAutoSession:
     ts: str
     nonce: str
     a_inbox_url: str
+
+
+def _id_bound_to_key(instance_id: str, identity_pk_hex: str) -> bool:
+    """Whether *instance_id* is a household id AND the one
+    *identity_pk_hex* derives to (§4.1.2). A malformed key is ``False``."""
+    if not is_instance_id(instance_id):
+        return False
+    try:
+        return derive_instance_id(bytes.fromhex(identity_pk_hex)) == instance_id
+    except ValueError:
+        return False
 
 
 def _vouch_blob(
@@ -250,6 +283,10 @@ class AutoPairCoordinator:
             raise ValueError(
                 "vouching peer must be a confirmed paired instance",
             )
+        if not is_instance_id(target_instance_id):
+            # It becomes our provisional row's id — and a URL path segment
+            # in the SPA. Only a derived household id can be a target.
+            raise ValueError("target_instance_id is not a household id")
         if target_instance_id == derive_instance_id(self._own_identity_pk):
             raise ValueError("cannot auto-pair with yourself")
         if not own_inbox_base_url:
@@ -261,6 +298,7 @@ class AutoPairCoordinator:
         if existing is not None and existing.status is PairingStatus.CONFIRMED:
             raise ValueError("already paired with this instance")
 
+        self._prune_pending()
         dh_kp = generate_x25519_keypair()
         token = random_token(16)
         nonce = secrets.token_hex(16)
@@ -313,6 +351,33 @@ class AutoPairCoordinator:
         )
         return {"status": "sent", "token": token}
 
+    def forget_requests_to(self, target_instance_id: str) -> int:
+        """Drop every outstanding request of ours to *target_instance_id*.
+
+        Called when our admin cancels the pending pairing. The in-memory
+        session (its ephemeral DH secret, nonce and token) is the only thing
+        :meth:`on_ack_at_originator` accepts an ack against, so once it is
+        gone an approval from the target that arrives later is ignored and
+        can never turn the cancelled request into a pairing. Returns how
+        many were dropped.
+        """
+        tokens = [
+            token
+            for token, session in self._pending.items()
+            if session.target_instance_id == target_instance_id
+        ]
+        for token in tokens:
+            del self._pending[token]
+        return len(tokens)
+
+    def _prune_pending(self) -> None:
+        """Forget our own requests past the TTL — the target forgets them
+        too (:data:`~socialhome.services.auto_pair_inbox.AUTO_PAIR_REQUEST_TTL_SECONDS`)."""
+        for token in [
+            t for t, sess in self._pending.items() if auto_pair_request_expired(sess.ts)
+        ]:
+            del self._pending[token]
+
     # ── Vouching peer (B) ──────────────────────────────────────────────
 
     async def on_intro_from_peer(self, event: "FederationEvent") -> None:
@@ -343,8 +408,14 @@ class AutoPairCoordinator:
             return
         try:
             t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - t).total_seconds() > INTRO_TTL_SECONDS:
+            age = (datetime.now(timezone.utc) - t).total_seconds()
+            if age > INTRO_TTL_SECONDS:
                 log.warning("auto-pair (vouch): stale ts=%s", ts)
+                return
+            if -age > TIMESTAMP_SKEW_SECONDS:
+                # Dated past the clock-skew window: not a real clock, and a
+                # stamp the target's expiry would never catch up with.
+                log.warning("auto-pair (vouch): future ts=%s", ts)
                 return
         except ValueError:
             log.warning("auto-pair (vouch): invalid ts=%s", ts)
@@ -455,6 +526,18 @@ class AutoPairCoordinator:
             context="target",
         ):
             return
+        if not _id_bound_to_key(a_id, a_pk_hex):
+            # The id must be the one A's key derives to — else a vouching
+            # peer could seat its own key under another household's id (and
+            # the id becomes a row id and a URL path segment here).
+            log.warning(
+                "auto-pair (target): introduced id %r is not bound to its key",
+                a_id[:40],
+            )
+            return
+        if auto_pair_request_expired(ts):
+            log.warning("auto-pair (target): stale or future-dated ts=%r", ts[:40])
+            return
 
         b = await self._repo.get_instance(via_b_id)
         if b is None or b.status is not PairingStatus.CONFIRMED:
@@ -535,6 +618,14 @@ class AutoPairCoordinator:
         req = self._inbox.pop(request_id)
         if req is None:
             raise KeyError(f"no pending auto-pair request {request_id!r}")
+        if auto_pair_request_expired(req.ts):
+            # Measured from A's own signed timestamp: A has stopped waiting.
+            raise AutoPairRequestExpiredError()
+        existing = await self._repo.get_instance(req.from_a_id)
+        if existing is not None and existing.status is PairingStatus.CONFIRMED:
+            # Paired meanwhile (e.g. by a pairing code): never overwrite a
+            # live pairing's keys with this request's.
+            raise PairingAlreadyConfirmedError("Already paired with this household.")
         if not own_inbox_base_url:
             raise ValueError(
                 "own_inbox_base_url required — set [standalone].external_url"
@@ -551,9 +642,13 @@ class AutoPairCoordinator:
             is_initiator=False,
         )
         now = datetime.now(timezone.utc).isoformat()
-        existing = await self._repo.get_instance(req.from_a_id)
         inbox_id = existing.local_inbox_id if existing else secrets.token_urlsafe(24)
-        confirmed = RemoteInstance(
+        # Pending, not confirmed: A may have cancelled its request meanwhile,
+        # and a one-sided confirmed row would be a pairing A never agreed
+        # to. A confirms when our ack reaches it and then talks to us; its
+        # first envelope that verifies and decrypts under these keys
+        # confirms the row here (``make_confirm_relay_approval``).
+        approved = RemoteInstance(
             id=req.from_a_id,
             display_name=req.from_a_display or req.from_a_id[:8],
             remote_identity_pk=req.from_a_pk,
@@ -561,13 +656,12 @@ class AutoPairCoordinator:
             key_remote_to_self=self._key_manager.encrypt(k_remote_to_self),
             remote_inbox_url=req.from_a_inbox_url,
             local_inbox_id=inbox_id,
-            status=PairingStatus.CONFIRMED,
+            status=PairingStatus.PENDING_SENT,
             source=InstanceSource.MANUAL,
             relay_via=req.via_b_id,
             paired_at=now,
         )
-        await self._repo.save_instance(confirmed)
-        await self._bus.publish(PairingConfirmed(instance_id=req.from_a_id))
+        await self._repo.save_instance(approved)
 
         # Sign ack and send back to A.
         c_id = derive_instance_id(self._own_identity_pk)
@@ -607,7 +701,7 @@ class AutoPairCoordinator:
             event_type=FederationEventType.PAIRING_INTRO_AUTO_ACK_VIA,
             payload=ack_payload,
         )
-        return confirmed
+        return approved
 
     async def decline_pending(
         self,
@@ -668,6 +762,7 @@ class AutoPairCoordinator:
     async def on_ack_at_originator(self, event: "FederationEvent") -> None:
         p = event.payload
         token = str(p.get("token") or "")
+        self._prune_pending()
         session = self._pending.pop(token, None)
         if session is None:
             # §Audit #8: redact pairing nonce in logs — it's the secret
@@ -699,6 +794,9 @@ class AutoPairCoordinator:
             log.warning("auto-pair ack: via mismatch")
             return
         if not _inbox_url_ok(c_inbox_url, field="c_inbox_url", context="ack"):
+            return
+        if not _id_bound_to_key(c_id, c_pk_hex):
+            log.warning("auto-pair ack: c_id is not bound to c_pk")
             return
         a_id = derive_instance_id(self._own_identity_pk)
         a_inbox_url = session.a_inbox_url
@@ -752,21 +850,27 @@ class AutoPairCoordinator:
             is_initiator=True,
         )
         existing = await self._repo.get_instance(c_id)
-        display_name = existing.display_name if existing else c_id[:8]
+        if existing is None:
+            # Our provisional row is gone — the request was cancelled after
+            # this ack had already taken the in-memory session.
+            log.info("auto-pair ack: request to %s was cancelled — ignored", c_id)
+            return
         confirmed = RemoteInstance(
             id=c_id,
-            display_name=display_name,
+            display_name=existing.display_name,
             remote_identity_pk=c_pk_hex,
             key_self_to_remote=self._key_manager.encrypt(k_self_to_remote),
             key_remote_to_self=self._key_manager.encrypt(k_remote_to_self),
             remote_inbox_url=c_inbox_url,
-            local_inbox_id=(
-                existing.local_inbox_id if existing else secrets.token_urlsafe(24)
-            ),
+            local_inbox_id=existing.local_inbox_id,
             status=PairingStatus.CONFIRMED,
             source=InstanceSource.MANUAL,
             relay_via=via_b_id,
             paired_at=datetime.now(timezone.utc).isoformat(),
         )
-        await self._repo.save_instance(confirmed)
+        # Only over our still-pending provisional row, in one transaction:
+        # a cancel that committed first leaves nothing to confirm.
+        if not await self._repo.promote_pending_instance(confirmed):
+            log.info("auto-pair ack: request to %s was cancelled — ignored", c_id)
+            return
         await self._bus.publish(PairingConfirmed(instance_id=c_id))

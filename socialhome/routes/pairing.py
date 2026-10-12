@@ -11,7 +11,10 @@ The pairing flow:
 Paired-instance management:
 
 * ``GET /api/pairing/connections`` — list every remote instance (any status).
-* ``DELETE /api/pairing/connections/{instance_id}`` — unpair.
+* ``DELETE /api/pairing/connections/{instance_id}`` — unpair (a still
+  pending pairing is cancelled instead).
+* ``DELETE /api/pairing/pending/{instance_id}`` — cancel a pairing that was
+  never confirmed; never touches a confirmed one (409).
 
 ``GET /api/connections`` is a read-only alias for the list endpoint that the
 frontend NetworkMap component consumes.
@@ -32,6 +35,7 @@ from ..app_keys import (
     federation_service_key,
     federation_transport_key,
     outbox_repo_key,
+    pairing_cancel_service_key,
     pairing_relay_queue_key,
     peer_gfs_relay_service_key,
     peer_home_sharing_service_key,
@@ -44,10 +48,12 @@ from ..domain.federation import (
     PAIRING_REACH_GFS,
     FederationEventType,
     InstanceSource,
+    PairingAlreadyConfirmedError,
     PairingStatus,
     RemoteInstance,
     gfs_relay_available,
     is_relay_only,
+    pending_kind,
 )
 from ..federation.pairing_gfs_reach import parse_reach
 from ..security import error_response
@@ -147,6 +153,10 @@ def _instance_dict(
         "peer_keywrap_known": bool(getattr(inst, "remote_keywrap_pk", None)),
         "gfs_relay_available": gfs_relay_available(inst),
         "status": status,
+        # Which handshake a pending row is (``code`` / ``request`` /
+        # ``approval``), ``None`` once confirmed — the SPA words the
+        # cancel for it.
+        "pending_kind": pending_kind(inst),
         "reachable": reachable,
         "transport": transport_state,
         # Undelivered envelopes still queued for this peer. A peer that
@@ -634,9 +644,48 @@ class PairingConnectionDetailView(BaseView):
         if not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
         instance_id = self.match("instance_id")
-        notified = await self.svc(peer_unpair_service_key).unpair(instance_id)
-        if notified is None:
+        inst = await self.svc(federation_repo_key).get_instance(instance_id)
+        if inst is not None and inst.status is not PairingStatus.CONFIRMED:
+            # A handshake still in flight is cancelled, not unpaired: no
+            # UNPAIR tombstone retrying for weeks to a peer that never
+            # confirmed. Should it have been confirmed a moment ago, the
+            # caller asked for it gone either way — unpair it below.
+            try:
+                notified = await self.svc(pairing_cancel_service_key).cancel_pending(
+                    instance_id
+                )
+            except PairingAlreadyConfirmedError:
+                pass
+            else:
+                return web.json_response({"ok": True, "peer_notified": notified})
+        notified_or_none = await self.svc(peer_unpair_service_key).unpair(instance_id)
+        if notified_or_none is None:
             return error_response(404, "NOT_FOUND", "Instance not found.")
+        return web.json_response({"ok": True, "peer_notified": notified_or_none})
+
+
+class PairingPendingDetailView(BaseView):
+    """``DELETE /api/pairing/pending/{instance_id}`` — cancel a pairing that
+    was never confirmed (the "Cancel" on a pending connection card).
+
+    200 ``{ok, peer_notified}`` when cancelled (``peer_notified: false`` —
+    the other household could not be told, or there was no channel to tell
+    it on), 404 when there is no pending pairing with that household
+    (including a second cancel), 409 ``PAIRING_CONFIRMED`` when it is
+    confirmed — including one that was confirmed a moment before the click
+    landed; then nothing was removed or sent. A separate resource rather
+    than a status switch on ``DELETE /api/pairing/connections/{id}``: the
+    admin's intent was "stop this handshake", and a stale card must never
+    turn that into tearing down a pairing that just went live. Admin-only.
+    See :class:`~socialhome.services.pairing_cancel_service.PairingCancelService`.
+    """
+
+    async def delete(self) -> web.Response:
+        if not self.user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
+        notified = await self.svc(pairing_cancel_service_key).cancel_pending(
+            self.match("instance_id")
+        )
         return web.json_response({"ok": True, "peer_notified": notified})
 
 

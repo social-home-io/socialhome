@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -1021,33 +1022,12 @@ class PairingCoordinator:
             # don't re-write the row. Safe replay.
             return {"ok": True, "instance_id": claimed_instance_id, "replay": True}
 
-        confirmed = RemoteInstance(
-            id=instance.id,
-            display_name=instance.display_name,
-            remote_identity_pk=instance.remote_identity_pk,
-            key_self_to_remote=instance.key_self_to_remote,
-            key_remote_to_self=instance.key_remote_to_self,
-            remote_inbox_url=instance.remote_inbox_url,
-            local_inbox_id=instance.local_inbox_id,
-            status=PairingStatus.CONFIRMED,
-            source=instance.source,
-            intro_relay_enabled=instance.intro_relay_enabled,
-            proto_version=instance.proto_version,
-            remote_pq_algorithm=instance.remote_pq_algorithm,
-            remote_pq_identity_pk=instance.remote_pq_identity_pk,
-            sig_suite=instance.sig_suite,
-            relay_via=instance.relay_via,
-            remote_keywrap_pk=instance.remote_keywrap_pk,
-            gfs_relay=instance.gfs_relay,
-            home_lat=instance.home_lat,
-            home_lon=instance.home_lon,
-            paired_at=instance.paired_at,
-            created_at=instance.created_at,
-            last_reachable_at=instance.last_reachable_at,
-            unreachable_since=instance.unreachable_since,
-        )
-        await self._repo.save_instance(confirmed)
-        await self._repo.delete_pairing(token)
+        # One transaction: consume the session and flip the row, only while
+        # it is still pending. A cancel that committed first leaves neither
+        # — the confirm is refused and nothing is resurrected.
+        confirmed = replace(instance, status=PairingStatus.CONFIRMED)
+        if not await self._repo.promote_pending_instance(confirmed, token=token):
+            raise ValueError("No pending pairing for this token")
 
         if self._bus is not None:
             await self._bus.publish(PairingConfirmed(instance_id=instance.id))
@@ -1092,35 +1072,14 @@ class PairingCoordinator:
                 f"RemoteInstance not found for peer_instance_id={peer_instance_id!r}"
             )
 
-        # Replace with a confirmed instance (frozen dataclass — rebuild).
-        # ``home_lat`` / ``home_lon`` mirror :meth:`peer_confirm` —
-        # without them the rebuild silently drops the coords carried
-        # via the peer-accept body and the row goes NULL until the next
-        # ``LOCAL_HOME_LOCATION_CHANGED`` envelope refills it.
-        confirmed = RemoteInstance(
-            id=instance.id,
-            display_name=instance.display_name,
-            remote_identity_pk=instance.remote_identity_pk,
-            key_self_to_remote=instance.key_self_to_remote,
-            key_remote_to_self=instance.key_remote_to_self,
-            remote_inbox_url=instance.remote_inbox_url,
-            local_inbox_id=instance.local_inbox_id,
-            status=PairingStatus.CONFIRMED,
-            source=instance.source,
-            remote_pq_algorithm=instance.remote_pq_algorithm,
-            remote_pq_identity_pk=instance.remote_pq_identity_pk,
-            sig_suite=instance.sig_suite,
-            remote_keywrap_pk=instance.remote_keywrap_pk,
-            gfs_relay=instance.gfs_relay,
-            home_lat=instance.home_lat,
-            home_lon=instance.home_lon,
-            paired_at=instance.paired_at,
-            created_at=instance.created_at,
-            last_reachable_at=instance.last_reachable_at,
-            unreachable_since=instance.unreachable_since,
-        )
-        await self._repo.save_instance(confirmed)
-        await self._repo.delete_pairing(token)
+        # Flip the row and consume the session in ONE transaction, only
+        # while the row is still pending: a cancel that committed first
+        # leaves neither, and this confirm is refused rather than writing
+        # the row back. Every stored field is kept (``replace``), including
+        # the coords carried via the peer-accept body.
+        confirmed = replace(instance, status=PairingStatus.CONFIRMED)
+        if not await self._repo.promote_pending_instance(confirmed, token=token):
+            raise ValueError("No pending pairing for this token")
 
         # Tell B we confirmed. Signature is verifiable by B using the
         # identity_pk B already stored during its ``accept()``.

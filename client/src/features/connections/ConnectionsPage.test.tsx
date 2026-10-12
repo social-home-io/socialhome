@@ -1,16 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, waitFor, fireEvent } from '@testing-library/preact'
 
-// Mock the API module before importing the page
-vi.mock('@/api', () => ({
-  api: {
-    get: vi.fn().mockResolvedValue([]),
-    post: vi.fn().mockResolvedValue({}),
-    put: vi.fn().mockResolvedValue({}),
-    patch: vi.fn().mockResolvedValue({}),
-    delete: vi.fn().mockResolvedValue(undefined),
-  },
-}))
+// Mock the API module before importing the page (the real ``ApiError`` —
+// the page tells a 404 apart from other failures).
+vi.mock('@/api', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@/api')>()
+  return {
+    ApiError: real.ApiError,
+    api: {
+      get: vi.fn().mockResolvedValue([]),
+      post: vi.fn().mockResolvedValue({}),
+      put: vi.fn().mockResolvedValue({}),
+      patch: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue(undefined),
+    },
+  }
+})
 
 // Mock auth store
 vi.mock('@/store/auth', () => ({
@@ -134,8 +139,10 @@ vi.mock('./FederationMap', () => ({
   },
 }))
 
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
 import { currentUser } from '@/store/auth'
+import { confirmDialog } from '@/components/confirm'
+import { showToast } from '@/components/Toast'
 import ConnectionsPage from './ConnectionsPage'
 import { setLocale } from '@/i18n/i18n'
 
@@ -1394,5 +1401,159 @@ describe('Map view "Manage"', () => {
     ;(currentUser as { value: { is_admin: boolean } }).value.is_admin = false
     const props = await openMap([makeConnection()])
     expect(props.onManage).toBeUndefined()
+  })
+})
+
+describe('ConnectionsPage — cancelling a pending pairing', () => {
+  const apiDelete = (api as unknown as { delete: ReturnType<typeof vi.fn> }).delete
+  const apiPost = (api as unknown as { post: ReturnType<typeof vi.fn> }).post
+  const confirmMock = confirmDialog as unknown as ReturnType<typeof vi.fn>
+  const toastMock = showToast as unknown as ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    apiDelete.mockReset()
+    apiDelete.mockResolvedValue({ ok: true, peer_notified: true })
+    confirmMock.mockReset()
+    toastMock.mockClear()
+  })
+
+  function renderWith(conns: Array<Record<string, unknown>>, requests: unknown[] = []) {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') return Promise.resolve(conns)
+      if (url === '/api/pairing/auto-pair-requests') return Promise.resolve(requests)
+      return Promise.resolve([])
+    })
+    return render(<ConnectionsPage />)
+  }
+
+  async function clickCancel(conn: Record<string, unknown>) {
+    const r = renderWith([makeConnection(conn)])
+    fireEvent.click(await r.findByText('connections.cancel_pending'))
+    return r
+  }
+
+  it.each(['pending_sent', 'pending_received'])(
+    'a %s card offers Cancel pairing (and no Unpair)', async (status) => {
+      const { container, queryByText } = renderWith([makeConnection({ status })])
+      await waitFor(() => {
+        expect(container.querySelector('.sh-connection-card--pending')).not.toBeNull()
+      })
+      expect(queryByText('connections.cancel_pending')).not.toBeNull()
+      expect(queryByText('connections.unpair')).toBeNull()
+    },
+  )
+
+  it('a confirmed card has no Cancel pairing', async () => {
+    const { container, queryByText } = renderWith([makeConnection()])
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card')).not.toBeNull()
+    })
+    expect(queryByText('connections.cancel_pending')).toBeNull()
+  })
+
+  it('a non-admin gets no Cancel pairing', async () => {
+    ;(currentUser as { value: { is_admin: boolean } }).value.is_admin = false
+    const { container, queryByText } = renderWith([makeConnection({ status: 'pending_sent' })])
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card--pending')).not.toBeNull()
+    })
+    expect(queryByText('connections.cancel_pending')).toBeNull()
+  })
+
+  it.each([
+    ['code', 'pending_received', 'connections.cancel_pending_confirm(name=The Smiths)'],
+    ['request', 'pending_sent', 'connections.cancel_pending_confirm_request(name=The Smiths)'],
+    ['approval', 'pending_sent', 'connections.cancel_pending_confirm_approval(name=The Smiths)'],
+  ])('asks with the %s wording, then calls the cancel endpoint', async (kind, status, text) => {
+    confirmMock.mockResolvedValue(true)
+    await clickCancel({
+      status, pending_kind: kind, instance_id: 'inst-p', display_name: 'The Smiths',
+    })
+    await waitFor(() => {
+      expect(apiDelete).toHaveBeenCalledWith('/api/pairing/pending/inst-p')
+    })
+    expect(confirmMock).toHaveBeenCalledWith(text, { destructive: true })
+    expect(toastMock).toHaveBeenCalledWith('connections.pending_cancelled', 'info')
+  })
+
+  it('encodes the household id into the path (never a path of its own)', async () => {
+    confirmMock.mockResolvedValue(true)
+    await clickCancel({ status: 'pending_sent', instance_id: '../connections/victim' })
+    await waitFor(() => {
+      expect(apiDelete).toHaveBeenCalledWith(
+        '/api/pairing/pending/..%2Fconnections%2Fvictim',
+      )
+    })
+  })
+
+  it('says so when the other household could not be told', async () => {
+    confirmMock.mockResolvedValue(true)
+    apiDelete.mockResolvedValue({ ok: true, peer_notified: false })
+    await clickCancel({
+      status: 'pending_received', pending_kind: 'code', display_name: 'The Smiths',
+    })
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith(
+        'connections.pending_cancelled_unnotified(name=The Smiths)', 'info',
+      )
+    })
+  })
+
+  it('a request through a trust relay has no one to tell — plain toast', async () => {
+    confirmMock.mockResolvedValue(true)
+    apiDelete.mockResolvedValue({ ok: true, peer_notified: false })
+    await clickCancel({ status: 'pending_sent', pending_kind: 'request' })
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith('connections.pending_cancelled', 'info')
+    })
+  })
+
+  it('backing out of the dialog cancels nothing', async () => {
+    confirmMock.mockResolvedValue(false)
+    await clickCancel({ status: 'pending_sent' })
+    await waitFor(() => expect(confirmMock).toHaveBeenCalled())
+    expect(apiDelete).not.toHaveBeenCalled()
+  })
+
+  it('already gone (404) is what was asked for — no error', async () => {
+    confirmMock.mockResolvedValue(true)
+    apiDelete.mockRejectedValueOnce(
+      new ApiError(404, '/api/pairing/pending/inst-1', { code: 'NOT_FOUND', detail: 'x' }),
+    )
+    await clickCancel({ status: 'pending_received' })
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith('connections.pending_cancelled', 'info')
+    })
+    expect(toastMock).not.toHaveBeenCalledWith(expect.anything(), 'error')
+  })
+
+  it('a refused cancel (confirmed meanwhile) toasts the error and reloads', async () => {
+    confirmMock.mockResolvedValue(true)
+    apiDelete.mockRejectedValueOnce(new Error('This household is already paired with you.'))
+    await clickCancel({ status: 'pending_received' })
+    await waitFor(() => {
+      expect(toastMock).toHaveBeenCalledWith(
+        'This household is already paired with you.', 'error',
+      )
+    })
+    const reloads = apiMock.get.mock.calls.filter(([u]) => u === '/api/connections')
+    expect(reloads.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('approving an introduction says the pairing completes once they confirm', async () => {
+    apiPost.mockResolvedValue({ ok: true })
+    const r = renderWith([], [{
+      request_id: 'r/1', from_a_id: 'a1', from_a_display: 'The Smiths',
+      via_b_id: 'b1', via_b_display: 'B', ts: '', received_at: '',
+    }])
+    fireEvent.click(await r.findByText('connections.requests.approve'))
+    await waitFor(() => {
+      expect(apiPost).toHaveBeenCalledWith(
+        '/api/pairing/auto-pair-requests/r%2F1/approve', {},
+      )
+    })
+    expect(toastMock).toHaveBeenCalledWith(
+      'connections.requests.approved(name=The Smiths)', 'success',
+    )
   })
 })

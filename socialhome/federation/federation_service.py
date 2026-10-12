@@ -50,6 +50,7 @@ from ..domain.events import (
     ConnectionReachable,
     ConnectionUnreachable,
     LocalHomeLocationUpdated,
+    PairingConfirmed,
     PairingIntroRelayReceived,
     PeerHomeChanged,
     PeerProtoVersionRaised,
@@ -72,6 +73,7 @@ from ..domain.federation import (
     DELIVERY_ERROR_ROUTE_COOLDOWN,
     DELIVERY_ERROR_ROUTED_SEND_FAILED,
     PAIRING_REACH_URL,
+    PENDING_KIND_APPROVAL,
     BroadcastResult,
     DeliveryResult,
     FederationEvent,
@@ -79,6 +81,7 @@ from ..domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+    pending_kind,
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
@@ -115,6 +118,7 @@ from .inbound_validator import (
     make_check_relay_opt_in,
     make_check_timestamp,
     make_check_unpairing,
+    make_confirm_relay_approval,
     make_decrypt_and_parse,
     make_idempotency_check,
     make_lookup_instance,
@@ -527,6 +531,11 @@ class FederationService:
                 encoder=self._encoder,
                 loads=_loads,
             ),
+            # An approved trust-relay pair confirms on the requester's first
+            # envelope that verified AND decrypted — proof it completed the
+            # pairing on its side. Before dispatch, so the handler already
+            # sees a confirmed peer.
+            make_confirm_relay_approval(on_contact=self._on_relay_approval_contact),
             make_idempotency_check(
                 cache_holder=lambda: self._idempotency_cache,
             ),
@@ -540,6 +549,21 @@ class FederationService:
         # redelivering.
         steps.extend(self.post_decrypt_gate_steps())
         return steps
+
+    async def _on_relay_approval_contact(self, instance_id: str) -> None:
+        """The household whose introduction our admin approved just sent its
+        first authenticated envelope — confirm the pair (§11 simple
+        pairing). Atomic and only while the row is still an approval
+        (:func:`~socialhome.domain.federation.pending_kind`): a cancel that
+        committed first leaves nothing to confirm."""
+        inst = await self._federation_repo.get_instance(instance_id)
+        if inst is None or pending_kind(inst) != PENDING_KIND_APPROVAL:
+            return
+        confirmed = replace(inst, status=PairingStatus.CONFIRMED)
+        if not await self._federation_repo.promote_pending_instance(confirmed):
+            return
+        log.info("auto-pair: %s confirmed the approved pairing", instance_id)
+        await self._bus.publish(PairingConfirmed(instance_id=instance_id))
 
     async def _on_tombstone_contact(self, instance_id: str) -> bool:
         """An unpair tombstone just proved it is online — send our queued
@@ -1547,6 +1571,62 @@ class FederationService:
             ok=False,
             status_code=status_code if isinstance(status_code, int) else None,
             error=DELIVERY_ERROR_QUEUED,
+        )
+
+    async def send_event_once(
+        self,
+        *,
+        instance: RemoteInstance,
+        event_type: FederationEventType,
+        payload: dict,
+    ) -> DeliveryResult:
+        """One attempt to deliver an event to *instance* — a row the caller
+        holds, which need no longer be in the repository.
+
+        For the pairing cancel's ``PAIRING_ABORT``: the half-pair is removed
+        first (so a cancel that loses a race to a confirm has sent nothing),
+        and the abort is then sealed with the keys of the captured row and
+        POSTed to its inbox. Unlike :meth:`send_event` there is no outbox
+        fallback, no RTC handshake and no reachability bookkeeping — there is
+        no row left to retry for or to mark. A peer with no inbox URL is not
+        reached at all.
+        """
+        if not instance.remote_inbox_url:
+            return DeliveryResult(
+                instance_id=instance.id, ok=False, error="no_inbox_url"
+            )
+        envelope_dict = self._seal_envelope(
+            instance,
+            event_type=event_type,
+            payload=payload,
+            space_id=None,
+        )
+        if envelope_dict is None:
+            return DeliveryResult(
+                instance_id=instance.id, ok=False, error="key_decrypt_error"
+            )
+        try:
+            client = await self._get_http_client()
+            async with post_to_peer(
+                client,
+                instance.remote_inbox_url,
+                json=envelope_dict,
+                timeout=_aiohttp_timeout(10),
+            ) as resp:
+                status_code = resp.status
+        except Exception as exc:
+            log.warning(
+                "send_event_once: transport error to %s: %s",
+                instance.id,
+                exc,
+            )
+            return DeliveryResult(
+                instance_id=instance.id, ok=False, error="transport_error"
+            )
+        return DeliveryResult(
+            instance_id=instance.id,
+            ok=200 <= status_code < 300,
+            status_code=status_code,
         )
 
     async def send_event_via_gfs(

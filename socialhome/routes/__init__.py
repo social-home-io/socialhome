@@ -194,6 +194,7 @@ from .pairing import (
     PairingConnectionVisibleUsersView,
     PairingInitiateView,
     PairingIntroduceView,
+    PairingPendingDetailView,
     PairingRelayApproveView,
     PairingRelayDeclineView,
     PairingRelayRequestCollectionView,
@@ -1164,6 +1165,10 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view(
         "/api/pairing/connections/{instance_id}",
         PairingConnectionDetailView,
+    )
+    app.router.add_view(
+        "/api/pairing/pending/{instance_id}",
+        PairingPendingDetailView,
     )
     app.router.add_view(
         "/api/pairing/connections/{instance_id}/visible-users",

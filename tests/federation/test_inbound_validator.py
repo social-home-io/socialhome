@@ -38,6 +38,7 @@ from socialhome.federation.inbound_validator import (
     make_check_replay,
     make_check_timestamp,
     make_check_unpairing,
+    make_confirm_relay_approval,
     make_idempotency_check,
     make_lookup_instance,
     make_parse_json,
@@ -907,6 +908,7 @@ class _StubPipelineOwner:
     _space_remote_member_repo = None
     _pending_seat_buffer = None
     _on_tombstone_contact = None
+    _on_relay_approval_contact = None
     _own_instance_id = "own-1"
 
     async def _notify_archived_write(self, event, space) -> None:
@@ -1607,3 +1609,82 @@ async def test_archived_gate_ignores_a_missing_event():
     ctx = InboundContext()
     await step(ctx)
     assert ctx.early_response is None
+
+
+# ─── An approved trust-relay pair confirms on the requester's first word ──
+
+
+class _KeyedStatusInstance(_StatusInstance):
+    def __init__(self, status, *, identity_pk: str = "aa" * 32):
+        super().__init__(status)
+        self.remote_identity_pk = identity_pk
+
+
+async def test_relay_approval_step_confirms_on_the_requesters_first_envelope():
+    seen: list[str] = []
+
+    async def _confirm(iid: str) -> None:
+        seen.append(iid)
+
+    step = make_confirm_relay_approval(on_contact=_confirm)
+    await step(
+        InboundContext(
+            envelope=_minimal_envelope(
+                event_type=FederationEventType.INSTANCE_CAPABILITIES_UPDATED.value
+            ),
+            instance=_KeyedStatusInstance(PairingStatus.PENDING_SENT),
+        )
+    )
+    assert seen == ["remote-iid"]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        PairingStatus.CONFIRMED,
+        # A pairing code (QR) half-pair: only our own verification step
+        # confirms it — never anything the pending peer sends.
+        PairingStatus.PENDING_RECEIVED,
+    ],
+)
+async def test_relay_approval_step_ignores_every_other_row(status):
+    seen: list[str] = []
+
+    async def _confirm(iid: str) -> None:
+        seen.append(iid)
+
+    step = make_confirm_relay_approval(on_contact=_confirm)
+    await step(
+        InboundContext(
+            envelope=_minimal_envelope(),
+            instance=_KeyedStatusInstance(status),
+        )
+    )
+    assert seen == []
+
+
+async def test_relay_approval_step_never_rejects_the_envelope():
+    """Fail-soft: a promotion that blows up leaves the envelope alone."""
+
+    async def _boom(iid: str) -> None:
+        raise RuntimeError("db down")
+
+    step = make_confirm_relay_approval(on_contact=_boom)
+    ctx = InboundContext(
+        envelope=_minimal_envelope(),
+        instance=_KeyedStatusInstance(PairingStatus.PENDING_SENT),
+    )
+    await step(ctx)
+    assert ctx.early_response is None
+
+
+async def test_relay_approval_step_runs_after_decrypt_and_before_dispatch():
+    """Mutation guard: only an envelope that verified AND decrypted under
+    the session key may confirm an approval."""
+    steps = FederationService._common_pipeline_steps(
+        _StubPipelineOwner(),  # type: ignore[arg-type]
+        lookup_step=_noop_step,
+    )
+    names = [getattr(s, "__name__", "") for s in steps]
+    assert names.index("verify_signature") < names.index("confirm_relay_approval")
+    assert names.index("decrypt_and_parse") < names.index("confirm_relay_approval")

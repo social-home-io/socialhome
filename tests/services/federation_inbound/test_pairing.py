@@ -973,3 +973,22 @@ async def test_a_link_joined_household_reports_no_switch(bus, repo, handlers):
     await _announce(handlers, row.id, {"gfs_relay": False})
 
     assert [e.peer_gfs_relay for e in seen] == [None]
+
+
+async def test_approval_withdrawn_after_the_requester_confirmed_is_forgotten(
+    bus, repo, handlers
+):
+    """The approver (C) cancels its trust-relay approval after our ack-side
+    confirm: it sends ``UNPAIR`` (a ``PAIRING_ABORT`` could not undo a
+    confirmed row), and we forget C — no one-sided pairing on our side."""
+    c_row = replace(
+        _sample_instance("peer-a", PairingStatus.CONFIRMED), relay_via="peer-b"
+    )
+    repo.instances["peer-a"] = c_row
+    captured: list[PeerUnpaired] = []
+    bus.subscribe(PeerUnpaired, captured.append)
+
+    await handlers._on_unpair(_event(FederationEventType.UNPAIR, {}))
+
+    assert "peer-a" not in repo.instances
+    assert [e.instance_id for e in captured] == ["peer-a"]

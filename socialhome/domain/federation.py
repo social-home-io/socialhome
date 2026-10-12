@@ -1264,6 +1264,33 @@ class GfsRelayNotAllowedError(CodedError, ValueError):
     detail = "The GFS fallback is only for confirmed, directly paired households."
 
 
+class PendingPairingNotFoundError(CodedError, LookupError):
+    """A cancel names a household we hold no pending pairing with."""
+
+    status = 404
+    code = "NOT_FOUND"
+    detail = "No pending pairing with this household."
+
+
+class PairingAlreadyConfirmedError(CodedError, ValueError):
+    """A cancel was asked for a pairing that is confirmed (it may have been
+    confirmed a moment ago). Cancelling never tears down a live pairing —
+    removing a connection is the unpair."""
+
+    status = 409
+    code = "PAIRING_CONFIRMED"
+    detail = "This pairing is already confirmed — remove the connection instead."
+
+
+class AutoPairRequestExpiredError(CodedError, ValueError):
+    """A trust-relay introduction is too old to approve — the household
+    that asked has long stopped waiting for the answer."""
+
+    status = 410
+    code = "REQUEST_EXPIRED"
+    detail = "This pairing request has expired — ask them to send a new one."
+
+
 class PairingKeywrapInvalidError(CodedError, ValueError):
     """The peer's key-wrap key is missing, of an unknown suite, or not
     bound to its identity key — never seal anything to it."""
@@ -1465,6 +1492,32 @@ def gfs_relay_available(instance: "RemoteInstance") -> bool:
     return bool(instance.remote_keywrap_pk) or (
         instance.proto_version >= FederationCapability.MIN_FOR_GFS_RELAY_KEY_EXCHANGE
     )
+
+
+#: ``pending_kind`` values — which handshake a pending row is.
+PENDING_KIND_CODE: str = "code"
+PENDING_KIND_REQUEST: str = "request"
+PENDING_KIND_APPROVAL: str = "approval"
+
+
+def pending_kind(instance: "RemoteInstance") -> str | None:
+    """Which handshake a pending ``remote_instances`` row is, or ``None``
+    when it is not pending. Pure, no I/O.
+
+    * ``code`` — a pairing code (QR / manual code) shown or scanned, the
+      SAS not entered yet (``pending_received``, either side).
+    * ``request`` — we asked a confirmed peer to introduce us to this
+      household (trust relay): a provisional row with no key.
+    * ``approval`` — our admin approved this household's introduction; we
+      wait for its signed confirmation (keyed ``pending_sent``).
+    """
+    if instance.status is PairingStatus.PENDING_RECEIVED:
+        return PENDING_KIND_CODE
+    if instance.status is PairingStatus.PENDING_SENT:
+        if instance.remote_identity_pk and instance.key_self_to_remote:
+            return PENDING_KIND_APPROVAL
+        return PENDING_KIND_REQUEST
+    return None
 
 
 @dataclass(slots=True, frozen=True)

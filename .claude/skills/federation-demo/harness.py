@@ -6830,15 +6830,15 @@ def cmd_relay_pair() -> None:
         _must("auto-pair approve(d)", s, _resp)
         print(f"  d approves request {request_id}")
 
-    # Settle: both the confirmed-status flip AND the on-pair
-    # ``INSTANCE_CAPABILITIES_UPDATED`` need a moment to land. The
-    # capabilities envelope races ahead of the ack — the receiver's
-    # provisional row has an empty ``remote_identity_pk`` until the
-    # ack lands, so the first send returns 404 and the outbox retries
-    # on a 5/10/20s backoff. Sleep past the first retry slot before
-    # checking, so we hit each token's ``/api/pairing/*`` bucket only
-    # once for this step (the bucket is 5 calls per 60 s; we've
-    # already spent ~2 on the request/approve round).
+    # Settle: d's approval is stored ``pending_sent`` — not confirmed —
+    # until a, having confirmed on the ack (relayed through b), sends its
+    # first envelope (its on-pair ``INSTANCE_CAPABILITIES_UPDATED``); that
+    # envelope confirms d's row, and d then announces itself back. Both
+    # hops can ride the outbox on a 5/10/20 s backoff. Sleep past the
+    # first retry slot before checking, so we hit each token's
+    # ``/api/pairing/*`` bucket only once for this step (the bucket is 5
+    # calls per 60 s; we've already spent ~2 on the request/approve
+    # round).
     state["relay_pair_ran"] = True
     _save(state)
     # ``INSTANCE_CAPABILITIES_UPDATED`` rides the outbox on the 5/10/20 s

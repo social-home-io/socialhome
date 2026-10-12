@@ -63,6 +63,10 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   // Spaces: joining, following, writing.
   ALREADY_MEMBER: () => t('error.already_member'),
   GFS_RELAY_NOT_ALLOWED: () => t('error.gfs_relay_not_allowed'),
+  // Pairing: a cancel or an approval raced a pairing that went live, or
+  // a trust-relay request too old to approve.
+  PAIRING_CONFIRMED: () => t('error.pairing_confirmed'),
+  REQUEST_EXPIRED: () => t('error.request_expired'),
   SPACE_NOT_PUBLIC: () => t('error.space_not_public'),
   // Listing a space on a GFS: only a global space, on servers its owner
   // picks. Publishing a public space would make it global (a tier change).
