@@ -21,6 +21,29 @@ describe('Modal', () => {
     expect(getByText('Hello modal')).toBeTruthy()
   })
 
+  it('is a plain dialog by default', () => {
+    const { getByRole } = render(<Modal open={true} title="T" onClose={() => {}}>C</Modal>)
+    expect(getByRole('dialog').className).toBe('sh-modal')
+  })
+
+  it('takes an extra class and the alertdialog role for a destructive confirm', () => {
+    const { getByRole } = render(
+      <Modal open={true} title="T" onClose={() => {}} class="sh-conn-confirm" role="alertdialog">C</Modal>
+    )
+    const el = getByRole('alertdialog')
+    expect(el.className).toBe('sh-modal sh-conn-confirm')
+    expect(el.getAttribute('aria-modal')).toBe('true')
+  })
+
+  it('a custom header replaces the title + ×, and gets the labelling id', () => {
+    const { getByRole, container } = render(
+      <Modal open={true} title="T" onClose={() => {}} header={(id) => <h2 id={id}>Custom</h2>}>C</Modal>
+    )
+    const dialog = getByRole('dialog')
+    expect(document.getElementById(dialog.getAttribute('aria-labelledby')!)!.textContent).toBe('Custom')
+    expect(container.querySelector('.sh-modal-close')).toBeNull()
+  })
+
   it('calls onClose when X clicked', () => {
     const fn = vi.fn()
     const { container } = render(

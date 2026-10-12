@@ -24,7 +24,36 @@ vi.mock('@/api', () => ({
   api: { get: (...args: unknown[]) => apiGet(...args) },
 }))
 
-import { connections, selfLat, selfLon, wireConnectionsWs } from './connections'
+import {
+  connections, connectionsLoadError, connectionsLoading, loadConnections,
+  selfLat, selfLon, wireConnectionsWs,
+} from './connections'
+
+describe('loadConnections', () => {
+  beforeEach(() => {
+    connections.value = []
+    connectionsLoadError.value = false
+    apiGet.mockReset()
+  })
+
+  it('fills the list and clears the error flag', async () => {
+    connectionsLoadError.value = true
+    apiGet.mockResolvedValue([{ instance_id: 'a', display_name: 'A', reachable: true }])
+    await loadConnections()
+    expect(connections.value).toHaveLength(1)
+    expect(connectionsLoadError.value).toBe(false)
+    expect(connectionsLoading.value).toBe(false)
+  })
+
+  it('records a failure as a flag and keeps the last list (never an empty "no households")', async () => {
+    connections.value = [{ instance_id: 'a', display_name: 'A', reachable: true }]
+    apiGet.mockRejectedValue(new Error('offline'))
+    await loadConnections()
+    expect(connectionsLoadError.value).toBe(true)
+    expect(connections.value).toHaveLength(1)
+    expect(connectionsLoading.value).toBe(false)
+  })
+})
 
 describe('wireConnectionsWs', () => {
   beforeEach(() => {

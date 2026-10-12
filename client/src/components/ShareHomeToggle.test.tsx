@@ -21,6 +21,27 @@ beforeEach(() => {
   mockShowToast.mockReset()
 })
 
+describe('ShareHomeToggle — card variant (Manage sheet)', () => {
+  it('is a labelled switch with the map wording, and PATCHes the same field', async () => {
+    render(<ShareHomeToggle variant="card" instanceId="abc123" peerName="The Smiths" initialValue={true} />)
+    const sw = screen.getByRole('switch', { name: 'Share our home location' }) as HTMLInputElement
+    expect(sw.checked).toBe(true)
+    expect(document.getElementById(sw.getAttribute('aria-describedby')!)!.textContent)
+      .toBe('Your “You” pin appears on The Smiths\'s map.')
+    fireEvent.click(sw)
+    expect(mockPatch).toHaveBeenCalledWith('/api/pairing/connections/abc123', { share_home: false })
+    expect(await screen.findByText('Your home stays hidden from The Smiths\'s map.')).toBeTruthy()
+  })
+})
+
+describe('ShareHomeToggle — URL', () => {
+  it('URL-encodes the instance id', () => {
+    render(<ShareHomeToggle instanceId="a/b c" peerName="P" initialValue={true} />)
+    fireEvent.click(screen.getByRole('checkbox'))
+    expect(mockPatch).toHaveBeenCalledWith('/api/pairing/connections/a%2Fb%20c', { share_home: false })
+  })
+})
+
 describe('ShareHomeToggle', () => {
   it('renders the label and helper text (enabled)', () => {
     const { container } = render(

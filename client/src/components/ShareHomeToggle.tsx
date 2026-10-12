@@ -15,6 +15,9 @@ export interface ShareHomeToggleProps {
   peerName: string
   initialValue: boolean
   onChange?: (newValue: boolean) => void
+  /** ``row`` (default): checkbox row, as in the pairing flow. ``card``: a
+   *  setting card with a switch, as in the Manage sheet. */
+  variant?: 'row' | 'card'
 }
 
 export function ShareHomeToggle({
@@ -22,6 +25,7 @@ export function ShareHomeToggle({
   peerName,
   initialValue,
   onChange,
+  variant = 'row',
 }: ShareHomeToggleProps) {
   const [enabled, setEnabled] = useState(initialValue)
 
@@ -37,6 +41,32 @@ export function ShareHomeToggle({
       setEnabled(!next)
       showToast(e.message || t('share_home.failed'), 'error')
     }
+  }
+
+  if (variant === 'card') {
+    const titleId = `sh-share-home-title-${instanceId}`
+    const helpId = `sh-share-home-help-${instanceId}`
+    return (
+      <label class="sh-conn-setting sh-share-home-toggle">
+        <span class="sh-conn-setting__text">
+          <b id={titleId}>{t('connections.manage.share_home_title')}</b>
+          <span id={helpId}>
+            {t(enabled ? 'connections.manage.share_home_on' : 'connections.manage.share_home_off', { peer: peerName })}
+          </span>
+        </span>
+        <span class="sh-switch">
+          <input
+            type="checkbox"
+            role="switch"
+            checked={enabled}
+            aria-labelledby={titleId}
+            aria-describedby={helpId}
+            onChange={() => void toggle()}
+          />
+          <span class="sh-switch-track" />
+        </span>
+      </label>
+    )
   }
 
   const helpText = enabled

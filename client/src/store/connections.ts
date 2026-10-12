@@ -38,10 +38,11 @@ export interface Connection {
   federated_display_name?: string
   local_alias?: string | null
   status?: string
-  /** Which handshake a pending row is — ``code`` (a pairing code shown or
-   *  scanned), ``request`` (we asked a connected household to introduce
-   *  us), ``approval`` (we approved an introduction; waiting for them).
-   *  ``null`` once confirmed. Absent on older API responses. */
+  /** What an unconfirmed row is waiting on (``null`` once confirmed):
+   *  ``code`` — a QR / pairing code is out (issuer and scanner can't be
+   *  told apart); ``request`` — we asked to pair through a household we
+   *  know; ``approval`` — we approved their request and wait for them to
+   *  confirm. Absent on older servers. */
   pending_kind?: 'code' | 'request' | 'approval' | null
   paired_at?: string | null
   source?: string
@@ -114,11 +115,38 @@ function upsert(patch: Partial<Connection> & { instance_id: string }): void {
   }
 }
 
+/** True while the Connections page's own load is in flight. */
+export const connectionsLoading = signal(true)
+/** The last :func:`loadConnections` failed. Kept as a flag (not an empty
+ *  list) so a fetch failure renders "Couldn't load", never the first-run
+ *  "no households yet" state. */
+export const connectionsLoadError = signal(false)
+/** A :func:`loadConnections` has finished at least once (either way).
+ *  The page's skeleton is only for the time before that — a refetch of
+ *  an empty list must not flash it. */
+export const connectionsLoadedOnce = signal(false)
+
+/** Load the list for the Connections page, recording failure in
+ *  :data:`connectionsLoadError`. The last known list is kept on failure. */
+export async function loadConnections(): Promise<void> {
+  connectionsLoading.value = true
+  try {
+    connections.value = await api.get('/api/connections') as Connection[]
+    connectionsLoadError.value = false
+  } catch {
+    connectionsLoadError.value = true
+  } finally {
+    connectionsLoading.value = false
+    connectionsLoadedOnce.value = true
+  }
+}
+
 /** Refetch the canonical list. On failure the current list is kept — a
  *  transient network error must not blank the connections page. */
 async function refreshConnections(): Promise<void> {
   try {
     connections.value = await api.get('/api/connections') as Connection[]
+    connectionsLoadError.value = false
   } catch {
     /* keep the last known list */
   }

@@ -357,18 +357,6 @@
   background-color: var(--sh-text-muted);
 }
 
-/* Connection type badge */
-.sh-type-badge {
-  display: inline-block;
-  font-size: var(--sh-font-size-xs);
-  padding: 1px 6px;
-  border-radius: var(--sh-radius-sm);
-  background: var(--sh-bg-secondary);
-  border: 1px solid var(--sh-border);
-  color: var(--sh-text-muted);
-  white-space: nowrap;
-}
-
 /* Skeleton animation (§23.118) */
 @keyframes sh-shimmer {
   0% { background-position: -200px 0; }
