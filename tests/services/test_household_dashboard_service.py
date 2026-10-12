@@ -16,7 +16,11 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import Calendar, CalendarEvent
 from socialhome.domain.conversation import ConversationMessage, MentionGlance
 from socialhome.domain.household_dashboard import (
+    CHAT_MAX_AGE,
+    CHAT_SHOWN,
     HERE_SHOWN,
+    MESSAGE_MAX_AGE,
+    MESSAGES_SHOWN,
     PERSON_PALETTE,
     TIMETABLE_COLOR_HEX,
     DashboardEvent,
@@ -49,6 +53,7 @@ from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import household_dashboard_service as dashboard_module
 from socialhome.services.household_dashboard_service import (
+    MAX_STICKIES,
     HouseholdDashboardService,
 )
 from socialhome.services.child_protection_service import ChildProtectionService
@@ -838,6 +843,37 @@ async def test_home_shopping_and_stickies():
     assert snap.shopping_total == 2
     assert [s.content for s in snap.stickies] == ["Call plumber"]  # Carl hidden
     assert snap.stickies[0].color == "#FFEE88"
+    assert snap.stickies_total == 1
+
+
+def _note(i: int, author: str = "u-anna") -> Sticky:
+    return Sticky(
+        id=f"n{i}",
+        author=author,
+        content=f"Note {i}",
+        color="#FFEE88",
+        position_x=0,
+        position_y=0,
+        created_at="",
+        updated_at="",
+    )
+
+
+async def test_home_carries_every_sticky_for_the_notes_tab():
+    """Review: the Notes tab showed only the first 20."""
+    h = Harness()
+    h.stickies.notes = [_note(i) for i in range(25)] + [_note(99, author="u-carl")]
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert len(snap.stickies) == 25 and snap.stickies_total == 25
+
+
+async def test_stickies_have_a_hard_upper_bound_but_a_true_count():
+    h = Harness()
+    h.stickies.notes = [_note(i) for i in range(MAX_STICKIES + 20)]
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert MAX_STICKIES == 100
+    assert len(snap.stickies) == MAX_STICKIES
+    assert snap.stickies_total == MAX_STICKIES + 20
 
 
 async def test_home_shopping_is_capped_but_counted():
@@ -1588,12 +1624,14 @@ async def test_messages_on_home():
     ]
     h.chat.rows[3] = dataclasses.replace(h.chat.rows[3], content="")
     snap = await h.home(now)
-    # One read: the last 6 h, only shown members (hidden Carl is not
-    # asked for), at most three (plus the mention glance).
+    # One read: the last day (the Messages tab; the Overview card takes
+    # its newest few of the last 6 h), only shown members (hidden Carl is
+    # not asked for), at most 30 (plus the mention glance).
     assert sorted(h.chat.calls) == ["recent_mentions", "recent_messages"]
-    assert h.chat.args["since"] == now - timedelta(hours=6)
+    assert h.chat.args["since"] == now - timedelta(hours=24)
     assert h.chat.args["senders"] == frozenset({"u-anna", "u-ben", "u-dora"})
-    assert h.chat.args["limit"] == 3
+    assert h.chat.args["limit"] == 30
+    assert snap.messages_on
     assert [(m.id, m.kind, m.text) for m in snap.messages] == [
         ("m1", "text", "Dinner at 7"),
         ("m2", "photo", ""),
@@ -1671,6 +1709,78 @@ async def test_messages_only_on_picture_view_pages():
     assert pupil is not None and pupil.person.picture_view
     assert [m.id for m in pupil.messages] == ["m1"]
     assert sorted(h.chat.calls) == ["recent_mentions", "recent_messages"]
+    # The picture view keeps the short glance: the last 6 h, three.
+    assert h.chat.args["since"] == now - MESSAGE_MAX_AGE
+    assert h.chat.args["limit"] == MESSAGES_SHOWN == 3
+
+
+def test_the_messages_tab_window_is_a_day_of_thirty():
+    assert CHAT_MAX_AGE == timedelta(hours=24)
+    assert CHAT_SHOWN == 30
+
+
+async def test_home_carries_the_last_day_across_midnight():
+    """The Messages tab lists the last 24 h — yesterday evening too —
+    in the household zone, newest first."""
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 8, 0)
+    h.chat.rows = [
+        chat_msg("today", "u-anna", now - timedelta(hours=1)),
+        chat_msg("late", "u-ben", at(TUESDAY - timedelta(days=1), 0, 5)),
+        chat_msg("evening", "u-dora", at(MONDAY - timedelta(days=1), 21, 10)),
+        chat_msg("morning", "u-anna", at(MONDAY - timedelta(days=1), 9, 0)),
+    ]
+    snap = await h.home(now)
+    assert h.chat.args["since"] == now - CHAT_MAX_AGE
+    assert [m.id for m in snap.messages] == ["today", "late", "evening", "morning"]
+    assert [m.sent_at.date() for m in snap.messages] == [
+        MONDAY,
+        MONDAY,
+        MONDAY - timedelta(days=1),
+        MONDAY - timedelta(days=1),
+    ]
+    assert all(m.sent_at.utcoffset() == timedelta(hours=2) for m in snap.messages)
+
+
+@pytest.mark.parametrize(
+    ("show", "chat", "expected"),
+    [(True, True, True), (False, True, False), (True, False, False)],
+)
+async def test_messages_on_follows_the_opt_in_and_the_chat(show, chat, expected):
+    h = Harness(
+        prefs=HouseholdPreferences(tz=BERLIN, feat_household_chat=chat),
+        settings=DashboardSettings(show_household_messages=show),
+    )
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert snap.messages_on is expected
+
+
+async def test_the_whole_day_keeps_the_overview_filters():
+    """The Messages tab's longer window is the same read: hidden members,
+    guardian blocks and deleted messages stay off it."""
+    h = Harness(settings=messages_on())
+    h.cp.counterparts = {"u-ben": frozenset({"u-anna"})}
+    now = at(MONDAY, 15, 30)
+    old = now - timedelta(hours=20)
+    h.chat.rows = [
+        chat_msg("blocked", "u-anna", old),
+        chat_msg("minor", "u-ben", old),
+        chat_msg("hidden", "u-carl", old),
+        chat_msg("gone", "u-dora", old, deleted=True),
+        chat_msg("ok", "u-dora", old),
+    ]
+    snap = await h.home(now)
+    assert h.chat.args["senders"] == frozenset({"u-dora"})
+    assert [m.id for m in snap.messages] == ["ok"]
+
+
+async def test_messages_on_even_with_nothing_to_show_or_at_night():
+    """The tab stays (with its empty state) when there is nothing; night
+    hides the whole bar itself."""
+    h = Harness(settings=messages_on())
+    assert (await h.home(at(MONDAY, 15, 30))).messages_on
+    night = await h.home(at(MONDAY, 23, 0))
+    assert night.messages_on and night.messages == ()
 
 
 # ─── Household chat: guardian blocks, future stamps ──────────────────────

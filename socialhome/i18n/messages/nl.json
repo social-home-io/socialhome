@@ -160,5 +160,18 @@
   "dashboard.mentions.for_you": "Bericht voor jou",
   "dashboard.mentions.got_it": "Gezien",
   "dashboard.mentions.badge": "Nieuw bericht voor {name}",
-  "dashboard.mentions.from_for_you": "Bericht van {name} voor jou"
+  "dashboard.mentions.from_for_you": "Bericht van {name} voor jou",
+  "dashboard.tabs.label": "Thuis",
+  "dashboard.tabs.overview": "Overzicht",
+  "dashboard.tabs.messages": "Berichten",
+  "dashboard.tabs.notes": "Notities",
+  "dashboard.tabs.new": "{n} nieuw",
+  "dashboard.home.see_all": "Alles",
+  "dashboard.messages.yesterday": "Gisteren",
+  "dashboard.messages.hear_rest": "tik om de rest te horen",
+  "dashboard.messages.playing": "Bericht van {name} wordt voorgelezen",
+  "dashboard.messages.empty": "Geen berichten van de afgelopen dag",
+  "dashboard.messages.empty_hint": "Schrijf er een in de Social Home-app.",
+  "dashboard.notes.empty": "Nog geen notities",
+  "dashboard.notes.empty_hint": "Voeg er een toe in de Social Home-app."
 }

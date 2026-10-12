@@ -1,0 +1,16 @@
+{#- Home's tab bar (tabs.py): quiet underline tabs, text only. The rail
+    keeps Home current; the current tab gets aria-current. The Messages
+    tab counts messages under 15 min old ("new", never "unread": a shared
+    board has no read state) — not on the Messages tab itself. Messages
+    and Notes keep a small clock at the end of the row (hidden on a
+    phone). Hidden at night with the day view. -#}
+<nav class="dash-tabs" aria-label="{{ t("dashboard.tabs.label") }}">
+  <ul class="dash-tab-list">
+    {% for tb in tabs %}
+    <li><a class="dash-tab" href="{{ tb.href }}"{% if tb.key == tab %} aria-current="page"{% endif %}><span class="dash-tab-label">{{ t("dashboard.tabs." ~ tb.key) }}</span>
+    {%- if tb.key == "messages" and tab != "messages" and tab_new %}<span class="dash-tab-badge" aria-hidden="true">{{ tab_new }}</span><span class="dash-visually-hidden">, {{ t("dashboard.tabs.new", n=tab_new) }}</span>{% endif -%}
+    </a></li>
+    {% endfor %}
+  </ul>
+  {% if tab != "overview" %}<time class="dash-tabs-clock" datetime="{{ clock.iso }}" data-clock>{{ clock.time }}</time>{% endif %}
+</nav>

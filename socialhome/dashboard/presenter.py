@@ -42,7 +42,7 @@ from ..domain.household_dashboard import (
     leading_emoji,
 )
 from .clock import days_late, due_label, hhmm, relative_in, until
-from .contrast import hex_color, ink_on, readable_on
+from .contrast import hex_color, ink_on, note_colors, readable_on
 from .icons import title_icon
 
 __all__ = [
@@ -96,14 +96,19 @@ NOW_LABEL_CLEARANCE = 12
 NARROW_BLOCK = 10
 SCHOOL_ICON = "🎒"
 SHOPPING_SHOWN = 6
-STICKIES_SHOWN = 4
+#: Notes on Home's Overview; the Notes tab shows them all.
+STICKIES_SHOWN = 3
 
 
 class ColorBook:
     """Validated colours → short CSS classes (``k0``, ``k1``…).
 
-    Each class sets ``--kc`` (the colour) and ``--kt`` (black or white
-    ink that reads on it). Register every colour *before* rendering
+    Each class sets ``--kc`` (the colour), ``--kt`` (black or white
+    ink that reads on it) and, for note cards, ``--kb`` (the colour
+    softened toward the page, mixed here in Oklab) with ``--kn`` (an ink
+    picked against that fill, :func:`~.contrast.note_colors`) — the dark
+    fill and ink again under ``prefers-color-scheme: dark`` and at night.
+    Register every colour *before* rendering
     (:meth:`add`); the template asks :meth:`cls`. Anything that isn't a
     plain hex colour gets no class — the element keeps its neutral look.
     """
@@ -123,9 +128,24 @@ class ColorBook:
         return "" if color is None else self._classes.get(color, "")
 
     def css(self) -> str:
-        return "".join(
-            f".{name}{{--kc:{color};--kt:{ink_on(color)}}}"
+        notes = {color: note_colors(color) for color in self._classes}
+        light = "".join(
+            f".{name}{{--kc:{color};--kt:{ink_on(color)};"
+            f"--kn:{notes[color].light_ink};--kb:{notes[color].light_bg}}}"
             for color, name in self._classes.items()
+        )
+        dark = [
+            (name, f"{{--kn:{notes[color].dark_ink};--kb:{notes[color].dark_bg}}}")
+            for color, name in self._classes.items()
+        ]
+        if not dark:
+            return light
+        return (
+            light
+            + "@media (prefers-color-scheme:dark){"
+            + "".join(f".{name}{rule}" for name, rule in dark)
+            + "}"
+            + "".join(f".dash-night .{name}{rule}" for name, rule in dark)
         )
 
 

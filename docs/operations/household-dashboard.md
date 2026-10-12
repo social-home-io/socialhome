@@ -112,21 +112,39 @@ dashboard **address** — it always wins over the guess.
 
 ## What the tablet shows
 
-- **Home** (`/`): the time and date, the next thing coming up today
-  (with whose it is and "in 28 min"), who's home and who's away (a zone
-  name like "Work" at most — never a map or coordinates), then **Today**:
+- **Home** has up to three tabs at the top — **Overview**, **Messages**
+  and **Notes** — while household messages are on and/or notes are
+  turned on (with neither, there is no tab bar). Tapping 🏠 in the rail
+  always brings back Overview, and so does leaving the tablet alone on
+  Messages or Notes for the "Back to Home after" time. The Messages tab
+  shows a small number when there are messages under 15 minutes old
+  ("new" — the tablet can't know who has read what). At night the tabs
+  are hidden and the tablet always wakes on Overview.
+- **Overview** (`/`): the time and date with who's home and who's away
+  under it (a zone name like "Work" at most — never a map or
+  coordinates), the next thing coming up today (with whose it is and
+  "in 28 min"), then **Today**:
   one lane per person from 08:00 to 22:00 (stretched for earlier / later
   plans) with their calendar events, a striped school block from their
   timetable and a "now" line; under it who is at school right now and
   today's timetable changes (⚠ cancelled, 🔁 changed, + added). Last, the
   chores due today (✓ done, ☐ to do, ⚠ "2 days late"), the shopping list
-  (the first six and "+ 5 more") and the household sticky notes. Empty
+  (the first six and "+ 5 more") and the first three household sticky
+  notes ("Notes · 6" with **See all ›** when there are more). Empty
   columns are left out; a day with nothing on it says "Nothing planned
   today 🎈". With more than six people — and on a phone — the lanes become
   one list in time order; with one person there is no rail and no "who's
   home". A bar too short for its title shows just an icon (its leading
   emoji, a guess from its words, else 🔹). When nothing is
   left today, the "Next" box shows tomorrow's first item instead.
+- **Messages** (`/messages`, part of *Show household messages*): the
+  household chat of the last day, newest first under **Today** and
+  **Yesterday**, each with the sender's face and name, "new" and the
+  time it was sent. A long message is cut short with "🔊 tap to hear the
+  rest"; tap a row to hear the whole message, tap again to stop. With
+  nothing in the last day it says "No messages in the last day".
+- **Notes** (`/notes`): every household sticky note on a flat board in
+  its own colour; "No notes yet" when there are none.
 - **A person** (tap their face in the rail): what they're doing now and
   next, their school day with rooms and teachers (a cancelled lesson is
   struck through *and* says "Cancelled"), today's and tomorrow's plans
@@ -170,9 +188,11 @@ dashboard **address** — it always wins over the guess.
   person's stored `picture` and the resolved `picture_effective`.
 - **Household messages** (off by default — Admin › Dashboard › Display ›
   *Show household messages*, `show_household_messages`; needs the
-  household chat turned on). Home shows a **Messages** card right under
-  "Next": the last three messages of the household chat from the past six
-  hours — the sender's face, the text (two lines at most) and when; one
+  household chat turned on). Overview shows a **Messages** card right
+  under "Next": the last three messages of the household chat from the
+  past six hours — the sender's face, the text (two lines at most) and
+  when (with **See all ›** to the Messages tab, which lists the whole
+  last day); one
   under 15 minutes old is marked "new" with "4 min ago". A photo, video
   or file says "📷 Photo" / "🎬 Video" / "📎 File" (its caption isn't
   shown), a voice note shows its transcript (or "🎤 Voice message"). Only
@@ -198,8 +218,10 @@ dashboard **address** — it always wins over the guess.
   Reading a message on the tablet doesn't mark it read for anyone — if
   it's urgent, call.
 - **Mentions** (part of *Show household messages*). Write `@here` in the
-  household chat and Home shows a banner on top — the sender's face and
-  name, the message and a big **✓ Got it** — for up to an hour. Tapping
+  household chat and Home shows a banner on top of every tab — the
+  sender's face and name, the message and a big **✓ Got it** — for up
+  to an hour. While the banner is up, that message isn't repeated in the
+  Messages card or on the Messages tab. Tapping
   Got it on any tablet clears it on all of them and adds a ✅ reaction to
   the message in the chat, so you see it was seen. Write `@leo` and
   Leo's face in the left rail (or the face strip on a phone) gets a dot,

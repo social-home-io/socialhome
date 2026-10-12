@@ -1,7 +1,8 @@
 /* Household dashboard — login, lock screen and the boards (Home, a person).
    System fonts only: the dashboard never fetches from a third-party host.
    No inline style attributes anywhere (the CSP forbids them): per-person /
-   per-item colours arrive as classes (.kN sets --kc / --kt) in the page's
+   per-item colours arrive as classes (.kN sets --kc / --kt, and --kb / --kn
+   for note cards) in the page's
    one hash-admitted <style>; timeline geometry uses the .x-N / .w-N steps
    at the end of this file. Logical properties throughout, so RTL flips. */
 
@@ -1746,7 +1747,15 @@ h3.dash-sublabel {
 .dash-night:not(.dash-woken) .dash-rail,
 .dash-night:not(.dash-woken) .dash-corner,
 .dash-night:not(.dash-woken) .dash-day,
+.dash-night:not(.dash-woken) .dash-alerts,
 .dash-woken .dash-night-view {
+  display: none;
+}
+
+/* Home's tabs and "See all" links stay hidden all night, woken or not:
+   at night /messages and /notes only bounce back to Overview. */
+.dash-night .dash-tabs,
+.dash-night .dash-see-all {
   display: none;
 }
 
@@ -2556,6 +2565,496 @@ h3.dash-sublabel {
     block-size: 38px;
     inset-block-end: -8px;
     inset-inline-end: -14px;
+    font-size: 1.25rem;
+  }
+}
+
+/* ── Home tabs: Overview · Messages · Notes (tabs.py) ───────────────── */
+
+:root {
+  --dash-gap: 20px;
+}
+
+/* Tab bar: quiet underline tabs, text only. */
+
+.dash-tabs {
+  display: flex;
+  align-items: center;
+  gap: 12px 24px;
+  margin-block: -8px 16px;
+  border-block-end: 1px solid var(--dash-border);
+}
+
+.dash-tab-list {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-block-size: 48px;
+  min-inline-size: 48px;
+  margin-block-end: -1px;
+  padding-inline: 16px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--dash-muted);
+  text-decoration: none;
+  border-block-end: 4px solid transparent;
+}
+
+/* The current tab: bold text + a 4 px accent bar (the rail ring's
+   weight) — never a fill, so "Got it" stays the only green pill. */
+.dash-tab[aria-current="page"] {
+  font-weight: 700;
+  color: var(--dash-text);
+  border-block-end-color: var(--dash-accent);
+}
+
+.dash-tab:focus-visible,
+.dash-see-all:focus-visible {
+  outline: 3px solid var(--dash-focus);
+  outline-offset: -3px;
+}
+
+/* New messages (< 15 min old — time-based, never "unread"). Not
+   rendered on the current tab; the CSS guard is belt and braces. */
+.dash-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 24px;
+  block-size: 24px;
+  padding-inline: 6px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--dash-accent-text);
+  background: var(--dash-accent);
+  border-radius: 999px;
+}
+
+.dash-tab[aria-current="page"] .dash-tab-badge {
+  display: none;
+}
+
+/* Messages / Notes on a tablet: the time stays on the wall. */
+.dash-tabs-clock {
+  margin-inline-start: auto;
+  font-size: 2.25rem;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+/* One alert slot under the bar, every tab: offline, then @here. */
+
+.dash-alert-slot > .dash-offline,
+.dash-alert-slot > .dash-alerts {
+  margin-block: 0 16px;
+}
+
+/* Overview. */
+
+/* Who's home lives under the date, in the clock column's empty space. */
+.dash-top-clock .dash-presence {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-block: 20px 0;
+}
+
+/* One "See all ›" pattern: a header link at the card's end, pulled into
+   the card padding so the 48 px target doesn't make the card taller. */
+.dash-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-block: -12px -4px;
+  margin-inline-end: -8px;
+}
+
+.dash-card-head .dash-label {
+  margin-block: 0;
+}
+
+.dash-col .dash-card-head {
+  margin-block-end: 4px;
+}
+
+.dash-see-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-block-size: 48px;
+  padding-inline: 12px;
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--dash-accent);
+  text-decoration: none;
+  white-space: nowrap;
+  border-radius: 12px;
+}
+
+.dash-see-all-arrow {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+[dir="rtl"] .dash-see-all-arrow {
+  transform: scaleX(-1);
+}
+
+/* Softened household colours (Overview previews and the Notes board):
+   the fill (--kb) is mixed toward the page on the server and the ink
+   (--kn) picked against it, light and dark (presenter.py ColorBook) —
+   faces and lanes keep --kt. */
+.dash-sticky,
+.dash-note {
+  color: var(--kn, #1f1d1a);
+  background: var(--kb, #fff3a8);
+}
+
+/* Messages tab: one newest-first column. */
+
+.dash-chat {
+  max-inline-size: 52rem;
+}
+
+.dash-chat-day + .dash-chat-day {
+  margin-block-start: var(--dash-gap);
+}
+
+/* Day dividers (h2): the dash-label look. */
+.dash-chat-label {
+  margin-block: 0 8px;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dash-muted);
+}
+
+.dash-chat-list {
+  margin: 0;
+  padding-block: 4px;
+  padding-inline: 12px;
+  list-style: none;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius);
+}
+
+.dash-chat-item + .dash-chat-item {
+  border-block-start: 1px solid var(--dash-border);
+}
+
+/* The whole row is one toggle button (tap = read aloud). Width and style
+   only — the colour belongs to .dash-msg-new / .dash-speaking. */
+.dash-chat-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  inline-size: 100%;
+  min-block-size: 72px;
+  margin-block: 4px;
+  padding-block: 12px;
+  padding-inline: 8px;
+  font: inherit;
+  color: inherit;
+  text-align: start;
+  background: transparent;
+  border: 0;
+  border-inline-start-width: 6px;
+  border-inline-start-style: solid;
+  border-inline-start-color: transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.dash-chat-msg.dash-msg-new {
+  border-inline-start-color: var(--dash-accent);
+}
+
+.dash-chat-msg:focus-visible {
+  outline: 3px solid var(--dash-focus);
+  outline-offset: -3px;
+}
+
+.dash-face-chat {
+  inline-size: 56px;
+  block-size: 56px;
+  font-size: 1.25rem;
+}
+
+.dash-chat-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-inline-size: 0;
+}
+
+.dash-chat-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  font-size: 1.125rem;
+}
+
+.dash-chat-who {
+  font-weight: 700;
+}
+
+.dash-chat-when {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--dash-muted);
+}
+
+.dash-chat-when .dash-tag {
+  font-size: 0.8125rem;
+}
+
+/* The text is clipped server-side (CHAT_CHARS) and gets the "tap to hear
+   the rest" cue; the 5-line clamp is only a safety net. */
+.dash-chat-text {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 1.5rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  line-clamp: 5;
+}
+
+.dash-chat-rest {
+  display: none;
+  margin-block-start: 4px;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--dash-accent);
+}
+
+.dash-can-speak .dash-chat-rest {
+  display: block;
+}
+
+/* The visible 🔊: a 48 px outlined circle, top-aligned with the face. It
+   is part of the row button (no nested control); only where speaking
+   works (html.dash-can-speak). */
+.dash-chat-speaker {
+  display: none;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  inline-size: 48px;
+  block-size: 48px;
+  margin-block-start: 4px;
+  font-size: 1.25rem;
+  line-height: 1;
+  background: var(--dash-surface);
+  border: 2px solid var(--dash-border);
+  border-radius: 50%;
+}
+
+.dash-can-speak .dash-chat-speaker {
+  display: inline-flex;
+}
+
+/* Playing (aria-pressed="true", .dash-speaking from dashboard.js): the
+   row is tinted and barred, the speaker fills. */
+.dash-chat-msg.dash-speaking {
+  background: color-mix(in oklab, var(--dash-accent) 12%, var(--dash-surface));
+  border-inline-start-color: var(--dash-accent);
+}
+
+.dash-chat-msg.dash-speaking .dash-chat-speaker {
+  background: var(--dash-accent);
+  border-color: var(--dash-accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dash-chat-msg.dash-speaking .dash-chat-speaker {
+    animation: dash-say 1.2s ease-in-out infinite alternate;
+  }
+}
+
+/* Notes tab. */
+
+.dash-note-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--dash-gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-note {
+  min-block-size: 10.5rem;
+  padding-block: 16px;
+  padding-inline: 20px;
+  font-size: 1.625rem;
+  line-height: 1.3;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.18),
+    0 4px 10px rgb(0 0 0 / 0.08);
+}
+
+/* Empty states (Messages, Notes). */
+
+.dash-tab-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-inline-size: 40rem;
+  margin-inline: auto;
+  padding-block: 32px;
+  padding-inline: 28px;
+  text-align: center;
+  border: 2px dashed var(--dash-border);
+  border-radius: var(--dash-radius);
+}
+
+.dash-tab-empty-icon {
+  font-size: 3rem;
+  line-height: 1;
+}
+
+.dash-tab-empty-title {
+  margin: 8px 0 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+}
+
+.dash-tab-empty-text {
+  margin: 0;
+  font-size: 1.375rem;
+  color: var(--dash-muted);
+}
+
+/* Dark mode. */
+
+@media (prefers-color-scheme: dark) {
+  .dash-sticky,
+  .dash-note {
+    box-shadow: none;
+    outline: 1px solid var(--dash-border);
+  }
+}
+
+/* Portrait tablet. */
+
+@media (max-width: 900px), (orientation: portrait) {
+  .dash-note-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Phone: one text-only row, 48 px. */
+
+@media (max-width: 600px) {
+  :root {
+    --dash-gap: 16px;
+  }
+
+  .dash-tabs {
+    margin-block-start: -4px;
+  }
+
+  /* Content-sized cells that share the spare width: "Messages" + its
+     count never truncates in English; a long translation ellipsises. */
+  .dash-tab-list {
+    flex: 1;
+    gap: 0;
+    min-inline-size: 0;
+  }
+
+  .dash-tab-list > li {
+    display: flex;
+    flex: 1 1 auto;
+    min-inline-size: 0;
+  }
+
+  .dash-tab {
+    flex: 1;
+    gap: 6px;
+    min-inline-size: 0;
+    padding-inline: 4px;
+    font-size: 1rem;
+  }
+
+  .dash-tab-label {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dash-tabs-clock {
+    display: none;
+  }
+
+  .dash-chat-list {
+    padding-inline: 4px;
+  }
+
+  .dash-chat-msg {
+    gap: 12px;
+    padding-inline: 6px;
+  }
+
+  .dash-face-chat {
+    inline-size: 44px;
+    block-size: 44px;
+    font-size: 1rem;
+  }
+
+  .dash-chat-text {
+    font-size: 1.25rem;
+  }
+
+  .dash-note-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dash-note {
+    min-block-size: 8rem;
+    padding-block: 12px;
+    padding-inline: 14px;
+    font-size: 1.25rem;
+  }
+
+  .dash-tab-empty {
+    padding-block: 28px;
+    padding-inline: 20px;
+  }
+
+  .dash-tab-empty-title {
+    font-size: 1.5rem;
+  }
+
+  .dash-tab-empty-text {
     font-size: 1.25rem;
   }
 }

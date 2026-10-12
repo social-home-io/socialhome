@@ -274,18 +274,26 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
     return response
 
 
-#: The page routes whose loads renew the cookie (an allow-list).
-_RENEWING_PATH = re.compile(r"/(?:p/[^/]+)?")
+#: The page routes whose loads renew the cookie (an allow-list): Home,
+#: its Messages and Notes tabs, a person page.
+_RENEWING_PATH = re.compile(r"/(?:p/[^/]+|messages|notes)?")
 
 
 def _may_renew(request: web.Request, response: web.StreamResponse) -> bool:
-    """Only page loads (``GET`` / ``HEAD`` of ``/`` or ``/p/{id}``) renew
-    the cookie — an allow-list. Never a ``/fragment/`` fetch, an avatar,
-    a static file or a form ``POST``: such a response can land after a
-    ``/lock`` (sent with the pre-lock cookie) and must not overwrite the
-    locked cookie. Never on a page that didn't render (a 404 for an
-    unknown or hidden person). And never over a cookie the view set
-    itself."""
+    """Only a ``200`` page load (``GET`` / ``HEAD`` of ``/``,
+    ``/messages``, ``/notes`` or ``/p/{id}``) renews the cookie — an
+    allow-list by path and status. Never a ``/fragment/`` fetch, an
+    avatar, a static file or a form ``POST``: such a response can land
+    after a ``/lock`` (sent with the pre-lock cookie) and must not
+    overwrite the locked cookie. Never a non-``200`` answer: an unlocked
+    tablet's 404 (an unknown or hidden person, a tab that is off) or a
+    tab's 303 at night. And never over a cookie the view set itself.
+
+    A *locked* tablet is answered by the guard with the lock screen, a
+    ``200`` on any of these paths (even ``/p/<unknown>`` or a tab that is
+    off) — so it does renew, into a cookie that is still locked
+    (:func:`_session_guard` re-issues ``locked``). Harmless: it only
+    keeps the locked session alive."""
     return (
         request.method in ("GET", "HEAD")
         and response.status == 200

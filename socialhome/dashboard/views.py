@@ -1,6 +1,6 @@
 """Household dashboard pages — login, setup link, logout, lock, and the
-boards: Home, a person, their ``/fragment/…`` refreshes and avatars —
-plus ``POST /ack``, the "Got it" on a household-chat mention (the
+boards: Home (its Overview · Messages · Notes tabs, :mod:`.tabs`), a
+person, their ``/fragment/…`` refreshes and avatars — plus ``POST /ack``, the "Got it" on a household-chat mention (the
 dashboard's one data write).
 
 Every view is server-rendered HTML; the session guard in
@@ -50,7 +50,15 @@ from .auth import (
     DashboardAuth,
 )
 from .clock import household_clock, resolve_zone
-from .messages import MentionCard, mention_cards, message_rows
+from .messages import (
+    MentionCard,
+    card_rows,
+    chat_days,
+    chat_window,
+    mention_cards,
+    message_rows,
+    new_count,
+)
 from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
@@ -81,6 +89,7 @@ from .presenter import (
     view_key,
 )
 from .render import DashboardRenderer
+from .tabs import TAB_MESSAGES, TAB_NOTES, TAB_OVERVIEW, home_tab, home_tabs
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +108,8 @@ __all__ = [
     "EnterView",
     "HealthView",
     "HomeFragmentView",
+    "HomeTabFragmentView",
+    "HomeTabView",
     "HomeView",
     "LockView",
     "LoginView",
@@ -502,11 +513,13 @@ async def _board(
     extra: dict[str, object],
     own_color: str | None = None,
     picture: bool = False,
+    tab: str | None = None,
 ) -> _Board:
     """The context every dashboard board (Home, a person) shares: rail,
     clock, night mode, the inline colour style and its view key.
     ``picture`` (a picture-view person) is part of the key too: it
-    changes the rail and the night view, which a swap can't."""
+    changes the rail and the night view, which a swap can't — and so is
+    Home's ``tab``, so a swap never crosses tabs."""
     app = request.app
     settings = await app[SETTINGS_KEY].get()
     t = app[RENDERER_KEY].translator(settings.locale)
@@ -558,9 +571,16 @@ async def _board(
             settings.idle_return_minutes,
             settings.keep_screen_on,
             picture,
+            tab,
         ),
         "fragment_url": fragment_url,
-        "idle_minutes": settings.idle_return_minutes if current else 0,
+        # A person page and Home's Messages / Notes tabs go back to
+        # Overview when nobody touches the tablet.
+        "idle_minutes": (
+            settings.idle_return_minutes
+            if current or tab not in (None, TAB_OVERVIEW)
+            else 0
+        ),
         "keep_awake": settings.keep_screen_on,
         "view_template": template,
         # The picture view's model (``picture.py``), set by the person
@@ -578,50 +598,93 @@ async def _board(
         "mention_sound": settings.mention_sound,
         "here_cards": [],
         "my_mentions": [],
+        # Home's tab bar (empty with only Overview, and on person pages).
+        "tab": tab,
+        "tabs": (),
+        "tab_new": 0,
         **extra,
     }
     return _Board(locale=settings.locale, context=context, style=style)
 
 
-async def _home_board(request: web.Request) -> _Board:
+async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board | None:
+    """Home on ``tab`` — ``None`` when that tab doesn't show (:mod:`.tabs`).
+
+    Every tab carries the tab bar (with the Messages badge: messages under
+    :data:`~.messages.NEW_FOR` old that the Messages tab lists, never on the
+    Messages tab itself) and the ``@here`` banners; a message on a banner
+    is left out of the Overview card, the Messages list and the badge
+    until someone taps "Got it"."""
     snap = await request.app[SNAPSHOTS_KEY].home()
-    colors = home_colors(snap)
+    tabs = home_tabs(snap)
+    if tab not in {t.key for t in tabs}:
+        return None
+    template = {
+        TAB_OVERVIEW: "_home.html.j2",
+        TAB_MESSAGES: "_home_messages.html.j2",
+        TAB_NOTES: "_home_notes.html.j2",
+    }[tab]
     board = await _board(
         request,
         snapshot=snap,
         people=snap.people,
-        colors=colors,
+        colors=home_colors(snap),
         current=None,
-        fragment_url=HOME_FRAGMENT,
-        template="_home.html.j2",
+        fragment_url=home_tab(tab).fragment,
+        template=template,
         extra={},
+        tab=tab,
     )
     fmt = cast(Fmt, board.context["f"])
+    here_cards = (
+        []
+        if snap.is_night
+        else mention_cards(here_alerts(snap.mentions), fmt)[:HERE_SHOWN]
+    )
+    bannered = frozenset(c.id for c in here_cards)
+    # The tab's window again here (the read model bounds it already).
+    rows = (
+        [] if snap.is_night else chat_window(message_rows(snap.messages, fmt), snap.now)
+    )
+    listed = [r for r in rows if r.id not in bannered]
     board.context.update(
         snap=snap,
-        timeline=build_timeline(snap, fmt),
-        day_rows=day_list(snap),
-        presence=presence_groups(snap),
-        at_school=(
-            school_now(snap.school, snap.now)
-            if SECTION_TIMETABLE in snap.sections
-            else []
-        ),
-        changes=(
-            school_changes(snap.school) if SECTION_TIMETABLE in snap.sections else []
-        ),
-        shopping_shown=snap.shopping[:SHOPPING_SHOWN],
-        shopping_more=max(0, snap.shopping_total - SHOPPING_SHOWN),
-        stickies=snap.stickies[:STICKIES_SHOWN],
-        open_chores=sum(1 for c in snap.chores_today if not c.done),
-        messages=[] if snap.is_night else message_rows(snap.messages, fmt),
-        here_cards=(
-            []
-            if snap.is_night
-            else mention_cards(here_alerts(snap.mentions), fmt)[:HERE_SHOWN]
-        ),
+        # Only Overview qualifying: no bar at all.
+        tabs=tabs if len(tabs) > 1 else (),
+        tab_new=new_count(listed),
+        here_cards=here_cards,
     )
-    _add_keys(board, cast(list[MentionCard], board.context["here_cards"]))
+    _add_keys(board, here_cards)
+    if tab == TAB_MESSAGES:
+        board.context["chat_days"] = chat_days(listed, fmt)
+    elif tab == TAB_NOTES:
+        board.context["notes"] = snap.stickies
+        board.context["notes_beyond"] = max(0, snap.stickies_total - len(snap.stickies))
+    else:
+        card = card_rows(rows, snap.now, hide=bannered)
+        board.context.update(
+            timeline=build_timeline(snap, fmt),
+            day_rows=day_list(snap),
+            presence=presence_groups(snap),
+            at_school=(
+                school_now(snap.school, snap.now)
+                if SECTION_TIMETABLE in snap.sections
+                else []
+            ),
+            changes=(
+                school_changes(snap.school)
+                if SECTION_TIMETABLE in snap.sections
+                else []
+            ),
+            shopping_shown=snap.shopping[:SHOPPING_SHOWN],
+            shopping_more=max(0, snap.shopping_total - SHOPPING_SHOWN),
+            stickies=snap.stickies[:STICKIES_SHOWN],
+            # "See all ›" only where the tab holds more than the card.
+            notes_more=snap.stickies_total > STICKIES_SHOWN,
+            open_chores=sum(1 for c in snap.chores_today if not c.done),
+            messages=card,
+            messages_more=snap.messages_on and len(listed) > len(card),
+        )
     return board
 
 
@@ -710,21 +773,62 @@ class _BoardView(_DashboardView):
         return html_response(text)
 
 
-class HomeView(_BoardView):
+class _PageView(_BoardView):
+    """A board page: ``HEAD`` is the ``GET`` (same status, headers and
+    cookie renewal) — aiohttp sends it without the body."""
+
+    async def head(self) -> web.Response:
+        return await self.get()  # type: ignore[attr-defined]
+
+
+class HomeView(_PageView):
     """``GET /`` — the household overview (or night mode)."""
 
     async def get(self) -> web.Response:
-        return await self.page(await _home_board(self.request))
+        board = await _home_board(self.request)
+        assert board is not None  # Overview always shows
+        return await self.page(board)
 
 
 class HomeFragmentView(_BoardView):
     """``GET /fragment/home`` — Home's ``<main>`` content, for live refresh."""
 
     async def get(self) -> web.Response:
-        return await self.fragment(await _home_board(self.request))
+        board = await _home_board(self.request)
+        assert board is not None  # Overview always shows
+        return await self.fragment(board)
 
 
-class PersonView(_BoardView):
+class HomeTabView(_PageView):
+    """``GET /messages`` and ``GET /notes`` — Home's other tabs.
+
+    ``404`` (the plain not-found page) while the tab doesn't show; at night
+    ``303`` to ``/``, so every wake lands on Overview."""
+
+    async def get(self) -> web.Response:
+        board = await _home_board(self.request, self.request.match_info["tab"])
+        if board is None:
+            locale = (await self.settings.get()).locale
+            return await self.render("not_found.html.j2", locale=locale, status=404)
+        if board.context["night"]:
+            return redirect("/")
+        return await self.page(board)
+
+
+class HomeTabFragmentView(_BoardView):
+    """``GET /fragment/home/messages`` and ``/fragment/home/notes`` — a
+    tab's ``<main>`` content; a plain ``404`` once the tab is gone (the
+    script goes to Overview). At night its view key changes, so the page
+    reloads — into the ``303``."""
+
+    async def get(self) -> web.Response:
+        board = await _home_board(self.request, self.request.match_info["tab"])
+        if board is None:
+            return web.Response(status=404, text="Not Found")
+        return await self.fragment(board)
+
+
+class PersonView(_PageView):
     """``GET /p/{user_id}`` — one shown person's page; ``404`` for anyone
     unknown, inactive or hidden (the same page either way)."""
 
@@ -944,8 +1048,12 @@ class StaticView(_DashboardView):
 
 def register_routes(app: web.Application) -> None:
     app.router.add_view("/", HomeView)
+    app.router.add_view(f"/{{tab:{TAB_MESSAGES}|{TAB_NOTES}}}", HomeTabView)
     app.router.add_view("/p/{user_id}", PersonView)
     app.router.add_view("/fragment/home", HomeFragmentView)
+    app.router.add_view(
+        f"/fragment/home/{{tab:{TAB_MESSAGES}|{TAB_NOTES}}}", HomeTabFragmentView
+    )
     app.router.add_view("/fragment/p/{user_id}", PersonFragmentView)
     app.router.add_view("/avatar/{user_id}", AvatarView)
     app.router.add_view("/login", LoginView)

@@ -18,8 +18,10 @@ House rules:
   Never DMs, notifications, space chats or polls.
 * **Household chat, only when asked.** With the admin's
   ``show_household_messages`` on (and ``feat_household_chat`` on), Home
-  and picture-view pages carry the newest :data:`MESSAGES_SHOWN`
-  household-chat messages of the last :data:`MESSAGE_MAX_AGE` — never at
+  carries the household-chat messages of the last :data:`CHAT_MAX_AGE`
+  (at most :data:`CHAT_SHOWN`, for its Messages tab) and picture-view
+  pages the newest :data:`MESSAGES_SHOWN` of the last
+  :data:`MESSAGE_MAX_AGE` — never at
   night, never on a reader page, never a location, a deleted message,
   one stamped in the future or one from a hidden person. The read
   (:meth:`HouseholdChatService.recent_messages`) never creates the chat
@@ -74,6 +76,8 @@ from ..domain import timetable as td
 from ..domain.calendar import Calendar, CalendarEvent, all_day_covers
 from ..domain.conversation import ConversationMessage, MentionGlance
 from ..domain.household_dashboard import (
+    CHAT_MAX_AGE,
+    CHAT_SHOWN,
     HERE_SHOWN,
     MENTION_HERE,
     MENTION_MAX_AGE,
@@ -139,7 +143,10 @@ __all__ = ["HouseholdDashboardService"]
 MAX_EVENTS = 30
 MAX_CHORES = 30
 MAX_SHOPPING = 20
-MAX_STICKIES = 20
+#: A hard upper bound on the stickies a snapshot carries — the Notes
+#: tab shows them all up to this; ``stickies_total`` keeps the true
+#: count (the household board is read whole, as the app reads it).
+MAX_STICKIES = 100
 MAX_TOMORROW_ITEMS = 5
 #: A person's page lists chores due within this many days; done chores
 #: due that far ahead still count when they were finished today.
@@ -347,17 +354,21 @@ class HouseholdDashboardService:
         )
         colors = self._person_colors(ctx, calendars)
         senders = await self._chat_senders(ctx)
-        people, events, chores, shopping, stickies, chat = await asyncio.gather(
+        people, events, chores, shopping, notes, chat = await asyncio.gather(
             self._people(ctx, colors),
             self._events(ctx, calendars, colors),
             self._chores(ctx, due_to=ctx.today),
             self._shopping_slice(),
             self._sticky_slice(ctx),
-            asyncio.gather(self._messages(ctx, senders), self._mentions(ctx, senders)),
+            asyncio.gather(
+                self._messages(ctx, senders, max_age=CHAT_MAX_AGE, limit=CHAT_SHOWN),
+                self._mentions(ctx, senders),
+            ),
         )
         messages, mentions = chat
         school = [self._school(ctx, user.user_id, timetables) for user in ctx.shown]
         shopping_items, shopping_total = shopping
+        stickies, stickies_total = notes
         all_today = events.get(ctx.today, [])
         school_today = tuple(d.today for d in school if d.today is not None)
         school_tomorrow = tuple(
@@ -378,12 +389,14 @@ class HouseholdDashboardService:
             shopping=shopping_items,
             shopping_total=shopping_total,
             stickies=stickies,
+            stickies_total=stickies_total,
             school=school_today,
             tomorrow_first=_next_after(
                 ctx.now, [*events.get(tomorrow, []), *school_tomorrow]
             ),
             messages=messages,
             mentions=mentions,
+            messages_on=self._messages_on(ctx),
         )
 
     async def person(
@@ -814,29 +827,36 @@ class HouseholdDashboardService:
         )
         return shown, len(items)
 
-    async def _sticky_slice(self, ctx: _Context) -> tuple[DashboardSticky, ...]:
+    async def _sticky_slice(
+        self, ctx: _Context
+    ) -> tuple[tuple[DashboardSticky, ...], int]:
+        """The household stickies (hidden authors left out), at most
+        :data:`MAX_STICKIES` of them, and how many there are in all."""
         if not ctx.on(SECTION_STICKIES):
-            return ()
+            return (), 0
         notes = await _safe("stickies", self._stickies.list(space_id=None), [])
-        return tuple(
+        shown = [
             DashboardSticky(id=n.id, content=n.content, color=n.color)
             for n in notes
             if n.author not in ctx.hidden_ids
-        )[:MAX_STICKIES]
+        ]
+        return tuple(shown[:MAX_STICKIES]), len(shown)
 
     # ── Household chat ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _messages_on(ctx: _Context) -> bool:
+        """The admin turned messages on and the household chat is on."""
+        return ctx.settings.show_household_messages and ctx.prefs.is_enabled(
+            HOUSEHOLD_CHAT_SECTION
+        )
 
     async def _chat_senders(self, ctx: _Context) -> frozenset[str]:
         """Whose household-chat messages and mentions the wall may show:
         the shown members no guardian block withholds — empty (nothing is
         read) while the admin hasn't turned messages on, the household
         chat is off, or it is night."""
-        if (
-            not ctx.settings.show_household_messages
-            or not ctx.prefs.is_enabled(HOUSEHOLD_CHAT_SECTION)
-            or self._is_night(ctx)
-            or not ctx.shown_ids
-        ):
+        if not self._messages_on(ctx) or self._is_night(ctx) or not ctx.shown_ids:
             return frozenset()
         try:
             withheld = await self._guardian_withheld(ctx)
@@ -847,20 +867,25 @@ class HouseholdDashboardService:
         return ctx.shown_ids - withheld
 
     async def _messages(
-        self, ctx: _Context, senders: frozenset[str]
+        self,
+        ctx: _Context,
+        senders: frozenset[str],
+        *,
+        max_age: timedelta = MESSAGE_MAX_AGE,
+        limit: int = MESSAGES_SHOWN,
     ) -> tuple[DashboardMessage, ...]:
-        """The newest household-chat messages of the last
-        :data:`MESSAGE_MAX_AGE` from ``senders`` (:meth:`_chat_senders`) —
-        ``()`` without reading anything when there are none."""
+        """The newest ``limit`` household-chat messages of the last
+        ``max_age`` from ``senders`` (:meth:`_chat_senders`) — ``()``
+        without reading anything when there are none."""
         if not senders:
             return ()
         rows = await _safe(
             "household chat",
             self._chat.recent_messages(
-                since=ctx.now - MESSAGE_MAX_AGE,
+                since=ctx.now - max_age,
                 until=ctx.now + MESSAGE_CLOCK_SKEW,
                 senders=senders,
-                limit=MESSAGES_SHOWN,
+                limit=limit,
             ),
             list[ConversationMessage](),
         )

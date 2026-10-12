@@ -1,6 +1,9 @@
-{#- Home (mockup B): clock + next up + who's home, then today, then the
-    chores / shopping / notes columns. Empty columns are left out. -#}
-{% from "_macros.html.j2" import face, faces, agenda_row, chore, say_hint, message_row, mention_alert with context %}
+{#- Home's Overview tab (mockup B): clock, date and who's home, next up
+    and the newest messages, then today, then the chores / shopping /
+    notes columns. Empty columns are left out. The @here banners sit in
+    the alert slot above (_view.html.j2); "See all ›" links to the
+    Messages / Notes tab when it holds more than the card. -#}
+{% from "_macros.html.j2" import face, faces, agenda_row, chore, say_hint, message_row, see_all with context %}
 {% set day_on = "calendar" in snap.sections or "timetable" in snap.sections %}
 {#- Today in time order (crowded households; phones instead of lanes). -#}
 {% macro day_list_ol(extra="") -%}
@@ -20,19 +23,32 @@
 {%- endmacro %}
 <div class="dash-home">
   <h1 class="dash-visually-hidden">{{ household }}</h1>
-  {% if here_cards %}
-  {#- An @here in the household chat: on top until someone taps "Got it"
-      (on any tablet) or it is an hour old. -#}
-  <section class="dash-alerts" aria-label="{{ t("dashboard.mentions.everyone") }}">
-    <ul class="dash-alert-list">
-      {% for m in here_cards %}{{ mention_alert(m, t("dashboard.mentions.everyone")) }}{% endfor %}
-    </ul>
-  </section>
-  {% endif %}
   <header class="dash-top">
     <div class="dash-top-clock">
       <time class="dash-clock" datetime="{{ clock.iso }}" data-clock>{{ clock.time }}</time>
       <p class="dash-date">{{ clock.date }}</p>
+      {% if presence %}
+      {#- Who's home, under the date: 🏠 faces, then 🚗 faces + zone. -#}
+      <section class="dash-presence" aria-labelledby="dash-presence-label" data-live>
+        <h2 class="dash-visually-hidden" id="dash-presence-label">{{ t("dashboard.home.whos_home") }}</h2>
+        {% if presence.home %}
+        <p class="dash-presence-group">
+          <span class="dash-presence-icon" aria-hidden="true">🏠</span>
+          <span class="dash-visually-hidden">{{ t("dashboard.presence.home") }}:</span>
+          {% for p in presence.home %}{{ face(p, "sm") }}{% endfor %}
+        </p>
+        {% endif %}
+        {% if presence.away %}
+        <p class="dash-presence-group dash-presence-away">
+          <span class="dash-presence-icon" aria-hidden="true">🚗</span>
+          <span class="dash-visually-hidden">{{ t("dashboard.presence.away") }}:</span>
+          {% for p in presence.away %}
+          <span class="dash-away">{{ face(p, "sm") }}{% if p.zone_name %}<span class="dash-zone">{{ p.zone_name }}</span>{% endif %}</span>
+          {% endfor %}
+        </p>
+        {% endif %}
+      </section>
+      {% endif %}
     </div>
     {% if snap.next_up or snap.tomorrow_first or messages %}
     <div class="dash-top-side">
@@ -69,9 +85,13 @@
     {% endif %}
     {% if messages %}
     {#- The newest household-chat messages (admin opt-in), right under
-        NEXT; the card is left out entirely when there are none. -#}
+        NEXT, minus any on an @here banner; the card is left out entirely
+        when there are none. -#}
     <section class="dash-msgs" aria-labelledby="dash-msgs-label">
-      <h2 class="dash-label" id="dash-msgs-label">{{ t("dashboard.messages.heading") }}</h2>
+      <div class="dash-card-head">
+        <h2 class="dash-label" id="dash-msgs-label">{{ t("dashboard.messages.heading") }}</h2>
+        {% if messages_more %}{{ see_all("/messages", "dash-msgs-label") }}{% endif %}
+      </div>
       {{ say_hint() }}
       <ul class="dash-msg-list">
         {% for m in messages %}{{ message_row(m) }}{% endfor %}
@@ -81,28 +101,6 @@
     </div>
     {% endif %}
   </header>
-
-  {% if presence %}
-  <section class="dash-presence" aria-labelledby="dash-presence-label" data-live>
-    <h2 class="dash-visually-hidden" id="dash-presence-label">{{ t("dashboard.home.whos_home") }}</h2>
-    {% if presence.home %}
-    <p class="dash-presence-group">
-      <span class="dash-presence-icon" aria-hidden="true">🏠</span>
-      <span class="dash-visually-hidden">{{ t("dashboard.presence.home") }}:</span>
-      {% for p in presence.home %}{{ face(p, "sm") }}{% endfor %}
-    </p>
-    {% endif %}
-    {% if presence.away %}
-    <p class="dash-presence-group dash-presence-away">
-      <span class="dash-presence-icon" aria-hidden="true">🚗</span>
-      <span class="dash-visually-hidden">{{ t("dashboard.presence.away") }}:</span>
-      {% for p in presence.away %}
-      <span class="dash-away">{{ face(p, "sm") }}{% if p.zone_name %}<span class="dash-zone">{{ p.zone_name }}</span>{% endif %}</span>
-      {% endfor %}
-    </p>
-    {% endif %}
-  </section>
-  {% endif %}
 
   {% if day_on %}
   <section class="dash-today" aria-labelledby="dash-today-label">
@@ -204,7 +202,10 @@
     {% endif %}
     {% if show_notes %}
     <section class="dash-col" aria-labelledby="dash-notes-label">
-      <h2 class="dash-label" id="dash-notes-label">{{ t("dashboard.home.notes") }}</h2>
+      <div class="dash-card-head">
+        <h2 class="dash-label" id="dash-notes-label">{{ t("dashboard.home.notes") }} · {{ snap.stickies_total }}</h2>
+        {% if notes_more %}{{ see_all("/notes", "dash-notes-label") }}{% endif %}
+      </div>
       <ul class="dash-stickies">
         {% for s in stickies %}<li class="dash-sticky {{ f.kc(s.color) }}">{{ s.content }}</li>{% endfor %}
       </ul>

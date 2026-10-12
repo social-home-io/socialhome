@@ -1441,7 +1441,7 @@ drives it) and is then served by a **separate aiohttp application on its own por
   makes locked cookies count as unlocked (nothing could unlock them
   otherwise).
   - **Races.** Only page loads renew the cookie — an allow-list of `GET` /
-    `HEAD` `/` and `/p/{id}`; never `/fragment/…`, `/avatar/…`, static files or
+    `HEAD` `/`, `/messages`, `/notes` and `/p/{id}` (with a 200); never `/fragment/…`, `/avatar/…`, static files or
     a `POST` — and `POST /lock` revokes the incoming unlocked cookie as
     *locked* — by session id, so every renewed copy of it too: if a
     slow response still lands one, it shows the lock screen (not a
@@ -1533,9 +1533,12 @@ picture-view default (on for child-protected minors) is one shared rule,
 
 **Household messages (opt-in glance).** With the admin's
 `show_household_messages` (default off) and `feat_household_chat` on,
-Home and picture-view pages carry the newest three household-chat
-messages of the last six hours (wall-clock age) — nothing at night, and a
-reader person page never reads them. The source is the household group
+Home carries the household-chat messages of the last 24 hours (at most
+30, newest first — one read, `CHAT_MAX_AGE` / `CHAT_SHOWN`) and
+picture-view pages the newest three of the last six hours (wall-clock
+age) — nothing at night, and a reader person page never reads them.
+Home's Overview card shows the newest three of the last six hours of
+that list (`messages.card_rows`); the Messages tab shows all of it. The source is the household group
 chat only, through `HouseholdChatService.recent_messages`: a plain read
 (`ConversationRepo.list_recent_messages`) that finds the chat with
 `get_household_chat` and never creates it, never reconciles seats and
@@ -1564,6 +1567,37 @@ attribute (Jinja-escaped); the picture view shows the sender's face, a
 characters by `clip`), and a tap reads the whole message. Every sender is a shown
 person whose colour is already in the page style, so a new or deleted
 message just swaps in with the next fragment (no view-key change).
+
+**Home tabs: Overview · Messages · Notes** (`dashboard/tabs.py`).
+Home is three views behind one rail entry (Home stays current on all
+three): `/` (Overview — the glance above), `/messages` (the household
+chat of the last day, grouped Today / Yesterday by the household's day,
+each row one `aria-pressed` toggle that reads the whole message aloud,
+text cut at 220 characters on a word) and `/notes` (every sticky on a
+flat board, up to a hard bound of 100 — `MAX_STICKIES`; the "Notes · N"
+label and a "+ N more" line use the true count, `stickies_total`). Overview always shows; Messages while the messages opt-in
+and the household chat are on (`HomeSnapshot.messages_on` — even with
+nothing to show: an empty state); Notes while the stickies section is
+on. With only Overview there is no tab bar; a tab that doesn't show is
+404. Every tab has the bar (with a badge counting messages under 15
+minutes old that the tab lists — time-based, a shared board has no read
+state; a bannered `@here` is not counted — never on
+the Messages tab itself) and one alert slot under it: the offline
+banner, then the `@here` banners, so "Got it" is in reach from any tab.
+While an `@here` is on a banner its message is left out of the Overview
+card (not backfilled) and the Messages list. Each tab has its own
+fragment (`/fragment/home/messages`, `/fragment/home/notes`) and view
+key (the tab is part of it, so a swap never crosses tabs); Messages and
+Notes return to Overview after `idle_return_minutes`, and at night they
+303 to `/` — night starting on a tab changes the fragment's view key, so
+the page reloads into that redirect. The banners hide
+with the day view at night; the tab bar and "See all" links stay hidden
+all night, even on a woken board (they would only bounce back). Note cards (Overview's three and the Notes
+board) are the household colour softened toward the page — mixed in
+Oklab on the server (`contrast.note_colors`: 82 % light, 75 % dark and
+at night) and emitted as `--kb` — with an ink picked against that fill
+(`--kn`: the board's warm `#1f1d1a` where black would win and it still
+reaches 4.5:1, else black or white); faces and lanes keep `--kt`.
 
 **Mentions (same opt-in).** Household-chat `@here` and `@name`
 mentions of the last hour that nobody has acknowledged ride along on
@@ -1633,7 +1667,11 @@ screen, 401 goes to `/login?next=…`, 404 (person hidden) goes Home. Two
 failed refreshes in a row show the offline banner (rendered hidden in
 every fragment, with that snapshot's time), hide relative times
 (`data-rel`) and grey "now" / presence (`data-live`) until a refresh works.
-A person page returns Home after `idle_return_minutes` without a touch.
+A person page, and Home's Messages / Notes tab, returns to Overview after
+`idle_return_minutes` without a touch. A Messages-tab row keeps
+`aria-pressed` in step with what is read, and a polite live region
+(`[data-say-status]`, outside `<main>` so a refresh never cuts it off)
+says "Reading Anna's message aloud".
 A household message is a `<button>`: a tap reads its `data-say` with the
 browser's `speechSynthesis` in the page language — only on a tap, one
 utterance at a time, a second tap stops it, a swap that drops the message

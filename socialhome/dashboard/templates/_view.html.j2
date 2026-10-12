@@ -1,16 +1,32 @@
 {#- The swappable content of <main>. data-view-key changes with what a
-    swap can't change (inline style, night mode, rail) — dashboard.js
-    reloads the page then. At night the day view is rendered too but
-    stays hidden until someone taps the screen (dashboard.js, 60 s). -#}
+    swap can't change (inline style, night mode, rail, Home's tab) —
+    dashboard.js reloads the page then. At night the day view is rendered
+    too but stays hidden until someone taps the screen (dashboard.js,
+    60 s); the tab bar and the @here banners go with it. -#}
+{% from "_macros.html.j2" import mention_alert with context %}
 <div class="dash-view" data-view-key="{{ view_key }}">
   {#- Mentions for the script (dashboard.js): who the rail badges, which
       mentions are up (it chimes once for each new one) and whether it
       may chime at all. -#}
   <div hidden data-mention-state data-mention-keys="{{ mention_keys }}" data-mention-badges="{{ badges|sort|join(" ") }}" data-mention-sound="{{ 1 if mention_sound else 0 }}"></div>
-  <div class="dash-offline" data-offline role="status" hidden>
-    <span aria-hidden="true">⚠</span>
-    <span class="dash-offline-text{% if picture %} dash-visually-hidden{% endif %}">{{ t("dashboard.offline", time=clock.time) }}</span>
-    <button type="button" class="dash-offline-retry" data-reload aria-label="{{ t("dashboard.offline.retry") }}" title="{{ t("dashboard.offline.retry") }}"><span aria-hidden="true">↻</span></button>
+  {% if tabs %}{% include "_tabs.html.j2" %}{% endif %}
+  {#- One alert slot on every board: the offline banner, then Home's
+      @here banners (on all three tabs, so "Got it" is always in reach). -#}
+  <div class="dash-alert-slot">
+    <div class="dash-offline" data-offline role="status" hidden>
+      <span aria-hidden="true">⚠</span>
+      <span class="dash-offline-text{% if picture %} dash-visually-hidden{% endif %}">{{ t("dashboard.offline", time=clock.time) }}</span>
+      <button type="button" class="dash-offline-retry" data-reload aria-label="{{ t("dashboard.offline.retry") }}" title="{{ t("dashboard.offline.retry") }}"><span aria-hidden="true">↻</span></button>
+    </div>
+    {% if here_cards %}
+    {#- An @here in the household chat: on top until someone taps "Got it"
+        (on any tablet) or it is an hour old. -#}
+    <section class="dash-alerts" aria-label="{{ t("dashboard.mentions.everyone") }}">
+      <ul class="dash-alert-list">
+        {% for m in here_cards %}{{ mention_alert(m, t("dashboard.mentions.everyone")) }}{% endfor %}
+      </ul>
+    </section>
+    {% endif %}
   </div>
   {% if night %}
   {% include "_night_picture.html.j2" if picture else "_night.html.j2" %}

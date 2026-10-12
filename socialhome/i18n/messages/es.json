@@ -160,5 +160,18 @@
   "dashboard.mentions.for_you": "Mensaje para ti",
   "dashboard.mentions.got_it": "Entendido",
   "dashboard.mentions.badge": "Mensaje nuevo para {name}",
-  "dashboard.mentions.from_for_you": "Mensaje de {name} para ti"
+  "dashboard.mentions.from_for_you": "Mensaje de {name} para ti",
+  "dashboard.tabs.label": "Casa",
+  "dashboard.tabs.overview": "Resumen",
+  "dashboard.tabs.messages": "Mensajes",
+  "dashboard.tabs.notes": "Notas",
+  "dashboard.tabs.new": "{n} nuevos",
+  "dashboard.home.see_all": "Ver todo",
+  "dashboard.messages.yesterday": "Ayer",
+  "dashboard.messages.hear_rest": "toca para oír el resto",
+  "dashboard.messages.playing": "Leyendo en voz alta el mensaje de {name}",
+  "dashboard.messages.empty": "No hay mensajes del último día",
+  "dashboard.messages.empty_hint": "Escribe uno en la app de Social Home.",
+  "dashboard.notes.empty": "Aún no hay notas",
+  "dashboard.notes.empty_hint": "Añade una en la app de Social Home."
 }

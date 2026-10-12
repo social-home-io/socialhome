@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 __all__ = [
     "ACK_EMOJI",
     "DEFAULT_DASHBOARD_PORT",
+    "CHAT_MAX_AGE",
+    "CHAT_SHOWN",
     "HERE_SHOWN",
     "IDLE_RETURN_CHOICES",
     "MENTION_HERE",
@@ -119,6 +121,12 @@ SETUP_TOKEN_TTL_SECONDS = 600
 #: newest few, and none older than this (wall-clock age).
 MESSAGES_SHOWN = 3
 MESSAGE_MAX_AGE = timedelta(hours=6)
+
+#: Home's Messages tab lists the household chat of the last day — at most
+#: this many, newest first (Home's messages card shows the newest
+#: :data:`MESSAGES_SHOWN` of the last :data:`MESSAGE_MAX_AGE` of them).
+CHAT_MAX_AGE = timedelta(hours=24)
+CHAT_SHOWN = 30
 
 #: The reaction a "Got it" on the wall writes to a household-chat message
 #: — and the one that marks a mention as seen (the SPA picker's ✅).
@@ -714,8 +722,11 @@ class HomeSnapshot:
     section is off is empty. ``next_up`` is the soonest timed event or
     lesson still to start today. ``tomorrow_first`` is the earliest timed
     event or first lesson tomorrow — for night mode. ``messages`` are the
-    newest household-chat messages, newest first — empty unless the admin
-    turned them on, and always at night. ``mentions`` are the
+    household-chat messages of the last :data:`CHAT_MAX_AGE` (at most
+    :data:`CHAT_SHOWN`), newest first — empty unless the admin turned them
+    on, and always at night. ``messages_on`` says whether they are on at
+    all (the admin's opt-in and the household chat) — Home then has a
+    Messages tab, even with nothing in it. ``mentions`` are the
     unacknowledged household-chat ``@here`` / ``@name`` mentions of the
     last :data:`MENTION_MAX_AGE`, newest first — on the same opt-in.
     """
@@ -736,6 +747,10 @@ class HomeSnapshot:
     tomorrow_first: DashboardAgendaItem | None = None
     messages: tuple[DashboardMessage, ...] = ()
     mentions: tuple[DashboardMention, ...] = ()
+    messages_on: bool = False
+    #: Every household sticky the wall may show (hidden authors left out)
+    #: — ``stickies`` holds at most a hard bound of them.
+    stickies_total: int = 0
 
 
 @dataclass(slots=True, frozen=True)

@@ -14,14 +14,16 @@
  *     view key (colours, night, rail changed) reloads the whole page;
  *   - two failed refreshes in a row show the offline banner, hide
  *     relative times and grey "now" until a refresh works again;
- *   - a person page returns Home after data-idle-minutes without a touch;
+ *   - a person page, or Home's Messages / Notes tab, returns to Home's
+ *     Overview after data-idle-minutes without a touch;
  *   - the Wake Lock keeps the screen on (data-keep-awake);
  *   - every 10 min the content drifts 1–2 px against burn-in (not with
  *     prefers-reduced-motion);
  *   - night mode: a tap shows the normal page for 60 s;
  *   - household messages ([data-say]): a tap reads one aloud with the
  *     browser's speech synthesis in the page language — never on its
- *     own, one at a time, a second tap stops it; only an on-device voice
+ *     own, one at a time, a second tap stops it (a toggle row keeps
+ *     aria-pressed and a polite live region in step); only an on-device voice
  *     for the language is used (the text never leaves the tablet) —
  *     without one there is no 🔊 and a tap does nothing.
  *   - mentions ([data-mention-state] in <main>): after every load and
@@ -334,8 +336,18 @@
     return exact || near;
   }
 
+  // The polite live region (outside <main>, so a refresh keeps it):
+  // written only when its text changes, so a swap never re-announces.
+  function sayStatus(text) {
+    var el = document.querySelector("[data-say-status]");
+    if (el && el.textContent !== text) {
+      el.textContent = text;
+    }
+  }
+
   function markSay() {
     var can = voice !== null;
+    var playing = "";
     document.documentElement.classList.toggle("dash-can-speak", can);
     document.querySelectorAll("[data-say]").forEach(function (el) {
       if (can) {
@@ -343,11 +355,17 @@
       } else {
         el.removeAttribute("aria-describedby");
       }
-      el.classList.toggle(
-        "dash-speaking",
-        speakingId !== null && el.getAttribute("data-msg") === speakingId
-      );
+      var on = speakingId !== null && el.getAttribute("data-msg") === speakingId;
+      el.classList.toggle("dash-speaking", on);
+      // The Messages tab's rows are toggle buttons.
+      if (el.hasAttribute("aria-pressed")) {
+        el.setAttribute("aria-pressed", on ? "true" : "false");
+      }
+      if (on) {
+        playing = el.getAttribute("data-say-playing") || "";
+      }
     });
+    sayStatus(playing);
   }
 
   function stopSpeaking() {
@@ -655,7 +673,7 @@
     );
   }
 
-  // ── Idle return to Home (person pages) ───────────────────────────────
+  // ── Idle return to Overview (person pages, Home's other tabs) ────────
   if (idleMinutes > 0) {
     var idleTimer = null;
     var idleDue = function () {
