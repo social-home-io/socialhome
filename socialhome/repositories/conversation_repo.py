@@ -159,6 +159,7 @@ class AbstractConversationRepo(Protocol):
         types: Collection[str],
         senders: Collection[str],
         limit: int,
+        containing: str | None = None,
     ) -> list[ConversationMessage]: ...
     async def list_messages_sync_page(
         self,
@@ -1038,6 +1039,7 @@ class SqliteConversationRepo:
         types: Collection[str],
         senders: Collection[str],
         limit: int,
+        containing: str | None = None,
     ) -> list[ConversationMessage]:
         """The newest messages of ``conversation_id`` created between
         ``since`` and ``until`` (both inclusive), newest first: only
@@ -1051,6 +1053,11 @@ class SqliteConversationRepo:
         ``since`` (true for both stamp shapes) lets the
         ``(conversation_id, created_at)`` index narrow the scan first.
         Empty ``types`` / ``senders`` (or ``limit`` below one) read nothing.
+
+        ``containing``: only messages whose content holds that literal text
+        (``instr``, so no ``LIKE`` wildcard or escape applies) — filtered
+        before the ``LIMIT``, so a busy hour of chatter can't push an older
+        ``@`` mention out of the scan.
         """
         type_list = sorted(set(types))
         sender_list = sorted(set(senders))
@@ -1063,6 +1070,7 @@ class SqliteConversationRepo:
                AND type IN ({",".join("?" * len(type_list))})
                AND sender_user_id IN ({",".join("?" * len(sender_list))})
                AND NOT (type IN ('text', 'transcript') AND trim(content) = '')
+               AND (? IS NULL OR instr(content, ?) > 0)
                AND created_at >= ?
                AND julianday(created_at) >= julianday(?)
                AND julianday(created_at) <= julianday(?)
@@ -1072,6 +1080,8 @@ class SqliteConversationRepo:
                 conversation_id,
                 *type_list,
                 *sender_list,
+                containing,
+                containing,
                 (as_utc(since) - timedelta(days=1)).date().isoformat(),
                 as_utc(since).isoformat(),
                 as_utc(until).isoformat(),

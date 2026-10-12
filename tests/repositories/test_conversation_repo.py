@@ -1155,6 +1155,30 @@ async def test_list_recent_messages_filters_and_orders(env):
     assert ids(rows) == ["d", "c"]
 
 
+async def test_list_recent_messages_containing_filters_before_the_limit(env):
+    """``containing`` narrows in SQL before ``LIMIT``: chatter can't push
+    an older mention out, and LIKE wildcards in the needle are literal."""
+    await env.repo.create(_conv("c1", ConversationType.GROUP_DM))
+    await env.repo.save_message(_glance("here", 50, content="@here dinner"))
+    for n in range(20):
+        await env.repo.save_message(_glance(f"chat-{n}", 40 - n, content="hi"))
+    await env.repo.save_message(_glance("pct", 1, content="100% sure"))
+    common = {
+        "since": _NOW - timedelta(hours=1),
+        "until": _UNTIL,
+        "types": {"text"},
+        "senders": {"uid-alice"},
+        "limit": 5,
+    }
+    rows = await env.repo.list_recent_messages("c1", containing="@", **common)
+    assert [m.id for m in rows] == ["here"]
+    rows = await env.repo.list_recent_messages("c1", containing="%", **common)
+    assert [m.id for m in rows] == ["pct"]
+    # Without it: the five newest, the mention long gone.
+    rows = await env.repo.list_recent_messages("c1", **common)
+    assert "here" not in [m.id for m in rows]
+
+
 async def test_list_recent_messages_skips_blank_text(env):
     """A blank text or dictated message never eats one of the few slots."""
     await env.repo.create(_conv("c1", ConversationType.GROUP_DM))

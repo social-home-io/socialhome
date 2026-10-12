@@ -564,6 +564,24 @@ async def test_recent_mentions_parses_here_and_people_with_acks(stack):
     assert await _table_rows(stack) == before
 
 
+async def test_recent_mentions_an_older_here_survives_a_busy_hour(stack):
+    """Regression: the scan cap applied before the "@" filter, so 100
+    chatty messages after an @here hid it."""
+    anna = await stack.provision("anna")
+    chat = await stack.chat.reconcile()
+    await stack.convos.save_message(
+        _glance_msg(chat.id, "here", anna.user_id, 50, content="@here dinner")
+    )
+    for n in range(100):
+        await stack.convos.save_message(
+            _glance_msg(chat.id, f"chat-{n}", anna.user_id, 40 - n * 0.3, content="ok")
+        )
+    rows = await stack.chat.recent_mentions(
+        **_window(), senders={anna.user_id}, limit=100
+    )
+    assert [g.message.id for g in rows] == ["here"]
+
+
 async def test_recent_mentions_only_from_senders_and_window(stack):
     anna = await stack.provision("anna")
     bob = await stack.provision("bob")

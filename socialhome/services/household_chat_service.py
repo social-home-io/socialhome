@@ -151,7 +151,7 @@ class HouseholdChatService:
         limit: int,
     ) -> list[MentionGlance]:
         """The household chat's messages from ``since`` to ``until`` (newest
-        first; the newest ``limit`` are scanned) that carry ``@here`` or
+        first; the newest ``limit`` messages holding an ``@`` are scanned) that carry ``@here`` or
         @-mention a seated member, each with who reacted
         :data:`~socialhome.domain.household_dashboard.ACK_EMOJI`.
 
@@ -175,6 +175,8 @@ class HouseholdChatService:
                 types=MENTIONABLE_TYPES,
                 senders=senders,
                 limit=limit,
+                # In SQL, before the limit: chatter never hides a mention.
+                containing="@",
             )
             if not m.deleted and "@" in m.content
         ]
