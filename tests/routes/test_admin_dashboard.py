@@ -141,6 +141,7 @@ async def test_get_defaults(client):
     assert body["keep_screen_on"] is True
     assert body["show_status_text"] is False
     assert body["show_household_messages"] is False
+    assert body["mention_sound"] is True
     assert body["household_chat_enabled"] is True
     assert body["url_host_allowed"] is True
     assert body["host_port_mapped"] is None
@@ -349,6 +350,21 @@ async def test_household_messages_toggle_round_trips(client):
     assert (await resp.json())["show_household_messages"] is True
     resp = await client.get("/api/admin/dashboard", headers=_auth(client._tok))
     assert (await resp.json())["show_household_messages"] is True
+
+
+async def test_mention_sound_toggle_round_trips(client):
+    resp = await _put(client, {"mention_sound": False})
+    assert resp.status == 200
+    assert (await resp.json())["mention_sound"] is False
+    resp = await client.get("/api/admin/dashboard", headers=_auth(client._tok))
+    assert (await resp.json())["mention_sound"] is False
+
+
+async def test_mention_sound_toggle_must_be_a_bool(client):
+    resp = await _put(client, {"mention_sound": "no"})
+    assert resp.status == 422
+    body = await resp.json()
+    assert body["error"]["params"] == {"field": "mention_sound"}
 
 
 async def test_household_messages_toggle_must_be_a_bool(client):

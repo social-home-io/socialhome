@@ -74,6 +74,8 @@ def test_settings_defaults():
     assert s.keep_screen_on is True
     assert s.show_status_text is False
     assert s.show_household_messages is False
+    # Mentions play a tone by default (admin can turn it off).
+    assert s.mention_sound is True
     assert s.address is None
     assert s.people == ()
     assert s.password_set_at is None

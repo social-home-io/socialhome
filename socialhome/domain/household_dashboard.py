@@ -148,6 +148,9 @@ class DashboardSettings:
     #: Home (and picture-view pages) show the last few household-chat
     #: messages. Off by default: anyone at the tablet can read them.
     show_household_messages: bool = False
+    #: Play a short on-device tone when a new @here / @name mention of
+    #: the household chat appears (part of the messages opt-in above).
+    mention_sound: bool = True
     #: Admin-set base URL tablets use (``http(s)://host[:port]``), shown
     #: in the admin UI and setup links instead of a guessed address.
     address: str | None = None
