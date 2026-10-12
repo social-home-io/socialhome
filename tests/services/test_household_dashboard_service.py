@@ -16,7 +16,11 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import Calendar, CalendarEvent
 from socialhome.domain.conversation import ConversationMessage, MentionGlance
 from socialhome.domain.household_dashboard import (
+    CHAT_MAX_AGE,
+    CHAT_SHOWN,
     HERE_SHOWN,
+    MESSAGE_MAX_AGE,
+    MESSAGES_SHOWN,
     PERSON_PALETTE,
     TIMETABLE_COLOR_HEX,
     DashboardEvent,
@@ -1588,12 +1592,14 @@ async def test_messages_on_home():
     ]
     h.chat.rows[3] = dataclasses.replace(h.chat.rows[3], content="")
     snap = await h.home(now)
-    # One read: the last 6 h, only shown members (hidden Carl is not
-    # asked for), at most three (plus the mention glance).
+    # One read: the last day (the Messages tab; the Overview card takes
+    # its newest few of the last 6 h), only shown members (hidden Carl is
+    # not asked for), at most 30 (plus the mention glance).
     assert sorted(h.chat.calls) == ["recent_mentions", "recent_messages"]
-    assert h.chat.args["since"] == now - timedelta(hours=6)
+    assert h.chat.args["since"] == now - timedelta(hours=24)
     assert h.chat.args["senders"] == frozenset({"u-anna", "u-ben", "u-dora"})
-    assert h.chat.args["limit"] == 3
+    assert h.chat.args["limit"] == 30
+    assert snap.messages_on
     assert [(m.id, m.kind, m.text) for m in snap.messages] == [
         ("m1", "text", "Dinner at 7"),
         ("m2", "photo", ""),
@@ -1671,6 +1677,59 @@ async def test_messages_only_on_picture_view_pages():
     assert pupil is not None and pupil.person.picture_view
     assert [m.id for m in pupil.messages] == ["m1"]
     assert sorted(h.chat.calls) == ["recent_mentions", "recent_messages"]
+    # The picture view keeps the short glance: the last 6 h, three.
+    assert h.chat.args["since"] == now - MESSAGE_MAX_AGE
+    assert h.chat.args["limit"] == MESSAGES_SHOWN == 3
+
+
+def test_the_messages_tab_window_is_a_day_of_thirty():
+    assert CHAT_MAX_AGE == timedelta(hours=24)
+    assert CHAT_SHOWN == 30
+
+
+async def test_home_carries_the_last_day_across_midnight():
+    """The Messages tab lists the last 24 h — yesterday evening too —
+    in the household zone, newest first."""
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 8, 0)
+    h.chat.rows = [
+        chat_msg("today", "u-anna", now - timedelta(hours=1)),
+        chat_msg("late", "u-ben", at(TUESDAY - timedelta(days=1), 0, 5)),
+        chat_msg("evening", "u-dora", at(MONDAY - timedelta(days=1), 21, 10)),
+        chat_msg("morning", "u-anna", at(MONDAY - timedelta(days=1), 9, 0)),
+    ]
+    snap = await h.home(now)
+    assert h.chat.args["since"] == now - CHAT_MAX_AGE
+    assert [m.id for m in snap.messages] == ["today", "late", "evening", "morning"]
+    assert [m.sent_at.date() for m in snap.messages] == [
+        MONDAY,
+        MONDAY,
+        MONDAY - timedelta(days=1),
+        MONDAY - timedelta(days=1),
+    ]
+    assert all(m.sent_at.utcoffset() == timedelta(hours=2) for m in snap.messages)
+
+
+@pytest.mark.parametrize(
+    ("show", "chat", "expected"),
+    [(True, True, True), (False, True, False), (True, False, False)],
+)
+async def test_messages_on_follows_the_opt_in_and_the_chat(show, chat, expected):
+    h = Harness(
+        prefs=HouseholdPreferences(tz=BERLIN, feat_household_chat=chat),
+        settings=DashboardSettings(show_household_messages=show),
+    )
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert snap.messages_on is expected
+
+
+async def test_messages_on_even_with_nothing_to_show_or_at_night():
+    """The tab stays (with its empty state) when there is nothing; night
+    hides the whole bar itself."""
+    h = Harness(settings=messages_on())
+    assert (await h.home(at(MONDAY, 15, 30))).messages_on
+    night = await h.home(at(MONDAY, 23, 0))
+    assert night.messages_on and night.messages == ()
 
 
 # ─── Household chat: guardian blocks, future stamps ──────────────────────

@@ -160,5 +160,18 @@
   "dashboard.mentions.for_you": "Nachricht für dich",
   "dashboard.mentions.got_it": "Gesehen",
   "dashboard.mentions.badge": "Neue Nachricht für {name}",
-  "dashboard.mentions.from_for_you": "Nachricht von {name} für dich"
+  "dashboard.mentions.from_for_you": "Nachricht von {name} für dich",
+  "dashboard.tabs.label": "Zuhause",
+  "dashboard.tabs.overview": "Übersicht",
+  "dashboard.tabs.messages": "Nachrichten",
+  "dashboard.tabs.notes": "Notizen",
+  "dashboard.tabs.new": "{n} neu",
+  "dashboard.home.see_all": "Alle",
+  "dashboard.messages.yesterday": "Gestern",
+  "dashboard.messages.hear_rest": "tippen, um den Rest zu hören",
+  "dashboard.messages.playing": "Nachricht von {name} wird vorgelesen",
+  "dashboard.messages.empty": "Keine Nachrichten seit gestern",
+  "dashboard.messages.empty_hint": "Schreib eine in der Social-Home-App.",
+  "dashboard.notes.empty": "Noch keine Notizen",
+  "dashboard.notes.empty_hint": "Füge eine in der Social-Home-App hinzu."
 }
