@@ -1591,8 +1591,8 @@ household chat is never federated, so neither is this. Every tablet
 sees it on its next refresh. The fragment carries a hidden marker (rail
 badges, mention keys, the `mention_sound` switch): the rail sits outside
 the swapped `<main>`, so `dashboard.js` re-badges it after each swap,
-and plays one short two-note WebAudio tone (made on the device, gain ≤
-0.12) per new mention per tablet (keys remembered in `sessionStorage`) —
+and plays one short two-note WebAudio tone (made on the device, peak gain
+0.1, softer than the app ringtone's 0.12) per new mention per tablet (keys remembered in `sessionStorage`) —
 never at night, never when locked (nothing is rendered), silent where
 autoplay is blocked; the first tap anywhere unlocks audio.
 

@@ -482,7 +482,7 @@
   }
 
   // Two soft notes, once (the app's ringtone shape: sine, a short gain
-  // ramp that never passes 0.12) — synthesised here, nothing fetched.
+  // ramp peaking at 0.1, below its 0.12) — synthesised here, nothing fetched.
   function tone(ctx) {
     var now = ctx.currentTime;
     var osc = ctx.createOscillator();
