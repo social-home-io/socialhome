@@ -13,6 +13,7 @@ from socialhome.dashboard.contrast import contrast_ratio
 from socialhome.dashboard.presenter import (
     MAX_LANE_ROWS,
     MAX_LANES,
+    STICKIES_SHOWN,
     ColorBook,
     Fmt,
     avatar_url,
@@ -93,9 +94,15 @@ def test_color_book_classes_and_css():
     assert book.cls("#112233") == "k1"
     assert book.cls("red;}body{x:y") == ""
     assert book.cls("#abcdef") == ""  # never registered
+    # --kt for faces and lanes; --kn, the softer warm ink, for note cards.
     assert book.css() == (
-        ".k0{--kc:#ffee88;--kt:#000000}.k1{--kc:#112233;--kt:#ffffff}"
+        ".k0{--kc:#ffee88;--kt:#000000;--kn:#1f1d1a}"
+        ".k1{--kc:#112233;--kt:#ffffff;--kn:#ffffff}"
     )
+
+
+def test_overview_shows_three_notes():
+    assert STICKIES_SHOWN == 3
 
 
 def test_theme_css_uses_a_readable_colour_in_both_schemes():

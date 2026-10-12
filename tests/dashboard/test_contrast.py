@@ -8,9 +8,11 @@ import pytest
 
 from socialhome.dashboard.contrast import (
     AA_TEXT,
+    WARM_INK,
     contrast_ratio,
     hex_color,
     ink_on,
+    note_ink,
     readable_on,
     relative_luminance,
 )
@@ -80,6 +82,25 @@ def test_contrast_ratio_known_value():
 def test_ink_on_picks_the_higher_contrast(bg, ink):
     assert ink_on(bg) == ink
     assert contrast_ratio(ink_on(bg), bg) >= AA_TEXT
+
+
+@pytest.mark.parametrize(
+    ("bg", "ink"),
+    [
+        ("#fff9b1", WARM_INK),  # a pastel note: the board's warm ink
+        ("#ffee88", WARM_INK),
+        ("#2f6f5e", "#ffffff"),  # white ink stays white
+        ("#777777", "#000000"),  # black only just reads: no softer ink
+    ],
+)
+def test_note_ink_is_warm_where_it_still_reads(bg, ink):
+    assert note_ink(bg) == ink
+    assert contrast_ratio(note_ink(bg), bg) >= AA_TEXT
+
+
+def test_warm_ink_is_the_board_text_colour():
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    assert f"--dash-text: {WARM_INK};" in css
 
 
 def test_readable_on_needs_every_surface():

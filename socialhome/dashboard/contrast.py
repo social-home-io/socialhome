@@ -10,7 +10,8 @@ their contrast depends on what's behind them).
 Contrast follows WCAG 2.x: relative luminance from sRGB, ratio
 ``(L1 + 0.05) / (L2 + 0.05)``. :data:`AA_TEXT` (4.5:1) is the bar for
 text; :func:`ink_on` picks black or white text for a coloured fill —
-one of the two always clears it.
+one of the two always clears it; :func:`note_ink` softens black to the
+board's warm text colour for note cards where that still reads.
 """
 
 from __future__ import annotations
@@ -21,10 +22,12 @@ from collections.abc import Iterable
 __all__ = [
     "AA_TEXT",
     "BLACK",
+    "WARM_INK",
     "WHITE",
     "contrast_ratio",
     "hex_color",
     "ink_on",
+    "note_ink",
     "readable_on",
     "relative_luminance",
 ]
@@ -33,6 +36,8 @@ __all__ = [
 AA_TEXT = 4.5
 BLACK = "#000000"
 WHITE = "#ffffff"
+#: The board's text colour (``--dash-text``): a softer black for notes.
+WARM_INK = "#1f1d1a"
 
 _HEX = re.compile(r"#(?:[0-9a-f]{3}|[0-9a-f]{6})")
 
@@ -73,6 +78,16 @@ def ink_on(fill: str) -> str:
     return (
         BLACK if contrast_ratio(BLACK, fill) >= contrast_ratio(WHITE, fill) else WHITE
     )
+
+
+def note_ink(fill: str) -> str:
+    """The ink for a note card on ``fill``: the board's own warm text
+    colour (:data:`WARM_INK`) where black would win and the warm ink
+    still reaches :data:`AA_TEXT`; otherwise :func:`ink_on`'s pick."""
+    ink = ink_on(fill)
+    if ink == BLACK and contrast_ratio(WARM_INK, fill) >= AA_TEXT:
+        return WARM_INK
+    return ink
 
 
 def readable_on(color: str, surfaces: Iterable[str], minimum: float = AA_TEXT) -> bool:
