@@ -1747,9 +1747,15 @@ h3.dash-sublabel {
 .dash-night:not(.dash-woken) .dash-rail,
 .dash-night:not(.dash-woken) .dash-corner,
 .dash-night:not(.dash-woken) .dash-day,
-.dash-night:not(.dash-woken) .dash-tabs,
 .dash-night:not(.dash-woken) .dash-alerts,
 .dash-woken .dash-night-view {
+  display: none;
+}
+
+/* Home's tabs and "See all" links stay hidden all night, woken or not:
+   at night /messages and /notes only bounce back to Overview. */
+.dash-night .dash-tabs,
+.dash-night .dash-see-all {
   display: none;
 }
 

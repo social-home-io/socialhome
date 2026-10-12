@@ -3327,6 +3327,20 @@ async def test_tabs_go_to_overview_at_night(client, auth, snapshots, path):
     assert "dash-night-view" in html
 
 
+def test_a_woken_night_board_has_no_tab_links():
+    """Review: tapped awake at night, the tab bar and "See all" links
+    would only bounce back (the tabs 303 to Overview) — hidden all night,
+    woken or not; the banners hide until woken like the day view."""
+    css = RENDERER.static_asset("dashboard.css").body.decode()
+    rule = re.search(
+        r"\n(\.dash-night \.dash-tabs,\n\.dash-night \.dash-see-all) \{\n  display: none;",
+        css,
+    )
+    assert rule is not None
+    assert ".dash-night:not(.dash-woken) .dash-alerts," in css
+    assert ".dash-night:not(.dash-woken) .dash-tabs," not in css
+
+
 @pytest.mark.parametrize(
     "fragment", ["/fragment/home/messages", "/fragment/home/notes"]
 )

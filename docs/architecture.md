@@ -1590,11 +1590,14 @@ fragment (`/fragment/home/messages`, `/fragment/home/notes`) and view
 key (the tab is part of it, so a swap never crosses tabs); Messages and
 Notes return to Overview after `idle_return_minutes`, and at night they
 303 to `/` — night starting on a tab changes the fragment's view key, so
-the page reloads into that redirect. The tab bar and the banners hide
-with the day view at night. Note cards (Overview's three and the Notes
-board) take a softer warm ink (`--kn`, `contrast.note_ink`: the board's
-`#1f1d1a` where black would win and it still reaches 4.5:1); faces and
-lanes keep `--kt`.
+the page reloads into that redirect. The banners hide
+with the day view at night; the tab bar and "See all" links stay hidden
+all night, even on a woken board (they would only bounce back). Note cards (Overview's three and the Notes
+board) are the household colour softened toward the page — mixed in
+Oklab on the server (`contrast.note_colors`: 82 % light, 75 % dark and
+at night) and emitted as `--kb` — with an ink picked against that fill
+(`--kn`: the board's warm `#1f1d1a` where black would win and it still
+reaches 4.5:1, else black or white); faces and lanes keep `--kt`.
 
 **Mentions (same opt-in).** Household-chat `@here` and `@name`
 mentions of the last hour that nobody has acknowledged ride along on
