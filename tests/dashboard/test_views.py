@@ -41,6 +41,7 @@ from socialhome.i18n import Catalog
 
 from .conftest import PASSWORD, default_theme
 from .factories import (
+    ANNA,
     FOR_LEO,
     FOR_MIA,
     HERE,
@@ -2575,6 +2576,34 @@ async def test_mentions_swap_in_without_a_reload(client, auth, snapshots):
     assert _attr(frag, "data-mention-badges") == "u-leo u-mia"
     assert _attr(frag, "data-mention-keys") == "h1:here p1:u-leo p2:u-mia"
     assert _attr(frag, "data-mention-sound") == "1"
+
+
+async def test_only_rendered_mentions_are_listed_for_the_tone(client, auth, snapshots):
+    """A 4th @here has no banner (three at most), so it must not chime;
+    a person page shows no @here at all."""
+    heres = tuple(
+        mention(f"h{n}", "u-anna", n, text=f"@here number {n}") for n in range(1, 5)
+    )
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, mentions=(*heres, FOR_LEO)
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert _banner(html).count('<li class="dash-alert">') == 3
+    assert "number 4" not in html
+    assert _attr(html, "data-mention-keys") == "h1:here h2:here h3:here p1:u-leo"
+    snapshots.pages["u-anna"] = person(mentions=(*heres, FOR_LEO))
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    assert _attr(html, "data-mention-keys") == "p1:u-leo"
+
+
+async def test_without_a_rail_only_the_own_mention_is_listed(client, auth, snapshots):
+    """One shown person: no rail, so no badges — only their own card counts."""
+    from_anna = mention("p5", "u-anna", 2, person="u-anna", text="@anna hi")
+    snapshots.pages["u-anna"] = person(people=(ANNA,), mentions=(from_anna,))
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    assert "dash-rail-badge" not in html
+    assert _attr(html, "data-mention-badges") == ""
+    assert _attr(html, "data-mention-keys") == "p5:u-anna"
 
 
 async def test_mention_sound_follows_the_admin_setting(

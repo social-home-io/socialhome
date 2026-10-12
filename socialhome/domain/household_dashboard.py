@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ACK_EMOJI",
     "DEFAULT_DASHBOARD_PORT",
+    "HERE_SHOWN",
     "IDLE_RETURN_CHOICES",
     "MENTION_HERE",
     "MENTION_MAX_AGE",
@@ -128,6 +129,10 @@ ACK_EMOJI: Final = "✅"
 #: newest messages of that hour are scanned for mentions.
 MENTION_MAX_AGE = timedelta(hours=1)
 MENTIONS_SCANNED = 100
+
+#: ``@here`` banners Home shows at once (the newest) — and so the only
+#: ``@here`` mentions a "Got it" can acknowledge.
+HERE_SHOWN = 3
 
 #: :attr:`DashboardMention.kind` values: ``@here`` (a banner on Home) or
 #: ``@name`` (a badge on that person's face and a card on their page).

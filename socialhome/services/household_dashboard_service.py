@@ -74,6 +74,7 @@ from ..domain import timetable as td
 from ..domain.calendar import Calendar, CalendarEvent, all_day_covers
 from ..domain.conversation import ConversationMessage, MentionGlance
 from ..domain.household_dashboard import (
+    HERE_SHOWN,
     MENTION_HERE,
     MENTION_MAX_AGE,
     MENTION_PERSON,
@@ -469,19 +470,31 @@ class HouseholdDashboardService:
         ``message_id`` must be one of them — an ``@here`` when no
         ``person_id`` is given (written as
         :data:`~socialhome.domain.user.DASHBOARD_AUTHOR`), else a mention of
-        that shown person (credited to them: it is their page). Already
-        acknowledged → ``True`` without a second write.
+        that shown person (credited to them: it is their page). An
+        ``@here`` must be one of the newest :data:`HERE_SHOWN` waiting —
+        the banners Home shows — so what can be written is what is
+        visible. Already acknowledged → ``True`` without a second write.
         """
         ctx = await self._context(now)
         if person_id is not None and person_id not in ctx.shown_ids:
             return False
         senders = await self._chat_senders(ctx)
         kind = MENTION_HERE if person_id is None else MENTION_PERSON
+        rows = await self._mention_rows(ctx, senders)
+        # Only the @here banners Home shows: the newest waiting ones (and
+        # any already seen, which just answer yes).
+        waiting_here = [m for m, seen in rows if m.kind == MENTION_HERE and not seen]
+        banners = {m.message_id for m in waiting_here[:HERE_SHOWN]}
         match = next(
             (
                 (mention, seen)
-                for mention, seen in await self._mention_rows(ctx, senders)
-                if mention.message_id == message_id
+                for mention, seen in rows
+                if (
+                    seen
+                    or mention.kind != MENTION_HERE
+                    or mention.message_id in banners
+                )
+                and mention.message_id == message_id
                 and mention.kind == kind
                 and mention.person_id == person_id
             ),

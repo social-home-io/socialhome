@@ -29,6 +29,7 @@ from urllib.parse import quote, urlsplit
 from aiohttp import web
 
 from ..domain.household_dashboard import (
+    HERE_SHOWN,
     SECTION_TIMETABLE,
     here_alerts,
     mentions_for,
@@ -49,7 +50,7 @@ from .auth import (
     DashboardAuth,
 )
 from .clock import household_clock, resolve_zone
-from .messages import mention_cards, message_rows
+from .messages import MentionCard, mention_cards, message_rows
 from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
@@ -443,9 +444,6 @@ class LogoutView(_DashboardView):
 #: load passes the session guard again (423 locked, 404 once hidden).
 AVATAR_CACHE = "private, no-cache"
 
-#: ``@here`` banners shown on Home at once (the newest).
-HERE_SHOWN = 3
-
 #: Longest ``message_id`` / ``person_id`` ``POST /ack`` accepts.
 ACK_ID_MAX = 128
 
@@ -527,7 +525,15 @@ async def _board(
     )
     # Every unacknowledged mention (never at night): the rail badges
     # everyone with one waiting, and the script chimes for new ones.
-    mentions = [] if night else mention_cards(snapshot.mentions, fmt)
+    show_rail = len(people) > 1
+    # The rail's badges (only where there is a rail): every person
+    # mention waiting. Home and the person board add what they render
+    # themselves — the script chimes only for what this page shows.
+    badged = (
+        []
+        if night or not show_rail
+        else [c for c in mention_cards(snapshot.mentions, fmt) if c.person_id]
+    )
     zone = snapshot.now.tzinfo
     assert zone is not None
     context: dict[str, object] = {
@@ -535,7 +541,7 @@ async def _board(
         "f": fmt,
         "people": people,
         "current": current,
-        "show_rail": len(people) > 1,
+        "show_rail": show_rail,
         "rail_many": len(people) > MAX_LANES,
         "pin_set": settings.pin_set,
         "clock": household_clock(snapshot.now.timestamp(), zone, t),
@@ -567,8 +573,8 @@ async def _board(
         # Mentions: the rail's badges, the marker the script reads after a
         # swap (badges + chime), Home's ``@here`` banners and the person
         # page's own (``mention_cards``).
-        "badges": frozenset(c.person_id for c in mentions if c.person_id),
-        "mention_keys": " ".join(c.key for c in mentions),
+        "badges": frozenset(c.person_id for c in badged if c.person_id),
+        "mention_keys": " ".join(c.key for c in badged),
         "mention_sound": settings.mention_sound,
         "here_cards": [],
         "my_mentions": [],
@@ -615,6 +621,7 @@ async def _home_board(request: web.Request) -> _Board:
             else mention_cards(here_alerts(snap.mentions), fmt)[:HERE_SHOWN]
         ),
     )
+    _add_keys(board, cast(list[MentionCard], board.context["here_cards"]))
     return board
 
 
@@ -650,14 +657,24 @@ async def _person_board(request: web.Request) -> _Board | None:
     )
     fmt = cast(Fmt, board.context["f"])
     if not page.is_night:
-        board.context["my_mentions"] = mention_cards(
-            mentions_for(page.mentions, page.person.user_id), fmt
-        )
+        mine = mention_cards(mentions_for(page.mentions, page.person.user_id), fmt)
+        board.context["my_mentions"] = mine
+        if not board.context["show_rail"]:
+            # No rail, so no badge listed them yet.
+            _add_keys(board, mine)
     if page.person.picture_view:
         board.context["picture"] = picture_view(page, fmt, tomorrow=tomorrow)
         if not page.is_night:
             board.context["messages"] = message_rows(page.messages, fmt)
     return board
+
+
+def _add_keys(board: _Board, cards: list[MentionCard]) -> None:
+    """List ``cards`` (rendered on this page) first among the mention keys
+    the script chimes for."""
+    keys = [c.key for c in cards]
+    rest = cast(str, board.context["mention_keys"])
+    board.context["mention_keys"] = " ".join([*keys, *([rest] if rest else [])])
 
 
 def _tomorrow(page: PersonSnapshot) -> list[DashboardAgendaItem]:

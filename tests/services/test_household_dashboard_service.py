@@ -16,6 +16,7 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import Calendar, CalendarEvent
 from socialhome.domain.conversation import ConversationMessage, MentionGlance
 from socialhome.domain.household_dashboard import (
+    HERE_SHOWN,
     PERSON_PALETTE,
     TIMETABLE_COLOR_HEX,
     DashboardEvent,
@@ -1989,6 +1990,21 @@ async def test_acknowledge_a_person_mention_credits_that_person():
     ]
     assert await h.service.acknowledge("ben", person_id="u-ben", now=now) is True
     assert h.acks.acks == [("ben", "u-ben")]
+
+
+async def test_acknowledge_here_only_among_the_banners_shown():
+    """Home shows the newest HERE_SHOWN @here banners; a 4th (older) one
+    has no banner, so no tap can acknowledge it — write set = visible set."""
+    assert HERE_SHOWN == 3
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance(f"h{n}", "u-anna", now - timedelta(minutes=n), here=True)
+        for n in range(1, 5)
+    ]
+    assert await h.service.acknowledge("h4", now=now) is False
+    assert await h.service.acknowledge("h3", now=now) is True
+    assert h.acks.acks == [("h3", DASHBOARD_AUTHOR)]
 
 
 async def test_acknowledge_already_seen_is_a_quiet_yes():
