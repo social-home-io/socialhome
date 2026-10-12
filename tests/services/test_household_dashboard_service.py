@@ -1723,6 +1723,25 @@ async def test_messages_on_follows_the_opt_in_and_the_chat(show, chat, expected)
     assert snap.messages_on is expected
 
 
+async def test_the_whole_day_keeps_the_overview_filters():
+    """The Messages tab's longer window is the same read: hidden members,
+    guardian blocks and deleted messages stay off it."""
+    h = Harness(settings=messages_on())
+    h.cp.counterparts = {"u-ben": frozenset({"u-anna"})}
+    now = at(MONDAY, 15, 30)
+    old = now - timedelta(hours=20)
+    h.chat.rows = [
+        chat_msg("blocked", "u-anna", old),
+        chat_msg("minor", "u-ben", old),
+        chat_msg("hidden", "u-carl", old),
+        chat_msg("gone", "u-dora", old, deleted=True),
+        chat_msg("ok", "u-dora", old),
+    ]
+    snap = await h.home(now)
+    assert h.chat.args["senders"] == frozenset({"u-dora"})
+    assert [m.id for m in snap.messages] == ["ok"]
+
+
 async def test_messages_on_even_with_nothing_to_show_or_at_night():
     """The tab stays (with its empty state) when there is nothing; night
     hides the whole bar itself."""

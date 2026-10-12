@@ -1,0 +1,20 @@
+{#- Home's Messages tab: the last day of the household chat in one
+    newest-first column, under "Today" / "Yesterday". A message on an
+    @here banner is left out until someone taps "Got it". -#}
+{% from "_macros.html.j2" import chat_row, say_hint, tab_empty with context %}
+<div class="dash-chat">
+  <h1 class="dash-visually-hidden">{{ t("dashboard.tabs.messages") }}</h1>
+  {% if chat_days %}
+  {{ say_hint() }}
+  {% for day in chat_days %}
+  <section class="dash-chat-day" aria-labelledby="dash-day-{{ day.key }}">
+    <h2 class="dash-chat-label" id="dash-day-{{ day.key }}">{{ day.label }}</h2>
+    <ul class="dash-chat-list">
+      {% for r in day.rows %}{{ chat_row(r) }}{% endfor %}
+    </ul>
+  </section>
+  {% endfor %}
+  {% else %}
+  {{ tab_empty("💬", t("dashboard.messages.empty"), t("dashboard.messages.empty_hint")) }}
+  {% endif %}
+</div>

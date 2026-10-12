@@ -1,0 +1,13 @@
+{#- Home's Notes tab: every household sticky on a flat board, each in its
+    own colour (softened toward the page) with the warm note ink. -#}
+{% from "_macros.html.j2" import tab_empty with context %}
+<div class="dash-notes-page">
+  <h1 class="dash-visually-hidden">{{ t("dashboard.tabs.notes") }}</h1>
+  {% if notes %}
+  <ul class="dash-note-board">
+    {% for s in notes %}<li class="dash-note {{ f.kc(s.color) }}">{{ s.content }}</li>{% endfor %}
+  </ul>
+  {% else %}
+  {{ tab_empty("📝", t("dashboard.notes.empty"), t("dashboard.notes.empty_hint")) }}
+  {% endif %}
+</div>

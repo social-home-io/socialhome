@@ -26,5 +26,8 @@
   <main class="dash-content" data-main>
     {% include "_view.html.j2" %}
   </main>
+  {#- Says which message is being read aloud (dashboard.js); outside
+      <main>, so a refresh never cuts it off. -#}
+  <p class="dash-visually-hidden" aria-live="polite" data-say-status></p>
 </div>
 {% endblock %}

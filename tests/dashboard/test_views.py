@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import timedelta
 from dataclasses import replace
 from html import unescape
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ from socialhome.dashboard.views import (
     safe_next,
 )
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
+from socialhome.domain.household_dashboard import DashboardSticky
 from socialhome.domain.theme import HouseholdTheme
 from socialhome.i18n import Catalog
 
@@ -54,6 +56,7 @@ from .factories import (
     PASCAL,
     PEOPLE,
     SWIM,
+    TODAY,
     TOMORROW,
     WORK,
     FakeDashboardService,
@@ -1931,7 +1934,8 @@ async def test_home_fragment_is_main_only(client, auth):
     assert resp.status == 200
     frag = await resp.text()
     assert frag.lstrip().startswith('<div class="dash-view" data-view-key=')
-    assert "<html" not in frag and "<nav" not in frag and "<style" not in frag
+    assert "<html" not in frag and "<style" not in frag
+    assert "dash-rail" not in frag  # the rail is outside <main>
     assert "Swimming" in frag and "data-offline" in frag
     assert _attr(frag, "data-view-key") == _attr(page, "data-view-key")
     assert resp.headers["Cache-Control"] == "no-store"
@@ -2016,7 +2020,7 @@ async def test_one_person_has_no_rail_but_keeps_the_lock(pin_client, auth, snaps
     snap = snapshots.home_snapshot
     snapshots.home_snapshot = replace(snap, people=(snap.people[0],))
     html = await (await _get(pin_client, auth, "/")).text()
-    assert "<nav" not in html
+    assert '<nav class="dash-rail' not in html
     assert 'class="dash-corner"' in html and 'action="/lock"' in html
     assert "dash-presence" not in html  # no "who's home" for one person
 
@@ -2025,7 +2029,7 @@ async def test_one_person_without_a_pin_has_no_corner(client, auth, snapshots):
     snap = snapshots.home_snapshot
     snapshots.home_snapshot = replace(snap, people=(snap.people[0],))
     html = await (await _get(client, auth, "/")).text()
-    assert "dash-corner" not in html and "<nav" not in html
+    assert "dash-corner" not in html and '<nav class="dash-rail' not in html
 
 
 async def test_more_than_six_people_scroll_and_list(client, auth, snapshots):
@@ -2234,7 +2238,8 @@ async def test_next_band_falls_back_to_tomorrow_when_today_is_done(
         snapshots.home_snapshot, now=at(21), next_up=None, tomorrow_first=gym
     )
     html = await (await _get(client, auth, "/")).text()
-    band = html[html.index("dash-next") : html.index("</section>")]
+    start = html.index("dash-next")
+    band = html[start : html.index("</section>", start)]
     assert "dash-next-tomorrow" in band
     assert ">Tomorrow</h2>" in band
     assert '<span class="dash-next-time">07:00</span>' in band
@@ -2246,7 +2251,8 @@ async def test_next_band_falls_back_to_tomorrow_when_today_is_done(
 async def test_next_band_tomorrow_lesson_says_school(client, auth, snapshots):
     snapshots.home_snapshot = replace(snapshots.home_snapshot, next_up=None)
     html = await (await _get(client, auth, "/")).text()
-    band = html[html.index("dash-next") : html.index("</section>")]
+    start = html.index("dash-next")
+    band = html[start : html.index("</section>", start)]
     assert "🎒</span> School" in band and "07:30" in band
 
 
@@ -2294,8 +2300,12 @@ async def test_person_page_paints_events_in_the_persons_colour(client, auth, sna
         "/avatar/u-anna",
         "/static/dashboard.css",
         "/fragment/home",
+        "/fragment/home/messages",
+        "/fragment/home/notes",
         "/fragment/p/u-anna",
         "/p/u-anna/extra",
+        "/messages/extra",
+        "/notes/",
         "/nowhere",
     ],
 )
@@ -2305,18 +2315,41 @@ async def test_only_page_routes_renew_the_cookie(
     """S1: an avatar / static / fragment response never sets a cookie — a
     late one, sent with the pre-lock cookie, could overwrite the lock."""
     snapshots.pictures["u-anna"] = (b"RIFF\0\0\0\0WEBPVP8 ", "pic1")
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, messages_on=True)
     headers = await _cookie(auth)
     clock.advance(RENEW_AFTER_S + 60)
     resp = await pin_client.get(path, headers=headers, allow_redirects=False)
     assert COOKIE_NAME not in resp.cookies, (path, resp.status)
 
 
-@pytest.mark.parametrize("path", ["/", "/p/u-anna"])
-async def test_page_routes_still_renew(pin_client, auth, clock, path):
+@pytest.mark.parametrize("path", ["/", "/p/u-anna", "/messages", "/notes"])
+async def test_page_routes_still_renew(pin_client, auth, clock, snapshots, path):
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, messages_on=True)
     headers = await _cookie(auth)
     clock.advance(RENEW_AFTER_S + 60)
     resp = await pin_client.get(path, headers=headers, allow_redirects=False)
+    assert resp.status == 200
     assert COOKIE_NAME in resp.cookies
+
+
+@pytest.mark.parametrize("path", ["/messages", "/notes"])
+async def test_tab_that_did_not_render_never_renews(
+    pin_client, auth, clock, snapshots, path
+):
+    """A tab that is off (404) or redirected at night (303) renews nothing."""
+    snap = snapshots.home_snapshot
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 60)
+    snapshots.home_snapshot = replace(
+        snap, messages_on=False, sections=snap.sections - {"stickies"}
+    )
+    resp = await pin_client.get(path, headers=headers, allow_redirects=False)
+    assert resp.status == 404 and COOKIE_NAME not in resp.cookies
+    snapshots.home_snapshot = replace(
+        snap, messages_on=True, is_night=True, now=at(22, 47)
+    )
+    resp = await pin_client.get(path, headers=headers, allow_redirects=False)
+    assert resp.status == 303 and COOKIE_NAME not in resp.cookies
 
 
 async def test_late_avatar_response_cannot_lift_the_lock(
@@ -2423,10 +2456,11 @@ async def test_home_messages_card_under_next(client, auth, snapshots):
     resp = await _get(client, auth, "/")
     html = await resp.text()
     _assert_board_csp(resp, html)
-    # In the header's side column, right under NEXT, before who's home.
+    # In the header's side column, right under NEXT; who's home sits in
+    # the clock column, under the date.
     head = html[html.index('<header class="dash-top">') : html.index("</header>")]
     assert head.index('class="dash-next ') < head.index('class="dash-msgs"')
-    assert html.index("</header>") < html.index('class="dash-presence"')
+    assert head.index('class="dash-presence"') < head.index('class="dash-top-side"')
     assert '<h2 class="dash-label" id="dash-msgs-label">Messages</h2>' in head
     # Real buttons; the sentence to speak is an escaped attribute — the
     # message's markup is text, never HTML.
@@ -2455,7 +2489,7 @@ async def test_home_messages_card_under_next(client, auth, snapshots):
 
 async def test_home_without_messages_has_no_card(client, auth):
     html = await (await _get(client, auth, "/")).text()
-    assert "dash-msgs" not in html and "data-say" not in html
+    assert "dash-msgs" not in html and "data-say=" not in html
     assert "dash-say-hint" not in html
 
 
@@ -2503,10 +2537,10 @@ async def test_no_messages_at_night(client, auth, snapshots):
     )
     html = await (await _get(client, auth, "/")).text()
     assert "dash-night-view" in html
-    assert "data-say" not in html and "Dinner at 7" not in html
+    assert "data-say=" not in html and "Dinner at 7" not in html
     snapshots.pages["u-leo"] = leo_page(is_night=True, messages=MESSAGES)
     html = await (await _get(client, auth, "/p/u-leo")).text()
-    assert "data-say" not in html and "dash-pv-msg" not in html
+    assert "data-say=" not in html and "dash-pv-msg" not in html
 
 
 @pytest.mark.parametrize("path", ["/", "/fragment/home", "/p/u-leo"])
@@ -2514,7 +2548,7 @@ async def test_a_locked_tablet_shows_no_message(pin_client, auth, snapshots, pat
     snapshots.home_snapshot = replace(snapshots.home_snapshot, messages=MESSAGES)
     snapshots.pages["u-leo"] = leo_page(messages=MESSAGES)
     html = await (await pin_client.get(path, headers=await _locked(auth))).text()
-    assert "Dinner" not in html and "data-say" not in html
+    assert "Dinner" not in html and "data-say=" not in html
     assert snapshots.calls == []
 
 
@@ -2596,7 +2630,7 @@ async def test_picture_page_shows_no_caption_for_senders_not_on_the_page(
 async def test_reader_page_never_shows_messages(client, auth, snapshots):
     snapshots.pages["u-anna"] = person(messages=MESSAGES)
     html = await (await _get(client, auth, "/p/u-anna")).text()
-    assert "data-say" not in html and "Dinner at 7" not in html
+    assert "data-say=" not in html and "Dinner at 7" not in html
 
 
 # ─── Household-chat mentions: @here banner, @name badge + card ───────────
@@ -2896,3 +2930,384 @@ async def test_get_ack_goes_home(client, auth, snapshots):
     resp = await client.get("/ack", headers=await _cookie(auth), allow_redirects=False)
     assert resp.status == 303 and resp.headers["Location"] == "/"
     assert snapshots.calls == []
+
+
+# ─── Home tabs: Overview · Messages · Notes ─────────────────────────────
+
+#: Anna's @here (on a banner while waiting) is a chat message too.
+HERE_MSG = message("h1", "u-anna", 3, text="@here Dinner is <b>ready</b>!")
+LONG_MSG = message("m4", "u-pascal", 200, text="Remember the plumber " * 20)
+EVENING_MSG = replace(
+    message("y1", "u-mia", 0, text="Movie after dinner?"),
+    sent_at=at(21, 10, TODAY - timedelta(days=1)),
+)
+CHAT = (HERE_MSG, *MESSAGES, LONG_MSG, EVENING_MSG)
+NOTES = tuple(
+    DashboardSticky(id=f"n{i}", content=f"Note number {i}", color="#FFF9B1")
+    for i in range(1, 7)
+)
+
+
+def _tabs_on(snapshots, **kw) -> None:
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, messages_on=True, **kw)
+
+
+def _tab_bar(html: str) -> str:
+    start = html.index('<nav class="dash-tabs"')
+    return html[start : html.index("</nav>", start)]
+
+
+def _current_tab(html: str) -> str:
+    match = re.search(
+        r'<a class="dash-tab" href="([^"]+)" aria-current="page">', _tab_bar(html)
+    )
+    assert match
+    return match.group(1)
+
+
+def _main(html: str) -> str:
+    return html[html.index("<main") : html.index("</main>")]
+
+
+@pytest.mark.parametrize("path", ["/", "/messages", "/notes"])
+async def test_every_home_tab_has_the_bar(client, auth, snapshots, path):
+    _tabs_on(snapshots)
+    resp = await _get(client, auth, path)
+    assert resp.status == 200
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    bar = _tab_bar(html)
+    assert '<nav class="dash-tabs" aria-label="Home">' in html
+    assert [m for m in re.findall(r'href="([^"]+)"', bar)] == [
+        "/",
+        "/messages",
+        "/notes",
+    ]
+    assert ">Overview<" in bar and ">Messages<" in bar and ">Notes<" in bar
+    assert _current_tab(html) == path
+    assert bar.count('aria-current="page"') == 1
+    # The tabs are views inside Home: the rail keeps Home current.
+    assert re.search(r'<a class="dash-rail-item" href="/" aria-current="page">', html)
+    # The small clock on Messages and Notes; Overview has the big one.
+    small = '<time class="dash-tabs-clock" datetime='
+    assert (small in bar) is (path != "/")
+    if path != "/":
+        assert "data-clock>14:32</time>" in bar
+
+
+async def test_tab_pages_wire_their_own_fragment_and_idle_return(
+    client, auth, snapshots, settings_service
+):
+    await settings_service.update(
+        actor_is_admin=True, patch={"idle_return_minutes": 10}
+    )
+    _tabs_on(snapshots)
+    html = await (await _get(client, auth, "/")).text()
+    assert 'data-fragment="/fragment/home"' in html
+    assert 'data-idle-minutes="0"' in html
+    for path, fragment in (
+        ("/messages", "/fragment/home/messages"),
+        ("/notes", "/fragment/home/notes"),
+    ):
+        html = await (await _get(client, auth, path)).text()
+        assert f'data-fragment="{fragment}"' in html
+        assert 'data-idle-minutes="10"' in html  # back to Overview
+
+
+async def test_no_tab_bar_with_only_overview(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot,
+        messages_on=False,
+        sections=snapshots.home_snapshot.sections - {"stickies"},
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-tabs" not in html and 'href="/messages"' not in html
+    for path in ("/messages", "/notes"):
+        resp = await _get(client, auth, path)
+        assert resp.status == 404
+        assert "This page isn&#39;t on the dashboard." in await resp.text()
+    for path in ("/fragment/home/messages", "/fragment/home/notes"):
+        resp = await _get(client, auth, path)
+        assert resp.status == 404 and "<" not in await resp.text()
+
+
+async def test_messages_tab_needs_the_opt_in(client, auth, snapshots):
+    """Notes on, messages off: Overview · Notes, and /messages is 404."""
+    html = await (await _get(client, auth, "/")).text()
+    assert 'href="/messages"' not in html
+    assert re.findall(r'href="([^"]+)"', _tab_bar(html)) == ["/", "/notes"]
+    assert (await _get(client, auth, "/messages")).status == 404
+    assert (await _get(client, auth, "/notes")).status == 200
+
+
+async def test_notes_tab_needs_the_stickies_section(client, auth, snapshots):
+    _tabs_on(snapshots, sections=snapshots.home_snapshot.sections - {"stickies"})
+    html = await (await _get(client, auth, "/messages")).text()
+    assert re.findall(r'href="([^"]+)"', _tab_bar(html)) == ["/", "/messages"]
+    assert (await _get(client, auth, "/notes")).status == 404
+
+
+async def test_tab_views_never_share_a_view_key(client, auth, snapshots):
+    _tabs_on(snapshots)
+    keys = set()
+    for path, fragment in (
+        ("/", "/fragment/home"),
+        ("/messages", "/fragment/home/messages"),
+        ("/notes", "/fragment/home/notes"),
+    ):
+        page = await (await _get(client, auth, path)).text()
+        resp = await _get(client, auth, fragment)
+        assert resp.status == 200
+        frag = await resp.text()
+        assert frag.lstrip().startswith('<div class="dash-view" data-view-key=')
+        assert "<html" not in frag and 'class="dash-rail' not in frag
+        assert _attr(frag, "data-view-key") == _attr(page, "data-view-key")
+        # The fragment keeps the bar (its badge follows the refresh).
+        assert _current_tab(frag) == path
+        keys.add(_attr(page, "data-view-key"))
+    assert len(keys) == 3
+
+
+async def test_messages_badge_counts_new_messages_off_its_tab(client, auth, snapshots):
+    _tabs_on(snapshots, messages=CHAT)  # h1 and m1 are under 15 min old
+    for path in ("/", "/notes"):
+        bar = _tab_bar(await (await _get(client, auth, path)).text())
+        assert '<span class="dash-tab-badge" aria-hidden="true">2</span>' in bar
+        assert '<span class="dash-visually-hidden">, 2 new</span>' in bar
+    bar = _tab_bar(await (await _get(client, auth, "/messages")).text())
+    assert "dash-tab-badge" not in bar and " new<" not in bar
+
+
+async def test_no_badge_without_new_messages(client, auth, snapshots):
+    _tabs_on(snapshots, messages=(EVENING_MSG,))
+    assert "dash-tab-badge" not in await (await _get(client, auth, "/")).text()
+
+
+@pytest.mark.parametrize("path", ["/", "/messages", "/notes"])
+async def test_here_banner_on_every_tab(client, auth, snapshots, path):
+    _tabs_on(snapshots, messages=CHAT, mentions=MENTIONS)
+    html = await (await _get(client, auth, path)).text()
+    banner = _banner(html)
+    assert "@here Dinner is &lt;b&gt;ready&lt;/b&gt;!" in banner
+    assert "Got it</button>" in banner
+    # Under the bar, after the offline banner, in one slot.
+    slot = html.index('<div class="dash-alert-slot">')
+    assert html.index('<nav class="dash-tabs"') < slot
+    assert slot < html.index("data-offline") < html.index('class="dash-alerts"')
+    # The tone marker lists what this page shows (the banner, the badges).
+    assert _attr(html, "data-mention-keys") == "h1:here p1:u-leo p2:u-mia"
+
+
+async def test_bannered_here_is_left_out_of_the_lists(client, auth, snapshots):
+    _tabs_on(snapshots, messages=CHAT, mentions=MENTIONS)
+    html = await (await _get(client, auth, "/")).text()
+    card = html[html.index('class="dash-msgs"') : html.index("</header>")]
+    # The newest three minus the banner's: not backfilled.
+    assert re.findall(r'data-msg="([^"]+)"', card) == ["m1", "m2"]
+    html = await (await _get(client, auth, "/messages")).text()
+    listed = re.findall(r'data-msg="([^"]+)"', _main(html))
+    assert "h1" not in listed and listed[0] == "m1"
+    # After "Got it" it is back in its place in time order.
+    _tabs_on(snapshots, messages=CHAT, mentions=(FOR_LEO,))
+    html = await (await _get(client, auth, "/")).text()
+    card = html[html.index('class="dash-msgs"') : html.index("</header>")]
+    assert re.findall(r'data-msg="([^"]+)"', card) == ["h1", "m1", "m2"]
+    html = await (await _get(client, auth, "/messages")).text()
+    assert re.findall(r'data-msg="([^"]+)"', _main(html))[:2] == ["h1", "m1"]
+
+
+async def test_messages_tab(client, auth, snapshots):
+    _tabs_on(snapshots, messages=CHAT)
+    resp = await _get(client, auth, "/messages")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    main = _main(html)
+    assert '<h1 class="dash-visually-hidden">Messages</h1>' in main
+    # Newest first, grouped by the household's day.
+    assert '<h2 class="dash-chat-label" id="dash-day-today">Today</h2>' in main
+    assert '<h2 class="dash-chat-label" id="dash-day-yesterday">Yesterday</h2>' in main
+    assert main.index("dash-day-today") < main.index('data-msg="m4"')
+    assert main.index('data-msg="m4"') < main.index("dash-day-yesterday")
+    assert main.index("dash-day-yesterday") < main.index('data-msg="y1"')
+    assert re.findall(r'data-msg="([^"]+)"', main) == [
+        "h1",
+        "m1",
+        "m2",
+        "m3",
+        "m4",
+        "y1",
+    ]
+    # One toggle button per row; the escaped sentence to speak.
+    assert main.count('<button type="button" class="dash-chat-msg') == 6
+    assert main.count('aria-pressed="false"') == 6
+    assert _SAY_ANNA in main and "<b>" not in html
+    assert 'data-say-playing="Reading Anna&#39;s message aloud"' in main
+    row = main[main.index('data-msg="m1"') : main.index('data-msg="m2"')]
+    assert 'class="dash-chat-msg dash-msg-new"' in main
+    # New: the chip, but an absolute time (a stale board stays truthful).
+    assert '<span class="dash-tag dash-tag-now">new</span>' in row
+    assert '<time datetime="' in row and ">14:28</time>" in row
+    assert "data-rel" not in row
+    assert '<span class="dash-chat-who">Anna</span>' in row
+    assert "dash-face dash-face-chat" in row
+    assert '<span class="dash-chat-speaker" aria-hidden="true">🔊</span>' in row
+    # A long one is cut on a word, with the cue; the whole is spoken.
+    row = main[main.index('data-msg="m4"') : main.index('data-msg="y1"')]
+    shown = re.search(r"Message from Pascal:</span> ([^<]*)</span>", row)
+    assert shown is not None and shown.group(1).endswith("…")
+    assert len(unescape(shown.group(1))) <= 220
+    assert (
+        '<span class="dash-chat-rest"><span aria-hidden="true">🔊</span> '
+        "tap to hear the rest</span>" in row
+    )
+    whole = "Remember the plumber " * 20
+    assert f'data-say="Pascal says: {whole}"' in main
+    # The polite live region the script writes "Reading …" into.
+    assert (
+        '<p class="dash-visually-hidden" aria-live="polite" data-say-status></p>'
+        in html
+    )
+    assert '<span id="dash-say-hint" hidden>Read aloud</span>' in main
+
+
+async def test_messages_tab_same_privacy_filters_as_overview(client, auth, snapshots):
+    """A sender the page doesn't show (hidden, or held back by a guardian
+    block — the read model never hands those over) stays off the tab."""
+    stranger = message("x1", "u-hidden", 2, text="secret from a hidden member")
+    _tabs_on(snapshots, messages=(stranger, *MESSAGES))
+    html = await (await _get(client, auth, "/messages")).text()
+    assert "secret from a hidden member" not in html
+    assert re.findall(r'data-msg="([^"]+)"', _main(html)) == ["m1", "m2", "m3"]
+
+
+async def test_messages_tab_empty_state(client, auth, snapshots):
+    _tabs_on(snapshots, messages=())
+    html = await (await _get(client, auth, "/messages")).text()
+    main = _main(html)
+    assert '<div class="dash-tab-empty">' in main
+    assert '<span class="dash-tab-empty-icon" aria-hidden="true">💬</span>' in main
+    assert ">No messages in the last day<" in main
+    assert ">Write one in the Social Home app.<" in main
+    assert "dash-chat-list" not in main
+    # The tab stays, so the bar never jumps.
+    assert _current_tab(html) == "/messages"
+
+
+async def test_notes_tab(client, auth, snapshots):
+    _tabs_on(snapshots, stickies=NOTES)
+    resp = await _get(client, auth, "/notes")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    main = _main(html)
+    assert '<h1 class="dash-visually-hidden">Notes</h1>' in main
+    assert '<ul class="dash-note-board">' in main
+    assert main.count('<li class="dash-note k') == 6
+    for i in range(1, 7):
+        assert f"Note number {i}" in main
+    # Warm ink for note cards only: --kn in the style, --kt unchanged.
+    style = _board_style(html)[0]
+    assert re.search(r"\{--kc:#fff9b1;--kt:#000000;--kn:#1f1d1a\}", style)
+
+
+async def test_notes_tab_empty_state(client, auth, snapshots):
+    _tabs_on(snapshots, stickies=())
+    html = await (await _get(client, auth, "/notes")).text()
+    main = _main(html)
+    assert '<span class="dash-tab-empty-icon" aria-hidden="true">📝</span>' in main
+    assert ">No notes yet<" in main and ">Add one in the Social Home app.<" in main
+    assert "dash-note-board" not in main
+
+
+async def test_overview_shows_three_notes_and_a_see_all(client, auth, snapshots):
+    _tabs_on(snapshots, stickies=NOTES)
+    html = await (await _get(client, auth, "/")).text()
+    col = html[html.index('id="dash-notes-label"') :]
+    col = col[: col.index("</section>")]
+    assert ">Notes · 6</h2>" in col
+    assert col.count('<li class="dash-sticky') == 3
+    assert "Note number 3" in col and "Note number 4" not in col
+    assert (
+        '<a class="dash-see-all" href="/notes" aria-describedby="dash-notes-label">'
+        "See all" in html
+    )
+    _tabs_on(snapshots, stickies=NOTES[:3])
+    html = await (await _get(client, auth, "/")).text()
+    assert 'href="/notes" aria-describedby' not in html
+    assert ">Notes · 3</h2>" in html
+
+
+async def test_overview_messages_see_all_only_with_more(client, auth, snapshots):
+    _tabs_on(snapshots, messages=CHAT)
+    html = await (await _get(client, auth, "/")).text()
+    head = html[html.index('class="dash-msgs"') : html.index("</header>")]
+    assert '<div class="dash-card-head">' in head
+    assert (
+        '<a class="dash-see-all" href="/messages" aria-describedby="dash-msgs-label">'
+        in head
+    )
+    assert '<span class="dash-see-all-arrow" aria-hidden="true">›</span>' in head
+    _tabs_on(snapshots, messages=MESSAGES)  # the card shows them all
+    html = await (await _get(client, auth, "/")).text()
+    assert 'href="/messages" aria-describedby' not in html
+    # Without the opt-in there is no Messages tab to see.
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, messages_on=False, messages=CHAT
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert 'href="/messages"' not in html
+
+
+async def test_overview_whos_home_sits_under_the_date(client, auth):
+    html = await (await _get(client, auth, "/")).text()
+    clock = html[html.index('<div class="dash-top-clock">') :]
+    clock = clock[: clock.index('<div class="dash-top-side">')]
+    assert clock.index('class="dash-date"') < clock.index('class="dash-presence"')
+    assert ">Work<" in clock
+
+
+@pytest.mark.parametrize("path", ["/messages", "/notes"])
+async def test_tabs_go_to_overview_at_night(client, auth, snapshots, path):
+    _tabs_on(snapshots, is_night=True, now=at(22, 47))
+    resp = await _get(client, auth, path, allow_redirects=False)
+    assert resp.status == 303 and resp.headers["Location"] == "/"
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-night-view" in html
+
+
+@pytest.mark.parametrize(
+    "fragment", ["/fragment/home/messages", "/fragment/home/notes"]
+)
+async def test_night_starting_on_a_tab_reloads_it(client, auth, snapshots, fragment):
+    """Night begins on a tab: the fragment's view key changes, so the
+    page reloads — into the 303 to Overview."""
+    _tabs_on(snapshots)
+    path = fragment.removeprefix("/fragment/home")
+    day = _attr(await (await _get(client, auth, path)).text(), "data-view-key")
+    _tabs_on(snapshots, is_night=True, now=at(22, 47))
+    frag = await (await _get(client, auth, fragment)).text()
+    assert _attr(frag, "data-view-key") != day
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/messages", "/notes", "/fragment/home/messages", "/fragment/home/notes"],
+)
+async def test_a_locked_tablet_shows_no_tab_content(pin_client, auth, snapshots, path):
+    _tabs_on(snapshots, messages=CHAT, mentions=MENTIONS, stickies=NOTES)
+    resp = await pin_client.get(path, headers=await _locked(auth))
+    assert resp.status == 200
+    html = await resp.text()
+    for text in ("Anna", "Mia", "Dinner", "Lena", "Note number", "plumber"):
+        assert text not in html, text
+    if path.startswith("/fragment/"):
+        assert resp.headers["X-Dashboard-Locked"] == "1"
+    else:
+        assert "data-lock" in html
+    assert snapshots.calls == []
+
+
+@pytest.mark.parametrize("path", ["/messages", "/notes"])
+async def test_tab_pages_send_a_signed_out_tablet_to_login(client, path):
+    resp = await client.get(path, allow_redirects=False)
+    assert resp.status == 302
+    assert resp.headers["Location"] == f"/login?next=%2F{path[1:]}"

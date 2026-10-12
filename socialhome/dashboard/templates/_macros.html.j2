@@ -137,6 +137,42 @@
 </li>
 {%- endmacro %}
 
+{#- Home's Messages tab (messages.py ChatRow): the whole row is one
+    toggle button — a tap reads the full message aloud, a second tap stops
+    it (dashboard.js keeps aria-pressed and the live region in step). Face,
+    name, "new" + the clock time, the text (cut on a word, with a "tap to
+    hear the rest" cue) and the 🔊 (drawn only where speaking works). -#}
+{% macro chat_row(r) -%}
+{%- set m = r.message -%}
+<li class="dash-chat-item">
+<button type="button" class="dash-chat-msg{% if m.new %} dash-msg-new{% endif %}" aria-pressed="false" data-say="{{ m.say }}" data-say-playing="{{ r.playing }}" data-msg="{{ m.id }}">
+{{ face(m.person, "chat", spoken=False) }}
+<span class="dash-chat-body">
+<span class="dash-chat-head"><span class="dash-chat-who">{{ m.person.display_name }}</span> <span class="dash-chat-when">{% if m.new %}<span class="dash-tag dash-tag-now">{{ t("dashboard.messages.new") }}</span> {% endif %}<time datetime="{{ m.iso }}">{{ r.time }}</time></span></span>
+<span class="dash-chat-text"><span class="dash-visually-hidden">{{ t("dashboard.messages.from", name=m.person.display_name) }}:</span> {% if m.icon %}<span aria-hidden="true">{{ m.icon }}</span> {% endif %}{{ r.text }}</span>
+{%- if r.rest %}<span class="dash-chat-rest"><span aria-hidden="true">🔊</span> {{ t("dashboard.messages.hear_rest") }}</span>{% endif %}
+</span>
+<span class="dash-chat-speaker" aria-hidden="true">🔊</span>
+</button>
+</li>
+{%- endmacro %}
+
+{#- Home's "See all ›" card-header link to a tab, read as "See all,
+    <card label>". -#}
+{% macro see_all(href, label_id) -%}
+<a class="dash-see-all" href="{{ href }}" aria-describedby="{{ label_id }}">{{ t("dashboard.home.see_all") }}<span class="dash-see-all-arrow" aria-hidden="true">›</span></a>
+{%- endmacro %}
+
+{#- A tab with nothing in it: an icon, what's missing, where to add it
+    (never an example of what to put on a wall screen). -#}
+{% macro tab_empty(icon, title, text) -%}
+<div class="dash-tab-empty">
+<span class="dash-tab-empty-icon" aria-hidden="true">{{ icon }}</span>
+<p class="dash-tab-empty-title">{{ title }}</p>
+<p class="dash-tab-empty-text">{{ text }}</p>
+</div>
+{%- endmacro %}
+
 {#- Picture view: the sender's face and a 💬, one short line of the text
     under it (a tap reads the whole message aloud). A new one's 💬 sits
     on a filled accent circle — never the ring the page owner's face
