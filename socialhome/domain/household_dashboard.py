@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from .user import User
 
 __all__ = [
+    "ACK_EMOJI",
     "DEFAULT_DASHBOARD_PORT",
     "IDLE_RETURN_CHOICES",
     "MESSAGE_KINDS",
@@ -109,6 +110,10 @@ SETUP_TOKEN_TTL_SECONDS = 600
 #: newest few, and none older than this (wall-clock age).
 MESSAGES_SHOWN = 3
 MESSAGE_MAX_AGE = timedelta(hours=6)
+
+#: The reaction a "Got it" on the wall writes to a household-chat message
+#: — and the one that marks a mention as seen (the SPA picker's ✅).
+ACK_EMOJI: Final = "✅"
 
 #: :attr:`DashboardMessage.kind` values.
 MESSAGE_KINDS = frozenset({"text", "photo", "video", "file", "voice"})
