@@ -7,6 +7,7 @@ import dataclasses
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 import orjson
 
@@ -40,12 +41,14 @@ from socialhome.crypto import (
 )
 from socialhome.domain.events import PeerUnpaired
 from socialhome.domain.federation import (
+    DeliveryResult,
     FederationEventType,
     GfsConnection,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.federation.peer_pairing_client import sign_peer_body
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
 from socialhome.services.dm_routing_service import DmRoutingService
 
@@ -2178,3 +2181,303 @@ async def test_managing_connections_has_its_own_rate_limit_bucket(client):
     # …while the handshake endpoints keep the tight bucket of their own.
     statuses = [(await _initiate(client)).status for _ in range(6)]
     assert statuses[-1] == 429
+
+
+# ─── Cancelling a pending pairing ──────────────────────────────────────────
+
+
+class _AbortRecorder:
+    """Patched onto ``FederationService.send_event`` (slotted — patch the
+    class) so a cancel's ``PAIRING_ABORT`` never leaves the test."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        #: Run inside the send — lets a test land a confirm mid-cancel.
+        self.during = None
+
+    def install(self, client, monkeypatch) -> "_AbortRecorder":
+        rec = self
+
+        async def _send(self_, *, to_instance_id, event_type, payload, **kw):
+            rec.sent.append(
+                {"to": to_instance_id, "type": event_type, "payload": payload}
+            )
+            if rec.during is not None:
+                await rec.during()
+            return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+        monkeypatch.setattr(
+            type(client.app[federation_service_key]), "send_event", _send
+        )
+        return self
+
+
+async def _issuer_half_pair(client) -> tuple[str, str, str, str]:
+    """We showed a code; the scanner's signed peer-accept landed. Returns
+    ``(token, sas, scanner_id, inbox_path)`` — our row is PENDING_RECEIVED
+    with keys, our session holds the SAS."""
+    qr = await (
+        await client.post("/api/pairing/initiate", json={}, headers=_auth(client._tok))
+    ).json()
+    scanner = generate_identity_keypair()
+    scanner_id = derive_instance_id(scanner.public_key)
+    body = sign_peer_body(
+        {
+            "event_type": FederationEventType.PAIRING_PEER_ACCEPT.value,
+            "token": qr["token"],
+            "verification_code": "424242",
+            "identity_pk": scanner.public_key.hex(),
+            "instance_id": scanner_id,
+            "dh_pk": generate_x25519_keypair().public_key.hex(),
+            "inbox_url": "https://scanner.example/federation/inbox/s1",
+            "display_name": "Scanner",
+        },
+        own_identity_seed=scanner.private_key,
+    )
+    path = urlparse(qr["inbox_url"]).path
+    r = await client.post(
+        path, data=orjson.dumps(body), headers={"Content-Type": "application/json"}
+    )
+    assert r.status == 200
+    client._scanner = scanner  # for signing a late peer-confirm
+    client._peer_accept = body
+    return qr["token"], "424242", scanner_id, path
+
+
+async def _cancel(client, iid: str, tok: str | None = None):
+    return await client.delete(
+        f"/api/pairing/pending/{iid}", headers=_auth(tok or client._tok)
+    )
+
+
+async def test_cancel_issuer_half_pair_tells_the_peer_and_forgets_it(
+    client, monkeypatch
+):
+    rec = _AbortRecorder().install(client, monkeypatch)
+    token, _sas, scanner_id, _path = await _issuer_half_pair(client)
+    seen: list[PeerUnpaired] = []
+    client.app[event_bus_key].subscribe(PeerUnpaired, seen.append)
+
+    r = await _cancel(client, scanner_id)
+
+    assert r.status == 204
+    repo = client.app[federation_repo_key]
+    assert await repo.get_instance(scanner_id, include_unpairing=True) is None
+    assert await repo.get_pairing(token) is None
+    assert rec.sent == [
+        {
+            "to": scanner_id,
+            "type": FederationEventType.PAIRING_ABORT,
+            "payload": {"token": token, "reason": "cancelled"},
+        }
+    ]
+    assert [e.instance_id for e in seen] == [scanner_id]
+    listing = await client.get("/api/connections", headers=_auth(client._tok))
+    assert await listing.json() == []
+
+
+async def test_cancelled_pairing_cannot_be_completed_late(client, monkeypatch):
+    """No resurrection: the code, the SAS, a replayed peer-accept and the
+    peer's signed peer-confirm are all refused once we cancelled."""
+    _AbortRecorder().install(client, monkeypatch)
+    token, sas, scanner_id, path = await _issuer_half_pair(client)
+    assert (await _cancel(client, scanner_id)).status == 204
+
+    # Our own admin entering the SAS.
+    r = await client.post(
+        "/api/pairing/confirm",
+        json={"token": token, "verification_code": sas},
+        headers=_auth(client._tok),
+    )
+    assert r.status in (404, 422)
+    # The scanner retrying its peer-accept.
+    r = await client.post(
+        path,
+        data=orjson.dumps(client._peer_accept),
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status == 404
+    # The scanner's admin confirmed on its side and sends the peer-confirm.
+    confirm = sign_peer_body(
+        {
+            "event_type": FederationEventType.PAIRING_PEER_CONFIRM.value,
+            "token": token,
+            "instance_id": scanner_id,
+        },
+        own_identity_seed=client._scanner.private_key,
+    )
+    r = await client.post(
+        path, data=orjson.dumps(confirm), headers={"Content-Type": "application/json"}
+    )
+    assert r.status == 404
+
+    repo = client.app[federation_repo_key]
+    assert await repo.get_instance(scanner_id) is None
+    assert await repo.list_instances() == []
+
+
+async def test_cancel_scanner_half_pair_closes_its_session(client, monkeypatch):
+    """The scanning side: its session and keyed row go, the code owner is
+    told with the token both sides hold."""
+    rec = _AbortRecorder().install(client, monkeypatch)
+    _record_outbound(client)
+    code, owner_id = _scanned_code("tok-scan")
+    r = await client.post("/api/pairing/accept", json=code, headers=_auth(client._tok))
+    assert r.status == 200
+    repo = client.app[federation_repo_key]
+    assert (await repo.get_instance(owner_id)).status is PairingStatus.PENDING_RECEIVED
+
+    assert (await _cancel(client, owner_id)).status == 204
+
+    assert await repo.get_instance(owner_id) is None
+    assert await repo.get_pairing("tok-scan") is None
+    assert rec.sent[0]["payload"] == {"token": "tok-scan", "reason": "cancelled"}
+
+
+async def test_cancel_trust_relay_request_sends_nothing(client, monkeypatch):
+    """A request we sent through a trust relay: no key to the target, so
+    nothing is sent; the provisional row goes."""
+    rec = _AbortRecorder().install(client, monkeypatch)
+    repo = client.app[federation_repo_key]
+    await repo.save_instance(
+        RemoteInstance(
+            id="target-c",
+            display_name="C",
+            remote_identity_pk="",
+            key_self_to_remote="",
+            key_remote_to_self="",
+            remote_inbox_url="",
+            local_inbox_id="wh-target-c",
+            status=PairingStatus.PENDING_SENT,
+            source=InstanceSource.MANUAL,
+        )
+    )
+
+    assert (await _cancel(client, "target-c")).status == 204
+
+    assert await repo.get_instance("target-c") is None
+    assert rec.sent == []
+
+
+async def test_cancel_unknown_is_404(client, monkeypatch):
+    rec = _AbortRecorder().install(client, monkeypatch)
+    r = await _cancel(client, "nope")
+    assert r.status == 404
+    assert rec.sent == []
+
+
+async def test_cancel_confirmed_pairing_is_409_and_keeps_it(client, monkeypatch):
+    rec = _AbortRecorder().install(client, monkeypatch)
+    repo = client.app[federation_repo_key]
+    await repo.save_instance(_fake_instance("peer-live"))
+
+    r = await _cancel(client, "peer-live")
+
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "PAIRING_CONFIRMED"
+    inst = await repo.get_instance("peer-live")
+    assert inst is not None and inst.status is PairingStatus.CONFIRMED
+    assert rec.sent == []
+
+
+async def test_cancel_racing_a_confirm_is_409_and_the_pair_stays(client, monkeypatch):
+    """The peer's confirm lands while our abort is in flight: the pairing is
+    live now, and a cancel never tears a live pairing down."""
+    rec = _AbortRecorder().install(client, monkeypatch)
+    _token, _sas, scanner_id, _path = await _issuer_half_pair(client)
+    repo = client.app[federation_repo_key]
+
+    async def _confirm_now() -> None:
+        inst = await repo.get_instance(scanner_id)
+        await repo.save_instance(
+            dataclasses.replace(inst, status=PairingStatus.CONFIRMED)
+        )
+
+    rec.during = _confirm_now
+    seen: list[PeerUnpaired] = []
+    client.app[event_bus_key].subscribe(PeerUnpaired, seen.append)
+
+    r = await _cancel(client, scanner_id)
+
+    assert r.status == 409
+    inst = await repo.get_instance(scanner_id)
+    assert inst is not None and inst.status is PairingStatus.CONFIRMED
+    assert seen == []
+
+
+async def test_cancel_requires_admin(client, monkeypatch):
+    rec = _AbortRecorder().install(client, monkeypatch)
+    _token, _sas, scanner_id, _path = await _issuer_half_pair(client)
+    member_tok = await _seed_member(client._db)
+
+    r = await _cancel(client, scanner_id, member_tok)
+
+    assert r.status == 403
+    assert await client.app[federation_repo_key].get_instance(scanner_id) is not None
+    assert rec.sent == []
+
+
+async def test_cancel_requires_sign_in(client):
+    r = await client.delete("/api/pairing/pending/anything")
+    assert r.status == 401
+
+
+async def test_unpair_endpoint_cancels_a_pending_pairing_without_a_tombstone(
+    client, monkeypatch
+):
+    """``DELETE /api/pairing/connections/{id}`` on a handshake still in
+    flight takes the cancel path: a PAIRING_ABORT, no UNPAIR, and no
+    tombstone retrying it for weeks."""
+    rec = _AbortRecorder().install(client, monkeypatch)
+    token, _sas, scanner_id, _path = await _issuer_half_pair(client)
+
+    r = await client.delete(
+        f"/api/pairing/connections/{scanner_id}", headers=_auth(client._tok)
+    )
+
+    assert r.status == 200
+    assert await r.json() == {"ok": True, "peer_notified": True}
+    repo = client.app[federation_repo_key]
+    assert await repo.get_instance(scanner_id, include_unpairing=True) is None
+    assert await repo.get_pairing(token) is None
+    assert [s["type"] for s in rec.sent] == [FederationEventType.PAIRING_ABORT]
+
+
+async def test_unpair_endpoint_still_unpairs_a_confirmed_pairing(client, monkeypatch):
+    rec = _AbortRecorder().install(client, monkeypatch)
+    await client.app[federation_repo_key].save_instance(_fake_instance("peer-u"))
+
+    r = await client.delete(
+        "/api/pairing/connections/peer-u", headers=_auth(client._tok)
+    )
+
+    assert r.status == 200
+    assert [s["type"] for s in rec.sent] == [FederationEventType.UNPAIR]
+    assert await client.app[federation_repo_key].get_instance("peer-u") is None
+
+
+async def test_unpair_endpoint_unpairs_when_confirmed_mid_cancel(client, monkeypatch):
+    """Removing a connection means "gone either way": a pending pairing that
+    gets confirmed while it is being cancelled is unpaired instead."""
+    rec = _AbortRecorder().install(client, monkeypatch)
+    _token, _sas, scanner_id, _path = await _issuer_half_pair(client)
+    repo = client.app[federation_repo_key]
+
+    async def _confirm_now() -> None:
+        rec.during = None
+        inst = await repo.get_instance(scanner_id)
+        await repo.save_instance(
+            dataclasses.replace(inst, status=PairingStatus.CONFIRMED)
+        )
+
+    rec.during = _confirm_now
+    r = await client.delete(
+        f"/api/pairing/connections/{scanner_id}", headers=_auth(client._tok)
+    )
+
+    assert r.status == 200
+    assert [s["type"] for s in rec.sent] == [
+        FederationEventType.PAIRING_ABORT,
+        FederationEventType.UNPAIR,
+    ]
+    assert await repo.get_instance(scanner_id) is None

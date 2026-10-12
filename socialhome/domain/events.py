@@ -1412,7 +1412,8 @@ class AutoPairRequestIncoming(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class PeerUnpaired(DomainEvent):
     """A pairing was torn down — by the peer (inbound ``UNPAIR``) or by
-    our own admin (``DELETE /api/pairing/connections/{id}``)."""
+    our own admin (``DELETE /api/pairing/connections/{id}``) — or our admin
+    cancelled a pending one (``DELETE /api/pairing/pending/{id}``)."""
 
     instance_id: str
     occurred_at: datetime = field(default_factory=_now)

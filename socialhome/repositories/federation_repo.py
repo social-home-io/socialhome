@@ -71,6 +71,7 @@ class AbstractFederationRepo(Protocol):
         self, instance_id: str
     ) -> tuple[int, str | None] | None: ...
     async def delete_instance(self, instance_id: str) -> None: ...
+    async def delete_pending_instance(self, instance_id: str) -> bool: ...
     async def mark_unpairing(self, instance_id: str) -> None: ...
     async def mark_reachable(self, instance_id: str) -> None: ...
     async def mark_unreachable(self, instance_id: str) -> None: ...
@@ -129,6 +130,7 @@ class AbstractFederationRepo(Protocol):
     async def get_pairing(self, token: str) -> PairingSession | None: ...
     async def update_pairing(self, session: PairingSession) -> None: ...
     async def delete_pairing(self, token: str) -> None: ...
+    async def pop_pairings_for_inbox(self, local_inbox_id: str) -> list[str]: ...
     async def cleanup_expired_pairings(self) -> int: ...
 
     # Bans ----------------------------------------------------------------
@@ -413,6 +415,32 @@ class SqliteFederationRepo:
             "DELETE FROM remote_instances WHERE id=?",
             (instance_id,),
         )
+
+    async def delete_pending_instance(self, instance_id: str) -> bool:
+        """Drop a half-paired household's row — only while it is still
+        pending — plus everything queued or learned for it, in one
+        transaction. Returns whether a row was removed.
+
+        Used when our admin cancels a pairing that was never confirmed.
+        The status condition is the race guard: a pairing confirmed after
+        the caller looked (the peer's signed confirm, our own SAS entry)
+        is never torn down by a cancel, and a tombstone is left to its own
+        lifecycle. The side rows go in the same order and scope as
+        ``PeerUnpairService.purge`` (see :func:`_purge_instance_side_rows`).
+        """
+
+        def _run(conn) -> bool:
+            removed = conn.execute(
+                "DELETE FROM remote_instances WHERE id=?"
+                " AND status IN ('pending_sent', 'pending_received')",
+                (instance_id,),
+            ).rowcount
+            if not removed:
+                return False
+            _purge_instance_side_rows(conn, [instance_id])
+            return True
+
+        return bool(await self._db.transact(_run))
 
     async def mark_unpairing(self, instance_id: str) -> None:
         """Turn a pairing into an unpair tombstone, atomically.
@@ -809,6 +837,33 @@ class SqliteFederationRepo:
             "DELETE FROM pending_pairings WHERE token=?",
             (token,),
         )
+
+    async def pop_pairings_for_inbox(self, local_inbox_id: str) -> list[str]:
+        """Delete every ``pending_pairings`` session that minted
+        *local_inbox_id* and return their tokens.
+
+        A pending ``remote_instances`` row shares its ``local_inbox_id`` with
+        the session that created it (the issuer's QR inbox id, or the
+        scanner's own). Deleting the session is what makes a cancelled
+        handshake impossible to finish: ``confirm``, ``handle_peer_accept``
+        and ``handle_peer_confirm`` all start from the session.
+        """
+
+        def _run(conn) -> list[str]:
+            tokens = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT token FROM pending_pairings WHERE own_local_inbox_id=?",
+                    (local_inbox_id,),
+                ).fetchall()
+            ]
+            conn.execute(
+                "DELETE FROM pending_pairings WHERE own_local_inbox_id=?",
+                (local_inbox_id,),
+            )
+            return tokens
+
+        return list(await self._db.transact(_run))
 
     async def cleanup_expired_pairings(self) -> int:
         """Delete ``pending_pairings`` past their ``expires_at`` plus the

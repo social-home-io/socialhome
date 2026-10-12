@@ -1239,3 +1239,80 @@ async def test_save_instance_with_a_new_keywrap_key_replaces_it(env):
     )
     got = await env.fed_repo.get_instance("peer-gfs")
     assert got is not None and got.remote_keywrap_pk == "dd" * 32
+
+
+# ── Cancelling a pending pairing ─────────────────────────────────────────
+
+
+def _session(token: str, inbox: str, *, minutes: int = 5) -> PairingSession:
+    now = datetime.now(timezone.utc)
+    return PairingSession(
+        token=token,
+        own_identity_pk="aa" * 32,
+        own_dh_pk="bb" * 32,
+        own_dh_sk="cc" * 32,
+        inbox_url=f"https://local/inbox/{inbox}",
+        own_local_inbox_id=inbox,
+        issued_at=now.isoformat(),
+        expires_at=(now + timedelta(minutes=minutes)).isoformat(),
+        status=PairingStatus.PENDING_RECEIVED,
+    )
+
+
+async def test_pop_pairings_for_inbox_deletes_and_returns_the_tokens(env):
+    await env.fed_repo.create_pairing(_session("tok-a", "inbox-a"))
+    await env.fed_repo.create_pairing(_session("tok-other", "inbox-other"))
+
+    assert await env.fed_repo.pop_pairings_for_inbox("inbox-a") == ["tok-a"]
+
+    assert await env.fed_repo.get_pairing("tok-a") is None
+    assert await env.fed_repo.get_pairing("tok-other") is not None
+
+
+async def test_pop_pairings_for_inbox_without_a_session_is_empty(env):
+    assert await env.fed_repo.pop_pairings_for_inbox("nope") == []
+
+
+async def test_delete_pending_instance_purges_the_half_pair_and_its_side_rows(env):
+    await env.fed_repo.save_instance(
+        replace_status(_tomb_inst("peer-half", "own-h"), PairingStatus.PENDING_RECEIVED)
+    )
+    await _seed_side_rows(env.db, "peer-half")
+
+    assert await env.fed_repo.delete_pending_instance("peer-half") is True
+
+    assert await env.fed_repo.get_instance("peer-half") is None
+    assert await _side_row_counts(env.db, "peer-half") == (0, 0, 0, 0)
+
+
+async def test_delete_pending_instance_also_takes_an_auto_pair_row(env):
+    await env.fed_repo.save_instance(
+        replace_status(_tomb_inst("peer-ap", "own-ap"), PairingStatus.PENDING_SENT)
+    )
+    assert await env.fed_repo.delete_pending_instance("peer-ap") is True
+    assert await env.fed_repo.get_instance("peer-ap") is None
+
+
+async def test_delete_pending_instance_never_touches_a_confirmed_row(env):
+    """The race guard: a pairing that was confirmed between the caller's
+    read and this delete stays, with everything queued for it."""
+    await env.fed_repo.save_instance(_tomb_inst("peer-live", "own-live"))
+    await _seed_side_rows(env.db, "peer-live")
+
+    assert await env.fed_repo.delete_pending_instance("peer-live") is False
+
+    assert await env.fed_repo.get_instance("peer-live") is not None
+    assert await _side_row_counts(env.db, "peer-live") == (1, 1, 1, 1)
+
+
+async def test_delete_pending_instance_never_touches_a_tombstone(env):
+    await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-t"))
+    await env.fed_repo.mark_unpairing("peer-t")
+    assert await env.fed_repo.delete_pending_instance("peer-t") is False
+    assert (
+        await env.fed_repo.get_instance("peer-t", include_unpairing=True)
+    ) is not None
+
+
+async def test_delete_pending_instance_unknown_is_false(env):
+    assert await env.fed_repo.delete_pending_instance("nope") is False

@@ -313,6 +313,25 @@ class AutoPairCoordinator:
         )
         return {"status": "sent", "token": token}
 
+    def forget_requests_to(self, target_instance_id: str) -> int:
+        """Drop every outstanding request of ours to *target_instance_id*.
+
+        Called when our admin cancels the pending pairing. The in-memory
+        session (its ephemeral DH secret, nonce and token) is the only thing
+        :meth:`on_ack_at_originator` accepts an ack against, so once it is
+        gone an approval from the target that arrives later is ignored and
+        can never turn the cancelled request into a pairing. Returns how
+        many were dropped.
+        """
+        tokens = [
+            token
+            for token, session in self._pending.items()
+            if session.target_instance_id == target_instance_id
+        ]
+        for token in tokens:
+            del self._pending[token]
+        return len(tokens)
+
     # ── Vouching peer (B) ──────────────────────────────────────────────
 
     async def on_intro_from_peer(self, event: "FederationEvent") -> None:

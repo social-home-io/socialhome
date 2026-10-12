@@ -41,7 +41,10 @@ paired (`manual`) row — a GFS-reach pairing does.
   auto-pair finalisation); the event is logged at WARNING and ignored.
 - `PAIRING_ABORT` cancels a pending session only when the peer identity
   stored on it derives to the envelope's `from_instance` — a household
-  can cancel its own handshake, never another's.
+  can cancel its own handshake, never another's. It also drops the
+  sender's half-pair row unless that pairing is confirmed. Sent by an admin
+  cancelling a pending pairing ([below](#cancelling-a-pending-pairing)) and
+  by a trust-relay target declining a request.
 
 ## Flow — direct QR handshake
 
@@ -603,6 +606,80 @@ by an explicit status filter (the real `confirm()` path deletes the
 session before flipping the instance, so the scenario is defensive
 rather than actual).
 
+## Cancelling a pending pairing
+
+A pairing that was never confirmed is not unpaired — there is nothing to
+tear down on the other side but a handshake in flight, and a tombstone that
+retries an `UNPAIR` for 30 days would be wrong for a household that may not
+even know us. Our admin cancels it instead
+(`DELETE /api/pairing/pending/{instance_id}`, the "Cancel pairing" action on
+a pending card; `DELETE /api/pairing/connections/{instance_id}` on a pending
+row takes the same path). Implemented by
+[`PairingCancelService`](../../socialhome/services/pairing_cancel_service.py).
+
+### Pending states
+
+| Our state | Where it comes from | What we hold | What the peer holds | Cancel |
+|---|---|---|---|---|
+| Code shown, not scanned | `initiate` | `pending_pairings` session only — no row, not in the connections list | the code (if it was shared) | not listed; the session expires after 5 min, and a late scan's peer-accept is then refused (`404 No pending pairing`) |
+| `pending_received` — issuer | the scanner's signed peer-accept landed | session (token, SAS) + keyed row | session + keyed row (`pending_received`) | delete session, `PAIRING_ABORT` to the scanner, delete row |
+| `pending_received` — scanner | we scanned the code | session (token, SAS) + keyed row | session; plus our keyed row once our peer-accept reached it | delete session, `PAIRING_ABORT` to the code owner, delete row |
+| `pending_sent` — trust relay | we asked a confirmed peer to introduce us (§auto-pair) | provisional row **without a key** + in-memory request | the target holds the vouched request in its approval inbox; no row, no channel to us | forget the in-memory request, delete row — nothing is sent |
+
+### Order
+
+1. **Close every way to finish the handshake.** The `pending_pairings`
+   sessions behind the row (same `local_inbox_id`) are deleted, and the
+   trust-relay request is forgotten. Our own SAS entry, the peer's signed
+   `PAIRING_PEER_ACCEPT` / `PAIRING_PEER_CONFIRM` (direct or relayed through
+   a GFS) and a late `PAIRING_INTRO_AUTO_ACK` all start from that state, so
+   from here on each is refused (`404 No pending pairing` / ignored). An
+   inbox `PAIRING_CONFIRM` never confirmed anything to begin with.
+2. **Tell the peer — best effort, never a leak.** Only when the row holds
+   the peer's identity key and our session key (the peer has state about
+   us, and a signed, encrypted channel exists): one `PAIRING_ABORT`
+   `{token, reason: "cancelled"}` — the token is the one the peer already
+   holds. Its receiver drops only the **signer's** pending session and
+   half-pair (never a confirmed pairing) and pushes `pairing.aborted`.
+   Bounded to 5 s; not retried — an unreached peer's half expires with its
+   own session.
+3. **Forget the row** — atomically and only while it is still pending,
+   with its queued outbox envelopes, DM / space media and mesh hints
+   (`delete_pending_instance`), then `PeerUnpaired` →
+   `connection.removed`.
+
+A pairing confirmed in the meantime (the peer's confirm landed while the
+abort was in flight) is never torn down by a cancel: the dedicated endpoint
+answers `409 PAIRING_CONFIRMED` and the list shows it live. (The unpair
+endpoint unpairs it instead — the admin asked for the connection gone.)
+
+Residual: a peer that missed our abort and whose admin enters the SAS before
+its session expires flips its own half to confirmed (a local step, as when
+our session had simply expired); its peer-confirm is refused, our inbox
+refuses everything it sends, and its admin can remove the connection.
+Likewise a trust-relay target that approves after we cancelled holds a
+one-sided row (its ack is ignored here).
+
+```mermaid
+sequenceDiagram
+    participant AdminA as Admin (household A)
+    participant A as Household A
+    participant B as Household B (pending)
+    AdminA->>A: DELETE /api/pairing/pending/B
+    A->>A: delete pending_pairings session(s), forget auto-pair request
+    opt row holds B's key (QR half-pair)
+        A->>B: PAIRING_ABORT {token, reason} (encrypted, signed; ≤ 5 s)
+        B->>B: drop session + half-pair of A (signer only), pairing.aborted
+    end
+    alt row still pending
+        A->>A: delete row + queued rows, PeerUnpaired
+        A-->>AdminA: 204
+    else confirmed meanwhile
+        A-->>AdminA: 409 PAIRING_CONFIRMED
+    end
+    Note over B,A: late peer-accept / peer-confirm / SAS → refused (no session)
+```
+
 ## Unpairing
 
 Either admin can end a pairing (`DELETE /api/pairing/connections/{instance_id}`),
@@ -759,13 +836,17 @@ sequenceDiagram
   the handshake only ever arrives through the federation inbox. Managing
   household connections is admin-only throughout: introductions,
   auto-pair via a trusted peer, the approve / decline queues, per-peer
-  settings and unpairing all answer `403` to a non-admin. Only the
+  settings, cancelling a pending pairing and unpairing all answer `403` to
+  a non-admin. Only the
   connections listing stays readable by every signed-in member.
 - `socialhome/services/federation_inbound/pairing.py` — §24.11
   inbound handlers for already-paired peers (covers
   `PAIRING_INTRO_RELAY`, `URL_UPDATED`, `UNPAIR`).
 - `socialhome/services/peer_unpair_service.py` — `unpair` (send
   `UNPAIR`, then forget) and the shared `forget` step both directions use.
+- `socialhome/services/pairing_cancel_service.py` — `cancel_pending`
+  (close the handshake, `PAIRING_ABORT`, forget the half-pair) for a
+  pairing that was never confirmed.
 - `socialhome/services/url_update_outbound.py` — outbound fan-out of
   `URL_UPDATED` when this instance's base URL changes.
 - `socialhome/crypto.py` — key derivation primitives.

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import MappingProxyType
+from urllib.parse import urlparse
 
 import pytest
 
@@ -21,6 +22,7 @@ from socialhome.app_keys import (
     event_bus_key,
     federation_repo_key,
     federation_service_key,
+    pairing_cancel_service_key,
 )
 from socialhome.auth import (
     _DEFAULT_PUBLIC_PATH_PATTERNS,
@@ -35,9 +37,11 @@ from socialhome.crypto import (
 )
 from socialhome.domain.events import PairingConfirmed
 from socialhome.domain.federation import (
+    DeliveryResult,
     FederationEvent,
     FederationEventType,
     InstanceSource,
+    PairingAlreadyConfirmedError,
     PairingStatus,
     RemoteInstance,
 )
@@ -188,6 +192,7 @@ def test_trust_mutation_walk_finds_the_known_routes(anon_client):
         ("post", "/api/pairing/introduce"),
         ("post", "/api/pairing/auto-pair-via"),
         ("delete", "/api/pairing/connections/{instance_id}"),
+        ("delete", "/api/pairing/pending/{instance_id}"),
         ("patch", "/api/pairing/connections/{instance_id}"),
         ("patch", "/api/pairing/connections/{instance_id}/alias"),
     ):
@@ -358,3 +363,97 @@ async def test_abort_from_the_sessions_own_peer_still_cancels(anon_client):
     repo = app[federation_repo_key]
     assert await repo.get_pairing(token) is None
     assert await repo.get_instance(scanner_id) is None
+
+
+# ─── A cancelled pairing stays cancelled ───────────────────────────────────
+#
+# Our admin cancelling a pending pairing (``PairingCancelService``) must
+# leave nothing the peer — or a replay of its earlier messages — can use to
+# finish the handshake: the signed peer-accept, the signed peer-confirm and
+# the SAS all start from the session the cancel deleted. And a cancel never
+# tears down a pairing that is confirmed.
+
+
+async def _cancel_without_network(app, monkeypatch, instance_id: str) -> list:
+    sent: list = []
+
+    async def _send(self, *, to_instance_id, event_type, payload, **kw):
+        sent.append((to_instance_id, event_type, payload))
+        return DeliveryResult(instance_id=to_instance_id, ok=True)
+
+    monkeypatch.setattr(type(app[federation_service_key]), "send_event", _send)
+    await app[pairing_cancel_service_key].cancel_pending(instance_id)
+    return sent
+
+
+async def test_cancelled_pairing_refuses_every_late_completion(
+    anon_client, monkeypatch
+):
+    app = anon_client.server.app
+    coord = app[federation_service_key]._pairing
+    qr = await coord.initiate("https://test.example/federation/inbox")
+    scanner = generate_identity_keypair()
+    scanner_id = derive_instance_id(scanner.public_key)
+    accept = sign_peer_body(
+        {
+            "token": qr["token"],
+            "verification_code": "424242",
+            "identity_pk": scanner.public_key.hex(),
+            "instance_id": scanner_id,
+            "dh_pk": generate_x25519_keypair().public_key.hex(),
+            "inbox_url": "https://scanner.example/federation/inbox/s1",
+            "display_name": "Scanner",
+        },
+        own_identity_seed=scanner.private_key,
+    )
+    await coord.handle_peer_accept(accept)
+    confirmed: list[PairingConfirmed] = []
+    app[event_bus_key].subscribe(PairingConfirmed, confirmed.append)
+
+    sent = await _cancel_without_network(app, monkeypatch, scanner_id)
+    # The peer is told with the token it already holds — nothing more.
+    assert sent == [
+        (
+            scanner_id,
+            FederationEventType.PAIRING_ABORT,
+            {"token": qr["token"], "reason": "cancelled"},
+        )
+    ]
+
+    with pytest.raises(ValueError, match="No pending pairing"):
+        await coord.handle_peer_accept(accept)
+    with pytest.raises(ValueError, match="No pending pairing"):
+        await coord.handle_peer_confirm(
+            sign_peer_body(
+                {"token": qr["token"], "instance_id": scanner_id},
+                own_identity_seed=scanner.private_key,
+            )
+        )
+    with pytest.raises(ValueError, match="No pending pairing"):
+        await coord.confirm(qr["token"], "424242")
+    # A pending peer's inbox PAIRING_CONFIRM was never a way in either.
+    await _dispatch(
+        app, FederationEventType.PAIRING_CONFIRM, {}, from_instance=scanner_id
+    )
+
+    repo = app[federation_repo_key]
+    assert await repo.get_instance(scanner_id, include_unpairing=True) is None
+    assert (
+        await repo.get_instance_by_local_inbox_id(
+            urlparse(qr["inbox_url"]).path.rsplit("/", 1)[-1]
+        )
+        is None
+    )
+    assert confirmed == []
+
+
+async def test_cancel_never_tears_down_a_confirmed_pairing(anon_client, monkeypatch):
+    app = anon_client.server.app
+    repo = app[federation_repo_key]
+    await repo.save_instance(_seeded_peer())
+
+    with pytest.raises(PairingAlreadyConfirmedError):
+        await _cancel_without_network(app, monkeypatch, _SEEDED_PEER)
+
+    inst = await repo.get_instance(_SEEDED_PEER)
+    assert inst is not None and inst.status is PairingStatus.CONFIRMED

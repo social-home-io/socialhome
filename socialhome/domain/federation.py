@@ -1264,6 +1264,24 @@ class GfsRelayNotAllowedError(CodedError, ValueError):
     detail = "The GFS fallback is only for confirmed, directly paired households."
 
 
+class PendingPairingNotFoundError(CodedError, LookupError):
+    """A cancel names a household we hold no pending pairing with."""
+
+    status = 404
+    code = "NOT_FOUND"
+    detail = "No pending pairing with this household."
+
+
+class PairingAlreadyConfirmedError(CodedError, ValueError):
+    """A cancel was asked for a pairing that is confirmed (it may have been
+    confirmed a moment ago). Cancelling never tears down a live pairing —
+    removing a connection is the unpair."""
+
+    status = 409
+    code = "PAIRING_CONFIRMED"
+    detail = "This pairing is already confirmed — remove the connection instead."
+
+
 class PairingKeywrapInvalidError(CodedError, ValueError):
     """The peer's key-wrap key is missing, of an unknown suite, or not
     bound to its identity key — never seal anything to it."""

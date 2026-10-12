@@ -18,8 +18,10 @@ import pytest
 from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
+    generate_x25519_keypair,
     sign_ed25519,
 )
+from socialhome.domain.events import PairingConfirmed
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -860,3 +862,92 @@ async def test_on_ack_at_originator_rejects_invalid_c_inbox_url(
         )
     assert fed_repo.instances[c_id].status is PairingStatus.PENDING_SENT
     assert "invalid c_inbox_url" in caplog.text
+
+
+# ── cancelling an outstanding request (A side) ─────────────────────
+
+
+async def _request_and_signed_ack(coord, fed_repo, identity) -> tuple[str, dict]:
+    """A (``coord``) asks B to introduce it to C; return ``(c_id, ack)`` where
+    ``ack`` is the valid ``PAIRING_INTRO_AUTO_ACK`` payload B would forward
+    once C's admin approved (vouch signed by B, ack signed by C)."""
+    b_kp = generate_identity_keypair()
+    b = _make_peer_remote_instance(b_kp.public_key.hex())
+    fed_repo.instances[b.id] = b
+    c_kp = generate_identity_keypair()
+    c_id = derive_instance_id(c_kp.public_key)
+    r = await coord.request_via(
+        via_instance_id=b.id,
+        target_instance_id=c_id,
+        target_display_name="C",
+        own_inbox_base_url=_OWN_INBOX_BASE,
+    )
+    session = coord._pending[r["token"]]
+    a_id = derive_instance_id(identity.public_key)
+    c_dh = generate_x25519_keypair()
+    vouch = sign_ed25519(
+        b_kp.private_key,
+        _vouch_blob(
+            a_id=a_id,
+            a_pk_hex=identity.public_key.hex(),
+            a_inbox_url=session.a_inbox_url,
+            a_dh_pk_hex=session.dh_pk_hex,
+            c_id=c_id,
+            ts=session.ts,
+            nonce=session.nonce,
+        ),
+    )
+    ack = sign_ed25519(
+        c_kp.private_key,
+        _ack_blob(
+            a_id=a_id,
+            a_dh_pk_hex=session.dh_pk_hex,
+            c_id=c_id,
+            c_dh_pk_hex=c_dh.public_key.hex(),
+            ts=session.ts,
+            nonce=session.nonce,
+        ),
+    )
+    return c_id, {
+        "token": r["token"],
+        "a_id": a_id,
+        "c_id": c_id,
+        "c_pk": c_kp.public_key.hex(),
+        "c_inbox_url": "https://c.example/federation/inbox/c1",
+        "c_dh_pk": c_dh.public_key.hex(),
+        "via_b_id": b.id,
+        "vouch_sig": vouch.hex(),
+        "ack_sig": ack.hex(),
+        "ts": session.ts,
+        "nonce": session.nonce,
+    }
+
+
+async def test_valid_ack_confirms_the_request(coord, fed_repo, identity):
+    """Control for the cancel test below: this ack is good."""
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity)
+    await coord.on_ack_at_originator(_evt("b", ack))
+    assert fed_repo.instances[c_id].status is PairingStatus.CONFIRMED
+
+
+async def test_forget_requests_to_refuses_a_late_ack(coord, fed_repo, identity, bus):
+    """A cancelled request must never be completed by C's approval arriving
+    afterwards — the in-memory session is what an ack is checked against."""
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity)
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+
+    assert coord.forget_requests_to(c_id) == 1
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    assert fed_repo.instances[c_id].status is PairingStatus.PENDING_SENT
+    assert confirmed == []
+
+
+async def test_forget_requests_to_leaves_other_targets(coord, fed_repo, identity):
+    c_id, _ack = await _request_and_signed_ack(coord, fed_repo, identity)
+    other_id, other_ack = await _request_and_signed_ack(coord, fed_repo, identity)
+    assert coord.forget_requests_to(c_id) == 1
+    assert coord.forget_requests_to(c_id) == 0
+    await coord.on_ack_at_originator(_evt("b", other_ack))
+    assert fed_repo.instances[other_id].status is PairingStatus.CONFIRMED
