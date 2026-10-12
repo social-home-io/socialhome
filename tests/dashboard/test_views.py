@@ -1129,6 +1129,24 @@ def test_dashboard_js_mention_tone_is_on_device_once_and_quiet_at_night():
     assert "TONE_LATE_MS" in chime
 
 
+def test_dashboard_js_says_which_message_plays():
+    """The Messages tab row is a toggle: aria-pressed follows the speaking
+    row (a second tap stops it), and a polite live region names whose
+    message is read — from the row's own (server-translated) sentence."""
+    js = RENDERER.static_asset("dashboard.js").body.decode()
+    mark = js[js.index("function markSay()") :]
+    mark = mark[: mark.index("\n  }\n")]
+    assert 'hasAttribute("aria-pressed")' in mark
+    assert 'setAttribute("aria-pressed", on ? "true" : "false")' in mark
+    assert 'getAttribute("data-say-playing")' in mark
+    assert "sayStatus(" in mark
+    status = js[js.index("function sayStatus(") :]
+    status = status[: status.index("\n  }\n")]
+    assert 'querySelector("[data-say-status]")' in status
+    # Written only on a change: a refresh never re-announces it.
+    assert "el.textContent !== text" in status
+
+
 def test_dashboard_js_posts_got_it_same_origin():
     js = RENDERER.static_asset("dashboard.js").body.decode()
     submit = js[js.index('addEventListener("submit"') :]
