@@ -32,6 +32,9 @@ export interface GfsFallbackToggleProps {
   instanceId: string
   peerName: string
   initial: GfsFallbackState
+  /** ``row`` (default): checkbox row. ``card``: a setting card with a
+   *  switch, as in the Manage sheet. */
+  variant?: 'row' | 'card'
 }
 
 /** Delays between the status re-reads after switching on (~22 s in all):
@@ -67,7 +70,7 @@ function pick(body: unknown, fallback: GfsFallbackState): GfsFallbackState {
   }
 }
 
-export function GfsFallbackToggle({ instanceId, peerName, initial }: GfsFallbackToggleProps) {
+export function GfsFallbackToggle({ instanceId, peerName, initial, variant = 'row' }: GfsFallbackToggleProps) {
   const [state, setState] = useState<GfsFallbackState>(initial)
   const [busy, setBusy] = useState(false)
   /** Bumped by every successful "on" — schedules one status re-read. */
@@ -128,6 +131,37 @@ export function GfsFallbackToggle({ instanceId, peerName, initial }: GfsFallback
   // on, it can always be turned off.
   const locked = !state.gfs_relay && !state.gfs_relay_available
   const helpId = `sh-gfs-fallback-status-${instanceId}`
+  if (variant === 'card') {
+    const titleId = `sh-gfs-fallback-title-${instanceId}`
+    const privacyId = `sh-gfs-fallback-privacy-${instanceId}`
+    return (
+      <label class="sh-conn-setting sh-gfs-fallback">
+        <span class="sh-conn-setting__text">
+          <b id={titleId}>{t('gfs_fallback.label')}</b>
+          {!locked && <span id={privacyId} role="note">{t('gfs_fallback.privacy', { peer: peerName })}</span>}
+          <span
+            id={helpId}
+            class={`sh-gfs-fallback__status${state.gfs_relay_available ? '' : ' sh-conn-setting__warn'}`}
+            role="status"
+          >
+            {statusText(state, peerName)}
+          </span>
+        </span>
+        <span class="sh-switch">
+          <input
+            type="checkbox"
+            role="switch"
+            checked={state.gfs_relay}
+            disabled={locked || busy}
+            aria-labelledby={titleId}
+            aria-describedby={locked ? helpId : `${privacyId} ${helpId}`}
+            onChange={() => void toggle()}
+          />
+          <span class="sh-switch-track" />
+        </span>
+      </label>
+    )
+  }
   return (
     <div class="sh-gfs-fallback">
       <label class="sh-toggle-row">

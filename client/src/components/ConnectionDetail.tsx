@@ -1,13 +1,28 @@
 /**
- * ConnectionDetail — per-connection settings (§23.88, §23.89, §23.90).
+ * ConnectionDetail — the Manage sheet for a paired household (§23.88,
+ * §23.89, §23.90). Admin-only: members never reach it.
+ *
+ * Top to bottom (Connections HANDOFF §2, "Manage sheet"):
+ *   header      ConnAvatar + name + 44 px pencil → inline rename (✓ / Cancel
+ *               replace the dialog ×; Esc or Cancel discard only the edit)
+ *               + one status line
+ *   facts       Last connected · Connection · App version (tiles)
+ *   notes       only when something needs saying (unreachable, backlog,
+ *               dropped messages, relay-only, slow path)
+ *   Sharing     home location + GFS fallback as setting cards
+ *   Who can see per-person visibility (``/visible-users``)
+ *   Technical   collapsed: ID + address (copy buttons), paired date,
+ *               missing features, chat route, Check version again
+ *   Danger zone outlined "Unpair {name}" → confirm → DELETE
+ *
+ * A dialog on desktop, a bottom sheet ≤ 640 px (``.sh-modal`` rules).
  */
-import { signal } from '@preact/signals'
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { normaliseTimestamp, relativeDocsTime } from '@/utils/relativeTime'
 import { featureLabels } from '@/utils/capabilityLabels'
 import { Modal } from './Modal'
-import { Button } from './Button'
+import { Avatar } from './Avatar'
 import { ConfirmDialog } from './ConfirmDialog'
 import { Spinner } from './Spinner'
 import { showToast } from './Toast'
@@ -20,65 +35,54 @@ import {
   loadFederationCompat,
   type CompatPeer,
 } from '@/store/federationCompat'
+import { ConnAvatar, type AvatarStatus } from '@/features/connections/ConnAvatar'
+import { ConnIcon, type ConnIconName } from '@/features/connections/ConnIcon'
+import { formatSince, householdStatus, initialOf, tintFor, versionsBehind } from '@/features/connections/model'
 
 interface Connection {
   instance_id: string; display_name: string; status: string
   unreachable_since: string | null; paired_at: string | null
+  /** Live reachability (WS-patched). When absent, ``unreachable_since``
+   *  decides — see ``householdStatus``. */
+  reachable?: boolean
   /** Last moment an outbound envelope to this peer was accepted
    *  (``remote_instances.last_reachable_at``). ``null`` when it has never
-   *  been reached. "Not connected" is the most common federation support
-   *  question and the status chip alone can't answer it: a peer that
-   *  dropped a minute ago and one that has been dead for three weeks look
-   *  identical, yet one means wait and the other means investigate. */
+   *  been reached. A peer that dropped a minute ago and one that has been
+   *  dead for three weeks look alike without it. */
   last_reachable_at?: string | null
-  /** Last time the connection-server relay ACCEPTED an envelope for this
-   *  peer. Acceptance is not delivery — see ``relay_only``. Absent on
-   *  older API responses and when the relay was never used. */
+  /** Last time the GFS relay ACCEPTED an envelope for this peer.
+   *  Acceptance is not delivery — see ``relay_only``. */
   last_relay_accepted_at?: string | null
   /** The relay has accepted traffic for this peer more recently than any
-   *  proven delivery: "accepted by the connection server", not "delivered". */
+   *  proven delivery: "accepted by the GFS", not "delivered". */
   relay_only?: boolean
   /** Whether our household's home pin is shared with this peer (§23.90).
-   *  Defaults to true when absent (old API responses pre-dating the field). */
+   *  Defaults to true when absent (old API responses). */
   share_home?: boolean
-  /** The raw name the peer advertised via the federation handshake.
-   *  Shown read-only so the admin sees "Peer advertises: <name>"
-   *  alongside their own editable alias. */
+  /** The raw name the peer advertised via the federation handshake. */
   federated_display_name?: string
-  /** Local-only alias the admin set; ``null`` until they set one.
-   *  When non-null, ``display_name`` already reflects this value
-   *  (the backend pre-resolves the effective name). */
+  /** Local-only alias the admin set; ``null`` until they set one. When
+   *  non-null, ``display_name`` already reflects it. */
   local_alias?: string | null
-  /** Undelivered federation envelopes still queued for this peer.
-   *  Rendered only when non-zero, next to "Unreachable since": a peer
-   *  that has been dark for months is sitting on a visible backlog, and
-   *  seeing it is the difference between "wait" and "re-pair". Absent on
-   *  older API responses. */
+  /** Undelivered federation envelopes still queued for this peer. */
   queued_envelopes?: number
-  /** Envelopes permanently given up on for this peer — a PERMANENT
-   *  rejection or an exhausted retry budget. Never retried, so they are
-   *  rendered as their own line: folding them into the queued count
-   *  would present data loss as "queued for delivery". Absent on older
-   *  API responses. */
+  /** Envelopes permanently given up on — never retried, so never folded
+   *  into the queued count. */
   dropped_envelopes?: number
-  /** Active federation transport for this peer. Shown read-only
-   *  in the detail panel so the admin can see whether WebRTC is up. */
+  /** Active federation transport for this peer. */
   transport?: 'rtc' | 'https' | 'gfs_relay' | null
-  /** Monotonic federation protocol version the peer last advertised via
-   *  INSTANCE_CAPABILITIES_UPDATED. Shown read-only so an admin can spot a
-   *  peer that's behind. Absent on old API responses (defaults to v1 there). */
+  /** Protocol version the peer last advertised. */
   proto_version?: number
-  /** ``manual`` (paired directly) or ``space_session`` (met through an
-   *  invite link). Only a direct pair gets the GFS fallback switch. */
+  /** ``manual`` (paired directly) or ``space_session`` (invite link).
+   *  Only a direct pair gets the GFS fallback switch. */
   source?: string
   /** GFS fallback (v_54): our own opt-in for this household. */
   gfs_relay?: boolean
   /** GFSes both households were proven to use — a count, never a list. */
   gfs_routes?: number
-  /** We hold the other household's key-wrap key (it turned the switch on). */
+  /** We hold the other household's key-wrap key. */
   peer_keywrap_known?: boolean
-  /** The switch can work with this household at all (it runs a new
-   *  enough Social Home). */
+  /** The switch can work with this household at all. */
   gfs_relay_available?: boolean
 }
 
@@ -95,74 +99,108 @@ interface RelayDetail {
   ts: string
 }
 
-const showRevoke = signal(false)
-
-const STATUS_KEYS: Record<string, string> = {
-  confirmed: 'connections.status.confirmed',
-  pending_sent: 'connections.status.pending_sent',
-  pending_received: 'connections.status.pending_received',
+const TRANSPORT: Record<'rtc' | 'https' | 'gfs_relay', { icon: ConnIconName; key: string; hint: string }> = {
+  rtc: { icon: 'bolt', key: 'connections.transport.direct', hint: 'connections.detail.direct_hint' },
+  https: { icon: 'globe', key: 'connections.transport.internet', hint: 'connections.detail.internet_hint' },
+  gfs_relay: { icon: 'cloud', key: 'connections.transport.gfs', hint: 'connections.detail.gfs_hint' },
 }
 
-/** Translated label for a connection status; unknown values show as-is. */
-function statusLabel(status: string): string {
-  const key = STATUS_KEYS[status]
-  return key ? t(key) : status
+function capitalise(s: string): string {
+  return s ? s.charAt(0).toLocaleUpperCase(formatLocale()) + s.slice(1) : s
 }
 
-export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRevoke, onAliasSaved }: {
+function absolute(iso: string): string {
+  return new Date(normaliseTimestamp(iso)).toLocaleString(formatLocale())
+}
+
+/** "v57, same as you" / "v55, 2 behind" / "v58, newer than yours" / "v55". */
+export function versionText(peerVersion: number, ours: number, compat?: CompatPeer): string {
+  const v = `v${peerVersion}`
+  if (ours <= 0 || (compat && !compat.capabilities_known)) return v
+  const behind = versionsBehind(compat ?? {
+    instance_id: '', display_name: '', proto_version: peerVersion, status: '',
+    last_reachable_at: null, capabilities_known: true, lacking_features: [],
+  }, ours)
+  if (behind > 0) {
+    return t(isOne(behind) ? 'connections.manage.version_behind_one' : 'connections.manage.version_behind',
+      { v, n: String(behind) })
+  }
+  if (peerVersion > ours) return t('connections.manage.version_newer', { v })
+  return t('connections.manage.version_same', { v })
+}
+
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    showToast(t('connections.manage.copied'), 'success')
+  } catch {
+    showToast(t('connections.manage.copy_failed'), 'error')
+  }
+}
+
+export function ConnectionDetail({ conn, compat, ours = 0, relayGfs = false, onClose, onRevoke, onAliasSaved }: {
   conn: Connection
   /** This household has at least one GFS connection that relays
    *  envelopes — without one the GFS fallback switch is hidden (unless it
    *  is already on, so it can still be turned off). */
   relayGfs?: boolean
-  /** Matched federation-compat row for this peer, if loaded. Surfaces the
-   *  peer's missing-feature list + the "Re-check version" affordance. */
+  /** Matched federation-compat row for this peer, if loaded. */
   compat?: CompatPeer
+  /** Our own protocol version (admin compat data); 0 = unknown. */
+  ours?: number
   onClose: () => void
   onRevoke: () => void
-  /** Called after the alias was successfully saved so the parent
-   *  can refresh its listing — the rendered ``display_name``
-   *  changes everywhere the connection is shown. */
+  /** Called after the alias was saved so the parent can refresh its
+   *  listing. The sheet stays open and shows the new name. */
   onAliasSaved?: () => void
 }) {
+  const id = encodeURIComponent(conn.instance_id)
+  const peerName = conn.federated_display_name ?? conn.display_name
+  const [name, setName] = useState(conn.display_name)
+  const [savedAlias, setSavedAlias] = useState<string | null>(conn.local_alias ?? null)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [aliasBusy, setAliasBusy] = useState(false)
   const [visUsers, setVisUsers] = useState<VisibleUser[] | null>(null)
   const [visBusy, setVisBusy] = useState<Set<string>>(new Set())
-  const [alias, setAlias] = useState(conn.local_alias ?? '')
-  const [aliasBusy, setAliasBusy] = useState(false)
   const [relay, setRelay] = useState<RelayDetail | null>(null)
-  /** Peer inbox address — only returned (admin-only, via
-   *  ``/transport-detail``) for a confirmed, directly paired household
-   *  that isn't relay-only. ``null`` hides the row. */
+  /** Peer inbox address — only returned (admin-only) for a confirmed,
+   *  directly paired household that isn't relay-only. */
   const [inboxUrl, setInboxUrl] = useState<string | null>(null)
   const [recheckBusy, setRecheckBusy] = useState(false)
-  /** Effective display name as currently rendered — handshake name
-   *  if no alias is set, else the alias. Shown above the input as
-   *  the "Display this household as" hint. */
-  const peerName =
-    conn.federated_display_name ?? conn.display_name
+  const [confirmUnpair, setConfirmUnpair] = useState(false)
+  const [techOpen, setTechOpen] = useState(false)
+  const pencil = useRef<HTMLButtonElement>(null)
+  const input = useRef<HTMLInputElement>(null)
+  const refocusPencil = useRef(false)
+
+  useEffect(() => {
+    if (editing) {
+      input.current?.focus()
+      input.current?.select()
+    } else if (refocusPencil.current) {
+      refocusPencil.current = false
+      pencil.current?.focus()
+    }
+  }, [editing])
 
   useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
-        const body = await api.get(
-          `/api/pairing/connections/${encodeURIComponent(conn.instance_id)}/visible-users`,
-        ) as { users: VisibleUser[] }
+        const body = await api.get(`/api/pairing/connections/${id}/visible-users`) as { users: VisibleUser[] }
         if (!cancelled) setVisUsers(body.users)
       } catch {
-        if (!cancelled) {
-          // 403 (non-admin) or 404 (peer no longer confirmed) — silently
-          // hide the section rather than scary-error the whole modal.
-          setVisUsers([])
-        }
+        // 403 / 404 — hide the section rather than error the whole sheet.
+        if (!cancelled) setVisUsers([])
       }
     })()
     return () => { cancelled = true }
-  }, [conn.instance_id])
+  }, [id])
 
   useEffect(() => {
     let cancelled = false
-    api.get(`/api/pairing/connections/${encodeURIComponent(conn.instance_id)}/transport-detail`)
+    api.get(`/api/pairing/connections/${id}/transport-detail`)
       .then((body: unknown) => {
         const b = body as { last_relay: RelayDetail | null, inbox_url?: string | null }
         if (cancelled) return
@@ -175,25 +213,64 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
         setInboxUrl(null)
       })
     return () => { cancelled = true }
-  }, [conn.instance_id])
+  }, [id])
+
+  const startRename = () => {
+    setDraft(name)
+    setEditing(true)
+  }
+
+  const stopRename = () => {
+    refocusPencil.current = true
+    setEditing(false)
+  }
+
+  const saveAlias = async () => {
+    if (aliasBusy) return
+    const trimmed = draft.trim()
+    // Empty, or the household's own name → no alias.
+    const next: string | null = trimmed && trimmed !== peerName ? trimmed : null
+    if ((next ?? '') === (savedAlias ?? '')) {
+      stopRename()
+      return
+    }
+    setAliasBusy(true)
+    try {
+      await api.patch(`/api/pairing/connections/${id}/alias`, { alias: next })
+      showToast(
+        next
+          ? t('connections.detail.alias_saved', { name: next })
+          : t('connections.detail.alias_cleared'),
+        'success',
+      )
+      setSavedAlias(next)
+      setName(next ?? peerName)
+      stopRename()
+      onAliasSaved?.()
+    } catch (e: unknown) {
+      showToast((e as Error).message || t('connections.detail.save_failed'), 'error')
+    } finally {
+      setAliasBusy(false)
+    }
+  }
 
   const toggleVisibility = async (u: VisibleUser) => {
     const next = !u.visible
     setVisBusy(b => new Set(b).add(u.user_id))
     try {
       const body = await api.patch(
-        `/api/pairing/connections/${encodeURIComponent(conn.instance_id)}/visible-users`,
+        `/api/pairing/connections/${id}/visible-users`,
         { updates: [{ user_id: u.user_id, visible: next }] },
       ) as { users: VisibleUser[] }
       setVisUsers(body.users)
       showToast(
         t(next ? 'connections.detail.toast_visible' : 'connections.detail.toast_hidden', {
-          user: u.display_name, name: conn.display_name,
+          user: u.display_name, name,
         }),
         'success',
       )
-    } catch (e: any) {
-      showToast(e.message || t('connections.detail.visibility_failed'), 'error')
+    } catch (e: unknown) {
+      showToast((e as Error).message || t('connections.detail.visibility_failed'), 'error')
     } finally {
       setVisBusy(b => {
         const n = new Set(b)
@@ -203,79 +280,67 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
     }
   }
 
-  const saveAlias = async () => {
-    if (aliasBusy) return
-    const trimmed = alias.trim()
-    // Empty → null. Same trimmed value as the displayed one → no-op.
-    const next: string | null = trimmed || null
-    if ((next ?? '') === (conn.local_alias ?? '')) return
-    setAliasBusy(true)
-    try {
-      await api.patch(`/api/pairing/connections/${encodeURIComponent(conn.instance_id)}/alias`, {
-        alias: next,
-      })
-      showToast(
-        next
-          ? t('connections.detail.alias_saved', { name: next })
-          : t('connections.detail.alias_cleared'),
-        'success',
-      )
-      onAliasSaved?.()
-    } catch (e: any) {
-      showToast(e.message || t('connections.detail.save_failed'), 'error')
-    } finally {
-      setAliasBusy(false)
-    }
-  }
-
-  /** Ask the peer to re-advertise its protocol version. The fresh
-   *  proto_version arrives asynchronously via the peer's reply, so we refresh
-   *  the compat store a beat after firing. */
+  /** Ask the peer to re-advertise its protocol version; the fresh value
+   *  arrives asynchronously, so the compat store is refreshed a beat later. */
   const recheck = async () => {
     setRecheckBusy(true)
     try {
       await resyncPeerCapabilities(conn.instance_id)
-      showToast(t('connections.detail.recheck_sent', { name: conn.display_name }), 'info')
+      showToast(t('connections.detail.recheck_sent', { name }), 'info')
       setTimeout(() => { void loadFederationCompat() }, 2500)
-    } catch (e: any) {
-      showToast(e.message || t('connections.detail.recheck_failed'), 'error')
+    } catch (e: unknown) {
+      showToast((e as Error).message || t('connections.detail.recheck_failed'), 'error')
     } finally {
       setRecheckBusy(false)
     }
   }
 
-  const revoke = async () => {
+  const unpair = async () => {
     try {
-      await api.delete(`/api/pairing/connections/${encodeURIComponent(conn.instance_id)}`)
+      await api.delete(`/api/pairing/connections/${id}`)
       showToast(t('connections.detail.removed'), 'info')
-      showRevoke.value = false
+      setConfirmUnpair(false)
       onRevoke()
-    } catch (e: any) { showToast(e.message || t('common.error'), 'error') }
+    } catch (e: unknown) { showToast((e as Error).message || t('common.error'), 'error') }
   }
 
-  const aliasDirty = alias.trim() !== (conn.local_alias ?? '').trim()
-  return (
-    <Modal open={true} onClose={onClose} title={conn.display_name}>
-      <div class="sh-connection-detail">
-        <section class="sh-connection-alias">
-          <label
-            class="sh-connection-alias__label"
-            for="sh-connection-alias-input"
-          >
-            {t('connections.detail.alias_label')}
-          </label>
-          <div class="sh-connection-alias__row">
+  // Esc / overlay while renaming discards only the edit.
+  const handleClose = () => {
+    if (editing) stopRename()
+    else onClose()
+  }
+
+  const behind = versionsBehind(compat, ours)
+  // Same rule as the list and the map: the live ``reachable`` flag wins.
+  const avatarStatus: AvatarStatus = householdStatus(conn, behind)
+  const unreachable = avatarStatus === 'down'
+  const tx = conn.transport ? TRANSPORT[conn.transport] : null
+  const since = formatSince(conn.unreachable_since, 'long', formatLocale())
+  const statusLine = unreachable
+    ? (since
+      ? t('connections.manage.status_unreachable_since', { when: since })
+      : t('connections.manage.status_unreachable'))
+    : [t('connections.manage.status_connected'), tx ? t(tx.key) : null].filter(Boolean).join(' · ')
+
+  const header = (titleId: string) => (
+    <>
+      <ConnAvatar letter={initialOf(name)} tint={tintFor(conn.instance_id)} status={avatarStatus} />
+      {editing ? (
+        <div class="sh-conn-manage__title">
+          <h2 id={titleId} class="sh-conn-sr">{name}</h2>
+          <label for="sh-conn-rename-input" class="sh-conn-sr">{t('connections.manage.name_label')}</label>
+          <div class="sh-conn-rename">
             <input
-              id="sh-connection-alias-input"
+              ref={input}
+              id="sh-conn-rename-input"
+              class="sh-input"
               type="text"
-              class="sh-input sh-connection-alias__input"
               maxLength={80}
               placeholder={peerName}
-              value={alias}
+              value={draft}
               disabled={aliasBusy}
-              onInput={(e) =>
-                setAlias((e.target as HTMLInputElement).value)
-              }
+              aria-describedby="sh-conn-rename-hint"
+              onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault()
@@ -283,158 +348,148 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
                 }
               }}
             />
-            <Button
-              variant="secondary"
+            <button
+              type="button"
+              class="sh-conn-iconbtn sh-conn-iconbtn--ok"
+              aria-label={t('connections.manage.save_name')}
+              disabled={aliasBusy}
               onClick={() => void saveAlias()}
-              disabled={!aliasDirty || aliasBusy}
             >
-              {t('common.save')}
-            </Button>
+              <ConnIcon name="check" />
+            </button>
+            <button type="button" class="sh-btn sh-conn-btn-text sh-conn-cancel" onClick={stopRename}>
+              {t('common.cancel')}
+            </button>
           </div>
-          <p class="sh-muted sh-connection-alias__hint">
+          <span id="sh-conn-rename-hint">
             {t('connections.detail.alias_hint')}
-            {conn.local_alias
-              ? null
-              : ` ${t('connections.detail.alias_own_name', { name: peerName })}`}
-          </p>
-        </section>
-        <hr />
-        <dl>
-          <dt>{t('connections.detail.household_id')}</dt><dd class="sh-mono">{conn.instance_id}</dd>
-          <dt>{t('connections.detail.status')}</dt><dd class={`sh-status sh-status--${conn.status}`}>{statusLabel(conn.status)}</dd>
-          {inboxUrl && (
-            <><dt>{t('connections.detail.address')}</dt><dd class="sh-mono sh-muted">{inboxUrl}</dd></>
-          )}
-          {conn.paired_at && <><dt>{t('connections.detail.paired')}</dt><dd>{new Date(conn.paired_at).toLocaleString(formatLocale())}</dd></>}
-          {conn.proto_version != null && (
-            <><dt>{t('connections.detail.app_version')}</dt><dd>v{conn.proto_version}</dd></>
-          )}
-          {compat && compat.capabilities_known && (
-            compat.lacking_features.length === 0 ? (
-              <><dt>{t('connections.detail.compatibility')}</dt><dd><span class="sh-chip sh-chip--success">{t('connections.compat.up_to_date')}</span></dd></>
-            ) : (
-              <><dt>{t('connections.detail.missing_features')}</dt><dd>{featureLabels(compat.lacking_features, compat.lacking_feature_keys).join(', ')}</dd></>
-            )
-          )}
-          {/* Absolute timestamp AND a relative hint: the absolute one is
-              what you quote in a bug report, the relative one is what
-              tells you at a glance whether this is a blip or weeks of
-              silence. */}
-          <dt>{t('connections.detail.last_connected')}</dt>
-          <dd>
-            {conn.last_reachable_at ? (
-              <>
-                {new Date(normaliseTimestamp(conn.last_reachable_at)).toLocaleString(formatLocale())}
-                <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
-                  ({relativeDocsTime(conn.last_reachable_at)})
-                </span>
-              </>
-            ) : (
-              <span class="sh-muted">{t('connections.detail.never')}</span>
-            )}
-          </dd>
-          {/* Relay acceptance is shown apart from "Last connected": the
-              connection server answers the same 202 whether or not the
-              household is online, so it must never read as delivery. */}
-          {conn.last_relay_accepted_at && (
-            <><dt>GFS</dt><dd>
-              {conn.relay_only && (
-                <span class="sh-chip sh-chip--honey" style={{ marginRight: 'var(--sh-space-xs)' }}>
-                  {t('connections.detail.gfs_only')}
-                </span>
-              )}
-              {t('connections.detail.gfs_last_handed', { time: new Date(normaliseTimestamp(conn.last_relay_accepted_at)).toLocaleString(formatLocale()) })}
-              <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
-                ({relativeDocsTime(conn.last_relay_accepted_at)})
-              </span>
-              {conn.relay_only && (
-                <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                  {t('connections.detail.gfs_only_hint')}
-                </span>
-              )}
-            </dd></>
-          )}
-          {conn.unreachable_since && (
-            <><dt>{t('connections.detail.unreachable_since')}</dt><dd class="sh-text-warning">
-              {new Date(normaliseTimestamp(conn.unreachable_since)).toLocaleString(formatLocale())}
-              <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)' }}>
-                ({relativeDocsTime(conn.unreachable_since)})
-              </span>
-            </dd></>
-          )}
-          {(conn.queued_envelopes ?? 0) > 0 && (
-            <><dt>{t('connections.detail.waiting')}</dt><dd>
-              {t(isOne(conn.queued_envelopes ?? 0) ? 'connections.detail.queued_one' : 'connections.detail.queued',
-                { n: String(conn.queued_envelopes) })}
-              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                {t('connections.detail.queued_hint')}
-              </span>
-            </dd></>
-          )}
-          {(conn.dropped_envelopes ?? 0) > 0 && (
-            <><dt>{t('connections.detail.undelivered')}</dt><dd class="sh-text-warning">
-              {t(isOne(conn.dropped_envelopes ?? 0) ? 'connections.detail.dropped_one' : 'connections.detail.dropped',
-                { n: String(conn.dropped_envelopes) })}
-              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                {t('connections.detail.dropped_hint')}
-              </span>
-            </dd></>
-          )}
-          {conn.transport === 'rtc' && (
-            <><dt>{t('connections.detail.connection')}</dt><dd>
-              {t('connections.transport.direct')}
-              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                {t('connections.detail.direct_hint')}
-              </span>
-            </dd></>
-          )}
-          {conn.transport === 'https' && (
-            <><dt>{t('connections.detail.connection')}</dt><dd>
-              {t('connections.transport.internet')}
-              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                {t('connections.detail.internet_hint')}
-              </span>
-            </dd></>
-          )}
-          {conn.transport === 'gfs_relay' && (
-            <><dt>{t('connections.detail.connection')}</dt><dd>
-              {t('connections.transport.gfs')}
-              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                {t('connections.detail.gfs_hint')}
-              </span>
-            </dd></>
-          )}
-          {relay !== null && (
-            <><dt>{t('connections.detail.chat_route')}</dt><dd>
-              {t('connections.detail.you')} → 🔁 {relay.via} → {conn.display_name}
-              <span class="sh-muted" style={{ display: 'block', fontSize: 'var(--sh-font-size-sm)' }}>
-                {t('connections.detail.chat_route_hint', { via: relay.via, time: relativeDocsTime(relay.ts) })}
-              </span>
-            </dd></>
-          )}
-        </dl>
-        {compat && peerSupportsResync(compat) && (
-          <div class="sh-row" style={{ marginBottom: 'var(--sh-space-sm)' }}>
-            <Button variant="secondary" onClick={() => void recheck()} loading={recheckBusy}>
-              {t('connections.detail.recheck')}
-            </Button>
+            {` ${t('connections.detail.alias_own_name', { name: peerName })}`}
+          </span>
+        </div>
+      ) : (
+        <>
+          <div class="sh-conn-manage__title">
+            <div class="sh-conn-manage__name">
+              <h2 id={titleId} title={name}>{name}</h2>
+              <button
+                ref={pencil}
+                type="button"
+                class="sh-conn-iconbtn"
+                aria-label={t('connections.manage.rename')}
+                onClick={startRename}
+              >
+                <ConnIcon name="pencil" />
+              </button>
+            </div>
+            <span class={unreachable ? 'sh-conn-manage__down' : undefined}>{statusLine}</span>
           </div>
-        )}
-        <section class="sh-connection-share-home">
-          <h4 style={{ margin: '12px 0 4px' }}>{t('connections.detail.home_location')}</h4>
+          <button type="button" class="sh-modal-close" onClick={onClose} aria-label={t('modal.close')}>
+            &times;
+          </button>
+        </>
+      )}
+    </>
+  )
+
+  const facts: { label: string; value: preact.ComponentChildren; title?: string }[] = [
+    {
+      label: t('connections.detail.last_connected'),
+      value: conn.last_reachable_at
+        ? capitalise(relativeDocsTime(conn.last_reachable_at))
+        : capitalise(t('connections.detail.never')),
+      title: conn.last_reachable_at ? absolute(conn.last_reachable_at) : undefined,
+    },
+  ]
+  if (tx) {
+    facts.push({
+      label: t('connections.detail.connection'),
+      value: <><ConnIcon name={tx.icon} />{t(tx.key)}</>,
+    })
+  }
+  if (conn.proto_version != null) {
+    facts.push({ label: t('connections.detail.app_version'), value: versionText(conn.proto_version, ours, compat) })
+  }
+
+  const notes: { tone: 'down' | 'warn' | 'info'; icon: ConnIconName; label: string; text: string; hint?: string }[] = []
+  if (conn.unreachable_since) {
+    notes.push({
+      tone: 'down', icon: 'off', label: t('connections.detail.unreachable_since'),
+      text: `${absolute(conn.unreachable_since)} (${relativeDocsTime(conn.unreachable_since)})`,
+    })
+  }
+  if ((conn.queued_envelopes ?? 0) > 0) {
+    notes.push({
+      tone: 'info', icon: 'clock', label: t('connections.detail.waiting'),
+      text: t(isOne(conn.queued_envelopes ?? 0) ? 'connections.detail.queued_one' : 'connections.detail.queued',
+        { n: String(conn.queued_envelopes) }),
+      hint: t('connections.detail.queued_hint'),
+    })
+  }
+  if ((conn.dropped_envelopes ?? 0) > 0) {
+    notes.push({
+      tone: 'down', icon: 'alert', label: t('connections.detail.undelivered'),
+      text: t(isOne(conn.dropped_envelopes ?? 0) ? 'connections.detail.dropped_one' : 'connections.detail.dropped',
+        { n: String(conn.dropped_envelopes) }),
+      hint: t('connections.detail.dropped_hint'),
+    })
+  }
+  // Relay acceptance is shown apart from "Last connected": the GFS answers
+  // the same 202 whether or not the household is online.
+  if (conn.last_relay_accepted_at) {
+    notes.push({
+      tone: conn.relay_only ? 'warn' : 'info', icon: 'cloud',
+      label: conn.relay_only ? t('connections.detail.gfs_only') : 'GFS',
+      text: `${t('connections.detail.gfs_last_handed', { time: absolute(conn.last_relay_accepted_at) })} (${relativeDocsTime(conn.last_relay_accepted_at)})`,
+      hint: conn.relay_only ? t('connections.detail.gfs_only_hint') : undefined,
+    })
+  }
+  if (conn.transport === 'https' || conn.transport === 'gfs_relay') {
+    notes.push({ tone: 'info', icon: TRANSPORT[conn.transport].icon, label: t('connections.detail.connection'), text: t(TRANSPORT[conn.transport].hint) })
+  }
+
+  const showGfsFallback = conn.status === 'confirmed' && (conn.source ?? 'manual') === 'manual'
+    && (relayGfs || conn.gfs_relay)
+
+  return (
+    <Modal open={true} onClose={handleClose} title={name} class="sh-conn-manage" header={header}>
+      <dl class={`sh-conn-facts sh-conn-facts--n${facts.length}`}>
+        {facts.map((f) => (
+          <div class="sh-conn-fact" key={f.label}>
+            <dt>{f.label}</dt>
+            <dd title={f.title}>{f.value}</dd>
+          </div>
+        ))}
+      </dl>
+
+      {notes.length > 0 && (
+        <ul class="sh-conn-notes">
+          {notes.map((n) => (
+            <li key={n.label} class={`sh-conn-note sh-conn-note--${n.tone}`}>
+              <ConnIcon name={n.icon} />
+              <span>
+                <b>{n.label}</b>
+                <span>{n.text}</span>
+                {n.hint && <span class="sh-conn-note__hint">{n.hint}</span>}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div class="sh-conn-group">
+        <h3>{t('connections.manage.sharing')}</h3>
+        <div class="sh-conn-stack">
           <ShareHomeToggle
+            variant="card"
             instanceId={conn.instance_id}
-            peerName={conn.display_name}
+            peerName={name}
             initialValue={conn.share_home ?? true}
           />
-        </section>
-        {conn.status === 'confirmed' && (conn.source ?? 'manual') === 'manual'
-          && (relayGfs || conn.gfs_relay) && (
-          <section class="sh-connection-gfs-fallback">
-            <h4 style={{ margin: '12px 0 4px' }}>{t('connections.detail.gfs_fallback')}</h4>
+          {showGfsFallback && (
             <GfsFallbackToggle
+              variant="card"
               instanceId={conn.instance_id}
-              peerName={conn.display_name}
+              peerName={name}
               initial={{
                 gfs_relay: conn.gfs_relay ?? false,
                 gfs_routes: conn.gfs_routes ?? 0,
@@ -442,57 +497,125 @@ export function ConnectionDetail({ conn, compat, relayGfs = false, onClose, onRe
                 gfs_relay_available: conn.gfs_relay_available ?? false,
               }}
             />
-          </section>
-        )}
+          )}
+        </div>
+      </div>
 
-        {visUsers !== null && visUsers.length > 0 && (
-          <>
-            <hr />
-            <div class="sh-visible-users">
-              <h4 style={{ margin: '0 0 4px' }}>
-                {t('connections.detail.visible_title', { name: conn.display_name })}
-              </h4>
-              <p class="sh-muted" style={{ marginTop: 0, fontSize: 'var(--sh-font-size-sm)' }}>
-                {t('connections.detail.visible_hint')}
-              </p>
-              <ul class="sh-visible-users-list" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                {visUsers.map(u => (
-                  <li key={u.user_id} class="sh-visible-users-row">
-                    <label class="sh-toggle-row">
-                      <input
-                        type="checkbox"
-                        checked={u.visible}
-                        disabled={visBusy.has(u.user_id)}
-                        onChange={() => void toggleVisibility(u)}
-                      />
-                      <span>
-                        {u.display_name || u.username}
-                        {u.is_admin && (
-                          <span class="sh-muted" style={{ marginLeft: 'var(--sh-space-xs)', fontSize: 'var(--sh-font-size-xs)' }}>
-                            {t('connections.detail.admin')}
-                          </span>
-                        )}
-                      </span>
-                    </label>
-                  </li>
-                ))}
-              </ul>
+      {visUsers === null && (
+        <div class="sh-conn-group" aria-busy="true"><Spinner /></div>
+      )}
+      {visUsers !== null && visUsers.length > 0 && (
+        <div class="sh-conn-group">
+          <h3>{t('connections.detail.visible_title', { name })}</h3>
+          <p class="sh-conn-hint">{t('connections.detail.visible_hint')}</p>
+          <ul class="sh-conn-people">
+            {visUsers.map(u => {
+              const who = u.display_name || u.username
+              return (
+                <li key={u.user_id}>
+                  <label class="sh-conn-person">
+                    <Avatar name={who} size={32} />
+                    <span class="grow">
+                      {who}
+                      {u.is_admin && <span class="sh-conn-person__role"> · {t('connections.detail.admin')}</span>}
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={u.visible}
+                      disabled={visBusy.has(u.user_id)}
+                      aria-label={t('connections.manage.visible_label', { user: who, name })}
+                      onChange={() => void toggleVisibility(u)}
+                    />
+                  </label>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
+
+      <details
+        class="sh-conn-tech"
+        open={techOpen}
+        onToggle={(e) => setTechOpen((e.currentTarget as HTMLDetailsElement).open)}
+      >
+        <summary aria-expanded={techOpen}>
+          {t('connections.manage.technical')}
+          <span class="sh-conn-caret" aria-hidden="true"><ConnIcon name="chev" /></span>
+        </summary>
+        <dl>
+          <div>
+            <dt>{t('connections.detail.household_id')}</dt>
+            <dd>
+              <code>{conn.instance_id}</code>
+              <button type="button" class="sh-conn-copy" aria-label={t('connections.manage.copy_id')}
+                onClick={() => void copyText(conn.instance_id)}>
+                <ConnIcon name="copy" />
+              </button>
+            </dd>
+          </div>
+          {inboxUrl && (
+            <div>
+              <dt>{t('connections.detail.address')}</dt>
+              <dd>
+                <code>{inboxUrl}</code>
+                <button type="button" class="sh-conn-copy" aria-label={t('connections.manage.copy_address')}
+                  onClick={() => void copyText(inboxUrl)}>
+                  <ConnIcon name="copy" />
+                </button>
+              </dd>
             </div>
-          </>
-        )}
-        {visUsers === null && (
-          <div style={{ textAlign: 'center', padding: 'var(--sh-space-sm)' }}>
-            <Spinner />
+          )}
+          {conn.paired_at && (
+            <div>
+              <dt>{t('connections.detail.paired')}</dt>
+              <dd>{absolute(conn.paired_at)}</dd>
+            </div>
+          )}
+          {compat && compat.capabilities_known && compat.lacking_features.length > 0 && (
+            <div>
+              <dt>{t('connections.detail.missing_features')}</dt>
+              <dd>{featureLabels(compat.lacking_features, compat.lacking_feature_keys).join(', ')}</dd>
+            </div>
+          )}
+          {relay !== null && (
+            <div>
+              <dt>{t('connections.detail.chat_route')}</dt>
+              <dd class="sh-conn-tech__stack">
+                <span>{t('connections.detail.you')} → {relay.via} → {name}</span>
+                <span class="sh-conn-hint">
+                  {t('connections.detail.chat_route_hint', { via: relay.via, time: relativeDocsTime(relay.ts) })}
+                </span>
+              </dd>
+            </div>
+          )}
+        </dl>
+        {compat && peerSupportsResync(compat) && (
+          <div class="sh-conn-tech__actions">
+            <button type="button" class="sh-btn sh-btn--secondary" disabled={recheckBusy} onClick={() => void recheck()}>
+              {t('connections.detail.recheck')}
+            </button>
           </div>
         )}
+      </details>
 
-        <hr />
-        <Button variant="danger" onClick={() => showRevoke.value = true}>{t('connections.detail.remove')}</Button>
+      <div class="sh-conn-danger">
+        <h3>{t('connections.manage.danger')}</h3>
+        <p>{t('connections.manage.danger_body', { name })}</p>
+        <button type="button" class="sh-btn sh-conn-btn-danger-outline" onClick={() => setConfirmUnpair(true)}>
+          {t('connections.manage.unpair', { name })}
+        </button>
       </div>
-      <ConfirmDialog open={showRevoke.value} title={t('connections.detail.remove_title')}
-        message={t('connections.detail.remove_message')}
-        confirmLabel={t('connections.detail.remove_ok')} destructive onConfirm={revoke}
-        onCancel={() => showRevoke.value = false} />
+
+      <ConfirmDialog
+        open={confirmUnpair}
+        title={t('connections.detail.remove_title', { name })}
+        message={t('connections.detail.remove_message', { name })}
+        confirmLabel={t('connections.detail.remove_ok')}
+        destructive
+        onConfirm={() => void unpair()}
+        onCancel={() => setConfirmUnpair(false)}
+      />
     </Modal>
   )
 }

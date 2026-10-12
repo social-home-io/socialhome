@@ -1,11 +1,12 @@
-/* FederationMap — canvas + pin styles + not-on-map footer */
+/* FederationMap — canvas, pins, popups and the not-on-map footer.
+ * Pins reuse the page's ConnAvatar (.sh-conn-av*, app.css). Tokens only. */
 
 .sh-federation-map {
-  border: 1px solid var(--sh-border-color, #e5e7eb);
-  border-radius: 12px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
   overflow: hidden;
-  background: #fff;
-  margin-bottom: 16px;
+  background: var(--sh-bg-secondary);
+  margin-bottom: var(--sh-space-md);
   /* Confine Leaflet's internal z-indices (panes 200–700, controls
    * 800) so they don't float over the sticky sidebar, which has no
    * z-index of its own. */
@@ -24,91 +25,128 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--sh-text-muted, #6b7280);
-  font-size: 14px;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
 }
 
-/* ── Pin base — Leaflet sets className='sh-fed-icon' on the wrapper */
+/* ── Tile seams at 2× ─────────────────────────────────────────────
+ * When the map container sits at a fractional page offset (content
+ * above it has fractional heights), tile edges land on half device
+ * pixels and Chromium anti-aliases each edge against the empty pane —
+ * a hairline at every tile row. A transparent outline makes Chromium
+ * rasterise each tile as its own layer and snap it, which removes the
+ * seam without scaling (so no blur). Measured: seam-row deviation 31 →
+ * 1 on a DPR-2 phone, both themes. */
+.sh-federation-map .leaflet-tile-container img.leaflet-tile {
+  outline: 1px solid transparent;
+  mix-blend-mode: normal;
+}
+
+/* ── Controls: zoom +/− and the attribution box, on tokens ───────── */
+.sh-federation-map .leaflet-bar,
+.sh-federation-map.leaflet-touch .leaflet-bar,
+.sh-federation-map .leaflet-touch .leaflet-bar {
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  box-shadow: var(--sh-shadow-sm);
+  overflow: hidden;
+  background-clip: padding-box;
+}
+.sh-federation-map .leaflet-bar a,
+.sh-federation-map .leaflet-touch .leaflet-bar a {
+  width: 44px;
+  height: 44px;
+  line-height: 44px;
+  font-size: 22px;
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  border-bottom: 1px solid var(--sh-border);
+  border-radius: 0;
+}
+.sh-federation-map .leaflet-bar a:last-child { border-bottom: 0; }
+.sh-federation-map .leaflet-bar a:hover { background: var(--sh-bg-secondary); color: var(--sh-text); }
+.sh-federation-map .leaflet-bar a:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -3px;
+}
+.sh-federation-map .leaflet-bar a.leaflet-disabled {
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+}
+.sh-federation-map .leaflet-control-attribution,
+.sh-federation-map .leaflet-container .leaflet-control-attribution {
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  border-top-left-radius: var(--sh-radius-sm);
+  padding: 2px 6px;
+  font-family: var(--sh-font-family);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.sh-federation-map .leaflet-control-attribution a { color: var(--sh-primary-text); text-decoration: underline; text-underline-offset: 2px; }
+.sh-federation-map .leaflet-control-attribution a:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 1px; }
+
+/* ── Pins — Leaflet sets className='sh-fed-icon' on the wrapper ───── */
 .sh-fed-icon {
   background: none !important;
   border: none !important;
 }
-
-.sh-fed-pin {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: #fff;
-  border: 2px solid #10b981;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  color: #166534;
-  font-family: system-ui, sans-serif;
-  font-weight: 600;
-  position: relative;
-  /* Prevent Leaflet default pointer cursor bleed */
-  cursor: pointer;
+.sh-fed-icon:focus-visible { outline: none; }
+.sh-fed-icon:focus-visible .sh-conn-av,
+.sh-fed-icon:focus-visible .sh-conn-pin__you {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 6px;
 }
 
-/* Self pin: smaller, filled green */
-.sh-fed-pin--self {
-  width: 22px;
-  height: 22px;
-  font-size: 11px;
-  background: #166534;
-  color: #fff;
-  border-color: #166534;
+/* The icon box is the 44 px avatar (anchored at its centre); the name
+ * chip hangs below it without moving the anchor. */
+.sh-conn-pin { position: relative; width: 44px; height: 44px; cursor: pointer; }
+/* Paper halo inside and outside the status ring, so the ring is always
+ * read against --sh-bg (same contrast as in the list), never the tiles. */
+.sh-conn-pin .sh-conn-av { box-shadow: 0 0 0 4px var(--sh-bg), var(--sh-shadow-md); }
+.sh-conn-pin .sh-conn-av[data-s]::after { inset: -6px; box-shadow: 0 0 0 2px var(--sh-bg); }
+.sh-conn-pin .sh-conn-badge { border-color: var(--sh-bg); }
+.sh-conn-pin__label {
+  position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+  padding: 2px 8px; border-radius: var(--sh-radius-full);
+  background: var(--sh-bg); color: var(--sh-text);
+  font-family: var(--sh-font-family); font-size: var(--sh-font-size-xs); font-weight: 700; line-height: 1.4;
+  white-space: nowrap; box-shadow: var(--sh-shadow-sm);
+  pointer-events: none;
 }
-
-/* HTTPS-only peer: amber border */
-.sh-fed-pin--https {
-  border-color: #f59e0b;
-  color: #92400e;
-}
-
-/* Transport badge: small circle in the bottom-right of the pin */
-.sh-fed-pin-tx {
-  position: absolute;
-  bottom: -4px;
-  right: -4px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  font-size: 9px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
+.sh-conn-pin--you { width: 48px; height: 48px; }
+.sh-conn-pin__you {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 48px; height: 48px; border-radius: var(--sh-radius-full);
+  background: var(--sh-primary-fill); color: var(--sh-on-primary-fill);
+  font-family: var(--sh-font-family); font-weight: 700; font-size: var(--sh-font-size-sm);
+  box-shadow: 0 0 0 3px var(--sh-bg), var(--sh-shadow-md);
 }
 
 /* ── "Not on map" footer ──────────────────────────────────────────── */
 .sh-federation-map__footer {
-  padding: 12px 14px;
-  background: #fafafa;
-  border-top: 1px solid #f3f4f6;
-  font-size: 13px;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  background: var(--sh-bg-tertiary);
+  border-top: 1px solid var(--sh-border);
+  font-size: var(--sh-font-size-sm);
 }
 
 .sh-federation-map__footer-heading {
   margin: 0 0 6px;
-  font-size: 12px;
-  color: #6b7280;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .sh-federation-map__footer-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sh-space-sm);
   padding: 4px 0;
-  color: #4b5563;
+  color: var(--sh-text);
   flex-wrap: wrap;
 }
 
@@ -116,60 +154,74 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #d1d5db;
+  background: var(--sh-border-strong);
   flex-shrink: 0;
 }
 
-/* ── Popup overrides (Leaflet adds these to the map root) ──────────── */
-/* Handled in app.css — no duplication needed here. */
-
-/* ── Mobile ──────────────────────────────────────────────────────── */
-@media (max-width: 480px) {
-  .sh-federation-map__canvas {
-    height: 300px;
-  }
-
-  .sh-fed-pin {
-    width: 24px;
-    height: 24px;
-    font-size: 12px;
-  }
-
-  .sh-fed-pin--self {
-    width: 18px;
-    height: 18px;
-    font-size: 10px;
-  }
+/* ── Popups (themed: Leaflet's default is a white card) ──────────── */
+.sh-federation-map .leaflet-popup-content-wrapper,
+.sh-federation-map .leaflet-popup-tip {
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  box-shadow: var(--sh-shadow-md);
 }
+.sh-federation-map .leaflet-popup-content-wrapper {
+  border-radius: var(--sh-radius-lg);
+  border: 1px solid var(--sh-border);
+}
+.sh-federation-map .leaflet-popup-content { margin: var(--sh-space-sm) var(--sh-space-md); font-family: var(--sh-font-family); }
+/* 44 px close target; sits on the popup's own --sh-bg. */
+.sh-federation-map .leaflet-container a.leaflet-popup-close-button,
+.sh-federation-map a.leaflet-popup-close-button {
+  color: var(--sh-text-muted);
+  width: 44px; height: 44px; font: 400 22px/44px var(--sh-font-family);
+  top: 0; right: 0;
+  border-radius: var(--sh-radius-full);
+}
+.sh-federation-map a.leaflet-popup-close-button:hover { color: var(--sh-text); background: var(--sh-bg-secondary); }
+.sh-federation-map a.leaflet-popup-close-button:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: -4px; }
 
-/* ── Peer popup (built as DOM nodes in _peerPopup) ───────────────── */
 .sh-fed-popup {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+  min-width: 160px;
+  font-size: var(--sh-font-size-sm);
 }
+.sh-fed-popup strong { font-size: var(--sh-font-size-base); font-weight: 600; padding-right: 32px; overflow-wrap: anywhere; }
+.sh-fed-popup__status { font-weight: 600; }
+.sh-fed-popup__status--ok { color: var(--sh-success); }
+.sh-fed-popup__status--warn { color: color-mix(in srgb, var(--sh-warning) 35%, var(--sh-text)); }
+.sh-fed-popup__status--down { color: var(--sh-danger); }
+.sh-fed-popup__status--pending,
+.sh-fed-popup__status--none { color: var(--sh-text-muted); }
+.sh-fed-popup__muted { color: var(--sh-text-muted); }
 
-.sh-fed-popup__muted {
-  color: var(--sh-text-muted, #6b7280);
-}
-
-/* Link-styled button: opens the connection's manage dialog in place. */
+/* Opens the household's Manage sheet in place. */
 .sh-fed-popup__manage {
-  margin-top: 4px;
-  padding: 6px 0;
-  min-height: 36px;
-  border: 0;
-  background: none;
+  margin-top: var(--sh-space-sm);
+  min-height: 44px;
+  padding: 0 var(--sh-space-md);
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg);
+  color: var(--sh-text);
   font: inherit;
-  font-size: 13px;
-  color: var(--sh-primary, #0e7490);
-  text-decoration: underline;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
   cursor: pointer;
 }
-
+.sh-fed-popup__manage:hover { background: var(--sh-bg-secondary); }
 .sh-fed-popup__manage:focus-visible {
-  outline: 2px solid var(--sh-primary, #0e7490);
+  outline: 2px solid var(--sh-primary);
   outline-offset: 2px;
-  border-radius: 4px;
+}
+
+/* ── Mobile ──────────────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .sh-federation-map__canvas,
+  .sh-federation-map__loading {
+    height: 300px;
+  }
 }

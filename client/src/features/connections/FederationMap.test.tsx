@@ -27,12 +27,17 @@ vi.mock('leaflet', () => {
   const layerGroupStub = {
     addTo: vi.fn().mockReturnThis(),
     clearLayers: vi.fn().mockReturnThis(),
+    removeLayer: vi.fn().mockReturnThis(),
     getBounds: vi.fn(() => ({ pad: vi.fn(() => ({})) })),
   }
   const markerStub = {
     addTo: vi.fn().mockReturnThis(),
     bindPopup: vi.fn().mockReturnThis(),
     getLatLng: vi.fn(() => ({ lat: 0, lng: 0 })),
+    setLatLng: vi.fn().mockReturnThis(),
+    setIcon: vi.fn().mockReturnThis(),
+    setPopupContent: vi.fn().mockReturnThis(),
+    getElement: vi.fn(() => undefined),
   }
   const mapStub = {
     remove: vi.fn(),
@@ -106,6 +111,14 @@ describe('FederationMap', () => {
     expect(screen.getByText('Not on map')).toBeDefined()
     expect(screen.getByText('Bob')).toBeDefined()
     expect(screen.getByText('Paired, but no home location yet.')).toBeDefined()
+  })
+
+  test('omits the footer when the host page names off-map peers itself', () => {
+    connections.value = [
+      { instance_id: 'p1', display_name: 'Bob', reachable: true, home_lat: null, home_lon: null },
+    ]
+    render(<FederationMap showOffMapFooter={false} />)
+    expect(screen.queryByText('Not on map')).toBeNull()
   })
 
   test('omits the footer when every peer has coords', () => {
@@ -217,7 +230,8 @@ describe('FederationMap', () => {
     const pin = document.createElement('div')
     pin.innerHTML = pinHtml
     expect(pin.querySelector('img')).toBeNull()
-    expect(pin.querySelector('.sh-fed-pin')!.textContent).toBe('<')
+    expect(pin.querySelector('.sh-conn-av')!.textContent).toBe('<')
+    expect(pin.querySelector('.sh-conn-pin__label')!.textContent).toBe('<img src=x>')
     // The popup is a DOM node built from text, never an HTML string.
     const popup = vi.mocked(marker.bindPopup).mock.calls[0][0] as HTMLElement
     expect(popup).toBeInstanceOf(HTMLElement)
@@ -225,27 +239,121 @@ describe('FederationMap', () => {
     expect(popup.querySelector('strong')!.textContent).toBe('<img src=x>')
   })
 
-  test.each([
-    ['rtc', '⚡'],
-    ['https', '🌐'],
-    ['gfs_relay', '☁'],
-  ] as const)('a %s peer gets the %s badge on its pin and in its popup', (transport, glyph) => {
+  function pinFor(peer: Record<string, unknown>, props: Record<string, unknown> = {}) {
     const marker = L.marker([0, 0])
     vi.mocked(marker.bindPopup).mockClear()
     vi.mocked(L.divIcon).mockClear()
-    connections.value = [
-      {
-        instance_id: 'peer-1', display_name: 'Peer', reachable: true,
-        home_lat: 52.52, home_lon: 13.40, transport,
-      } as never,
-    ]
-    render(<FederationMap onManage={() => {}} />)
-    const pinHtml = vi.mocked(L.divIcon).mock.calls[0][0]!.html as string
+    vi.mocked(L.marker).mockClear()
+    connections.value = [{ home_lat: 52.52, home_lon: 13.40, reachable: true, ...peer } as never]
+    render(<FederationMap {...props} />)
+    const opts = vi.mocked(L.divIcon).mock.calls[0][0]!
     const pin = document.createElement('div')
-    pin.innerHTML = pinHtml
-    expect(pin.querySelector('.sh-fed-pin-tx')!.textContent).toBe(glyph)
+    pin.innerHTML = opts.html as string
     const popup = vi.mocked(marker.bindPopup).mock.calls[0][0] as HTMLElement
-    expect(popup.textContent).toContain(glyph)
+    const markerOpts = vi.mocked(L.marker).mock.calls.at(-1)![1] as { title?: string }
+    return { opts, pin, popup, markerOpts }
+  }
+
+  test('a pin is the household\'s ConnAvatar, anchored at the avatar centre, with a name chip', () => {
+    const { opts, pin, markerOpts } = pinFor({ instance_id: 'peer-1', display_name: 'Beta House', status: 'confirmed' })
+    expect(opts.iconSize).toEqual([44, 44])
+    expect(opts.iconAnchor).toEqual([22, 22])
+    const av = pin.querySelector('.sh-conn-av')!
+    expect(av.className).toMatch(/sh-conn-av--(moss|hearth|honey|ink)/)
+    expect(av.getAttribute('data-s')).toBe('ok')
+    expect(av.textContent).toBe('B')
+    expect(pin.querySelector('.sh-conn-badge')).toBeNull()
+    expect(pin.querySelector('.sh-conn-pin__label')!.textContent).toBe('Beta House')
+    expect(markerOpts.title).toBe('Beta House · Connected')
+  })
+
+  test.each([
+    [{ reachable: false, status: 'confirmed' }, 'down', 'sh-conn-badge--down', 'Unreachable'],
+    [{ status: 'pending_sent' }, 'pending', 'sh-conn-badge--pending', 'Waiting for the other household'],
+  ])('%o → ring %s with a shape badge, and the status in the popup', (over, ring, badge, label) => {
+    const { pin, popup } = pinFor({ instance_id: 'p', display_name: 'P', ...over })
+    expect(pin.querySelector('.sh-conn-av')!.getAttribute('data-s')).toBe(ring)
+    expect(pin.querySelector(`.${badge}`)).not.toBeNull()
+    expect(popup.querySelector('.sh-fed-popup__status')!.textContent).toBe(label)
+  })
+
+  test('the page decides "needs an update" (admin-only data) through statusOf', () => {
+    const { pin, popup } = pinFor(
+      { instance_id: 'p', display_name: 'P', status: 'confirmed' },
+      { statusOf: () => 'warn' },
+    )
+    expect(pin.querySelector('.sh-conn-av')!.getAttribute('data-s')).toBe('warn')
+    expect(pin.querySelector('.sh-conn-badge--warn')).not.toBeNull()
+    expect(popup.querySelector('.sh-fed-popup__status')!.textContent).toBe('Needs an update')
+  })
+
+  test('a space-only household gets no status ring', () => {
+    const { pin } = pinFor({ instance_id: 'p', display_name: 'P', status: 'confirmed', source: 'space_session' })
+    expect(pin.querySelector('.sh-conn-av')!.hasAttribute('data-s')).toBe(false)
+  })
+
+  test.each([
+    ['rtc', 'Direct'],
+    ['https', 'Over the internet'],
+    ['gfs_relay', 'Through the GFS'],
+  ] as const)('a %s peer names its transport in the popup, in words', (transport, words) => {
+    const { popup } = pinFor({ instance_id: 'p', display_name: 'P', status: 'confirmed', transport })
+    expect(popup.textContent).toContain(words)
+    expect(popup.textContent).not.toMatch(/[⚡🌐☁]/u)
+  })
+
+  test('a transport/status update edits pins in place and never refits the view', async () => {
+    const map = L.map(document.createElement('div'))
+    const marker = L.marker([0, 0])
+    const peer = { instance_id: 'p1', display_name: 'P', reachable: true, status: 'confirmed', home_lat: 1, home_lon: 2 }
+    connections.value = [peer, { ...peer, instance_id: 'p2', home_lat: 3, home_lon: 4 }]
+    render(<FederationMap />)
+    const created = vi.mocked(L.marker).mock.calls.length
+    const fits = vi.mocked(map.fitBounds).mock.calls.length + vi.mocked(map.setView).mock.calls.length
+    vi.mocked(marker.setIcon).mockClear()
+    act(() => {
+      connections.value = [{ ...peer, transport: 'https', reachable: false } as never, connections.value[1]]
+    })
+    await waitFor(() => expect(marker.setIcon).toHaveBeenCalled())
+    expect(vi.mocked(L.marker).mock.calls.length).toBe(created)
+    expect(vi.mocked(map.fitBounds).mock.calls.length + vi.mocked(map.setView).mock.calls.length).toBe(fits)
+  })
+
+  test('a household joining the map refits; one leaving is removed', async () => {
+    const map = L.map(document.createElement('div'))
+    const layer = L.layerGroup()
+    const peer = { instance_id: 'p1', display_name: 'P', reachable: true, status: 'confirmed', home_lat: 1, home_lon: 2 }
+    connections.value = [peer]
+    render(<FederationMap />)
+    const fits = vi.mocked(map.fitBounds).mock.calls.length + vi.mocked(map.setView).mock.calls.length
+    act(() => { connections.value = [peer, { ...peer, instance_id: 'p2' }] })
+    await waitFor(() => {
+      expect(vi.mocked(map.fitBounds).mock.calls.length + vi.mocked(map.setView).mock.calls.length).toBe(fits + 1)
+    })
+    vi.mocked(layer.removeLayer).mockClear()
+    act(() => { connections.value = [peer] })
+    await waitFor(() => expect(layer.removeLayer).toHaveBeenCalledOnce())
+  })
+
+  test('pins only the rows it is given', () => {
+    vi.mocked(L.divIcon).mockClear()
+    const peer = { instance_id: 'p1', display_name: 'P', reachable: true, status: 'confirmed', home_lat: 1, home_lon: 2 }
+    connections.value = [peer, { ...peer, instance_id: 'z', display_name: 'Zeta', status: 'pending_sent' }]
+    render(<FederationMap rows={[peer]} />)
+    expect(vi.mocked(L.divIcon).mock.calls).toHaveLength(1)
+  })
+
+  test('this household is a hearth "You" disc', () => {
+    selfLat.value = 48.1
+    selfLon.value = 11.6
+    vi.mocked(L.divIcon).mockClear()
+    connections.value = []
+    render(<FederationMap />)
+    const opts = vi.mocked(L.divIcon).mock.calls[0][0]!
+    const pin = document.createElement('div')
+    pin.innerHTML = opts.html as string
+    expect(pin.querySelector('.sh-conn-pin__you')!.textContent).toBe('You')
+    expect(opts.iconAnchor).toEqual([24, 24])
   })
 
   test('Manage in a peer popup is a real button that opens that peer', () => {

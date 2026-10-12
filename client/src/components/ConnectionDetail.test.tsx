@@ -62,103 +62,217 @@ const _conn = (over: Partial<Record<string, unknown>> = {}) => ({
   ...over,
 })
 
-describe('ConnectionDetail — alias rename row', () => {
+describe('ConnectionDetail — header + inline rename', () => {
   it('module exports exist', async () => {
     const mod = await import('./ConnectionDetail')
     expect(mod).toBeTruthy()
     expect(Object.keys(mod).length).toBeGreaterThan(0)
   })
 
-  it('shows the federated name in the placeholder and hint when no alias is set', async () => {
+  async function open(over: Partial<Record<string, unknown>> = {}, extra: Record<string, unknown> = {}) {
     const { ConnectionDetail } = await import('./ConnectionDetail')
-    render(
-      <ConnectionDetail
-        conn={_conn() as any}
-        onClose={() => {}}
-        onRevoke={() => {}}
-      />,
-    )
-    const input = await screen.findByLabelText('Display this household as') as HTMLInputElement
-    expect(input.placeholder).toBe('z7k63zfi')
-    // Hint mentions the peer's advertised name when no alias is set.
-    const hint = document.querySelector('.sh-connection-alias__hint')
-    expect(hint?.textContent).toMatch(/They call themselves "z7k63zfi"/)
-  })
-
-  it('Save button is disabled until the alias differs from the persisted value', async () => {
-    const { ConnectionDetail } = await import('./ConnectionDetail')
-    render(
-      <ConnectionDetail
-        conn={_conn({ local_alias: 'Brother' }) as any}
-        onClose={() => {}}
-        onRevoke={() => {}}
-      />,
-    )
-    const save = (await screen.findAllByText('Save'))[0] as HTMLButtonElement
-    expect(save.disabled).toBe(true)
-    const input = screen.getByLabelText('Display this household as') as HTMLInputElement
-    fireEvent.input(input, { target: { value: 'Brother\'s house' } })
-    expect(save.disabled).toBe(false)
-  })
-
-  it('Save PATCHes /api/pairing/connections/{id}/alias with the new value', async () => {
-    const { ConnectionDetail } = await import('./ConnectionDetail')
+    const onClose = vi.fn()
     const onAliasSaved = vi.fn()
-    render(
+    const r = render(
       <ConnectionDetail
-        conn={_conn() as any}
-        onClose={() => {}}
+        conn={_conn(over) as any}
+        onClose={onClose}
         onRevoke={() => {}}
         onAliasSaved={onAliasSaved}
+        {...extra}
       />,
     )
-    const input = await screen.findByLabelText('Display this household as') as HTMLInputElement
-    fireEvent.input(input, { target: { value: "Brother's house" } })
-    fireEvent.click((screen.getAllByText('Save'))[0])
-    await new Promise(r => setTimeout(r, 0))
-    expect(apiPatch).toHaveBeenCalledWith(
-      '/api/pairing/connections/z7k63zfi/alias',
-      { alias: "Brother's house" },
-    )
-    expect(onAliasSaved).toHaveBeenCalledTimes(1)
+    return { ...r, onClose, onAliasSaved }
+  }
+
+  async function startRename() {
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    return await screen.findByLabelText('Name on your side') as HTMLInputElement
+  }
+
+  it('shows the name as the dialog title, a 44 px Rename pencil and a status line', async () => {
+    await open({ display_name: 'Alpha House', transport: 'rtc' })
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.classList.contains('sh-conn-manage')).toBe(true)
+    const titleId = dialog.getAttribute('aria-labelledby')!
+    expect(document.getElementById(titleId)!.textContent).toBe('Alpha House')
+    expect(screen.getByRole('button', { name: 'Rename' }).className).toContain('sh-conn-iconbtn')
+    expect(screen.getByText('Connected · Direct')).toBeTruthy()
   })
 
-  it('whitespace-only alias clears (posts null)', async () => {
-    const { ConnectionDetail } = await import('./ConnectionDetail')
-    render(
-      <ConnectionDetail
-        conn={_conn({ local_alias: 'OldName' }) as any}
-        onClose={() => {}}
-        onRevoke={() => {}}
-      />,
-    )
-    const input = await screen.findByLabelText('Display this household as') as HTMLInputElement
+  it('an unreachable household says since when in the status line', async () => {
+    await open({ unreachable_since: '2026-06-01T09:00:00Z' })
+    expect(document.querySelector('.sh-conn-manage__down')!.textContent).toMatch(/^Unreachable since /)
+  })
+
+  it('rename swaps the × for ✓ + Cancel and prefills the current name', async () => {
+    await open({ display_name: 'Alpha House', federated_display_name: 'Alpha House' })
+    const input = await startRename()
+    expect(input.value).toBe('Alpha House')
+    expect(document.activeElement).toBe(input)
+    expect(screen.queryByRole('button', { name: 'Close dialog' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save name' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy()
+    expect(screen.getByText(/They call themselves "Alpha House"/)).toBeTruthy()
+  })
+
+  it('✓ PATCHes the alias (id URL-encoded), keeps the sheet open and shows the new name', async () => {
+    const { onAliasSaved, onClose } = await open({ instance_id: 'a/b c', display_name: 'z7k63zfi' })
+    const input = await startRename()
+    fireEvent.input(input, { target: { value: "  Brother's house  " } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
+    await waitFor(() => {
+      expect(apiPatch).toHaveBeenCalledWith('/api/pairing/connections/a%2Fb%20c/alias', { alias: "Brother's house" })
+    })
+    await waitFor(() => expect(onAliasSaved).toHaveBeenCalled())
+    expect(onClose).not.toHaveBeenCalled()
+    await waitFor(() => {
+      const titleId = screen.getByRole('dialog').getAttribute('aria-labelledby')!
+      expect(document.getElementById(titleId)!.textContent).toBe("Brother's house")
+    })
+    expect(screen.getByRole('button', { name: 'Rename' })).toBeTruthy()
+  })
+
+  it('an empty name, or the household\'s own name, clears the alias (null)', async () => {
+    await open({ local_alias: 'Brother', display_name: 'Brother', federated_display_name: 'z7k63zfi' })
+    let input = await startRename()
     fireEvent.input(input, { target: { value: '   ' } })
-    fireEvent.click((screen.getAllByText('Save'))[0])
-    await new Promise(r => setTimeout(r, 0))
-    expect(apiPatch).toHaveBeenCalledWith(
-      '/api/pairing/connections/z7k63zfi/alias',
-      { alias: null },
-    )
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => {
+      expect(apiPatch).toHaveBeenCalledWith('/api/pairing/connections/z7k63zfi/alias', { alias: null })
+    })
+    apiPatch.mockClear()
+    cleanup()
+    await open({ local_alias: 'Brother', display_name: 'Brother', federated_display_name: 'z7k63zfi' })
+    input = await startRename()
+    fireEvent.input(input, { target: { value: 'z7k63zfi' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => {
+      expect(apiPatch).toHaveBeenCalledWith('/api/pairing/connections/z7k63zfi/alias', { alias: null })
+    })
   })
 
-  it('Enter key submits the alias too', async () => {
+  it('an unchanged name saves nothing and just leaves edit mode', async () => {
+    await open()
+    await startRename()
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Rename' })).toBeTruthy())
+    expect(apiPatch).not.toHaveBeenCalled()
+  })
+
+  it('Esc while renaming discards the edit only — the sheet stays, focus returns to the pencil', async () => {
+    const { onClose } = await open()
+    const input = await startRename()
+    fireEvent.input(input, { target: { value: 'Something else' } })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Rename' })).toBeTruthy())
+    expect(onClose).not.toHaveBeenCalled()
+    expect(apiPatch).not.toHaveBeenCalled()
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Rename' })))
+    // A second Esc closes the sheet.
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('Cancel discards the edit too', async () => {
+    await open()
+    const input = await startRename()
+    fireEvent.input(input, { target: { value: 'Something else' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Rename' })).toBeTruthy())
+    expect(apiPatch).not.toHaveBeenCalled()
+  })
+})
+
+describe('ConnectionDetail — technical details + danger zone', () => {
+  it('Technical details start collapsed and copy the ID and address', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/transport-detail')) {
+        return Promise.resolve({ last_relay: null, inbox_url: 'https://alpha.example/federation/inbox/x' })
+      }
+      return Promise.resolve({ users: [] })
+    })
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(<ConnectionDetail conn={_conn() as any} onClose={() => {}} onRevoke={() => {}} />)
+    const details = document.querySelector('details.sh-conn-tech') as HTMLDetailsElement
+    expect(details.open).toBe(false)
+    expect(details.querySelector('summary')!.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(screen.getByRole('button', { name: 'Copy household ID' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('z7k63zfi'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy address' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://alpha.example/federation/inbox/x'))
+  })
+
+  it('Unpair asks first, then DELETEs with the id URL-encoded', async () => {
+    const onRevoke = vi.fn()
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail conn={_conn({ instance_id: 'a/b', display_name: 'Alpha House' }) as any}
+        onClose={() => {}} onRevoke={onRevoke} />,
+    )
+    const danger = document.querySelector('.sh-conn-danger')!
+    expect(danger.textContent).toContain('Danger zone')
+    fireEvent.click(screen.getByRole('button', { name: 'Unpair Alpha House' }))
+    expect(apiDelete).not.toHaveBeenCalled()
+    expect(await screen.findByText('Remove Alpha House?')).toBeTruthy()
+    expect(screen.getByText(/You'd need to pair again to undo this/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Unpair' }))
+    await waitFor(() => expect(apiDelete).toHaveBeenCalledWith('/api/pairing/connections/a%2Fb'))
+    await waitFor(() => expect(onRevoke).toHaveBeenCalled())
+  })
+})
+
+describe('ConnectionDetail — structure + status rule', () => {
+  it('the Technical <dl> holds only dt/dd groups; Check version again sits after it', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail conn={_conn() as any}
+        compat={{ instance_id: 'z7k63zfi', display_name: 'z', proto_version: 57, status: 'confirmed',
+          last_reachable_at: null, capabilities_known: true, lacking_features: [] } as any}
+        onClose={() => {}} onRevoke={() => {}} />,
+    )
+    const dl = document.querySelector('.sh-conn-tech dl')!
+    for (const group of dl.children) {
+      expect(group.tagName).toBe('DIV')
+      expect([...group.children].map((c) => c.tagName)).toEqual(['DT', 'DD'])
+    }
+    const btn = screen.getByRole('button', { name: 'Check version again' })
+    expect(dl.contains(btn)).toBe(false)
+  })
+
+  it('uses the live reachable flag like the list (unreachable_since alone is stale)', async () => {
+    const { ConnectionDetail } = await import('./ConnectionDetail')
+    render(
+      <ConnectionDetail conn={_conn({ reachable: true, unreachable_since: '2026-06-01T09:00:00Z', transport: 'rtc' }) as any}
+        onClose={() => {}} onRevoke={() => {}} />,
+    )
+    expect(document.querySelector('.sh-conn-manage__down')).toBeNull()
+    expect(screen.getByText('Connected · Direct')).toBeTruthy()
+    expect(document.querySelector('.sh-modal-header .sh-conn-av')!.getAttribute('data-s')).toBe('ok')
+  })
+})
+
+describe('App version tile', () => {
+  it.each([
+    [57, 57, 'v57, same as you'],
+    [55, 57, 'v55, 2 behind'],
+    [56, 57, 'v56, 1 behind'],
+    [58, 57, 'v58, newer than yours'],
+    [55, 0, 'v55'],
+  ])('peer v%i, ours v%i → %s', async (peer, ours, text) => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
       <ConnectionDetail
-        conn={_conn() as any}
+        conn={_conn({ proto_version: peer }) as any}
+        compat={{ instance_id: 'z7k63zfi', display_name: 'z', proto_version: peer, status: 'confirmed', last_reachable_at: null, capabilities_known: true, lacking_features: [] } as any}
+        ours={ours}
         onClose={() => {}}
         onRevoke={() => {}}
       />,
     )
-    const input = await screen.findByLabelText('Display this household as') as HTMLInputElement
-    fireEvent.input(input, { target: { value: 'Mom' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
-    await new Promise(r => setTimeout(r, 0))
-    expect(apiPatch).toHaveBeenCalledWith(
-      '/api/pairing/connections/z7k63zfi/alias',
-      { alias: 'Mom' },
-    )
+    expect(screen.getByText(text)).toBeTruthy()
   })
 })
 
@@ -288,20 +402,6 @@ describe('Federation compatibility row + re-check', () => {
     })
   })
 
-  it('shows "up to date ✓" when caps known and nothing lacking', async () => {
-    const { ConnectionDetail } = await import('./ConnectionDetail')
-    render(
-      <ConnectionDetail
-        conn={_conn() as any}
-        compat={_compat({ lacking_features: [] }) as any}
-        onClose={() => {}}
-        onRevoke={() => {}}
-      />,
-    )
-    expect(await screen.findByText('Compatibility')).toBeTruthy()
-    expect(screen.getByText('up to date ✓')).toBeTruthy()
-  })
-
   it('renders a "Check version again" button that calls resyncPeerCapabilities', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
     render(
@@ -344,9 +444,8 @@ describe('Federation compatibility row + re-check', () => {
         onRevoke={() => {}}
       />,
     )
-    await screen.findByLabelText('Display this household as')
+    await screen.findByRole('button', { name: 'Rename' })
     expect(screen.queryByText('Missing features')).toBeNull()
-    expect(screen.queryByText('Compatibility')).toBeNull()
     expect(screen.queryByText('Check version again')).toBeNull()
   })
 })
@@ -415,7 +514,7 @@ describe('DM path row', () => {
     )
     await waitFor(() => {
       expect(screen.getByText(/Your last chat went through peer-relay/)).toBeTruthy()
-      expect(screen.getByText(/You → 🔁 peer-relay →/)).toBeTruthy()
+      expect(screen.getByText(/You → peer-relay →/)).toBeTruthy()
     })
   })
 
@@ -570,8 +669,9 @@ describe('ConnectionDetail — naive-UTC timestamps render in the viewer\'s zone
       />,
     )
     // 11:26:45Z is 13:26:45 in Zurich — the naive misparse would show 11:26:45.
-    expect(screen.getByText(utcStamp('2026-06-04 11:26:45'), { exact: false })).toBeTruthy()
-    expect(screen.queryByText(/11:26:45/)).toBeNull()
+    // The tile shows the relative time; the absolute stamp is its title.
+    expect(document.querySelector(`[title="${utcStamp('2026-06-04 11:26:45')}"]`)).not.toBeNull()
+    expect(document.querySelector('[title*="11:26:45"]')).toBeNull()
   })
 
   it('renders unreachable_since as UTC, not as local wall-clock', async () => {
@@ -683,7 +783,6 @@ describe('GFS row — relay acceptance is not delivery', () => {
         onRevoke={() => {}}
       />,
     )
-    expect(screen.getByText('GFS')).toBeTruthy()
     expect(screen.getByText('GFS only')).toBeTruthy()
     const stamp = new Date('2026-09-20T10:00:00Z').toLocaleString()
     expect(screen.getByText(`Last handed over ${stamp}`, { exact: false })).toBeTruthy()
@@ -769,7 +868,7 @@ describe('ConnectionDetail — writes only target registered routes', () => {
 })
 
 describe('ConnectionDetail — GFS fallback section', () => {
-  const section = () => document.querySelector('.sh-connection-gfs-fallback')
+  const section = () => document.querySelector('.sh-gfs-fallback')
 
   it('shows the switch for a direct pair when a GFS relays envelopes', async () => {
     const { ConnectionDetail } = await import('./ConnectionDetail')
@@ -782,8 +881,7 @@ describe('ConnectionDetail — GFS fallback section', () => {
       />,
     )
     expect(section()).not.toBeNull()
-    expect(screen.getByText('GFS fallback')).toBeTruthy()
-    expect(screen.getByRole('checkbox', { name: 'Use the GFS as a fallback' })).toBeTruthy()
+    expect(screen.getByRole('switch', { name: 'Use the GFS as a fallback' })).toBeTruthy()
   })
 
   it('hides the switch without a relaying GFS while it is off', async () => {
@@ -833,6 +931,7 @@ describe('ConnectionDetail in German', () => {
     render(
       <ConnectionDetail
         conn={_conn({ proto_version: 19, queued_envelopes: 1, transport: 'https' }) as any}
+        ours={19}
         compat={{
           instance_id: 'z7k63zfi', display_name: 'z7k63zfi', proto_version: 19,
           status: 'confirmed', last_reachable_at: null,
@@ -844,10 +943,10 @@ describe('ConnectionDetail in German', () => {
     )
     expect(screen.getByText('Haushalts-ID')).toBeTruthy()
     expect(screen.getByText('App-Version')).toBeTruthy()
-    expect(screen.getByText('Verbunden')).toBeTruthy()
-    expect(screen.getByText('aktuell ✓')).toBeTruthy()
+    expect(screen.getByText('Verbunden · Über das Internet')).toBeTruthy()
+    expect(screen.getByText('v19, wie bei dir')).toBeTruthy()
     expect(screen.getByText('1 Nachricht wartet auf den Versand')).toBeTruthy()
-    expect(screen.getByText('Über das Internet')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Verbindung entfernen' })).toBeTruthy()
+    expect(screen.getAllByText('Über das Internet').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: 'z7k63zfi entkoppeln' })).toBeTruthy()
   })
 })

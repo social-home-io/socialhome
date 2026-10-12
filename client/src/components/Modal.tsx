@@ -7,6 +7,14 @@ interface ModalProps {
   onClose: () => void
   title: string
   children: ComponentChildren
+  /** Extra class on the dialog surface (e.g. a page-specific sheet). */
+  class?: string
+  /** ``alertdialog`` for a confirmation that interrupts a destructive
+   *  action; ``dialog`` otherwise. */
+  role?: 'dialog' | 'alertdialog'
+  /** Replace the default header (``h2`` title + close ×). Receives the id
+   *  the dialog's ``aria-labelledby`` points at — put it on the heading. */
+  header?: (titleId: string) => ComponentChildren
 }
 
 /**
@@ -31,7 +39,7 @@ interface ModalProps {
 
 /** Open dialogs, oldest first. Only the last entry reacts to keys. */
 const _stack: object[] = []
-export function Modal({ open, onClose, title, children }: ModalProps) {
+export function Modal({ open, onClose, title, children, class: extraClass, role = 'dialog', header }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const titleId = useRef<string>(`sh-modal-title-${Math.random().toString(36).slice(2, 8)}`)
   // Stash ``onClose`` in a ref so the focus-trap effect only depends on
@@ -111,8 +119,8 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
     <div class="sh-modal-overlay" onClick={onClose}>
       <div
         ref={dialogRef}
-        class="sh-modal"
-        role="dialog"
+        class={extraClass ? `sh-modal ${extraClass}` : 'sh-modal'}
+        role={role}
         aria-modal="true"
         aria-labelledby={titleId.current}
         tabIndex={-1}
@@ -123,10 +131,14 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
          *  this is a dismissible sheet. Hidden via CSS on ≥640px. */}
         <div class="sh-modal-grabber" aria-hidden="true" />
         <div class="sh-modal-header">
-          <h2 id={titleId.current}>{title}</h2>
-          <button class="sh-modal-close" onClick={onClose} aria-label={t('modal.close')}>
-            &times;
-          </button>
+          {header ? header(titleId.current) : (
+            <>
+              <h2 id={titleId.current}>{title}</h2>
+              <button class="sh-modal-close" onClick={onClose} aria-label={t('modal.close')}>
+                &times;
+              </button>
+            </>
+          )}
         </div>
         <div class="sh-modal-body">{children}</div>
       </div>

@@ -56,6 +56,37 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+describe('GfsFallbackToggle — card variant (Manage sheet)', () => {
+  it('is a labelled switch described by the privacy note and the live status', () => {
+    render(<GfsFallbackToggle variant="card" instanceId="peer-1" peerName="The Smiths" initial={OFF} />)
+    const sw = screen.getByRole('switch', { name: 'Use the GFS as a fallback' }) as HTMLInputElement
+    expect(sw.checked).toBe(false)
+    const described = sw.getAttribute('aria-describedby')!.split(' ')
+      .map((id) => document.getElementById(id)!.textContent).join(' ')
+    expect(described).toContain("Only used when The Smiths can't be reached directly")
+    expect(described).toContain('Off — messages to The Smiths only travel directly.')
+  })
+
+  it('locked (not available) only describes why', () => {
+    render(<GfsFallbackToggle variant="card" instanceId="peer-1" peerName="The Smiths"
+      initial={{ ...OFF, gfs_relay_available: false }} />)
+    const sw = screen.getByRole('switch') as HTMLInputElement
+    expect(sw.disabled).toBe(true)
+    expect(screen.queryByRole('note')).toBeNull()
+  })
+})
+
+describe('GfsFallbackToggle — URL', () => {
+  it('URL-encodes the instance id', async () => {
+    mockPatch.mockResolvedValue({})
+    render(<GfsFallbackToggle instanceId="a/b c" peerName="P" initial={OFF} />)
+    fireEvent.click(screen.getByRole('checkbox'))
+    await waitFor(() => {
+      expect(mockPatch).toHaveBeenCalledWith('/api/pairing/connections/a%2Fb%20c', { gfs_relay: true })
+    })
+  })
+})
+
 describe('GfsFallbackToggle', () => {
   it('off: unchecked, says messages only travel directly, shows the privacy note', () => {
     const { container } = renderToggle()
