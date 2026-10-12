@@ -654,6 +654,7 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
         board.context["chat_days"] = chat_days(listed, fmt)
     elif tab == TAB_NOTES:
         board.context["notes"] = snap.stickies
+        board.context["notes_beyond"] = max(0, snap.stickies_total - len(snap.stickies))
     else:
         card = card_rows(rows, snap.now, hide=bannered)
         board.context.update(
@@ -674,7 +675,7 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
             shopping_more=max(0, snap.shopping_total - SHOPPING_SHOWN),
             stickies=snap.stickies[:STICKIES_SHOWN],
             # "See all ›" only where the tab holds more than the card.
-            notes_more=len(snap.stickies) > STICKIES_SHOWN,
+            notes_more=snap.stickies_total > STICKIES_SHOWN,
             open_chores=sum(1 for c in snap.chores_today if not c.done),
             messages=card,
             messages_more=snap.messages_on and len(listed) > len(card),

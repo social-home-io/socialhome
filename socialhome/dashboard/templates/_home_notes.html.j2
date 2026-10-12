@@ -7,6 +7,8 @@
   <ul class="dash-note-board">
     {% for s in notes %}<li class="dash-note {{ f.kc(s.color) }}">{{ s.content }}</li>{% endfor %}
   </ul>
+  {#- Past the wall's hard bound: how many more the app holds. -#}
+  {% if notes_beyond %}<p class="dash-more">{{ t("dashboard.home.shopping_more", n=notes_beyond) }}</p>{% endif %}
   {% else %}
   {{ tab_empty("📝", t("dashboard.notes.empty"), t("dashboard.notes.empty_hint")) }}
   {% endif %}

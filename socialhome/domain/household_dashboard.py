@@ -748,6 +748,9 @@ class HomeSnapshot:
     messages: tuple[DashboardMessage, ...] = ()
     mentions: tuple[DashboardMention, ...] = ()
     messages_on: bool = False
+    #: Every household sticky the wall may show (hidden authors left out)
+    #: — ``stickies`` holds at most a hard bound of them.
+    stickies_total: int = 0
 
 
 @dataclass(slots=True, frozen=True)

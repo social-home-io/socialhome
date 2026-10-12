@@ -244,6 +244,7 @@ def home(**kw) -> HomeSnapshot:
         shopping=SHOPPING,
         shopping_total=11,
         stickies=STICKIES,
+        stickies_total=len(STICKIES),
         school=(MIA_SCHOOL,),
         tomorrow_first=lesson("Maths", at(7, 30, TOMORROW), at(8, 15, TOMORROW)),
     )

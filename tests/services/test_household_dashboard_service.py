@@ -53,6 +53,7 @@ from socialhome.repositories.cp_repo import SqliteCpRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import household_dashboard_service as dashboard_module
 from socialhome.services.household_dashboard_service import (
+    MAX_STICKIES,
     HouseholdDashboardService,
 )
 from socialhome.services.child_protection_service import ChildProtectionService
@@ -842,6 +843,37 @@ async def test_home_shopping_and_stickies():
     assert snap.shopping_total == 2
     assert [s.content for s in snap.stickies] == ["Call plumber"]  # Carl hidden
     assert snap.stickies[0].color == "#FFEE88"
+    assert snap.stickies_total == 1
+
+
+def _note(i: int, author: str = "u-anna") -> Sticky:
+    return Sticky(
+        id=f"n{i}",
+        author=author,
+        content=f"Note {i}",
+        color="#FFEE88",
+        position_x=0,
+        position_y=0,
+        created_at="",
+        updated_at="",
+    )
+
+
+async def test_home_carries_every_sticky_for_the_notes_tab():
+    """Review: the Notes tab showed only the first 20."""
+    h = Harness()
+    h.stickies.notes = [_note(i) for i in range(25)] + [_note(99, author="u-carl")]
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert len(snap.stickies) == 25 and snap.stickies_total == 25
+
+
+async def test_stickies_have_a_hard_upper_bound_but_a_true_count():
+    h = Harness()
+    h.stickies.notes = [_note(i) for i in range(MAX_STICKIES + 20)]
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert MAX_STICKIES == 100
+    assert len(snap.stickies) == MAX_STICKIES
+    assert snap.stickies_total == MAX_STICKIES + 20
 
 
 async def test_home_shopping_is_capped_but_counted():

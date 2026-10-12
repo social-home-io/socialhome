@@ -3212,7 +3212,7 @@ async def test_messages_tab_empty_state(client, auth, snapshots):
 
 
 async def test_notes_tab(client, auth, snapshots):
-    _tabs_on(snapshots, stickies=NOTES)
+    _tabs_on(snapshots, stickies=NOTES, stickies_total=6)
     resp = await _get(client, auth, "/notes")
     html = await resp.text()
     _assert_board_csp(resp, html)
@@ -3229,7 +3229,7 @@ async def test_notes_tab(client, auth, snapshots):
 
 
 async def test_notes_tab_empty_state(client, auth, snapshots):
-    _tabs_on(snapshots, stickies=())
+    _tabs_on(snapshots, stickies=(), stickies_total=0)
     html = await (await _get(client, auth, "/notes")).text()
     main = _main(html)
     assert '<span class="dash-tab-empty-icon" aria-hidden="true">📝</span>' in main
@@ -3238,7 +3238,7 @@ async def test_notes_tab_empty_state(client, auth, snapshots):
 
 
 async def test_overview_shows_three_notes_and_a_see_all(client, auth, snapshots):
-    _tabs_on(snapshots, stickies=NOTES)
+    _tabs_on(snapshots, stickies=NOTES, stickies_total=6)
     html = await (await _get(client, auth, "/")).text()
     col = html[html.index('id="dash-notes-label"') :]
     col = col[: col.index("</section>")]
@@ -3249,10 +3249,28 @@ async def test_overview_shows_three_notes_and_a_see_all(client, auth, snapshots)
         '<a class="dash-see-all" href="/notes" aria-describedby="dash-notes-label">'
         "See all" in html
     )
-    _tabs_on(snapshots, stickies=NOTES[:3])
+    _tabs_on(snapshots, stickies=NOTES[:3], stickies_total=3)
     html = await (await _get(client, auth, "/")).text()
     assert 'href="/notes" aria-describedby' not in html
     assert ">Notes · 3</h2>" in html
+
+
+async def test_notes_count_is_the_true_total(client, auth, snapshots):
+    """Review: past the wall's hard bound the label still tells the
+    truth, and the Notes tab says how many more the app holds."""
+    many = tuple(
+        DashboardSticky(id=f"n{i}", content=f"Note number {i}", color="#FFF9B1")
+        for i in range(100)
+    )
+    _tabs_on(snapshots, stickies=many, stickies_total=120)
+    html = await (await _get(client, auth, "/")).text()
+    assert ">Notes · 120</h2>" in html
+    main = _main(await (await _get(client, auth, "/notes")).text())
+    assert main.count('<li class="dash-note k') == 100
+    assert '<p class="dash-more">+ 20 more</p>' in main
+    _tabs_on(snapshots, stickies=NOTES, stickies_total=6)
+    main = _main(await (await _get(client, auth, "/notes")).text())
+    assert "dash-more" not in main
 
 
 async def test_overview_messages_see_all_only_with_more(client, auth, snapshots):
@@ -3312,7 +3330,9 @@ async def test_night_starting_on_a_tab_reloads_it(client, auth, snapshots, fragm
     ["/messages", "/notes", "/fragment/home/messages", "/fragment/home/notes"],
 )
 async def test_a_locked_tablet_shows_no_tab_content(pin_client, auth, snapshots, path):
-    _tabs_on(snapshots, messages=CHAT, mentions=MENTIONS, stickies=NOTES)
+    _tabs_on(
+        snapshots, messages=CHAT, mentions=MENTIONS, stickies=NOTES, stickies_total=6
+    )
     resp = await pin_client.get(path, headers=await _locked(auth))
     assert resp.status == 200
     html = await resp.text()

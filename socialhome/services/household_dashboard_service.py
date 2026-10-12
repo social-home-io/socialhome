@@ -143,7 +143,10 @@ __all__ = ["HouseholdDashboardService"]
 MAX_EVENTS = 30
 MAX_CHORES = 30
 MAX_SHOPPING = 20
-MAX_STICKIES = 20
+#: A hard upper bound on the stickies a snapshot carries — the Notes
+#: tab shows them all up to this; ``stickies_total`` keeps the true
+#: count (the household board is read whole, as the app reads it).
+MAX_STICKIES = 100
 MAX_TOMORROW_ITEMS = 5
 #: A person's page lists chores due within this many days; done chores
 #: due that far ahead still count when they were finished today.
@@ -351,7 +354,7 @@ class HouseholdDashboardService:
         )
         colors = self._person_colors(ctx, calendars)
         senders = await self._chat_senders(ctx)
-        people, events, chores, shopping, stickies, chat = await asyncio.gather(
+        people, events, chores, shopping, notes, chat = await asyncio.gather(
             self._people(ctx, colors),
             self._events(ctx, calendars, colors),
             self._chores(ctx, due_to=ctx.today),
@@ -365,6 +368,7 @@ class HouseholdDashboardService:
         messages, mentions = chat
         school = [self._school(ctx, user.user_id, timetables) for user in ctx.shown]
         shopping_items, shopping_total = shopping
+        stickies, stickies_total = notes
         all_today = events.get(ctx.today, [])
         school_today = tuple(d.today for d in school if d.today is not None)
         school_tomorrow = tuple(
@@ -385,6 +389,7 @@ class HouseholdDashboardService:
             shopping=shopping_items,
             shopping_total=shopping_total,
             stickies=stickies,
+            stickies_total=stickies_total,
             school=school_today,
             tomorrow_first=_next_after(
                 ctx.now, [*events.get(tomorrow, []), *school_tomorrow]
@@ -822,15 +827,20 @@ class HouseholdDashboardService:
         )
         return shown, len(items)
 
-    async def _sticky_slice(self, ctx: _Context) -> tuple[DashboardSticky, ...]:
+    async def _sticky_slice(
+        self, ctx: _Context
+    ) -> tuple[tuple[DashboardSticky, ...], int]:
+        """The household stickies (hidden authors left out), at most
+        :data:`MAX_STICKIES` of them, and how many there are in all."""
         if not ctx.on(SECTION_STICKIES):
-            return ()
+            return (), 0
         notes = await _safe("stickies", self._stickies.list(space_id=None), [])
-        return tuple(
+        shown = [
             DashboardSticky(id=n.id, content=n.content, color=n.color)
             for n in notes
             if n.author not in ctx.hidden_ids
-        )[:MAX_STICKIES]
+        ]
+        return tuple(shown[:MAX_STICKIES]), len(shown)
 
     # ── Household chat ───────────────────────────────────────────────────
 

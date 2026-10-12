@@ -203,7 +203,7 @@
     {% if show_notes %}
     <section class="dash-col" aria-labelledby="dash-notes-label">
       <div class="dash-card-head">
-        <h2 class="dash-label" id="dash-notes-label">{{ t("dashboard.home.notes") }} · {{ snap.stickies|length }}</h2>
+        <h2 class="dash-label" id="dash-notes-label">{{ t("dashboard.home.notes") }} · {{ snap.stickies_total }}</h2>
         {% if notes_more %}{{ see_all("/notes", "dash-notes-label") }}{% endif %}
       </div>
       <ul class="dash-stickies">

@@ -1574,7 +1574,8 @@ three): `/` (Overview — the glance above), `/messages` (the household
 chat of the last day, grouped Today / Yesterday by the household's day,
 each row one `aria-pressed` toggle that reads the whole message aloud,
 text cut at 220 characters on a word) and `/notes` (every sticky on a
-flat board). Overview always shows; Messages while the messages opt-in
+flat board, up to a hard bound of 100 — `MAX_STICKIES`; the "Notes · N"
+label and a "+ N more" line use the true count, `stickies_total`). Overview always shows; Messages while the messages opt-in
 and the household chat are on (`HomeSnapshot.messages_on` — even with
 nothing to show: an empty state); Notes while the stickies section is
 on. With only Overview there is no tab bar; a tab that doesn't show is
