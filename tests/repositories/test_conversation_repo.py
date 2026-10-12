@@ -350,6 +350,14 @@ async def test_add_and_list_reactions(env):
     assert len(reactions) == 2
 
 
+async def test_add_reaction_says_whether_it_inserted(env):
+    await env.repo.create(_conv("conv-react-new"))
+    await env.repo.save_message(_message("rnew-1", "conv-react-new"))
+    assert await env.repo.add_reaction("rnew-1", "uid-alice", "✅") is True
+    assert await env.repo.add_reaction("rnew-1", "uid-alice", "✅") is False
+    assert len(await env.repo.list_reactions("rnew-1")) == 1
+
+
 async def test_remove_reaction(env):
     """remove_reaction deletes the specified user's reaction."""
     conv = _conv("conv-rm-react")

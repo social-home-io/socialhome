@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -1199,6 +1200,25 @@ async def test_dashboard_ack_reacts_publishes_and_never_federates(stack):
         s for s in fed.sent if s["type"] is FederationEventType.DM_MESSAGE_REACTION
     ] == []
     assert fed.sent == []
+
+
+async def test_parallel_dashboard_acks_publish_once(stack):
+    """Five tablets tapping "Got it" at once: one row, one live event."""
+    convos, _chat, msg, _anna = await _household_chat_with_message(stack)
+    seen: list[DmMessageReactionChanged] = []
+
+    async def grab(event):
+        seen.append(event)
+
+    stack.bus.subscribe(DmMessageReactionChanged, grab)
+    await asyncio.gather(
+        *(
+            stack.dm_svc.acknowledge_on_dashboard(msg.id, as_user_id=DASHBOARD_AUTHOR)
+            for _ in range(5)
+        )
+    )
+    assert len(await convos.list_reactions(msg.id)) == 1
+    assert len(seen) == 1
 
 
 async def test_dashboard_ack_credits_a_person(stack):

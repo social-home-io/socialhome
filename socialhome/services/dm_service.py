@@ -1478,7 +1478,8 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         for anything else (unknown, deleted, another chat), without
         saying which. The caller (the dashboard's snapshot service) has
         already re-checked that the wall may acknowledge it. Idempotent
-        (``INSERT OR IGNORE``). Open chats update live through the same
+        (``INSERT OR IGNORE``): only the tap that adds the row publishes,
+        so tablets tapping at once send one live update. Open chats update live through the same
         ``DmMessageReactionChanged`` as a reaction from the app; it is
         never federated (the household chat stays on this household).
         """
@@ -1488,8 +1489,8 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         conv = await self._convos.get(msg.conversation_id)
         if conv is None or conv.system_scope is not SystemChatScope.HOUSEHOLD:
             raise KeyError("message not found")
-        await self._convos.add_reaction(message_id, as_user_id, ACK_EMOJI)
-        await self._publish_reaction(msg, as_user_id, ACK_EMOJI, "add")
+        if await self._convos.add_reaction(message_id, as_user_id, ACK_EMOJI):
+            await self._publish_reaction(msg, as_user_id, ACK_EMOJI, "add")
 
     async def list_reactions(
         self,

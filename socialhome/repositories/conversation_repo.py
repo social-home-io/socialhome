@@ -226,7 +226,7 @@ class AbstractConversationRepo(Protocol):
         message_id: str,
         user_id: str,
         emoji: str,
-    ) -> None: ...
+    ) -> bool: ...
     async def remove_reaction(
         self,
         message_id: str,
@@ -1500,8 +1500,10 @@ class SqliteConversationRepo:
         message_id: str,
         user_id: str,
         emoji: str,
-    ) -> None:
-        await self._db.enqueue(
+    ) -> bool:
+        """Add one reaction; ``True`` when it was new (``INSERT OR IGNORE``
+        inserted a row), ``False`` when that person already had it."""
+        inserted = await self._db.enqueue_rowcount(
             """
             INSERT OR IGNORE INTO message_reactions(
                 message_id, user_id, emoji
@@ -1509,6 +1511,7 @@ class SqliteConversationRepo:
             """,
             (message_id, user_id, emoji),
         )
+        return inserted > 0
 
     async def remove_reaction(
         self,
