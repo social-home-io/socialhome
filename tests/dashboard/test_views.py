@@ -3222,9 +3222,10 @@ async def test_notes_tab(client, auth, snapshots):
     assert main.count('<li class="dash-note k') == 6
     for i in range(1, 7):
         assert f"Note number {i}" in main
-    # Warm ink for note cards only: --kn in the style, --kt unchanged.
+    # Warm ink for note cards only, on the server-mixed fill: --kn / --kb
+    # in the style, --kt unchanged.
     style = _board_style(html)[0]
-    assert re.search(r"\{--kc:#fff9b1;--kt:#000000;--kn:#1f1d1a\}", style)
+    assert re.search(r"\{--kc:#fff9b1;--kt:#000000;--kn:#1f1d1a;--kb:#", style)
 
 
 async def test_notes_tab_empty_state(client, auth, snapshots):

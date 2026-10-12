@@ -8,7 +8,13 @@ import pytest
 
 from socialhome.dashboard.contrast import (
     AA_TEXT,
+    NOTE_DARK_BG,
+    NOTE_LIGHT_BG,
+    NOTE_MIX_DARK,
+    NOTE_MIX_LIGHT,
     WARM_INK,
+    mix_oklab,
+    note_colors,
     contrast_ratio,
     hex_color,
     ink_on,
@@ -96,6 +102,45 @@ def test_ink_on_picks_the_higher_contrast(bg, ink):
 def test_note_ink_is_warm_where_it_still_reads(bg, ink):
     assert note_ink(bg) == ink
     assert contrast_ratio(note_ink(bg), bg) >= AA_TEXT
+
+
+def test_mix_oklab_known_values():
+    assert mix_oklab("#8855ee", "#8855ee", 0.82) == "#8855ee"
+    assert mix_oklab("#ffffff", "#000000", 1.0) == "#ffffff"
+    assert mix_oklab("#ffffff", "#000000", 0.0) == "#000000"
+    # Oklab L 0.5 grey: linear 0.125 → sRGB 99.
+    assert mix_oklab("#ffffff", "#000000", 0.5) == "#636363"
+
+
+def test_note_colours_are_the_softened_fills_with_their_ink():
+    note = note_colors("#8855ee")
+    assert note.light_bg == mix_oklab("#8855ee", NOTE_LIGHT_BG, NOTE_MIX_LIGHT)
+    assert note.dark_bg == mix_oklab("#8855ee", NOTE_DARK_BG, NOTE_MIX_DARK)
+    # The two the review proved broken against the raw colour.
+    assert contrast_ratio(note.light_ink, note.light_bg) >= AA_TEXT
+    dark = note_colors("#5588bb")
+    assert contrast_ratio(dark.dark_ink, dark.dark_bg) >= AA_TEXT
+    # A pastel keeps the warm ink.
+    assert note_colors("#fff9b1").light_ink == WARM_INK
+
+
+_STEPS = range(0, 256, 51)
+_GRID = [f"#{r:02x}{g:02x}{b:02x}" for r in _STEPS for g in _STEPS for b in _STEPS]
+
+
+@pytest.mark.parametrize("color", [*_GRID, "#5588bb", "#8855ee", "#777777"])
+def test_note_ink_reads_on_the_softened_fill_in_both_modes(color):
+    note = note_colors(color)
+    assert contrast_ratio(note.light_ink, note.light_bg) >= AA_TEXT, color
+    assert contrast_ratio(note.dark_ink, note.dark_bg) >= AA_TEXT, color
+
+
+def test_note_mix_grounds_are_the_page_backgrounds():
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    assert f"--dash-bg: {NOTE_LIGHT_BG};" in css
+    assert f"--dash-bg: {NOTE_DARK_BG};" in css
+    # The CSS no longer mixes note colours itself.
+    assert "color-mix(in oklab, var(--kc" not in css
 
 
 def test_warm_ink_is_the_board_text_colour():

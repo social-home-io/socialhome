@@ -1,7 +1,8 @@
 /* Household dashboard — login, lock screen and the boards (Home, a person).
    System fonts only: the dashboard never fetches from a third-party host.
    No inline style attributes anywhere (the CSP forbids them): per-person /
-   per-item colours arrive as classes (.kN sets --kc / --kt / --kn) in the page's
+   per-item colours arrive as classes (.kN sets --kc / --kt, and --kb / --kn
+   for note cards) in the page's
    one hash-admitted <style>; timeline geometry uses the .x-N / .w-N steps
    at the end of this file. Logical properties throughout, so RTL flips. */
 
@@ -2707,12 +2708,14 @@ h3.dash-sublabel {
   transform: scaleX(-1);
 }
 
-/* Softened household colours (Overview previews and the Notes board),
-   in the warm note ink (--kn, presenter.py) — faces and lanes keep --kt. */
+/* Softened household colours (Overview previews and the Notes board):
+   the fill (--kb) is mixed toward the page on the server and the ink
+   (--kn) picked against it, light and dark (presenter.py ColorBook) —
+   faces and lanes keep --kt. */
 .dash-sticky,
 .dash-note {
-  color: var(--kn, var(--kt, #1f1d1a));
-  background: color-mix(in oklab, var(--kc, #fff3a8) 82%, var(--dash-bg));
+  color: var(--kn, #1f1d1a);
+  background: var(--kb, #fff3a8);
 }
 
 /* Messages tab: one newest-first column. */
@@ -2949,7 +2952,6 @@ h3.dash-sublabel {
 @media (prefers-color-scheme: dark) {
   .dash-sticky,
   .dash-note {
-    background: color-mix(in oklab, var(--kc, #fff3a8) 75%, var(--dash-bg));
     box-shadow: none;
     outline: 1px solid var(--dash-border);
   }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import socialhome.i18n as i18n_pkg
-from socialhome.dashboard.contrast import contrast_ratio
+from socialhome.dashboard.contrast import contrast_ratio, note_colors
 from socialhome.dashboard.presenter import (
     MAX_LANE_ROWS,
     MAX_LANES,
@@ -94,11 +95,31 @@ def test_color_book_classes_and_css():
     assert book.cls("#112233") == "k1"
     assert book.cls("red;}body{x:y") == ""
     assert book.cls("#abcdef") == ""  # never registered
-    # --kt for faces and lanes; --kn, the softer warm ink, for note cards.
+    # --kt for faces and lanes; note cards get their softened fill (--kb)
+    # and an ink picked against it (--kn) — light, then dark and night.
+    y, d = note_colors("#ffee88"), note_colors("#112233")
     assert book.css() == (
-        ".k0{--kc:#ffee88;--kt:#000000;--kn:#1f1d1a}"
-        ".k1{--kc:#112233;--kt:#ffffff;--kn:#ffffff}"
+        f".k0{{--kc:#ffee88;--kt:#000000;--kn:{y.light_ink};--kb:{y.light_bg}}}"
+        f".k1{{--kc:#112233;--kt:#ffffff;--kn:{d.light_ink};--kb:{d.light_bg}}}"
+        "@media (prefers-color-scheme:dark){"
+        f".k0{{--kn:{y.dark_ink};--kb:{y.dark_bg}}}"
+        f".k1{{--kn:{d.dark_ink};--kb:{d.dark_bg}}}}}"
+        f".dash-night .k0{{--kn:{y.dark_ink};--kb:{y.dark_bg}}}"
+        f".dash-night .k1{{--kn:{d.dark_ink};--kb:{d.dark_bg}}}"
     )
+
+
+def test_color_book_note_inks_read_on_the_drawn_fill():
+    """Review: ink picked against the raw colour failed AA on the
+    softened fill (#8855ee light, #5588bb dark)."""
+    book = ColorBook()
+    for color in ("#8855ee", "#5588bb"):
+        book.add(color)
+    css = book.css()
+    light, dark = css.split("@media (prefers-color-scheme:dark){", 1)
+    for part in (light, dark):
+        for ink, bg in re.findall(r"--kn:(#[0-9a-f]{6});--kb:(#[0-9a-f]{6})", part):
+            assert contrast_ratio(ink, bg) >= 4.5, (ink, bg)
 
 
 def test_overview_shows_three_notes():
