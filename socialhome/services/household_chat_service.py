@@ -24,6 +24,8 @@ This service owns the chat's lifecycle:
 * :meth:`recent_messages` is the household dashboard's glance: a plain
   read that never creates the chat, never reconciles seats and never
   moves anyone's read watermark (so nothing reads as "seen").
+  :meth:`recent_mentions` is its sibling for ``@here`` / ``@name``
+  mentions, with who has acknowledged each (a ✅ reaction) — same rules.
 """
 
 from __future__ import annotations
@@ -35,15 +37,18 @@ from datetime import datetime, timezone
 from ..domain.conversation import (
     Conversation,
     ConversationMessage,
+    MentionGlance,
     SystemChatScope,
     SystemChatSummary,
     mute_active,
 )
 from ..domain.events import UserDeprovisioned, UserProvisioned
+from ..domain.household_dashboard import ACK_EMOJI
+from ..domain.mention import MentionType
 from ..infrastructure.event_bus import EventBus
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
-from .dm_mentions import DmMentionResolver
+from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .system_chat_policy import HouseholdChatAccess
 
 log = logging.getLogger(__name__)
@@ -136,6 +141,65 @@ class HouseholdChatService:
             senders=senders,
             limit=limit,
         )
+
+    async def recent_mentions(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+        senders: Collection[str],
+        limit: int,
+    ) -> list[MentionGlance]:
+        """The household chat's messages from ``since`` to ``until`` (newest
+        first; the newest ``limit`` are scanned) that carry ``@here`` or
+        @-mention a seated member, each with who reacted
+        :data:`~socialhome.domain.household_dashboard.ACK_EMOJI`.
+
+        Only member-written text (:data:`MENTIONABLE_TYPES`: text and media
+        captions — never a transcript), only from ``senders``, never a
+        deleted message. ``@here`` is kept here (the chat itself ignores
+        it). Read-only like :meth:`recent_messages`: three reads (messages,
+        the seat roster, the reactions), nothing created or moved.
+        """
+        if not await self._access.enabled():
+            return []
+        chat = await self._convos.get_household_chat()
+        if chat is None:
+            return []
+        rows = [
+            m
+            for m in await self._convos.list_recent_messages(
+                chat.id,
+                since=since,
+                until=until,
+                types=MENTIONABLE_TYPES,
+                senders=senders,
+                limit=limit,
+            )
+            if not m.deleted and "@" in m.content
+        ]
+        if not rows:
+            return []
+        parsed = await DmMentionResolver(self._convos, self._users).parse_with_here(
+            chat.id, [m.content for m in rows]
+        )
+        found = [(m, ms) for m, ms in zip(rows, parsed, strict=True) if ms]
+        if not found:
+            return []
+        acked: dict[str, set[str]] = {}
+        for r in await self._convos.list_reactions_with_emoji(
+            [m.id for m, _ in found], ACK_EMOJI
+        ):
+            acked.setdefault(r.message_id, set()).add(r.user_id)
+        return [
+            MentionGlance(
+                message=m,
+                here=any(x.type is MentionType.HERE for x in ms),
+                user_ids=tuple(x.user_id for x in ms if x.user_id is not None),
+                acked_by=frozenset(acked.get(m.id, ())),
+            )
+            for m, ms in found
+        ]
 
     async def summary(self, username: str) -> SystemChatSummary:
         """What the feed's Chat tab needs for ``username``.

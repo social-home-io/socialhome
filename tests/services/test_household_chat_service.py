@@ -21,6 +21,8 @@ from socialhome.domain.events import (
     DmMessageUpdated,
 )
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.household_dashboard import ACK_EMOJI
+from socialhome.domain.user import DASHBOARD_AUTHOR
 from socialhome.domain.preferences import FeatureDisabledError
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -518,3 +520,80 @@ async def test_recent_messages_feature_off_reads_nothing(stack):
         limit=3,
     )
     assert rows == []
+
+
+# ── The household dashboard's mention glance ──────────────────────────────
+
+
+def _window() -> dict:
+    now = datetime.now(timezone.utc)
+    return {"since": now - timedelta(hours=1), "until": now + timedelta(minutes=2)}
+
+
+async def test_recent_mentions_parses_here_and_people_with_acks(stack):
+    anna = await stack.provision("anna")
+    bob = await stack.provision("bob")
+    leo = await stack.provision("leo")
+    chat = await stack.chat.reconcile()
+    for m in (
+        _glance_msg(chat.id, "here", anna.user_id, 5, content="@here dinner!"),
+        _glance_msg(chat.id, "leo", anna.user_id, 4, content="@leo homework?"),
+        _glance_msg(chat.id, "plain", anna.user_id, 3, content="no mention"),
+        _glance_msg(chat.id, "nobody", bob.user_id, 2, content="@ghost hi"),
+        _glance_msg(chat.id, "pic", bob.user_id, 1, type="image", content="look @leo"),
+        _glance_msg(chat.id, "voice", bob.user_id, 1, type="audio", content="@leo"),
+        _glance_msg(chat.id, "gone", bob.user_id, 1, content="@here", deleted=True),
+    ):
+        await stack.convos.save_message(m)
+    await stack.convos.add_reaction("here", DASHBOARD_AUTHOR, ACK_EMOJI)
+    await stack.convos.add_reaction("leo", leo.user_id, "👍")
+    before = await _table_rows(stack)
+
+    rows = await stack.chat.recent_mentions(
+        **_window(), senders={anna.user_id, bob.user_id}, limit=50
+    )
+
+    by_id = {g.message.id: g for g in rows}
+    assert [g.message.id for g in rows] == ["pic", "leo", "here"]
+    assert by_id["here"].here and by_id["here"].user_ids == ()
+    assert by_id["here"].acked_by == frozenset({DASHBOARD_AUTHOR})
+    assert not by_id["leo"].here and by_id["leo"].user_ids == (leo.user_id,)
+    assert by_id["leo"].acked_by == frozenset()  # 👍 is not an acknowledgement
+    assert by_id["pic"].user_ids == (leo.user_id,)  # a caption counts
+    # A plain read: nothing moved.
+    assert await _table_rows(stack) == before
+
+
+async def test_recent_mentions_only_from_senders_and_window(stack):
+    anna = await stack.provision("anna")
+    bob = await stack.provision("bob")
+    chat = await stack.chat.reconcile()
+    await stack.convos.save_message(
+        _glance_msg(chat.id, "old", anna.user_id, 90, content="@here")
+    )
+    await stack.convos.save_message(
+        _glance_msg(chat.id, "bob", bob.user_id, 5, content="@here")
+    )
+    rows = await stack.chat.recent_mentions(
+        **_window(), senders={anna.user_id}, limit=50
+    )
+    assert rows == []
+
+
+async def test_recent_mentions_never_creates_the_chat_and_respects_the_toggle(stack):
+    anna = await stack.provision("anna")
+    window = _window()
+    assert (
+        await stack.chat.recent_mentions(**window, senders={anna.user_id}, limit=5)
+        == []
+    )
+    assert await stack.convos.get_household_chat() is None
+    chat = await stack.chat.reconcile()
+    await stack.convos.save_message(
+        _glance_msg(chat.id, "a", anna.user_id, 3, content="@here")
+    )
+    await stack.feature(False)
+    assert (
+        await stack.chat.recent_mentions(**window, senders={anna.user_id}, limit=5)
+        == []
+    )
