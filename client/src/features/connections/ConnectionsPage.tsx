@@ -325,6 +325,23 @@ async function unpair(instanceId: string) {
   }
 }
 
+/** Cancel a pairing that was never confirmed. Its own endpoint, not the
+ *  unpair: the server answers 409 instead of unpairing should the pairing
+ *  have been confirmed a moment ago, and the reload then shows it live. */
+async function cancelPending(c: Connection) {
+  if (!await confirmDialog(
+    t('connections.cancel_pending_confirm', { name: c.display_name }),
+    { destructive: true },
+  )) return
+  try {
+    await api.delete(`/api/pairing/pending/${c.instance_id}`)
+    showToast(t('connections.pending_cancelled'), 'info')
+  } catch (e: unknown) {
+    showToast((e as Error).message || t('connections.cancel_pending_failed'), 'error')
+  }
+  await loadConnections()
+}
+
 
 interface IceOverview {
   servers: { urls: string[]; kinds: string[]; has_credentials: boolean }[]
@@ -936,6 +953,12 @@ export default function ConnectionsPage() {
                         {t('connections.unpair')}
                       </Button>
                     </>
+                  )}
+                  {isAdmin && (c.status === 'pending_sent' || c.status === 'pending_received') && (
+                    <Button variant="secondary"
+                            onClick={() => void cancelPending(c)}>
+                      {t('connections.cancel_pending')}
+                    </Button>
                   )}
                 </div>
               </div>

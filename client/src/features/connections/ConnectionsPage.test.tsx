@@ -136,6 +136,8 @@ vi.mock('./FederationMap', () => ({
 
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
+import { confirmDialog } from '@/components/confirm'
+import { showToast } from '@/components/Toast'
 import ConnectionsPage from './ConnectionsPage'
 import { setLocale } from '@/i18n/i18n'
 
@@ -1394,5 +1396,86 @@ describe('Map view "Manage"', () => {
     ;(currentUser as { value: { is_admin: boolean } }).value.is_admin = false
     const props = await openMap([makeConnection()])
     expect(props.onManage).toBeUndefined()
+  })
+})
+
+describe('ConnectionsPage — cancelling a pending pairing', () => {
+  const apiDelete = (api as unknown as { delete: ReturnType<typeof vi.fn> }).delete
+  const confirmMock = confirmDialog as unknown as ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    apiDelete.mockClear()
+    confirmMock.mockReset()
+  })
+
+  function renderWith(conns: Array<Record<string, unknown>>) {
+    apiMock.get.mockImplementation((url: string) => {
+      if (url === '/api/connections') return Promise.resolve(conns)
+      return Promise.resolve([])
+    })
+    return render(<ConnectionsPage />)
+  }
+
+  it.each(['pending_sent', 'pending_received'])(
+    'a %s card offers Cancel pairing (and no Unpair)', async (status) => {
+      const { container, queryByText } = renderWith([makeConnection({ status })])
+      await waitFor(() => {
+        expect(container.querySelector('.sh-connection-card--pending')).not.toBeNull()
+      })
+      expect(queryByText('connections.cancel_pending')).not.toBeNull()
+      expect(queryByText('connections.unpair')).toBeNull()
+    },
+  )
+
+  it('a confirmed card has no Cancel pairing', async () => {
+    const { container, queryByText } = renderWith([makeConnection()])
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card')).not.toBeNull()
+    })
+    expect(queryByText('connections.cancel_pending')).toBeNull()
+  })
+
+  it('a non-admin gets no Cancel pairing', async () => {
+    ;(currentUser as { value: { is_admin: boolean } }).value.is_admin = false
+    const { container, queryByText } = renderWith([makeConnection({ status: 'pending_sent' })])
+    await waitFor(() => {
+      expect(container.querySelector('.sh-connection-card--pending')).not.toBeNull()
+    })
+    expect(queryByText('connections.cancel_pending')).toBeNull()
+  })
+
+  it('asks first, naming the household, then calls the cancel endpoint', async () => {
+    confirmMock.mockResolvedValue(true)
+    const { findByText } = renderWith([
+      makeConnection({ status: 'pending_received', instance_id: 'inst-p', display_name: 'The Smiths' }),
+    ])
+    fireEvent.click(await findByText('connections.cancel_pending'))
+    await waitFor(() => {
+      expect(apiDelete).toHaveBeenCalledWith('/api/pairing/pending/inst-p')
+    })
+    expect(confirmMock).toHaveBeenCalledWith(
+      'connections.cancel_pending_confirm(name=The Smiths)',
+      { destructive: true },
+    )
+  })
+
+  it('backing out of the dialog cancels nothing', async () => {
+    confirmMock.mockResolvedValue(false)
+    const { findByText } = renderWith([makeConnection({ status: 'pending_sent' })])
+    fireEvent.click(await findByText('connections.cancel_pending'))
+    await waitFor(() => expect(confirmMock).toHaveBeenCalled())
+    expect(apiDelete).not.toHaveBeenCalled()
+  })
+
+  it('a refused cancel (e.g. confirmed meanwhile) toasts and reloads the list', async () => {
+    confirmMock.mockResolvedValue(true)
+    apiDelete.mockRejectedValueOnce(new Error('This pairing is already confirmed'))
+    const { findByText } = renderWith([makeConnection({ status: 'pending_received' })])
+    fireEvent.click(await findByText('connections.cancel_pending'))
+    await waitFor(() => {
+      expect(showToast).toHaveBeenCalledWith('This pairing is already confirmed', 'error')
+    })
+    const reloads = apiMock.get.mock.calls.filter(([u]) => u === '/api/connections')
+    expect(reloads.length).toBeGreaterThanOrEqual(2)
   })
 })
