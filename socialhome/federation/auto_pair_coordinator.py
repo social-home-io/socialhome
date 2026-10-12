@@ -85,6 +85,7 @@ from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
 from ..repositories.federation_repo import AbstractFederationRepo
 from ..services.auto_pair_inbox import AutoPairInbox, auto_pair_request_expired
+from .inbound_validator import TIMESTAMP_SKEW_SECONDS
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 
 if TYPE_CHECKING:
@@ -126,6 +127,17 @@ class _PendingAutoSession:
     ts: str
     nonce: str
     a_inbox_url: str
+
+
+def _id_bound_to_key(instance_id: str, identity_pk_hex: str) -> bool:
+    """Whether *instance_id* is a household id AND the one
+    *identity_pk_hex* derives to (§4.1.2). A malformed key is ``False``."""
+    if not is_instance_id(instance_id):
+        return False
+    try:
+        return derive_instance_id(bytes.fromhex(identity_pk_hex)) == instance_id
+    except ValueError:
+        return False
 
 
 def _vouch_blob(
@@ -396,8 +408,14 @@ class AutoPairCoordinator:
             return
         try:
             t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - t).total_seconds() > INTRO_TTL_SECONDS:
+            age = (datetime.now(timezone.utc) - t).total_seconds()
+            if age > INTRO_TTL_SECONDS:
                 log.warning("auto-pair (vouch): stale ts=%s", ts)
+                return
+            if -age > TIMESTAMP_SKEW_SECONDS:
+                # Dated past the clock-skew window: not a real clock, and a
+                # stamp the target's expiry would never catch up with.
+                log.warning("auto-pair (vouch): future ts=%s", ts)
                 return
         except ValueError:
             log.warning("auto-pair (vouch): invalid ts=%s", ts)
@@ -507,6 +525,18 @@ class AutoPairCoordinator:
             field="from_a_inbox_url",
             context="target",
         ):
+            return
+        if not _id_bound_to_key(a_id, a_pk_hex):
+            # The id must be the one A's key derives to — else a vouching
+            # peer could seat its own key under another household's id (and
+            # the id becomes a row id and a URL path segment here).
+            log.warning(
+                "auto-pair (target): introduced id %r is not bound to its key",
+                a_id[:40],
+            )
+            return
+        if auto_pair_request_expired(ts):
+            log.warning("auto-pair (target): stale or future-dated ts=%r", ts[:40])
             return
 
         b = await self._repo.get_instance(via_b_id)
@@ -764,6 +794,9 @@ class AutoPairCoordinator:
             log.warning("auto-pair ack: via mismatch")
             return
         if not _inbox_url_ok(c_inbox_url, field="c_inbox_url", context="ack"):
+            return
+        if not _id_bound_to_key(c_id, c_pk_hex):
+            log.warning("auto-pair ack: c_id is not bound to c_pk")
             return
         a_id = derive_instance_id(self._own_identity_pk)
         a_inbox_url = session.a_inbox_url

@@ -1396,3 +1396,42 @@ async def test_promote_never_touches_a_confirmed_row(env):
     )
     got = await env.fed_repo.get_instance("peer-live")
     assert got.display_name == "peer-live"
+
+
+async def test_cancel_pending_instance_never_takes_another_peers_session(env):
+    """Sessions are found by the cancelled row's own inbox id and by ITS
+    identity key only. Ids are bound to keys (§4.1.2) on every path that
+    seats a keyed half-pair, so a session naming a different key is a
+    different household's handshake and stays."""
+    await env.fed_repo.save_instance(_half("peer-one", "own-1"))
+    other = replace(_half("peer-two", "own-2"), remote_identity_pk="cd" * 32)
+    await env.fed_repo.save_instance(other)
+    await env.fed_repo.create_pairing(_session("tok-1", "own-1"))
+    await env.fed_repo.create_pairing(
+        _session("tok-2", "own-2", peer_pk=other.remote_identity_pk)
+    )
+    await env.fed_repo.create_pairing(
+        _session("tok-2b", "own-2b", peer_pk=other.remote_identity_pk)
+    )
+
+    assert await env.fed_repo.cancel_pending_instance("peer-one") == ["tok-1"]
+
+    assert await env.fed_repo.get_pairing("tok-2") is not None
+    assert await env.fed_repo.get_pairing("tok-2b") is not None
+    assert await env.fed_repo.get_instance("peer-two") is not None
+
+
+async def test_cancel_pending_instance_of_a_keyless_row_takes_no_keyed_session(env):
+    """A trust-relay request row has no key: the empty key matches nothing."""
+    await env.fed_repo.save_instance(
+        replace(
+            _half("peer-ap", "own-ap", PairingStatus.PENDING_SENT),
+            remote_identity_pk="",
+        )
+    )
+    await env.fed_repo.create_pairing(_session("tok-x", "own-x", peer_pk=""))
+    await env.fed_repo.create_pairing(_session("tok-y", "own-y", peer_pk="ab" * 32))
+
+    assert await env.fed_repo.cancel_pending_instance("peer-ap") == []
+    assert await env.fed_repo.get_pairing("tok-x") is not None
+    assert await env.fed_repo.get_pairing("tok-y") is not None

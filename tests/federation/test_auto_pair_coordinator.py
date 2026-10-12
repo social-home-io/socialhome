@@ -1095,3 +1095,153 @@ async def test_request_via_refuses_a_target_that_is_not_a_household_id(
         )
     assert target not in fed_repo.instances
     fed_service.send_event.assert_not_awaited()
+
+
+# ── A malicious introducer: ids bound to keys, timestamps bounded ───────
+
+
+async def _forged_intro(
+    coord,
+    fed_repo,
+    identity,
+    *,
+    a_id: str | None = None,
+    a_pk_hex: str | None = None,
+    ts: str | None = None,
+) -> str:
+    """B (a confirmed peer of ours) vouches for an introduction it built
+    itself — a valid vouch signature over whatever ids and keys B chose.
+    Returns the ``a_id`` it claimed."""
+    b_kp = generate_identity_keypair()
+    b = _make_peer_remote_instance(b_kp.public_key.hex())
+    fed_repo.instances[b.id] = b
+    attacker = generate_identity_keypair()  # B's own key, not the victim's
+    a_pk_hex = a_pk_hex if a_pk_hex is not None else attacker.public_key.hex()
+    a_id = a_id or derive_instance_id(attacker.public_key)
+    a_dh = generate_x25519_keypair()
+    c_id = derive_instance_id(identity.public_key)
+    ts = ts or datetime.now(timezone.utc).isoformat()
+    url = "https://evil.example/federation/inbox/x"
+    vouch = sign_ed25519(
+        b_kp.private_key,
+        _vouch_blob(
+            a_id=a_id,
+            a_pk_hex=a_pk_hex,
+            a_inbox_url=url,
+            a_dh_pk_hex=a_dh.public_key.hex(),
+            c_id=c_id,
+            ts=ts,
+            nonce="n1",
+        ),
+    )
+    await coord.on_intro_at_target(
+        _evt(
+            b.id,
+            {
+                "via_b_id": b.id,
+                "from_a_id": a_id,
+                "from_a_pk": a_pk_hex,
+                "from_a_inbox_url": url,
+                "from_a_dh_pk": a_dh.public_key.hex(),
+                "from_a_display": "Grandma",
+                "vouch_sig": vouch.hex(),
+                "ts": ts,
+                "nonce": "n1",
+                "token": "tk",
+            },
+        )
+    )
+    return a_id
+
+
+async def test_a_well_formed_vouched_intro_is_queued(coord, fed_repo, inbox, identity):
+    """Control for the forgeries below."""
+    a_id = await _forged_intro(coord, fed_repo, identity)
+    assert [r.from_a_id for r in inbox.list_pending()] == [a_id]
+
+
+async def test_an_introduction_naming_another_households_id_is_refused(
+    coord, fed_repo, inbox, identity
+):
+    """B vouches a victim's id with its own key: the id must derive from the
+    key, else the approval would seat the attacker's key under the victim's
+    name (and the row id would not be the key's)."""
+    victim_id = derive_instance_id(generate_identity_keypair().public_key)
+    await _forged_intro(coord, fed_repo, identity, a_id=victim_id)
+    assert inbox.list_pending() == []
+
+
+@pytest.mark.parametrize("a_id", ["../connections/" + "a" * 32, "A" * 32, "a" * 31, ""])
+async def test_an_introduction_with_a_malformed_id_is_refused(
+    coord, fed_repo, inbox, identity, a_id
+):
+    await _forged_intro(coord, fed_repo, identity, a_id=a_id or "x")
+    assert inbox.list_pending() == []
+
+
+@pytest.mark.parametrize("a_pk_hex", ["zz" * 32, "aa" * 31, "abc"])
+async def test_an_introduction_with_a_malformed_key_is_refused(
+    coord, fed_repo, inbox, identity, a_pk_hex
+):
+    await _forged_intro(coord, fed_repo, identity, a_id="a" * 32, a_pk_hex=a_pk_hex)
+    assert inbox.list_pending() == []
+
+
+async def test_a_future_dated_introduction_is_refused_at_the_target(
+    coord, fed_repo, inbox, identity
+):
+    """A stamp far in the future would never expire."""
+    far = (datetime.now(timezone.utc) + timedelta(days=3650)).isoformat()
+    await _forged_intro(coord, fed_repo, identity, ts=far)
+    assert inbox.list_pending() == []
+
+
+async def test_a_future_dated_intro_is_not_vouched_for(coord, fed_repo, fed_service):
+    """B side: A's request is forwarded only within the clock-skew window."""
+    a = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    c = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    fed_repo.instances[a.id] = a
+    fed_repo.instances[c.id] = c
+    far = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    await coord.on_intro_from_peer(
+        _evt(
+            a.id,
+            {
+                "target_id": c.id,
+                "a_dh_pk": generate_x25519_keypair().public_key.hex(),
+                "a_inbox_url": "https://a.example/federation/inbox/x",
+                "ts": far,
+                "nonce": "n" * 16,
+                "token": "tk",
+            },
+        )
+    )
+    fed_service.send_event.assert_not_awaited()
+
+
+async def test_an_ack_whose_target_id_is_not_its_key_is_ignored(
+    coord, fed_repo, identity
+):
+    """The ack's c_id must derive from its c_pk — the ack signature alone is
+    over a c_id the signer chose."""
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity)
+    # A malicious introducer answers with ITS key for the target's id, and
+    # signs the ack blob with that key — every signature checks out.
+    attacker = generate_identity_keypair()
+    session = coord._pending[ack["token"]]
+    forged_sig = sign_ed25519(
+        attacker.private_key,
+        _ack_blob(
+            a_id=ack["a_id"],
+            a_dh_pk_hex=session.dh_pk_hex,
+            c_id=c_id,
+            c_dh_pk_hex=ack["c_dh_pk"],
+            ts=ack["ts"],
+            nonce=ack["nonce"],
+        ),
+    )
+    ack = dict(ack, c_pk=attacker.public_key.hex(), ack_sig=forged_sig.hex())
+
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    assert fed_repo.instances[c_id].status is PairingStatus.PENDING_SENT

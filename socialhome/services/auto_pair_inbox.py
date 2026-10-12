@@ -19,6 +19,7 @@ import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from ..federation.inbound_validator import TIMESTAMP_SKEW_SECONDS
 from ..infrastructure.event_bus import EventBus
 
 log = logging.getLogger(__name__)
@@ -30,8 +31,11 @@ AUTO_PAIR_REQUEST_TTL_SECONDS: int = 24 * 3600
 
 
 def auto_pair_request_expired(iso_ts: str, *, now: datetime | None = None) -> bool:
-    """Whether a request stamped *iso_ts* is older than the TTL. An
-    unparseable stamp counts as expired (fail closed)."""
+    """Whether a request stamped *iso_ts* is older than the TTL — or dated
+    further in the future than the federation clock-skew window
+    (:data:`~socialhome.federation.inbound_validator.TIMESTAMP_SKEW_SECONDS`),
+    which no real clock produces and which would otherwise never expire.
+    An unparseable stamp counts as expired (fail closed)."""
     try:
         stamp = datetime.fromisoformat(iso_ts)
     except TypeError, ValueError:
@@ -39,6 +43,8 @@ def auto_pair_request_expired(iso_ts: str, *, now: datetime | None = None) -> bo
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
     now = now or datetime.now(timezone.utc)
+    if stamp - now > timedelta(seconds=TIMESTAMP_SKEW_SECONDS):
+        return True
     return now - stamp > timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS)
 
 

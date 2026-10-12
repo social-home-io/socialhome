@@ -37,8 +37,10 @@ which expires by itself after five minutes.)
    The trust-relay request is then forgotten in memory too.
 2. **Tell the peer, best effort** — only after the cancel committed, and
    only when the removed row held a key (the peer has state about us and
-   a signed, encrypted channel exists): one ``PAIRING_ABORT`` sealed with
-   the captured row (:meth:`FederationService.send_event_once` — one
+   a signed, encrypted channel exists): one ``PAIRING_ABORT`` for a
+   pairing-code half-pair, or one ``UNPAIR`` for a trust-relay approval
+   (its requester may already be confirmed; see :func:`_cancel_message`),
+   sealed with the captured row (:meth:`FederationService.send_event_once` — one
    attempt, never queued). Its receiver drops only the *signer's* pending
    session and half-pair, never a confirmed pairing. Bounded by
    :data:`PAIRING_CANCEL_NOTIFY_TIMEOUT_S`; a peer that is not reached
@@ -56,11 +58,13 @@ from typing import TYPE_CHECKING, Protocol
 
 from ..domain.events import PeerUnpaired
 from ..domain.federation import (
+    PENDING_KIND_APPROVAL,
     FederationEventType,
     PairingAlreadyConfirmedError,
     PairingStatus,
     PendingPairingNotFoundError,
     RemoteInstance,
+    pending_kind,
 )
 from ..infrastructure.event_bus import EventBus
 
@@ -164,30 +168,28 @@ class PairingCancelService:
         return notified
 
     async def _notify_peer(self, inst: RemoteInstance, tokens: list[str]) -> bool:
-        # The peer already holds the token (it is the one from the code);
-        # the receiver binds it to the signer before dropping anything.
-        payload: dict = {"reason": PAIRING_CANCEL_REASON}
-        if tokens:
-            payload = {"token": tokens[0], **payload}
+        event_type, payload = _cancel_message(inst, tokens)
         try:
             result = await asyncio.wait_for(
                 self._federation.send_event_once(
                     instance=inst,
-                    event_type=FederationEventType.PAIRING_ABORT,
+                    event_type=event_type,
                     payload=payload,
                 ),
                 timeout=self._notify_timeout_s,
             )
         except TimeoutError:
             log.warning(
-                "pairing cancel: PAIRING_ABORT to %s timed out after %gs",
+                "pairing cancel: %s to %s timed out after %gs",
+                event_type.value,
                 inst.id,
                 self._notify_timeout_s,
             )
             return False
         except Exception:
             log.warning(
-                "pairing cancel: PAIRING_ABORT to %s failed",
+                "pairing cancel: %s to %s failed",
+                event_type.value,
                 inst.id,
                 exc_info=True,
             )
@@ -196,12 +198,34 @@ class PairingCancelService:
             # One attempt, never queued: the row is gone, and the peer's
             # half expires with its own session.
             log.warning(
-                "pairing cancel: PAIRING_ABORT to %s not delivered (%s)",
+                "pairing cancel: %s to %s not delivered (%s)",
+                event_type.value,
                 inst.id,
                 result.error or result.status_code,
             )
             return False
         return True
+
+
+def _cancel_message(
+    inst: RemoteInstance, tokens: list[str]
+) -> tuple[FederationEventType, dict]:
+    """What tells the peer: a ``PAIRING_ABORT`` for a pairing-code
+    half-pair; an ``UNPAIR`` for a trust-relay approval.
+
+    The requester of an approved introduction may already have confirmed
+    on our ack — ``PAIRING_ABORT``'s receiver only drops a *non-confirmed*
+    half, so it would keep a one-sided pairing. ``UNPAIR``'s receiver
+    forgets the signer whatever the row's status (bound to the verified
+    signature; the payload is empty, like a local unpair's)."""
+    if pending_kind(inst) == PENDING_KIND_APPROVAL:
+        return FederationEventType.UNPAIR, {}
+    # The peer already holds the token (it is the one from the code); the
+    # receiver binds it to the signer before dropping anything.
+    payload: dict = {"reason": PAIRING_CANCEL_REASON}
+    if tokens:
+        payload = {"token": tokens[0], **payload}
+    return FederationEventType.PAIRING_ABORT, payload
 
 
 def _has_signed_channel(inst: RemoteInstance) -> bool:

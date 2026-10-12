@@ -368,7 +368,18 @@ until C's admin cancels it.
 
 A request is answerable for 24 h (`AUTO_PAIR_REQUEST_TTL_SECONDS`): C's
 approval inbox forgets it, C refuses to approve it past A's signed `ts`
-(`410 REQUEST_EXPIRED`), and A forgets its own outstanding request. C
+(`410 REQUEST_EXPIRED`), and A forgets its own outstanding request. A
+stamp dated past the federation clock-skew window (±300 s,
+`TIMESTAMP_SKEW_SECONDS`) is no real clock's: B does not vouch for it and C
+treats it as expired.
+
+Every id on this flow is bound to its key (§4.1.2): C queues an
+introduction only when `from_a_id` is a household id **and** derives from
+`from_a_pk` — otherwise a vouching peer could seat its own key under
+another household's id — and A accepts an ack only when `c_id` derives
+from `c_pk`. (Since then every keyed half-pair's id is its key's, which is
+what lets a cancel find the sessions naming that key without touching
+another household's.) C
 refuses to approve for a household it is already paired with (`409
 PAIRING_CONFIRMED`). A's `target_instance_id` must be a derived household
 id (32 lowercase base32 characters, `is_instance_id`).
@@ -653,7 +664,7 @@ row takes the same path). Implemented by
 | `pending_received` (`code`) — issuer | the scanner's signed peer-accept landed | session (token, SAS) + keyed row | session + keyed row (`pending_received`) | sessions + row in one transaction, then `PAIRING_ABORT` |
 | `pending_received` (`code`) — scanner | we scanned the code | session (token, SAS) + keyed row | session; plus our keyed row once our peer-accept reached it | sessions + row in one transaction, then `PAIRING_ABORT` |
 | `pending_sent` (`request`) — trust relay, we asked | we asked a confirmed peer to introduce us | provisional row **without a key** + in-memory request | the target holds the vouched request in its approval inbox (24 h); no row, no channel to us | row in one transaction, in-memory request forgotten — nothing is sent |
-| `pending_sent` (`approval`) — trust relay, we approved | our admin approved an introduction | keyed row, waiting for the requester's first envelope | it confirms when our ack reaches it | row in one transaction, then `PAIRING_ABORT` (its receiver drops only a non-confirmed half) |
+| `pending_sent` (`approval`) — trust relay, we approved | our admin approved an introduction | keyed row, waiting for the requester's first envelope | it confirms when our ack reaches it | row in one transaction, then `UNPAIR` — the requester may already have confirmed on our ack, and `UNPAIR`'s receiver forgets the signer whatever its row's status (a `PAIRING_ABORT` would leave its confirmed row) |
 
 ### Order
 
@@ -674,7 +685,9 @@ row takes the same path). Implemented by
 2. **Tell the peer — only now, best effort, never a leak.** Only when the
    removed row held the peer's identity key and our session key (the peer
    has state about us, and a signed, encrypted channel exists): one
-   `PAIRING_ABORT` `{token, reason: "cancelled"}` sealed with the captured
+   `PAIRING_ABORT` `{token, reason: "cancelled"}` for a pairing-code
+   half-pair — or one `UNPAIR` `{}` for a trust-relay approval, whose
+   requester may already be confirmed — sealed with the captured
    row (`send_event_once` — one attempt to its inbox, never queued, no
    retry). The token is the one the peer already holds. Its receiver drops
    only the **signer's** pending session and half-pair (never a confirmed
@@ -690,7 +703,11 @@ our session had simply expired); its peer-confirm is refused, our inbox
 refuses everything it sends, and its admin can remove the connection. A
 trust-relay target that approves after we cancelled is **not** left
 confirmed — its approval waits for an envelope we never send, and its admin
-can cancel it.
+can cancel it. A target that withdraws its approval sends the requester an
+`UNPAIR`; if the requester had not processed the ack yet it cannot verify
+that envelope (its provisional row has no key), and when the ack then
+arrives it confirms a pairing the target already dropped — its first
+envelope is refused there, and its admin can remove the connection.
 
 ```mermaid
 sequenceDiagram
@@ -701,8 +718,8 @@ sequenceDiagram
     alt row still pending (one transaction)
         A->>A: delete sessions + row + queued rows<br/>forget auto-pair request
         opt removed row held B's key
-            A->>B: PAIRING_ABORT {token, reason} (encrypted, signed; one try, ≤ 5 s)
-            B->>B: drop session + half-pair of A (signer only), pairing.aborted
+            A->>B: PAIRING_ABORT {token, reason} — or UNPAIR {} for an approval<br/>(encrypted, signed; one try, ≤ 5 s)
+            B->>B: drop session + half-pair of A (signer only) / forget A
         end
         A->>A: PeerUnpaired (connection.removed)
         A-->>AdminA: 200 {ok, peer_notified}

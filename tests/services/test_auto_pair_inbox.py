@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from socialhome.federation.inbound_validator import TIMESTAMP_SKEW_SECONDS
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.auto_pair_inbox import (
     AUTO_PAIR_REQUEST_TTL_SECONDS,
@@ -59,3 +60,13 @@ def test_request_expiry():
     assert auto_pair_request_expired(naive.isoformat()) is False
     # Fail closed on garbage.
     assert auto_pair_request_expired("not-a-date") is True
+
+
+def test_a_future_dated_request_counts_as_expired():
+    """Past the federation clock-skew window a stamp is not from a real
+    clock — and would otherwise never expire."""
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(seconds=TIMESTAMP_SKEW_SECONDS + 60)
+    assert auto_pair_request_expired(future.isoformat()) is True
+    near = now + timedelta(seconds=60)
+    assert auto_pair_request_expired(near.isoformat()) is False

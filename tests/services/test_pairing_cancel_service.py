@@ -307,18 +307,27 @@ async def test_works_without_the_auto_pair_coordinator(env):
 
 
 class _SlowFed:
-    """``send_event_once`` that yields *ticks* times before answering —
-    widens the window in which a confirm can interleave."""
+    """``send_event_once`` that yields *ticks* times — or, for a ``float``,
+    sleeps that many seconds — before answering: widens the window in which
+    a confirm can interleave."""
 
-    def __init__(self, ticks: int) -> None:
+    def __init__(self, ticks: int | float) -> None:
         self.ticks = ticks
         self.sent: list = []
 
     async def send_event_once(self, *, instance, event_type, payload):
         self.sent.append(event_type)
-        for _ in range(self.ticks):
-            await asyncio.sleep(0)
+        if isinstance(self.ticks, float):
+            await asyncio.sleep(self.ticks)
+        else:
+            for _ in range(self.ticks):
+                await asyncio.sleep(0)
         return DeliveryResult(instance_id=instance.id, ok=False, error="unreachable")
+
+
+#: Every interleaving the reviewers' repros walked: 0–11 event-loop ticks,
+#: and real delays.
+_RACE_DELAYS: list[int | float] = [*range(12), 0.001, 0.02]
 
 
 @pytest.fixture
@@ -373,7 +382,7 @@ async def _cancel(svc, iid) -> str:
         return "conflict"
 
 
-@pytest.mark.parametrize("ticks", [0, 1, 3, 8])
+@pytest.mark.parametrize("ticks", _RACE_DELAYS)
 @pytest.mark.parametrize("first", ["confirm", "cancel"])
 async def test_own_sas_entry_racing_a_cancel_never_resurrects(race, ticks, first):
     fed = _SlowFed(ticks)
@@ -399,7 +408,7 @@ async def test_own_sas_entry_racing_a_cancel_never_resurrects(race, ticks, first
     await _check_outcome(race, fed, outcome, confirm_ok)
 
 
-@pytest.mark.parametrize("ticks", [0, 1, 3, 8])
+@pytest.mark.parametrize("ticks", _RACE_DELAYS)
 @pytest.mark.parametrize("first", ["peer", "cancel"])
 async def test_peer_confirm_racing_a_cancel_never_resurrects(race, ticks, first):
     fed = _SlowFed(ticks)
@@ -429,3 +438,24 @@ async def test_peer_confirm_racing_a_cancel_never_resurrects(race, ticks, first)
             _cancel(svc, race.peer_id), peer_confirm()
         )
     await _check_outcome(race, fed, outcome, confirm_ok)
+
+
+def _approval_pending(iid: str = "peer-ap") -> RemoteInstance:
+    """A trust-relay introduction our admin approved: keyed, waiting for
+    the requester's first envelope."""
+    return replace(_qr_pending(iid), status=PairingStatus.PENDING_SENT, relay_via="b")
+
+
+async def test_withdrawing_an_approval_sends_unpair_not_abort(env):
+    """The requester may already have confirmed on our ack — a
+    ``PAIRING_ABORT`` cannot undo a confirmed row there (and before the ack
+    it has no key to check one with). ``UNPAIR`` makes its receiver forget
+    the signer whatever the row's status."""
+    env.repo.instances["peer-ap"] = _approval_pending()
+
+    assert await env.svc.cancel_pending("peer-ap") is True
+
+    assert env.fed.sent == [
+        {"to": "peer-ap", "event_type": FederationEventType.UNPAIR, "payload": {}}
+    ]
+    assert "peer-ap" not in env.repo.instances
