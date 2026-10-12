@@ -59,17 +59,17 @@ host name is added to the dashboard's `Host` allow-list. *Headless:*
 
 Inside the Home Assistant App the dashboard always listens on container
 port `8100` (the **Port** field in **Admin › Dashboard** is read-only there;
-HA Supervisor owns the host port mapping). The port is off until you turn it on:
-
-1. In Home Assistant go to **Settings › Apps › Social Home › Network**.
-2. Enter a host port for the dashboard (for example `8100`) and save.
-3. Restart the App when Home Assistant asks — Supervisor only publishes a
-   changed port when it starts the App.
+HA Supervisor owns the host port mapping). The App publishes it on host
+port `8100` by default — nothing listens there until you switch the
+dashboard on, so there is nothing to set up in Home Assistant.
 
 Social Home reads the mapped port from Supervisor and shows the right
-address automatically (for example `http://homeassistant.local:8100`, or
-your own host port if you picked another). Until a port is mapped **Admin › Dashboard** asks you to turn it on
-(the API reports `host_port_mapped: false`).
+address automatically (for example `http://homeassistant.local:8100`).
+If port `8100` is already used on your Home Assistant host, pick another
+host port under **Settings › Apps › Social Home › Network**, save, and
+restart the App when Home Assistant asks — the address follows. If you
+clear the host port there, **Admin › Dashboard** asks you to turn it back
+on (the API reports `host_port_mapped: false`).
 App releases that don't offer the dashboard port yet have no such entry
 under **Network**: the admin view then reports `host_port_mapped: null`
 and the address uses `8100` — update the App, or set the dashboard
