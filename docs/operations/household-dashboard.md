@@ -187,8 +187,21 @@ dashboard **address** — it always wins over the guess.
   the cleaner, a babysitter — can read these messages, so keep private
   things in a DM. To take a message off the wall, delete it in the app;
   it disappears with the tablet's next refresh (within 30 seconds).
-  The tablet can't confirm that anyone read a message, and reading it
-  there doesn't mark it read for anyone — if it's urgent, call.
+  Reading a message on the tablet doesn't mark it read for anyone — if
+  it's urgent, call.
+- **Mentions** (part of *Show household messages*). Write `@here` in the
+  household chat and Home shows a banner on top — the sender's face and
+  name, the message and a big **✓ Got it** — for up to an hour. Tapping
+  Got it on any tablet clears it on all of them and adds a ✅ reaction to
+  the message in the chat, so you see it was seen. Write `@leo` and
+  Leo's face in the left rail (or the face strip on a phone) gets a dot,
+  and his page shows the message on top with **Got it** — in picture
+  view as your face with a 💬 (tap to hear it) and a big ✓. That ✅ is
+  credited to Leo: it's his page. It clears when Leo taps it or after an
+  hour. Mentions of someone hidden on the dashboard don't show. A new
+  mention plays a short, soft tone on the tablet (*Play a sound for
+  mentions*, `mention_sound`, on by default) — never at night, and only
+  once the tablet's browser allows sound (a first tap on the screen).
 - **Night** (between `night_start` and `night_end`, default 22:00–06:00):
   only a dim clock, the date and the first thing of the morning. Tap the
   screen to see everything (and the 🔒 button) for a minute.
