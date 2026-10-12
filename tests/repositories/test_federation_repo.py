@@ -1241,10 +1241,12 @@ async def test_save_instance_with_a_new_keywrap_key_replaces_it(env):
     assert got is not None and got.remote_keywrap_pk == "dd" * 32
 
 
-# ── Cancelling a pending pairing ─────────────────────────────────────────
+# ── Cancelling vs confirming a pending pairing — one wins, atomically ────
 
 
-def _session(token: str, inbox: str, *, minutes: int = 5) -> PairingSession:
+def _session(
+    token: str, inbox: str, *, peer_pk: str | None = None, minutes: int = 5
+) -> PairingSession:
     now = datetime.now(timezone.utc)
     return PairingSession(
         token=token,
@@ -1253,66 +1255,144 @@ def _session(token: str, inbox: str, *, minutes: int = 5) -> PairingSession:
         own_dh_sk="cc" * 32,
         inbox_url=f"https://local/inbox/{inbox}",
         own_local_inbox_id=inbox,
+        peer_identity_pk=peer_pk,
         issued_at=now.isoformat(),
         expires_at=(now + timedelta(minutes=minutes)).isoformat(),
         status=PairingStatus.PENDING_RECEIVED,
     )
 
 
-async def test_pop_pairings_for_inbox_deletes_and_returns_the_tokens(env):
-    await env.fed_repo.create_pairing(_session("tok-a", "inbox-a"))
+def _half(iid: str, inbox: str, status=PairingStatus.PENDING_RECEIVED):
+    return replace_status(_tomb_inst(iid, inbox), status)
+
+
+async def test_cancel_pending_instance_takes_row_sessions_and_side_rows(env):
+    await env.fed_repo.save_instance(_half("peer-half", "own-h"))
+    await env.fed_repo.create_pairing(_session("tok-a", "own-h"))
     await env.fed_repo.create_pairing(_session("tok-other", "inbox-other"))
-
-    assert await env.fed_repo.pop_pairings_for_inbox("inbox-a") == ["tok-a"]
-
-    assert await env.fed_repo.get_pairing("tok-a") is None
-    assert await env.fed_repo.get_pairing("tok-other") is not None
-
-
-async def test_pop_pairings_for_inbox_without_a_session_is_empty(env):
-    assert await env.fed_repo.pop_pairings_for_inbox("nope") == []
-
-
-async def test_delete_pending_instance_purges_the_half_pair_and_its_side_rows(env):
-    await env.fed_repo.save_instance(
-        replace_status(_tomb_inst("peer-half", "own-h"), PairingStatus.PENDING_RECEIVED)
-    )
     await _seed_side_rows(env.db, "peer-half")
 
-    assert await env.fed_repo.delete_pending_instance("peer-half") is True
+    assert await env.fed_repo.cancel_pending_instance("peer-half") == ["tok-a"]
 
     assert await env.fed_repo.get_instance("peer-half") is None
+    assert await env.fed_repo.get_pairing("tok-a") is None
+    assert await env.fed_repo.get_pairing("tok-other") is not None
     assert await _side_row_counts(env.db, "peer-half") == (0, 0, 0, 0)
 
 
-async def test_delete_pending_instance_also_takes_an_auto_pair_row(env):
-    await env.fed_repo.save_instance(
-        replace_status(_tomb_inst("peer-ap", "own-ap"), PairingStatus.PENDING_SENT)
+async def test_cancel_pending_instance_also_takes_a_session_naming_the_peer(env):
+    """A session whose inbox id no longer matches the row (a re-scan minted
+    a new one) is still found through the peer identity it names."""
+    await env.fed_repo.save_instance(_half("peer-half", "own-h"))
+    peer_pk = _tomb_inst("x", "y").remote_identity_pk
+    await env.fed_repo.create_pairing(
+        _session("tok-stale", "own-stale", peer_pk=peer_pk.upper())
     )
-    assert await env.fed_repo.delete_pending_instance("peer-ap") is True
+
+    tokens = await env.fed_repo.cancel_pending_instance("peer-half")
+
+    assert tokens == ["tok-stale"]
+    assert await env.fed_repo.get_pairing("tok-stale") is None
+
+
+async def test_cancel_pending_instance_takes_an_auto_pair_row(env):
+    await env.fed_repo.save_instance(
+        _half("peer-ap", "own-ap", PairingStatus.PENDING_SENT)
+    )
+    assert await env.fed_repo.cancel_pending_instance("peer-ap") == []
     assert await env.fed_repo.get_instance("peer-ap") is None
 
 
-async def test_delete_pending_instance_never_touches_a_confirmed_row(env):
-    """The race guard: a pairing that was confirmed between the caller's
-    read and this delete stays, with everything queued for it."""
+async def test_cancel_pending_instance_never_touches_a_confirmed_row(env):
     await env.fed_repo.save_instance(_tomb_inst("peer-live", "own-live"))
+    await env.fed_repo.create_pairing(_session("tok-live", "own-live"))
     await _seed_side_rows(env.db, "peer-live")
 
-    assert await env.fed_repo.delete_pending_instance("peer-live") is False
+    assert await env.fed_repo.cancel_pending_instance("peer-live") is None
 
     assert await env.fed_repo.get_instance("peer-live") is not None
+    assert await env.fed_repo.get_pairing("tok-live") is not None
     assert await _side_row_counts(env.db, "peer-live") == (1, 1, 1, 1)
 
 
-async def test_delete_pending_instance_never_touches_a_tombstone(env):
+async def test_cancel_pending_instance_never_touches_a_tombstone(env):
     await env.fed_repo.save_instance(_tomb_inst("peer-t", "wh-t"))
     await env.fed_repo.mark_unpairing("peer-t")
-    assert await env.fed_repo.delete_pending_instance("peer-t") is False
+    assert await env.fed_repo.cancel_pending_instance("peer-t") is None
     assert (
         await env.fed_repo.get_instance("peer-t", include_unpairing=True)
     ) is not None
 
 
-async def test_delete_pending_instance_unknown_is_false(env):
-    assert await env.fed_repo.delete_pending_instance("nope") is False
+async def test_cancel_pending_instance_unknown_is_none(env):
+    assert await env.fed_repo.cancel_pending_instance("nope") is None
+
+
+async def test_promote_pending_instance_consumes_the_session_and_confirms(env):
+    half = _half("peer-half", "own-h")
+    await env.fed_repo.save_instance(half)
+    await env.fed_repo.create_pairing(_session("tok-a", "own-h"))
+
+    promoted = replace(half, status=PairingStatus.CONFIRMED, display_name="New")
+    assert await env.fed_repo.promote_pending_instance(promoted, token="tok-a")
+
+    got = await env.fed_repo.get_instance("peer-half")
+    assert got is not None
+    assert got.status is PairingStatus.CONFIRMED
+    assert got.display_name == "New"
+    assert got.local_inbox_id == "own-h"
+    assert await env.fed_repo.get_pairing("tok-a") is None
+
+
+async def test_promote_after_cancel_never_resurrects_the_row(env):
+    """Cancel committed first: the confirm finds nothing and writes nothing."""
+    half = _half("peer-half", "own-h")
+    await env.fed_repo.save_instance(half)
+    await env.fed_repo.create_pairing(_session("tok-a", "own-h"))
+    await env.fed_repo.cancel_pending_instance("peer-half")
+
+    promoted = replace(half, status=PairingStatus.CONFIRMED)
+    assert not await env.fed_repo.promote_pending_instance(promoted, token="tok-a")
+
+    assert await env.fed_repo.get_instance("peer-half") is None
+
+
+async def test_promote_without_the_session_changes_nothing(env):
+    """The session is the right to confirm: no session → the row stays
+    pending (and nothing half-applied)."""
+    half = _half("peer-half", "own-h")
+    await env.fed_repo.save_instance(half)
+
+    promoted = replace(half, status=PairingStatus.CONFIRMED)
+    assert not await env.fed_repo.promote_pending_instance(promoted, token="gone")
+
+    got = await env.fed_repo.get_instance("peer-half")
+    assert got is not None and got.status is PairingStatus.PENDING_RECEIVED
+
+
+async def test_promote_with_a_session_but_no_pending_row_keeps_the_session(env):
+    """Rolled back as one: a missing row must not cost the session."""
+    await env.fed_repo.create_pairing(_session("tok-a", "own-h"))
+    promoted = replace(_half("peer-gone", "own-h"), status=PairingStatus.CONFIRMED)
+    assert not await env.fed_repo.promote_pending_instance(promoted, token="tok-a")
+    assert await env.fed_repo.get_pairing("tok-a") is not None
+
+
+async def test_promote_without_a_token_needs_only_the_pending_row(env):
+    """The trust-relay ack has no pairing session — only the pending row."""
+    half = _half("peer-ap", "own-ap", PairingStatus.PENDING_SENT)
+    await env.fed_repo.save_instance(half)
+    promoted = replace(half, status=PairingStatus.CONFIRMED, key_self_to_remote="n")
+    assert await env.fed_repo.promote_pending_instance(promoted)
+    got = await env.fed_repo.get_instance("peer-ap")
+    assert got.status is PairingStatus.CONFIRMED and got.key_self_to_remote == "n"
+
+
+async def test_promote_never_touches_a_confirmed_row(env):
+    live = _tomb_inst("peer-live", "own-live")
+    await env.fed_repo.save_instance(live)
+    assert not await env.fed_repo.promote_pending_instance(
+        replace(live, display_name="Hijack")
+    )
+    got = await env.fed_repo.get_instance("peer-live")
+    assert got.display_name == "peer-live"

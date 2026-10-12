@@ -53,6 +53,7 @@ from ..domain.federation import (
     RemoteInstance,
     gfs_relay_available,
     is_relay_only,
+    pending_kind,
 )
 from ..federation.pairing_gfs_reach import parse_reach
 from ..security import error_response
@@ -152,6 +153,10 @@ def _instance_dict(
         "peer_keywrap_known": bool(getattr(inst, "remote_keywrap_pk", None)),
         "gfs_relay_available": gfs_relay_available(inst),
         "status": status,
+        # Which handshake a pending row is (``code`` / ``request`` /
+        # ``approval``), ``None`` once confirmed — the SPA words the
+        # cancel for it.
+        "pending_kind": pending_kind(inst),
         "reachable": reachable,
         "transport": transport_state,
         # Undelivered envelopes still queued for this peer. A peer that
@@ -663,9 +668,12 @@ class PairingPendingDetailView(BaseView):
     """``DELETE /api/pairing/pending/{instance_id}`` — cancel a pairing that
     was never confirmed (the "Cancel" on a pending connection card).
 
-    204 when cancelled, 404 when there is no pairing with that household,
-    409 ``PAIRING_CONFIRMED`` when it is confirmed — including one that was
-    confirmed a moment before the click landed. A separate resource rather
+    200 ``{ok, peer_notified}`` when cancelled (``peer_notified: false`` —
+    the other household could not be told, or there was no channel to tell
+    it on), 404 when there is no pending pairing with that household
+    (including a second cancel), 409 ``PAIRING_CONFIRMED`` when it is
+    confirmed — including one that was confirmed a moment before the click
+    landed; then nothing was removed or sent. A separate resource rather
     than a status switch on ``DELETE /api/pairing/connections/{id}``: the
     admin's intent was "stop this handshake", and a stale card must never
     turn that into tearing down a pairing that just went live. Admin-only.
@@ -675,10 +683,10 @@ class PairingPendingDetailView(BaseView):
     async def delete(self) -> web.Response:
         if not self.user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
-        await self.svc(pairing_cancel_service_key).cancel_pending(
+        notified = await self.svc(pairing_cancel_service_key).cancel_pending(
             self.match("instance_id")
         )
-        return web.Response(status=204)
+        return web.json_response({"ok": True, "peer_notified": notified})
 
 
 def _relay_request_dict(req) -> dict:

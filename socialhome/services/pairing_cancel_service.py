@@ -22,24 +22,30 @@ which expires by itself after five minutes.)
 
 :meth:`PairingCancelService.cancel_pending` goes in this order:
 
-1. **Close every way to finish the handshake.** The ``pending_pairings``
-   sessions behind the row are deleted — our own SAS entry, the peer's
-   signed peer-accept / peer-confirm (direct or through a GFS) all start
-   from the session and are refused without it — and the trust-relay
-   request is forgotten, so a target that approves later is ignored.
-2. **Tell the peer, best effort** — only when the row holds a key, i.e. the
-   peer has state about us and a signed, encrypted channel exists: one
-   ``PAIRING_ABORT`` (the existing handshake-cancel event; its receiver
-   drops only the *signer's* pending session and half-pair, never a
-   confirmed pairing). Bounded by :data:`PAIRING_CANCEL_NOTIFY_TIMEOUT_S`;
-   a peer that does not answer is not retried (its half expires with its
-   own session) and nothing it could not already see is sent.
-3. **Forget the row** — atomically and only while it is still pending,
-   with everything queued or learned for it
-   (:meth:`~socialhome.repositories.federation_repo.AbstractFederationRepo.delete_pending_instance`).
-   A pairing confirmed in the meantime is never torn down by a cancel:
-   :class:`PairingAlreadyConfirmedError` (409). The SPA learns through
-   :class:`PeerUnpaired` (``connection.removed``).
+1. **Cancel, atomically** (:meth:`~socialhome.repositories.federation_repo.AbstractFederationRepo.cancel_pending_instance`):
+   in ONE transaction the ``pending_pairings`` sessions behind the row
+   (by its inbox id and by the peer identity they name) and the row
+   itself go — only while the row is still pending — with everything
+   queued or learned for it. Our own SAS entry, the peer's signed
+   peer-accept / peer-confirm (direct or through a GFS) and the
+   trust-relay ack all confirm through
+   :meth:`~socialhome.repositories.federation_repo.AbstractFederationRepo.promote_pending_instance`,
+   which needs the same session and pending row in its own transaction:
+   whichever commits first wins, and the loser changes nothing. A
+   pairing confirmed first is never torn down by a cancel:
+   :class:`PairingAlreadyConfirmedError` (409), and nothing was sent.
+   The trust-relay request is then forgotten in memory too.
+2. **Tell the peer, best effort** — only after the cancel committed, and
+   only when the removed row held a key (the peer has state about us and
+   a signed, encrypted channel exists): one ``PAIRING_ABORT`` sealed with
+   the captured row (:meth:`FederationService.send_event_once` — one
+   attempt, never queued). Its receiver drops only the *signer's* pending
+   session and half-pair, never a confirmed pairing. Bounded by
+   :data:`PAIRING_CANCEL_NOTIFY_TIMEOUT_S`; a peer that is not reached
+   keeps its half until its own session expires, and nothing it could not
+   already see is sent.
+3. **Announce** :class:`PeerUnpaired` (``connection.removed``) — once: a
+   second cancel finds nothing and is a 404.
 """
 
 from __future__ import annotations
@@ -114,10 +120,12 @@ class PairingCancelService:
 
         Returns whether the peer's transport accepted our ``PAIRING_ABORT``
         (``False`` too when there was no channel to tell it on). Raises
-        :class:`PendingPairingNotFoundError` when there is no pairing with
-        that household (an unpair tombstone is not one), and
-        :class:`PairingAlreadyConfirmedError` when it is — or became —
-        confirmed. Callers check the caller is an admin.
+        :class:`PendingPairingNotFoundError` when there is no pending
+        pairing with that household — unknown, an unpair tombstone, or
+        already cancelled (a second cancel publishes nothing) — and
+        :class:`PairingAlreadyConfirmedError` when it is, or became,
+        confirmed: then nothing was removed and nothing was sent. Callers
+        check the caller is an admin.
         """
         inst = await self._federation_repo.get_instance(instance_id)
         if inst is None:
@@ -125,28 +133,28 @@ class PairingCancelService:
         if inst.status not in _PENDING:
             raise PairingAlreadyConfirmedError()
 
-        tokens = await self._federation_repo.pop_pairings_for_inbox(
-            inst.local_inbox_id,
-        )
-        if self._auto_pair is not None:
-            self._auto_pair.forget_requests_to(instance_id)
-
-        notified = False
-        if _has_signed_channel(inst):
-            notified = await self._notify_peer(instance_id, tokens)
-
-        if not await self._federation_repo.delete_pending_instance(instance_id):
+        # One transaction: the sessions (the only right to finish the
+        # handshake) and the row go together, and only while the row is
+        # still pending. A confirm that commits first wins; ours then finds
+        # nothing to cancel.
+        tokens = await self._federation_repo.cancel_pending_instance(instance_id)
+        if tokens is None:
             current = await self._federation_repo.get_instance(instance_id)
             if current is not None and current.status not in _PENDING:
-                # Confirmed between our read and the delete (the peer's
-                # signed confirm, or our own SAS entry, got there first).
                 log.info(
                     "pairing cancel: %s was confirmed meanwhile — kept",
                     instance_id,
                 )
                 raise PairingAlreadyConfirmedError()
-            # Already gone (the peer's own abort, the expiry sweep): the
-            # pairing is cancelled either way.
+            raise PendingPairingNotFoundError()
+        if self._auto_pair is not None:
+            self._auto_pair.forget_requests_to(instance_id)
+
+        # Only now, with the cancel committed, does anything leave this
+        # household — sealed with the keys of the row we just removed.
+        notified = False
+        if _has_signed_channel(inst):
+            notified = await self._notify_peer(inst, tokens)
         log.info(
             "pairing cancel: pending pairing with %s cancelled (peer told: %s)",
             instance_id,
@@ -155,7 +163,7 @@ class PairingCancelService:
         await self._bus.publish(PeerUnpaired(instance_id=instance_id))
         return notified
 
-    async def _notify_peer(self, instance_id: str, tokens: list[str]) -> bool:
+    async def _notify_peer(self, inst: RemoteInstance, tokens: list[str]) -> bool:
         # The peer already holds the token (it is the one from the code);
         # the receiver binds it to the signer before dropping anything.
         payload: dict = {"reason": PAIRING_CANCEL_REASON}
@@ -163,8 +171,8 @@ class PairingCancelService:
             payload = {"token": tokens[0], **payload}
         try:
             result = await asyncio.wait_for(
-                self._federation.send_event(
-                    to_instance_id=instance_id,
+                self._federation.send_event_once(
+                    instance=inst,
                     event_type=FederationEventType.PAIRING_ABORT,
                     payload=payload,
                 ),
@@ -173,22 +181,23 @@ class PairingCancelService:
         except TimeoutError:
             log.warning(
                 "pairing cancel: PAIRING_ABORT to %s timed out after %gs",
-                instance_id,
+                inst.id,
                 self._notify_timeout_s,
             )
             return False
         except Exception:
             log.warning(
                 "pairing cancel: PAIRING_ABORT to %s failed",
-                instance_id,
+                inst.id,
                 exc_info=True,
             )
             return False
         if not result.ok:
-            # A copy may sit in the outbox; it goes with the row.
+            # One attempt, never queued: the row is gone, and the peer's
+            # half expires with its own session.
             log.warning(
                 "pairing cancel: PAIRING_ABORT to %s not delivered (%s)",
-                instance_id,
+                inst.id,
                 result.error or result.status_code,
             )
             return False

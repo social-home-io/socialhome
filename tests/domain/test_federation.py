@@ -28,6 +28,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
     gfs_relay_available,
     is_relay_only,
+    pending_kind,
 )
 
 
@@ -368,3 +369,16 @@ def test_pending_pairing_cancel_errors_are_coded():
     assert isinstance(missing, LookupError)
     raced = PairingAlreadyConfirmedError()
     assert (raced.status, raced.code) == (409, "PAIRING_CONFIRMED")
+
+
+def test_pending_kind_names_each_handshake():
+    assert pending_kind(_peer()) is None
+    assert pending_kind(_peer(status=PairingStatus.UNPAIRING)) is None
+    assert pending_kind(_peer(status=PairingStatus.PENDING_RECEIVED)) == "code"
+    assert pending_kind(_peer(status=PairingStatus.PENDING_SENT)) == "approval"
+    provisional = _peer(
+        status=PairingStatus.PENDING_SENT,
+        remote_identity_pk="",
+        key_self_to_remote="",
+    )
+    assert pending_kind(provisional) == "request"

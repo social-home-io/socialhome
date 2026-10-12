@@ -1549,6 +1549,62 @@ class FederationService:
             error=DELIVERY_ERROR_QUEUED,
         )
 
+    async def send_event_once(
+        self,
+        *,
+        instance: RemoteInstance,
+        event_type: FederationEventType,
+        payload: dict,
+    ) -> DeliveryResult:
+        """One attempt to deliver an event to *instance* — a row the caller
+        holds, which need no longer be in the repository.
+
+        For the pairing cancel's ``PAIRING_ABORT``: the half-pair is removed
+        first (so a cancel that loses a race to a confirm has sent nothing),
+        and the abort is then sealed with the keys of the captured row and
+        POSTed to its inbox. Unlike :meth:`send_event` there is no outbox
+        fallback, no RTC handshake and no reachability bookkeeping — there is
+        no row left to retry for or to mark. A peer with no inbox URL is not
+        reached at all.
+        """
+        if not instance.remote_inbox_url:
+            return DeliveryResult(
+                instance_id=instance.id, ok=False, error="no_inbox_url"
+            )
+        envelope_dict = self._seal_envelope(
+            instance,
+            event_type=event_type,
+            payload=payload,
+            space_id=None,
+        )
+        if envelope_dict is None:
+            return DeliveryResult(
+                instance_id=instance.id, ok=False, error="key_decrypt_error"
+            )
+        try:
+            client = await self._get_http_client()
+            async with post_to_peer(
+                client,
+                instance.remote_inbox_url,
+                json=envelope_dict,
+                timeout=_aiohttp_timeout(10),
+            ) as resp:
+                status_code = resp.status
+        except Exception as exc:
+            log.warning(
+                "send_event_once: transport error to %s: %s",
+                instance.id,
+                exc,
+            )
+            return DeliveryResult(
+                instance_id=instance.id, ok=False, error="transport_error"
+            )
+        return DeliveryResult(
+            instance_id=instance.id,
+            ok=200 <= status_code < 300,
+            status_code=status_code,
+        )
+
     async def send_event_via_gfs(
         self,
         *,

@@ -46,6 +46,19 @@ class _FakeRepo:
     async def delete_pairing(self, token):
         self.pairings.pop(token, None)
 
+    async def promote_pending_instance(self, inst, *, token=None):
+        """Mirrors the SQLite repo: needs the session (when named) AND a
+        still-pending row, else changes nothing."""
+        row = self.instances.get(inst.id)
+        if token is not None and token not in self.pairings:
+            return False
+        if row is None or row.status.value not in ("pending_sent", "pending_received"):
+            return False
+        if token is not None:
+            self.pairings.pop(token)
+        self.instances[inst.id] = inst
+        return True
+
     async def get_local_identity(self):
         return self._local_identity
 

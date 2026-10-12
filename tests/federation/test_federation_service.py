@@ -287,6 +287,19 @@ class InMemoryFederationRepo:
     async def delete_pairing(self, token: str) -> None:
         self._pairings.pop(token, None)
 
+    async def promote_pending_instance(self, inst, *, token=None):
+        """Mirrors the SQLite repo: needs the session (when named) AND a
+        still-pending row, else changes nothing."""
+        row = self._instances.get(inst.id)
+        if token is not None and token not in self._pairings:
+            return False
+        if row is None or row.status.value not in ("pending_sent", "pending_received"):
+            return False
+        if token is not None:
+            self._pairings.pop(token)
+        self._instances[inst.id] = inst
+        return True
+
     async def ban_instance_from_space(
         self,
         space_id: str,
@@ -5161,3 +5174,120 @@ async def test_broadcast_to_space_members_only_instances_narrows_never_widens(
     )
     assert sent == [writer.id]
     assert result.attempted == 1
+
+
+# ── send_event_once — one attempt to a row we no longer hold ───────────
+
+
+def _ok_http(status: int = 200):
+    resp = AsyncMock()
+    resp.status = status
+    resp.__aenter__ = AsyncMock(return_value=resp)
+    resp.__aexit__ = AsyncMock(return_value=False)
+    http = MagicMock()
+    http.post = MagicMock(return_value=resp)
+    return http
+
+
+@pytest.mark.asyncio
+async def test_send_event_once_seals_with_the_given_row_not_the_repo():
+    """The pairing-cancel abort: the row is already gone from the repo, so
+    the envelope is sealed with the captured instance and POSTed to its
+    inbox — nothing is looked up, marked or queued."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()  # empty: the row was removed
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _key = _make_remote_instance(km, peer_kp=generate_identity_keypair())
+    http = _ok_http()
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=http,
+    )
+
+    result = await svc.send_event_once(
+        instance=inst,
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={"reason": "cancelled"},
+    )
+
+    assert result.ok is True
+    posted = http.post.call_args
+    assert posted.args[0] == inst.remote_inbox_url
+    envelope = posted.kwargs["json"]
+    assert envelope["event_type"] == FederationEventType.PAIRING_ABORT.value
+    assert envelope["to_instance"] == inst.id
+    assert "reason" not in str(envelope)  # encrypted, never plaintext
+    assert outbox_repo.enqueued == []
+    assert fed_repo.reachable_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["status", "raise"])
+async def test_send_event_once_failure_is_never_queued(failure):
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    outbox_repo = InMemoryOutboxRepo()
+    inst, _key = _make_remote_instance(km, peer_kp=generate_identity_keypair())
+    if failure == "status":
+        http = _ok_http(503)
+    else:
+        http = MagicMock()
+        http.post = MagicMock(side_effect=Exception("connection refused"))
+    svc, _ = _make_service(
+        federation_repo=fed_repo,
+        outbox_repo=outbox_repo,
+        key_manager=km,
+        http_client=http,
+    )
+
+    result = await svc.send_event_once(
+        instance=inst,
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={},
+    )
+
+    assert result.ok is False
+    assert outbox_repo.enqueued == []
+    assert fed_repo.unreachable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_send_event_once_without_an_inbox_sends_nothing():
+    km = _make_kek_manager()
+    inst, _key = _make_remote_instance(km, peer_kp=generate_identity_keypair())
+    http = _ok_http()
+    svc, _ = _make_service(
+        federation_repo=InMemoryFederationRepo(),
+        outbox_repo=InMemoryOutboxRepo(),
+        key_manager=km,
+        http_client=http,
+    )
+    result = await svc.send_event_once(
+        instance=dataclasses.replace(inst, remote_inbox_url=""),
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={},
+    )
+    assert result.ok is False and result.error == "no_inbox_url"
+    http.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_event_once_with_an_unreadable_key_sends_nothing():
+    km = _make_kek_manager()
+    inst, _key = _make_remote_instance(km, peer_kp=generate_identity_keypair())
+    http = _ok_http()
+    svc, _ = _make_service(
+        federation_repo=InMemoryFederationRepo(),
+        outbox_repo=InMemoryOutboxRepo(),
+        key_manager=km,
+        http_client=http,
+    )
+    result = await svc.send_event_once(
+        instance=dataclasses.replace(inst, key_self_to_remote="garbage"),
+        event_type=FederationEventType.PAIRING_ABORT,
+        payload={},
+    )
+    assert result.ok is False and result.error == "key_decrypt_error"
+    http.post.assert_not_called()

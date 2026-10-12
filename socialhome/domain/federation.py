@@ -1485,6 +1485,32 @@ def gfs_relay_available(instance: "RemoteInstance") -> bool:
     )
 
 
+#: ``pending_kind`` values — which handshake a pending row is.
+PENDING_KIND_CODE: str = "code"
+PENDING_KIND_REQUEST: str = "request"
+PENDING_KIND_APPROVAL: str = "approval"
+
+
+def pending_kind(instance: "RemoteInstance") -> str | None:
+    """Which handshake a pending ``remote_instances`` row is, or ``None``
+    when it is not pending. Pure, no I/O.
+
+    * ``code`` — a pairing code (QR / manual code) shown or scanned, the
+      SAS not entered yet (``pending_received``, either side).
+    * ``request`` — we asked a confirmed peer to introduce us to this
+      household (trust relay): a provisional row with no key.
+    * ``approval`` — our admin approved this household's introduction; we
+      wait for its signed confirmation (keyed ``pending_sent``).
+    """
+    if instance.status is PairingStatus.PENDING_RECEIVED:
+        return PENDING_KIND_CODE
+    if instance.status is PairingStatus.PENDING_SENT:
+        if instance.remote_identity_pk and instance.key_self_to_remote:
+            return PENDING_KIND_APPROVAL
+        return PENDING_KIND_REQUEST
+    return None
+
+
 @dataclass(slots=True, frozen=True)
 class BroadcastResult:
     """Aggregate result of fan-out to many peers."""

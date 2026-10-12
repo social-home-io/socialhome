@@ -2358,6 +2358,9 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # the 5/min handshake bucket below 429'd after two opens and a
             # toggle. The longest matching prefix wins.
             "/api/pairing/connections": (30, 60),
+            # Cancelling pending pairings — an admin clearing a few stale
+            # cards in a row; the same cadence as connection management.
+            "/api/pairing/pending": (30, 60),
             "/api/pairing": (5, 60),  # pairing handshakes
         },
     )

@@ -377,11 +377,11 @@ async def test_abort_from_the_sessions_own_peer_still_cancels(anon_client):
 async def _cancel_without_network(app, monkeypatch, instance_id: str) -> list:
     sent: list = []
 
-    async def _send(self, *, to_instance_id, event_type, payload, **kw):
-        sent.append((to_instance_id, event_type, payload))
-        return DeliveryResult(instance_id=to_instance_id, ok=True)
+    async def _send(self, *, instance, event_type, payload):
+        sent.append((instance.id, event_type, payload))
+        return DeliveryResult(instance_id=instance.id, ok=True)
 
-    monkeypatch.setattr(type(app[federation_service_key]), "send_event", _send)
+    monkeypatch.setattr(type(app[federation_service_key]), "send_event_once", _send)
     await app[pairing_cancel_service_key].cancel_pending(instance_id)
     return sent
 
