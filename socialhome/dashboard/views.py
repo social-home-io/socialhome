@@ -54,6 +54,7 @@ from .messages import (
     MentionCard,
     card_rows,
     chat_days,
+    chat_window,
     mention_cards,
     message_rows,
     new_count,
@@ -641,7 +642,10 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
         else mention_cards(here_alerts(snap.mentions), fmt)[:HERE_SHOWN]
     )
     bannered = frozenset(c.id for c in here_cards)
-    rows = [] if snap.is_night else message_rows(snap.messages, fmt)
+    # The tab's window again here (the read model bounds it already).
+    rows = (
+        [] if snap.is_night else chat_window(message_rows(snap.messages, fmt), snap.now)
+    )
     listed = [r for r in rows if r.id not in bannered]
     board.context.update(
         snap=snap,

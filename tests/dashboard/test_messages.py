@@ -15,6 +15,7 @@ from socialhome.dashboard.messages import (
     NEW_FOR,
     card_rows,
     chat_days,
+    chat_window,
     clip,
     clip_words,
     mention_cards,
@@ -22,6 +23,7 @@ from socialhome.dashboard.messages import (
     new_count,
 )
 from socialhome.dashboard.presenter import ColorBook, Fmt
+from socialhome.domain.household_dashboard import CHAT_SHOWN
 from socialhome.i18n import Catalog
 
 from .factories import (
@@ -273,6 +275,33 @@ def test_chat_days_only_name_days_with_messages():
 def test_chat_days_drop_anything_older_than_yesterday():
     older = _at_msg("o", at(23, 0, TODAY - timedelta(days=2)))
     assert chat_days(message_rows([older], _fmt()), _fmt()) == []
+
+
+def test_chat_window_keeps_the_last_day_and_the_cap():
+    """Defence in depth: the tab never trusts the read model alone."""
+    rows = message_rows(
+        [message(f"m{i}", "u-anna", i + 1) for i in range(CHAT_SHOWN + 5)]
+        + [message("stale", "u-anna", 24 * 60 + 1)],
+        _fmt(),
+    )
+    kept = chat_window(rows, NOW)
+    assert [r.id for r in kept] == [f"m{i}" for i in range(CHAT_SHOWN)]
+    only_stale = message_rows([message("stale", "u-anna", 24 * 60 + 1)], _fmt())
+    assert chat_window(only_stale, NOW) == []
+
+
+def test_chat_days_apply_the_window_too():
+    """Yesterday's date but over 24 h old: not on the tab; and never more
+    than CHAT_SHOWN rows."""
+    rows = message_rows(
+        [message("ok", "u-anna", 60), message("stale", "u-anna", 24 * 60 + 1)],
+        _fmt(),
+    )
+    assert [r.message.id for d in chat_days(rows, _fmt()) for r in d.rows] == ["ok"]
+    many = message_rows(
+        [message(f"m{i}", "u-anna", i + 1) for i in range(CHAT_SHOWN + 5)], _fmt()
+    )
+    assert sum(len(d.rows) for d in chat_days(many, _fmt())) == CHAT_SHOWN
 
 
 def test_chat_days_in_german():

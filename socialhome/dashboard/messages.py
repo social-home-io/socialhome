@@ -40,6 +40,8 @@ from datetime import datetime, timedelta
 from typing import Final
 
 from ..domain.household_dashboard import (
+    CHAT_MAX_AGE,
+    CHAT_SHOWN,
     MESSAGE_MAX_AGE,
     MESSAGES_SHOWN,
     DashboardMention,
@@ -60,6 +62,7 @@ __all__ = [
     "MessageRow",
     "card_rows",
     "chat_days",
+    "chat_window",
     "clip",
     "clip_words",
     "mention_cards",
@@ -191,6 +194,14 @@ def card_rows(
     return [r for r in fresh[:MESSAGES_SHOWN] if r.id not in hide]
 
 
+def chat_window(rows: Iterable[MessageRow], now: datetime) -> list[MessageRow]:
+    """The Messages tab's window over ``rows`` (newest first): only the
+    last :data:`~socialhome.domain.household_dashboard.CHAT_MAX_AGE`, at
+    most :data:`~socialhome.domain.household_dashboard.CHAT_SHOWN` — the
+    read model already bounds both; this never trusts it alone."""
+    return [r for r in rows if now - r.sent_at <= CHAT_MAX_AGE][:CHAT_SHOWN]
+
+
 def new_count(rows: Iterable[MessageRow]) -> int:
     """How many of ``rows`` are new (under :data:`NEW_FOR` old) — the
     Messages tab badge. Time-based: a shared board has no read state."""
@@ -224,11 +235,12 @@ class ChatDay:
 
 def chat_days(rows: Iterable[MessageRow], fmt: Fmt) -> list[ChatDay]:
     """``rows`` (newest first) grouped under "Today" and "Yesterday" by
-    the household's day — only days with a message. The tab reads one
-    day back, so anything older never shows."""
+    the household's day — only days with a message, within
+    :func:`chat_window` (so nothing older than a day, never more than the
+    cap, whatever ``rows`` holds)."""
     zone = fmt.now.tzinfo
     days: dict[str, list[ChatRow]] = {"today": [], "yesterday": []}
-    for r in rows:
+    for r in chat_window(rows, fmt.now):
         local = r.sent_at.astimezone(zone)
         age = (fmt.today - local.date()).days
         if age not in (0, 1):

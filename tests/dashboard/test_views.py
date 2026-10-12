@@ -3214,6 +3214,19 @@ async def test_messages_tab_same_privacy_filters_as_overview(client, auth, snaps
     assert re.findall(r'data-msg="([^"]+)"', _main(html)) == ["m1", "m2", "m3"]
 
 
+async def test_messages_tab_keeps_its_window_even_past_the_read(
+    client, auth, snapshots
+):
+    """Defence in depth: more than 30, or older than a day, never lists
+    or counts, whatever the snapshot hands over."""
+    flood = tuple(message(f"f{i}", "u-anna", i + 1, text="hi") for i in range(35))
+    stale = message("stale", "u-anna", 24 * 60 + 5, text="old news")
+    _tabs_on(snapshots, messages=(*flood, stale))
+    html = await (await _get(client, auth, "/messages")).text()
+    listed = re.findall(r'data-msg="([^"]+)"', _main(html))
+    assert len(listed) == 30 and "stale" not in listed
+
+
 async def test_messages_tab_empty_state(client, auth, snapshots):
     _tabs_on(snapshots, messages=())
     html = await (await _get(client, auth, "/messages")).text()
