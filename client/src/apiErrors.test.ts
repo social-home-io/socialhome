@@ -18,6 +18,20 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('Only households you paired with directly can use the GFS fallback.')
   })
 
+  it('translates a cancel or approval that raced a pairing going live', () => {
+    expect(apiErrorMessage(409, '/api/pairing/pending/p1', {
+      code: 'PAIRING_CONFIRMED',
+      detail: 'This pairing is already confirmed — remove the connection instead.',
+    })).toBe('This household is already paired with you.')
+  })
+
+  it('translates an expired trust-relay pairing request', () => {
+    expect(apiErrorMessage(410, '/api/pairing/auto-pair-requests/r1/approve', {
+      code: 'REQUEST_EXPIRED',
+      detail: 'This pairing request has expired — ask them to send a new one.',
+    })).toBe('This pairing request has expired — ask them to send a new one.')
+  })
+
   it('explains that publishing a public space to a GFS is a tier change', () => {
     // The space settings' Publish button on a public space answers this
     // since public stopped meaning "may be on a GFS".

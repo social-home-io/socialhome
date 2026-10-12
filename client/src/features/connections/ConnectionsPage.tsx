@@ -13,7 +13,7 @@
 import { useEffect, useState, lazy, Suspense } from 'preact/compat'
 import type { ComponentChildren } from 'preact'
 import { signal, useSignal } from '@preact/signals'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { openPairing, PairingFlow } from '@/components/PairingFlow'
@@ -272,9 +272,10 @@ async function loadAutoPairRequests() {
 async function approveAutoPair(r: AutoPairRequest) {
   try {
     await api.post(
-      `/api/pairing/auto-pair-requests/${r.request_id}/approve`, {},
+      `/api/pairing/auto-pair-requests/${encodeURIComponent(r.request_id)}/approve`, {},
     )
-    showToast(t('connections.requests.paired', { name: r.from_a_display }), 'success')
+    // Not paired yet: the requester confirms on our ack, a moment later.
+    showToast(t('connections.requests.approved', { name: r.from_a_display }), 'success')
     autoPairRequests.value = autoPairRequests.value.filter(
       x => x.request_id !== r.request_id,
     )
@@ -289,7 +290,7 @@ async function declineAutoPair(r: AutoPairRequest) {
   if (!await confirmDialog(t('connections.requests.decline_confirm', { name: r.from_a_display }), { destructive: true })) return
   try {
     await api.post(
-      `/api/pairing/auto-pair-requests/${r.request_id}/decline`,
+      `/api/pairing/auto-pair-requests/${encodeURIComponent(r.request_id)}/decline`,
       {},
     )
     showToast(t('connections.requests.declined'), 'info')
@@ -317,7 +318,7 @@ async function disconnectGfs(gfs: GfsConnection) {
 async function unpair(instanceId: string) {
   if (!await confirmDialog(t('connections.unpair_confirm'), { destructive: true })) return
   try {
-    await api.delete(`/api/pairing/connections/${instanceId}`)
+    await api.delete(`/api/pairing/connections/${encodeURIComponent(instanceId)}`)
     showToast(t('connections.unpaired'), 'info')
     await loadConnections()
   } catch (e: unknown) {
@@ -325,19 +326,44 @@ async function unpair(instanceId: string) {
   }
 }
 
+/** The confirm copy for cancelling a pending pairing, by which handshake
+ *  it is (``pending_kind`` from the server). A pairing code is the same on
+ *  both households — the one that showed it and the one that scanned it. */
+function cancelPendingConfirmText(c: Connection): string {
+  const name = c.display_name
+  switch (c.pending_kind) {
+    case 'request': return t('connections.cancel_pending_confirm_request', { name })
+    case 'approval': return t('connections.cancel_pending_confirm_approval', { name })
+    default: return t('connections.cancel_pending_confirm', { name })
+  }
+}
+
 /** Cancel a pairing that was never confirmed. Its own endpoint, not the
  *  unpair: the server answers 409 instead of unpairing should the pairing
- *  have been confirmed a moment ago, and the reload then shows it live. */
+ *  have been confirmed a moment ago, and the reload then shows it live.
+ *  A 404 means it is already gone (cancelled elsewhere, or the other
+ *  household cancelled first) — that is what was asked for, so no error. */
 async function cancelPending(c: Connection) {
-  if (!await confirmDialog(
-    t('connections.cancel_pending_confirm', { name: c.display_name }),
-    { destructive: true },
-  )) return
+  if (!await confirmDialog(cancelPendingConfirmText(c), { destructive: true })) return
   try {
-    await api.delete(`/api/pairing/pending/${c.instance_id}`)
-    showToast(t('connections.pending_cancelled'), 'info')
+    const res = await api.delete(
+      `/api/pairing/pending/${encodeURIComponent(c.instance_id)}`,
+    ) as { peer_notified?: boolean } | undefined
+    // A request we sent through a trust relay has no one to tell — only
+    // a household that holds a half of the pairing can miss the news.
+    const unnotified = res?.peer_notified === false && c.pending_kind !== 'request'
+    showToast(
+      unnotified
+        ? t('connections.pending_cancelled_unnotified', { name: c.display_name })
+        : t('connections.pending_cancelled'),
+      'info',
+    )
   } catch (e: unknown) {
-    showToast((e as Error).message || t('connections.cancel_pending_failed'), 'error')
+    if (e instanceof ApiError && e.status === 404) {
+      showToast(t('connections.pending_cancelled'), 'info')
+    } else {
+      showToast((e as Error).message || t('connections.cancel_pending_failed'), 'error')
+    }
   }
   await loadConnections()
 }

@@ -38,6 +38,11 @@ export interface Connection {
   federated_display_name?: string
   local_alias?: string | null
   status?: string
+  /** Which handshake a pending row is — ``code`` (a pairing code shown or
+   *  scanned), ``request`` (we asked a connected household to introduce
+   *  us), ``approval`` (we approved an introduction; waiting for them).
+   *  ``null`` once confirmed. Absent on older API responses. */
+  pending_kind?: 'code' | 'request' | 'approval' | null
   paired_at?: string | null
   source?: string
   reachable:     boolean

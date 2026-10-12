@@ -30,7 +30,7 @@ export function ShareHomeToggle({
     // Optimistic flip
     setEnabled(next)
     try {
-      await api.patch(`/api/pairing/connections/${instanceId}`, { share_home: next })
+      await api.patch(`/api/pairing/connections/${encodeURIComponent(instanceId)}`, { share_home: next })
       onChange?.(next)
     } catch (e: any) {
       // Revert on error

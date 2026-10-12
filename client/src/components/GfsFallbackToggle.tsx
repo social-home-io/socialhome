@@ -106,7 +106,7 @@ export function GfsFallbackToggle({ instanceId, peerName, initial }: GfsFallback
     setState({ ...state, gfs_relay: next, gfs_routes: next ? state.gfs_routes : 0 })
     setBusy(true)
     try {
-      const body = await api.patch(`/api/pairing/connections/${instanceId}`, { gfs_relay: next })
+      const body = await api.patch(`/api/pairing/connections/${encodeURIComponent(instanceId)}`, { gfs_relay: next })
       setState(prev => pick(body, prev))
       if (next) setRecheck(n => n + 1)
     } catch (e: any) {
