@@ -1509,7 +1509,8 @@ views render: a `HomeSnapshot` (people, today's events, next up, chores,
 shopping, household stickies, today's school timetables, night-mode
 "tomorrow") and a per-member `PersonSnapshot` — frozen types in
 `domain/household_dashboard.py`. It only reads the owning services, never
-anything with side effects, and is *household-safe*: presence is home /
+anything with side effects — the one write is a "Got it" on a mention
+(below) — and is *household-safe*: presence is home /
 away / a zone name (never coordinates), events come from members' personal
 calendars (recurring ones as occurrences, a shared household event once),
 and DMs, notifications, space chats and polls never appear (the
@@ -1562,6 +1563,38 @@ attribute (Jinja-escaped) so the picture view, which shows only the
 sender's face and a 💬, keeps its no-words rule. Every sender is a shown
 person whose colour is already in the page style, so a new or deleted
 message just swaps in with the next fragment (no view-key change).
+
+**Mentions (same opt-in).** Household-chat `@here` and `@name`
+mentions of the last hour that nobody has acknowledged ride along on
+every page: `@here` as a banner at the top of Home, `@name` as a dot on
+that person's face in the rail (and the phone face strip) plus a card at
+the top of their page — a text card with "Got it" on a reader page, a
+face + 💬 tile (tap to hear, on-device voices only) with a big ✓ in
+picture view. `HouseholdChatService.recent_mentions` reads the newest
+100 member-written messages (`MENTIONABLE_TYPES`) of the hour from the
+same senders as the messages (shown, guardian blocks fail closed),
+parses them with `DmMentionResolver.parse_with_here` — a dashboard-only
+parse that keeps `@here`, which chat notifications still drop — and
+reads every ✅ on them in one query
+(`ConversationRepo.list_reactions_with_emoji`). **No new state: the ✅
+reaction in `message_reactions` is the acknowledgement** — an `@here` is
+seen once anyone but its sender reacted ✅, an `@name` once that person
+did. A mention of a hidden person, or of the sender themself, is
+skipped. "Got it" (`POST /ack`, the dashboard's one data write) is
+re-derived from scratch by `HouseholdDashboardService.acknowledge`
+(nothing the tablet sends is trusted; 404 for anything the wall doesn't
+show), then `DmService.acknowledge_on_dashboard` adds the ✅ — as
+`DASHBOARD_AUTHOR` (`household-dashboard`, no user row; the chat shows a
+count) for `@here`, as the person for their own mention — and publishes
+the usual `DmMessageReactionChanged` so open chats update live. The
+household chat is never federated, so neither is this. Every tablet
+sees it on its next refresh. The fragment carries a hidden marker (rail
+badges, mention keys, the `mention_sound` switch): the rail sits outside
+the swapped `<main>`, so `dashboard.js` re-badges it after each swap,
+and plays one short two-note WebAudio tone (made on the device, peak gain
+0.1, softer than the app ringtone's 0.12) per new mention per tablet (keys remembered in `sessionStorage`) —
+never at night, never when locked (nothing is rendered), silent where
+autoplay is blocked; the first tap anywhere unlocks audio.
 
 **How it is rendered.** The views (`dashboard/views.py`) fetch a snapshot
 per request and render Jinja templates (`dashboard/templates/`); the pure

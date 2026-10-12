@@ -42,6 +42,9 @@ export interface DashboardState {
   show_status_text: boolean
   /** Home shows the last few household-chat messages (admin opt-in). */
   show_household_messages: boolean
+  /** A short on-device tone for a new @here / @name mention (default on;
+   *  only matters while ``show_household_messages`` is). */
+  mention_sound: boolean
   /** ``feat_household_chat`` is on — the messages switch needs it. */
   household_chat_enabled: boolean
   last_seen_at: string | null

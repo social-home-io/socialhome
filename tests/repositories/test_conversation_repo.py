@@ -350,6 +350,14 @@ async def test_add_and_list_reactions(env):
     assert len(reactions) == 2
 
 
+async def test_add_reaction_says_whether_it_inserted(env):
+    await env.repo.create(_conv("conv-react-new"))
+    await env.repo.save_message(_message("rnew-1", "conv-react-new"))
+    assert await env.repo.add_reaction("rnew-1", "uid-alice", "✅") is True
+    assert await env.repo.add_reaction("rnew-1", "uid-alice", "✅") is False
+    assert len(await env.repo.list_reactions("rnew-1")) == 1
+
+
 async def test_remove_reaction(env):
     """remove_reaction deletes the specified user's reaction."""
     conv = _conv("conv-rm-react")
@@ -359,6 +367,28 @@ async def test_remove_reaction(env):
     await env.repo.remove_reaction("rmmsg-1", "uid-alice", "❤️")
     reactions = await env.repo.list_reactions("rmmsg-1")
     assert reactions == []
+
+
+async def test_list_reactions_with_emoji_reads_many_messages_at_once(env):
+    """One query for many messages; only the asked emoji; unknown ids skip."""
+    await env.repo.create(_conv("conv-ack"))
+    await env.repo.save_message(_message("ack-1", "conv-ack"))
+    await env.repo.save_message(_message("ack-2", "conv-ack"))
+    await env.repo.save_message(_message("ack-3", "conv-ack"))
+    await env.repo.add_reaction("ack-1", "uid-alice", "✅")
+    await env.repo.add_reaction("ack-1", "household-dashboard", "✅")
+    await env.repo.add_reaction("ack-2", "uid-bob", "👍")
+    await env.repo.add_reaction("ack-3", "uid-bob", "✅")
+    rows = await env.repo.list_reactions_with_emoji(
+        ["ack-1", "ack-2", "ack-3", "nope"], "✅"
+    )
+    assert sorted((r.message_id, r.user_id) for r in rows) == [
+        ("ack-1", "household-dashboard"),
+        ("ack-1", "uid-alice"),
+        ("ack-3", "uid-bob"),
+    ]
+    assert all(r.emoji == "✅" for r in rows)
+    assert await env.repo.list_reactions_with_emoji([], "✅") == []
 
 
 # ── DM history sync helpers ──────────────────────────────────────────────
@@ -1131,6 +1161,30 @@ async def test_list_recent_messages_filters_and_orders(env):
         limit=10,
     )
     assert ids(rows) == ["d", "c"]
+
+
+async def test_list_recent_messages_containing_filters_before_the_limit(env):
+    """``containing`` narrows in SQL before ``LIMIT``: chatter can't push
+    an older mention out, and LIKE wildcards in the needle are literal."""
+    await env.repo.create(_conv("c1", ConversationType.GROUP_DM))
+    await env.repo.save_message(_glance("here", 50, content="@here dinner"))
+    for n in range(20):
+        await env.repo.save_message(_glance(f"chat-{n}", 40 - n, content="hi"))
+    await env.repo.save_message(_glance("pct", 1, content="100% sure"))
+    common = {
+        "since": _NOW - timedelta(hours=1),
+        "until": _UNTIL,
+        "types": {"text"},
+        "senders": {"uid-alice"},
+        "limit": 5,
+    }
+    rows = await env.repo.list_recent_messages("c1", containing="@", **common)
+    assert [m.id for m in rows] == ["here"]
+    rows = await env.repo.list_recent_messages("c1", containing="%", **common)
+    assert [m.id for m in rows] == ["pct"]
+    # Without it: the five newest, the mention long gone.
+    rows = await env.repo.list_recent_messages("c1", **common)
+    assert "here" not in [m.id for m in rows]
 
 
 async def test_list_recent_messages_skips_blank_text(env):

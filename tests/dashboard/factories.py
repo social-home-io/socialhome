@@ -7,8 +7,11 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from socialhome.domain.household_dashboard import (
+    MENTION_HERE,
+    MENTION_PERSON,
     DashboardEvent,
     DashboardLesson,
+    DashboardMention,
     DashboardMessage,
     DashboardPerson,
     DashboardSchoolDay,
@@ -202,6 +205,31 @@ MESSAGES = (
 )
 
 
+def mention(
+    mid: str,
+    sender: str,
+    minutes_ago: float,
+    *,
+    person: str | None = None,
+    text: str = "",
+) -> DashboardMention:
+    return DashboardMention(
+        message_id=mid,
+        sender_id=sender,
+        text=text,
+        sent_at=NOW - timedelta(minutes=minutes_ago),
+        kind=MENTION_HERE if person is None else MENTION_PERSON,
+        person_id=person,
+    )
+
+
+#: Anna's @here 3 min ago, Pascal's @leo 10 min ago, Anna's @mia 20 min ago.
+HERE = mention("h1", "u-anna", 3, text="@here Dinner is <b>ready</b>!")
+FOR_LEO = mention("p1", "u-pascal", 10, person="u-leo", text="@leo shoes on")
+FOR_MIA = mention("p2", "u-anna", 20, person="u-mia", text="@mia call grandma")
+MENTIONS = (HERE, FOR_LEO, FOR_MIA)
+
+
 def home(**kw) -> HomeSnapshot:
     base = HomeSnapshot(
         now=NOW,
@@ -274,6 +302,9 @@ class FakeDashboardService:
         }
         self.pictures: dict[str, tuple[bytes, str]] = {}
         self.calls: list[str] = []
+        #: ``(message_id, person_id)`` pairs :meth:`acknowledge` accepts.
+        self.ackable: set[tuple[str, str | None]] = set()
+        self.acks: list[tuple[str, str | None]] = []
 
     async def home(self, *, now: datetime | None = None) -> HomeSnapshot:
         self.calls.append("home")
@@ -288,6 +319,19 @@ class FakeDashboardService:
     async def avatar(self, user_id: str) -> tuple[bytes, str] | None:
         self.calls.append(f"avatar:{user_id}")
         return self.pictures.get(user_id)
+
+    async def acknowledge(
+        self,
+        message_id: str,
+        *,
+        person_id: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        self.calls.append(f"ack:{message_id}:{person_id}")
+        if (message_id, person_id) not in self.ackable:
+            return False
+        self.acks.append((message_id, person_id))
+        return True
 
 
 LEO_READING = lesson("Lesen", at(8), at(8, 45), person="u-leo")

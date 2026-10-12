@@ -212,6 +212,24 @@ class MessageReaction:
 
 
 @dataclass(slots=True, frozen=True)
+class MentionGlance:
+    """A recent household-chat message that @-mentions someone, as the
+    household dashboard reads it
+    (:meth:`~socialhome.services.household_chat_service.HouseholdChatService.recent_mentions`).
+
+    ``here`` — it carries ``@here``; ``user_ids`` — the people it
+    @-mentions (resolved against the chat's seats); ``acked_by`` — who
+    reacted with the acknowledgement emoji (a user id, or the dashboard's
+    pseudo-author).
+    """
+
+    message: ConversationMessage
+    here: bool
+    user_ids: tuple[str, ...]
+    acked_by: frozenset[str]
+
+
+@dataclass(slots=True, frozen=True)
 class ConversationMember:
     """One participant row of a :class:`Conversation` (local users only)."""
 

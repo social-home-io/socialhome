@@ -159,6 +159,7 @@ class AbstractConversationRepo(Protocol):
         types: Collection[str],
         senders: Collection[str],
         limit: int,
+        containing: str | None = None,
     ) -> list[ConversationMessage]: ...
     async def list_messages_sync_page(
         self,
@@ -225,7 +226,7 @@ class AbstractConversationRepo(Protocol):
         message_id: str,
         user_id: str,
         emoji: str,
-    ) -> None: ...
+    ) -> bool: ...
     async def remove_reaction(
         self,
         message_id: str,
@@ -233,6 +234,9 @@ class AbstractConversationRepo(Protocol):
         emoji: str,
     ) -> None: ...
     async def list_reactions(self, message_id: str) -> list[MessageReaction]: ...
+    async def list_reactions_with_emoji(
+        self, message_ids: Collection[str], emoji: str
+    ) -> list[MessageReaction]: ...
 
     # Delivery state (§12.5 — read receipts + delivery tracking) ---------
     async def upsert_delivery_state(
@@ -1035,6 +1039,7 @@ class SqliteConversationRepo:
         types: Collection[str],
         senders: Collection[str],
         limit: int,
+        containing: str | None = None,
     ) -> list[ConversationMessage]:
         """The newest messages of ``conversation_id`` created between
         ``since`` and ``until`` (both inclusive), newest first: only
@@ -1048,6 +1053,11 @@ class SqliteConversationRepo:
         ``since`` (true for both stamp shapes) lets the
         ``(conversation_id, created_at)`` index narrow the scan first.
         Empty ``types`` / ``senders`` (or ``limit`` below one) read nothing.
+
+        ``containing``: only messages whose content holds that literal text
+        (``instr``, so no ``LIKE`` wildcard or escape applies) — filtered
+        before the ``LIMIT``, so a busy hour of chatter can't push an older
+        ``@`` mention out of the scan.
         """
         type_list = sorted(set(types))
         sender_list = sorted(set(senders))
@@ -1060,6 +1070,7 @@ class SqliteConversationRepo:
                AND type IN ({",".join("?" * len(type_list))})
                AND sender_user_id IN ({",".join("?" * len(sender_list))})
                AND NOT (type IN ('text', 'transcript') AND trim(content) = '')
+               AND (? IS NULL OR instr(content, ?) > 0)
                AND created_at >= ?
                AND julianday(created_at) >= julianday(?)
                AND julianday(created_at) <= julianday(?)
@@ -1069,6 +1080,8 @@ class SqliteConversationRepo:
                 conversation_id,
                 *type_list,
                 *sender_list,
+                containing,
+                containing,
                 (as_utc(since) - timedelta(days=1)).date().isoformat(),
                 as_utc(since).isoformat(),
                 as_utc(until).isoformat(),
@@ -1487,8 +1500,10 @@ class SqliteConversationRepo:
         message_id: str,
         user_id: str,
         emoji: str,
-    ) -> None:
-        await self._db.enqueue(
+    ) -> bool:
+        """Add one reaction; ``True`` when it was new (``INSERT OR IGNORE``
+        inserted a row), ``False`` when that person already had it."""
+        inserted = await self._db.enqueue_rowcount(
             """
             INSERT OR IGNORE INTO message_reactions(
                 message_id, user_id, emoji
@@ -1496,6 +1511,7 @@ class SqliteConversationRepo:
             """,
             (message_id, user_id, emoji),
         )
+        return inserted > 0
 
     async def remove_reaction(
         self,
@@ -1516,6 +1532,30 @@ class SqliteConversationRepo:
         rows = await self._db.fetchall(
             "SELECT * FROM message_reactions WHERE message_id=? ORDER BY reacted_at",
             (message_id,),
+        )
+        return [
+            MessageReaction(
+                message_id=r["message_id"],
+                user_id=r["user_id"],
+                emoji=r["emoji"],
+                reacted_at=_parse(r["reacted_at"]) or datetime.now(timezone.utc),
+            )
+            for r in rows
+        ]
+
+    async def list_reactions_with_emoji(
+        self, message_ids: Collection[str], emoji: str
+    ) -> list[MessageReaction]:
+        """Every ``emoji`` reaction on any of ``message_ids`` in one query
+        (the household dashboard's acknowledgements)."""
+        ids = list(dict.fromkeys(message_ids))
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        rows = await self._db.fetchall(
+            "SELECT * FROM message_reactions WHERE emoji = ? "
+            f"AND message_id IN ({marks}) ORDER BY reacted_at",
+            (emoji, *ids),
         )
         return [
             MessageReaction(

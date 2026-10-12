@@ -13,6 +13,8 @@ from unittest.mock import patch
 import pytest
 
 from socialhome.dashboard.auth import (
+    ACK_MAX,
+    ACK_WINDOW_S,
     COOKIE_NAME,
     GLOBAL_MAX_FAILURES,
     PRUNE_INTERVAL_S,
@@ -733,3 +735,22 @@ def test_global_failure_count(auth):
     auth.begin_attempt("a")
     auth.begin_attempt("b", count_global=False)
     assert auth.global_failure_count == 1
+
+
+# ─── "Got it" (acknowledgement) rate limit ───────────────────────────────
+
+
+async def test_ack_limit_is_per_session_and_frees_up_after_the_window(auth, clock):
+    a = await auth.verify(await auth.issue(True))
+    b = await auth.verify(await auth.issue(True))
+    assert a is not None and b is not None
+    for _ in range(ACK_MAX):
+        assert auth.begin_ack(a) == 0
+    wait = auth.begin_ack(a)
+    assert 0 < wait <= ACK_WINDOW_S
+    # Another tablet (session) has its own budget.
+    assert auth.begin_ack(b) == 0
+    # The password / PIN throttle is untouched.
+    assert auth.throttle_key_count == 0
+    clock.advance(ACK_WINDOW_S + 1)
+    assert auth.begin_ack(a) == 0

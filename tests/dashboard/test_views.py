@@ -17,6 +17,8 @@ from aiohttp import web
 import socialhome.i18n as i18n_pkg
 from socialhome.dashboard.app import build_dashboard_app, build_dashboard_csp
 from socialhome.dashboard.auth import (
+    ACK_MAX,
+    ACK_WINDOW_S,
     COOKIE_NAME,
     RENEW_AFTER_S,
     REVOKED_LOCKED,
@@ -39,8 +41,13 @@ from socialhome.i18n import Catalog
 
 from .conftest import PASSWORD, default_theme
 from .factories import (
+    ANNA,
+    FOR_LEO,
+    FOR_MIA,
+    HERE,
     LEO,
     DINNER,
+    MENTIONS,
     MESSAGES,
     MIA_SCHOOL,
     NOW,
@@ -53,6 +60,7 @@ from .factories import (
     at,
     event,
     leo_page,
+    mention,
     message,
     person,
 )
@@ -1086,6 +1094,46 @@ def test_dashboard_js_speaks_only_with_an_on_device_voice():
     # and once more after a second.
     assert "synth.onvoiceschanged = updateVoice" in js
     assert "window.setTimeout(updateVoice, 1000)" in js
+
+
+def test_dashboard_js_mention_tone_is_on_device_once_and_quiet_at_night():
+    """The mention tone: synthesised (WebAudio, nothing fetched), soft
+    (gain never above 0.12), once per mention per tablet (sessionStorage,
+    every access in try/catch), never at night or with the admin's
+    switch off, silent when autoplay is blocked."""
+    js = RENDERER.static_asset("dashboard.js").body.decode()
+    assert js.count("chime();") == 1
+    sync = js[js.index("function syncMentions()") :]
+    sync = sync[: sync.index("\n  }\n")]
+    assert "chime();" in sync
+    assert 'getAttribute("data-mention-sound") === "1"' in sync
+    assert '!body.classList.contains("dash-night")' in sync
+    assert "seen.indexOf(k) < 0" in sync and "saveSeen()" in sync
+    assert "syncMentions();" in js[js.index("function swap(") :]
+    for fn in ("function loadSeen()", "function saveSeen()"):
+        body = js[js.index(fn) :]
+        body = body[: body.index("\n  }\n")]
+        assert "try {" in body and "catch (e)" in body, fn
+    tone = js[js.index("function tone(ctx)") :]
+    tone = tone[: tone.index("\n  }\n")]
+    assert 'osc.type = "sine"' in tone and "osc.stop(" in tone
+    gains = [float(g) for g in re.findall(r"linearRampToValueAtTime\(([\d.]+)", tone)]
+    assert gains and max(gains) <= 0.12
+    assert "new Audio(" not in js and ".mp3" not in js and ".ogg" not in js
+    # A resume that only lands later (on some tap) plays nothing.
+    chime = js[js.index("function chime()") :]
+    chime = chime[: chime.index("\n  }\n")]
+    assert "TONE_LATE_MS" in chime
+
+
+def test_dashboard_js_posts_got_it_same_origin():
+    js = RENDERER.static_asset("dashboard.js").body.decode()
+    submit = js[js.index('addEventListener("submit"') :]
+    submit = submit[: submit.index("\n  });")]
+    assert 'hasAttribute("data-ack")' in submit
+    assert 'method: "POST"' in submit and 'credentials: "same-origin"' in submit
+    assert 'redirect: "manual"' in submit
+    assert "event.preventDefault()" in submit and "refresh();" in submit
 
 
 def test_dashboard_js_never_leaves_the_page_while_offline():
@@ -2457,3 +2505,301 @@ async def test_reader_page_never_shows_messages(client, auth, snapshots):
     snapshots.pages["u-anna"] = person(messages=MESSAGES)
     html = await (await _get(client, auth, "/p/u-anna")).text()
     assert "data-say" not in html and "Dinner at 7" not in html
+
+
+# ─── Household-chat mentions: @here banner, @name badge + card ───────────
+
+
+def _banner(html: str) -> str:
+    start = html.index('class="dash-alerts"')
+    return html[start : html.index("</section>", start)]
+
+
+async def test_home_here_banner(client, auth, snapshots):
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, mentions=MENTIONS)
+    resp = await _get(client, auth, "/")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    banner = _banner(html)
+    # Above everything else on Home.
+    assert html.index('class="dash-alerts"') < html.index('<header class="dash-top">')
+    assert "Message for everyone" in banner
+    # Sender face + name, the text (escaped), when.
+    assert "dash-face dash-face-msg" in banner and ">Anna<" in banner
+    assert "@here Dinner is &lt;b&gt;ready&lt;/b&gt;!" in banner
+    assert "<b>ready" not in html
+    assert "data-rel>3 min ago</time>" in banner
+    # A real form, so it works without JS: message id, no person.
+    assert '<form class="dash-ack-form" method="post" action="/ack" data-ack>' in banner
+    assert '<input type="hidden" name="message_id" value="h1">' in banner
+    assert 'name="person_id"' not in banner
+    assert '<span aria-hidden="true">✓</span> Got it</button>' in banner
+    # Person mentions are not on Home (only their badges).
+    assert "shoes on" not in html and "call grandma" not in html
+
+
+async def test_home_without_here_has_no_banner(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, mentions=(FOR_LEO, FOR_MIA)
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-alerts" not in html and 'action="/ack"' not in html
+
+
+def _badge(html: str, user_id: str) -> str:
+    match = re.search(
+        rf'<span class="dash-rail-badge" data-badge="{user_id}"[^>]*>', html
+    )
+    assert match, user_id
+    return match.group(0)
+
+
+async def test_rail_badges_people_with_a_mention_waiting(client, auth, snapshots):
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, mentions=MENTIONS)
+    html = await (await _get(client, auth, "/")).text()
+    assert not _badge(html, "u-leo").endswith(" hidden>")
+    assert not _badge(html, "u-mia").endswith(" hidden>")
+    assert _badge(html, "u-anna").endswith(" hidden>")  # @here badges nobody
+    assert _badge(html, "u-pascal").endswith(" hidden>")
+    assert '<span class="dash-visually-hidden">New message for Leo</span>' in html
+
+
+async def test_mentions_swap_in_without_a_reload(client, auth, snapshots):
+    page = await (await _get(client, auth, "/")).text()
+    assert _attr(page, "data-mention-badges") == ""
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, mentions=MENTIONS)
+    frag = await (await _get(client, auth, "/fragment/home")).text()
+    # Same view key: the banner swaps in; the script re-badges the rail
+    # and chimes from the marker.
+    assert _attr(frag, "data-view-key") == _attr(page, "data-view-key")
+    assert 'class="dash-alerts"' in frag
+    assert _attr(frag, "data-mention-badges") == "u-leo u-mia"
+    assert _attr(frag, "data-mention-keys") == "h1:here p1:u-leo p2:u-mia"
+    assert _attr(frag, "data-mention-sound") == "1"
+
+
+async def test_only_rendered_mentions_are_listed_for_the_tone(client, auth, snapshots):
+    """A 4th @here has no banner (three at most), so it must not chime;
+    a person page shows no @here at all."""
+    heres = tuple(
+        mention(f"h{n}", "u-anna", n, text=f"@here number {n}") for n in range(1, 5)
+    )
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, mentions=(*heres, FOR_LEO)
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert _banner(html).count('<li class="dash-alert">') == 3
+    assert "number 4" not in html
+    assert _attr(html, "data-mention-keys") == "h1:here h2:here h3:here p1:u-leo"
+    snapshots.pages["u-anna"] = person(mentions=(*heres, FOR_LEO))
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    assert _attr(html, "data-mention-keys") == "p1:u-leo"
+
+
+async def test_without_a_rail_only_the_own_mention_is_listed(client, auth, snapshots):
+    """One shown person: no rail, so no badges — only their own card counts."""
+    from_anna = mention("p5", "u-anna", 2, person="u-anna", text="@anna hi")
+    snapshots.pages["u-anna"] = person(people=(ANNA,), mentions=(from_anna,))
+    html = await (await _get(client, auth, "/p/u-anna")).text()
+    assert "dash-rail-badge" not in html
+    assert _attr(html, "data-mention-badges") == ""
+    assert _attr(html, "data-mention-keys") == "p5:u-anna"
+
+
+async def test_mention_sound_follows_the_admin_setting(
+    client, auth, snapshots, settings_service
+):
+    await settings_service.update(actor_is_admin=True, patch={"mention_sound": False})
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, mentions=MENTIONS)
+    html = await (await _get(client, auth, "/")).text()
+    assert _attr(html, "data-mention-sound") == "0"
+
+
+async def test_no_mentions_at_night(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, is_night=True, now=at(22, 47), mentions=MENTIONS
+    )
+    html = await (await _get(client, auth, "/")).text()
+    assert "dash-alerts" not in html and "Dinner is" not in html
+    assert _attr(html, "data-mention-keys") == ""
+    assert _attr(html, "data-mention-badges") == ""
+    snapshots.pages["u-leo"] = leo_page(is_night=True, mentions=MENTIONS)
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert "dash-pv-mentions" not in html and "shoes on" not in html
+
+
+@pytest.mark.parametrize(
+    "path", ["/", "/fragment/home", "/p/u-leo", "/fragment/p/u-leo"]
+)
+async def test_a_locked_tablet_shows_no_mention(pin_client, auth, snapshots, path):
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, mentions=MENTIONS)
+    snapshots.pages["u-leo"] = leo_page(mentions=MENTIONS)
+    html = await (await pin_client.get(path, headers=await _locked(auth))).text()
+    assert "Dinner is" not in html and "shoes on" not in html
+    # No tone marker, no badge, no form.
+    assert "data-mention" not in html and "dash-rail-badge" not in html
+    assert 'action="/ack"' not in html
+    assert snapshots.calls == []
+
+
+async def test_reader_page_mention_card(client, auth, snapshots):
+    for_anna = mention("p9", "u-pascal", 5, person="u-anna", text="@anna keys?")
+    snapshots.pages["u-anna"] = person(mentions=(HERE, for_anna, FOR_LEO))
+    resp = await _get(client, auth, "/p/u-anna")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    start = html.index('class="dash-for-you"')
+    card = html[start : html.index("</section>", start)]
+    assert html.index('class="dash-person-head"') < start
+    assert "Message for you" in card and ">Pascal<" in card
+    assert "@anna keys?" in card
+    assert '<input type="hidden" name="message_id" value="p9">' in card
+    assert '<input type="hidden" name="person_id" value="u-anna">' in card
+    assert "Got it</button>" in card
+    # Nothing of the others' mentions on Anna's page (only rail badges),
+    # and no @here banner (that is Home's).
+    assert "shoes on" not in html and "Dinner is" not in html
+    assert "dash-alerts" not in html
+    assert not _badge(html, "u-leo").endswith(" hidden>")
+    assert not _badge(html, "u-anna").endswith(" hidden>")
+
+
+async def test_picture_page_mention_tile(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(now=NOW, mentions=MENTIONS)
+    resp = await _get(client, auth, "/p/u-leo")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    # Still nothing to read but names: the text is only spoken.
+    _assert_only_names_and_icons(html, PEOPLE)
+    assert "shoes on" not in _visible_text(html)
+    start = html.index('class="dash-pv-mentions"')
+    tile = html[start : html.index("</section>", start)]
+    assert 'aria-label="Message from Pascal for you"' in tile
+    assert 'data-say="Pascal says: @leo shoes on"' in tile
+    assert 'data-msg="mention-p1"' in tile
+    assert "💬" in tile and "dash-face dash-face-lg" in tile
+    assert '<input type="hidden" name="person_id" value="u-leo">' in tile
+    assert 'aria-label="Got it"' in tile
+    assert '<span aria-hidden="true">✓</span></button>' in tile
+    # Only Leo's own mention.
+    assert "mention-h1" not in html and "mention-p2" not in html
+
+
+async def test_picture_page_mention_without_now_or_next(client, auth, snapshots):
+    snapshots.pages["u-leo"] = leo_page(
+        now_item=None, next_item=None, mentions=(FOR_LEO,)
+    )
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert '<div class="dash-pv-top">' in html and "dash-pv-mentions" in html
+
+
+# ─── POST /ack ───────────────────────────────────────────────────────────
+
+
+async def _ack(client, headers, data, page: str = "/"):
+    return await client.post(
+        "/ack",
+        data=data,
+        headers={**headers, **_origin(client, page)},
+        allow_redirects=False,
+    )
+
+
+async def test_ack_here_redirects_home(client, auth, snapshots):
+    snapshots.ackable = {("h1", None)}
+    resp = await _ack(client, await _cookie(auth), {"message_id": "h1"})
+    assert resp.status == 303 and resp.headers["Location"] == "/"
+    assert snapshots.acks == [("h1", None)]
+
+
+async def test_ack_on_a_person_page_redirects_back_there(client, auth, snapshots):
+    snapshots.ackable = {("p1", "u-leo")}
+    resp = await _ack(
+        client,
+        await _cookie(auth),
+        {"message_id": "p1", "person_id": "u-leo"},
+        page="/p/u-leo",
+    )
+    assert resp.status == 303 and resp.headers["Location"] == "/p/u-leo"
+    assert snapshots.acks == [("p1", "u-leo")]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"message_id": "h1", "person_id": "u-leo"},  # not Leo's mention
+        {"message_id": "nope"},
+        {"message_id": "p1"},  # a person mention is no @here
+        {},
+        {"message_id": ""},
+        {"message_id": "x" * 300},
+        {"message_id": "h1", "person_id": "x" * 300},
+    ],
+)
+async def test_ack_anything_else_is_a_plain_404(client, auth, snapshots, data):
+    snapshots.ackable = {("p1", "u-leo"), ("h1", None), ("x" * 300, None)}
+    resp = await _ack(client, await _cookie(auth), data)
+    assert resp.status == 404
+    assert "Location" not in resp.headers
+    assert snapshots.acks == []
+
+
+async def test_ack_never_redirects_anywhere_but_home_or_the_page(
+    client, auth, snapshots
+):
+    snapshots.ackable = {("p1", "u-leo"), ("h1", None)}
+    resp = await _ack(
+        client,
+        await _cookie(auth),
+        {"message_id": "p1", "person_id": "u-leo", "next": "//evil.example"},
+    )
+    assert resp.headers["Location"] == "/p/u-leo"
+    resp = await _ack(
+        client,
+        await _cookie(auth),
+        {"message_id": "h1", "person_id": "", "next": "https://evil.example"},
+    )
+    assert resp.status == 303 and resp.headers["Location"] == "/"
+
+
+async def test_ack_without_a_session_is_401(client, snapshots):
+    snapshots.ackable = {("h1", None)}
+    resp = await _ack(client, {}, {"message_id": "h1"})
+    assert resp.status == 401
+    assert snapshots.acks == []
+
+
+async def test_ack_from_a_foreign_origin_is_403(client, auth, snapshots):
+    snapshots.ackable = {("h1", None)}
+    resp = await client.post(
+        "/ack",
+        data={"message_id": "h1"},
+        headers={**await _cookie(auth), "Origin": "http://evil.example"},
+        allow_redirects=False,
+    )
+    assert resp.status == 403
+    assert snapshots.acks == []
+
+
+async def test_ack_on_a_locked_tablet_is_423(pin_client, auth, snapshots):
+    snapshots.ackable = {("h1", None)}
+    resp = await _ack(pin_client, await _locked(auth), {"message_id": "h1"})
+    assert resp.status == 423
+    assert snapshots.calls == [] and snapshots.acks == []
+
+
+async def test_ack_is_rate_limited_per_tablet(client, auth, snapshots):
+    snapshots.ackable = {("h1", None)}
+    headers = await _cookie(auth)
+    for _ in range(ACK_MAX):
+        assert (await _ack(client, headers, {"message_id": "h1"})).status == 303
+    resp = await _ack(client, headers, {"message_id": "h1"})
+    assert resp.status == 429
+    assert 0 < int(resp.headers["Retry-After"]) <= ACK_WINDOW_S
+    assert len(snapshots.acks) == ACK_MAX
+
+
+async def test_get_ack_goes_home(client, auth, snapshots):
+    resp = await client.get("/ack", headers=await _cookie(auth), allow_redirects=False)
+    assert resp.status == 303 and resp.headers["Location"] == "/"
+    assert snapshots.calls == []

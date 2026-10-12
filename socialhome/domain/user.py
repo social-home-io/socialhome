@@ -45,6 +45,12 @@ RESERVED_USERNAMES: frozenset[str] = frozenset(
 SYSTEM_AUTHOR: str = "system-integration"
 SYSTEM_USERNAME: str = SYSTEM_AUTHOR  # alias for call sites that prefer "username"
 
+# Pseudo-author of a household-chat reaction made on the household
+# dashboard (the wall tablet has no account): someone tapped "Got it" on
+# an ``@here`` banner. Stored in ``message_reactions.user_id``; matches no
+# user row, so the chat shows it only as a count.
+DASHBOARD_AUTHOR: str = "household-dashboard"
+
 
 @dataclass(slots=True, frozen=True)
 class UserStatus:

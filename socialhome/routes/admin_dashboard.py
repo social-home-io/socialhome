@@ -210,6 +210,7 @@ class _DashboardAdminView(BaseView):
                 "keep_screen_on": settings.keep_screen_on,
                 "show_status_text": settings.show_status_text,
                 "show_household_messages": settings.show_household_messages,
+                "mention_sound": settings.mention_sound,
                 # The messages come from the household chat: the admin UI
                 # greys the switch while the chat itself is off.
                 "household_chat_enabled": prefs.is_enabled(HOUSEHOLD_CHAT_SECTION),

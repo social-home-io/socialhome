@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -11,10 +12,19 @@ from socialhome.crypto import generate_identity_keypair, derive_instance_id
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.conversation import (
     MUTED_FOREVER,
+    ConversationMessage,
     ConversationType,
+    SystemChatScope,
 )
+from socialhome.domain.federation import FederationEventType
+from socialhome.domain.household_dashboard import ACK_EMOJI
 from socialhome.domain.errors import InvalidMediaRefError
-from socialhome.domain.events import DmMessageCreated, DmMessageUpdated
+from socialhome.domain.user import DASHBOARD_AUTHOR
+from socialhome.domain.events import (
+    DmMessageCreated,
+    DmMessageReactionChanged,
+    DmMessageUpdated,
+)
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.conversation_repo import SqliteConversationRepo
@@ -46,6 +56,7 @@ async def stack(tmp_dir):
 
     s = Stack()
     s.db = db
+    s.bus = bus
     s.user_svc = user_svc
     s.dm_svc = dm_svc
 
@@ -1142,3 +1153,95 @@ async def test_edit_message_guards(stack):
     )
     with pytest.raises(ValueError):
         await stack.dm_svc.edit_message(msg.id, editor_username="anna", new_content="d")
+
+
+# ── Household dashboard acknowledgement ───────────────────────────────────
+
+
+async def _household_chat_with_message(stack, *, content="@here dinner!"):
+    convos = SqliteConversationRepo(stack.db)
+    anna = await stack.provision_user("anna")
+    await stack.provision_user("bob")
+    chat = await convos.create_system_chat(SystemChatScope.HOUSEHOLD)
+    for name in ("anna", "bob"):
+        await convos.upsert_seat(chat.id, name, notif_level="all")
+    msg = ConversationMessage(
+        id="hh-msg-1",
+        conversation_id=chat.id,
+        sender_user_id=anna.user_id,
+        content=content,
+        created_at=datetime.now(timezone.utc),
+    )
+    await convos.save_message(msg)
+    return convos, chat, msg, anna
+
+
+async def test_dashboard_ack_reacts_publishes_and_never_federates(stack):
+    convos, chat, msg, anna = await _household_chat_with_message(stack)
+    fed = _FakeFederationService()
+    repo = _FakeFederationRepo({"peer-a": _confirmed_peer("peer-a")})
+    stack.dm_svc.attach_federation(fed, repo, own_instance_id="self")
+    seen: list[DmMessageReactionChanged] = []
+
+    async def grab(event):
+        seen.append(event)
+
+    stack.bus.subscribe(DmMessageReactionChanged, grab)
+    await stack.dm_svc.acknowledge_on_dashboard(msg.id, as_user_id=DASHBOARD_AUTHOR)
+    # Idempotent: a second tap on another tablet changes nothing.
+    await stack.dm_svc.acknowledge_on_dashboard(msg.id, as_user_id=DASHBOARD_AUTHOR)
+    reactions = await convos.list_reactions(msg.id)
+    assert [(r.user_id, r.emoji) for r in reactions] == [(DASHBOARD_AUTHOR, ACK_EMOJI)]
+    assert seen and seen[0].message_id == msg.id
+    assert seen[0].emoji == ACK_EMOJI and seen[0].action == "add"
+    assert seen[0].user_id == DASHBOARD_AUTHOR
+    assert anna.user_id in seen[0].recipient_user_ids
+    assert [
+        s for s in fed.sent if s["type"] is FederationEventType.DM_MESSAGE_REACTION
+    ] == []
+    assert fed.sent == []
+
+
+async def test_parallel_dashboard_acks_publish_once(stack):
+    """Five tablets tapping "Got it" at once: one row, one live event."""
+    convos, _chat, msg, _anna = await _household_chat_with_message(stack)
+    seen: list[DmMessageReactionChanged] = []
+
+    async def grab(event):
+        seen.append(event)
+
+    stack.bus.subscribe(DmMessageReactionChanged, grab)
+    await asyncio.gather(
+        *(
+            stack.dm_svc.acknowledge_on_dashboard(msg.id, as_user_id=DASHBOARD_AUTHOR)
+            for _ in range(5)
+        )
+    )
+    assert len(await convos.list_reactions(msg.id)) == 1
+    assert len(seen) == 1
+
+
+async def test_dashboard_ack_credits_a_person(stack):
+    convos, _chat, msg, _anna = await _household_chat_with_message(stack)
+    bob = await stack.user_svc.get("bob")
+    await stack.dm_svc.acknowledge_on_dashboard(msg.id, as_user_id=bob.user_id)
+    assert [r.user_id for r in await convos.list_reactions(msg.id)] == [bob.user_id]
+
+
+async def test_dashboard_ack_refuses_anything_but_a_live_household_message(stack):
+    convos, _chat, msg, _anna = await _household_chat_with_message(stack)
+    with pytest.raises(KeyError):
+        await stack.dm_svc.acknowledge_on_dashboard("nope", as_user_id=DASHBOARD_AUTHOR)
+    dm = await stack.dm_svc.create_dm(creator_username="anna", other_username="bob")
+    dm_msg = await stack.dm_svc.send_message(
+        dm.id, sender_username="anna", content="hi"
+    )
+    with pytest.raises(KeyError):
+        await stack.dm_svc.acknowledge_on_dashboard(
+            dm_msg.id, as_user_id=DASHBOARD_AUTHOR
+        )
+    assert await convos.list_reactions(dm_msg.id) == []
+    await convos.soft_delete_message(msg.id)
+    with pytest.raises(KeyError):
+        await stack.dm_svc.acknowledge_on_dashboard(msg.id, as_user_id=DASHBOARD_AUTHOR)
+    assert await convos.list_reactions(msg.id) == []

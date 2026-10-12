@@ -1,6 +1,6 @@
 {#- A person who reads (mockups C + D2): header, NOW / NEXT, then school
     today (when there is school), today's events + tomorrow, chores. -#}
-{% from "_macros.html.j2" import face, whereabouts, agenda_row, chore with context %}
+{% from "_macros.html.j2" import face, whereabouts, agenda_row, chore, mention_alert with context %}
 {% set p = page.person %}
 <div class="dash-person">
   <header class="dash-person-head">
@@ -14,6 +14,15 @@
     {% endif %}
     <time class="dash-clock dash-clock-sm" datetime="{{ clock.iso }}" data-clock>{{ clock.time }}</time>
   </header>
+
+  {% if my_mentions %}
+  {#- Someone @-mentioned this person in the household chat. -#}
+  <section class="dash-for-you" aria-label="{{ t("dashboard.mentions.for_you") }}">
+    <ul class="dash-alert-list">
+      {% for m in my_mentions %}{{ mention_alert(m, t("dashboard.mentions.for_you")) }}{% endfor %}
+    </ul>
+  </section>
+  {% endif %}
 
   {% if page.now_item or page.next_item %}
   <section class="dash-nownext">

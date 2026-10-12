@@ -153,5 +153,10 @@
   "dashboard.messages.say.photo": "{name} heeft een foto gestuurd.",
   "dashboard.messages.say.video": "{name} heeft een video gestuurd.",
   "dashboard.messages.say.file": "{name} heeft een bestand gestuurd.",
-  "dashboard.messages.say.voice": "{name} heeft een spraakbericht gestuurd."
+  "dashboard.messages.say.voice": "{name} heeft een spraakbericht gestuurd.",
+  "dashboard.mentions.everyone": "Bericht voor iedereen",
+  "dashboard.mentions.for_you": "Bericht voor jou",
+  "dashboard.mentions.got_it": "Gezien",
+  "dashboard.mentions.badge": "Nieuw bericht voor {name}",
+  "dashboard.mentions.from_for_you": "Bericht van {name} voor jou"
 }

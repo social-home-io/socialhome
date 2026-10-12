@@ -31,8 +31,14 @@ if TYPE_CHECKING:
     from .user import User
 
 __all__ = [
+    "ACK_EMOJI",
     "DEFAULT_DASHBOARD_PORT",
+    "HERE_SHOWN",
     "IDLE_RETURN_CHOICES",
+    "MENTION_HERE",
+    "MENTION_MAX_AGE",
+    "MENTION_PERSON",
+    "MENTIONS_SCANNED",
     "MESSAGE_KINDS",
     "MESSAGE_MAX_AGE",
     "MESSAGES_SHOWN",
@@ -53,6 +59,7 @@ __all__ = [
     "DashboardAgendaItem",
     "DashboardEvent",
     "DashboardLesson",
+    "DashboardMention",
     "DashboardMessage",
     "DashboardNotRunningError",
     "DashboardPasswordRequiredError",
@@ -71,11 +78,14 @@ __all__ = [
     "HomeSnapshot",
     "PersonSnapshot",
     "hash_color",
+    "here_alerts",
     "in_night_window",
     "initials",
     "is_pure_emoji",
     "leading_emoji",
     "lesson_color_token",
+    "mentioned_ids",
+    "mentions_for",
     "normalize_token_key",
     "picture_effective",
     "subject_color_tokens",
@@ -109,6 +119,25 @@ SETUP_TOKEN_TTL_SECONDS = 600
 #: newest few, and none older than this (wall-clock age).
 MESSAGES_SHOWN = 3
 MESSAGE_MAX_AGE = timedelta(hours=6)
+
+#: The reaction a "Got it" on the wall writes to a household-chat message
+#: — and the one that marks a mention as seen (the SPA picker's ✅).
+ACK_EMOJI: Final = "✅"
+
+#: A household-chat ``@here`` / ``@name`` shows on the wall (banner,
+#: badge) until acknowledged or this old; at most this many of the
+#: newest messages of that hour are scanned for mentions.
+MENTION_MAX_AGE = timedelta(hours=1)
+MENTIONS_SCANNED = 100
+
+#: ``@here`` banners Home shows at once (the newest) — and so the only
+#: ``@here`` mentions a "Got it" can acknowledge.
+HERE_SHOWN = 3
+
+#: :attr:`DashboardMention.kind` values: ``@here`` (a banner on Home) or
+#: ``@name`` (a badge on that person's face and a card on their page).
+MENTION_HERE: Final = "here"
+MENTION_PERSON: Final = "person"
 
 #: :attr:`DashboardMessage.kind` values.
 MESSAGE_KINDS = frozenset({"text", "photo", "video", "file", "voice"})
@@ -148,6 +177,9 @@ class DashboardSettings:
     #: Home (and picture-view pages) show the last few household-chat
     #: messages. Off by default: anyone at the tablet can read them.
     show_household_messages: bool = False
+    #: Play a short on-device tone when a new @here / @name mention of
+    #: the household chat appears (part of the messages opt-in above).
+    mention_sound: bool = True
     #: Admin-set base URL tablets use (``http(s)://host[:port]``), shown
     #: in the admin UI and setup links instead of a guessed address.
     address: str | None = None
@@ -631,6 +663,50 @@ class DashboardMessage:
 
 
 @dataclass(slots=True, frozen=True)
+class DashboardMention:
+    """An unacknowledged household-chat mention the wall shows.
+
+    ``kind`` is :data:`MENTION_HERE` (``person_id`` is ``None``) or
+    :data:`MENTION_PERSON` (``person_id`` is the shown member it
+    @-mentions). ``text`` is the message's plain text (its latest edit);
+    ``sent_at`` is in the household zone. One message may give both an
+    ``@here`` and several person mentions.
+    """
+
+    message_id: str
+    sender_id: str
+    text: str
+    sent_at: datetime
+    kind: str
+    person_id: str | None = None
+
+
+def here_alerts(
+    mentions: tuple[DashboardMention, ...],
+) -> tuple[DashboardMention, ...]:
+    """The ``@here`` mentions among ``mentions`` (order kept)."""
+    return tuple(m for m in mentions if m.kind == MENTION_HERE)
+
+
+def mentions_for(
+    mentions: tuple[DashboardMention, ...], person_id: str
+) -> tuple[DashboardMention, ...]:
+    """``person_id``'s own ``@name`` mentions among ``mentions``."""
+    return tuple(
+        m for m in mentions if m.kind == MENTION_PERSON and m.person_id == person_id
+    )
+
+
+def mentioned_ids(mentions: tuple[DashboardMention, ...]) -> frozenset[str]:
+    """Everyone with an ``@name`` mention waiting — the rail's badges."""
+    return frozenset(
+        m.person_id
+        for m in mentions
+        if m.kind == MENTION_PERSON and m.person_id is not None
+    )
+
+
+@dataclass(slots=True, frozen=True)
 class HomeSnapshot:
     """Everything the dashboard's household overview renders.
 
@@ -639,7 +715,9 @@ class HomeSnapshot:
     lesson still to start today. ``tomorrow_first`` is the earliest timed
     event or first lesson tomorrow — for night mode. ``messages`` are the
     newest household-chat messages, newest first — empty unless the admin
-    turned them on, and always at night.
+    turned them on, and always at night. ``mentions`` are the
+    unacknowledged household-chat ``@here`` / ``@name`` mentions of the
+    last :data:`MENTION_MAX_AGE`, newest first — on the same opt-in.
     """
 
     now: datetime
@@ -657,6 +735,7 @@ class HomeSnapshot:
     school: tuple[DashboardSchoolDay, ...] = ()
     tomorrow_first: DashboardAgendaItem | None = None
     messages: tuple[DashboardMessage, ...] = ()
+    mentions: tuple[DashboardMention, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -672,7 +751,9 @@ class PersonSnapshot:
     week (overdue included) and those completed today. ``people`` is
     every shown member (``person`` among them), in household order — the
     dashboard's rail. ``messages`` (as on Home) only for a picture-view
-    person — a reader page never shows them.
+    person — a reader page never shows them. ``mentions`` are all of
+    them, as on Home (the rail badges everyone mentioned); the page shows
+    only the person's own (:func:`mentions_for`).
     """
 
     person: DashboardPerson
@@ -689,6 +770,7 @@ class PersonSnapshot:
     school_tomorrow_first: DashboardLesson | None = None
     people: tuple[DashboardPerson, ...] = ()
     messages: tuple[DashboardMessage, ...] = ()
+    mentions: tuple[DashboardMention, ...] = ()
 
 
 class DashboardPinInvalidError(CodedError, ValueError):

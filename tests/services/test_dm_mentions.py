@@ -121,6 +121,25 @@ async def test_here_is_never_a_dm_mention(env):
     assert [(m.type, m.user_id) for m in out] == [(MentionType.USER, bob.user_id)]
 
 
+async def test_parse_with_here_keeps_here_for_the_dashboard(env):
+    """The dashboard's read keeps ``@here`` (one roster read for all the
+    texts); the chat's own resolve still drops it."""
+    await env.user_svc.provision(username="anna", display_name="Anna")
+    bob = await env.user_svc.provision(username="bob", display_name="Bob")
+    await _group(env, "g2h", "anna", "bob")
+    out = await env.resolver.parse_with_here(
+        "g2h", ["@here @bob", "plain", "", "@nobody"]
+    )
+    assert [[(m.type, m.user_id) for m in ms] for ms in out] == [
+        [(MentionType.HERE, None), (MentionType.USER, bob.user_id)],
+        [],
+        [],
+        [],
+    ]
+    assert [m.type for m in await env.resolver.resolve("g2h", "@here")] == []
+    assert await env.resolver.parse_with_here("g2h", []) == []
+
+
 async def test_member_who_left_the_group_does_not_resolve(env):
     await env.user_svc.provision(username="anna", display_name="Anna")
     await env.user_svc.provision(username="bob", display_name="Bob")

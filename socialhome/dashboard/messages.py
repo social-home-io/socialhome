@@ -16,6 +16,11 @@ module turns each into a :class:`MessageRow` the templates render:
 
 Mentions and links stay plain text: nothing on the wall is tappable but
 the row itself. Pure: no I/O.
+
+**Mentions** (:class:`~socialhome.domain.household_dashboard.DashboardMention`)
+become :class:`MentionCard` values: the ``@here`` banner on Home, the
+"Message for you" card on a reader page and the 💬 tile on a picture
+page — each with a "Got it" form posting to ``/ack``.
 """
 
 from __future__ import annotations
@@ -25,11 +30,22 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Final
 
-from ..domain.household_dashboard import DashboardMessage, DashboardPerson
+from ..domain.household_dashboard import (
+    DashboardMention,
+    DashboardMessage,
+    DashboardPerson,
+)
 from .clock import ago, hhmm
 from .presenter import Fmt
 
-__all__ = ["KIND_ICON", "NEW_FOR", "MessageRow", "message_rows"]
+__all__ = [
+    "KIND_ICON",
+    "NEW_FOR",
+    "MentionCard",
+    "MessageRow",
+    "mention_cards",
+    "message_rows",
+]
 
 #: A message this fresh is "new": an accent bar, a "new" chip and a
 #: relative time.
@@ -96,6 +112,58 @@ def message_rows(messages: Iterable[DashboardMessage], fmt: Fmt) -> list[Message
                 say=_say(m, person.display_name, fmt),
                 new=new,
                 when=ago(fmt.now, m.sent_at, fmt.t) if new else hhmm(m.sent_at),
+                iso=m.sent_at.isoformat(),
+            )
+        )
+    return out
+
+
+@dataclass(slots=True, frozen=True)
+class MentionCard:
+    """One unacknowledged mention as the wall renders it (plain text)."""
+
+    #: The household-chat message id (what the "Got it" form names).
+    id: str
+    #: ``None`` for an ``@here``; else the mentioned person (the form's
+    #: ``person_id``).
+    person_id: str | None
+    #: The sender.
+    person: DashboardPerson
+    text: str
+    #: What tap-to-speak reads.
+    say: str
+    #: "4 min ago".
+    when: str
+    iso: str
+
+    @property
+    def key(self) -> str:
+        """Unique per mention on a page (``dashboard.js`` remembers which
+        it has chimed for): ``<message id>:<person id | "here">``."""
+        return f"{self.id}:{self.person_id or 'here'}"
+
+
+def mention_cards(mentions: Iterable[DashboardMention], fmt: Fmt) -> list[MentionCard]:
+    """The cards for ``mentions``, in their order — one whose sender
+    isn't a shown person on this page is left out."""
+    out: list[MentionCard] = []
+    for m in mentions:
+        found = fmt.people((m.sender_id,))
+        if not found:
+            continue
+        person = found[0]
+        out.append(
+            MentionCard(
+                id=m.message_id,
+                person_id=m.person_id,
+                person=person,
+                text=m.text,
+                say=fmt.t(
+                    "dashboard.messages.say.text",
+                    name=person.display_name,
+                    text=m.text,
+                ),
+                when=ago(fmt.now, m.sent_at, fmt.t),
                 iso=m.sent_at.isoformat(),
             )
         )

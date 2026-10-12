@@ -14,8 +14,9 @@ import pytest
 
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import Calendar, CalendarEvent
-from socialhome.domain.conversation import ConversationMessage
+from socialhome.domain.conversation import ConversationMessage, MentionGlance
 from socialhome.domain.household_dashboard import (
+    HERE_SHOWN,
     PERSON_PALETTE,
     TIMETABLE_COLOR_HEX,
     DashboardEvent,
@@ -25,6 +26,9 @@ from socialhome.domain.household_dashboard import (
     HomeSnapshot,
     PersonSnapshot,
     hash_color,
+    here_alerts,
+    mentioned_ids,
+    mentions_for,
 )
 from socialhome.domain.preferences import HouseholdPreferences
 from socialhome.domain.presence import PersonPresence
@@ -38,7 +42,7 @@ from socialhome.domain.timetable import (
     TimetableEntry,
     TimetableOverride,
 )
-from socialhome.domain.user import User, UserStatus
+from socialhome.domain.user import DASHBOARD_AUTHOR, User, UserStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.calendar_repo import _expand_window
 from socialhome.repositories.cp_repo import SqliteCpRepo
@@ -233,6 +237,8 @@ class FakeChat(Recorder):
         super().__init__()
         self.rows: list[ConversationMessage] = []
         self.args: dict[str, Any] = {}
+        self.mention_rows: list[MentionGlance] = []
+        self.mention_args: dict[str, Any] = {}
 
     async def recent_messages(self, *, since, until, senders, limit):
         self.hit("recent_messages")
@@ -243,6 +249,31 @@ class FakeChat(Recorder):
             "limit": limit,
         }
         return list(self.rows)
+
+    async def recent_mentions(self, *, since, until, senders, limit):
+        self.hit("recent_mentions")
+        self.mention_args = {
+            "since": since,
+            "until": until,
+            "senders": frozenset(senders),
+            "limit": limit,
+        }
+        return list(self.mention_rows)
+
+
+class FakeAcks(Recorder):
+    """``DmService.acknowledge_on_dashboard``: records each write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.acks: list[tuple[str, str]] = []
+        self.unknown: set[str] = set()
+
+    async def acknowledge_on_dashboard(self, message_id: str, *, as_user_id: str):
+        self.hit("acknowledge_on_dashboard")
+        if message_id in self.unknown:
+            raise KeyError(message_id)
+        self.acks.append((message_id, as_user_id))
 
 
 class FakeChildProtection(Recorder):
@@ -635,6 +666,7 @@ class Harness:
             )
         )
         self.chat = FakeChat()
+        self.acks = FakeAcks()
         self.cp = FakeChildProtection()
         self.service = HouseholdDashboardService(
             user_service=self.users,  # type: ignore[arg-type]
@@ -648,6 +680,7 @@ class Harness:
             dashboard_settings=self.settings,  # type: ignore[arg-type]
             household_chat=self.chat,  # type: ignore[arg-type]
             child_protection=child_protection or self.cp,
+            acknowledgements=self.acks,  # type: ignore[arg-type]
         )
 
     async def home(self, now: datetime) -> HomeSnapshot:
@@ -1168,6 +1201,7 @@ async def test_many_lessons_tomorrow_never_hide_an_after_school_event():
         dashboard_settings=h.settings,  # type: ignore[arg-type]
         household_chat=h.chat,  # type: ignore[arg-type]
         child_protection=h.cp,  # type: ignore[arg-type]
+        acknowledgements=h.acks,  # type: ignore[arg-type]
     )
     page = await h.person("u-ben", at(MONDAY, 15, 30))
     assert page is not None
@@ -1555,8 +1589,8 @@ async def test_messages_on_home():
     h.chat.rows[3] = dataclasses.replace(h.chat.rows[3], content="")
     snap = await h.home(now)
     # One read: the last 6 h, only shown members (hidden Carl is not
-    # asked for), at most three.
-    assert h.chat.calls == ["recent_messages"]
+    # asked for), at most three (plus the mention glance).
+    assert sorted(h.chat.calls) == ["recent_mentions", "recent_messages"]
     assert h.chat.args["since"] == now - timedelta(hours=6)
     assert h.chat.args["senders"] == frozenset({"u-anna", "u-ben", "u-dora"})
     assert h.chat.args["limit"] == 3
@@ -1630,11 +1664,13 @@ async def test_messages_only_on_picture_view_pages():
     h.chat.rows = [chat_msg("m1", "u-anna", now - timedelta(minutes=1))]
     reader = await h.person("u-anna", now)
     assert reader is not None and reader.messages == ()
-    assert h.chat.calls == []  # a reader page never reads them
+    # A reader page never reads the messages (only the mention glance).
+    assert h.chat.calls == ["recent_mentions"]
+    h.chat.calls.clear()
     pupil = await h.person("u-ben", now)  # child-protected minor: pictures
     assert pupil is not None and pupil.person.picture_view
     assert [m.id for m in pupil.messages] == ["m1"]
-    assert h.chat.calls == ["recent_messages"]
+    assert sorted(h.chat.calls) == ["recent_mentions", "recent_messages"]
 
 
 # ─── Household chat: guardian blocks, future stamps ──────────────────────
@@ -1792,3 +1828,264 @@ async def test_a_lifted_protection_lifts_the_block_from_the_database(cp_db):
     snap = await h.home(at(MONDAY, 15, 30))
     assert h.chat.args["senders"] == frozenset({"u-anna", "u-ben", "u-dora"})
     assert snap.messages == ()
+
+
+# ─── Household chat mentions (@here banner, @name badge) ─────────────────
+
+
+def glance(
+    mid: str,
+    sender: str,
+    sent: datetime,
+    *,
+    here: bool = False,
+    users: tuple[str, ...] = (),
+    acked: frozenset[str] = frozenset(),
+    **kw: Any,
+) -> MentionGlance:
+    return MentionGlance(
+        message=chat_msg(mid, sender, sent, **kw),
+        here=here,
+        user_ids=users,
+        acked_by=acked,
+    )
+
+
+async def test_mentions_are_off_with_the_messages_and_never_read():
+    h = Harness()
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert snap.mentions == ()
+    assert h.chat.calls == []
+
+
+async def test_mentions_on_home_and_their_acknowledgement_state():
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    ago = lambda m: now - timedelta(minutes=m)  # noqa: E731
+    h.chat.mention_rows = [
+        glance("here", "u-anna", ago(5), here=True, content=" @here dinner! "),
+        # The sender's own ✅ doesn't count for @here; anyone else's does.
+        glance("own-ack", "u-anna", ago(6), here=True, acked=frozenset({"u-anna"})),
+        glance(
+            "seen", "u-anna", ago(7), here=True, acked=frozenset({DASHBOARD_AUTHOR})
+        ),
+        glance("ben", "u-anna", ago(8), users=("u-ben",), content="@ben shoes"),
+        # Ben acknowledged this one; Dora hasn't.
+        glance(
+            "both",
+            "u-anna",
+            ago(9),
+            users=("u-ben", "u-dora"),
+            acked=frozenset({"u-ben"}),
+        ),
+        # Hidden Carl, the sender herself and strangers get nothing.
+        glance("carl", "u-anna", ago(10), users=("u-carl", "u-anna", "u-x")),
+    ]
+    snap = await h.home(now)
+    assert h.chat.mention_args["since"] == now - timedelta(hours=1)
+    assert h.chat.mention_args["until"] == now + timedelta(minutes=2)
+    assert h.chat.mention_args["senders"] == frozenset({"u-anna", "u-ben", "u-dora"})
+    assert h.chat.mention_args["limit"] == 100
+    assert [(m.message_id, m.kind, m.person_id) for m in snap.mentions] == [
+        ("here", "here", None),
+        ("own-ack", "here", None),
+        ("ben", "person", "u-ben"),
+        ("both", "person", "u-dora"),
+    ]
+    first = snap.mentions[0]
+    assert first.text == "@here dinner!"
+    assert first.sender_id == "u-anna"
+    assert first.sent_at.utcoffset() == timedelta(hours=2)  # household zone
+    assert [m.message_id for m in here_alerts(snap.mentions)] == ["here", "own-ack"]
+    assert mentioned_ids(snap.mentions) == frozenset({"u-ben", "u-dora"})
+
+
+async def test_mentions_never_trust_the_read_alone():
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance("hidden", "u-carl", now - timedelta(minutes=1), here=True),
+        glance("gone", "u-anna", now - timedelta(minutes=1), here=True, deleted=True),
+        glance("ahead", "u-anna", now + timedelta(minutes=1), here=True),
+        glance("old", "u-anna", now - timedelta(minutes=61), here=True),
+        glance("voice", "u-anna", now - timedelta(minutes=1), here=True, type="audio"),
+        glance("ok", "u-anna", now - timedelta(minutes=1), here=True),
+    ]
+    snap = await h.home(now)
+    assert [m.message_id for m in snap.mentions] == ["ok"]
+
+
+async def test_mentions_not_read_at_night_or_with_the_chat_off():
+    h = Harness(settings=messages_on())
+    h.chat.mention_rows = [glance("x", "u-anna", at(MONDAY, 22, 50), here=True)]
+    snap = await h.home(at(MONDAY, 23, 0))
+    assert snap.mentions == () and h.chat.calls == []
+    h = Harness(
+        prefs=HouseholdPreferences(tz=BERLIN, feat_household_chat=False),
+        settings=messages_on(),
+    )
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert snap.mentions == () and h.chat.calls == []
+
+
+async def test_mentions_skip_guardian_withheld_senders():
+    h = Harness(settings=messages_on())
+    h.cp.counterparts = {"u-ben": frozenset({"u-anna"})}
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance("from-anna", "u-anna", now - timedelta(minutes=1), users=("u-dora",)),
+        glance("from-dora", "u-dora", now - timedelta(minutes=2), here=True),
+    ]
+    snap = await h.home(now)
+    assert h.chat.mention_args["senders"] == frozenset({"u-dora"})
+    assert [m.message_id for m in snap.mentions] == ["from-dora"]
+    # One guardian read serves both the messages and the mentions.
+    assert h.cp.calls == ["u-ben"]
+
+
+async def test_a_failing_mention_read_degrades_alone(caplog):
+    h = Harness(settings=messages_on())
+    h.chat.fail.add("recent_mentions")
+    with caplog.at_level(logging.WARNING):
+        snap = await h.home(at(MONDAY, 15, 30))
+    assert "household chat mentions failed" in caplog.text
+    assert snap.mentions == ()
+    assert snap.events_today
+
+
+async def test_every_page_carries_the_mentions_for_the_rail():
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance("ben", "u-anna", now - timedelta(minutes=1), users=("u-ben",)),
+        glance("here", "u-dora", now - timedelta(minutes=2), here=True),
+    ]
+    page = await h.person("u-anna", now)  # a reader page
+    assert page is not None
+    assert [m.message_id for m in page.mentions] == ["ben", "here"]
+    assert mentions_for(page.mentions, "u-anna") == ()
+    pupil = await h.person("u-ben", now)
+    assert pupil is not None
+    assert [m.message_id for m in mentions_for(pupil.mentions, "u-ben")] == ["ben"]
+
+
+# ─── Acknowledging from the wall ─────────────────────────────────────────
+
+
+async def test_acknowledge_here_writes_as_the_dashboard():
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance("here", "u-anna", now - timedelta(minutes=5), here=True)
+    ]
+    assert await h.service.acknowledge("here", now=now) is True
+    assert h.acks.acks == [("here", DASHBOARD_AUTHOR)]
+
+
+async def test_acknowledge_a_person_mention_credits_that_person():
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance("ben", "u-anna", now - timedelta(minutes=5), users=("u-ben",))
+    ]
+    assert await h.service.acknowledge("ben", person_id="u-ben", now=now) is True
+    assert h.acks.acks == [("ben", "u-ben")]
+
+
+async def test_acknowledge_here_only_among_the_banners_shown():
+    """Home shows the newest HERE_SHOWN @here banners; a 4th (older) one
+    has no banner, so no tap can acknowledge it — write set = visible set."""
+    assert HERE_SHOWN == 3
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance(f"h{n}", "u-anna", now - timedelta(minutes=n), here=True)
+        for n in range(1, 5)
+    ]
+    assert await h.service.acknowledge("h4", now=now) is False
+    assert await h.service.acknowledge("h3", now=now) is True
+    assert h.acks.acks == [("h3", DASHBOARD_AUTHOR)]
+
+
+async def test_acknowledge_already_seen_is_a_quiet_yes():
+    """Two tablets tapping at once: the second needs no second write."""
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance(
+            "here",
+            "u-anna",
+            now - timedelta(minutes=5),
+            here=True,
+            acked=frozenset({DASHBOARD_AUTHOR}),
+        ),
+        glance(
+            "ben",
+            "u-anna",
+            now - timedelta(minutes=5),
+            users=("u-ben",),
+            acked=frozenset({"u-ben"}),
+        ),
+    ]
+    assert await h.service.acknowledge("here", now=now) is True
+    assert await h.service.acknowledge("ben", person_id="u-ben", now=now) is True
+    assert h.acks.acks == []
+
+
+@pytest.mark.parametrize(
+    ("message_id", "person_id"),
+    [
+        ("nope", None),  # not a recent mention at all
+        ("ben", None),  # a person mention is no @here
+        ("here", "u-ben"),  # an @here mentions nobody in particular
+        ("ben", "u-dora"),  # Dora isn't mentioned
+        ("carl", "u-carl"),  # hidden person
+        ("ben", "u-nobody"),  # unknown person
+        ("old", None),  # over an hour old
+        ("hidden-sender", None),  # from a hidden person
+        ("self", "u-anna"),  # the sender mentioning herself
+    ],
+)
+async def test_acknowledge_refuses_anything_the_wall_does_not_show(
+    message_id, person_id
+):
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance("here", "u-anna", now - timedelta(minutes=5), here=True),
+        glance("ben", "u-anna", now - timedelta(minutes=5), users=("u-ben",)),
+        glance("carl", "u-anna", now - timedelta(minutes=5), users=("u-carl",)),
+        glance("old", "u-anna", now - timedelta(minutes=70), here=True),
+        glance("hidden-sender", "u-carl", now - timedelta(minutes=5), here=True),
+        glance("self", "u-anna", now - timedelta(minutes=5), users=("u-anna",)),
+    ]
+    assert (
+        await h.service.acknowledge(message_id, person_id=person_id, now=now) is False
+    )
+    assert h.acks.acks == []
+
+
+async def test_acknowledge_refused_at_night_and_with_messages_off():
+    h = Harness(settings=messages_on())
+    late = at(MONDAY, 23, 0)
+    h.chat.mention_rows = [
+        glance("here", "u-anna", late - timedelta(minutes=5), here=True)
+    ]
+    assert await h.service.acknowledge("here", now=late) is False
+    h = Harness()  # messages (and so mentions) off
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance("here", "u-anna", now - timedelta(minutes=5), here=True)
+    ]
+    assert await h.service.acknowledge("here", now=now) is False
+    assert h.chat.calls == [] and h.acks.acks == []
+
+
+async def test_acknowledge_a_message_gone_meanwhile_is_refused():
+    h = Harness(settings=messages_on())
+    now = at(MONDAY, 15, 30)
+    h.chat.mention_rows = [
+        glance("here", "u-anna", now - timedelta(minutes=5), here=True)
+    ]
+    h.acks.unknown.add("here")
+    assert await h.service.acknowledge("here", now=now) is False

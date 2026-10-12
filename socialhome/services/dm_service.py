@@ -49,6 +49,7 @@ from ..domain.events import (
     DmMessageUpdated,
 )
 from ..domain.federation import FederationEventType
+from ..domain.household_dashboard import ACK_EMOJI
 from ..federation import compat
 from ..federation.owner_bound_id import SPACE_CHAT_MESSAGE_KIND, mint_owner_bound_id
 from ..infrastructure.event_bus import EventBus
@@ -1463,6 +1464,33 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             },
             sender_user_id=actor.user_id,
         )
+
+    async def acknowledge_on_dashboard(
+        self, message_id: str, *, as_user_id: str
+    ) -> None:
+        """A "Got it" tapped on the household dashboard: an
+        :data:`~socialhome.domain.household_dashboard.ACK_EMOJI` reaction
+        by ``as_user_id`` (the person whose page it was, or
+        :data:`~socialhome.domain.user.DASHBOARD_AUTHOR` for an ``@here``
+        banner on Home).
+
+        Only for a live message of the household chat — :class:`KeyError`
+        for anything else (unknown, deleted, another chat), without
+        saying which. The caller (the dashboard's snapshot service) has
+        already re-checked that the wall may acknowledge it. Idempotent
+        (``INSERT OR IGNORE``): only the tap that adds the row publishes,
+        so tablets tapping at once send one live update. Open chats update live through the same
+        ``DmMessageReactionChanged`` as a reaction from the app; it is
+        never federated (the household chat stays on this household).
+        """
+        msg = await self._convos.get_message(message_id)
+        if msg is None or msg.deleted:
+            raise KeyError("message not found")
+        conv = await self._convos.get(msg.conversation_id)
+        if conv is None or conv.system_scope is not SystemChatScope.HOUSEHOLD:
+            raise KeyError("message not found")
+        if await self._convos.add_reaction(message_id, as_user_id, ACK_EMOJI):
+            await self._publish_reaction(msg, as_user_id, ACK_EMOJI, "add")
 
     async def list_reactions(
         self,

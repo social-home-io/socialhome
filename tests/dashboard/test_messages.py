@@ -8,11 +8,20 @@ from pathlib import Path
 import pytest
 
 import socialhome.i18n as i18n_pkg
-from socialhome.dashboard.messages import NEW_FOR, message_rows
+from socialhome.dashboard.messages import NEW_FOR, mention_cards, message_rows
 from socialhome.dashboard.presenter import ColorBook, Fmt
 from socialhome.i18n import Catalog
 
-from .factories import MESSAGES, NOW, PEOPLE, TODAY, message
+from .factories import (
+    FOR_LEO,
+    HERE,
+    MESSAGES,
+    NOW,
+    PEOPLE,
+    TODAY,
+    mention,
+    message,
+)
 
 CATALOG = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
 
@@ -89,3 +98,24 @@ def test_rows_in_german():
     assert rows[0].say.startswith("Anna sagt: ")
     assert rows[0].when == "vor 4 Min."
     assert rows[1].text == "Foto" and rows[1].say == "Pascal hat ein Foto geschickt."
+
+
+# ─── Mentions (@here banner, @name card / tile) ─────────────────────────
+
+
+def test_mention_cards_show_the_sender_text_and_a_sentence():
+    here, leo = mention_cards([HERE, FOR_LEO], _fmt())
+    assert (here.id, here.person.user_id) == ("h1", "u-anna")
+    assert here.key == "h1:here"
+    assert here.text == "@here Dinner is <b>ready</b>!"  # escaped by the template
+    assert here.say == "Anna says: @here Dinner is <b>ready</b>!"
+    assert here.when == "3 min ago"
+    assert here.iso == (NOW - timedelta(minutes=3)).isoformat()
+    assert here.person_id is None
+    assert (leo.key, leo.person_id) == ("p1:u-leo", "u-leo")
+    assert leo.person.user_id == "u-pascal"
+
+
+def test_mention_cards_skip_senders_not_shown():
+    hidden = mention("x", "u-hidden", 1, text="@here secret")
+    assert [c.id for c in mention_cards([hidden, HERE], _fmt())] == ["h1"]

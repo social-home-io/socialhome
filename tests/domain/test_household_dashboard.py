@@ -10,6 +10,12 @@ import pytest
 
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
+    MENTION_HERE,
+    MENTION_PERSON,
+    DashboardMention,
+    here_alerts,
+    mentioned_ids,
+    mentions_for,
     is_pure_emoji,
     leading_emoji,
     DEFAULT_DASHBOARD_PORT,
@@ -74,6 +80,8 @@ def test_settings_defaults():
     assert s.keep_screen_on is True
     assert s.show_status_text is False
     assert s.show_household_messages is False
+    # Mentions play a tone by default (admin can turn it off).
+    assert s.mention_sound is True
     assert s.address is None
     assert s.people == ()
     assert s.password_set_at is None
@@ -412,3 +420,28 @@ def test_is_pure_emoji(text, pure):
 )
 def test_leading_emoji_only_takes_pictures(text, lead):
     assert leading_emoji(text) == lead
+
+
+def _mention(mid: str, kind: str, person: str | None = None) -> DashboardMention:
+    return DashboardMention(
+        message_id=mid,
+        sender_id="u-anna",
+        text="hi",
+        sent_at=datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc),
+        kind=kind,
+        person_id=person,
+    )
+
+
+def test_mention_helpers_split_here_from_people():
+    ms = (
+        _mention("a", MENTION_HERE),
+        _mention("b", MENTION_PERSON, "u-ben"),
+        _mention("c", MENTION_PERSON, "u-dora"),
+        _mention("d", MENTION_PERSON, "u-ben"),
+    )
+    assert [m.message_id for m in here_alerts(ms)] == ["a"]
+    assert [m.message_id for m in mentions_for(ms, "u-ben")] == ["b", "d"]
+    assert mentions_for(ms, "u-anna") == ()
+    assert mentioned_ids(ms) == frozenset({"u-ben", "u-dora"})
+    assert mentioned_ids(()) == frozenset()

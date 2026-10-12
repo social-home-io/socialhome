@@ -1,5 +1,7 @@
 """Household dashboard pages — login, setup link, logout, lock, and the
-boards: Home, a person, their ``/fragment/…`` refreshes and avatars.
+boards: Home, a person, their ``/fragment/…`` refreshes and avatars —
+plus ``POST /ack``, the "Got it" on a household-chat mention (the
+dashboard's one data write).
 
 Every view is server-rendered HTML; the session guard in
 :mod:`socialhome.dashboard.app` has already decided whether the request
@@ -27,7 +29,10 @@ from urllib.parse import quote, urlsplit
 from aiohttp import web
 
 from ..domain.household_dashboard import (
+    HERE_SHOWN,
     SECTION_TIMETABLE,
+    here_alerts,
+    mentions_for,
     DashboardAgendaItem,
     DashboardEvent,
     DashboardPerson,
@@ -45,7 +50,7 @@ from .auth import (
     DashboardAuth,
 )
 from .clock import household_clock, resolve_zone
-from .messages import message_rows
+from .messages import MentionCard, mention_cards, message_rows
 from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
@@ -80,13 +85,16 @@ from .render import DashboardRenderer
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "ACK_ID_MAX",
     "AVATAR_CACHE",
+    "HERE_SHOWN",
     "HOME_FRAGMENT",
     "LOCKED_FRAGMENT",
     "LOCKED_HEADER",
     "PIN_WAIT",
     "PIN_WRONG",
     "SIGNED_OUT_PATH",
+    "AckView",
     "AvatarView",
     "EnterView",
     "HealthView",
@@ -436,6 +444,9 @@ class LogoutView(_DashboardView):
 #: load passes the session guard again (423 locked, 404 once hidden).
 AVATAR_CACHE = "private, no-cache"
 
+#: Longest ``message_id`` / ``person_id`` ``POST /ack`` accepts.
+ACK_ID_MAX = 128
+
 #: Events listed under "Tomorrow" on a person page.
 TOMORROW_SHOWN = 3
 
@@ -512,6 +523,17 @@ async def _board(
         colors=colors,
         own_color=own_color,
     )
+    # Every unacknowledged mention (never at night): the rail badges
+    # everyone with one waiting, and the script chimes for new ones.
+    show_rail = len(people) > 1
+    # The rail's badges (only where there is a rail): every person
+    # mention waiting. Home and the person board add what they render
+    # themselves — the script chimes only for what this page shows.
+    badged = (
+        []
+        if night or not show_rail
+        else [c for c in mention_cards(snapshot.mentions, fmt) if c.person_id]
+    )
     zone = snapshot.now.tzinfo
     assert zone is not None
     context: dict[str, object] = {
@@ -519,7 +541,7 @@ async def _board(
         "f": fmt,
         "people": people,
         "current": current,
-        "show_rail": len(people) > 1,
+        "show_rail": show_rail,
         "rail_many": len(people) > MAX_LANES,
         "pin_set": settings.pin_set,
         "clock": household_clock(snapshot.now.timestamp(), zone, t),
@@ -548,6 +570,14 @@ async def _board(
         # never at night. New ones just swap in with the fragment — every
         # sender is a shown person, whose colour is in the style already.
         "messages": [],
+        # Mentions: the rail's badges, the marker the script reads after a
+        # swap (badges + chime), Home's ``@here`` banners and the person
+        # page's own (``mention_cards``).
+        "badges": frozenset(c.person_id for c in badged if c.person_id),
+        "mention_keys": " ".join(c.key for c in badged),
+        "mention_sound": settings.mention_sound,
+        "here_cards": [],
+        "my_mentions": [],
         **extra,
     }
     return _Board(locale=settings.locale, context=context, style=style)
@@ -585,7 +615,13 @@ async def _home_board(request: web.Request) -> _Board:
         stickies=snap.stickies[:STICKIES_SHOWN],
         open_chores=sum(1 for c in snap.chores_today if not c.done),
         messages=[] if snap.is_night else message_rows(snap.messages, fmt),
+        here_cards=(
+            []
+            if snap.is_night
+            else mention_cards(here_alerts(snap.mentions), fmt)[:HERE_SHOWN]
+        ),
     )
+    _add_keys(board, cast(list[MentionCard], board.context["here_cards"]))
     return board
 
 
@@ -619,12 +655,26 @@ async def _person_board(request: web.Request) -> _Board | None:
             "tomorrow_list": tomorrow,
         },
     )
+    fmt = cast(Fmt, board.context["f"])
+    if not page.is_night:
+        mine = mention_cards(mentions_for(page.mentions, page.person.user_id), fmt)
+        board.context["my_mentions"] = mine
+        if not board.context["show_rail"]:
+            # No rail, so no badge listed them yet.
+            _add_keys(board, mine)
     if page.person.picture_view:
-        fmt = cast(Fmt, board.context["f"])
         board.context["picture"] = picture_view(page, fmt, tomorrow=tomorrow)
         if not page.is_night:
             board.context["messages"] = message_rows(page.messages, fmt)
     return board
+
+
+def _add_keys(board: _Board, cards: list[MentionCard]) -> None:
+    """List ``cards`` (rendered on this page) first among the mention keys
+    the script chimes for."""
+    keys = [c.key for c in cards]
+    rest = cast(str, board.context["mention_keys"])
+    board.context["mention_keys"] = " ".join([*keys, *([rest] if rest else [])])
 
 
 def _tomorrow(page: PersonSnapshot) -> list[DashboardAgendaItem]:
@@ -814,6 +864,56 @@ class UnlockView(_GoHomeOnGet):
         return response
 
 
+def _form_id(value: object) -> str | None:
+    """A form's id field if it is a plausible id, else ``None``."""
+    if isinstance(value, str) and 0 < len(value) <= ACK_ID_MAX:
+        return value
+    return None
+
+
+class AckView(_GoHomeOnGet):
+    """``POST /ack`` (``message_id``, optional ``person_id``) — "Got it"
+    on a household-chat mention: an ``@here`` banner on Home (no
+    ``person_id``) or a person's own mention on their page.
+
+    The dashboard's one data write, so nothing the tablet sends is
+    trusted: :meth:`HouseholdDashboardService.acknowledge` re-derives
+    that the wall shows exactly that mention right now (opt-in, chat on,
+    not night, shown unblocked sender, within the hour, really ``@here`` /
+    really naming that shown person) — anything else is the plain
+    not-found page (``404``), never saying why. The session guard has
+    already required a session (``401``), a same-origin ``POST``
+    (``403``) and an unlocked tablet (``423``). Writes are capped per
+    session (:meth:`DashboardAuth.begin_ack`, ``429``). Post/Redirect/Get
+    back to Home or to that person's page — never anywhere the form
+    names.
+    """
+
+    async def post(self) -> web.Response:
+        wait = self.auth.begin_ack(self.request[CLAIMS_KEY])
+        if wait:
+            return web.Response(
+                status=429,
+                text="Too Many Requests",
+                headers={"Retry-After": str(wait)},
+            )
+        form = await self.request.post()
+        message_id = _form_id(form.get("message_id"))
+        raw_person = form.get("person_id") or None
+        person_id = _form_id(raw_person)
+        snapshots = self.request.app[SNAPSHOTS_KEY]
+        if (
+            message_id is None
+            or (raw_person is not None and person_id is None)
+            or not await snapshots.acknowledge(message_id, person_id=person_id)
+        ):
+            locale = (await self.settings.get()).locale
+            return await self.render("not_found.html.j2", locale=locale, status=404)
+        if person_id is None:
+            return redirect("/")
+        return redirect(f"/p/{quote(person_id, safe='')}")
+
+
 class HealthView(web.View):
     async def get(self) -> web.Response:
         return web.Response(text="ok")
@@ -853,5 +953,6 @@ def register_routes(app: web.Application) -> None:
     app.router.add_view("/logout", LogoutView)
     app.router.add_view("/lock", LockView)
     app.router.add_view("/unlock", UnlockView)
+    app.router.add_view("/ack", AckView)
     app.router.add_view("/healthz", HealthView)
     app.router.add_view("/static/{name}", StaticView)

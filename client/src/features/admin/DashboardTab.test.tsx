@@ -57,6 +57,7 @@ function state(over: Partial<DashboardState> = {}): DashboardState {
     keep_screen_on: true,
     show_status_text: false,
     show_household_messages: false,
+    mention_sound: true,
     household_chat_enabled: true,
     last_seen_at: null,
     people: [
@@ -419,8 +420,10 @@ describe('DashboardTab — display settings', () => {
     expect(sw.disabled).toBe(false)
     expect(sw.checked).toBe(false)
     expect(document.getElementById(sw.getAttribute('aria-describedby')!)?.textContent).toBe(
-      'Shows the last 3 household-chat messages (up to 6 h) on Home and on picture-view pages. Anyone at the tablet can see them. '
-      + "The tablet can't confirm a message was read — call if it's urgent.")
+      'Shows the last 3 household-chat messages (up to 6 h) on Home and on picture-view pages. '
+      + "@here and @name mentions show up too: @here as a banner on Home, @name as a dot on that person's face, "
+      + 'until someone taps "Got it" (the chat gets a ✅) or an hour passes. '
+      + "Anyone at the tablet can see them — call if it's urgent.")
     mPut.mockResolvedValueOnce(state({ show_household_messages: true }))
     fireEvent.click(sw)
     await waitFor(() => expect(mPut).toHaveBeenLastCalledWith(
@@ -436,6 +439,33 @@ describe('DashboardTab — display settings', () => {
     expect(document.getElementById(sw.getAttribute('aria-describedby')!)?.textContent)
       .toMatch(/^Turn on household chat first\. Shows the last 3/)
     expect(sw.closest('.sh-dashboard-row')?.classList.contains('sh-dashboard-row--disabled')).toBe(true)
+  })
+
+  it('plays a sound for mentions by default and saves the switch', async () => {
+    await mount(state({ show_household_messages: true }))
+    const sw = screen.getByRole('switch', { name: 'Play a sound for mentions' }) as HTMLInputElement
+    expect(sw.disabled).toBe(false)
+    expect(sw.checked).toBe(true)
+    expect(document.getElementById(sw.getAttribute('aria-describedby')!)?.textContent).toBe(
+      'A short, soft tone on the tablet when a new @here or @name mention appears. Never at night.')
+    mPut.mockResolvedValueOnce(state({ show_household_messages: true, mention_sound: false }))
+    fireEvent.click(sw)
+    await waitFor(() => expect(mPut).toHaveBeenLastCalledWith(
+      '/api/admin/dashboard', { mention_sound: false }))
+    await waitFor(() => expect(sw.checked).toBe(false))
+  })
+
+  it('greys the mention sound switch while household messages are off', async () => {
+    await mount(state())
+    const sw = screen.getByRole('switch', { name: 'Play a sound for mentions' }) as HTMLInputElement
+    expect(sw.disabled).toBe(true)
+    expect(sw.checked).toBe(true)
+  })
+
+  it('greys the mention sound switch while the household chat is off', async () => {
+    await mount(state({ household_chat_enabled: false, show_household_messages: true }))
+    const sw = screen.getByRole('switch', { name: 'Play a sound for mentions' }) as HTMLInputElement
+    expect(sw.disabled).toBe(true)
   })
 
   it('lists the languages by their own names', async () => {

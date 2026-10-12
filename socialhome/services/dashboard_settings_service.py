@@ -76,7 +76,13 @@ _MAX_PORT = 65535
 _PIN = re.compile(rf"[0-9]{{{MIN_PIN_LENGTH},{MAX_PIN_LENGTH}}}")
 _HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 _BOOL_FIELDS = frozenset(
-    {"enabled", "keep_screen_on", "show_status_text", "show_household_messages"}
+    {
+        "enabled",
+        "keep_screen_on",
+        "show_status_text",
+        "show_household_messages",
+        "mention_sound",
+    }
 )
 _PERSON_KEYS = frozenset({"show", "picture"})
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
@@ -177,6 +183,7 @@ _SCALAR_FIELDS = (
     "keep_screen_on",
     "show_status_text",
     "show_household_messages",
+    "mention_sound",
     "address",
 )
 

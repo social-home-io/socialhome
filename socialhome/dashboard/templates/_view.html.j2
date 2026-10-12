@@ -3,6 +3,10 @@
     reloads the page then. At night the day view is rendered too but
     stays hidden until someone taps the screen (dashboard.js, 60 s). -#}
 <div class="dash-view" data-view-key="{{ view_key }}">
+  {#- Mentions for the script (dashboard.js): who the rail badges, which
+      mentions are up (it chimes once for each new one) and whether it
+      may chime at all. -#}
+  <div hidden data-mention-state data-mention-keys="{{ mention_keys }}" data-mention-badges="{{ badges|sort|join(" ") }}" data-mention-sound="{{ 1 if mention_sound else 0 }}"></div>
   <div class="dash-offline" data-offline role="status" hidden>
     <span aria-hidden="true">⚠</span>
     <span class="dash-offline-text{% if picture %} dash-visually-hidden{% endif %}">{{ t("dashboard.offline", time=clock.time) }}</span>

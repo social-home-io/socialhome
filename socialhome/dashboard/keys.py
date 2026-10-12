@@ -38,7 +38,8 @@ HouseholdThemeFn = Callable[[], Awaitable[HouseholdTheme]]
 
 
 class DashboardSnapshots(Protocol):
-    """The read model the pages render
+    """The read model the pages render — and its one write, a "Got it" on a
+    mention
     (:class:`~socialhome.services.household_dashboard_service.HouseholdDashboardService`)."""
 
     async def home(self, *, now: datetime | None = None) -> HomeSnapshot: ...
@@ -48,6 +49,14 @@ class DashboardSnapshots(Protocol):
     ) -> PersonSnapshot | None: ...
 
     async def avatar(self, user_id: str) -> tuple[bytes, str] | None: ...
+
+    async def acknowledge(
+        self,
+        message_id: str,
+        *,
+        person_id: str | None = None,
+        now: datetime | None = None,
+    ) -> bool: ...
 
 
 AUTH_KEY: web.AppKey[DashboardAuth] = web.AppKey("dashboard_auth")
