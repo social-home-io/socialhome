@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 import socialhome.i18n as i18n_pkg
-from socialhome.dashboard.messages import NEW_FOR, mention_cards, message_rows
+from socialhome.dashboard.messages import (
+    CAPTION_CHARS,
+    NEW_FOR,
+    clip,
+    mention_cards,
+    message_rows,
+)
 from socialhome.dashboard.presenter import ColorBook, Fmt
 from socialhome.i18n import Catalog
 
@@ -119,3 +125,34 @@ def test_mention_cards_show_the_sender_text_and_a_sentence():
 def test_mention_cards_skip_senders_not_shown():
     hidden = mention("x", "u-hidden", 1, text="@here secret")
     assert [c.id for c in mention_cards([hidden, HERE], _fmt())] == ["h1"]
+
+
+# ─── Picture-view captions: one short line ──────────────────────────────
+
+
+def test_clip_keeps_short_text_and_cuts_long_text_on_one_line():
+    assert clip("Dinner at 7") == "Dinner at 7"
+    assert clip("  two\n lines\t here ") == "two lines here"
+    long = "word " * 30
+    out = clip(long)
+    assert len(out) <= CAPTION_CHARS and out.endswith("…")
+    assert not out.endswith(" …")
+    assert clip("x" * CAPTION_CHARS) == "x" * CAPTION_CHARS
+
+
+def test_message_captions():
+    anna, pascal, mia = message_rows(MESSAGES, _fmt())
+    assert anna.caption == 'Dinner at 7 <b>"sharp"</b> @Pascal'
+    assert pascal.caption == "📷 Photo"
+    assert mia.caption == "🎤 Can I go to Lena's?"
+    long = message("m9", "u-anna", 1, text="Please " * 20)
+    (row,) = message_rows([long], _fmt())
+    assert row.caption == clip("Please " * 20) and row.caption.endswith("…")
+
+
+def test_mention_caption_is_clipped():
+    (leo,) = mention_cards([FOR_LEO], _fmt())
+    assert leo.caption == "@leo shoes on"
+    long = mention("x", "u-pascal", 1, person="u-leo", text="@leo " + "a" * 80)
+    (card,) = mention_cards([long], _fmt())
+    assert len(card.caption) == CAPTION_CHARS and card.caption.endswith("…")

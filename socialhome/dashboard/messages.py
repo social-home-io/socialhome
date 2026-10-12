@@ -8,11 +8,13 @@ module turns each into a :class:`MessageRow` the templates render:
   lines by CSS) and when — "new" + "4 min ago" for a message under
   :data:`NEW_FOR` old, else the clock time. Media are a word with an
   icon ("📷 Photo"); a voice note is its transcript, or "Voice message".
-* **The picture view** shows only the sender's face with a 💬 badge.
+* **The picture view** shows the sender's face with a 💬 badge and,
+  under it, one short line (:attr:`MessageRow.caption`, cut by
+  :func:`clip`) for a grown-up reading along.
 * **Tap to speak:** ``say`` is the sentence ``dashboard.js`` hands to the
   browser's speech synthesis ("Anna says: …", "Anna sent a photo.") —
-  rendered into a ``data-say`` attribute (escaped by Jinja), so the
-  picture view keeps its no-words rule.
+  rendered into a ``data-say`` attribute (escaped by Jinja): the whole
+  message, read aloud to the child.
 
 Mentions and links stay plain text: nothing on the wall is tappable but
 the row itself. Pure: no I/O.
@@ -39,10 +41,12 @@ from .clock import ago, hhmm
 from .presenter import Fmt
 
 __all__ = [
+    "CAPTION_CHARS",
     "KIND_ICON",
     "NEW_FOR",
     "MentionCard",
     "MessageRow",
+    "clip",
     "mention_cards",
     "message_rows",
 ]
@@ -59,6 +63,19 @@ KIND_ICON: Final = {
     "file": "📎",
     "voice": "🎤",
 }
+
+#: A picture-view caption is at most this many characters (CSS clips it
+#: to one line on top; this keeps a long message out of the markup).
+CAPTION_CHARS: Final = 40
+
+
+def clip(text: str, limit: int = CAPTION_CHARS) -> str:
+    """``text`` on one line (runs of whitespace become one space), cut
+    to at most ``limit`` characters with a trailing "…"."""
+    line = " ".join(text.split())
+    if len(line) <= limit:
+        return line
+    return line[: limit - 1].rstrip() + "…"
 
 
 @dataclass(slots=True, frozen=True)
@@ -79,6 +96,11 @@ class MessageRow:
     when: str
     #: ``sent_at`` as ISO 8601, for ``<time datetime>``.
     iso: str
+
+    @property
+    def caption(self) -> str:
+        """The picture view's one short line: icon and text, clipped."""
+        return clip(f"{self.icon} {self.text}")
 
 
 def _text(m: DashboardMessage, fmt: Fmt) -> str:
@@ -135,6 +157,11 @@ class MentionCard:
     #: "4 min ago".
     when: str
     iso: str
+
+    @property
+    def caption(self) -> str:
+        """The picture view's one short line of the text."""
+        return clip(self.text)
 
     @property
     def key(self) -> str:

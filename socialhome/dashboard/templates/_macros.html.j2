@@ -62,7 +62,21 @@
 </li>
 {%- endmacro %}
 
-{#- ── Picture view (no words except names, no digits) ───────────────── -#}
+{#- ── Picture view (pictures first; small helper captions) ──────────────
+    The child reads the emoji. Under each sits a small muted caption for
+    a grown-up reading along; screen readers hear the tile's own
+    aria-label instead, so captions and section labels are aria-hidden. -#}
+
+{#- A section's quiet small-caps label ("Now", "My day" …). -#}
+{% macro pv_sec(text) -%}
+<span class="dash-pv-sec" aria-hidden="true">{{ text }}</span>
+{%- endmacro %}
+
+{#- A tile's caption — struck through for a cancelled lesson (whose ✕
+    and aria-label already say so). -#}
+{% macro pv_cap(text, cancelled=False) -%}
+{%- if text %}<span class="dash-pv-cap{% if cancelled %} dash-pv-cap-cancelled{% endif %}" aria-hidden="true">{{ text }}</span>{% endif -%}
+{%- endmacro %}
 
 {#- The analog clock: hands set from the household time (dashboard.js
     re-checks every second and writes their transform attribute when
@@ -85,11 +99,13 @@
 </svg>
 {%- endmacro %}
 
-{#- An emoji tile; the real title is spoken, never shown. -#}
+{#- An emoji tile: the real title (and time) is spoken; the title shows
+    small underneath. -#}
 {% macro pv_tile(tile) -%}
 <li class="dash-pv-tile {{ tile.color }}{% if tile.past %} dash-pv-past{% endif %}{% if tile.current %} dash-pv-current{% endif %}{% if tile.cancelled %} dash-pv-cancelled{% endif %}"{% if tile.current %} data-live{% endif %}>
 <span class="dash-pv-emoji" role="img" aria-label="{{ tile.label }}">{{ tile.icon }}</span>
 {%- if tile.cancelled %}<span class="dash-pv-x" aria-hidden="true">✕</span>{% endif -%}
+{{ pv_cap(tile.caption, tile.cancelled) }}
 </li>
 {%- endmacro %}
 
@@ -121,16 +137,20 @@
 </li>
 {%- endmacro %}
 
-{#- Picture view: the sender's face and a 💬, no words. A new one's 💬
-    sits on a filled accent circle — never the ring the page owner's face
+{#- Picture view: the sender's face and a 💬, one short line of the text
+    under it (a tap reads the whole message aloud). A new one's 💬 sits
+    on a filled accent circle — never the ring the page owner's face
     wears. The tile itself is the affordance: its 🔊 is drawn by the CSS
     only while it speaks. -#}
 {% macro message_tile(m) -%}
 <li class="dash-pv-msg-item">
 <button type="button" class="dash-pv-msg" aria-label="{{ t("dashboard.messages.from", name=m.person.display_name) }}" data-say="{{ m.say }}" data-msg="{{ m.id }}">
+<span class="dash-pv-msg-face">
 {{ face(m.person, "lg", spoken=False) }}
 <span class="dash-pv-msg-badge{% if m.new %} dash-pv-msg-badge-new{% endif %}" aria-hidden="true">💬</span>
 <span class="dash-pv-msg-speaker" aria-hidden="true"></span>
+</span>
+{{ pv_cap(m.caption) }}
 </button>
 </li>
 {%- endmacro %}
@@ -164,14 +184,17 @@
 </li>
 {%- endmacro %}
 
-{#- Picture view: the sender's face + 💬 (a tap reads it aloud — no
-    words on screen) and a big ✓. -#}
+{#- Picture view: the sender's face + 💬 with one short line of the text
+    (a tap reads it all aloud) and a big ✓. -#}
 {% macro mention_tile(m) -%}
 <li class="dash-pv-mention">
 <button type="button" class="dash-pv-msg" aria-label="{{ t("dashboard.mentions.from_for_you", name=m.person.display_name) }}" data-say="{{ m.say }}" data-msg="mention-{{ m.id }}">
+<span class="dash-pv-msg-face">
 {{ face(m.person, "lg", spoken=False) }}
 <span class="dash-pv-msg-badge dash-pv-msg-badge-new" aria-hidden="true">💬</span>
 <span class="dash-pv-msg-speaker" aria-hidden="true"></span>
+</span>
+{{ pv_cap(m.caption) }}
 </button>
 {{ ack_form(m, round=True) }}
 </li>

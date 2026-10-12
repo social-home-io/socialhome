@@ -139,6 +139,8 @@
   "dashboard.picture.job": "{state}: {title}",
   "dashboard.picture.sleeps": "Noch so oft schlafen: {n}",
   "dashboard.picture.night": "{when} {time}: {title}",
+  "dashboard.picture.night_caption": "{when} · {title} {time}",
+  "dashboard.picture.at": "{title} · {time}",
   "dashboard.rel.just_now": "gerade eben",
   "dashboard.rel.minutes_ago": "vor {n} Min.",
   "dashboard.messages.heading": "Nachrichten",

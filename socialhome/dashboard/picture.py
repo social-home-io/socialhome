@@ -1,7 +1,6 @@
 """The picture view — a person page for someone who can't read yet.
 
-Mockup D: no words except names, no digits. What a five-year-old reads
-instead:
+Mockup D: pictures first. What a five-year-old reads:
 
 * **an analog clock** showing the real household time, its hands set
   server-side (``dashboard.js`` re-checks them every second and
@@ -15,8 +14,14 @@ instead:
 * **MY JOBS** (emoji + ☐ / ✓), **HOME** (faces under 🏠 / 🚗) and, on
   an empty day, one big 🎈.
 
-Every tile's real title (and time) goes to screen readers through its
-``aria-label`` — the visible page has only emoji and names.
+**Helper captions.** Under every tile sits a small, muted caption — the
+title (a chore's name; NOW / NEXT add the time, "Swimming · 15:00") —
+and each section has a tiny label ("Now", "My day", "My jobs" …), so a
+grown-up or an older sibling standing next to the child can explain
+what a picture means. They are small print: the emoji stays what the
+child reads. Every tile's full title and time still goes to screen
+readers through its ``aria-label``; the caption repeats part of it, so
+the template hides it from them (``aria-hidden``).
 
 **The wedge.** Children know the "Time Timer": a red disc that shrinks
 as time runs out. The wedge is that disc, drawn on the clock face from
@@ -242,10 +247,13 @@ def item_icon(item: DashboardAgendaItem) -> str:
 
 @dataclass(slots=True, frozen=True)
 class PictureTile:
-    """One emoji tile. ``label`` is for screen readers only."""
+    """One emoji tile. ``label`` is what screen readers say; ``caption``
+    the small print under the emoji (screen readers skip it — the label
+    already says it)."""
 
     icon: str
     label: str
+    caption: str = ""
     color: str = ""
     past: bool = False
     current: bool = False
@@ -268,6 +276,7 @@ class PictureJob:
     icon: str
     label: str
     done: bool
+    caption: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -277,6 +286,8 @@ class PictureNight:
     when: str
     icon: str
     label: str
+    #: "Tomorrow · School 07:30".
+    caption: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -300,6 +311,19 @@ def _is_cancelled(item: DashboardAgendaItem) -> bool:
     return isinstance(item, DashboardLesson) and item.status == "cancelled"
 
 
+def _time(item: DashboardAgendaItem, f: Fmt) -> str:
+    """When ``item`` starts, as the reader page spells it — "All day"
+    for an all-day event (never a midnight "00:00")."""
+    if isinstance(item, DashboardEvent) and item.all_day:
+        return f.span(item)
+    return f.hhmm(item.start)
+
+
+def _card_caption(item: DashboardAgendaItem, f: Fmt) -> str:
+    """A NOW / NEXT card's caption: "Swimming · 15:00"."""
+    return f.t("dashboard.picture.at", title=f.title(item), time=_time(item, f))
+
+
 def _tile(item: DashboardAgendaItem, f: Fmt, *, today: bool = True) -> PictureTile:
     """An item's tile. ``today=False`` (tomorrow's list): never past or
     running — an event that started earlier (a holiday, a sleepover)
@@ -309,6 +333,7 @@ def _tile(item: DashboardAgendaItem, f: Fmt, *, today: bool = True) -> PictureTi
     return PictureTile(
         icon=item_icon(item),
         label=f.t(key, when=f.span(item), title=f.title(item)),
+        caption=f.title(item),
         color=f.kc(f.item_color(item)),
         past=today and f.is_past(item),
         current=today and f.is_now(item) and not cancelled,
@@ -318,13 +343,11 @@ def _tile(item: DashboardAgendaItem, f: Fmt, *, today: bool = True) -> PictureTi
 
 def _school_tile(item: DashboardLesson, f: Fmt) -> PictureTile:
     """Tomorrow's school day, said once: 🎒 at the first lesson."""
+    school = f.t("dashboard.school")
     return PictureTile(
         icon=SCHOOL_ICON,
-        label=f.t(
-            "dashboard.picture.item",
-            when=f.hhmm(item.start),
-            title=f.t("dashboard.school"),
-        ),
+        label=f.t("dashboard.picture.item", when=f.hhmm(item.start), title=school),
+        caption=school,
         color=f.kc(item.color_hex),
     )
 
@@ -378,6 +401,7 @@ def _job(c: DashboardTask, f: Fmt) -> PictureJob:
         icon=title_icon(c.title),
         label=f.t("dashboard.picture.job", state=state, title=c.title),
         done=c.done,
+        caption=c.title,
     )
 
 
@@ -403,13 +427,15 @@ def _night(page: PersonSnapshot, f: Fmt) -> PictureNight | None:
         icon, title = SCHOOL_ICON, f.t("dashboard.school")
     else:
         icon, title = item_icon(item), f.title(item)
-    label = f.t(
-        "dashboard.picture.night",
-        when=f.t(f"dashboard.night.{when}"),
-        time=f.hhmm(item.start),
-        title=title,
+    day, time = f.t(f"dashboard.night.{when}"), f.hhmm(item.start)
+    return PictureNight(
+        when=when,
+        icon=icon,
+        label=f.t("dashboard.picture.night", when=day, time=time, title=title),
+        caption=f.t(
+            "dashboard.picture.night_caption", when=day, time=time, title=title
+        ),
     )
-    return PictureNight(when=when, icon=icon, label=label)
 
 
 def picture_view(
@@ -430,14 +456,15 @@ def picture_view(
         now_tile = PictureTile(
             icon=item_icon(now_item),
             label=f.t("dashboard.picture.now", title=f.title(now_item)),
+            caption=_card_caption(now_item, f),
             color=f.kc(f.item_color(now_item)),
             current=True,
         )
     elif next_item is not None:
         at_home = SECTION_PRESENCE in page.sections and page.person.presence == "home"
+        free = f.t("dashboard.picture.free")
         now_tile = PictureTile(
-            icon=FREE_HOME_ICON if at_home else FREE_ICON,
-            label=f.t("dashboard.picture.free"),
+            icon=FREE_HOME_ICON if at_home else FREE_ICON, label=free, caption=free
         )
     if next_item is not None:
         next_tile = PictureTile(
@@ -447,6 +474,7 @@ def picture_view(
                 title=f.title(next_item),
                 when=f.rel(next_item.start),
             ),
+            caption=_card_caption(next_item, f),
             color=f.kc(f.item_color(next_item)),
         )
         pie = wedge(

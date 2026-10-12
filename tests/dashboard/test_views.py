@@ -1675,8 +1675,32 @@ def _visible_text(html: str) -> str:
     return unescape(re.sub(r"<[^>]+>", " ", html))
 
 
+_CAPTION = re.compile(
+    r'<span class="(dash-pv-(?:cap|sec)\b[^"]*)" aria-hidden="true">([^<]*)</span>'
+)
+
+
+def _captions(html: str, kind: str = "cap") -> list[str]:
+    """The helper captions (``cap``) or section labels (``sec``) in
+    ``html``, unescaped, in page order."""
+    return [
+        unescape(text)
+        for cls, text in _CAPTION.findall(html)
+        if cls.split()[0] == f"dash-pv-{kind}"
+    ]
+
+
+def _pv_section(html: str, cls: str) -> str:
+    start = html.index(f'class="{cls}"')
+    return html[start : html.index("</section>", start)]
+
+
 def _assert_only_names_and_icons(html: str, people) -> None:
-    text = _visible_text(html)
+    """Outside the helper captions and section labels (small print for a
+    grown-up reading along), the picture view shows names and pictures
+    only — no digits, no other words."""
+    assert "dash-pv-cap" not in _CAPTION.sub("", html), "a caption not aria-hidden"
+    text = _visible_text(_CAPTION.sub("", html))
     assert re.search(r"\d", text) is None, re.findall(r"\S*\d\S*", text)
     allowed = {w for p in people for w in (*p.display_name.split(), p.initials)}
     words = set(re.findall(r"[^\W\d_]+", text))
@@ -1691,10 +1715,35 @@ async def test_picture_page(client, auth, snapshots):
     _assert_board_csp(resp, html)
     assert "data-picture-view" in html and "dash-person-name" not in html
     _assert_only_names_and_icons(html, PEOPLE)
-    # No title, no time, no "Now"/"Next" label on screen …
-    text = _visible_text(html)
-    for word in ("Kunst", "Swimming", "Now", "Next", "Home", "Katze", "10:30"):
-        assert word not in text, word
+    # Small helper captions for a grown-up reading along: titles under the
+    # tiles, NOW / NEXT with their time, the chore names …
+    assert _captions(html) == [
+        "Kunst · 10:00",
+        "Swimming · 15:00",
+        "Lesen",
+        "Pause",
+        "Turnen",
+        "Kunst",
+        "Swimming",
+        "Dinner with Gran",
+        "School",
+        "Katze füttern",
+        "Zähneputzen",
+    ]
+    # … the cancelled lesson's caption struck through …
+    assert (
+        '<span class="dash-pv-cap dash-pv-cap-cancelled" aria-hidden="true">'
+        "Turnen</span>"
+    ) in html
+    # … and quiet section labels.
+    assert _captions(html, "sec") == [
+        "Now",
+        "Next",
+        "My day",
+        "Tomorrow",
+        "My jobs",
+        "Who's home",
+    ]
     # … but every tile speaks its real title.
     for label in (
         'aria-label="It&#39;s 10:30"',
@@ -1736,6 +1785,7 @@ async def test_picture_page_without_now_shows_free_time(client, auth, snapshots)
     snapshots.pages["u-leo"] = leo_page(now=at(12), now_item=None)
     html = await (await _get(client, auth, "/p/u-leo")).text()
     assert 'aria-label="Free time">🧸</span>' in html  # Leo is away
+    assert _captions(html)[:2] == ["Free time", "Swimming · 15:00"]
     assert "dash-pv-arrow" in html
     _assert_only_names_and_icons(html, PEOPLE)
 
@@ -1784,6 +1834,8 @@ async def test_picture_page_is_locked_like_any_other(pin_client, auth, snapshots
     for html in (await page.text(), await frag.text()):
         assert "Leo" not in html and "data-picture-view" not in html
         assert "Kunst" not in html and "🎨" not in html
+        assert "Swimming" not in html and "Katze" not in html
+        assert "dash-pv-cap" not in html and "dash-pv-sec" not in html
     assert snapshots.calls == []
 
 
@@ -1825,6 +1877,8 @@ async def test_picture_night_mode(client, auth, snapshots):
     assert "dash-pv-wedge" not in night
     assert '<span aria-hidden="true">🌙</span>' in night
     assert 'aria-label="Tomorrow 08:00: School">🎒</span>' in night
+    # One small caption for a grown-up; the icon already speaks it.
+    assert _captions(night) == ["Tomorrow · School 08:00"]
     _assert_only_names_and_icons(night, PEOPLE)
     assert "dash-night-date" not in night
     # The day view underneath is the picture view too.
@@ -1843,6 +1897,7 @@ async def test_picture_night_mode_small_hours(client, auth, snapshots):
     ]
     assert '<span aria-hidden="true">🌅</span>' in night
     assert 'aria-label="Today 15:00: Swimming">🏊</span>' in night
+    assert _captions(night) == ["Today · Swimming 15:00"]
 
 
 async def test_picture_night_mode_with_nothing_ahead(client, auth, snapshots):
@@ -2468,9 +2523,19 @@ async def test_picture_page_message_tiles(client, auth, snapshots):
     resp = await _get(client, auth, "/p/u-leo")
     html = await resp.text()
     _assert_board_csp(resp, html)
-    # Still nothing to read but names: faces, 💬, the sentence only in data-say.
+    # Faces and 💬, plus one small line of each message for a grown-up
+    # reading along (the whole sentence stays in data-say).
     _assert_only_names_and_icons(html, PEOPLE)
-    assert "Dinner" not in _visible_text(html) and "Photo" not in _visible_text(html)
+    msgs = _pv_section(html, "dash-pv-msgs")
+    assert _captions(msgs) == [
+        'Dinner at 7 <b>"sharp"</b> @Pascal',
+        "📷 Photo",
+        "🎤 Can I go to Lena's?",
+    ]
+    assert "&lt;b&gt;" in msgs and "<b>" not in msgs  # escaped, never markup
+    # The caption sits inside the tap target, under the face.
+    tile = msgs[msgs.index('data-msg="m1"') :]
+    assert tile.index("dash-pv-cap") < tile.index("</button>")
     # In the top row, after NOW ➜ NEXT.
     head = html[html.index('<header class="dash-pv-head">') : html.index("</header>")]
     assert head.index("dash-pv-nownext") < head.index('class="dash-pv-msgs"')
@@ -2499,6 +2564,33 @@ async def test_picture_page_messages_without_now_or_next(client, auth, snapshots
     html = await (await _get(client, auth, "/p/u-leo")).text()
     assert "dash-pv-nownext" not in html
     assert '<div class="dash-pv-top">' in html and 'data-msg="m1"' in html
+
+
+async def test_picture_page_message_captions_are_one_short_line(
+    client, auth, snapshots
+):
+    long = message("m9", "u-anna", 2, text="Please bring " + "the blue bag " * 10)
+    snapshots.pages["u-leo"] = leo_page(now=NOW, messages=(long,))
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    (cap,) = _captions(_pv_section(html, "dash-pv-msgs"))
+    assert cap.startswith("Please bring the blue bag") and cap.endswith("…")
+    assert len(cap) <= 40
+    # The whole message is still read aloud on a tap.
+    assert "the blue bag " * 10 in unescape(_attr(html, "data-say"))
+
+
+async def test_picture_page_shows_no_caption_for_senders_not_on_the_page(
+    client, auth, snapshots
+):
+    # The snapshot leaves hidden and guardian-withheld senders out of
+    # ``people``; their messages and mentions never reach a caption.
+    snapshots.pages["u-leo"] = leo_page(
+        now=NOW, people=(PASCAL, LEO), messages=MESSAGES, mentions=MENTIONS
+    )
+    html = await (await _get(client, auth, "/p/u-leo")).text()
+    assert _captions(_pv_section(html, "dash-pv-msgs")) == ["📷 Photo"]
+    for text in ("Dinner at 7", "Lena", "Dinner is", "call grandma"):
+        assert text not in html, text
 
 
 async def test_reader_page_never_shows_messages(client, auth, snapshots):
@@ -2669,14 +2761,15 @@ async def test_picture_page_mention_tile(client, auth, snapshots):
     resp = await _get(client, auth, "/p/u-leo")
     html = await resp.text()
     _assert_board_csp(resp, html)
-    # Still nothing to read but names: the text is only spoken.
+    # The face, 💬, ✓ and one small line of the text.
     _assert_only_names_and_icons(html, PEOPLE)
-    assert "shoes on" not in _visible_text(html)
     start = html.index('class="dash-pv-mentions"')
     tile = html[start : html.index("</section>", start)]
     assert 'aria-label="Message from Pascal for you"' in tile
     assert 'data-say="Pascal says: @leo shoes on"' in tile
     assert 'data-msg="mention-p1"' in tile
+    assert _captions(tile) == ["@leo shoes on"]
+    assert tile.index("dash-pv-cap") < tile.index("</button>")
     assert "💬" in tile and "dash-face dash-face-lg" in tile
     assert '<input type="hidden" name="person_id" value="u-leo">' in tile
     assert 'aria-label="Got it"' in tile

@@ -133,9 +133,9 @@ dashboard **address** — it always wins over the guess.
   and their chores. After the "Back to Home after" time without a touch
   (setting `idle_return_minutes`, default 3, `0` = never) the tablet goes
   back to Home.
-- **A person in picture view** — for children who can't read yet. The
-  page has no words except names and no digits: a big analog clock with
-  the real time; a **NOW** card (thick frame) ➜ a **NEXT** card, each one
+- **A person in picture view** — for children who can't read yet.
+  Pictures are what the child reads: a big analog clock with the real
+  time; a **NOW** card (thick frame) ➜ a **NEXT** card, each one
   big emoji; a coloured wedge on the clock (and a small pie on the NEXT
   card) shows the time left until NEXT starts — like a kitchen "time
   timer", it shrinks as the minute hand eats it and is a full disc from
@@ -149,8 +149,15 @@ dashboard **address** — it always wins over the guess.
   lesson's own timetable icon, else the emoji a title starts with
   ("🏊 Swimming"), else a guess from the title's words in English,
   German, Spanish, French or Dutch ("Zähneputzen" → 🦷), else a neutral
-  🔹 — start a title with an emoji to pick it yourself. Every tile still
-  tells a screen reader its real title and time.
+  🔹 — start a title with an emoji to pick it yourself. Under every
+  picture sits a small, muted **helper caption** so a grown-up or an
+  older sibling can explain it: the title under a tile, the chore's name
+  under a job, the title and time on NOW / NEXT ("Swimming · 15:00"), one
+  short line of a message, and at night "Tomorrow · School 07:30"; each
+  section has a tiny label (Now, Next, My day, Tomorrow, My jobs, Who's
+  home). They are always on — there is no setting — and stay quiet next
+  to the emoji. Every tile still tells a screen reader its real title
+  and time (the captions are hidden from it, so nothing is read twice).
 
   Picture view is **on by default for child-protected minors** and off
   for everyone else ("Default (child account)" next to the switch). An
@@ -174,7 +181,8 @@ dashboard **address** — it always wins over the guess.
   guardian blocked for them: the blocked person's messages don't show,
   and neither do the child's while that person is in the household. A picture-view
   page shows up to three message faces with a 💬 next to NOW ➜ NEXT
-  (a new one's 💬 sits on a coloured circle), no words. Tap a message to have it
+  (a new one's 💬 sits on a coloured circle), each with one short line of
+  the text under it. Tap a message to have it
   read aloud ("Anna says: …") — only on a tap, never on its own, a second
   tap stops it. Speech never leaves the tablet: only a voice installed
   on the tablet itself is used, never an online one — a tablet without an
