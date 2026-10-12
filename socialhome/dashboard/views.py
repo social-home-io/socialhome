@@ -773,7 +773,15 @@ class _BoardView(_DashboardView):
         return html_response(text)
 
 
-class HomeView(_BoardView):
+class _PageView(_BoardView):
+    """A board page: ``HEAD`` is the ``GET`` (same status, headers and
+    cookie renewal) — aiohttp sends it without the body."""
+
+    async def head(self) -> web.Response:
+        return await self.get()  # type: ignore[attr-defined]
+
+
+class HomeView(_PageView):
     """``GET /`` — the household overview (or night mode)."""
 
     async def get(self) -> web.Response:
@@ -791,7 +799,7 @@ class HomeFragmentView(_BoardView):
         return await self.fragment(board)
 
 
-class HomeTabView(_BoardView):
+class HomeTabView(_PageView):
     """``GET /messages`` and ``GET /notes`` — Home's other tabs.
 
     ``404`` (the plain not-found page) while the tab doesn't show; at night
@@ -820,7 +828,7 @@ class HomeTabFragmentView(_BoardView):
         return await self.fragment(board)
 
 
-class PersonView(_BoardView):
+class PersonView(_PageView):
     """``GET /p/{user_id}`` — one shown person's page; ``404`` for anyone
     unknown, inactive or hidden (the same page either way)."""
 

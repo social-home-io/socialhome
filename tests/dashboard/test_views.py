@@ -2366,6 +2366,36 @@ async def test_page_routes_still_renew(pin_client, auth, clock, snapshots, path)
     assert COOKIE_NAME in resp.cookies
 
 
+@pytest.mark.parametrize("path", ["/", "/p/u-anna", "/messages", "/notes"])
+async def test_head_on_a_page_is_the_get_without_a_body(
+    pin_client, auth, clock, snapshots, path
+):
+    """Review: HEAD was 405 on the board routes while documented."""
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, messages_on=True)
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 60)
+    resp = await pin_client.head(path, headers=headers, allow_redirects=False)
+    assert resp.status == 200
+    assert resp.headers["Content-Type"].startswith("text/html")
+    assert "Content-Security-Policy" in resp.headers
+    assert await resp.read() == b""
+    assert COOKIE_NAME in resp.cookies  # renews like the GET
+
+
+async def test_head_follows_the_get_status(client, auth, snapshots):
+    snapshots.home_snapshot = replace(
+        snapshots.home_snapshot, messages_on=True, is_night=True, now=at(22, 47)
+    )
+    resp = await client.head(
+        "/messages", headers=await _cookie(auth), allow_redirects=False
+    )
+    assert resp.status == 303 and resp.headers["Location"] == "/"
+    resp = await client.head(
+        "/p/u-nobody", headers=await _cookie(auth), allow_redirects=False
+    )
+    assert resp.status == 404
+
+
 @pytest.mark.parametrize("path", ["/messages", "/notes"])
 async def test_tab_that_did_not_render_never_renews(
     pin_client, auth, clock, snapshots, path
