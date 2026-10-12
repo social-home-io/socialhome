@@ -11,6 +11,7 @@ from socialhome.crypto import (
     MOVE_LINK_SUITE_ED25519,
     REPLAY_CACHE_WINDOW,
     SUPPORTED_MOVE_LINK_SUITES,
+    is_instance_id,
     SUPPORTED_USER_SIG_SUITES,
     USER_SIG_SUITE_ED25519,
     MoveLinkBindingInvalid,
@@ -1187,3 +1188,20 @@ def test_ed25519_public_key_rejects_wrong_length():
 
     with pytest.raises(ValueError):
         ed25519_public_key(b"short")
+
+
+def test_is_instance_id_accepts_exactly_the_derived_shape():
+    iid = derive_instance_id(generate_identity_keypair().public_key)
+    assert is_instance_id(iid) is True
+    for bad in (
+        "",
+        iid.upper(),
+        iid[:-1],
+        iid + "a",
+        "../connections/" + iid,
+        iid[:-1] + "/",
+        iid[:-1] + "1",  # base32 has no 0/1/8/9
+        None,
+        42,
+    ):
+        assert is_instance_id(bad) is False, bad

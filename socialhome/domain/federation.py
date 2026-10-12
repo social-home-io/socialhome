@@ -1282,6 +1282,15 @@ class PairingAlreadyConfirmedError(CodedError, ValueError):
     detail = "This pairing is already confirmed — remove the connection instead."
 
 
+class AutoPairRequestExpiredError(CodedError, ValueError):
+    """A trust-relay introduction is too old to approve — the household
+    that asked has long stopped waiting for the answer."""
+
+    status = 410
+    code = "REQUEST_EXPIRED"
+    detail = "This pairing request has expired — ask them to send a new one."
+
+
 class PairingKeywrapInvalidError(CodedError, ValueError):
     """The peer's key-wrap key is missing, of an unknown suite, or not
     bound to its identity key — never seal anything to it."""

@@ -10,7 +10,7 @@ is mocked with :class:`AsyncMock`.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -23,9 +23,11 @@ from socialhome.crypto import (
 )
 from socialhome.domain.events import PairingConfirmed
 from socialhome.domain.federation import (
+    AutoPairRequestExpiredError,
     FederationEvent,
     FederationEventType,
     InstanceSource,
+    PairingAlreadyConfirmedError,
     PairingStatus,
     RemoteInstance,
 )
@@ -37,7 +39,10 @@ from socialhome.federation.auto_pair_coordinator import (
 )
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
-from socialhome.services.auto_pair_inbox import AutoPairInbox
+from socialhome.services.auto_pair_inbox import (
+    AUTO_PAIR_REQUEST_TTL_SECONDS,
+    AutoPairInbox,
+)
 
 
 class _InMemoryFederationRepo:
@@ -60,6 +65,14 @@ class _InMemoryFederationRepo:
     async def save_instance(self, inst: RemoteInstance) -> RemoteInstance:
         self.instances[inst.id] = inst
         return inst
+
+    async def promote_pending_instance(self, inst, *, token=None):
+        """Mirrors the SQLite repo: only over a still-pending row."""
+        row = self.instances.get(inst.id)
+        if row is None or row.status is PairingStatus.CONFIRMED:
+            return False
+        self.instances[inst.id] = inst
+        return True
 
     async def list_social_instances(self):
         return await self.list_instances(status="confirmed")
@@ -625,7 +638,8 @@ async def test_full_auto_pair_handshake(
         req.request_id,
         own_inbox_base_url="https://c.example/federation/inbox",
     )
-    assert confirmed.status is PairingStatus.CONFIRMED
+    # Not confirmed until A, having confirmed on its side, talks to us.
+    assert confirmed.status is PairingStatus.PENDING_SENT
     # Ack sent to B (the trust relay), not directly to A — A has no
     # confirmed pairing with C yet, so the envelope-level signature
     # check on A would reject a direct C→A ack. B re-enwraps and
@@ -951,3 +965,133 @@ async def test_forget_requests_to_leaves_other_targets(coord, fed_repo, identity
     assert coord.forget_requests_to(c_id) == 0
     await coord.on_ack_at_originator(_evt("b", other_ack))
     assert fed_repo.instances[other_id].status is PairingStatus.CONFIRMED
+
+
+# ── The target's approval is not a pairing until the requester confirms ──
+
+
+def _queued_request(inbox, *, ts: str | None = None, a_id: str = "a1"):
+    a_kp = generate_identity_keypair()
+    return inbox.enqueue(
+        from_a_id=derive_instance_id(a_kp.public_key) if a_id == "a1" else a_id,
+        from_a_pk=a_kp.public_key.hex(),
+        from_a_inbox_url="https://a.example/federation/inbox/x",
+        from_a_dh_pk=generate_x25519_keypair().public_key.hex(),
+        via_b_id="b1",
+        vouch_sig="vv",
+        ts=ts or datetime.now(timezone.utc).isoformat(),
+        nonce="n",
+        token="tk",
+        from_a_display="A",
+        via_b_display="B",
+    )
+
+
+async def test_approval_stores_a_pending_row_and_confirms_nothing_yet(
+    coord, inbox, fed_repo, fed_service, bus
+):
+    """A may have cancelled its request meanwhile: approving must not leave
+    us with a one-sided confirmed pairing. The row waits (keyed,
+    ``pending_sent``) for A's first authenticated envelope."""
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+    req = _queued_request(inbox)
+
+    inst = await coord.finalize_pending(
+        req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+    )
+
+    assert inst.status is PairingStatus.PENDING_SENT
+    assert inst.remote_identity_pk and inst.key_self_to_remote
+    assert fed_repo.instances[req.from_a_id].status is PairingStatus.PENDING_SENT
+    assert confirmed == []
+    # The ack still goes back through the introducer.
+    kwargs = fed_service.send_event.await_args.kwargs
+    assert kwargs["event_type"] == FederationEventType.PAIRING_INTRO_AUTO_ACK_VIA
+
+
+async def test_approving_a_request_from_a_paired_household_changes_nothing(
+    coord, inbox, fed_repo, fed_service
+):
+    req = _queued_request(inbox)
+    live = _make_peer_remote_instance(req.from_a_pk)
+    fed_repo.instances[live.id] = live
+    fed_service.send_event.reset_mock()
+
+    with pytest.raises(PairingAlreadyConfirmedError, match="(?i)already paired"):
+        await coord.finalize_pending(
+            req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+        )
+
+    assert fed_repo.instances[live.id].status is PairingStatus.CONFIRMED
+    assert fed_repo.instances[live.id].key_self_to_remote == "enc"
+    fed_service.send_event.assert_not_awaited()
+
+
+async def test_a_stale_request_cannot_be_approved(coord, inbox, fed_repo, fed_service):
+    old = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
+    ).isoformat()
+    req = _queued_request(inbox, ts=old)
+    fed_service.send_event.reset_mock()
+
+    with pytest.raises(AutoPairRequestExpiredError):
+        await coord.finalize_pending(
+            req.request_id, own_inbox_base_url="https://c.example/federation/inbox"
+        )
+
+    assert req.from_a_id not in fed_repo.instances
+    assert inbox.get(req.request_id) is None
+    fed_service.send_event.assert_not_awaited()
+
+
+async def test_ack_after_the_request_was_cancelled_never_confirms(
+    coord, fed_repo, identity, bus
+):
+    """The cancel committed after the ack had already taken the in-memory
+    request: the provisional row is gone, so nothing is written back."""
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity)
+    confirmed: list[PairingConfirmed] = []
+    bus.subscribe(PairingConfirmed, confirmed.append)
+    del fed_repo.instances[c_id]  # the cancel's transaction
+
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    assert c_id not in fed_repo.instances
+    assert confirmed == []
+
+
+async def test_an_ack_for_a_request_past_its_ttl_is_ignored(coord, fed_repo, identity):
+    c_id, ack = await _request_and_signed_ack(coord, fed_repo, identity)
+    session = coord._pending[ack["token"]]
+    session.ts = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
+    ).isoformat()
+
+    await coord.on_ack_at_originator(_evt("b", ack))
+
+    assert fed_repo.instances[c_id].status is PairingStatus.PENDING_SENT
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["../connections/" + "a" * 32, "a" * 31, "A" * 32, "a" * 31 + "/"],
+)
+async def test_request_via_refuses_a_target_that_is_not_a_household_id(
+    coord, fed_repo, fed_service, target
+):
+    """The target id becomes our provisional row's id — and from there a
+    URL path segment in the SPA. Only a derived household id is a target."""
+    b = _make_peer_remote_instance(generate_identity_keypair().public_key.hex())
+    fed_repo.instances[b.id] = b
+    with pytest.raises(ValueError, match="household id"):
+        await coord.request_via(
+            via_instance_id=b.id,
+            target_instance_id=target,
+            target_display_name="C",
+            own_inbox_base_url=_OWN_INBOX_BASE,
+        )
+    assert target not in fed_repo.instances
+    fed_service.send_event.assert_not_awaited()

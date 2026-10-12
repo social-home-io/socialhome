@@ -19,6 +19,9 @@ Steps (in order):
 5. **Replay check** — ``msg_id`` already seen → reject.
 6. **Decrypt payload** — AES-256-GCM using ``key_remote_to_self``.
 7. **Parse inner** — decrypted bytes → ``FederationEvent``.
+7b. **Approved relay pair** — the first envelope that verified and
+    decrypted from a household our admin approved through a trust relay
+    (a keyed ``pending_sent`` row) confirms that pairing before dispatch.
 8. **Idempotency** — optional ``idempotency_key`` de-dup.
 9. **Ban check** — space-scoped events from banned instances → drop.
 10. **Persist replay** — insert ``msg_id`` into the replay table.
@@ -514,6 +517,50 @@ def make_check_unpairing(
         raise ValueError(f"No instance found for {ref!r}")
 
     return check_unpairing
+
+
+def make_confirm_relay_approval(
+    *,
+    on_contact: Callable[[str], Awaitable[None]],
+) -> InboundStep:
+    """Step 6b: an approved trust-relay pair confirms on the requester's
+    first authenticated envelope.
+
+    When our admin approves a household's introduction (§11 simple
+    pairing), the row is stored ``pending_sent`` with the keys derived for
+    it — not confirmed: the requester may have cancelled meanwhile, and a
+    one-sided confirmed row would be a pairing it never agreed to. The
+    requester confirms on its side when our ack reaches it, and from then
+    on it talks to us; the first envelope of its that passes the signature
+    check AND decrypts under the session key (so after
+    :func:`make_decrypt_and_parse`) proves it holds the DH secret its
+    introducer vouched for — it completed the pairing. ``on_contact``
+    confirms the row then, before the event is dispatched.
+
+    Only a keyed ``pending_sent`` row is such an approval
+    (:func:`~socialhome.domain.federation.pending_kind`); a pairing-code
+    half-pair (``pending_received``) is confirmed only by this household's
+    own verification step, never by anything the pending peer sends.
+    Fail-soft: a promotion error is logged and the envelope proceeds.
+    """
+
+    async def confirm_relay_approval(ctx: InboundContext) -> None:
+        inst = ctx.instance
+        if getattr(inst, "status", None) is not PairingStatus.PENDING_SENT:
+            return
+        if not getattr(inst, "remote_identity_pk", ""):
+            return
+        sender = getattr(inst, "from_instance", "")
+        try:
+            await on_contact(sender)
+        except Exception:  # noqa: BLE001 — never change the verdict
+            log.warning(
+                "inbound: could not confirm the approved pairing with %s",
+                sender,
+                exc_info=True,
+            )
+
+    return confirm_relay_approval
 
 
 def make_verify_signature(*, encoder) -> InboundStep:

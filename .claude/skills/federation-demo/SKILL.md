@@ -98,7 +98,9 @@ That single command runs the full sequence:
      ``GET /api/pairing/auto-pair-requests`` and approves it via
      ``POST /api/pairing/auto-pair-requests/{id}/approve`` —
      one-click, no QR scan.
-   - Both a and d now show each other as ``CONFIRMED``.
+   - Delta stores the approval as pending; Alpha confirms on the ack and
+     its first envelope confirms Delta's side. Both a and d then show
+     each other as ``CONFIRMED``.
 4. ``traffic`` — for each household (a / b / c — d stays out of the
    common content fan-out so the inner-ring assertions still bound at
    three viewers):

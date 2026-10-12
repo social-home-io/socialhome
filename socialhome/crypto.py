@@ -20,6 +20,7 @@ import binascii
 import hashlib
 import hmac
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,17 @@ def derive_instance_id(identity_public_key_bytes: bytes) -> str:
         raise ValueError("Ed25519 public key must be 32 bytes")
     digest = hashlib.sha256(identity_public_key_bytes).digest()
     return base64.b32encode(digest[:20]).decode("ascii").lower().rstrip("=")
+
+
+#: The exact shape :func:`derive_instance_id` produces: 32 lowercase base32
+#: characters. Anchored with ``fullmatch`` so nothing (a ``/``, ``..``, a
+#: newline) rides along with an id taken from a request body.
+INSTANCE_ID_RE = re.compile(r"[a-z2-7]{32}")
+
+
+def is_instance_id(value: object) -> bool:
+    """Whether *value* is shaped like a household id (no I/O)."""
+    return isinstance(value, str) and INSTANCE_ID_RE.fullmatch(value) is not None
 
 
 def derive_space_id(space_public_key_bytes: bytes) -> str:

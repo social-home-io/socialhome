@@ -4,10 +4,12 @@ Mirrors the shape of :class:`PairingRelayQueue` but for the *target*
 side (C): when B forwards a signed introduction, we park the full
 vouching envelope here so C's admin can click approve / decline.
 
-Approval completes the pair instantly — the vouch signature already
-attests that B has cryptographically verified both A and C, so the
-usual QR + SAS step is redundant. The actual fast-path handshake is
-performed by :class:`AutoPairCoordinator.finalize_pending`.
+Approval replaces the QR + SAS step — the vouch signature already
+attests that B has cryptographically verified both A and C. It stores the
+pair as pending and acks A; the pair is confirmed on C once A, having
+confirmed on its side, sends its first authenticated envelope (see
+:class:`AutoPairCoordinator.finalize_pending`). A request is kept for
+:data:`AUTO_PAIR_REQUEST_TTL_SECONDS` and then forgotten.
 """
 
 from __future__ import annotations
@@ -15,18 +17,36 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ..infrastructure.event_bus import EventBus
 
 log = logging.getLogger(__name__)
 
+#: How long a trust-relay introduction stays answerable — kept in the
+#: approval inbox on the target, approvable there (measured from the
+#: requester's signed timestamp), and awaited by the requester.
+AUTO_PAIR_REQUEST_TTL_SECONDS: int = 24 * 3600
+
+
+def auto_pair_request_expired(iso_ts: str, *, now: datetime | None = None) -> bool:
+    """Whether a request stamped *iso_ts* is older than the TTL. An
+    unparseable stamp counts as expired (fail closed)."""
+    try:
+        stamp = datetime.fromisoformat(iso_ts)
+    except TypeError, ValueError:
+        return True
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return now - stamp > timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS)
+
 
 @dataclass(slots=True)
 class PendingAutoPairRequest:
     """Full envelope received from B. Kept in memory only — process
-    restart discards pending requests, which matches the short-lived
-    intent (admins act on inbox within minutes, not hours)."""
+    restart discards pending requests — and for at most
+    :data:`AUTO_PAIR_REQUEST_TTL_SECONDS`."""
 
     request_id: str
     from_a_id: str
@@ -54,7 +74,17 @@ class AutoPairInbox:
         self._bus = bus
         self._items: dict[str, PendingAutoPairRequest] = {}
 
+    def _prune(self) -> None:
+        """Forget requests past :data:`AUTO_PAIR_REQUEST_TTL_SECONDS`."""
+        for request_id in [
+            rid
+            for rid, req in self._items.items()
+            if auto_pair_request_expired(req.received_at)
+        ]:
+            del self._items[request_id]
+
     def list_pending(self) -> list[PendingAutoPairRequest]:
+        self._prune()
         return sorted(
             self._items.values(),
             key=lambda r: r.received_at,
@@ -62,9 +92,11 @@ class AutoPairInbox:
         )
 
     def get(self, request_id: str) -> PendingAutoPairRequest | None:
+        self._prune()
         return self._items.get(request_id)
 
     def pop(self, request_id: str) -> PendingAutoPairRequest | None:
+        self._prune()
         return self._items.pop(request_id, None)
 
     def enqueue(
@@ -82,6 +114,7 @@ class AutoPairInbox:
         from_a_display: str = "",
         via_b_display: str = "",
     ) -> PendingAutoPairRequest:
+        self._prune()
         request_id = secrets.token_urlsafe(16)
         req = PendingAutoPairRequest(
             request_id=request_id,

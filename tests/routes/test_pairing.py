@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -13,6 +13,7 @@ import orjson
 
 from socialhome.app_keys import (
     auto_pair_coordinator_key,
+    auto_pair_inbox_key,
     capabilities_outbound_key,
     db_key as _db_key,
     dm_routing_service_key,
@@ -50,6 +51,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.peer_pairing_client import sign_peer_body
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
+from socialhome.services.auto_pair_inbox import AUTO_PAIR_REQUEST_TTL_SECONDS
 from socialhome.services.dm_routing_service import DmRoutingService
 
 from .conftest import _auth
@@ -2552,3 +2554,87 @@ async def test_unpair_endpoint_unpairs_when_confirmed_mid_cancel(client, monkeyp
     assert FederationEventType.PAIRING_ABORT not in [s["type"] for s in rec.sent]
     assert rec.sent[-1]["type"] is FederationEventType.UNPAIR
     assert await client.app[federation_repo_key].get_instance(scanner_id) is None
+
+
+# ─── Trust-relay pairing: input shape, stale approvals ────────────────────
+
+
+async def test_auto_pair_via_refuses_a_target_that_is_not_a_household_id(
+    client, monkeypatch
+):
+    rec = _SendRecorderPatch().install(client, monkeypatch)
+    repo = client.app[federation_repo_key]
+    await repo.save_instance(_fake_instance("peer-b"))
+    victim = derive_instance_id(generate_identity_keypair().public_key)
+
+    r = await client.post(
+        "/api/pairing/auto-pair-via",
+        json={
+            "via_instance_id": "peer-b",
+            "target_instance_id": f"../connections/{victim}",
+        },
+        headers=_auth(client._tok),
+    )
+
+    assert r.status == 422
+    assert await repo.list_instances() == [await repo.get_instance("peer-b")]
+    assert rec.sent == []
+
+
+def _enqueue_request(client, *, ts: str) -> str:
+    a_kp = generate_identity_keypair()
+    req = client.app[auto_pair_inbox_key].enqueue(
+        from_a_id=derive_instance_id(a_kp.public_key),
+        from_a_pk=a_kp.public_key.hex(),
+        from_a_inbox_url="https://a.example/federation/inbox/x",
+        from_a_dh_pk=generate_x25519_keypair().public_key.hex(),
+        via_b_id="peer-b",
+        vouch_sig="vv",
+        ts=ts,
+        nonce="n",
+        token="tk",
+    )
+    return req.request_id
+
+
+async def test_approving_a_stale_request_is_410(client, monkeypatch):
+    rec = _SendRecorderPatch().install(client, monkeypatch)
+    old = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=AUTO_PAIR_REQUEST_TTL_SECONDS + 60)
+    ).isoformat()
+    request_id = _enqueue_request(client, ts=old)
+
+    r = await client.post(
+        f"/api/pairing/auto-pair-requests/{request_id}/approve",
+        headers=_auth(client._tok),
+    )
+
+    assert r.status == 410
+    assert (await r.json())["error"]["code"] == "REQUEST_EXPIRED"
+    assert rec.sent == []
+
+
+async def test_approving_stores_a_pending_row_until_the_requester_confirms(
+    client, monkeypatch
+):
+    rec = _SendRecorderPatch().install(client, monkeypatch)
+    await client.app[federation_repo_key].save_instance(_fake_instance("peer-b"))
+    request_id = _enqueue_request(client, ts=datetime.now(timezone.utc).isoformat())
+
+    r = await client.post(
+        f"/api/pairing/auto-pair-requests/{request_id}/approve",
+        headers=_auth(client._tok),
+    )
+
+    assert r.status == 200
+    body = await r.json()
+    listing = await client.get("/api/connections", headers=_auth(client._tok))
+    row = next(
+        c for c in await listing.json() if c["instance_id"] == body["instance_id"]
+    )
+    assert row["status"] == "pending_sent"
+    assert row["pending_kind"] == "approval"
+    assert [s["type"] for s in rec.sent] == [
+        FederationEventType.PAIRING_INTRO_AUTO_ACK_VIA
+    ]
