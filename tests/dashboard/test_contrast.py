@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from socialhome.dashboard.contrast import (
@@ -12,6 +14,7 @@ from socialhome.dashboard.contrast import (
     readable_on,
     relative_luminance,
 )
+from socialhome.dashboard.render import STATIC_DIR
 
 
 @pytest.mark.parametrize(
@@ -84,3 +87,34 @@ def test_readable_on_needs_every_surface():
     assert readable_on("#d2542a", ("#ffffff",)) is False  # 4.06:1
     assert readable_on("#ffee88", ("#ffffff", "#151412")) is False
     assert readable_on("#ffee88", ("#151412", "#22201d")) is True
+
+
+def _rule(css: str, selector: str) -> str:
+    match = re.search(rf"(?m)^{re.escape(selector)} \{{([^}}]*)\}}", css)
+    assert match is not None, selector
+    return match.group(1)
+
+
+def _token(block: str, name: str) -> str:
+    found = re.search(rf"--dash-{name}: (#[0-9a-f]{{6}});", block)
+    assert found is not None, name
+    return found.group(1)
+
+
+def test_picture_view_captions_are_readable_on_both_themes():
+    """The picture view's helper captions and section labels are small
+    print in the muted ink: it must still reach AA (4.5:1) on the tile
+    and card surfaces, light and dark — and nothing may fade it."""
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    light = css[css.index(":root {") :]
+    dark = css[css.index("@media (prefers-color-scheme: dark)") :]
+    for block in (light, dark):
+        surfaces = (_token(block, "bg"), _token(block, "surface"))
+        assert readable_on(_token(block, "muted"), surfaces)
+    # Night: the caption under tomorrow's first thing sits on the page.
+    night = css[css.index(".dash-night {") :]
+    assert readable_on(_token(night, "muted"), (_token(night, "bg"),))
+    for selector in (".dash-pv-cap", ".dash-pv-sec"):
+        body = _rule(css, selector)
+        assert "color: var(--dash-muted);" in body, selector
+        assert "opacity" not in body, selector

@@ -1559,8 +1559,9 @@ media as "📷 Photo" / "🎬 Video" / "📎 File", a voice note as its
 transcript or "🎤 Voice message", "new" + "4 min ago" for one under 15
 minutes, else its clock time — and the sentence tap-to-speak reads
 ("Anna says: …", "Anna sent a photo."), rendered into a `data-say`
-attribute (Jinja-escaped) so the picture view, which shows only the
-sender's face and a 💬, keeps its no-words rule. Every sender is a shown
+attribute (Jinja-escaped); the picture view shows the sender's face, a
+💬 and one short caption line (`MessageRow.caption`, cut to 40
+characters by `clip`), and a tap reads the whole message. Every sender is a shown
 person whose colour is already in the page style, so a new or deleted
 message just swaps in with the next fragment (no view-key change).
 
@@ -1660,8 +1661,14 @@ included — for 60 s. Without JS the page reloads every two minutes
 
 **Picture view.** A person with `picture_view` (the admin's per-person
 choice; default on for child-protected minors, `picture_effective`) gets
-`_person_picture.html.j2` instead of the reader page — no words except
-names, no digits, every tile's real title and time in its `aria-label`.
+`_person_picture.html.j2` instead of the reader page — pictures first,
+every tile's real title and time in its `aria-label`. Each tile also
+carries a small muted helper caption (`PictureTile.caption`: the title;
+NOW / NEXT add the start time, "All day" for an all-day event) and each
+section a small-caps label, for a grown-up explaining the picture; both
+are `aria-hidden` (the label already says it) and use `--dash-muted`,
+which clears 4.5:1 on the tile and card surfaces in both themes and at
+night (`tests/dashboard/test_contrast.py`).
 `dashboard/picture.py` builds it from the same `PersonSnapshot`: hand
 angles from the household wall time; the NEXT *wedge*, a time-timer
 sector of the clock face from the minute hand clockwise to where it will

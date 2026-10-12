@@ -424,3 +424,63 @@ def test_night_before_noon_shows_the_morning_item():
     # A lesson is "school" at night, as on the reader page.
     assert v.night.icon == "🎒"
     assert v.night.label == "Today 08:20: School"
+
+
+# ─── Helper captions (for a grown-up reading along) ──────────────────────
+
+
+def test_tiles_carry_their_title_as_a_caption():
+    page = mia_page(now=at(10, 30))
+    parts = {p.key: p for p in _view(page).parts}
+    maths, brk, sport = parts["morning"].tiles
+    assert (maths.caption, brk.caption, sport.caption) == ("Maths", "Break", "Sport")
+    assert sport.cancelled  # the template strikes the caption through
+    assert [t.caption for t in parts["evening"].tiles] == ["Dinner with Gran"]
+
+
+def test_now_and_next_captions_carry_the_time():
+    v = _view(mia_page(now=at(8, 30)))
+    assert v.now is not None and v.now.caption == "Maths · 08:20"
+    assert v.next is not None and v.next.caption == "Art · 14:00"
+
+
+def test_an_all_day_next_card_says_all_day_not_midnight():
+    bday = event(
+        "b", "Mia's birthday", at(0), at(0, day=TOMORROW), "u-mia", all_day=True
+    )
+    v = _view(replace(mia_page(now=at(8, 30)), next_item=bday))
+    assert v.next is not None and v.next.caption == "Mia's birthday · All day"
+
+
+def test_free_time_caption():
+    page = person(LEO, now_item=None, next_item=DINNER, today_items=(DINNER,))
+    v = _view(page)
+    assert v.now is not None and v.now.caption == "Free time"
+
+
+def test_job_and_tomorrow_captions():
+    first = lesson("Maths", at(7, 30, TOMORROW), at(8, 15, TOMORROW))
+    swim = event("s", "Swimming", at(15, day=TOMORROW), at(16, day=TOMORROW), "u-leo")
+    chores = (
+        DashboardTask(
+            id="a",
+            title="Feed the cat",
+            due=TODAY,
+            overdue_days=0,
+            done=False,
+            person_ids=("u-leo",),
+        ),
+    )
+    v = _view(person(LEO, chores=chores), tomorrow=(first, swim))
+    assert [t.caption for t in v.tomorrow] == ["School", "Swimming"]
+    assert [j.caption for j in v.jobs] == ["Feed the cat"]
+
+
+def test_night_caption():
+    first = lesson("Maths", at(7, 30, TOMORROW), at(8, 15, TOMORROW))
+    page = replace(mia_page(now=at(22, 30), is_night=True), school_tomorrow_first=first)
+    v = _view(page)
+    assert v.night is not None and v.night.caption == "Tomorrow · School 07:30"
+    morning = _view(replace(mia_page(now=at(5), is_night=True), next_item=MATHS))
+    assert morning.night is not None
+    assert morning.night.caption == "Today · School 08:20"

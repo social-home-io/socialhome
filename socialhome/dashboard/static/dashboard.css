@@ -893,7 +893,8 @@ h3.dash-sublabel {
   outline-offset: 3px;
 }
 
-/* Picture view: who wrote — a face with a 💬 — after NOW ➜ NEXT. */
+/* Picture view: who wrote — a face with a 💬 and one short line of
+   the text — after NOW ➜ NEXT. */
 .dash-pv-top {
   display: flex;
   grid-area: nn;
@@ -912,13 +913,23 @@ h3.dash-sublabel {
 .dash-pv-msg {
   position: relative;
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-inline-size: 11rem;
   padding: 0;
   font: inherit;
   color: inherit;
   background: transparent;
   border: 0;
-  border-radius: 50%;
+  border-radius: 16px;
   cursor: pointer;
+}
+
+/* The face carries the 💬 badge and the speaking 🔊. */
+.dash-pv-msg-face {
+  position: relative;
+  display: flex;
 }
 
 .dash-pv-msg-badge {
@@ -1106,11 +1117,12 @@ h3.dash-sublabel {
   display: flex;
   align-items: center;
   gap: 24px;
-  padding-block: 10px;
-  padding-inline: 12px 10px;
+  min-inline-size: 0;
+  padding-block: 12px 10px;
+  padding-inline: 16px 12px;
   background: var(--dash-surface);
   border: 3px solid var(--dash-accent);
-  border-radius: 999px;
+  border-radius: 32px;
 }
 
 /* The rail: a dot on the face of anyone with a mention waiting (the
@@ -1977,9 +1989,12 @@ h3.dash-sublabel {
 
 /* ── Picture view (people who can't read yet) ─────────────────────────── */
 
-/* No words but names, no digits: an analog clock, big emoji cards and
-   tiles. Past things fade to 40 %, the running one gets a thick frame,
-   a cancelled lesson is grey with a big ✕ — never colour alone. */
+/* Pictures first: an analog clock, big emoji cards and tiles. Past
+   pictures fade to 40 %, the running one gets a thick frame, a cancelled
+   lesson is grey with a big ✕ — never colour alone. Under each picture a
+   small muted caption, and a small-caps label on each section, help a
+   grown-up explain it; they stay quiet so the emoji is what the child
+   reads (muted ink: AA on bg and surface, both themes — never faded). */
 .dash-pv {
   display: flex;
   flex-direction: column;
@@ -2100,10 +2115,14 @@ h3.dash-sublabel {
   position: relative;
   display: flex;
   flex: none;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  inline-size: 176px;
-  block-size: 144px;
+  gap: 4px;
+  inline-size: 200px;
+  min-block-size: 172px;
+  padding-block: 8px 10px;
+  padding-inline: 10px;
   background: var(--dash-surface);
   border: 3px solid var(--kc, var(--dash-border));
   border-radius: 24px;
@@ -2130,10 +2149,11 @@ h3.dash-sublabel {
   transform: scaleX(-1);
 }
 
-/* NEXT's own little time-timer, from twelve o'clock. */
+/* NEXT's own little time-timer, from twelve o'clock (top corner: the
+   caption runs along the bottom). */
 .dash-pv-pie {
   position: absolute;
-  inset-block-end: 8px;
+  inset-block-start: 8px;
   inset-inline-end: 8px;
   inline-size: 44px;
   block-size: 44px;
@@ -2147,6 +2167,56 @@ h3.dash-sublabel {
 
 .dash-pv-pie-fill {
   fill: var(--kc, var(--dash-accent));
+}
+
+/* The helper caption under a picture: one line, cut with an ellipsis. */
+.dash-pv-cap {
+  display: block;
+  max-inline-size: 100%;
+  overflow: hidden;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--dash-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A cancelled lesson: struck through (its ✕ and label say it too). */
+.dash-pv-cap-cancelled {
+  text-decoration: line-through;
+}
+
+/* The big NOW / NEXT cards: up to two lines. */
+.dash-pv-card .dash-pv-cap {
+  display: -webkit-box;
+  font-size: 1rem;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+/* A section's quiet label: Now, Next, My day, My jobs … */
+.dash-pv-sec {
+  display: block;
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  color: var(--dash-muted);
+}
+
+.dash-pv-day > .dash-pv-sec {
+  margin-block: 0 6px;
+  padding-inline-start: 6px;
+}
+
+.dash-pv-row > .dash-pv-sec {
+  flex-basis: 100%;
 }
 
 /* MY DAY: four day parts, the tiles under each. */
@@ -2199,10 +2269,17 @@ h3.dash-sublabel {
   position: relative;
   display: flex;
   flex: none;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  inline-size: 72px;
-  block-size: 72px;
+  gap: 4px;
+  /* As wide as the caption needs, within bounds: a long title ends in
+     an ellipsis instead of stretching the row. */
+  min-inline-size: 96px;
+  max-inline-size: 10rem;
+  min-block-size: 72px;
+  padding-block: 8px 4px;
+  padding-inline: 10px;
   background: var(--dash-bg);
   border: 2px solid var(--dash-border);
   border-block-end: 6px solid var(--kc, var(--dash-border));
@@ -2214,7 +2291,8 @@ h3.dash-sublabel {
   line-height: 1;
 }
 
-.dash-pv-past {
+/* Only the picture fades — the caption keeps its contrast. */
+.dash-pv-past .dash-pv-emoji {
   opacity: 0.4;
 }
 
@@ -2228,9 +2306,12 @@ h3.dash-sublabel {
   opacity: 0.6;
 }
 
+/* Over the emoji, not the caption under it. */
 .dash-pv-x {
   position: absolute;
-  inset: 0;
+  inset-block-start: 0;
+  inset-inline: 0;
+  block-size: 60px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2273,9 +2354,10 @@ h3.dash-sublabel {
   line-height: 1;
 }
 
+/* The top corner: the caption runs along the bottom. */
 .dash-pv-check {
   position: absolute;
-  inset-block-end: -10px;
+  inset-block-start: -10px;
   inset-inline-end: -10px;
   display: flex;
   align-items: center;
@@ -2351,12 +2433,22 @@ h3.dash-sublabel {
   font-size: 2rem;
 }
 
+.dash-pv-night .dash-pv-cap {
+  margin-block-start: 12px;
+  font-size: 1rem;
+}
+
 /* Portrait tablet / phone: the day parts become rows, read top to
    bottom (four columns that narrow hold one tile each). */
 @media (max-width: 900px), (orientation: portrait) {
   .dash-pv-parts {
     grid-template-columns: minmax(0, 1fr);
     gap: 10px;
+  }
+
+  /* NOW ➜ NEXT stay side by side next to the clock. */
+  .dash-pv-card {
+    inline-size: 168px;
   }
 
   .dash-pv-part {
@@ -2405,17 +2497,26 @@ h3.dash-sublabel {
     font-size: 2.5rem;
   }
 
+  .dash-pv-nownext {
+    gap: 12px;
+  }
+
   .dash-pv-card {
-    inline-size: 132px;
-    block-size: 116px;
+    inline-size: 140px;
+    min-block-size: 140px;
+    padding-inline: 8px;
   }
 
   .dash-pv-card-emoji {
-    font-size: 4rem;
+    font-size: 3.5rem;
+  }
+
+  .dash-pv-card .dash-pv-cap {
+    font-size: 0.9375rem;
   }
 
   .dash-pv-pie {
-    inset-block-end: 5px;
+    inset-block-start: 5px;
     inset-inline-end: 5px;
     inline-size: 32px;
     block-size: 32px;
@@ -2426,8 +2527,10 @@ h3.dash-sublabel {
   }
 
   .dash-pv-tile {
-    inline-size: 64px;
-    block-size: 64px;
+    min-inline-size: 84px;
+    max-inline-size: 9rem;
+    min-block-size: 64px;
+    padding-inline: 8px;
   }
 
   .dash-pv-emoji {
@@ -2435,7 +2538,16 @@ h3.dash-sublabel {
   }
 
   .dash-pv-x {
+    block-size: 52px;
     font-size: 3rem;
+  }
+
+  .dash-pv-cap {
+    font-size: 0.875rem;
+  }
+
+  .dash-pv-msg {
+    max-inline-size: 8.5rem;
   }
 
   /* The 64 px phone face: a smaller "new" badge keeps the initials clear. */
