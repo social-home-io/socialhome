@@ -233,6 +233,9 @@ class AbstractConversationRepo(Protocol):
         emoji: str,
     ) -> None: ...
     async def list_reactions(self, message_id: str) -> list[MessageReaction]: ...
+    async def list_reactions_with_emoji(
+        self, message_ids: Collection[str], emoji: str
+    ) -> list[MessageReaction]: ...
 
     # Delivery state (§12.5 — read receipts + delivery tracking) ---------
     async def upsert_delivery_state(
@@ -1516,6 +1519,30 @@ class SqliteConversationRepo:
         rows = await self._db.fetchall(
             "SELECT * FROM message_reactions WHERE message_id=? ORDER BY reacted_at",
             (message_id,),
+        )
+        return [
+            MessageReaction(
+                message_id=r["message_id"],
+                user_id=r["user_id"],
+                emoji=r["emoji"],
+                reacted_at=_parse(r["reacted_at"]) or datetime.now(timezone.utc),
+            )
+            for r in rows
+        ]
+
+    async def list_reactions_with_emoji(
+        self, message_ids: Collection[str], emoji: str
+    ) -> list[MessageReaction]:
+        """Every ``emoji`` reaction on any of ``message_ids`` in one query
+        (the household dashboard's acknowledgements)."""
+        ids = list(dict.fromkeys(message_ids))
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        rows = await self._db.fetchall(
+            "SELECT * FROM message_reactions WHERE emoji = ? "
+            f"AND message_id IN ({marks}) ORDER BY reacted_at",
+            (emoji, *ids),
         )
         return [
             MessageReaction(

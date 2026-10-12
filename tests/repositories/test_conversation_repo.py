@@ -361,6 +361,28 @@ async def test_remove_reaction(env):
     assert reactions == []
 
 
+async def test_list_reactions_with_emoji_reads_many_messages_at_once(env):
+    """One query for many messages; only the asked emoji; unknown ids skip."""
+    await env.repo.create(_conv("conv-ack"))
+    await env.repo.save_message(_message("ack-1", "conv-ack"))
+    await env.repo.save_message(_message("ack-2", "conv-ack"))
+    await env.repo.save_message(_message("ack-3", "conv-ack"))
+    await env.repo.add_reaction("ack-1", "uid-alice", "✅")
+    await env.repo.add_reaction("ack-1", "household-dashboard", "✅")
+    await env.repo.add_reaction("ack-2", "uid-bob", "👍")
+    await env.repo.add_reaction("ack-3", "uid-bob", "✅")
+    rows = await env.repo.list_reactions_with_emoji(
+        ["ack-1", "ack-2", "ack-3", "nope"], "✅"
+    )
+    assert sorted((r.message_id, r.user_id) for r in rows) == [
+        ("ack-1", "household-dashboard"),
+        ("ack-1", "uid-alice"),
+        ("ack-3", "uid-bob"),
+    ]
+    assert all(r.emoji == "✅" for r in rows)
+    assert await env.repo.list_reactions_with_emoji([], "✅") == []
+
+
 # ── DM history sync helpers ──────────────────────────────────────────────
 
 
