@@ -14,7 +14,9 @@ space chat's writers on the space roster), so a space chat's composer can
 
 Each household parses the decrypted message against its own seat view;
 nothing about mentions travels on the wire (no protocol change). ``@here``
-has no meaning in a chat and is always dropped.
+has no meaning in a chat and is always dropped — except by
+:meth:`DmMentionResolver.parse_with_here`, the household dashboard's
+read (a household-chat ``@here`` is a banner on the wall tablet).
 """
 
 from __future__ import annotations
@@ -152,17 +154,34 @@ class DmMentionResolver:
         """user_id → token (without ``@``) a composer should insert."""
         return mention_tokens(await self.candidates(conversation_id))
 
-    async def _parse(self, conversation_id: str, contents: list[str]) -> list:
+    async def _parse(
+        self, conversation_id: str, contents: list[str], *, keep_here: bool = False
+    ) -> list[tuple[Mention, ...]]:
         lookup = candidate_lookup(await self.candidates(conversation_id))
         parser = MentionParser(lookup_member=lookup)
         return [
             tuple(
                 m
                 for m in parser.parse(c, conversation_id)
-                if m.type is not MentionType.HERE
+                if keep_here or m.type is not MentionType.HERE
             )
             for c in contents
         ]
+
+    async def parse_with_here(
+        self, conversation_id: str, contents: list[str]
+    ) -> list[tuple[Mention, ...]]:
+        """Each of ``contents``' mentions — ``@here`` kept — resolved with
+        one roster read.
+
+        Only for the household dashboard, which shows a household-chat
+        ``@here`` as a banner on the wall. Chat notifications and unread
+        counts never call it (``@here`` means nothing to them). Errors
+        propagate: the caller decides how to fail.
+        """
+        if not contents:
+            return []
+        return await self._parse(conversation_id, contents, keep_here=True)
 
     async def resolve(
         self, conversation_id: str, content: str | None
