@@ -363,11 +363,13 @@ async def test_register_pushes_picture_when_hash_changed(repos, db):
     await pic_repo.set_user_picture(
         "u1",
         bytes_webp=b"webp-bytes",
-        hash="hashv1",
+        hash="aaaaaaaaaaaaaaa1",
         width=128,
         height=128,
     )
-    await db.enqueue("UPDATE users SET picture_hash='hashv1' WHERE user_id='u1'")
+    await db.enqueue(
+        "UPDATE users SET picture_hash='aaaaaaaaaaaaaaa1' WHERE user_id='u1'"
+    )
 
     sess = _StubSession(body={"digest": "irrelevant"})
     svc = MomentPublicService(
@@ -395,11 +397,13 @@ async def test_register_skips_picture_when_hash_matches(repos, db):
     await pic_repo.set_user_picture(
         "u1",
         bytes_webp=b"webp-bytes",
-        hash="hashv1",
+        hash="aaaaaaaaaaaaaaa1",
         width=128,
         height=128,
     )
-    await db.enqueue("UPDATE users SET picture_hash='hashv1' WHERE user_id='u1'")
+    await db.enqueue(
+        "UPDATE users SET picture_hash='aaaaaaaaaaaaaaa1' WHERE user_id='u1'"
+    )
 
     sess = _StubSession(body={})
     svc = MomentPublicService(
@@ -476,11 +480,13 @@ async def test_push_picture_propagates_500(repos, db):
     await pic_repo.set_user_picture(
         "u1",
         bytes_webp=b"webp",
-        hash="hashv1",
+        hash="aaaaaaaaaaaaaaa1",
         width=64,
         height=64,
     )
-    await db.enqueue("UPDATE users SET picture_hash='hashv1' WHERE user_id='u1'")
+    await db.enqueue(
+        "UPDATE users SET picture_hash='aaaaaaaaaaaaaaa1' WHERE user_id='u1'"
+    )
 
     # Sequential responses: register success, picture upload 500.
     class _SeqSession:

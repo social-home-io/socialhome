@@ -262,3 +262,45 @@ async def test_restore_round_trips_shopping_store_order(tmp_dir):
     items = await tgt.fetchall("SELECT id, store FROM shopping_list_items")
     assert [(i["id"], i["store"]) for i in items] == [("i1", "Bakery")]
     await tgt.shutdown()
+
+
+# ─── Picture hashes from before the 0098 check ───────────────────────────
+
+
+async def test_restore_keeps_a_user_whose_old_backup_has_a_bad_picture_hash(tmp_dir):
+    """A backup taken before migration 0098 can hold a picture hash the DB
+    now refuses. Restore cleans it to NULL instead of skipping the row —
+    the user must never be dropped for a cache-busting suffix."""
+    src = AsyncDatabase(tmp_dir / "src3.db", batch_timeout_ms=10)
+    await src.startup()
+    kp = generate_identity_keypair()
+    iid = derive_instance_id(kp.public_key)
+    await src.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES(?,?,?,?)",
+        (iid, kp.private_key.hex(), kp.public_key.hex(), "aa" * 32),
+    )
+    # The pre-0098 world: no trigger guards the column yet.
+    await src.enqueue("DROP TRIGGER users_picture_hash_insert_check")
+    await src.enqueue(
+        "INSERT INTO users(username, user_id, display_name, picture_hash)"
+        " VALUES('alice', 'a', 'Alice', 'ab&sig=evil')",
+    )
+    await src.enqueue(
+        "INSERT INTO users(username, user_id, display_name, picture_hash)"
+        " VALUES('bob', 'b', 'Bob', '0123456789abcdef')",
+    )
+    media_src = tmp_dir / "media-src3"
+    media_src.mkdir()
+    blob = await BackupService(src, media_src).export_to_bytes()
+    await src.shutdown()
+
+    tgt = AsyncDatabase(tmp_dir / "tgt3.db", batch_timeout_ms=10)
+    await tgt.startup()
+    await BackupService(tgt, tmp_dir / "media-tgt3").restore_from_bytes(blob)
+    rows = {
+        r["username"]: r["picture_hash"]
+        for r in await tgt.fetchall("SELECT username, picture_hash FROM users")
+    }
+    assert rows == {"alice": None, "bob": "0123456789abcdef"}
+    await tgt.shutdown()

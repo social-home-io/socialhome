@@ -405,7 +405,7 @@ async def test_presence_includes_remote_member_picture_url(client):
             "peer-jacqueline",
             "jacqueline",
             "Jacqueline",
-            "feedface",
+            "feedfacefeedface",
         ),
     )
     await _seed_remote_pin(
@@ -426,7 +426,7 @@ async def test_presence_includes_remote_member_picture_url(client):
     assert "api/users/uid-jacqueline/picture" in jacqueline["picture_url"]
     # The signer ran — the URL carries the cache-busting hash and
     # the signature query the SPA needs for <img> loads under ingress.
-    assert "v=feedface" in jacqueline["picture_url"]
+    assert "v=feedfacefeedface" in jacqueline["picture_url"]
     # Signed exactly once — a second pass appended a second exp/sig pair.
     assert jacqueline["picture_url"].count("sig=") == 1
     assert jacqueline["picture_url"].count("exp=") == 1
@@ -556,7 +556,7 @@ async def test_gps_entries_carry_a_signed_picture_url(client):
     space_id = await _create_space(client)
     await _enable_feature_location(client, space_id, enabled=True)
     await _set_member_opt_in(client, space_id, client._uid, enabled=True)
-    await _seed_local_picture(client, "cafe01")
+    await _seed_local_picture(client, "cafe0100cafe0100")
     await _seed_presence(
         client, username="admin", user_id=client._uid, lat=47.3769, lon=8.5417
     )
@@ -571,7 +571,7 @@ async def test_zone_only_entries_carry_a_signed_picture_url(client):
     await _enable_feature_location(client, space_id, enabled=True)
     await _set_location_mode(client, space_id, "zone_only")
     await _set_member_opt_in(client, space_id, client._uid, enabled=True)
-    await _seed_local_picture(client, "cafe02")
+    await _seed_local_picture(client, "cafe0200cafe0200")
     await _seed_zone(
         client, space_id, zid="z_home", name="Home", lat=47.3769, lon=8.5417
     )
@@ -592,6 +592,9 @@ async def test_remote_pin_picture_hash_is_url_encoded(client):
     await _seed_remote_member(
         client, space_id, instance_id="peer-x", user_id="uid-x", display_name="X"
     )
+    # Migration 0098's trigger refuses such a hash; drop it to model a
+    # writer that slips past — the URL builder must still encode it.
+    await client._db.enqueue("DROP TRIGGER remote_users_picture_hash_insert_check")
     await client._db.enqueue(
         "INSERT INTO remote_users"
         "(user_id, instance_id, remote_username, display_name,"

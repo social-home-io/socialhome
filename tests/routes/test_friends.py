@@ -237,7 +237,7 @@ async def test_friends_signs_picture_url_for_remote_members(client):
         "INSERT INTO remote_users("
         "  user_id, instance_id, remote_username, display_name, picture_hash"
         ") VALUES(?,?,?,?,?)",
-        ("ru-with-pic", "peer-pic", "gus", "Gus", "deadbeef"),
+        ("ru-with-pic", "peer-pic", "gus", "Gus", "deadbeefdeadbeef"),
     )
     r = await client.get("/api/friends", headers=_auth(client._tok))
     body = await r.json()

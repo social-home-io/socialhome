@@ -363,7 +363,7 @@ async def test_list_presence_carries_signed_picture_and_updated_at(client):
     other ``picture_url``) and the time of the last location update."""
     await client._db.enqueue(
         "UPDATE users SET picture_hash=? WHERE username=?",
-        ("feedbeef", "admin"),
+        ("feedbeeffeedbeef", "admin"),
     )
     await client.post(
         "/api/presence/location",

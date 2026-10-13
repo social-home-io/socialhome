@@ -28,8 +28,15 @@ import aiofiles.os
 import orjson
 
 from ..db import AsyncDatabase
+from ..domain.picture_hash import clean_picture_hash
 
 log = logging.getLogger(__name__)
+
+#: Tables whose ``picture_hash`` the DB guards (migration 0098) — restore
+#: cleans the column so an old backup's bad hash can't drop the whole row.
+_PICTURE_HASH_TABLES: frozenset[str] = frozenset(
+    {"users", "remote_users", "space_members"}
+)
 
 
 # ─── What's safe to export ────────────────────────────────────────────────
@@ -382,7 +389,15 @@ class BackupService:
         placeholders = ", ".join("?" for _ in cols)
         col_list = ", ".join(cols)
         sql = f"INSERT OR IGNORE INTO {table}({col_list}) VALUES({placeholders})"
+        clean_hash = table in _PICTURE_HASH_TABLES and "picture_hash" in cols
         for row in rows:
+            if clean_hash:
+                # A backup from before migration 0098 can carry a hash the
+                # DB's trigger now refuses; drop the hash, never the row.
+                row = {
+                    **row,
+                    "picture_hash": clean_picture_hash(row.get("picture_hash")),
+                }
             params = tuple(row.get(c) for c in cols)
             try:
                 await self._db.enqueue(sql, params)

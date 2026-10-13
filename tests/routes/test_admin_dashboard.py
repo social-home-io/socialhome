@@ -274,7 +274,7 @@ async def test_people_list(client):
         "INSERT INTO users(username, user_id, display_name, is_minor, "
         "child_protection_enabled, declared_age, picture_hash) "
         "VALUES(?,?,?,?,?,?,?)",
-        ("kid", "uid-kid", "Kid", 1, 1, 9, "abc123"),
+        ("kid", "uid-kid", "Kid", 1, 1, 9, "abc123abc123abc1"),
     )
     await db.enqueue(
         "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",

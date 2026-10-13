@@ -57,18 +57,18 @@ async def test_save_persists_and_reads_back_identity_anchor(env):
             user_id="uid-anchored",
             username="anchored",
             display_name="Anchored",
-            identity_anchor="deadbeef" * 4,
+            identity_anchor="deadbeefdeadbeef" * 4,
         )
     )
     got = await env.user_repo.get("anchored")
     assert got is not None
-    assert got.identity_anchor == "deadbeef" * 4
+    assert got.identity_anchor == "deadbeefdeadbeef" * 4
     # And it landed in the column, not just the dataclass.
     row = await env.db.fetchone(
         "SELECT identity_anchor FROM users WHERE username=?",
         ("anchored",),
     )
-    assert row["identity_anchor"] == "deadbeef" * 4
+    assert row["identity_anchor"] == "deadbeefdeadbeef" * 4
 
 
 async def test_set_user_identity_key_persists_both_halves(env):
@@ -346,14 +346,14 @@ async def test_get_remote_by_member_roundtrip(env):
             instance_id="peer-b",
             remote_username="brother",
             display_name="Brother",
-            picture_hash="pic-hash-abc",
+            picture_hash="0a1b2c3d4e5f6a7b",
         ),
     )
     got = await env.user_repo.get_remote_by_member("peer-b", "brother")
     assert got is not None
     assert got.user_id == "uid-brother-remote"
     assert got.display_name == "Brother"
-    assert got.picture_hash == "pic-hash-abc"
+    assert got.picture_hash == "0a1b2c3d4e5f6a7b"
     # Lookup with the wrong instance OR wrong username returns None —
     # the index is on the composite, not either half alone.
     assert await env.user_repo.get_remote_by_member("peer-x", "brother") is None

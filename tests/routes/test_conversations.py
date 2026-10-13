@@ -233,7 +233,7 @@ async def _seed_remote_brother(client) -> str:
             "peer-b",
             "brother",
             "Brother",
-            "pic-hash-abc",
+            "0a1b2c3d4e5f6a7b",
         ),
     )
     return remote_uid
@@ -271,7 +271,7 @@ async def test_list_conversations_includes_remote_peer_preview(client):
     # ``picture_url`` is the cache-busting relative path the SPA already
     # resolves against ``document.baseURI`` — same shape as for local
     # users, just keyed on the federated peer's globally-unique user_id.
-    assert peer["picture_url"] == f"api/users/{remote_uid}/picture?v=pic-hash-abc"
+    assert peer["picture_url"] == f"api/users/{remote_uid}/picture?v=0a1b2c3d4e5f6a7b"
 
 
 async def test_list_dm_members_includes_remote_peer(client):
@@ -300,7 +300,9 @@ async def test_list_dm_members_includes_remote_peer(client):
     brother = by_user_id[remote_uid]
     assert brother["display_name"] == "Brother"
     assert brother["username"] == "brother"
-    assert brother["picture_url"] == (f"api/users/{remote_uid}/picture?v=pic-hash-abc")
+    assert brother["picture_url"] == (
+        f"api/users/{remote_uid}/picture?v=0a1b2c3d4e5f6a7b"
+    )
     # A remote peer is never the caller.
     assert brother["is_self"] is False
     # Presence fields are part of the contract — the SPA renders the
