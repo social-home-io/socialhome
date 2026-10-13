@@ -31,6 +31,7 @@ __all__ = [
     "HouseholdZoneNameTakenError",
     "HouseholdZoneNotFoundError",
     "HouseholdZoneReadOnlyError",
+    "HouseholdZoneSyncStatus",
     "ZoneSourceUnavailableError",
 ]
 
@@ -114,6 +115,23 @@ class HouseholdZoneMirrorResult:
     removed: int
     skipped: int
     changed: bool
+
+
+@dataclass(slots=True, frozen=True)
+class HouseholdZoneSyncStatus:
+    """The platform zone sync as Admin › Zones shows it.
+
+    * ``available`` — the platform has a zone source (Home Assistant).
+    * ``enabled`` — the household's option (default on).
+    * ``last_synced_at`` — UTC ISO 8601 of the last run that read the
+      platform, this process lifetime; ``None`` before the first one.
+    * ``last_error`` — why the last run failed, ``None`` when it worked.
+    """
+
+    available: bool
+    enabled: bool
+    last_synced_at: str | None = None
+    last_error: str | None = None
 
 
 class HouseholdZoneNotFoundError(CodedError, LookupError):
