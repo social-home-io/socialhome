@@ -8,6 +8,12 @@ import pytest
 
 from socialhome.dashboard.contrast import (
     AA_TEXT,
+    BLACK,
+    BUBBLE_DARK,
+    BUBBLE_LIGHT,
+    WHITE,
+    frame_color,
+    mix_srgb,
     NOTE_DARK_BG,
     NOTE_LIGHT_BG,
     NOTE_MIX_DARK,
@@ -184,3 +190,42 @@ def test_picture_view_captions_are_readable_on_both_themes():
         body = _rule(css, selector)
         assert "color: var(--dash-muted);" in body, selector
         assert "opacity" not in body, selector
+
+
+# ─── Map marker frames (--kf) ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("color", "light", "dark"),
+    [
+        # The approved design's table (round 2).
+        ("#3e63dd", "#3e63dd", "#6582e4"),
+        ("#1f4a3a", "#1f4a3a", "#799289"),
+        ("#c8922e", "#be8b2c", "#c8922e"),
+        ("#d2552f", "#d2552f", "#d66644"),
+        ("#12a594", "#12a594", "#12a594"),
+        ("#8e4ec6", "#8e4ec6", "#a571d1"),
+    ],
+)
+def test_frame_colors_match_the_design(color, light, dark):
+    assert frame_color(color, BUBBLE_LIGHT, BLACK) == light
+    assert frame_color(color, BUBBLE_DARK, WHITE) == dark
+
+
+def _grid() -> list[str]:
+    steps = ("00", "33", "66", "99", "cc", "ff")
+    return [f"#{r}{g}{b}" for r in steps for g in steps for b in steps]
+
+
+@pytest.mark.parametrize("color", _grid())
+def test_frame_color_clears_non_text_contrast_on_both_bubbles(color):
+    """WCAG 1.4.11: a person's marker frame reads (3:1) on the bubble —
+    white in the light theme, the lifted dark bubble in the dark one."""
+    assert contrast_ratio(frame_color(color, BUBBLE_LIGHT, BLACK), BUBBLE_LIGHT) >= 3
+    assert contrast_ratio(frame_color(color, BUBBLE_DARK, WHITE), BUBBLE_DARK) >= 3
+
+
+def test_mix_srgb():
+    assert mix_srgb("#000000", "#ffffff", 0.5) == "#808080"
+    assert mix_srgb("#123456", "#000000", 0.0) == "#123456"
+    assert mix_srgb("#123456", "#ffffff", 1.0) == "#ffffff"

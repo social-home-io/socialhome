@@ -42,7 +42,17 @@ from ..domain.household_dashboard import (
     leading_emoji,
 )
 from .clock import days_late, due_label, hhmm, relative_in, until
-from .contrast import hex_color, ink_on, note_colors, readable_on
+from .contrast import (
+    BLACK,
+    BUBBLE_DARK,
+    BUBBLE_LIGHT,
+    WHITE,
+    frame_color,
+    hex_color,
+    ink_on,
+    note_colors,
+    readable_on,
+)
 from .icons import title_icon
 
 __all__ = [
@@ -104,10 +114,12 @@ class ColorBook:
     """Validated colours → short CSS classes (``k0``, ``k1``…).
 
     Each class sets ``--kc`` (the colour), ``--kt`` (black or white
-    ink that reads on it) and, for note cards, ``--kb`` (the colour
+    ink that reads on it), for note cards ``--kb`` (the colour
     softened toward the page, mixed here in Oklab) with ``--kn`` (an ink
-    picked against that fill, :func:`~.contrast.note_colors`) — the dark
-    fill and ink again under ``prefers-color-scheme: dark`` and at night.
+    picked against that fill, :func:`~.contrast.note_colors`), and for
+    Map markers ``--kf`` (a frame that reaches 3:1 on the marker bubble,
+    :func:`~.contrast.frame_color`) — the dark fill, ink and frame again
+    under ``prefers-color-scheme: dark`` and at night.
     Register every colour *before* rendering
     (:meth:`add`); the template asks :meth:`cls`. Anything that isn't a
     plain hex colour gets no class — the element keeps its neutral look.
@@ -131,11 +143,16 @@ class ColorBook:
         notes = {color: note_colors(color) for color in self._classes}
         light = "".join(
             f".{name}{{--kc:{color};--kt:{ink_on(color)};"
-            f"--kn:{notes[color].light_ink};--kb:{notes[color].light_bg}}}"
+            f"--kn:{notes[color].light_ink};--kb:{notes[color].light_bg};"
+            f"--kf:{frame_color(color, BUBBLE_LIGHT, BLACK)}}}"
             for color, name in self._classes.items()
         )
         dark = [
-            (name, f"{{--kn:{notes[color].dark_ink};--kb:{notes[color].dark_bg}}}")
+            (
+                name,
+                f"{{--kn:{notes[color].dark_ink};--kb:{notes[color].dark_bg};"
+                f"--kf:{frame_color(color, BUBBLE_DARK, WHITE)}}}",
+            )
             for color, name in self._classes.items()
         ]
         if not dark:
