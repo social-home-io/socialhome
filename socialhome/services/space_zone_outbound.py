@@ -46,6 +46,8 @@ class SpaceZoneOutbound:
         self._bus.subscribe(SpaceZoneDeleted, self._on_deleted)
 
     async def _on_upserted(self, event: SpaceZoneUpserted) -> None:
+        if event.origin_instance_id is not None:
+            return  # applied from another household — never echo it back
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_ZONE_UPSERTED,
@@ -64,6 +66,8 @@ class SpaceZoneOutbound:
         )
 
     async def _on_deleted(self, event: SpaceZoneDeleted) -> None:
+        if event.origin_instance_id is not None:
+            return  # applied from another household — never echo it back
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_ZONE_DELETED,

@@ -57,6 +57,8 @@ from ...domain.events import (
     GalleryItemDeleted,
     GalleryItemUploaded,
     PageDeleted,
+    SpaceZoneDeleted,
+    SpaceZoneUpserted,
     TaskCreated,
     TaskDeleted,
     TaskListCreated,
@@ -2353,6 +2355,24 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(
                 event, space_id=space_id, what="zone", row_id=zone_id
             )
+            return
+        # Live map refresh for local members; the origin keeps the
+        # outbound fan-out from echoing it back to the mesh.
+        await self._bus.publish(
+            SpaceZoneUpserted(
+                space_id=space_id,
+                zone_id=zone.id,
+                name=zone.name,
+                latitude=zone.latitude,
+                longitude=zone.longitude,
+                radius_m=zone.radius_m,
+                color=zone.color,
+                icon=zone.icon,
+                created_by=zone.created_by,
+                updated_at=zone.updated_at,
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     async def _on_zone_deleted(self, event: "FederationEvent") -> None:
         if self._zone_repo is None:
@@ -2374,6 +2394,15 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(
                 event, space_id=space_id, what="zone", row_id=zone_id
             )
+            return
+        await self._bus.publish(
+            SpaceZoneDeleted(
+                space_id=space_id,
+                zone_id=zone_id,
+                deleted_by=actor,
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     # ─── Space timetables (v_39) ─────────────────────────────────────────
 

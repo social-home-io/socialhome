@@ -16,6 +16,8 @@ from socialhome.domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    SpaceZoneDeleted,
+    SpaceZoneUpserted,
     TaskCreated,
     TaskDeleted,
     TaskListCreated,
@@ -3629,6 +3631,42 @@ async def test_zone_upserted_applies_the_icon(zone_handlers):
     handlers, zones = zone_handlers
     await _zone_up(handlers, icon="🏫")
     assert zones.upserted[-1].icon == "🏫"
+
+
+async def test_zone_upserted_publishes_with_origin(bus, zone_handlers):
+    """A remote zone edit reaches open maps live: the handler publishes
+    ``SpaceZoneUpserted`` tagged with the sender, so the outbound fan-out
+    skips it (no echo) while the realtime frame still goes out."""
+    handlers, _zones = zone_handlers
+    seen = _record(bus, SpaceZoneUpserted)
+    await _zone_up(handlers, icon="🏫")
+    assert len(seen) == 1
+    ev = seen[0]
+    assert (ev.space_id, ev.zone_id, ev.icon) == ("sp-1", "z-1", "🏫")
+    assert ev.origin_instance_id == "peer-x"
+
+
+async def test_zone_upsert_refused_publishes_nothing(bus, zone_handlers):
+    handlers, _zones = zone_handlers
+    seen = _record(bus, SpaceZoneUpserted)
+    await _zone_up(handlers, icon="not an emoji")
+    assert seen == []
+
+
+async def test_zone_deleted_publishes_with_origin(bus, zone_handlers):
+    handlers, _zones = zone_handlers
+    await _zone_up(handlers)
+    seen = _record(bus, SpaceZoneDeleted)
+    await handlers._on_zone_deleted(
+        _event(
+            FederationEventType.SPACE_ZONE_DELETED,
+            {"zone_id": "z-1", "deleted_by": "u-admin"},
+            space_id="sp-1",
+            from_instance="peer-x",
+        )
+    )
+    assert len(seen) == 1
+    assert (seen[0].zone_id, seen[0].origin_instance_id) == ("z-1", "peer-x")
 
 
 async def test_zone_upserted_without_icon_key_keeps_the_stored_icon(zone_handlers):

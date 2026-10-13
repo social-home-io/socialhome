@@ -405,6 +405,8 @@ class SpaceZoneUpserted(DomainEvent):
 
     Picked up by ``SpaceZoneOutboundService`` (federation fan-out)
     and ``RealtimeService`` (local WS ``space_zone_changed`` frame).
+    ``origin_instance_id`` is set when the upsert was applied from another
+    household — the realtime frame still goes out, the fan-out skips it.
     """
 
     space_id: str
@@ -418,6 +420,7 @@ class SpaceZoneUpserted(DomainEvent):
     updated_at: str
     occurred_at: datetime = field(default_factory=_now)
     icon: str | None = None
+    origin_instance_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -428,6 +431,7 @@ class SpaceZoneDeleted(DomainEvent):
     zone_id: str
     deleted_by: str
     occurred_at: datetime = field(default_factory=_now)
+    origin_instance_id: str | None = None
 
 
 # ─── Tasks ────────────────────────────────────────────────────────────────

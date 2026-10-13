@@ -8,6 +8,7 @@ also receive the events (F2a refactor).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -127,3 +128,25 @@ async def test_broadcast_failure_is_swallowed():
     # Must not raise.
     await bus.publish(_upsert_event())
     assert fed.broadcasts == []
+
+
+# ─── Echo guard ─────────────────────────────────────────────────────────
+
+
+async def test_upsert_applied_from_a_peer_is_never_echoed(env):
+    """An upsert another household sent us is published locally (live map
+    refresh) with its origin — fanning it back out would echo it."""
+    await env.bus.publish(replace(_upsert_event(), origin_instance_id="peer-a"))
+    assert env.fed.broadcasts == []
+
+
+async def test_delete_applied_from_a_peer_is_never_echoed(env):
+    await env.bus.publish(
+        SpaceZoneDeleted(
+            space_id="sp_test",
+            zone_id="z_office",
+            deleted_by="u_admin",
+            origin_instance_id="peer-a",
+        )
+    )
+    assert env.fed.broadcasts == []
