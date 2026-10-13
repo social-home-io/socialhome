@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -17,6 +18,7 @@ import pytest
 from PIL import Image
 
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import SpaceMemberProfileUpdated
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.space import (
@@ -30,6 +32,7 @@ from socialhome.domain.space import (
 from socialhome.federation.space_authorship import SpaceAuthorship
 from socialhome.federation.sync.space.receiver import HeldBack, SpaceSyncReceiver
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.media.profile_picture import PROFILE_PICTURE_MAX_DIMENSION
 from socialhome.repositories.profile_picture_repo import SqliteProfilePictureRepo
 from socialhome.repositories.space_remote_member_repo import (
@@ -37,6 +40,10 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.realtime_service import RealtimeService
+from socialhome.services.space_member_profile_federation_outbound import (
+    SpaceMemberProfileFederationOutbound,
+)
 
 HOST = "host-household"
 SPACE_ID = "sp-sync-pic"
@@ -103,8 +110,9 @@ async def stack(tmp_dir):
     peer_version = AsyncMock(
         return_value=FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC
     )
+    bus = EventBus()
     receiver = SpaceSyncReceiver(
-        bus=EventBus(),
+        bus=bus,
         encoder=MagicMock(),
         crypto=MagicMock(),
         federation_repo=AsyncMock(),
@@ -120,6 +128,7 @@ async def stack(tmp_dir):
         peer_version=peer_version,
     )
     yield SimpleNamespace(
+        bus=bus,
         db=db,
         spaces=spaces,
         pictures=pictures,
@@ -484,3 +493,131 @@ async def test_reset_of_a_member_without_a_picture_is_a_no_op(stack):
     member = await stack.spaces.get_member(SPACE_ID, MEMBER)
     assert member is not None and member.picture_hash is None
     assert await stack.pictures.get_member_picture(SPACE_ID, MEMBER) is None
+
+
+# ── Live nudge: an open SPA hears about a picture a catch-up changed ──
+
+
+class _Socket:
+    closed = False
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send_str(self, msg: str) -> None:
+        self.sent.append(json.loads(msg))
+
+
+class _Federation:
+    _own_instance_id = "this-household"
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send_event(self, **kwargs) -> None:
+        self.sent.append(kwargs)
+
+
+async def _listen(stack) -> SimpleNamespace:
+    """The production subscribers on the receiver's bus: the realtime frame
+    to local space members, and the per-space profile federation outbound
+    (which must stay silent — a catch-up is never re-broadcast)."""
+    events: list[SpaceMemberProfileUpdated] = []
+
+    async def _capture(event: SpaceMemberProfileUpdated) -> None:
+        events.append(event)
+
+    stack.bus.subscribe(SpaceMemberProfileUpdated, _capture)
+    ws = WebSocketManager()
+    socket = _Socket()
+    await ws.register(LOCAL, socket)  # type: ignore[arg-type]
+    RealtimeService(
+        stack.bus, ws, user_repo=SqliteUserRepo(stack.db), space_repo=stack.spaces
+    ).wire()
+    federation = _Federation()
+    SpaceMemberProfileFederationOutbound(
+        bus=stack.bus,
+        federation_service=federation,  # type: ignore[arg-type]
+        space_repo=stack.spaces,
+    ).wire()
+    return SimpleNamespace(events=events, socket=socket, federation=federation)
+
+
+def _frames(heard) -> list[dict]:
+    return [f for f in heard.socket.sent if f["type"] == "space.member.profile_updated"]
+
+
+async def test_a_caught_up_picture_is_told_to_local_clients_without_an_echo(stack):
+    await stack.spaces.set_member_profile(SPACE_ID, MEMBER, space_display_name="Remy")
+    heard = await _listen(stack)
+    await _persist(stack, "member_pictures", [_picture_record(_png())])
+    member = await stack.spaces.get_member(SPACE_ID, MEMBER)
+    assert member is not None and member.picture_hash is not None
+    assert len(heard.events) == 1
+    event = heard.events[0]
+    assert event.user_id == MEMBER
+    assert event.picture_hash == member.picture_hash
+    # The display name rides along unchanged (the frame overwrites it).
+    assert event.space_display_name == "Remy"
+    assert event.origin_instance_id == HOST
+    [frame] = _frames(heard)
+    assert frame["user_id"] == MEMBER
+    assert frame["picture_hash"] == member.picture_hash
+    assert frame["picture_url"].endswith(f"?v={member.picture_hash}")
+    assert heard.federation.sent == []
+
+
+async def test_an_unchanged_caught_up_picture_is_not_told_again(stack):
+    """A catch-up re-ships every picture: one we already hold (same bytes →
+    same hash) is no change, so no frame."""
+    await _persist(stack, "member_pictures", [_picture_record(_png())])
+    heard = await _listen(stack)
+    await _persist(stack, "member_pictures", [_picture_record(_png())])
+    assert heard.events == []
+    assert _frames(heard) == []
+
+
+async def test_one_nudge_per_changed_member_not_per_record(stack):
+    """A chunk naming the same member twice with the same picture, plus a
+    record for someone not seated here, tells clients once."""
+    heard = await _listen(stack)
+    await _persist(
+        stack,
+        "member_pictures",
+        [
+            _picture_record(_png()),
+            _picture_record(_png()),
+            _picture_record(_png(), "u-not-seated"),
+        ],
+    )
+    assert [e.user_id for e in heard.events] == [MEMBER]
+
+
+async def test_a_caught_up_reset_is_told_to_local_clients_without_an_echo(stack):
+    await _stale_picture(stack)
+    heard = await _listen(stack)
+    await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
+    await _cleared(stack)
+    assert len(heard.events) == 1
+    event = heard.events[0]
+    assert event.user_id == MEMBER
+    assert event.picture_hash is None
+    assert event.space_display_name == "Remy"
+    assert event.origin_instance_id == MEMBER_HOME
+    [frame] = _frames(heard)
+    assert frame["picture_hash"] is None
+    assert frame["picture_url"] is None
+    assert heard.federation.sent == []
+
+
+async def test_a_reset_that_was_not_taken_is_not_told(stack):
+    await _stale_picture(stack)
+    heard = await _listen(stack)
+    await _members_from(stack, HOST, [_members_record(picture_hash=None)])
+    assert heard.events == []
+
+
+async def test_a_reset_of_a_member_already_without_a_picture_is_not_told(stack):
+    heard = await _listen(stack)
+    await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
+    assert heard.events == []

@@ -3,7 +3,8 @@
 Subscribes to :class:`SpaceMemberProfileUpdated` and fans out
 ``SPACE_MEMBER_PROFILE_UPDATED`` to every paired peer that's a member
 of the space. Carries the WebP base64 bytes when the picture changes;
-display-name-only changes ship the hash alone.
+display-name-only changes ship the hash alone. A change applied from
+another household (``origin_instance_id`` set) is never fanned back out.
 """
 
 from __future__ import annotations
@@ -49,6 +50,8 @@ class SpaceMemberProfileFederationOutbound:
         self,
         event: SpaceMemberProfileUpdated,
     ) -> None:
+        if event.origin_instance_id is not None:
+            return  # applied from another household — never echo it back
         payload: dict = {
             "space_id": event.space_id,
             "user_id": event.user_id,

@@ -3279,6 +3279,7 @@ class FederationInboundService(ProtectionGateMixin):
                 user_id=user_id,
                 space_display_name=p.get("space_display_name"),
                 picture_hash=picture_hash,
+                origin_instance_id=event.from_instance,
             )
         )
 

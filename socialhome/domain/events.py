@@ -890,6 +890,12 @@ class SpaceMemberProfileUpdated(DomainEvent):
     picture_hash: str | None
     picture_webp: bytes | None = None
     occurred_at: datetime = field(default_factory=_now)
+    #: ``None`` on local origination; the sending household's instance id
+    #: when a change applied from another household (live
+    #: ``SPACE_MEMBER_PROFILE_UPDATED`` inbound, or a §25.6 catch-up) is
+    #: re-published so local clients hear about it — the federation
+    #: outbound never fans those back out.
+    origin_instance_id: str | None = None
 
 
 # ─── Gallery (§23.119) ────────────────────────────────────────────────────

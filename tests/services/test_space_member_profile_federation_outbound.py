@@ -130,3 +130,21 @@ async def test_no_members_no_sends():
         )
     )
     assert fed.sent == []
+
+
+async def test_a_change_applied_from_another_household_is_never_echoed(env):
+    """An event re-published after applying a peer's change (live
+    ``SPACE_MEMBER_PROFILE_UPDATED`` inbound, or a §25.6 catch-up) carries
+    the sender as ``origin_instance_id``: local clients hear about it, but
+    it is never fanned back out to the member households."""
+    bus, fed = env
+    await bus.publish(
+        SpaceMemberProfileUpdated(
+            space_id="sp",
+            user_id="u1",
+            space_display_name="Alice in sp",
+            picture_hash="h1",
+            origin_instance_id="peer-1",
+        )
+    )
+    assert fed.sent == []

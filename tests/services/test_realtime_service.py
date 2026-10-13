@@ -35,6 +35,7 @@ from socialhome.domain.events import (
     PostEdited,
     PostReactionChanged,
     SpaceConfigChanged,
+    SpaceMemberProfileUpdated,
     SpacePostCreated,
     SpacePostModerated,
     SpaceZoneDeleted,
@@ -1445,3 +1446,27 @@ async def test_dm_message_frame_says_whom_it_mentions_per_recipient():
     flags = {u: f["mentions_you"] for u, f in sent}
     assert flags == {"u-anna": False, "u-bob": True, "u-cat": False}
     assert "mentions" not in sent[0][1]
+
+
+async def test_space_member_profile_from_another_household_reaches_the_space(env):
+    """A per-space profile change applied from a peer (``origin_instance_id``
+    set — a live inbound or a §25.6 catch-up) is framed to local space
+    members like a local one; a cleared picture frames a null URL."""
+    svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    await bus.publish(
+        SpaceMemberProfileUpdated(
+            space_id="sp-1",
+            user_id="u-remote",
+            space_display_name="Remy",
+            picture_hash=None,
+            origin_instance_id="peer-1",
+        )
+    )
+    frames = [json.loads(m) for m in sock.sent]
+    frame = next(f for f in frames if f["type"] == "space.member.profile_updated")
+    assert frame["space_id"] == "sp-1"
+    assert frame["user_id"] == "u-remote"
+    assert frame["picture_hash"] is None
+    assert frame["picture_url"] is None

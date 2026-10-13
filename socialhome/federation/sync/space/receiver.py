@@ -71,6 +71,7 @@ from ....domain.events import (
     PageDeleted,
     PostDeleted,
     RemoteSpaceMemberBanned,
+    SpaceMemberProfileUpdated,
     SpaceCommentSynced,
     SpacePostSynced,
     TaskDeleted,
@@ -1072,6 +1073,9 @@ class SpaceSyncReceiver:
                 await self._space_repo.set_member_profile(
                     space_id, uid, picture_hash=None
                 )
+                await self._publish_member_picture(
+                    space_id, seat, picture_hash=None, provider=provider
+                )
             log.info(
                 "space sync: %s reset %s's per-space picture in %s — dropped "
                 "the stale copy held here",
@@ -1079,6 +1083,31 @@ class SpaceSyncReceiver:
                 uid,
                 space_id,
             )
+
+    async def _publish_member_picture(
+        self,
+        space_id: str,
+        seat: SpaceMember,
+        *,
+        picture_hash: str | None,
+        provider: str,
+    ) -> None:
+        """Tell open clients a catch-up changed ``seat``'s per-space picture
+        — the event the live path publishes, so the realtime frame and the
+        SPA's member cache follow. ``origin_instance_id`` is the provider:
+        the per-space profile federation outbound never fans a change
+        applied from another household back out (no echo). Called only when
+        the seat's hash actually changed, so a catch-up that re-ships every
+        picture nudges once per changed member, never per record."""
+        await self._bus.publish(
+            SpaceMemberProfileUpdated(
+                space_id=space_id,
+                user_id=seat.user_id,
+                space_display_name=seat.space_display_name,
+                picture_hash=picture_hash,
+                origin_instance_id=provider,
+            )
+        )
 
     async def _keep_owner_statement(self, space_id: str, statement: object) -> None:
         if not isinstance(statement, dict):
@@ -1224,9 +1253,14 @@ class SpaceSyncReceiver:
                 # resource never sets ``picture_hash`` — it only clears a
                 # reset one), so the picture renders — a no-op for someone
                 # not seated here.
+                seat = await self._space_repo.get_member(space_id, uid)
                 await self._space_repo.set_member_profile(
                     space_id, uid, picture_hash=local_hash
                 )
+                if seat is not None and seat.picture_hash != local_hash:
+                    await self._publish_member_picture(
+                        space_id, seat, picture_hash=local_hash, provider=provider
+                    )
         elif resource == "bans":
             for r in records:
                 user_id = str(r.get("user_id") or "")
