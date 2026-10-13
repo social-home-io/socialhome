@@ -158,9 +158,9 @@ def test_overview_sections():
     assert ov["shopping"]["more"] == "+ 5 more"
     assert len(ov["shopping"]["items"]) == 6
     assert ov["notes"]["label"] == "Notes · 2"
-    bad = next(n for n in ov["notes"]["items"] if n["id"] == "n2")
+    bad = next(n for n in ov["notes"]["items"] if n["text"] == "Bad colour")
     assert bad["color"] is None and bad["light"] is None
-    good = next(n for n in ov["notes"]["items"] if n["id"] == "n1")
+    good = next(n for n in ov["notes"]["items"] if n["text"] == "Plumber Tue 9am")
     assert good["light"]["bg"].startswith("#") and good["dark"]["ink"].startswith("#")
     assert ov["today"]["mode"] == "timeline"
     changes = ov["today"]["changes"]["items"]
@@ -394,3 +394,13 @@ def test_theme_payload():
     # Pale khaki reads on dark surfaces only.
     assert light["colors"]["dark"]["accent"] == "#f0e68c"
     assert light["colors"]["light"]["accent"] == "#2f6f5e"
+
+
+def test_picture_page_shows_no_status_text():
+    """The picture view shows the status emoji only — like its template."""
+    shown = replace(LEO, status_emoji="🦖", status_text="Dinosaur day")
+    p = _person(leo_page(person=shown))
+    assert p["person"]["status_emoji"]["text"] == "🦖"
+    assert p["person"]["status_text"] is None
+    reader = _person(person(replace(ANNA, status_text="Busy")))
+    assert reader["person"]["status_text"] == "Busy"

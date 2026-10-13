@@ -352,7 +352,6 @@ def _chore(c: DashboardTask, f: Fmt, *, show_people: bool, show_due: bool) -> Js
         else None
     )
     return {
-        "id": c.id,
         "title": c.title,
         "state": state,
         "state_label": f.t(f"dashboard.chore.{state}"),
@@ -404,7 +403,6 @@ def _note(s: DashboardSticky) -> Json:
     color = hex_color(s.color)
     colors = note_colors(color) if color is not None else None
     return {
-        "id": s.id,
         "text": s.content,
         "color": color,
         "light": (
@@ -1028,7 +1026,8 @@ def person_payload(
         "avatar": avatar_path(p),
         "picture_hash": p.picture_hash,
         "status_emoji": emoji(p.status_emoji),
-        "status_text": p.status_text or None,
+        # The picture view shows the emoji only (no words to read).
+        "status_text": (p.status_text or None) if not p.picture_view else None,
         "where": _where(p, t) if presence_on else None,
     }
     for_you = t("dashboard.mentions.for_you")

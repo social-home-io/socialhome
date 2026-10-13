@@ -38,7 +38,6 @@
       "items": [
         {
           "due": null,
-          "id": "t1",
           "late": null,
           "people": [
             "u-mia"
@@ -49,7 +48,6 @@
         },
         {
           "due": null,
-          "id": "t2",
           "late": "2 days late",
           "people": [
             "u-pascal"
@@ -60,7 +58,6 @@
         },
         {
           "due": null,
-          "id": "t3",
           "late": null,
           "people": [
             "u-anna"
@@ -143,7 +140,6 @@
             "bg": "#bdb168",
             "ink": "#1f1d1a"
           },
-          "id": "n1",
           "light": {
             "bg": "#fdef9d",
             "ink": "#1f1d1a"
@@ -153,7 +149,6 @@
         {
           "color": null,
           "dark": null,
-          "id": "n2",
           "light": null,
           "text": "Bad colour"
         }

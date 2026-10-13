@@ -164,8 +164,7 @@ async def guard_display_request(
         firmware=request.headers.get(FIRMWARE_HEADER),
         model=request.headers.get(MODEL_HEADER),
     )
-    if display.locked:
-        return await _locked(request)
+    # Budgeted first, so a locked panel's 423s are capped too.
     wait = request.app[AUTH_KEY].begin_display_read(
         display.id, image=request.path.startswith(IMAGE_PREFIXES)
     )
@@ -173,6 +172,8 @@ async def guard_display_request(
         response = error_response(429, "RATE_LIMITED", "Too many requests.")
         response.headers["Retry-After"] = str(wait)
         return response
+    if display.locked:
+        return await _locked(request)
     return await handler(request)
 
 
@@ -348,11 +349,13 @@ class _DisplayBoardView(web.View):
         settings, t = await self._setup()
         snap = await self.request.app[SNAPSHOTS_KEY].home()
         base = board_base(snap, people=snap.people, colors=home_colors(snap), t=t)
+        # Night first: at night every other tab is the same 409, whether or
+        # not it would show by day.
+        if tab != TAB_OVERVIEW and base.night:
+            return error_response(409, "NIGHT", "Night mode shows Overview only.")
         board = home_board(snap, base.fmt, tab)
         if board is None:
             return error_response(404, "TAB_OFF", "This tab isn't shown.")
-        if tab != TAB_OVERVIEW and base.night:
-            return error_response(409, "NIGHT", "Night mode shows Overview only.")
         header, clock = await self._header(
             view=tab, base=base, sections=snap.sections, settings=settings, tab=tab
         )

@@ -532,7 +532,6 @@
       "additionalProperties": false,
       "required": [
         "due",
-        "id",
         "late",
         "people",
         "state",
@@ -540,9 +539,6 @@
         "title"
       ],
       "properties": {
-        "id": {
-          "type": "string"
-        },
         "title": {
           "type": "string"
         },
@@ -601,14 +597,10 @@
       "required": [
         "color",
         "dark",
-        "id",
         "light",
         "text"
       ],
       "properties": {
-        "id": {
-          "type": "string"
-        },
         "text": {
           "type": "string"
         },

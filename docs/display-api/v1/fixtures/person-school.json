@@ -123,7 +123,6 @@
       "items": [
         {
           "due": "today",
-          "id": "t1",
           "late": null,
           "people": [],
           "state": "open",

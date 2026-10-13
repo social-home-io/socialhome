@@ -723,3 +723,27 @@ async def test_json_wording_matches_the_html_board(client, displays, snapshots, 
     assert mp["label"] in page
     for spot in mp["spots"]:
         assert spot["place"] in page and spot["when"] in page
+
+
+async def test_locked_display_is_rate_limited_too(client, displays, auth, monkeypatch):
+    display_id, token = await _paired(client, displays)
+    real = DashboardDisplayService.authenticate
+
+    async def locked(self, value):
+        found = await real(self, value)
+        return None if found is None else replace(found, locked=True)
+
+    monkeypatch.setattr(DashboardDisplayService, "authenticate", locked)
+    for _ in range(DISPLAY_READ_MAX):
+        auth.begin_display_read(display_id)
+    assert (await _get(client, "/api/display/v1/home", token)).status == 429
+
+
+async def test_night_answers_409_even_for_a_tab_that_is_off(
+    client, displays, snapshots
+):
+    """At night a tab never says whether it would show by day."""
+    _, token = await _paired(client, displays)
+    snapshots.home_snapshot = home(is_night=True, sections=frozenset({"calendar"}))
+    for tab in ("messages", "notes", "map"):
+        assert (await _get(client, f"/api/display/v1/{tab}", token)).status == 409

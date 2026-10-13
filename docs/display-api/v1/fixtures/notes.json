@@ -42,7 +42,6 @@
           "bg": "#bdb168",
           "ink": "#1f1d1a"
         },
-        "id": "n1",
         "light": {
           "bg": "#fdef9d",
           "ink": "#1f1d1a"
@@ -52,7 +51,6 @@
       {
         "color": null,
         "dark": null,
-        "id": "n2",
         "light": null,
         "text": "Bad colour"
       }
