@@ -28,12 +28,13 @@ import { escapeHtml } from '@/utils/html'
 import { zoneColor } from '@/utils/zoneColor'
 import { colorClass } from '@/utils/tokenColor'
 import {
-  MERGE_DISTANCE_PX,
   bubbleSlots,
   groupBounds,
   groupByZone,
   mergeOverlapping,
   personColorToken,
+  zoneBounds,
+  type BubbleExtent,
   type MarkerGroup,
 } from '@/utils/mapMarkers'
 import { t } from '@/i18n/i18n'
@@ -101,6 +102,10 @@ export interface LocationMapProps {
   selectedId?: string | null
   /** Called with a person id, ``zone:<id>``, or null (empty map click). */
   onSelect?: (id: string | null) => void
+  /** A picture of the map, not a control: no panning / zooming, inert
+   *  markers, no zoom buttons — for a map inside a link (the corner
+   *  card stays one link). Read once, on mount. */
+  readOnly?: boolean
 }
 
 function _initials(name: string): string {
@@ -140,12 +145,35 @@ function _avatarHtml(m: LocationMarker, selected: boolean): string {
  *  rises above its anchor (avatar + padding + tail + zone gap). */
 const FIT_PADDING_PX = 32
 const BUBBLE_HEIGHT_PX = 80
+/** Avatar edge (desktop; phones draw 36 px — 40 keeps merging safe). */
+const AVATAR_PX = 40
+/** Clearance kept between two bubbles before they merge. */
+const BUBBLE_GAP_PX = 6
+/** How far above its anchor a bubble's box ends (CSS ``--sh-map-gap``
+ *  minus the tail overhang): a zone bubble clears the zone marker. */
+const LIFT_PX: Record<'zone' | 'solo' | 'group', number> = { zone: 19, solo: 5, group: 5 }
+/** Below this on-screen radius the zone circle hides under the full
+ *  36 px centre marker, so the marker goes compact (22 px). */
+const COMPACT_ZONE_PX = 26
+/** Zoom cap when a click zooms to a group (and the zoom at which a
+ *  zone counts as already shown). */
+const GROUP_MAX_ZOOM = 18
+const GROUP_FIT_PADDING: [number, number] = [48, 48]
 
 type _Kind = 'zone' | 'solo' | 'group'
 
 function _kind(g: MarkerGroup<LocationMarker>): _Kind {
   if (g.merged) return 'group'
   return g.zoneIds.length > 0 ? 'zone' : 'solo'
+}
+
+/** Web-Mercator metres per screen pixel at ``lat`` and ``zoom``. */
+function _metresPerPixel(lat: number, zoom: number): number {
+  return (40_075_016.686 * Math.cos((lat * Math.PI) / 180)) / 2 ** (zoom + 8)
+}
+
+function _isCompactZone(z: LocationZoneOverlay, zoom: number): boolean {
+  return z.radius_m / _metresPerPixel(z.latitude, zoom) < COMPACT_ZONE_PX
 }
 
 function _bubbleHtml(
@@ -156,19 +184,31 @@ function _bubbleHtml(
   const more = overflow > 0
     ? `<span class="sh-map-bubble__more">+${overflow}</span>`
     : ''
-  const solo = g.members.length === 1 ? g.members[0] : null
-  const caption = solo && solo.id === selected
-    ? `<span class="sh-map-bubble__caption">${escapeHtml(_title(solo))}</span>`
+  // Name whoever is selected in this bubble — also when they're folded
+  // into the "+N" chip, so the selection is never invisible.
+  const picked = g.members.find((m) => m.id === selected)
+  const caption = picked
+    ? `<span class="sh-map-bubble__caption">${escapeHtml(_title(picked))}</span>`
     : ''
-  const anySelected = g.members.some((m) => m.id === selected)
   return (
-    `<div class="sh-map-bubble sh-map-bubble--${kind}${anySelected ? ' is-selected' : ''}">`
+    `<div class="sh-map-bubble sh-map-bubble--${kind}${picked ? ' is-selected' : ''}">`
     + caption
     + `<span class="sh-map-bubble__body" aria-hidden="true">${avatars}${more}</span>`
     + `<span class="sh-map-bubble__tail" aria-hidden="true"></span>`
-    + (kind === 'zone' ? '' : '<span class="sh-map-bubble__dot" aria-hidden="true"></span>')
+    // A solo bubble marks a real position; a zone bubble points at its
+    // zone marker and a merged one at a centroid that is nowhere.
+    + (kind === 'solo' ? '<span class="sh-map-bubble__dot" aria-hidden="true"></span>' : '')
     + `</div>`
   )
+}
+
+/** The bubble's on-screen box, for merging (see ``mergeOverlapping``). */
+function _extent(g: MarkerGroup<LocationMarker>, selected: string | null): BubbleExtent {
+  const { shown, overflow } = bubbleSlots(g.members)
+  const n = shown.length
+  const w = 12 + n * AVATAR_PX + (n - 1) * 4 + (overflow > 0 ? 40 : 0)
+  const h = AVATAR_PX + 12 + (g.members.some((m) => m.id === selected) ? 28 : 0)
+  return { w, h, lift: LIFT_PX[_kind(g)] }
 }
 
 function _zoneFace(z: LocationZoneOverlay): string {
@@ -177,27 +217,74 @@ function _zoneFace(z: LocationZoneOverlay): string {
   return Array.from(z.name.trim())[0]?.toUpperCase() ?? '?'
 }
 
-function _zoneHtml(z: LocationZoneOverlay, selected: boolean): string {
+function _zoneHtml(z: LocationZoneOverlay, selected: boolean, compact: boolean): string {
   // ``zoneColor`` only ever returns a ``#RRGGBB`` value, so it is safe
   // inside a style attribute.
   return (
-    `<div class="sh-map-zone${selected ? ' is-selected' : ''}" `
+    `<div class="sh-map-zone${selected ? ' is-selected' : ''}${compact ? ' sh-map-zone--compact' : ''}" `
     + `style="--zone-colour: ${zoneColor(z)}" aria-hidden="true">`
     + `<span class="sh-map-zone__icon">${escapeHtml(_zoneFace(z))}</span>`
     + `</div>`
   )
 }
 
-/** Leaflet puts ``title`` on the icon element; screen readers get the
- *  same text as the accessible name, and a photo that fails to load
- *  (expired signature) drops out so the initials show. */
-function _finishIcon(marker: L.Marker, title: string): void {
+/** Finish a marker's icon element: ``data-key`` (to find it again after
+ *  a redraw), the accessible name, Enter / Space activation (Leaflet
+ *  makes markers tabbable buttons but only clicks activate them), and a
+ *  photo that fails to load (expired signature) dropping out so the
+ *  initials show. */
+function _finishIcon(marker: L.Marker, title: string, key: string, interactive: boolean): void {
   const el = marker.getElement?.()
   if (!el) return
+  el.setAttribute('data-key', key)
   el.setAttribute('aria-label', title)
+  if (interactive) {
+    el.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return
+      e.preventDefault()
+      marker.fire('click')
+    })
+  } else {
+    el.tabIndex = -1
+  }
   for (const img of Array.from(el.querySelectorAll('img'))) {
     img.addEventListener('error', () => { img.remove() }, { once: true })
   }
+}
+
+/** Key of the marker holding keyboard focus, if any. */
+function _focusedKey(markers: Map<string, L.Marker>): string | null {
+  const active = document.activeElement
+  if (!active) return null
+  for (const [key, m] of markers) {
+    const el = m.getElement?.()
+    if (el && (el === active || el.contains(active))) return key
+  }
+  return null
+}
+
+function _refocus(markers: Map<string, L.Marker>, key: string | null): void {
+  if (key) markers.get(key)?.getElement?.()?.focus({ preventScroll: true })
+}
+
+/** The members of a crowded zone as real buttons (names as text, never
+ *  markup), for a Leaflet popup over the bubble. */
+function _membersList(
+  members: LocationMarker[], pick: (id: string) => void,
+): HTMLElement {
+  const list = document.createElement('ul')
+  list.className = 'sh-map-members'
+  for (const m of members) {
+    const item = document.createElement('li')
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'sh-map-members__button'
+    button.textContent = m.label
+    button.addEventListener('click', () => { pick(m.id) })
+    item.appendChild(button)
+    list.appendChild(item)
+  }
+  return list
 }
 
 /** A zero-size divIcon: the bubble positions itself from the anchor
@@ -213,13 +300,17 @@ function _icon(html: string, extra = ''): L.DivIcon {
 
 export function LocationMap({
   markers, zones, height = 320, emptyLabel,
-  onPick, ariaLabel, selectedId, onSelect,
+  onPick, ariaLabel, selectedId, onSelect, readOnly = false,
 }: LocationMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
   const placeLayerRef = useRef<L.LayerGroup | null>(null)
   const zoneLayerRef = useRef<L.LayerGroup | null>(null)
+  /** What each layer currently shows, by key — to restyle in place and
+   *  to put keyboard focus back after a redraw. */
+  const peopleMarkersRef = useRef(new Map<string, L.Marker>())
+  const zoneMarkersRef = useRef(new Map<string, L.Marker>())
   const [tileError, setTileError] = useState(false)
   // Uncontrolled fallback: callers that don't pass ``selectedId`` still
   // get click-to-show-name.
@@ -235,18 +326,21 @@ export function LocationMap({
   zonesRef.current = zones
   const selectedRef = useRef(selected)
   selectedRef.current = selected
+  const readOnlyRef = useRef(readOnly)
   const selectRef = useRef((_id: string | null) => {})
   selectRef.current = (id: string | null) => {
     if (selectedId === undefined) setOwnSelected(id)
     onSelect?.(id)
   }
   const drawPeopleRef = useRef(() => {})
+  const styleZonesRef = useRef(() => {})
 
   useEffect(() => {
     if (!containerRef.current) return
     if (mapRef.current) return
+    const still = readOnlyRef.current
     const map = L.map(containerRef.current, {
-      zoomControl: true,
+      zoomControl: !still,
       attributionControl: true,
       // Sensible defaults — fitBounds overrides these on first paint.
       center: [52.0, 5.0],
@@ -254,7 +348,12 @@ export function LocationMap({
       // Keep scroll-wheel off by default — users scroll pages past
       // embedded maps all the time and captured wheel events are
       // disorienting. Ctrl+scroll still zooms.
-      scrollWheelZoom: 'center',
+      scrollWheelZoom: still ? false : 'center',
+      dragging: !still,
+      touchZoom: !still,
+      doubleClickZoom: !still,
+      boxZoom: !still,
+      keyboard: !still,
     })
     // Tiles arrive a tick later (the config is fetched once per page
     // load); ``cancelled`` keeps us off a map that unmounted first.
@@ -278,16 +377,20 @@ export function LocationMap({
     layerRef.current = L.layerGroup().addTo(map)
     mapRef.current = map
     map.on('click', (e: L.LeafletMouseEvent) => {
+      if (readOnlyRef.current) return
       if (onPickRef.current) {
         onPickRef.current(e.latlng.lat, e.latlng.lng)
       } else if (selectedRef.current !== null) {
-        // Clicking the empty map deselects. Marker clicks don't bubble
-        // here (Leaflet markers stop propagation).
+        // Clicking the empty map (zone circles included — they let
+        // clicks through) deselects. Marker clicks don't reach here.
         selectRef.current(null)
       }
     })
-    // Screen distances change with the zoom: re-run the merge.
-    map.on('zoomend', () => { drawPeopleRef.current() })
+    // Screen distances and zone sizes change with the zoom.
+    map.on('zoomend', () => {
+      styleZonesRef.current()
+      drawPeopleRef.current()
+    })
 
     // Leaflet measures its container lazily — if the parent was
     // ``display:none`` on mount (e.g. a hidden tab) we need to
@@ -306,84 +409,89 @@ export function LocationMap({
     }
   }, [])
 
-  // Zones: coloured radius + centre marker with the zone's icon.
-  const fittedZonesRef = useRef<LocationZoneOverlay[] | undefined>(undefined)
+  // Zone look that follows the view and the selection — restyled in
+  // place, never rebuilt (that would drop focus and churn the layer).
+  styleZonesRef.current = () => {
+    const map = mapRef.current
+    if (!map) return
+    const zoom = map.getZoom()
+    for (const [id, marker] of zoneMarkersRef.current) {
+      const z = zonesRef.current?.find((zz) => zz.id === id)
+      const face = marker.getElement?.()?.querySelector('.sh-map-zone')
+      if (!z || !face) continue
+      const isSel = selectedRef.current === `zone:${id}`
+      face.classList.toggle('is-selected', isSel)
+      face.classList.toggle('sh-map-zone--compact', _isCompactZone(z, zoom))
+      marker.setZIndexOffset(isSel ? 500 : 0)
+    }
+  }
+
+  // Rebuild zones only when what they show changes — not when a parent
+  // re-render hands over an equal array.
+  const zonesDrawKey = JSON.stringify(
+    (zones ?? []).map((z) => [z.id, z.name, z.latitude, z.longitude, z.radius_m, z.color, z.icon ?? null]),
+  )
+  // Zones: a coloured radius plus a centre marker with the zone's icon.
+  // The circle is decoration (clicks pass through to the map); the
+  // centre marker names and selects the zone.
   useEffect(() => {
     const map = mapRef.current
     const zoneLayer = zoneLayerRef.current
     if (!map || !zoneLayer) return
+    const focused = _focusedKey(zoneMarkersRef.current)
     zoneLayer.clearLayers()
-    if (!zones) return
-    const circles: L.Circle[] = []
-    for (const z of zones) {
+    zoneMarkersRef.current = new Map()
+    const still = readOnlyRef.current
+    const zoom = map.getZoom()
+    for (const z of zonesRef.current ?? []) {
       const colour = zoneColor(z)
-      const c = L.circle([z.latitude, z.longitude], {
+      L.circle([z.latitude, z.longitude], {
         radius: z.radius_m,
         color: colour,
         opacity: 0.85,
         fillColor: colour,
-        // Light fill so two overlapping zones don't compound into a
-        // muddy grey blob. The crisp coloured border is what
-        // distinguishes one zone from the next on the map.
-        fillOpacity: 0.12,
+        // Light enough that two overlapping zones don't compound into a
+        // muddy blob; the crisp border tells one zone from the next.
+        fillOpacity: 0.2,
         weight: 2,
-      })
-        .addTo(zoneLayer)
-        // Leaflet mounts string tooltip / popup content via
-        // ``innerHTML``, and a zone name can come from another
-        // household's admin over federation — escape both.
-        .bindTooltip(escapeHtml(z.name), {
-          // Desktop hover surface — invisible to touch devices,
-          // so we also bind a popup below for tap discoverability.
-          direction: 'top',
-          offset: [0, -4],
-          className: 'sh-zone-tooltip',
-        })
-        .bindPopup(
-          `<strong>${escapeHtml(z.name)}</strong>`,
-          { closeButton: false, autoPan: false },
-        )
-      circles.push(c)
+        interactive: false,
+      }).addTo(zoneLayer)
+      const key = `zone:${z.id}`
       const title = t('location.map.zone_marker', { name: z.name })
-      const isSel = selected === `zone:${z.id}`
+      const isSel = selectedRef.current === key
       const centre = L.marker([z.latitude, z.longitude], {
-        icon: _icon(_zoneHtml(z, isSel), ' sh-map-icon--zone-centre'),
+        icon: _icon(_zoneHtml(z, isSel, _isCompactZone(z, zoom)), ' sh-map-icon--zone-centre'),
         title,
-        keyboard: true,
+        keyboard: !still,
+        interactive: !still,
         zIndexOffset: isSel ? 500 : 0,
       })
-        .on('click', () => { selectRef.current(`zone:${z.id}`) })
+        .on('click', () => { selectRef.current(key) })
         .addTo(zoneLayer)
-      _finishIcon(centre, title)
+      _finishIcon(centre, title, key, !still)
+      zoneMarkersRef.current.set(z.id, centre)
     }
-    // When there are no person bubbles to drive the viewport, fit the
-    // map to the zones (once per zone list, not on every selection) so
-    // the user actually sees them instead of a globe-zoom of Europe.
-    if (fittedZonesRef.current !== zones && circles.length > 0 && map.getZoom() < 6) {
-      const bounds = circles
-        .map((c) => c.getBounds())
-        .reduce((acc, b) => acc.extend(b), L.latLngBounds(
-          circles[0].getBounds().getSouthWest(),
-          circles[0].getBounds().getNorthEast(),
-        ))
-      map.fitBounds(bounds.pad(0.4), { maxZoom: 15 })
-    }
-    fittedZonesRef.current = zones
-  }, [zones, selected])
+    _refocus(zoneMarkersRef.current, focused)
+  }, [zonesDrawKey])
+  useEffect(() => { styleZonesRef.current() }, [selected])
 
   // People: group by zone, merge what would overlap at this zoom, draw.
   drawPeopleRef.current = () => {
     const map = mapRef.current
     const layer = layerRef.current
     if (!map || !layer) return
+    const focused = _focusedKey(peopleMarkersRef.current)
     layer.clearLayers()
+    peopleMarkersRef.current = new Map()
+    const still = readOnlyRef.current
     const zoneList = zonesRef.current ?? []
     const sel = selectedRef.current
     const people = markersRef.current.filter((m) => !_isPlace(m))
     const groups = mergeOverlapping(
       groupByZone(people, zoneList),
       (lat, lon) => map.latLngToContainerPoint([lat, lon]),
-      MERGE_DISTANCE_PX,
+      BUBBLE_GAP_PX,
+      (g) => _extent(g, sel),
     )
     for (const g of groups) {
       const kind = _kind(g)
@@ -397,7 +505,8 @@ export function LocationMap({
       const marker = L.marker([g.lat, g.lon], {
         icon: _icon(_bubbleHtml(g, kind, sel), ` sh-map-icon--${kind}`),
         title,
-        keyboard: true,
+        keyboard: !still,
+        interactive: !still,
         // Bubbles float over zone markers; the selected one on top.
         zIndexOffset: isSel ? 2000 : 1000,
       })
@@ -406,12 +515,40 @@ export function LocationMap({
             selectRef.current(single.id)
             return
           }
-          map.fitBounds(L.latLngBounds(groupBounds(g, zoneList)), {
-            padding: [48, 48], maxZoom: 18,
-          })
+          const bounds = L.latLngBounds(groupBounds(g, zoneList))
+          if (kind === 'zone') {
+            // A crowded zone: the first click shows the zone; once it
+            // already fills the view, zooming can't split the bubble, so
+            // list who's there to pick from.
+            selectRef.current(`zone:${g.zoneIds[0]}`)
+            const target = Math.min(
+              map.getBoundsZoom(bounds, false, L.point(
+                GROUP_FIT_PADDING[0] * 2, GROUP_FIT_PADDING[1] * 2,
+              )),
+              GROUP_MAX_ZOOM,
+            )
+            if (map.getZoom() >= target && map.getBounds().contains(bounds)) {
+              const list = _membersList(g.members, (id) => {
+                map.closePopup()
+                selectRef.current(id)
+              })
+              L.popup({
+                closeButton: false,
+                className: 'sh-map-members-popup',
+                offset: [0, -(LIFT_PX.zone + AVATAR_PX + 24)],
+              })
+                .setLatLng([g.lat, g.lon])
+                .setContent(list)
+                .openOn(map)
+              list.querySelector('button')?.focus({ preventScroll: true })
+              return
+            }
+          }
+          map.fitBounds(bounds, { padding: GROUP_FIT_PADDING, maxZoom: GROUP_MAX_ZOOM })
         })
         .addTo(layer)
-      _finishIcon(marker, title)
+      _finishIcon(marker, title, g.key, !still)
+      peopleMarkersRef.current.set(g.key, marker)
       // Accuracy ring only for the selected person drawn at their own
       // point — a zone bubble isn't at the person's position.
       if (single && single.id === sel && kind === 'solo'
@@ -426,21 +563,27 @@ export function LocationMap({
         }).addTo(layer)
       }
     }
+    _refocus(peopleMarkersRef.current, focused)
   }
   useEffect(() => { drawPeopleRef.current() }, [markers, zones, selected])
 
-  // Places + the viewport: only when the positions actually change, so a
-  // parent re-render (a selection, a poll returning the same pins) never
-  // yanks the user's zoom or closes an open place popup.
+  // Places + the viewport: only when positions or zones actually change,
+  // so a parent re-render (a selection, a poll returning the same pins)
+  // never yanks the user's zoom or closes an open place popup.
   const positionsKey = JSON.stringify(
     markers.map((m) => [m.id, m.lat ?? null, m.lon ?? null, m.zone_id ?? null, m.glyph ?? null]),
+  )
+  const zonesKey = JSON.stringify(
+    (zones ?? []).map((z) => [z.id, z.latitude, z.longitude, z.radius_m]),
   )
   useEffect(() => {
     const map = mapRef.current
     const placeLayer = placeLayerRef.current
     if (!map || !placeLayer) return
     placeLayer.clearLayers()
+    const still = readOnlyRef.current
     const current = markersRef.current
+    const zoneList = zonesRef.current ?? []
     for (const m of current) {
       if (!_isPlace(m) || !_finite(m.lat) || !_finite(m.lon)) continue
       const html = (
@@ -452,13 +595,16 @@ export function LocationMap({
       const pin = L.marker([m.lat, m.lon], {
         icon: _icon(html, ' sh-map-icon--solo'),
         title: m.label,
-        keyboard: true,
+        keyboard: !still,
+        interactive: !still,
       }).addTo(placeLayer)
-      pin.bindPopup(
-        `<strong>${escapeHtml(m.label)}</strong>`
-        + (m.sub_label ? `<br /><span>${escapeHtml(m.sub_label)}</span>` : ''),
-      )
-      _finishIcon(pin, m.label)
+      if (!still) {
+        pin.bindPopup(
+          `<strong>${escapeHtml(m.label)}</strong>`
+          + (m.sub_label ? `<br /><span>${escapeHtml(m.sub_label)}</span>` : ''),
+        )
+      }
+      _finishIcon(pin, m.label, `place:${m.id}`, !still)
       if (m.accuracy_m && m.accuracy_m > 0) {
         L.circle([m.lat, m.lon], {
           radius: m.accuracy_m,
@@ -471,13 +617,14 @@ export function LocationMap({
       }
     }
 
-    // Fit to where the bubbles point: zone centres for zoned people,
-    // own points for everyone else.
+    // Fit to where the bubbles point (zone centres for zoned people, own
+    // points for everyone else) plus every zone's whole circle.
     const anchors: Array<[number, number]> = [
-      ...groupByZone(current.filter((m) => !_isPlace(m)), zonesRef.current ?? [])
+      ...groupByZone(current.filter((m) => !_isPlace(m)), zoneList)
         .map((g): [number, number] => [g.lat, g.lon]),
       ...current.filter((m) => _isPlace(m) && _finite(m.lat) && _finite(m.lon))
         .map((m): [number, number] => [m.lat as number, m.lon as number]),
+      ...zoneList.flatMap((z) => zoneBounds(z)),
     ]
     if (anchors.length === 1) {
       // In pick mode keep the user's zoom when they move the pin — a
@@ -485,13 +632,13 @@ export function LocationMap({
       const zoom = onPickRef.current ? Math.max(map.getZoom(), 14) : 14
       map.setView(anchors[0], zoom)
     } else if (anchors.length > 1) {
-      // Bubbles float above their anchor, so leave room at the top
-      // for a whole bubble — otherwise the northernmost one is clipped.
-      // Capped at 40 % of the map so a short (dashboard / phone) map
-      // still has room left for the anchors themselves.
-      const height = map.getSize?.()?.y ?? 0
+      // Bubbles float above their anchor, so leave room at the top for a
+      // whole bubble — otherwise the northernmost one is clipped. Capped
+      // at 40 % of the map so a short (dashboard / phone) map still has
+      // room left for the anchors themselves.
+      const mapHeight = map.getSize?.()?.y ?? 0
       const top = Math.min(
-        FIT_PADDING_PX + BUBBLE_HEIGHT_PX, Math.max(FIT_PADDING_PX, height * 0.4),
+        FIT_PADDING_PX + BUBBLE_HEIGHT_PX, Math.max(FIT_PADDING_PX, mapHeight * 0.4),
       )
       map.fitBounds(L.latLngBounds(anchors), {
         paddingTopLeft: [FIT_PADDING_PX, top],
@@ -500,8 +647,9 @@ export function LocationMap({
       })
     }
     // Draw after the view settles so the merge sees the final zoom.
+    styleZonesRef.current()
     drawPeopleRef.current()
-  }, [positionsKey])
+  }, [positionsKey, zonesKey])
 
   const hasMarkers = markers.some((m) => _isPlace(m) && _finite(m.lat) && _finite(m.lon))
     || groupByZone(markers.filter((m) => !_isPlace(m)), zones ?? []).length > 0

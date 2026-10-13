@@ -16533,6 +16533,46 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   font-size: 17px; font-weight: 700; line-height: 1;
   cursor: pointer;
 }
+/* The zone circle is smaller on screen than the full marker (city
+ * zoom): a compact marker leaves the radius visible around it. */
+.sh-map-zone--compact {
+  width: 22px; height: 22px;
+  border-width: 2px;
+  font-size: 11px;
+}
+/* "Who's here" — a crowded zone's members as buttons, once zooming in
+ * can no longer split its bubble. */
+.sh-map-members-popup .leaflet-popup-content { margin: 6px; }
+.sh-map-members-popup .leaflet-popup-content-wrapper,
+.sh-map-members-popup .leaflet-popup-tip {
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  box-shadow: var(--sh-shadow-lg);
+}
+.sh-map-members {
+  list-style: none;
+  margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 220px; overflow-y: auto;
+  min-width: 160px;
+}
+.sh-map-members__button {
+  display: block; width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--sh-radius-sm);
+  background: none;
+  color: var(--sh-text);
+  font: inherit; font-weight: 600;
+  text-align: start;
+  cursor: pointer;
+}
+.sh-map-members__button:hover { background: var(--sh-bg-secondary); }
+.sh-map-members__button:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+}
 /* Leaflet path styles are SVG attributes; CSS wins, so the ring takes
  * the person's theme colour (the primary for a place). */
 .leaflet-container path.sh-map-accuracy {

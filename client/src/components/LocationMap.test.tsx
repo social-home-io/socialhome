@@ -17,24 +17,40 @@ beforeAll(() => {
 const mapHandlers: Record<string, (e: unknown) => void> = {}
 /** Every popup HTML string handed to a marker. */
 const popups: string[] = []
-/** Every tooltip / popup content handed to a zone circle, in order. */
-const zoneOverlays: unknown[] = []
-/** Pixels per degree for the fake projection — lower it to "zoom out". */
-const view = { scale: 100_000 }
+/** Map popups opened with ``L.popup().openOn(map)`` (their content). */
+const mapPopups: HTMLElement[] = []
+/** Fake view state: pixels per degree for the projection (lower it to
+ *  "zoom out"), the zoom, and whether a group's bounds already fit. */
+const view = { scale: 100_000, zoom: 4, boundsZoom: 15, contains: false, height: 400 }
 interface FakeMarker {
   latlng: [number, number]
-  opts: { icon?: { html: string }, title?: string, keyboard?: boolean }
+  opts: {
+    icon?: { html: string, className?: string }
+    title?: string
+    keyboard?: boolean
+    interactive?: boolean
+  }
   handlers: Record<string, (e?: unknown) => void>
+  /** The icon element, mounted while the marker is on a layer — built
+   *  the way Leaflet builds a divIcon (className + innerHTML), with
+   *  tabindex/role/title when ``keyboard`` is on. */
+  el: HTMLElement
 }
 /** Markers currently on a layer (cleared with ``clearLayers``). */
 let liveMarkers: FakeMarker[] = []
+/** Stands in for the map's marker pane so icon elements are in the
+ *  document (focusable). */
+let pane: HTMLElement
 const fakeMap = {
   remove: vi.fn(),
   invalidateSize: vi.fn(),
   setView: vi.fn(),
   fitBounds: vi.fn(),
-  getZoom: vi.fn(() => 4),
-  getSize: vi.fn(() => ({ x: 800, y: 400 })),
+  closePopup: vi.fn(),
+  getZoom: vi.fn(() => view.zoom),
+  getSize: vi.fn(() => ({ x: 800, y: view.height })),
+  getBoundsZoom: vi.fn(() => view.boundsZoom),
+  getBounds: vi.fn(() => ({ contains: vi.fn(() => view.contains) })),
   latLngToContainerPoint: vi.fn((ll: [number, number]) => ({
     x: ll[1] * view.scale, y: -ll[0] * view.scale,
   })),
@@ -51,15 +67,28 @@ vi.mock('leaflet', () => ({
       const g = {
         addTo: vi.fn(() => g),
         clearLayers: vi.fn(() => {
+          for (const m of mine) m.el.remove()
           liveMarkers = liveMarkers.filter((m) => !mine.includes(m))
           mine.length = 0
         }),
-        _track: (m: FakeMarker) => { mine.push(m); liveMarkers.push(m) },
+        _track: (m: FakeMarker) => {
+          mine.push(m)
+          liveMarkers.push(m)
+          pane.appendChild(m.el)
+        },
       }
       return g
     }),
     marker: vi.fn((latlng: [number, number], opts: FakeMarker['opts']) => {
-      const fm: FakeMarker = { latlng, opts, handlers: {} }
+      const el = document.createElement('div')
+      el.className = opts.icon?.className ?? ''
+      el.innerHTML = opts.icon?.html ?? ''
+      if (opts.keyboard !== false && opts.interactive !== false) {
+        el.tabIndex = 0
+        el.setAttribute('role', 'button')
+      }
+      if (opts.title) el.title = opts.title
+      const fm: FakeMarker = { latlng, opts, handlers: {}, el }
       const m = {
         addTo: vi.fn((layer: { _track?: (x: FakeMarker) => void }) => {
           layer._track?.(fm)
@@ -70,7 +99,9 @@ vi.mock('leaflet', () => ({
           fm.handlers[name] = fn
           return m
         }),
-        getElement: vi.fn(() => undefined),
+        fire: vi.fn((name: string) => { fm.handlers[name]?.(); return m }),
+        setZIndexOffset: vi.fn(() => m),
+        getElement: vi.fn(() => (el.isConnected ? el : undefined)),
       }
       return m
     }),
@@ -78,12 +109,26 @@ vi.mock('leaflet', () => ({
       const bounds = { getSouthWest: vi.fn(), getNorthEast: vi.fn() }
       const c = {
         addTo: vi.fn(() => c),
-        bindTooltip: vi.fn((content: unknown) => { zoneOverlays.push(content); return c }),
-        bindPopup: vi.fn((content: unknown) => { zoneOverlays.push(content); return c }),
+        bindTooltip: vi.fn(() => c),
+        bindPopup: vi.fn(() => c),
         getBounds: vi.fn(() => bounds),
       }
       return c
     }),
+    popup: vi.fn(() => {
+      const p = {
+        setLatLng: vi.fn(() => p),
+        setContent: vi.fn((el: HTMLElement) => { (p as { _el?: HTMLElement })._el = el; return p }),
+        openOn: vi.fn(() => {
+          const el = (p as { _el?: HTMLElement })._el!
+          pane.appendChild(el)
+          mapPopups.push(el)
+          return p
+        }),
+      }
+      return p
+    }),
+    point: vi.fn((x: number, y: number) => ({ x, y })),
     divIcon: vi.fn((opts: unknown) => opts),
     latLngBounds: vi.fn(() => {
       const b = { pad: vi.fn(() => ({})), extend: vi.fn(() => b) }
@@ -92,11 +137,11 @@ vi.mock('leaflet', () => ({
   },
 }))
 
-/** HTML of every bubble (person / group) marker currently drawn. */
+/** Every bubble (person / group) marker currently drawn. */
 function bubbles(): FakeMarker[] {
   return liveMarkers.filter((m) => m.opts.icon?.html.includes('sh-map-bubble'))
 }
-/** HTML of every zone-centre marker currently drawn. */
+/** Every zone-centre marker currently drawn. */
 function zoneMarkers(): FakeMarker[] {
   return liveMarkers.filter((m) => m.opts.icon?.html.includes('sh-map-zone'))
 }
@@ -121,9 +166,13 @@ vi.mock('@/utils/mapTiles', async (importOriginal) => ({
 beforeEach(() => {
   vi.clearAllMocks()
   liveMarkers = []
-  view.scale = 100_000
+  Object.assign(view, { scale: 100_000, zoom: 4, boundsZoom: 15, contains: false, height: 400 })
   popups.length = 0
-  zoneOverlays.length = 0
+  mapPopups.length = 0
+  document.body.querySelector('[data-pane]')?.remove()
+  pane = document.createElement('div')
+  pane.setAttribute('data-pane', '')
+  document.body.appendChild(pane)
   for (const k of Object.keys(mapHandlers)) delete mapHandlers[k]
   addTileLayer.mockReset()
   addTileLayer.mockResolvedValue(undefined)
@@ -233,8 +282,9 @@ describe('LocationMap', () => {
     expect(popups[0]).toContain('&quot;quoted&quot; &amp; &lt;b&gt;')
   })
 
-  it('shows a hostile zone name literally in the zone tooltip and popup', async () => {
+  it('names a hostile zone literally on its centre marker, never as markup', async () => {
     const { render } = await import('@testing-library/preact')
+    const L = (await import('leaflet')).default
     const { LocationMap } = await import('./LocationMap')
     const name = '<img src=x onerror="window.__xss=1"> & <b>Bold</b>'
     render(
@@ -245,17 +295,16 @@ describe('LocationMap', () => {
         }]}
       />,
     )
-    expect(zoneOverlays).toHaveLength(2)
-    for (const content of zoneOverlays) {
-      // Mount the way Leaflet's ``DivOverlay._updateContent`` does:
-      // a string goes through ``innerHTML``.
-      const el = document.createElement('div')
-      if (typeof content === 'string') el.innerHTML = content
-      else el.appendChild(content as Node)
-      expect(el.querySelector('img')).toBeNull()
-      expect(el.querySelector('b')).toBeNull()
-      expect(el.textContent).toBe(name)
-    }
+    const [centre] = zoneMarkers()
+    // Leaflet sets ``title`` as a DOM property — plain text.
+    expect(centre.opts.title).toBe(`Zone ${name}`)
+    expect(centre.el.getAttribute('aria-label')).toBe(`Zone ${name}`)
+    expect(centre.el.querySelector('img')).toBeNull()
+    expect(centre.el.querySelector('b')).toBeNull()
+    // The circle itself is decoration: no tooltip / popup of its own.
+    const circle = vi.mocked(L.circle).mock.results[0].value
+    expect(circle.bindTooltip).not.toHaveBeenCalled()
+    expect(circle.bindPopup).not.toHaveBeenCalled()
   })
 
   it('reports map clicks in pick mode and hides the empty pane', async () => {
@@ -395,7 +444,7 @@ describe('LocationMap person and zone markers', () => {
     expect(count(merged.opts.icon!.html, 'class="sh-map-avatar ')).toBe(2)
   })
 
-  it('zooms in to fit the members when a group bubble is clicked', async () => {
+  it('zooms to the zone on a first click of a crowded zone bubble', async () => {
     const { render } = await import('@testing-library/preact')
     const L = (await import('leaflet')).default
     const { LocationMap } = await import('./LocationMap')
@@ -411,7 +460,9 @@ describe('LocationMap person and zone markers', () => {
     const [[s], [n]] = vi.mocked(L.latLngBounds).mock.calls[0][0] as [[number, number], [number, number]]
     expect(s).toBeLessThan(47)
     expect(n).toBeGreaterThan(47)
-    expect(onSelect).not.toHaveBeenCalled()
+    // The zone is what's selected — nobody in particular yet.
+    expect(onSelect).toHaveBeenCalledWith('zone:z-home')
+    expect(mapPopups).toHaveLength(0)
   })
 
   it('selects a solo person on click and rings the selected avatar', async () => {
@@ -461,8 +512,14 @@ describe('LocationMap person and zone markers', () => {
     )
     zoneMarkers()[0].handlers.click()
     expect(onSelect).toHaveBeenCalledWith('zone:z-home')
+    const L = (await import('leaflet')).default
+    const circles = vi.mocked(L.circle).mock.calls.length
+    const centre = zoneMarkers()[0].el
     rerender(<LocationMap markers={[]} zones={[home]} selectedId="zone:z-home" onSelect={onSelect} />)
-    expect(zoneMarkers()[0].opts.icon!.html).toContain('is-selected')
+    // Restyled in place — not rebuilt on every selection.
+    expect(vi.mocked(L.circle).mock.calls.length).toBe(circles)
+    expect(zoneMarkers()[0].el).toBe(centre)
+    expect(centre.querySelector('.sh-map-zone')!.classList.contains('is-selected')).toBe(true)
   })
 
   it('deselects when the empty map is clicked', async () => {
@@ -549,5 +606,246 @@ describe('LocationMap viewport', () => {
     }
     expect(opts.paddingTopLeft[1] + opts.paddingBottomRight[1]).toBeLessThan(160 * 0.7)
     fakeMap.getSize.mockReturnValue({ x: 800, y: 400 })
+  })
+})
+
+describe('LocationMap crowded zones', () => {
+  const home = {
+    id: 'z-home', name: 'Home', latitude: 47, longitude: 8, radius_m: 200,
+    color: null, icon: '🏠',
+  }
+  const at = (id: string, label: string) => ({ id, label, lat: 47.0001, lon: 8.0001 })
+
+  it('lists the members as buttons once the zone already fills the view', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const onSelect = vi.fn()
+    const evil = '<img src=x onerror=alert(1)>'
+    render(
+      <LocationMap
+        markers={[at('a', 'Anna'), at('b', evil), at('c', 'Cara'), at('d', 'Dan')]}
+        zones={[home]}
+        selectedId={null}
+        onSelect={onSelect}
+      />,
+    )
+    view.zoom = 16
+    view.boundsZoom = 16
+    view.contains = true
+    fakeMap.fitBounds.mockClear()
+    bubbles()[0].handlers.click()
+    expect(fakeMap.fitBounds).not.toHaveBeenCalled()
+    expect(onSelect).toHaveBeenCalledWith('zone:z-home')
+    expect(mapPopups).toHaveLength(1)
+    const buttons = [...mapPopups[0].querySelectorAll('button')]
+    expect(buttons.map((b) => b.textContent)).toEqual(['Anna', evil, 'Cara', 'Dan'])
+    expect(mapPopups[0].querySelector('img')).toBeNull()
+    buttons[3].click()
+    expect(onSelect).toHaveBeenLastCalledWith('d')
+    expect(fakeMap.closePopup).toHaveBeenCalled()
+  })
+
+  it('keeps zooming a merged multi-zone bubble, never a member list', async () => {
+    const { render, act } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        markers={[at('a', 'Anna'), { id: 'b', label: 'Ben', lat: 47, lon: 8.01 }]}
+        zones={[home]}
+      />,
+    )
+    view.scale = 1_000
+    act(() => { mapHandlers.zoomend?.({}) })
+    const [merged] = bubbles()
+    expect(merged.opts.icon!.html).toContain('sh-map-bubble--group')
+    view.contains = true
+    view.zoom = 16
+    view.boundsZoom = 16
+    fakeMap.fitBounds.mockClear()
+    merged.handlers.click()
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+    expect(mapPopups).toHaveLength(0)
+  })
+
+  it('names the selected member on the zone bubble even when hidden in +N', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        markers={[at('a', 'Anna'), at('b', 'Ben'), at('c', 'Cara'), at('d', 'Dan')]}
+        zones={[home]}
+        selectedId="d"
+      />,
+    )
+    const el = document.createElement('div')
+    el.innerHTML = bubbles()[0].opts.icon!.html
+    expect(el.querySelector('.sh-map-bubble__caption')!.textContent).toBe('Dan')
+  })
+
+  it('draws no position dot for a merged bubble (its centroid is nowhere)', async () => {
+    const { render, act } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        markers={[
+          { id: 'a', label: 'Anna', lat: 47, lon: 8 },
+          { id: 'b', label: 'Ben', lat: 47, lon: 8.01 },
+        ]}
+      />,
+    )
+    expect(bubbles()[0].opts.icon!.html).toContain('sh-map-bubble__dot')
+    view.scale = 1_000
+    act(() => { mapHandlers.zoomend?.({}) })
+    expect(bubbles()[0].opts.icon!.html).not.toContain('sh-map-bubble__dot')
+  })
+})
+
+describe('LocationMap keyboard', () => {
+  it('activates a marker with Enter and with Space', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const onSelect = vi.fn()
+    render(
+      <LocationMap
+        markers={[{ id: 'c', label: 'Cara', lat: 46, lon: 7 }]}
+        selectedId={null}
+        onSelect={onSelect}
+      />,
+    )
+    const el = bubbles()[0].el
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    el.dispatchEvent(enter)
+    expect(onSelect).toHaveBeenCalledWith('c')
+    expect(enter.defaultPrevented).toBe(true)
+    onSelect.mockClear()
+    const space = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true })
+    el.dispatchEvent(space)
+    expect(onSelect).toHaveBeenCalledWith('c')
+    expect(space.defaultPrevented).toBe(true)
+  })
+
+  it('keeps keyboard focus on the same marker across a redraw', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const markers = [{ id: 'c', label: 'Cara', lat: 46, lon: 7 }]
+    const { rerender } = render(<LocationMap markers={markers} selectedId={null} />)
+    const before = bubbles()[0].el
+    before.focus()
+    expect(document.activeElement).toBe(before)
+    rerender(<LocationMap markers={markers} selectedId="c" />)
+    const after = bubbles()[0].el
+    expect(after).not.toBe(before)
+    expect(document.activeElement).toBe(after)
+    expect(after.getAttribute('data-key')).toBe('person:c')
+  })
+
+  it('names the marker for screen readers and drops a photo that fails to load', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        markers={[{ id: 'c', label: 'Cara', sub_label: 'Away', lat: 46, lon: 7, avatar_url: 'api/x.png' }]}
+      />,
+    )
+    const el = bubbles()[0].el
+    expect(el.getAttribute('aria-label')).toBe('Cara · Away')
+    const img = el.querySelector('img')!
+    img.dispatchEvent(new Event('error'))
+    expect(el.querySelector('img')).toBeNull()
+    expect(el.querySelector('.sh-map-avatar__initials')!.textContent).toBe('C')
+  })
+})
+
+describe('LocationMap zones', () => {
+  const work = {
+    id: 'z-work', name: 'Work', latitude: 47.3, longitude: 8.3, radius_m: 300,
+    color: null, icon: '💼',
+  }
+
+  it('fits the view to the people and every zone', async () => {
+    const { render } = await import('@testing-library/preact')
+    const L = (await import('leaflet')).default
+    const { LocationMap } = await import('./LocationMap')
+    render(<LocationMap markers={[{ id: 'a', label: 'Anna', lat: 47, lon: 8 }]} zones={[work]} />)
+    expect(fakeMap.fitBounds).toHaveBeenCalled()
+    const anchors = vi.mocked(L.latLngBounds).mock.calls.at(-1)![0] as Array<[number, number]>
+    const lats = anchors.map((a) => a[0])
+    // Anna plus the far edge of the Work zone's circle.
+    expect(lats).toContain(47)
+    expect(Math.max(...lats)).toBeGreaterThan(47.3)
+    expect(fakeMap.setView).not.toHaveBeenCalled()
+  })
+
+  it('refits when the zones change', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const markers = [{ id: 'a', label: 'Anna', lat: 47, lon: 8 }]
+    const { rerender } = render(<LocationMap markers={markers} zones={[work]} />)
+    fakeMap.fitBounds.mockClear()
+    rerender(<LocationMap markers={markers} zones={[work]} />)
+    expect(fakeMap.fitBounds).not.toHaveBeenCalled()
+    rerender(<LocationMap markers={markers} zones={[{ ...work, latitude: 47.5 }]} />)
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+  })
+
+  it('still centres a single place without zones', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(<LocationMap markers={[{ id: 'p', label: 'Pin', lat: 1, lon: 2, glyph: '📍' }]} />)
+    expect(fakeMap.setView).toHaveBeenCalledWith([1, 2], 14)
+  })
+
+  it('draws zone circles that let clicks through to the map', async () => {
+    const { render } = await import('@testing-library/preact')
+    const L = (await import('leaflet')).default
+    const { LocationMap } = await import('./LocationMap')
+    const onSelect = vi.fn()
+    render(<LocationMap markers={[]} zones={[work]} selectedId="zone:z-work" onSelect={onSelect} />)
+    const opts = vi.mocked(L.circle).mock.calls[0][1] as unknown as { interactive: boolean, fillOpacity: number }
+    expect(opts.interactive).toBe(false)
+    expect(opts.fillOpacity).toBeCloseTo(0.2)
+    mapHandlers.click({ latlng: { lat: 47.3, lng: 8.3 } })
+    expect(onSelect).toHaveBeenCalledWith(null)
+  })
+
+  it('shrinks the zone marker while the zone circle is smaller than it', async () => {
+    const { render, act } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(<LocationMap markers={[]} zones={[work]} />)
+    const zone = () => zoneMarkers()[0].el.querySelector('.sh-map-zone')!
+    // Zoom 4: a 300 m zone is a fraction of a pixel.
+    expect(zone().classList.contains('sh-map-zone--compact')).toBe(true)
+    view.zoom = 17 // ~0.8 m/px → a 300 m radius is hundreds of px
+    act(() => { mapHandlers.zoomend?.({}) })
+    expect(zone().classList.contains('sh-map-zone--compact')).toBe(false)
+  })
+})
+
+describe('LocationMap read-only', () => {
+  it('turns off every map interaction and makes markers inert', async () => {
+    const { render } = await import('@testing-library/preact')
+    const L = (await import('leaflet')).default
+    const { LocationMap } = await import('./LocationMap')
+    const onSelect = vi.fn()
+    render(
+      <LocationMap
+        readOnly
+        markers={[{ id: 'c', label: 'Cara', lat: 46, lon: 7 }, { id: 'p', label: 'Pin', lat: 45, lon: 6, glyph: '📍' }]}
+        zones={[{ id: 'z', name: 'Z', latitude: 46, longitude: 7, radius_m: 100, color: null }]}
+        onSelect={onSelect}
+      />,
+    )
+    const opts = vi.mocked(L.map).mock.calls[0][1] as Record<string, unknown>
+    for (const k of ['dragging', 'touchZoom', 'doubleClickZoom', 'scrollWheelZoom', 'boxZoom', 'keyboard', 'zoomControl']) {
+      expect(opts[k]).toBe(false)
+    }
+    for (const m of liveMarkers) {
+      expect(m.opts.interactive).toBe(false)
+      expect(m.opts.keyboard).toBe(false)
+      expect(m.el.tabIndex).toBe(-1)
+    }
+    expect(popups).toHaveLength(0)
+    mapHandlers.click?.({ latlng: { lat: 1, lng: 2 } })
+    expect(onSelect).not.toHaveBeenCalled()
   })
 })
