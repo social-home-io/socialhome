@@ -263,3 +263,14 @@ def test_located_now_is_relative_to_the_snapshot(minutes):
     view = map_view(snap, _fmt(snap))
     assert view is not None
     assert view.spots[1].when == f"{2 + minutes} min ago"
+
+
+def test_an_unavailable_presence_is_not_called_away():
+    """Review M-3: HA's "unavailable" (the dashboard's "unknown") with a
+    fresh point was drawn as "🚗 Away". Nobody knows where they are: they
+    stay off the map (and alone, there is no Map tab)."""
+    lost = located(PASCAL, presence="unknown", lat=52.5201, lon=13.4049)
+    view = _view(people=(lost, located(ANNA, presence="away", lat=52.5, lon=13.4)))
+    assert view is not None
+    assert [s.person.user_id for s in view.spots] == ["u-anna"]
+    assert not has_map(map_home(people=(lost,)))

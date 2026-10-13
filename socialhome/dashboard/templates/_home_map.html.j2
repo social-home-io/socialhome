@@ -32,7 +32,7 @@
       {% endfor %}
     </div>
     <button type="button" class="dash-mp-reset" data-map-reset hidden><span aria-hidden="true">⤢</span> {{ t("dashboard.map.show_all") }}</button>
-    <span class="dash-mp-attrib">© OpenStreetMap contributors</span>
+    <span class="dash-mp-attrib">{{ attribution }}</span>
   </div>
   <section class="dash-mp-side" aria-labelledby="dash-mp-list-label">
     <h2 class="dash-label" id="dash-mp-list-label">{{ t("dashboard.map.list") }}</h2>

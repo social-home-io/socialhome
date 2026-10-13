@@ -38,6 +38,11 @@ log = logging.getLogger(__name__)
 #: Highest zoom level the proxy will request. OSM raster tiles stop here.
 MAX_ZOOM: int = 19
 
+#: The credit every map drawn from these tiles shows — OSM's licence
+#: requires it. The one source for the SPA's (linked, HTML) attribution
+#: and the household dashboard's Map tab (plain text).
+MAP_ATTRIBUTION_TEXT: str = "© OpenStreetMap contributors"
+
 #: Media types a tile response may carry. Anything else is a failure —
 #: an HTML error page must never be handed back as a tile.
 ALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(

@@ -39,6 +39,7 @@ from socialhome.dashboard.views import (
 )
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
 from socialhome.services.map_tile_service import (
+    MAP_ATTRIBUTION_TEXT,
     MapTileService,
     Tile,
     TileUnavailableError,
@@ -3534,7 +3535,7 @@ async def test_map_page(client, auth, snapshots, settings_service):
     assert 'data-lat="52.5232" data-lon="13.3961"' in main
     assert "52.5201" not in main  # Pascal's point, inside Home
     assert re.findall(r'data-zone="([^"]+)"', main).count("hz_work") == 1
-    assert "© OpenStreetMap contributors" in main
+    assert f'<span class="dash-mp-attrib">{MAP_ATTRIBUTION_TEXT}</span>' in main
     assert 'data-map-reset hidden><span aria-hidden="true">⤢</span> Show everyone' in (
         main
     )
@@ -3664,9 +3665,17 @@ async def test_tiles_come_from_the_shared_proxy(client, auth, tiles):
     resp = await _get(client, auth, "/tiles/12/2200/1343")
     assert resp.status == 200
     assert resp.headers["Content-Type"] == "image/png"
-    assert resp.headers["Cache-Control"] == "private, max-age=86400"
+    # Review M-2: revalidated on every use, so a lock (423) wins at once;
+    # the ETag makes that a 304 from the shared in-memory tile cache.
+    assert resp.headers["Cache-Control"] == "private, no-cache"
+    etag = resp.headers["ETag"]
     assert await resp.read() == b"\x89PNG\r\n\x1a\ntile"
     assert tiles.calls == [(12, 2200, 1343)]
+    again = await client.get(
+        "/tiles/12/2200/1343", headers={**await _cookie(auth), "If-None-Match": etag}
+    )
+    assert again.status == 304 and await again.read() == b""
+    assert again.headers["Cache-Control"] == "private, no-cache"
 
 
 async def test_tiles_need_a_session(client, tiles):

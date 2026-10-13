@@ -42,7 +42,11 @@ from ..domain.household_dashboard import (
 )
 from ..rate_limiter import client_bucket
 from ..services.dashboard_settings_service import DashboardSettingsService
-from ..services.map_tile_service import TileCoordinateError, TileUnavailableError
+from ..services.map_tile_service import (
+    MAP_ATTRIBUTION_TEXT,
+    TileCoordinateError,
+    TileUnavailableError,
+)
 from .auth import (
     COOKIE_NAME,
     KEEP_TTL_S,
@@ -470,9 +474,10 @@ class LogoutView(_DashboardView):
 #: load passes the session guard again (423 locked, 404 once hidden).
 AVATAR_CACHE = "private, no-cache"
 
-#: A map tile is public map data, kept a day by the tablet only (it
-#: says which area the wall shows, so never by a shared cache).
-TILE_CACHE = "private, max-age=86400"
+#: A map tile may be stored by the tablet only (it says which area the
+#: wall shows) and is revalidated on every use, so the lock (423) wins
+#: at once; the ``ETag`` makes that a 304 from the shared tile cache.
+TILE_CACHE = "private, no-cache"
 
 #: Longest ``message_id`` / ``person_id`` ``POST /ack`` accepts.
 ACK_ID_MAX = 128
@@ -682,6 +687,7 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
         board.context["notes_beyond"] = max(0, snap.stickies_total - len(snap.stickies))
     elif tab == TAB_MAP:
         board.context["map"] = map_view(snap, fmt)
+        board.context["attribution"] = MAP_ATTRIBUTION_TEXT
     else:
         card = card_rows(rows, snap.now, hide=bannered)
         board.context.update(
@@ -904,10 +910,12 @@ class TileView(_DashboardView):
             raise web.HTTPNotFound() from None
         except TileUnavailableError:
             return web.Response(status=503, text="Service Unavailable")
+        etag = '"' + hashlib.sha256(tile.body).hexdigest()[:32] + '"'
+        headers = {"Cache-Control": TILE_CACHE, "ETag": etag}
+        if self.request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers=headers)
         return web.Response(
-            body=tile.body,
-            content_type=tile.content_type,
-            headers={"Cache-Control": TILE_CACHE},
+            body=tile.body, content_type=tile.content_type, headers=headers
         )
 
 

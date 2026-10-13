@@ -156,7 +156,14 @@ dashboard **address** — it always wins over the guess.
   goes back. The tab only appears while someone shares their location
   (or is in a known zone); it is hidden at night and behind the 🔒
   privacy lock — **lock the tablet when guests are around**, since the
-  map shows where family members are. Map tiles are fetched by Social
+  map shows where family members are. Who appears: every shown member
+  (Admin › Dashboard › People) with a location — child-protected minors
+  too, like everyone else (the owner's decision); a person you hide
+  there is never on the map, and with the household's presence feature
+  off there is no Map at all. Personal blocks between members don't
+  apply on the wall, which has no viewer of its own. A phone that Home
+  Assistant reports as unavailable is left off the map rather than
+  shown as away. Map tiles are fetched by Social
   Home (the tablet never contacts a map server); the map credits
   OpenStreetMap.
 - **A person** (tap their face in the rail): what they're doing now and

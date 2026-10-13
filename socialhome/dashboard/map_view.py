@@ -15,6 +15,8 @@ Assistant 2026.10's people/zone style:
   at the 4-dp point. A zone name the household has no zone for (Home
   Assistant knows more zones than were synced) is such a point too,
   named after that zone.
+* **Known only.** A point whose presence is ``unknown`` (Home Assistant's
+  ``unavailable``) is not drawn — it would read "Away".
 * **Fresh only.** A location older than :data:`MAP_STALE_AFTER` is
   *stale* (faded, "last seen 2 h ago"); older than :data:`MAP_DROP_AFTER`
   the person leaves the map. Someone who shares neither a point nor a
@@ -169,8 +171,17 @@ def _fresh(person: DashboardPerson, now: datetime) -> bool:
     return person.located_at is not None and now - person.located_at < MAP_DROP_AFTER
 
 
+#: Presence words whose point the map draws. ``unknown`` (Home Assistant's
+#: ``unavailable``) is left off: a point with "no idea where" is not "Away".
+_LOCATED = frozenset({"home", "away", "zone"})
+
+
 def _has_point(person: DashboardPerson) -> bool:
-    return person.latitude is not None and person.longitude is not None
+    return (
+        person.presence in _LOCATED
+        and person.latitude is not None
+        and person.longitude is not None
+    )
 
 
 def _on_map(

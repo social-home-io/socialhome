@@ -1566,7 +1566,11 @@ zone's bubble at the zone centre — their own point is never drawn —
 and everyone else at their own point (a zone name the household has no
 zone for is such a point, named after it); a location over an hour old
 is stale (faded, "last seen 2 h ago", never red), over a day gone;
-someone sharing neither a point nor a known zone is not shown. The tab
+someone sharing neither a point nor a known zone is not shown, nor is a
+point whose presence is unknown (HA `unavailable` — it would read
+"Away"). Visibility is the dashboard's: shown members only (minors
+included, by the owner's decision) and the presence toggle; per-viewer
+blocks don't apply on a wall with no viewer. The tab
 exists while anyone is located; otherwise `/map` (and its fragment) 303
 to Overview, as at night. The privacy lock answers `/map` with the lock
 screen and `/tiles/…` with 423 like every other route (the guard, not
