@@ -7,6 +7,7 @@ import {
   groupByZone,
   matchZone,
   mergeOverlapping,
+  personZone,
   personColorToken,
   type MapPerson,
   type MarkerGroup,
@@ -55,6 +56,19 @@ describe('matchZone', () => {
     const z = { id: 'z', latitude: 0, longitude: 0, radius_m: 120 }
     expect(matchZone([z], 0.001, 0)?.id).toBe('z')
     expect(matchZone([{ ...z, radius_m: 100 }], 0.001, 0)).toBeNull()
+  })
+})
+
+describe('personZone', () => {
+  it('prefers the stated zone, else the zone the point is in', () => {
+    expect(personZone(person('a', 47.1, 8.1, 'z-home'), [home, work])).toBe(home)
+    expect(personZone(person('b', 47.1, 8.1), [home, work])).toBe(work)
+    expect(personZone(person('c', 45, 7), [home, work])).toBeNull()
+  })
+
+  it('falls back to the point when the stated zone is gone', () => {
+    expect(personZone(person('a', 47.1, 8.1, 'z-deleted'), [home, work])).toBe(work)
+    expect(personZone(person('b', null, null, 'z-deleted'), [home, work])).toBeNull()
   })
 })
 

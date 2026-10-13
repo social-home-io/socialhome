@@ -5,8 +5,9 @@
  * phones), then a card per member.
  *
  * A member is placed in a household zone by the zone the server stored
- * for them (``zone_name``; ``state: home`` is the Home zone) — the same
- * zone on the map and in the overview's counts.
+ * for them (``zone_name``; ``state: home`` is the Home zone), else by the
+ * zone their point is in — the same zone on the map and in the overview's
+ * counts (both use ``personZone``).
  */
 import { useEffect, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
@@ -22,6 +23,7 @@ import { LocationMap, type LocationMarker } from '@/components/LocationMap'
 import { MapOverview, type OverviewPerson } from '@/components/MapOverview'
 import { currentUser } from '@/store/auth'
 import { presenceLabel } from '@/utils/presenceLabel'
+import { personZone } from '@/utils/mapMarkers'
 import type { HouseholdZone, UserStatus } from '@/types'
 
 interface PresenceEntry {
@@ -172,13 +174,16 @@ export default function PresencePage() {
     avatar_url: p.picture_url,
     state: p.state,
   }))
-  const people = placed.map<OverviewPerson>(({ p, zone }) => ({
+  // Counted in the zone the map draws them in: the stored zone, else
+  // the zone their point is in (Home Assistant can say not_home while
+  // the point sits inside a household zone).
+  const people = placed.map<OverviewPerson>(({ p }, i) => ({
     id: p.user_id,
     user_id: p.user_id,
     name: p.display_name,
     avatar_url: p.picture_url,
     status: presenceLabel(p.state, p.zone_name),
-    zone_id: zone?.id ?? null,
+    zone_id: personZone(markers[i], zones)?.id ?? null,
     updated_at: p.updated_at ?? null,
     online: p.is_online ? (p.is_idle ? 'idle' : 'online') : 'offline',
     last_seen_at: p.last_seen_at ?? null,

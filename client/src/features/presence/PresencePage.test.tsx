@@ -197,6 +197,31 @@ describe('PresencePage', () => {
         .toEqual(['1 person', '1 person'])
     })
 
+    it('counts a member in the zone the map puts them in when no zone is stored', async () => {
+      // Home Assistant says not_home, but the point is inside School: the
+      // map draws them in the School bubble, so the overview must too.
+      zones = [
+        zone('hz_home', 'Home', { is_home: true }),
+        zone('hz_school', 'School', { latitude: 46.9, longitude: 7.9 }),
+      ]
+      people = [{
+        ...row(null), user_id: 'u6', username: 'fa', display_name: 'Fa',
+        state: 'not_home', zone_name: null, latitude: 46.9, longitude: 7.9,
+      }]
+      const { default: PresencePage } = await import('./PresencePage')
+      const view = render(<PresencePage />)
+      await view.findByText('Fa', { selector: 'strong' })
+      await waitFor(() => expect(view.container.querySelectorAll('.sh-map-overview__tabs button')).toHaveLength(2))
+      fireEvent.click(view.container.querySelectorAll('.sh-map-overview__tabs button')[1])
+      const counts = Array.from(view.container.querySelectorAll<HTMLElement>(
+        '.sh-map-overview__body .sh-map-overview__row',
+      )).map((r) => [
+        r.querySelector('.sh-map-overview__row-name')!.textContent,
+        r.querySelector('.sh-map-overview__count')!.textContent,
+      ])
+      expect(counts).toEqual([['Home', 'Nobody'], ['School', '1 person']])
+    })
+
     it('shares the selection with the map and shows who is online', async () => {
       const { default: PresencePage } = await import('./PresencePage')
       const view = render(<PresencePage />)
