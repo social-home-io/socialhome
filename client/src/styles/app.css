@@ -16633,7 +16633,6 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   z-index: 1;
   display: flex;
   flex-direction: column;
-  max-height: 62%;
   overflow: hidden;
   background: var(--sh-bg);
   border: 1px solid var(--sh-border);
@@ -16701,10 +16700,13 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 }
 .sh-map-overview__row:hover { background: var(--sh-bg-secondary); }
 .sh-map-overview__row:focus-visible,
-.sh-map-overview__back:focus-visible,
-.sh-map-overview__title:focus-visible {
+.sh-map-overview__back:focus-visible {
   outline: 2px solid var(--sh-primary);
   outline-offset: -2px;
+}
+.sh-map-overview__title:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
 }
 .sh-map-overview__title:focus:not(:focus-visible) { outline: none; }
 .sh-map-overview__row-text {
@@ -16758,6 +16760,8 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-map-overview__back:hover { background: var(--sh-bg-tertiary); }
 .sh-map-overview__title {
   margin: 0;
+  /* Room for the focus ring inside the panel's clip. */
+  margin-inline-end: 4px;
   min-width: 0;
   font-size: var(--sh-font-size-md);
   font-weight: 700;
@@ -16810,6 +16814,11 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   /* Collapsed sheet: just the grabber and the tab strip (or the
    * detail's title row). */
   .sh-map-overview:not(.is-expanded) .sh-map-overview__body { display: none; }
+  /* The sheet sits over the map: give the map more height so an open
+   * sheet still leaves a useful view above it (min-height wins over
+   * the map's own inline height). */
+  .sh-map-overview.has-panel .sh-location-map { min-height: min(480px, 62svh); }
+  .sh-map-overview__panel { max-height: 55%; }
 }
 @container sh-map-overview (min-width: 640px) {
   .sh-map-overview.has-panel {

@@ -405,6 +405,11 @@ export function LocationMap({
    *  selection then fits everyone again. */
   const showsSelectionRef = useRef(false)
   const fitViewRef = useRef((_reason: 'data' | 'selection') => {})
+  /** A zoom animation is running: Leaflet drops a new view until it
+   *  ends, so a fit asked for meanwhile waits here (the panel over the
+   *  map often resizes right after a selection started zooming). */
+  const zoomingRef = useRef(false)
+  const pendingFitRef = useRef<'data' | 'selection' | null>(null)
   const selectRef = useRef((_id: string | null) => {})
   selectRef.current = (id: string | null) => {
     if (selectedId === undefined) setOwnSelected(id)
@@ -471,9 +476,14 @@ export function LocationMap({
       }
     })
     // Screen distances and zone sizes change with the zoom.
+    map.on('zoomstart', () => { zoomingRef.current = true })
     map.on('zoomend', () => {
+      zoomingRef.current = false
       styleZonesRef.current()
       drawPeopleRef.current()
+      const pending = pendingFitRef.current
+      pendingFitRef.current = null
+      if (pending) fitViewRef.current(pending)
     })
 
     // Leaflet measures its container lazily — if the parent was
@@ -720,6 +730,12 @@ export function LocationMap({
   fitViewRef.current = (reason) => {
     const map = mapRef.current
     if (!map) return
+    if (zoomingRef.current) {
+      // A data refit outranks a selection one (it also follows the
+      // selection).
+      if (pendingFitRef.current !== 'data') pendingFitRef.current = reason
+      return
+    }
     const still = readOnlyRef.current
     const current = markersRef.current
     const zoneList = zonesRef.current ?? []

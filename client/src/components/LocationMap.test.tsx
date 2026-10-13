@@ -1119,6 +1119,28 @@ describe('LocationMap zoom to selection', () => {
     expect(await lastBounds()).toEqual([[46.6, 7.5], [46.6, 7.5]])
   })
 
+  it('waits for a running zoom to end before moving the view again', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(
+      <LocationMap markers={people} zones={[home]} zoomToSelection selectedId="c" />,
+    )
+    fakeMap.fitBounds.mockClear()
+    // The selection started zooming; then the sheet over the map grew.
+    mapHandlers.zoomstart({})
+    rerender(
+      <LocationMap markers={people} zones={[home]} zoomToSelection selectedId="c"
+                   fitInsets={{ bottom: 240 }} />,
+    )
+    // Leaflet would drop a view change mid-animation — so none is made.
+    expect(fakeMap.fitBounds).not.toHaveBeenCalled()
+    mapHandlers.zoomend({})
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+    const opts = fakeMap.fitBounds.mock.calls[0][1] as FitOpts
+    expect(opts.paddingBottomRight[1]).toBe(30 + 240)
+    expect(await lastBounds()).toEqual([[46.5, 7.5], [46.5, 7.5]])
+  })
+
   it('leaves the view alone on selection without zoomToSelection', async () => {
     const { render } = await import('@testing-library/preact')
     const { LocationMap } = await import('./LocationMap')
