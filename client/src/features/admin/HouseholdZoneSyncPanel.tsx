@@ -46,7 +46,11 @@ export function HouseholdZoneSyncPanel({ onChanged }: HouseholdZoneSyncPanelProp
   // Move focus to the question so a keyboard / screen-reader user lands
   // on it (and its buttons) instead of staying on the switch.
   useEffect(() => {
-    if (confirmingOff) confirmRef.current?.focus()
+    const box = confirmRef.current
+    if (!confirmingOff || !box) return
+    // Keep the switch in view on a phone: scroll only as far as needed.
+    box.focus({ preventScroll: true })
+    box.scrollIntoView?.({ block: 'nearest' })
   }, [confirmingOff])
 
   useEffect(() => {

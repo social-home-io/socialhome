@@ -284,3 +284,13 @@ async def test_stop_cancels_a_stuck_run(zones, config):
     task.cancel()
     await sync_stop
     assert sync._task is None
+
+
+async def test_off_forgets_the_last_sync_time(sync, source):
+    """Off → on with a failing read must not show the old sync time."""
+    await sync.sync_now()
+    await sync.set_enabled(False)
+    source.fail = True
+    status = await sync.set_enabled(True)
+    assert status.last_synced_at is None
+    assert status.last_error == "Home Assistant didn't answer"

@@ -3040,7 +3040,7 @@
   "zones.sync.last_synced": "Last synced {when}",
   "zones.sync.pending": "Waiting for the first sync…",
   "zones.sync.off": "Off — only the zones you add here are used.",
-  "zones.sync.error": "The last sync couldn't reach Home Assistant. The synced zones stay, and Social Home tries again in a few minutes.",
+  "zones.sync.error": "The last sync couldn't reach Home Assistant. Social Home keeps the zones it has and tries again in a few minutes.",
   "zones.sync.confirm_off": "Zones from Home Assistant will be removed from Social Home. Your own zones stay.",
   "zones.sync.confirm_off_button": "Turn off and remove",
   "zones.sync.failed": "Couldn't change the zone sync",

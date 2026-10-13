@@ -2729,7 +2729,7 @@
   "zones.sync.last_synced": "Laatst gesynchroniseerd {when}",
   "zones.sync.pending": "Wachten op de eerste synchronisatie…",
   "zones.sync.off": "Uit — alleen de zones die je hier toevoegt, gelden.",
-  "zones.sync.error": "Bij de laatste synchronisatie was Home Assistant niet bereikbaar. De overgenomen zones blijven, en Social Home probeert het over een paar minuten opnieuw.",
+  "zones.sync.error": "Bij de laatste synchronisatie was Home Assistant niet bereikbaar. Social Home houdt de zones die het heeft en probeert het over een paar minuten opnieuw.",
   "zones.sync.confirm_off": "De zones uit Home Assistant worden uit Social Home verwijderd. Je eigen zones blijven.",
   "zones.sync.confirm_off_button": "Uitzetten en verwijderen",
   "zones.sync.failed": "De zonesynchronisatie kon niet worden gewijzigd",

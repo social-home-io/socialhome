@@ -2734,7 +2734,7 @@
   "zones.sync.last_synced": "Zuletzt abgeglichen {when}",
   "zones.sync.pending": "Warte auf den ersten Abgleich…",
   "zones.sync.off": "Aus — nur die hier angelegten Zonen gelten.",
-  "zones.sync.error": "Beim letzten Abgleich war Home Assistant nicht erreichbar. Die übernommenen Zonen bleiben, und Social Home versucht es in ein paar Minuten erneut.",
+  "zones.sync.error": "Beim letzten Abgleich war Home Assistant nicht erreichbar. Social Home behält die vorhandenen Zonen und versucht es in ein paar Minuten erneut.",
   "zones.sync.confirm_off": "Die Zonen aus Home Assistant werden aus Social Home entfernt. Deine eigenen Zonen bleiben.",
   "zones.sync.confirm_off_button": "Ausschalten und entfernen",
   "zones.sync.failed": "Der Zonen-Abgleich konnte nicht geändert werden",

@@ -135,6 +135,8 @@ class HouseholdZoneSync:
                 elif not self._cleared:
                     result = await self._zones.mirror_external([])
                     self._cleared = True
+                    # Turned back on later, "last synced" means that run.
+                    self._last_synced_at = None
                     self._last_error = None
                     if result.removed:
                         log.info(

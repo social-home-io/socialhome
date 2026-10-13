@@ -2756,7 +2756,7 @@
   "zones.sync.last_synced": "Última sincronización {when}",
   "zones.sync.pending": "Esperando la primera sincronización…",
   "zones.sync.off": "Desactivado: solo se usan las zonas que añadas aquí.",
-  "zones.sync.error": "La última sincronización no pudo conectar con Home Assistant. Las zonas sincronizadas se mantienen y Social Home lo volverá a intentar en unos minutos.",
+  "zones.sync.error": "La última sincronización no pudo conectar con Home Assistant. Social Home mantiene las zonas que tiene y lo volverá a intentar en unos minutos.",
   "zones.sync.confirm_off": "Las zonas de Home Assistant se quitarán de Social Home. Tus propias zonas se mantienen.",
   "zones.sync.confirm_off_button": "Desactivar y quitar",
   "zones.sync.failed": "No se pudo cambiar la sincronización de zonas",
