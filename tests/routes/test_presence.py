@@ -356,3 +356,23 @@ async def test_list_presence_hides_expired_status(client):
     )
     rows = await (await client.get("/api/presence", headers=_auth(client._tok))).json()
     assert [r["status"] for r in rows if r["username"] == "admin"] == [None]
+
+
+async def test_list_presence_carries_signed_picture_and_updated_at(client):
+    """Household map pins need the member's picture (signed like every
+    other ``picture_url``) and the time of the last location update."""
+    await client._db.enqueue(
+        "UPDATE users SET picture_hash=? WHERE username=?",
+        ("feedbeef", "admin"),
+    )
+    await client.post(
+        "/api/presence/location",
+        json={"username": "admin", "latitude": 1.0, "longitude": 2.0},
+        headers=_auth(client._tok),
+    )
+    rows = await (await client.get("/api/presence", headers=_auth(client._tok))).json()
+    (row,) = [r for r in rows if r["username"] == "admin"]
+    url = row["picture_url"]
+    assert url.startswith(f"api/users/{row['user_id']}/picture?v=feedbeef")
+    assert "sig=" in url and "exp=" in url
+    assert row["updated_at"]

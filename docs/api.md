@@ -826,7 +826,7 @@ bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST / DELETE | `/api/presence` | Own presence. `GET` rows now also carry session-presence fields `is_online`, `is_idle`, `last_seen_at` so the UI can render the green / amber dot without a separate fetch, and `status` (`{emoji, text, expires_at}`, or `null` when unset or expired). |
+| GET / POST / DELETE | `/api/presence` | Own presence. `GET` rows now also carry session-presence fields `is_online`, `is_idle`, `last_seen_at` so the UI can render the green / amber dot without a separate fetch, `status` (`{emoji, text, expires_at}`, or `null` when unset or expired), `picture_url` (signed avatar URL, or `null` for initials) and `updated_at` (UTC time of the member's last presence update, `null` when unknown) for the map pins. |
 | POST | `/api/presence/location` | Location update (rate-limited 10/min). |
 | GET | `/api/spaces/{id}/presence` | Presence visible in this space. Carries GPS only — `zone_name` is stripped at the household boundary (§23.8.6). |
 | GET | `/api/spaces/{id}/members` | Roster for this space. Each row carries `is_online`, `is_idle`, `last_seen_at` alongside the member metadata so the SPA renders the same dot on space pages. |

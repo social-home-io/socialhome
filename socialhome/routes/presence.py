@@ -7,12 +7,14 @@ from datetime import datetime, timezone
 from aiohttp import web
 
 from ..app_keys import (
+    media_signer_key,
     online_status_service_key,
     preferences_service_key,
     presence_service_key,
     user_repo_key,
 )
 from ..domain.presence import LocationUpdate, PresenceState
+from ..media_signer import sign_media_urls_in
 from ..security import error_response
 from .base import BaseView
 
@@ -93,17 +95,22 @@ class PresenceCollectionView(BaseView):
                     "username": p.username,
                     "user_id": p.user_id,
                     "display_name": p.display_name,
+                    "picture_url": p.picture_url,
                     "state": p.state,
                     "zone_name": p.zone_name,
                     "latitude": p.latitude,
                     "longitude": p.longitude,
                     "gps_accuracy_m": p.gps_accuracy_m,
+                    "updated_at": p.updated_at,
                     "is_online": is_online,
                     "is_idle": is_idle,
                     "last_seen_at": last_seen,
                     "status": statuses.get(p.user_id),
                 }
             )
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(rows, signer)
         return self._json(rows)
 
 

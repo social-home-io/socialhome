@@ -51,6 +51,8 @@ class PersonPresence:
     latitude: float | None = None  # 4dp-truncated
     longitude: float | None = None  # 4dp-truncated
     gps_accuracy_m: float | None = None
+    #: When the presence row last changed (UTC, as stored).
+    updated_at: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

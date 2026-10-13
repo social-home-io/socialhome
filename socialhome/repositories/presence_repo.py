@@ -65,6 +65,7 @@ def _to_presence(row) -> PersonPresence:
         latitude=row["latitude"],
         longitude=row["longitude"],
         gps_accuracy_m=row["gps_accuracy_m"],
+        updated_at=row["updated_at"],
     )
 
 
