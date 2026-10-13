@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Awaitable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.household_zone import HouseholdZone
+from ..domain.household_zone import HouseholdZone, HouseholdZoneNameTakenError
 from .base import row_to_dict, rows_to_dicts
 
 __all__ = ["AbstractHouseholdZoneRepo", "SqliteHouseholdZoneRepo"]
@@ -38,7 +39,9 @@ class AbstractHouseholdZoneRepo(Protocol):
     async def count(self) -> int: ...
     async def create(self, zone: HouseholdZone) -> None:
         """Insert ``zone``; when it is the Home zone the old Home loses the
-        flag in the same transaction."""
+        flag in the same transaction. A name clash (any case) raises
+        :class:`HouseholdZoneNameTakenError` — so do :meth:`update` and
+        :meth:`mirror_external`."""
         ...
 
     async def update(self, zone: HouseholdZone) -> bool:
@@ -54,6 +57,8 @@ class AbstractHouseholdZoneRepo(Protocol):
         flag. Returns ``(upserted, removed)``."""
         ...
 
+
+T = TypeVar("T")
 
 _COLS = (
     "id, name, latitude, longitude, radius_m, color, icon, is_home,"
@@ -103,6 +108,19 @@ def _clear_home(conn: sqlite3.Connection, *, except_id: str) -> None:
     )
 
 
+async def _translating_name_clash(run: Awaitable[T]) -> T:
+    """Await ``run``; the ``UNIQUE`` on ``name`` becomes
+    :class:`HouseholdZoneNameTakenError` (409) so a write that raced the
+    service's own name check never surfaces as a 500. Every other
+    integrity error passes through."""
+    try:
+        return await run
+    except sqlite3.IntegrityError as exc:
+        if "household_zones.name" in str(exc):
+            raise HouseholdZoneNameTakenError() from exc
+        raise
+
+
 class SqliteHouseholdZoneRepo:
     """SQLite-backed implementation of :class:`AbstractHouseholdZoneRepo`."""
 
@@ -149,7 +167,7 @@ class SqliteHouseholdZoneRepo:
                 _params(zone),
             )
 
-        await self._db.transact(_run)
+        await _translating_name_clash(self._db.transact(_run))
 
     async def update(self, zone: HouseholdZone) -> bool:
         def _run(conn: sqlite3.Connection) -> bool:
@@ -178,7 +196,7 @@ class SqliteHouseholdZoneRepo:
             )
             return True
 
-        result: bool = await self._db.transact(_run)
+        result: bool = await _translating_name_clash(self._db.transact(_run))
         return result
 
     async def delete(self, zone_id: str) -> bool:
@@ -221,5 +239,5 @@ class SqliteHouseholdZoneRepo:
                 )
             return len(incoming), int(removed)
 
-        result: tuple[int, int] = await self._db.transact(_run)
+        result: tuple[int, int] = await _translating_name_clash(self._db.transact(_run))
         return result

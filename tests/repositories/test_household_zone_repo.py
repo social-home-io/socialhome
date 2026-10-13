@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from socialhome.domain.household_zone import HouseholdZone
+from socialhome.domain.household_zone import HouseholdZone, HouseholdZoneNameTakenError
 from socialhome.repositories.household_zone_repo import (
     AbstractHouseholdZoneRepo,
     SqliteHouseholdZoneRepo,
@@ -76,9 +76,10 @@ async def test_get_by_external_id(repo):
     assert await repo.get_by_external_id("zone.other") is None
 
 
-async def test_create_duplicate_name_raises(repo):
+async def test_create_duplicate_name_raises_name_taken(repo):
+    """The DB UNIQUE on name surfaces as the domain 409, never a 500."""
     await repo.create(_zone("hz_1", "School"))
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(HouseholdZoneNameTakenError):
         await repo.create(_zone("hz_2", "SCHOOL"))
 
 
@@ -179,7 +180,24 @@ async def test_mirror_external_is_atomic(repo):
     """A failing row rolls the whole mirror back."""
     await repo.create(_zone("hz_native", "School"))
     await repo.create(_zone("hz_x1", "Gym", external_id="zone.gym"))
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(HouseholdZoneNameTakenError):
         await repo.mirror_external([_zone("hz_x2", "school", external_id="zone.s")])
     assert (await repo.get_by_external_id("zone.gym")).name == "Gym"
     assert await repo.count() == 2
+
+
+async def test_update_into_taken_name_raises_name_taken(repo):
+    await repo.create(_zone("hz_1", "School"))
+    await repo.create(_zone("hz_2", "Work"))
+    with pytest.raises(HouseholdZoneNameTakenError):
+        await repo.update(_zone("hz_2", "SCHOOL"))
+    assert (await repo.get("hz_2")).name == "Work"
+
+
+async def test_other_integrity_errors_pass_through(repo):
+    """Only the name clash is translated — e.g. a second row with the
+    same id is still a plain IntegrityError."""
+    await repo.create(_zone("hz_1", "School"))
+    with pytest.raises(sqlite3.IntegrityError) as info:
+        await repo.create(_zone("hz_1", "Other"))
+    assert not isinstance(info.value, HouseholdZoneNameTakenError)
