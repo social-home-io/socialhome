@@ -21,10 +21,10 @@ vi.mock('@/store/auth', () => ({
 // jsdom — stub it to a deterministic placeholder so the tests assert
 // on layout, not map internals.
 vi.mock('@/components/LocationMap', () => ({
-  LocationMap: ({ markers }: { markers: { id: string }[] }) => (
+  LocationMap: ({ markers }: { markers: { id: string, glyph?: string }[] }) => (
     <div data-testid="map" data-markers={markers.length}>
       {markers.map(m => (
-        <span key={m.id} class="map-marker" data-id={m.id} />
+        <span key={m.id} class="map-marker" data-id={m.id} data-glyph={m.glyph} />
       ))}
     </div>
   ),
@@ -144,6 +144,11 @@ describe('FriendsPage', () => {
     // Local + one paired with coords = 2 markers (B has no coords).
     const map = container.querySelector('[data-testid="map"]') as HTMLElement
     expect(map.getAttribute('data-markers')).toBe('2')
+    // Households are places, not people: house pins with a name popup,
+    // never merged into a person bubble.
+    for (const pin of map.querySelectorAll('.map-marker')) {
+      expect(pin.getAttribute('data-glyph')).toBe('🏠')
+    }
   })
 
   it('renders one card per paired household with member chips', async () => {

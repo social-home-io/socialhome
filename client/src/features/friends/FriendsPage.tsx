@@ -186,6 +186,9 @@ export default function FriendsPage() {
       label: instance.display_name,
       sub_label: `${memberCount(instance.member_count)} · ${t('friends.your_household')}`,
       state: 'home',
+      // A household is a place: a house pin with a name popup, never a
+      // person bubble that merges with its neighbours.
+      glyph: '🏠',
     })
   }
   for (const h of households) {
@@ -199,6 +202,7 @@ export default function FriendsPage() {
       sub_label: memberCount(h.member_count)
         + (ago ? ` · ${t('friends.paired_ago', { ago })}` : ''),
       state: h.reachable ? 'zone' : 'away',
+      glyph: '🏠',
     })
   }
 
