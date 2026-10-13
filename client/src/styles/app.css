@@ -16412,27 +16412,134 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
    * the app's ``--sh-z-*`` scale. */
   z-index: 1100;
 }
-.sh-map-pin {
-  width: 36px; height: 36px;
-  border-radius: 50%;
-  border: 3px solid #22c55e;
-  background: var(--sh-bg);
-  /* Initials sit on the paper disc: ink, not white (white on the light
-     paper was invisible). */
-  color: var(--sh-text);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-  display: flex; align-items: center; justify-content: center;
-  overflow: hidden;
-  transform: translate(0, -4px);
+/* Person + zone map markers (Home Assistant 2026.10-style). Leaflet
+ * gets a zero-size divIcon; each bubble positions itself from that
+ * anchor point here, so variable-width bubbles need no size maths in JS.
+ * People are framed in their own colour token (``--tt-*`` from
+ * ``.sh-timetable-c--<token>``), so light/dark follow the theme. */
+.sh-map-icon {
+  background: none;
+  border: 0;
 }
-.sh-map-pin img {
+.sh-map-icon:focus { outline: none; }
+.sh-map-icon:focus-visible .sh-map-bubble__body,
+.sh-map-icon:focus-visible .sh-map-zone {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+}
+.sh-map-bubble {
+  --sh-map-avatar: 40px;
+  /* Anchor → bottom of the bubble box. The tail overhangs that by ~3px. */
+  --sh-map-gap: 8px;
+  position: absolute; left: 0; top: 0;
+  transform: translate(-50%, calc(-100% - var(--sh-map-gap)));
+  display: flex; flex-direction: column; align-items: center;
+  cursor: pointer;
+  font-family: var(--sh-font-family);
+}
+/* A zone bubble floats clear of the 36px zone marker it points at. */
+.sh-map-bubble--zone { --sh-map-gap: 22px; }
+.sh-map-bubble__body {
+  display: flex; align-items: center; gap: 4px;
+  padding: 5px;
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-md);
+  white-space: nowrap;
+}
+.sh-map-bubble:hover .sh-map-bubble__body { box-shadow: var(--sh-shadow-lg); }
+.sh-map-bubble__tail {
+  width: 12px; height: 12px;
+  margin-top: -7px;
+  background: var(--sh-bg);
+  border-right: 1px solid var(--sh-border);
+  border-bottom: 1px solid var(--sh-border);
+  transform: rotate(45deg);
+}
+.sh-map-bubble__dot {
+  position: absolute; left: 50%;
+  bottom: calc(-1 * var(--sh-map-gap));
+  width: 10px; height: 10px;
+  transform: translate(-50%, 50%);
+  border-radius: 50%;
+  background: var(--sh-text);
+  border: 2px solid var(--sh-bg);
+  box-shadow: var(--sh-shadow-sm);
+}
+.sh-map-bubble__more {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 32px; height: var(--sh-map-avatar);
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+  font-size: 13px; font-weight: 700;
+}
+.sh-map-bubble__caption {
+  max-width: 200px;
+  margin-bottom: 4px;
+  padding: 2px 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-full);
+  box-shadow: var(--sh-shadow-sm);
+  font-size: var(--sh-font-size-xs); font-weight: 600;
+}
+.sh-map-avatar {
+  position: relative;
+  flex: none;
+  display: flex; align-items: center; justify-content: center;
+  width: var(--sh-map-avatar); height: var(--sh-map-avatar);
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 3px solid var(--tt-edge, var(--sh-border-strong));
+  border-radius: var(--sh-radius-md);
+  background: var(--tt-bg, var(--sh-bg));
+  color: var(--tt-fg, var(--sh-text));
+}
+.sh-map-avatar img {
+  position: absolute; inset: 0;
   width: 100%; height: 100%;
   object-fit: cover;
-  border-radius: 50%;
 }
-.sh-map-pin__initials {
-  font-size: 13px; font-weight: 700;
+.sh-map-avatar__initials { font-size: 14px; font-weight: 700; }
+.sh-map-avatar--place {
+  border-color: var(--sh-primary);
+  background: var(--sh-bg);
+}
+.sh-map-avatar--place .sh-map-avatar__initials { font-size: 20px; font-weight: 400; }
+/* Selected: a primary-colour ring just outside the person's frame. */
+.sh-map-avatar.is-selected,
+.sh-map-zone.is-selected {
+  box-shadow: 0 0 0 2px var(--sh-bg), 0 0 0 4px var(--sh-primary);
+}
+.sh-map-zone {
+  position: absolute; left: 0; top: 0;
+  transform: translate(-50%, -50%);
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 3px solid var(--zone-colour);
+  background: color-mix(in srgb, var(--zone-colour) 22%, var(--sh-bg));
+  color: var(--sh-text);
+  box-shadow: var(--sh-shadow-md);
   font-family: var(--sh-font-family);
+  font-size: 17px; font-weight: 700; line-height: 1;
+  cursor: pointer;
+}
+/* Leaflet path styles are SVG attributes; CSS wins, so the ring takes
+ * the person's theme colour (the primary for a place). */
+.leaflet-container path.sh-map-accuracy {
+  stroke: var(--tt-edge, var(--sh-primary));
+  fill: var(--tt-edge, var(--sh-primary));
+}
+@media (max-width: 640px) {
+  .sh-map-bubble { --sh-map-avatar: 36px; }
 }
 .leaflet-container .leaflet-popup-content {
   font-family: var(--sh-font-family);

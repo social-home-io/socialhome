@@ -4220,6 +4220,7 @@
   "location.card.stopped_location": "Vous ne partagez plus votre position avec cet espace",
   "location.zones_legend": "Légende des zones",
   "location.map_empty": "Aucune position à afficher.",
+  "location.map.zone_marker": "Zone {name}",
   "space_profile.title": "Votre profil dans cet espace",
   "space_profile.intro": "Choisissez un autre nom affiché ou une autre photo pour cet espace. Laissez un champ vide pour reprendre celui de votre foyer.",
   "space_profile.upload_hint": "Cliquez pour importer une nouvelle photo pour cet espace",

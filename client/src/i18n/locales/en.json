@@ -4256,6 +4256,7 @@
   "location.card.stopped_location": "You stopped sharing your location with this space",
   "location.zones_legend": "Zones legend",
   "location.map_empty": "No locations to show.",
+  "location.map.zone_marker": "Zone {name}",
   "space_profile.title": "Your profile in this space",
   "space_profile.intro": "Set a different display name or picture for this space. Leave a field blank to use your household one.",
   "space_profile.upload_hint": "Click to upload a new picture for this space",

@@ -4220,6 +4220,7 @@
   "location.card.stopped_location": "Du teilst deinen Standort nicht mehr mit diesem Raum",
   "location.zones_legend": "Legende der Zonen",
   "location.map_empty": "Keine Standorte zum Anzeigen.",
+  "location.map.zone_marker": "Zone {name}",
   "space_profile.title": "Dein Profil in diesem Raum",
   "space_profile.intro": "Leg für diesen Raum einen anderen Anzeigenamen oder ein anderes Bild fest. Lass ein Feld leer, um das deines Haushalts zu nutzen.",
   "space_profile.upload_hint": "Klicken, um ein neues Bild für diesen Raum hochzuladen",

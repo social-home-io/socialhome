@@ -36,7 +36,10 @@ vi.mock('leaflet', () => {
   const noop = () => undefined
   const layer = new Proxy({} as any, {
     get(_t, prop) {
-      if (prop === 'addTo' || prop === 'bindTooltip') return () => layer
+      if (
+        prop === 'addTo' || prop === 'bindTooltip' || prop === 'bindPopup'
+        || prop === 'on'
+      ) return () => layer
       return noop
     },
   })
@@ -47,6 +50,9 @@ vi.mock('leaflet', () => {
         || prop === 'fitBounds' || prop === 'invalidateSize'
         || prop === 'remove' || prop === 'clearLayers'
       ) return () => map
+      if (prop === 'latLngToContainerPoint') {
+        return (ll: [number, number]) => ({ x: ll[1] * 1e5, y: -ll[0] * 1e5 })
+      }
       return noop
     },
   })
