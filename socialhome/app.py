@@ -2129,6 +2129,7 @@ def _build_household_dashboard(
     *,
     user_service: UserService,
     presence_service: PresenceService,
+    household_zone_service: HouseholdZoneService,
     calendar_service: CalendarService,
     task_service: TaskService,
     shopping_service: ShoppingService,
@@ -2164,6 +2165,7 @@ def _build_household_dashboard(
     snapshots = HouseholdDashboardService(
         user_service=user_service,
         presence_service=presence_service,
+        household_zones=household_zone_service,
         calendar_service=calendar_service,
         task_service=task_service,
         shopping_service=shopping_service,
@@ -3084,6 +3086,7 @@ def create_app(config: Config | None = None) -> web.Application:
         i18n,
         user_service=user_service,
         presence_service=presence_service,
+        household_zone_service=household_zone_service,
         calendar_service=calendar_service,
         task_service=task_service,
         shopping_service=shopping_service,

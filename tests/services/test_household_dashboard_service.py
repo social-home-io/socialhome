@@ -34,6 +34,7 @@ from socialhome.domain.household_dashboard import (
     mentioned_ids,
     mentions_for,
 )
+from socialhome.domain.household_zone import HouseholdZone, zone_color
 from socialhome.domain.preferences import HouseholdPreferences
 from socialhome.domain.presence import PersonPresence
 from socialhome.domain.shopping import ShoppingItem
@@ -108,6 +109,38 @@ class FakePresence(Recorder):
     async def list_presence(self) -> list[PersonPresence]:
         self.hit("list_presence")
         return list(self.rows)
+
+
+class FakeZones(Recorder):
+    def __init__(self, zones: list[HouseholdZone]) -> None:
+        super().__init__()
+        self.zones = zones
+
+    async def list_zones(self) -> list[HouseholdZone]:
+        self.hit("list_zones")
+        return list(self.zones)
+
+
+def hzone(zid: str, name: str, lat: float, lon: float, **kw) -> HouseholdZone:
+    return HouseholdZone(
+        id=zid,
+        name=name,
+        latitude=lat,
+        longitude=lon,
+        radius_m=kw.pop("radius_m", 100),
+        created_at="2026-10-01T00:00:00+00:00",
+        updated_at="2026-10-01T00:00:00+00:00",
+        **kw,
+    )
+
+
+def zones() -> list[HouseholdZone]:
+    # Repository order: A–Z by name (Home is not first).
+    return [
+        hzone("hz_h", "Home", 52.52, 13.405, is_home=True, icon="🏠"),
+        hzone("hz_s", "School", 52.53, 13.415, color="#1F8A9E", icon="🏫"),
+        hzone("hz_a", "Aquarium", 52.5, 13.3, external_id="zone.aquarium"),
+    ]
 
 
 class FakeCalendar(Recorder):
@@ -563,6 +596,7 @@ def presence() -> list[PersonPresence]:
             latitude=52.5201,
             longitude=13.4049,
             gps_accuracy_m=12.0,
+            updated_at="2026-10-12T13:20:00+00:00",
         ),
         PersonPresence(
             username="ben",
@@ -573,6 +607,8 @@ def presence() -> list[PersonPresence]:
             zone_name="School",
             latitude=52.5301,
             longitude=13.4149,
+            # SQLite's naive ``datetime('now')`` shape — UTC.
+            updated_at="2026-10-12 11:05:00",
         ),
         PersonPresence(
             username="carl",
@@ -602,6 +638,7 @@ class Harness:
     ) -> None:
         self.users = FakeUsers(users if users is not None else [ANNA, BEN, CARL, DORA])
         self.presence = FakePresence(presence())
+        self.zones = FakeZones(zones())
         self.calendar = FakeCalendar(calendars(), events())
         self.tasks = FakeTasks(
             [
@@ -676,6 +713,7 @@ class Harness:
         self.service = HouseholdDashboardService(
             user_service=self.users,  # type: ignore[arg-type]
             presence_service=self.presence,  # type: ignore[arg-type]
+            household_zones=self.zones,  # type: ignore[arg-type]
             calendar_service=self.calendar,  # type: ignore[arg-type]
             task_service=self.tasks,  # type: ignore[arg-type]
             shopping_service=self.shopping,  # type: ignore[arg-type]
@@ -738,6 +776,54 @@ async def test_home_people_are_household_safe():
     assert dora.presence == "unknown"
     assert dora.color == PERSON_PALETTE[2]  # no calendar → palette by position
     assert dora.status_emoji is None  # expired status
+
+
+async def test_home_people_carry_their_location_for_the_map():
+    """The Map tab's inputs: the shared 4-dp point as stored and when the
+    presence row last changed (in the household zone; a naive SQLite
+    stamp is UTC). No presence row → nothing."""
+    h = Harness()
+    snap = await h.home(at(MONDAY, 15, 30))
+    anna, ben, dora = snap.people
+    assert (anna.latitude, anna.longitude) == (52.5201, 13.4049)
+    assert anna.located_at == at(MONDAY, 15, 20)
+    assert anna.located_at.utcoffset() == timedelta(hours=2)
+    assert (ben.latitude, ben.longitude) == (52.5301, 13.4149)
+    assert ben.located_at == at(MONDAY, 13, 5)
+    assert dora.latitude is None and dora.located_at is None
+
+
+async def test_unreadable_presence_stamp_is_no_location_time(caplog):
+    h = Harness()
+    h.presence.rows = [
+        dataclasses.replace(h.presence.rows[0], updated_at="not a time"),
+        dataclasses.replace(h.presence.rows[1], updated_at=None),
+    ]
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert snap.people[0].located_at is None
+    assert snap.people[0].latitude == 52.5201  # the point itself is kept
+    assert snap.people[1].located_at is None
+
+
+async def test_home_zones_home_first_with_the_apps_colours():
+    h = Harness()
+    snap = await h.home(at(MONDAY, 15, 30))
+    assert [z.id for z in snap.zones] == ["hz_h", "hz_a", "hz_s"]
+    home, aquarium, school = snap.zones
+    assert home.is_home and home.icon == "🏠" and home.name == "Home"
+    assert (home.latitude, home.longitude, home.radius_m) == (52.52, 13.405, 100)
+    assert school.color == "#1F8A9E"  # its own colour
+    raw = zones()
+    assert home.color == zone_color(raw[0])
+    assert aquarium.color == zone_color(raw[2])  # hashed on zone.aquarium
+    assert aquarium.icon is None and not aquarium.is_home
+    assert h.zones.calls == ["list_zones"]
+
+
+async def test_person_pages_never_read_zones():
+    h = Harness()
+    await h.person("u-ben", at(MONDAY, 15, 30))
+    assert h.zones.calls == []
 
 
 async def test_status_text_shown_when_enabled():
@@ -1064,6 +1150,9 @@ async def test_disabled_sections_are_empty_and_not_read():
     assert h.tasks.calls == []
     assert h.stickies.calls == []
     assert h.presence.calls == []
+    assert h.zones.calls == []
+    assert snap.zones == ()
+    assert all(p.located_at is None and p.latitude is None for p in snap.people)
     assert h.timetables.rec.calls == []
     assert snap.shopping_total == 2
 
@@ -1081,6 +1170,7 @@ async def test_disabled_sections_are_empty_and_not_read():
     ("target", "method"),
     [
         ("presence", "list_presence"),
+        ("zones", "list_zones"),
         ("calendar", "list_calendars"),
         ("tasks", "list_lists"),
         ("shopping", "list_items"),
@@ -1228,6 +1318,7 @@ async def test_many_lessons_tomorrow_never_hide_an_after_school_event():
     h.service = HouseholdDashboardService(
         user_service=h.users,  # type: ignore[arg-type]
         presence_service=h.presence,  # type: ignore[arg-type]
+        household_zones=h.zones,  # type: ignore[arg-type]
         calendar_service=h.calendar,  # type: ignore[arg-type]
         task_service=h.tasks,  # type: ignore[arg-type]
         shopping_service=h.shopping,  # type: ignore[arg-type]
@@ -1269,17 +1360,36 @@ def _values(value: Any) -> list[Any]:
     return [value]
 
 
-async def test_no_location_and_no_hidden_person_anywhere():
+async def test_no_location_on_a_person_page_and_no_hidden_person_anywhere():
+    """Only Home carries locations (its Map tab draws them); a person page
+    never does, and the accuracy never leaves the presence service. A
+    hidden member is nowhere — not even their point."""
     h = Harness()
+    h.presence.rows.append(
+        PersonPresence(
+            username="carl",
+            user_id="u-carl",
+            display_name="Carl",
+            entity_id="person.carl",
+            state="away",
+            latitude=48.1371,
+            longitude=11.5754,
+            updated_at="2026-10-12T06:00:00+00:00",
+        )
+    )
     home = dataclasses.asdict(await h.home(at(MONDAY, 8, 10)))
     page = await h.person("u-ben", at(MONDAY, 8, 10))
     assert page is not None
     person = dataclasses.asdict(page)
+    assert 52.5201 in _values(home)
+    assert not _keys(home) & {"gps", "gps_accuracy_m"}
+    assert 12.0 not in _values(home)
+    person_values = _values(person)
+    assert 52.5201 not in person_values and 13.4049 not in person_values
+    assert all(p.latitude is None for p in page.people)
     for blob in (home, person):
-        keys = _keys(blob)
-        assert not keys & {"latitude", "longitude", "gps", "gps_accuracy_m"}
         values = _values(blob)
-        assert 52.5201 not in values and 13.4049 not in values
+        assert 48.1371 not in values and 11.5754 not in values
         assert "u-carl" not in values
         assert "Secret" not in values and "Lecture" not in values
         assert "Clean room" not in values and "Carl's note" not in values

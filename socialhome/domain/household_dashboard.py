@@ -44,6 +44,8 @@ __all__ = [
     "MESSAGE_KINDS",
     "MESSAGE_MAX_AGE",
     "MESSAGES_SHOWN",
+    "MAP_DROP_AFTER",
+    "MAP_STALE_AFTER",
     "MAX_ADDRESS_LENGTH",
     "MAX_PIN_LENGTH",
     "MIN_PASSWORD_LENGTH",
@@ -77,6 +79,7 @@ __all__ = [
     "DashboardShoppingItem",
     "DashboardSticky",
     "DashboardTask",
+    "DashboardZone",
     "HomeSnapshot",
     "PersonSnapshot",
     "hash_color",
@@ -126,6 +129,13 @@ MESSAGE_MAX_AGE = timedelta(hours=6)
 #: this many, newest first (Home's messages card shows the newest
 #: :data:`MESSAGES_SHOWN` of the last :data:`MESSAGE_MAX_AGE` of them).
 CHAT_MAX_AGE = timedelta(hours=24)
+
+#: Home's Map tab: a location older than this is "stale" (the marker
+#: fades and says how long ago it was seen)…
+MAP_STALE_AFTER = timedelta(hours=1)
+#: …and one older than this is gone — the person leaves the map, and
+#: with nobody left the tab goes too.
+MAP_DROP_AFTER = timedelta(hours=24)
 CHAT_SHOWN = 30
 
 #: The reaction a "Got it" on the wall writes to a household-chat message
@@ -509,13 +519,17 @@ def in_night_window(now: time, start: str, end: str) -> bool:
 
 @dataclass(slots=True, frozen=True)
 class DashboardPerson:
-    """One shown household member, household-safe.
+    """One shown household member.
 
     ``presence`` is ``"home"`` / ``"away"`` / ``"zone"`` (then
-    ``zone_name`` names it) / ``"unknown"`` — never coordinates.
-    ``picture_hash`` is for an avatar URL the view builds (``None`` = use
-    ``initials`` on ``color``). ``status_text`` is ``None`` unless the
-    admin turned on ``show_status_text``.
+    ``zone_name`` names it) / ``"unknown"``. ``latitude`` / ``longitude``
+    are the member's shared GPS point (4 dp, as stored — only Home's Map
+    tab draws it, and only for someone outside every household zone) and
+    ``located_at`` when their presence last changed (household zone);
+    all three are ``None`` without a presence row. ``picture_hash`` is
+    for an avatar URL the view builds (``None`` = use ``initials`` on
+    ``color``). ``status_text`` is ``None`` unless the admin turned on
+    ``show_status_text``.
     """
 
     user_id: str
@@ -528,6 +542,26 @@ class DashboardPerson:
     zone_name: str | None = None
     status_emoji: str | None = None
     status_text: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    located_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class DashboardZone:
+    """A household zone as Home's Map tab draws it: the household's own
+    place (never federated). ``color`` is the resolved ``#rrggbb``
+    (:func:`~socialhome.domain.household_zone.zone_color`, as the app
+    paints it); ``icon`` one emoji or ``None``."""
+
+    id: str
+    name: str
+    latitude: float
+    longitude: float
+    radius_m: int
+    color: str
+    icon: str | None = None
+    is_home: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -751,6 +785,9 @@ class HomeSnapshot:
     #: Every household sticky the wall may show (hidden authors left out)
     #: — ``stickies`` holds at most a hard bound of them.
     stickies_total: int = 0
+    #: The household zones (Home first), for the Map tab — empty while
+    #: the presence section is off.
+    zones: tuple[DashboardZone, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)

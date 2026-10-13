@@ -20,6 +20,9 @@ from socialhome.domain.household_dashboard import (
     leading_emoji,
     DEFAULT_DASHBOARD_PORT,
     IDLE_RETURN_CHOICES,
+    MAP_DROP_AFTER,
+    MAP_STALE_AFTER,
+    DashboardZone,
     MIN_PASSWORD_LENGTH,
     PERSON_PALETTE,
     SETUP_TOKEN_TTL_SECONDS,
@@ -332,6 +335,7 @@ def test_snapshot_types_are_frozen_and_slotted():
         DashboardSchoolDay,
         DashboardShoppingItem,
         DashboardSticky,
+        DashboardZone,
         HomeSnapshot,
         PersonSnapshot,
     ):
@@ -445,3 +449,30 @@ def test_mention_helpers_split_here_from_people():
     assert mentions_for(ms, "u-anna") == ()
     assert mentioned_ids(ms) == frozenset({"u-ben", "u-dora"})
     assert mentioned_ids(()) == frozenset()
+
+
+def test_map_freshness_thresholds():
+    """Stale (faded, "last seen …") after an hour; gone after a day."""
+    assert MAP_STALE_AFTER.total_seconds() == 3600
+    assert MAP_DROP_AFTER.total_seconds() == 24 * 3600
+
+
+def test_people_and_home_carry_no_location_by_default():
+    p = DashboardPerson(
+        user_id="u",
+        display_name="U",
+        initials="U",
+        color="#000000",
+        picture_hash=None,
+        picture_view=False,
+    )
+    assert (p.latitude, p.longitude, p.located_at) == (None, None, None)
+    zone = DashboardZone(
+        id="hz",
+        name="Home",
+        latitude=1.0,
+        longitude=2.0,
+        radius_m=100,
+        color="#3b82f6",
+    )
+    assert zone.icon is None and zone.is_home is False
