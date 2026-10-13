@@ -1759,7 +1759,7 @@ class SpaceZone:
     * ``latitude``/``longitude`` — centre, 4dp-truncated.
     * ``radius_m`` — display radius (25 m – 50 km).
     * ``color`` — ``"#RRGGBB"`` or ``None`` (client picks from palette).
-    * ``icon`` — a single emoji shown on the map, or ``None``.
+    * ``icon`` — a single emoji shown with the zone, or ``None``.
     * ``created_by`` — ``user_id`` of the admin who first saved the zone.
     """
 
