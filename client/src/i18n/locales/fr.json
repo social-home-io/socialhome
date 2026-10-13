@@ -2719,7 +2719,7 @@
   "zones.synced.badge": "De Home Assistant",
   "zones.synced.hint": "Modifiez cette zone dans Home Assistant.",
   "zones.household.title": "Zones du foyer",
-  "zones.household.intro": "Des lieux comme la maison, l’école ou le travail. Quand la position de quelqu’un tombe dans une zone, le foyer voit le nom de la zone au lieu d’un point sur la carte.",
+  "zones.household.intro": "Des lieux comme la maison, l’école ou le travail. Quand quelqu’un se trouve dans une zone, le foyer le voit là, avec le nom de la zone, sur la carte et dans la liste des membres.",
   "zones.household.empty": "Aucune zone pour l’instant. Ajoutez d’abord votre zone Maison pour que Social Home sache qui est à la maison.",
   "zones.household.feature_off": "La présence est désactivée pour ce foyer, et les zones en font partie. Activez Présence dans Paramètres pour gérer les zones.",
   "zones.household.open_settings": "Ouvrir les paramètres",

@@ -2746,7 +2746,7 @@
   "zones.synced.badge": "De Home Assistant",
   "zones.synced.hint": "Edita esta zona en Home Assistant.",
   "zones.household.title": "Zonas del hogar",
-  "zones.household.intro": "Lugares como casa, el colegio o el trabajo. Cuando la ubicación de alguien cae dentro de una zona, el hogar ve el nombre de la zona en vez de un punto en el mapa.",
+  "zones.household.intro": "Lugares como casa, el colegio o el trabajo. Cuando alguien está dentro de una zona, el hogar lo ve allí con el nombre de la zona, en el mapa y en la lista de miembros.",
   "zones.household.empty": "Aún no hay zonas. Añade primero tu zona Casa para que Social Home sepa quién está en casa.",
   "zones.household.feature_off": "La presencia está desactivada en este hogar y las zonas forman parte de ella. Activa Presencia en Ajustes para gestionar las zonas.",
   "zones.household.open_settings": "Abrir Ajustes",

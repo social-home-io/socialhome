@@ -2719,7 +2719,7 @@
   "zones.synced.badge": "Uit Home Assistant",
   "zones.synced.hint": "Bewerk deze zone in Home Assistant.",
   "zones.household.title": "Zones van het huishouden",
-  "zones.household.intro": "Plekken zoals thuis, school of werk. Valt iemands locatie binnen een zone, dan ziet het huishouden de naam van de zone in plaats van een stip op de kaart.",
+  "zones.household.intro": "Plekken zoals thuis, school of werk. Is iemand binnen een zone, dan ziet het huishouden diegene daar met de naam van de zone – op de kaart en in de ledenlijst.",
   "zones.household.empty": "Nog geen zones. Voeg eerst je Thuis-zone toe, zodat Social Home weet wie er thuis is.",
   "zones.household.feature_off": "Aanwezigheid staat uit voor dit huishouden, en zones horen daarbij. Zet Aanwezigheid aan onder Instellingen om zones te beheren.",
   "zones.household.open_settings": "Instellingen openen",
