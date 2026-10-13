@@ -625,9 +625,28 @@ describe('LocationMap viewport', () => {
     // pixel padding.
     expect(b).toBe(bounds)
     expect(bounds.pad).not.toHaveBeenCalled()
-    expect(opts.paddingTopLeft).toEqual([32, 83])
+    // Left: the side gap plus room for the zoom buttons (34 + 10 px).
+    expect(opts.paddingTopLeft).toEqual([32 + 44, 83])
     expect(opts.paddingBottomRight).toEqual([32, 30])
     expect(opts.maxZoom).toBe(16)
+  })
+
+  it('a read-only map has no zoom buttons, so no room is kept for them', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        readOnly
+        markers={[
+          { id: 'a', label: 'Anna', lat: 47, lon: 8 },
+          { id: 'b', label: 'Ben', lat: 47.1, lon: 8.1 },
+        ]}
+      />,
+    )
+    const opts = fakeMap.fitBounds.mock.calls.at(-1)![1] as {
+      paddingTopLeft: [number, number],
+    }
+    expect(opts.paddingTopLeft).toEqual([32, 83])
   })
 })
 

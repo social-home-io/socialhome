@@ -167,6 +167,9 @@ const GROUP_FIT_PADDING: [number, number] = [48, 48]
 const FIT_PADDING_TOP_LEFT: [number, number] = [
   FIT_SIDE_PX, LIFT_PX.zone + AVATAR_PX + BUBBLE_CHROME_PX + EDGE_PX,
 ]
+/** Leaflet's zoom buttons in the top-left corner: 34 px wide plus a
+ *  10 px margin. A fit keeps the bubbles clear of them when shown. */
+const ZOOM_CONTROL_PX = 34 + 10
 const FIT_PADDING_BOTTOM_RIGHT: [number, number] = [
   FIT_SIDE_PX, ZONE_MARKER_PX / 2 + EDGE_PX,
 ]
@@ -651,7 +654,10 @@ export function LocationMap({
       // Pixel padding, no ``pad()`` inflation: room above for a whole
       // bubble (they float above their anchor), below for a zone marker.
       map.fitBounds(L.latLngBounds(anchors), {
-        paddingTopLeft: FIT_PADDING_TOP_LEFT,
+        paddingTopLeft: [
+          FIT_PADDING_TOP_LEFT[0] + (still ? 0 : ZOOM_CONTROL_PX),
+          FIT_PADDING_TOP_LEFT[1],
+        ],
         paddingBottomRight: FIT_PADDING_BOTTOM_RIGHT,
         maxZoom: FIT_MAX_ZOOM,
       })
