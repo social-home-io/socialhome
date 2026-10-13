@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+
+from PIL import Image
+
+from socialhome.services.map_tile_service import (
+    Tile,
+    TileCoordinateError,
+    TileUnavailableError,
+)
 
 from socialhome.domain.household_dashboard import (
     MENTION_HERE,
@@ -456,3 +466,42 @@ def map_home(**kw) -> HomeSnapshot:
     kw.setdefault("people", MAP_PEOPLE)
     kw.setdefault("zones", ZONES)
     return home(**kw)
+
+
+def solid_png(color: tuple[int, int, int], size: int = 256) -> bytes:
+    """A one-colour PNG."""
+    out = io.BytesIO()
+    Image.new("RGB", (size, size), color).save(out, format="PNG")
+    return out.getvalue()
+
+
+#: What :class:`PictureTiles` serves: a plain blue tile.
+TILE_BLUE = (0, 120, 255)
+
+
+class PictureTiles:
+    """A tile source serving one-colour PNG tiles (the map picture's
+    ground). ``fail`` holds tiles that are down — ``None``: every tile."""
+
+    source_tag = "stub-tiles"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int, int]] = []
+        self.fail: set[tuple[int, int, int]] | None = set()
+        self.in_flight = 0
+        self.peak = 0
+        self._body = solid_png(TILE_BLUE)
+
+    async def fetch(self, z: int, x: int, y: int) -> Tile:
+        self.calls.append((z, x, y))
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0)  # let the others start
+            if not 0 <= y < 2**z:
+                raise TileCoordinateError("off the grid")
+            if self.fail is None or (z, x, y) in self.fail:
+                raise TileUnavailableError("upstream down")
+            return Tile(body=self._body, content_type="image/png")
+        finally:
+            self.in_flight -= 1

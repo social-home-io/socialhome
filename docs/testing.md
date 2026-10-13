@@ -134,6 +134,13 @@ After an intended payload change, regenerate the fixtures with
 `SH_UPDATE_DISPLAY_FIXTURES=1 pytest tests/dashboard/test_display_api.py`
 and review the diff — the firmware pins the same files.
 
+The wall-panel map picture frames a household like the browser's Map tab:
+`tests/dashboard/map_frame_vectors.json` holds shared framing cases that
+both `tests/dashboard/test_map_frame.py` (the Python port,
+`socialhome/dashboard/map_frame.py`) and
+`client/src/dashboardMapScript.test.ts` (`map.js` in jsdom) assert. A
+change to either framing must keep both green.
+
 ## Frontend tests
 
 Frontend tests live in the client tree, not under `tests/`:

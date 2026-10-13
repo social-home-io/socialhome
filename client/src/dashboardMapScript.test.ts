@@ -12,6 +12,19 @@ import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { JSDOM } from 'jsdom'
 
+// Shared with the wall-panel map picture (socialhome/dashboard/map_frame.py,
+// tests/dashboard/test_map_frame.py): both must frame these alike.
+interface Vector {
+  name: string
+  w: number
+  h: number
+  groups: { key: string; lat: number; lon: number; r: number; home: boolean; members: string[] }[]
+  expect: { z: number; x0: number; y0: number; far: string[]; tiles: number }
+}
+const vectors: Vector[] = JSON.parse(
+  readFileSync(resolve(__dirname, '../../tests/dashboard/map_frame_vectors.json'), 'utf-8'),
+).cases
+
 // Outside the client root (vite's fs guard refuses `?raw` there).
 const mapScript = readFileSync(
   resolve(__dirname, '../../socialhome/dashboard/static/map.js'),
@@ -27,6 +40,7 @@ interface Who {
   lon: number
   radius?: number
   members: string
+  home?: boolean
 }
 
 const HOME: Who = { key: 'zone:hz_home', lat: 47.3769, lon: 8.5417, radius: 120, members: 'u-mia u-pascal' }
@@ -39,7 +53,7 @@ function markup(groups: Who[]): string {
       (g) =>
         `<span class="dash-mp-bubble" data-bubble="${g.key}" data-lat="${g.lat}" data-lon="${g.lon}"` +
         (g.radius ? ` data-radius="${g.radius}" data-in-zone="${g.key.slice(5)}"` : '') +
-        (g.key === HOME.key ? ' data-home' : '') +
+        (g.home ?? g.key === HOME.key ? ' data-home' : '') +
         ` data-members="${g.members}" data-caption="x" data-label="x">` +
         g.members
           .split(' ')
@@ -60,7 +74,7 @@ function markup(groups: Who[]): string {
   )
 }
 
-function boot(groups: Who[]) {
+function boot(groups: Who[], w = W, h = H) {
   const dom = new JSDOM(
     `<!doctype html><body data-dash><main data-main>${markup(groups)}</main></body>`,
     { runScripts: 'outside-only', url: 'http://127.0.0.1:8100/map' },
@@ -72,8 +86,8 @@ function boot(groups: Who[]) {
       return this.hasAttribute('data-map') ? value : 0
     },
   })
-  Object.defineProperty(win.HTMLElement.prototype, 'clientWidth', size(W))
-  Object.defineProperty(win.HTMLElement.prototype, 'clientHeight', size(H))
+  Object.defineProperty(win.HTMLElement.prototype, 'clientWidth', size(w))
+  Object.defineProperty(win.HTMLElement.prototype, 'clientHeight', size(h))
   let now = 1_800_000_000_000
   win.Date.now = () => now
   win.eval(mapScript)
@@ -172,5 +186,33 @@ describe('dashboard map.js', () => {
     row.click()
     expect(row.getAttribute('aria-pressed')).toBe('false')
     expect(srcs(map.tiles())).toEqual(overview)
+  })
+})
+
+describe('map.js framing matches the panel picture (map_frame_vectors.json)', () => {
+  it.each(vectors.map((v) => [v.name, v] as const))('%s', (_name, v) => {
+    const map = boot(
+      v.groups.map((g) => ({
+        key: g.key,
+        lat: g.lat,
+        lon: g.lon,
+        radius: g.r || undefined,
+        home: g.home,
+        members: g.members.join(' '),
+      })),
+      v.w,
+      v.h,
+    )
+    const tiles = map.tiles()
+    expect(tiles.length).toBe(v.expect.tiles)
+    const first = tiles[0]
+    const m = new URL(first.src).pathname.match(/^\/tiles\/(\d+)\/(\d+)\/(\d+)$/)!
+    expect(Number(m[1])).toBe(v.expect.z)
+    expect(Number(m[2]) * 256 - parseFloat(first.style.left)).toBe(v.expect.x0)
+    expect(Number(m[3]) * 256 - parseFloat(first.style.top)).toBe(v.expect.y0)
+    const far = Array.from(map.doc.querySelectorAll('[data-edge]'))
+      .map((el) => el.getAttribute('data-edge'))
+      .sort()
+    expect(far).toEqual(v.expect.far)
   })
 })

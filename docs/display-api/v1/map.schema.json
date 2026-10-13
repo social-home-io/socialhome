@@ -49,6 +49,7 @@
       "required": [
         "attribution",
         "bubbles",
+        "image",
         "label",
         "pins",
         "spots",
@@ -63,6 +64,39 @@
         },
         "attribution": {
           "type": "string"
+        },
+        "image": {
+          "description": "The map as one picture: GET {url}?w=&h=&scheme=light|dark (bearer, PNG). width/height are the default size (the firmware's map area); w is held to 200-1920 and h to 200-1200. etag is the ETag the default picture (default size, light) has now; a picture of another size or scheme has its own ETag — revalidate it with If-None-Match. null when the server has no tile source.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "etag",
+            "height",
+            "url",
+            "width"
+          ],
+          "properties": {
+            "url": {
+              "const": "/api/display/v1/map.png"
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 200,
+              "maximum": 1920
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 200,
+              "maximum": 1200
+            },
+            "etag": {
+              "type": "string",
+              "pattern": "^\"[0-9a-f]{32}\"$"
+            }
+          }
         },
         "spots": {
           "type": "array",

@@ -23,7 +23,7 @@
         },
         "params": {
           "type": "object",
-          "description": "Machine-readable details: DISPLAY_PIN_WRONG → {remaining} (wrong PINs left before the next try unpairs the panel); RATE_LIMITED from /unlock → {retry_after}; BAD_SIZE → {allowed}.",
+          "description": "Machine-readable details: DISPLAY_PIN_WRONG → {remaining} (wrong PINs left before the next try unpairs the panel); RATE_LIMITED from /unlock → {retry_after}; BAD_SIZE → {allowed} (sizes); BAD_SCHEME → {allowed} (scheme names).",
           "properties": {
             "remaining": {
               "type": "integer",
@@ -36,7 +36,10 @@
             "allowed": {
               "type": "array",
               "items": {
-                "type": "integer"
+                "type": [
+                  "integer",
+                  "string"
+                ]
               }
             }
           }

@@ -1,0 +1,328 @@
+{
+  "about": "Shared framing cases for the wall map: the browser (socialhome/dashboard/static/map.js, client/src/dashboardMapScript.test.ts) and the panel picture (socialhome/dashboard/map_frame.py, tests/dashboard/test_map_frame.py) must frame them alike. 'expect' is the frame map.js picks: zoom, the box's top-left in world pixels (rounded) and the bubbles left as edge chips.",
+  "cases": [
+    {
+      "name": "berlin household at the panel's map area",
+      "w": 748,
+      "h": 560,
+      "groups": [
+        {
+          "key": "zone:hz_home",
+          "lat": 52.52,
+          "lon": 13.405,
+          "r": 100,
+          "home": true,
+          "members": [
+            "u-mia",
+            "u-pascal"
+          ]
+        },
+        {
+          "key": "zone:hz_school",
+          "lat": 52.5262,
+          "lon": 13.4103,
+          "r": 80,
+          "home": false,
+          "members": [
+            "u-leo"
+          ]
+        },
+        {
+          "key": "person:u-anna",
+          "lat": 52.5232,
+          "lon": 13.3961,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-anna"
+          ]
+        }
+      ],
+      "expect": {
+        "z": 15,
+        "x0": 4506261,
+        "y0": 2750652,
+        "far": [],
+        "tiles": 12
+      }
+    },
+    {
+      "name": "one person never closer than zoom 16",
+      "w": 748,
+      "h": 560,
+      "groups": [
+        {
+          "key": "person:u-anna",
+          "lat": 47.3745,
+          "lon": 8.537,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-anna"
+          ]
+        }
+      ],
+      "expect": {
+        "z": 16,
+        "x0": 8786087,
+        "y0": 5874986,
+        "far": [],
+        "tiles": 12
+      }
+    },
+    {
+      "name": "zurich household, the browser test's box",
+      "w": 746,
+      "h": 694,
+      "groups": [
+        {
+          "key": "zone:hz_home",
+          "lat": 47.3769,
+          "lon": 8.5417,
+          "r": 120,
+          "home": true,
+          "members": [
+            "u-mia",
+            "u-pascal"
+          ]
+        },
+        {
+          "key": "zone:hz_school",
+          "lat": 47.3812,
+          "lon": 8.548,
+          "r": 90,
+          "home": false,
+          "members": [
+            "u-leo"
+          ]
+        },
+        {
+          "key": "person:u-anna",
+          "lat": 47.3745,
+          "lon": 8.537,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-anna"
+          ]
+        }
+      ],
+      "expect": {
+        "z": 15,
+        "x0": 4393000,
+        "y0": 2937137,
+        "far": [],
+        "tiles": 12
+      }
+    },
+    {
+      "name": "someone in New York stays an edge chip",
+      "w": 748,
+      "h": 560,
+      "groups": [
+        {
+          "key": "zone:hz_home",
+          "lat": 47.3769,
+          "lon": 8.5417,
+          "r": 120,
+          "home": true,
+          "members": [
+            "u-mia"
+          ]
+        },
+        {
+          "key": "person:u-pascal",
+          "lat": 40.7128,
+          "lon": -74.006,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-pascal"
+          ]
+        },
+        {
+          "key": "person:u-anna",
+          "lat": 47.05,
+          "lon": 8.31,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-anna"
+          ]
+        }
+      ],
+      "expect": {
+        "z": 10,
+        "x0": 136834,
+        "y0": 91654,
+        "far": [
+          "person:u-pascal"
+        ],
+        "tiles": 12
+      }
+    },
+    {
+      "name": "nobody home: the fullest bubble anchors, the far one is a chip",
+      "w": 1280,
+      "h": 800,
+      "groups": [
+        {
+          "key": "person:u-anna",
+          "lat": 35.6762,
+          "lon": 139.6503,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-anna"
+          ]
+        },
+        {
+          "key": "zone:hz_school",
+          "lat": 52.5262,
+          "lon": 13.4103,
+          "r": 80,
+          "home": false,
+          "members": [
+            "u-leo",
+            "u-mia"
+          ]
+        },
+        {
+          "key": "zone:hz_work",
+          "lat": 52.5121,
+          "lon": 13.4199,
+          "r": 120,
+          "home": false,
+          "members": [
+            "u-pascal"
+          ]
+        }
+      ],
+      "expect": {
+        "z": 14,
+        "x0": 2252813,
+        "y0": 1375123,
+        "far": [
+          "person:u-anna"
+        ],
+        "tiles": 24
+      }
+    },
+    {
+      "name": "a small picture zooms out",
+      "w": 200,
+      "h": 200,
+      "groups": [
+        {
+          "key": "zone:hz_home",
+          "lat": 52.52,
+          "lon": 13.405,
+          "r": 100,
+          "home": true,
+          "members": [
+            "u-mia"
+          ]
+        },
+        {
+          "key": "zone:hz_work",
+          "lat": 52.5121,
+          "lon": 13.4199,
+          "r": 120,
+          "home": false,
+          "members": [
+            "u-pascal"
+          ]
+        }
+      ],
+      "expect": {
+        "z": 9,
+        "x0": 70317,
+        "y0": 42846,
+        "far": [
+          "zone:hz_work"
+        ],
+        "tiles": 4
+      }
+    },
+    {
+      "name": "a big picture, regional spread",
+      "w": 1920,
+      "h": 1200,
+      "groups": [
+        {
+          "key": "zone:hz_home",
+          "lat": 52.52,
+          "lon": 13.405,
+          "r": 100,
+          "home": true,
+          "members": [
+            "u-mia"
+          ]
+        },
+        {
+          "key": "person:u-leo",
+          "lat": 52.3906,
+          "lon": 13.0645,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-leo"
+          ]
+        },
+        {
+          "key": "person:u-anna",
+          "lat": 51.3397,
+          "lon": 12.3731,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-anna"
+          ]
+        }
+      ],
+      "expect": {
+        "z": 9,
+        "x0": 69269,
+        "y0": 42694,
+        "far": [],
+        "tiles": 54
+      }
+    },
+    {
+      "name": "across the antimeridian (tiles wrap)",
+      "w": 748,
+      "h": 560,
+      "groups": [
+        {
+          "key": "zone:hz_home",
+          "lat": -16.5,
+          "lon": 179.995,
+          "r": 100,
+          "home": true,
+          "members": [
+            "u-mia"
+          ]
+        },
+        {
+          "key": "person:u-leo",
+          "lat": -16.51,
+          "lon": -179.996,
+          "r": 0,
+          "home": false,
+          "members": [
+            "u-leo"
+          ]
+        }
+      ],
+      "expect": {
+        "z": 16,
+        "x0": 16776609,
+        "y0": 9168098,
+        "far": [
+          "person:u-leo"
+        ],
+        "tiles": 16
+      }
+    }
+  ]
+}

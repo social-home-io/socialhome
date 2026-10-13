@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import aiohttp
@@ -32,7 +33,11 @@ from socialhome.dashboard.display_api import (
     is_display_api,
     is_public_display_path,
 )
-from socialhome.dashboard.auth import DISPLAY_IMAGE_MAX, DISPLAY_READ_MAX
+from socialhome.dashboard.auth import (
+    DISPLAY_IMAGE_MAX,
+    DISPLAY_READ_MAX,
+    MAP_RENDER_MAX,
+)
 from socialhome.dashboard.display_json import STRING_KEYS
 from socialhome.dashboard.render import DashboardRenderer
 from socialhome.domain.theme import HouseholdTheme
@@ -46,7 +51,10 @@ from socialhome.services.dashboard_settings_service import DashboardSettingsServ
 
 from .conftest import PASSWORD, default_theme
 from .factories import (
+    MAP_PEOPLE,
     MENTIONS,
+    PictureTiles,
+    solid_png,
     MESSAGES,
     home,
     leo_page,
@@ -90,8 +98,13 @@ def theme_box() -> dict:
 
 
 @pytest.fixture
+def tiles() -> PictureTiles:
+    return PictureTiles()
+
+
+@pytest.fixture
 async def client(
-    aiohttp_client, settings_service, auth, displays, snapshots, theme_box
+    aiohttp_client, settings_service, auth, displays, snapshots, theme_box, tiles
 ):
     async def household_theme() -> HouseholdTheme:
         return await theme_box["fn"]()
@@ -107,6 +120,7 @@ async def client(
         household_tz=_tz,
         household_theme=household_theme,
         snapshots=snapshots,
+        tiles=tiles,
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
 
@@ -489,6 +503,7 @@ BOARD_PATHS = [
     "/api/display/v1/theme",
     "/api/display/v1/avatar/u-anna",
     "/api/display/v1/emoji/1f3ca",
+    "/api/display/v1/map.png",
 ]
 
 
@@ -976,3 +991,222 @@ async def test_ack_refused_while_locked(client, displays, snapshots, settings_se
     resp = await client.post(ACK, json={"message_id": "h1"}, headers=_bearer(token))
     assert resp.status == 423
     assert snapshots.acks == []
+
+
+# ── The map as a picture ─────────────────────────────────────────────────
+
+MAP_PNG = "/api/display/v1/map.png"
+
+
+async def _map_png(client, token, query: str = "", **kw):
+    return await _get(client, MAP_PNG + query, token, **kw)
+
+
+def _size(body: bytes) -> tuple[int, int]:
+    with Image.open(io.BytesIO(body)) as img:
+        assert img.format == "PNG"
+        return img.size
+
+
+async def test_map_png_is_the_map_json_image(client, displays, snapshots, tiles):
+    _seed(snapshots)
+    snapshots.pictures["u-anna"] = (solid_png((255, 0, 0), 96), "pic1")
+    _, token = await _paired(client, displays)
+    image = (await (await _get(client, "/api/display/v1/map", token)).json())["map"][
+        "image"
+    ]
+    assert image["url"] == MAP_PNG and (image["width"], image["height"]) == (748, 560)
+    resp = await _map_png(client, token)
+    assert resp.status == 200 and resp.content_type == "image/png"
+    assert resp.headers["Cache-Control"] == "private, no-cache"
+    assert resp.headers["ETag"] == image["etag"]
+    assert _size(await resp.read()) == (748, 560)
+    fetched = len(tiles.calls)
+    assert fetched > 0
+    # Polling an unchanged map: a 304, nothing painted, no tile asked for.
+    again = await _map_png(client, token, headers={"If-None-Match": image["etag"]})
+    assert again.status == 304 and await again.read() == b""
+    assert again.headers["ETag"] == image["etag"]
+    # Another size or scheme is another picture, with its own ETag — a
+    # panel keeping one tag across a change never gets a wrong 304.
+    other = await _map_png(
+        client,
+        token,
+        "?w=1280&h=800&scheme=dark",
+        headers={"If-None-Match": image["etag"]},
+    )
+    assert other.status == 200 and other.headers["ETag"] != image["etag"]
+    assert _size(await other.read()) == (1280, 800)
+    assert len(tiles.calls) > fetched
+    dark = await _map_png(client, token, "?scheme=dark")
+    assert dark.headers["ETag"] not in (image["etag"], other.headers["ETag"])
+
+
+async def test_map_png_etag_follows_the_people(client, displays, snapshots):
+    _seed(snapshots)
+    _, token = await _paired(client, displays)
+    first = (await _map_png(client, token)).headers["ETag"]
+    moved = list(MAP_PEOPLE)
+    moved[1] = replace(moved[1], latitude=52.5240)
+    snapshots.home_snapshot = map_home(people=tuple(moved))
+    resp = await _map_png(client, token, headers={"If-None-Match": first})
+    assert resp.status == 200 and resp.headers["ETag"] != first
+
+
+@pytest.mark.parametrize(
+    ("query", "size"),
+    [
+        ("?w=10&h=99999", (200, 1200)),
+        ("?w=4000&h=1", (1920, 200)),
+        ("?w=640", (640, 560)),
+    ],
+)
+async def test_map_png_size_is_held_to_bounds(client, displays, snapshots, query, size):
+    _seed(snapshots)
+    _, token = await _paired(client, displays)
+    resp = await _map_png(client, token, query)
+    assert resp.status == 200
+    assert _size(await resp.read()) == size
+
+
+@pytest.mark.parametrize(
+    ("query", "code"),
+    [
+        ("?w=abc", "BAD_SIZE"),
+        ("?h=-5", "BAD_SIZE"),
+        ("?w=123456", "BAD_SIZE"),
+        ("?w=%EF%BC%95", "BAD_SIZE"),  # a full-width digit
+        ("?scheme=night", "BAD_SCHEME"),
+    ],
+)
+async def test_map_png_bad_query_is_400(client, displays, snapshots, query, code):
+    _seed(snapshots)
+    _, token = await _paired(client, displays)
+    resp = await _map_png(client, token, query)
+    assert resp.status == 400
+    body = await resp.json()
+    _validate("error", body)
+    assert body["error"]["code"] == code
+
+
+async def test_map_png_follows_the_map_tab_rules(client, displays, snapshots, tiles):
+    _, token = await _paired(client, displays)
+    # Nobody located (or presence off): the tab doesn't show.
+    snapshots.home_snapshot = home()
+    resp = await _map_png(client, token)
+    assert resp.status == 404 and (await resp.json())["error"]["code"] == "TAB_OFF"
+    snapshots.home_snapshot = map_home(sections=frozenset({"calendar"}))
+    assert (await _map_png(client, token)).status == 404
+    # Night: back to Overview.
+    snapshots.home_snapshot = map_home(is_night=True)
+    resp = await _map_png(client, token)
+    assert resp.status == 409 and (await resp.json())["error"]["code"] == "NIGHT"
+    assert tiles.calls == []  # nothing was drawn for any of them
+
+
+async def test_map_png_reads_only_shown_faces(client, displays, snapshots):
+    """Hidden people are not in the read model, so the picture never asks
+    for them; a shown person's picture is read through the same rule as
+    /avatar (the read model's ``avatar``)."""
+    _seed(snapshots)
+    snapshots.pictures["u-anna"] = (solid_png((255, 0, 0), 96), "anna-pic")
+    snapshots.pictures["u-hidden"] = (solid_png((0, 255, 0), 96), "hidden-pic")
+    _, token = await _paired(client, displays)
+    snapshots.calls.clear()
+    assert (await _map_png(client, token)).status == 200
+    assert "avatar:u-anna" in snapshots.calls
+    assert "avatar:u-hidden" not in snapshots.calls
+
+
+async def test_map_png_with_some_tiles_down_still_draws(
+    client, displays, snapshots, tiles
+):
+    _seed(snapshots)
+    _, token = await _paired(client, displays)
+    image = (await (await _get(client, "/api/display/v1/map", token)).json())["map"][
+        "image"
+    ]
+    first = await _map_png(client, token, "?w=400&h=300")
+    assert first.status == 200
+    down = tiles.calls[0]
+    tiles.fail = {down}
+    resp = await _map_png(client, token, "?w=401&h=300")
+    assert resp.status == 200
+    # A picture with a gap has an ETag of its own: once the tiles are back
+    # the whole picture replaces it.
+    assert resp.headers["ETag"] != image["etag"]
+
+
+async def test_map_png_with_no_tiles_is_503(client, displays, snapshots, tiles):
+    _seed(snapshots)
+    tiles.fail = None
+    _, token = await _paired(client, displays)
+    resp = await _map_png(client, token)
+    assert resp.status == 503
+    assert int(resp.headers["Retry-After"]) > 0
+    body = await resp.json()
+    _validate("error", body)
+    assert body["error"]["code"] == "TILES_UNAVAILABLE"
+
+
+async def test_map_png_without_a_tile_source(
+    aiohttp_client, settings_service, auth, displays, snapshots
+):
+    await settings_service.set_password(actor_is_admin=True, password=PASSWORD)
+    await settings_service.update(actor_is_admin=True, patch={"enabled": True})
+    app = build_dashboard_app(
+        settings_service=settings_service,
+        auth=auth,
+        displays=displays,
+        renderer=RENDERER,
+        household_name=_name,
+        household_tz=_tz,
+        household_theme=default_theme,
+        snapshots=snapshots,
+    )
+    bare = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+    _seed(snapshots)
+    _, token = await _paired(bare, displays)
+    payload = await (await _get(bare, "/api/display/v1/map", token)).json()
+    _validate("map", payload)
+    assert payload["map"]["image"] is None
+    assert (await _map_png(bare, token)).status == 503
+
+
+async def test_map_png_counts_as_an_image_and_painting_is_throttled(
+    client, displays, snapshots, auth, monkeypatch
+):
+    _seed(snapshots)
+    display_id, token = await _paired(client, displays)
+    kinds: list[bool] = []
+    real = DashboardAuth.begin_display_read
+
+    def spy(self, display: str, *, image: bool = False) -> int:
+        kinds.append(image)
+        return real(self, display, image=image)
+
+    monkeypatch.setattr(DashboardAuth, "begin_display_read", spy)
+    assert (await _map_png(client, token, "?w=300&h=300")).status == 200
+    assert kinds == [True]
+    # Each new size is a new painting: the budget runs out…
+    for k in range(1, MAP_RENDER_MAX):
+        assert (await _map_png(client, token, f"?w={300 + k}&h=300")).status == 200
+    resp = await _map_png(client, token, "?w=999&h=300")
+    assert resp.status == 429 and int(resp.headers["Retry-After"]) > 0
+    # …but a kept picture is still handed out.
+    kept = await _map_png(client, token, "?w=300&h=300")
+    assert kept.status == 200
+    # Another panel paints its own.
+    _, other = await _paired(client, displays, name="Hall")
+    assert (await _map_png(client, other, "?w=999&h=300")).status == 200
+
+
+async def test_locked_panel_gets_no_map_png(
+    client, displays, snapshots, tiles, settings_service
+):
+    _seed(snapshots)
+    _, token = await _locked(client, displays, settings_service)
+    snapshots.calls.clear()
+    resp = await _map_png(client, token)
+    assert resp.status == 423 and resp.content_type == "application/json"
+    assert tiles.calls == [] and snapshots.calls == []

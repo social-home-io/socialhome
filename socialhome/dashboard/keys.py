@@ -16,6 +16,7 @@ from ..services.map_tile_service import Tile
 from .auth import DashboardAuth, SessionClaims
 from .avatars import AvatarImages
 from .emoji import EmojiImages
+from .map_png import MapPictures
 from .render import DashboardRenderer
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "HOUSEHOLD_NAME_KEY",
     "HOUSEHOLD_THEME_KEY",
     "HOUSEHOLD_TZ_KEY",
+    "MAP_PICTURES_KEY",
     "DashboardSnapshots",
     "DashboardTiles",
     "HouseholdNameFn",
@@ -76,6 +78,11 @@ class DashboardTiles(Protocol):
 
     async def fetch(self, z: int, x: int, y: int) -> Tile: ...
 
+    @property
+    def source_tag(self) -> str:
+        """Names the upstream (never the template — it may carry a key)."""
+        ...
+
 
 AUTH_KEY: web.AppKey[DashboardAuth] = web.AppKey("dashboard_auth")
 SETTINGS_KEY: web.AppKey[DashboardSettingsService] = web.AppKey("dashboard_settings")
@@ -99,3 +106,6 @@ DISPLAY_KEY: web.RequestKey[DashboardDisplay] = web.RequestKey("dashboard_displa
 AVATARS_KEY: web.AppKey[AvatarImages] = web.AppKey("dashboard_display_avatars")
 #: The bundled emoji PNGs for wall panels (``/api/display/v1/emoji/…``).
 EMOJI_KEY: web.AppKey[EmojiImages] = web.AppKey("dashboard_display_emoji")
+#: The wall-panel map pictures (``/api/display/v1/map.png``); absent when
+#: no tile source is wired.
+MAP_PICTURES_KEY: web.AppKey[MapPictures] = web.AppKey("dashboard_display_map")

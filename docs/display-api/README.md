@@ -34,6 +34,26 @@ but draws it itself from JSON. It talks to the **dashboard port** (default
   with `ink` (black / white) where text sits on them; notes carry their
   softened light / dark fill and ink, as on the tablet.
 
+## The map picture
+
+A panel has no map engine, so `GET /map` comes with `image`:
+`{url, width, height, etag}`. Fetch
+`GET /api/display/v1/map.png?w=&h=&scheme=light|dark` for the picture —
+`w` 200–1920 and `h` 200–1200 (clamped), default `width` × `height`
+(748 × 560, the map area of a 1280 × 800 panel with the rail). The
+picture is framed exactly like the browser's Map tab, with the zone
+pins, the faces and "+N", stale people faded, edge chips for anyone far
+away and the tile credit already drawn in — show it as-is. `etag` is the
+`ETag` the default picture (default size, light scheme) has now: a panel
+showing that one can compare it and skip the request while it is
+unchanged. Every size and scheme has its own `ETag` — send the one you
+hold in `If-None-Match` and an unchanged map is a `304`. A picture drawn
+while some tiles (or someone's photo) were unreachable has a different
+`ETag` and is redrawn a minute later. `503 TILES_UNAVAILABLE` (+ `Retry-After`) means
+no tile could be loaded — keep the old picture or the placeholder.
+Labels in a script the bundled Roboto lacks (Hebrew, Arabic, CJK) are
+left off the picture; the "Who's where" list carries every name.
+
 ## Polling and caching
 
 Every answer has an `ETag` and `Cache-Control: private, no-cache`. Send
@@ -45,7 +65,9 @@ layout itself must be rebuilt (night mode, the rail, locale, settings,
 theme colour).
 
 Budgets per panel: 120 JSON requests and 600 images a minute, 30 "Got
-it" per 5 minutes (`429` + `Retry-After`).
+it" per 5 minutes (`429` + `Retry-After`); of the images, at most 6
+freshly painted map pictures a minute (a new size, scheme or map — a kept
+picture or a `304` is free).
 
 ## Lock, unlock and "Got it"
 
@@ -76,6 +98,7 @@ it" per 5 minutes (`429` + `Retry-After`).
 | `409 NIGHT` | A tab other than Overview at night | Go to Overview |
 | `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`) |
 | `429` | Over the request / ack budget, or the PIN can't be checked now | Wait `Retry-After` seconds |
+| `503 TILES_UNAVAILABLE` | `map.png` without any map tile | Keep the old picture, retry after `Retry-After` |
 
 ## Versioning
 
@@ -103,6 +126,13 @@ it" per 5 minutes (`429` + `Retry-After`).
   regenerate them after an intended change with
   `SH_UPDATE_DISPLAY_FIXTURES=1 pytest tests/dashboard/test_display_api.py`.
   The firmware repository pins the same fixtures for its screenshot tests.
+
+## Map attribution and font
+
+The map picture carries its tile provider's credit (© OpenStreetMap
+contributors) in its bottom-right corner, as the licence requires —
+don't crop it. Its text is drawn with **Roboto** (SIL Open Font License
+1.1, `socialhome/dashboard/fonts/OFL.txt`), the font the firmware uses.
 
 ## Emoji attribution
 
