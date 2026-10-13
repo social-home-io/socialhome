@@ -30,6 +30,7 @@ __all__ = [
     "HouseholdZoneNameTakenError",
     "HouseholdZoneNotFoundError",
     "HouseholdZoneReadOnlyError",
+    "ZoneSourceUnavailableError",
 ]
 
 #: Same cap as a space's zone catalogue — keeps the per-GPS-update match
@@ -152,3 +153,11 @@ class HouseholdZoneIsHomeError(CodedError):
     status = 409
     code = "ZONE_IS_HOME"
     detail = "The Home zone can't be removed. Mark another zone as Home first."
+
+
+class ZoneSourceUnavailableError(Exception):
+    """A platform zone source (Home Assistant) couldn't be read this time.
+
+    Distinct from an empty answer: a sync run that gets this skips the
+    mirror and keeps the synced zones it already has — a flaky HA
+    connection must never look like "HA has no zones" and wipe them."""

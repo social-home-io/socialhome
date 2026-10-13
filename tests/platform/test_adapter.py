@@ -13,6 +13,7 @@ from socialhome.platform.adapter import (
     ExternalUser,
     InstanceConfig,
     PlatformAdapter,
+    ZoneSource,
     _extract_bearer,
 )
 
@@ -184,6 +185,9 @@ async def test_build_platform_adapter_standalone(tmp_path):
             instance_config=SqliteInstanceConfigRepo(db),
         )
         assert isinstance(adapter, StandaloneAdapter)
+        # Standalone has no platform zones to sync.
+        assert adapter.zones is None
+        assert Capability.ZONE_SYNC not in adapter.capabilities
     finally:
         await db.shutdown()
 
@@ -318,3 +322,28 @@ async def test_get_public_base_url_derives_from_federation_base(
     federation_base, expected
 ):
     assert await _BaseAdapter(federation_base).get_public_base_url() == expected
+
+
+# ── zones (ZoneSource, ABC default) ──────────────────────────────────────────
+
+
+def test_zones_defaults_to_none():
+    """A platform that says nothing has no zone source — the household-zone
+    sync stays off and the SPA shows no sync toggle."""
+    adapter = _MinimalAdapter()
+    assert adapter.zones is None
+    assert Capability.ZONE_SYNC not in adapter.capabilities
+
+
+def test_zone_sync_is_a_spa_capability():
+    """Admin › Zones shows the sync toggle off this flag."""
+    assert Capability.ZONE_SYNC.value == "zone_sync"
+
+
+async def test_zone_source_protocol_is_runtime_checkable():
+    class _Source:
+        async def list_zones(self):
+            return []
+
+    assert isinstance(_Source(), ZoneSource)
+    assert not isinstance(object(), ZoneSource)
