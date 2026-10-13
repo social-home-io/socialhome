@@ -5,9 +5,10 @@
  * Wide enough (the host is a size container, see ``app.css``) the panel
  * sits beside the map and scrolls on its own; narrower it is a bottom
  * sheet over the lower part of the map — collapsed to its tab strip
- * until the grabber (a real button, ``aria-expanded``) or a tab opens
- * it. The map is drawn by the caller through ``renderMap``, which gets
- * the strip the sheet covers so a fit keeps markers out from under it.
+ * until the grabber (a real button, ``aria-expanded``) or a tab — the
+ * one already shown included — opens it. The map is drawn by the caller
+ * through ``renderMap``, which gets the strip the sheet covers so a fit
+ * keeps markers out from under it.
  *
  * One selection is shared with the map: a person id or ``zone:<id>``.
  * Picking a row selects; a selection (from either side) opens its
@@ -368,7 +369,12 @@ export function MapOverview({ people, zones, selectedId, onSelect, renderMap }: 
             >
               <span class="sh-map-overview__grabber-bar" aria-hidden="true" />
             </button>
-            <div class="sh-map-overview__head">{header}</div>
+            {/* Any tap on the tab strip opens a collapsed sheet — the tab
+                already shown too, which the switch itself ignores. */}
+            <div class="sh-map-overview__head"
+                 onClick={hasDetail ? undefined : () => setExpanded(true)}>
+              {header}
+            </div>
             <div ref={listRef} id={bodyId} class="sh-map-overview__body">{body}</div>
           </section>
         )}

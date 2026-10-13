@@ -251,6 +251,21 @@ describe('MapOverview sheet', () => {
     expect(second.container.querySelector('.sh-map-overview')!.classList.contains('is-expanded')).toBe(true)
   })
 
+  it('opens the collapsed sheet when the tab already shown is tapped', () => {
+    const { container } = render(<Harness />)
+    const sheet = container.querySelector('.sh-map-overview')!
+    expect(sheet.classList.contains('is-expanded')).toBe(false)
+    // People is the tab on show; tapping it must still open the sheet.
+    fireEvent.click(tabButtons(container)[0])
+    expect(sheet.classList.contains('is-expanded')).toBe(true)
+  })
+
+  it('opens the collapsed sheet from the single-tab heading too', () => {
+    const { container, getByText } = render(<Harness people={[]} />)
+    fireEvent.click(getByText('Zones', { selector: 'h3' }))
+    expect(container.querySelector('.sh-map-overview')!.classList.contains('is-expanded')).toBe(true)
+  })
+
   it('hands the map no insets while nothing covers it', () => {
     const seen: MapInsets[] = []
     render(<Harness onMapInsets={(i) => seen.push(i)} />)
