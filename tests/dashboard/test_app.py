@@ -19,6 +19,7 @@ from socialhome.dashboard.app import (
 from socialhome.dashboard.auth import COOKIE_NAME, RENEW_AFTER_S, DashboardAuth
 from socialhome.dashboard.render import DashboardRenderer
 from socialhome.i18n import Catalog
+from socialhome.services.dashboard_display_service import DashboardDisplayService
 
 from .conftest import PASSWORD, default_theme
 from .factories import FakeDashboardService
@@ -47,6 +48,7 @@ async def client(aiohttp_client, settings_service, auth):
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
+        displays=DashboardDisplayService(settings_service, auth),
         renderer=RENDERER,
         household_name=_name,
         household_tz=_tz,
@@ -449,6 +451,7 @@ async def test_local_hostnames_param(aiohttp_client, settings_service, auth):
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
+        displays=DashboardDisplayService(settings_service, auth),
         renderer=RENDERER,
         household_name=_name,
         household_tz=_tz,
@@ -482,6 +485,7 @@ async def test_extra_hosts(aiohttp_client, settings_service, auth, kind):
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
+        displays=DashboardDisplayService(settings_service, auth),
         renderer=RENDERER,
         household_name=_name,
         household_tz=_tz,

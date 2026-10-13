@@ -103,6 +103,10 @@ def test_dashboard_base_url(address, host, port, expected):
         ("DELETE", "/api/admin/dashboard/sessions", None),
         ("PUT", "/api/admin/dashboard/pin", {"pin": "1234"}),
         ("DELETE", "/api/admin/dashboard/pin", None),
+        ("GET", "/api/admin/dashboard/displays", None),
+        ("POST", "/api/admin/dashboard/displays", {"code": "ABCDEF", "name": "K"}),
+        ("PATCH", "/api/admin/dashboard/displays/d1", {"name": "K"}),
+        ("DELETE", "/api/admin/dashboard/displays/d1", None),
     ],
 )
 async def test_non_admin_is_refused(client, method, path, body):
@@ -680,3 +684,176 @@ async def test_pin_locks_and_unlocks_a_real_tablet(client):
         ) as resp:
             assert resp.status == 200
             assert "data-lock" not in await resp.text()
+
+
+# ── Wall panels (displays) ──────────────────────────────────────────────
+
+DISPLAYS = "/api/admin/dashboard/displays"
+
+
+async def _running(client) -> str:
+    """Password + dashboard on a free port; the dashboard's origin."""
+    await _set_password(client)
+    port = _free_port()
+    assert (await _put(client, {"enabled": True, "port": port})).status == 200
+    return f"http://127.0.0.1:{port}"
+
+
+async def _panel_start(origin: str) -> dict:
+    """What a wall panel does first: ask the dashboard for a code."""
+    async with aiohttp.ClientSession() as panel:
+        async with panel.post(
+            f"{origin}/api/display/v1/pair",
+            json={"model": "esp32-s3-box", "firmware": "0.1.0"},
+        ) as resp:
+            assert resp.status == 201
+            return await resp.json()
+
+
+async def _panel_get(origin: str, path: str, token: str | None = None):
+    headers = {} if token is None else {"Authorization": f"Bearer {token}"}
+    async with aiohttp.ClientSession() as panel:
+        async with panel.get(f"{origin}{path}", headers=headers) as resp:
+            body = await resp.json() if resp.status != 405 else None
+            return resp.status, body
+
+
+async def _add(client, code: str, name: str = "Kitchen"):
+    return await client.post(
+        DISPLAYS, headers=_auth(client._tok), json={"code": code, "name": name}
+    )
+
+
+async def test_displays_empty(client):
+    resp = await client.get(DISPLAYS, headers=_auth(client._tok))
+    assert resp.status == 200
+    assert await resp.json() == {"displays": []}
+    assert (await _state(client))["displays"] == []
+
+
+async def test_pair_a_wall_panel_end_to_end(client):
+    """Panel asks for a code on the dashboard port → admin types it →
+    panel collects its token once → the token opens the panel API →
+    rename → remove revokes it."""
+    origin = await _running(client)
+    started = await _panel_start(origin)
+    status, body = await _panel_get(
+        origin, f"/api/display/v1/pair/{started['pair_id']}"
+    )
+    assert (status, body) == (200, {"status": "pending"})
+
+    resp = await _add(client, started["code"].lower())
+    assert resp.status == 201
+    display = await resp.json()
+    assert set(display) == {
+        "id",
+        "name",
+        "model",
+        "firmware",
+        "created_at",
+        "last_seen_at",
+        "locked",
+    }
+    assert display["name"] == "Kitchen"
+    assert display["model"] == "esp32-s3-box"
+
+    status, body = await _panel_get(
+        origin, f"/api/display/v1/pair/{started['pair_id']}"
+    )
+    assert status == 200 and body["status"] == "paired"
+    assert body["display_id"] == display["id"]
+    token = body["token"]
+    status, _ = await _panel_get(origin, f"/api/display/v1/pair/{started['pair_id']}")
+    assert status == 404
+
+    status, body = await _panel_get(origin, "/api/display/v1/whoami", token)
+    assert (status, body) == (200, {"display_id": display["id"], "name": "Kitchen"})
+
+    listed = await (await client.get(DISPLAYS, headers=_auth(client._tok))).json()
+    assert [d["id"] for d in listed["displays"]] == [display["id"]]
+    assert listed["displays"][0]["last_seen_at"] is not None
+    state = await _state(client)
+    assert [d["id"] for d in state["displays"]] == [display["id"]]
+    # The token and its hash never reach the admin API.
+    for text in (str(listed), str(state)):
+        assert token not in text
+        assert "token_hash" not in text
+
+    resp = await client.patch(
+        f"{DISPLAYS}/{display['id']}",
+        headers=_auth(client._tok),
+        json={"name": "Hallway"},
+    )
+    assert resp.status == 200
+    assert (await resp.json())["name"] == "Hallway"
+
+    resp = await client.delete(
+        f"{DISPLAYS}/{display['id']}", headers=_auth(client._tok)
+    )
+    assert resp.status == 204
+    status, _ = await _panel_get(origin, "/api/display/v1/whoami", token)
+    assert status == 401
+
+
+async def test_sign_out_all_tablets_unpairs_panels(client):
+    origin = await _running(client)
+    started = await _panel_start(origin)
+    assert (await _add(client, started["code"])).status == 201
+    _, body = await _panel_get(origin, f"/api/display/v1/pair/{started['pair_id']}")
+    resp = await client.delete(
+        "/api/admin/dashboard/sessions", headers=_auth(client._tok)
+    )
+    assert resp.status == 204
+    status, _ = await _panel_get(origin, "/api/display/v1/whoami", body["token"])
+    assert status == 401
+    assert (await _state(client))["displays"] == []
+
+
+async def test_add_display_wrong_code(client):
+    await _running(client)
+    resp = await _add(client, "ZZZZZZ")
+    assert resp.status == 404
+    assert (await resp.json())["error"]["code"] == "DASHBOARD_PAIRING_CODE_INVALID"
+
+
+async def test_add_display_wrong_codes_are_throttled(client):
+    await _running(client)
+    for _ in range(5):
+        assert (await _add(client, "ZZZZZZ")).status == 404
+    resp = await _add(client, "ZZZZZZ")
+    assert resp.status == 429
+    body = await resp.json()
+    assert body["error"]["code"] == "DASHBOARD_PAIRING_THROTTLED"
+    assert body["error"]["params"]["retry_after"] > 0
+
+
+async def test_add_display_while_disabled(client):
+    await _set_password(client)
+    resp = await _add(client, "ABCDEF")
+    assert resp.status == 409
+    assert (await resp.json())["error"]["code"] == "DASHBOARD_DISABLED"
+
+
+@pytest.mark.parametrize(
+    "body", [{"code": "ABCDEF"}, {"code": "ABCDEF", "name": ""}, ["x"]]
+)
+async def test_add_display_invalid_name(client, body):
+    await _running(client)
+    resp = await client.post(DISPLAYS, headers=_auth(client._tok), json=body)
+    assert resp.status == 422
+    err = (await resp.json())["error"]
+    assert err["code"] == "DASHBOARD_SETTINGS_INVALID"
+    assert err["params"] == {"field": "name"}
+
+
+async def test_rename_unknown_display(client):
+    resp = await client.patch(
+        f"{DISPLAYS}/nope", headers=_auth(client._tok), json={"name": "x"}
+    )
+    assert resp.status == 404
+    assert (await resp.json())["error"]["code"] == "DASHBOARD_DISPLAY_NOT_FOUND"
+
+
+async def test_remove_unknown_display(client):
+    resp = await client.delete(f"{DISPLAYS}/nope", headers=_auth(client._tok))
+    assert resp.status == 404

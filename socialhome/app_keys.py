@@ -70,6 +70,7 @@ preferences_service_key: AppKey = AppKey("preferences_service")
 # Household dashboard (own port): settings, cookie auth (last-seen), listener.
 dashboard_settings_service_key: AppKey = AppKey("dashboard_settings_service")
 dashboard_auth_key: AppKey = AppKey("dashboard_auth")
+dashboard_display_service_key: AppKey = AppKey("dashboard_display_service")
 dashboard_server_key: AppKey = AppKey("dashboard_server")
 dashboard_controller_key: AppKey = AppKey("dashboard_controller")
 household_chat_service_key: AppKey = AppKey("household_chat_service")

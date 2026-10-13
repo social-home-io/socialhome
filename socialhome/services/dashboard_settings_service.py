@@ -14,7 +14,14 @@ Everything lives in the ``instance_config`` key/value table under the
   tells the dashboard a PIN exists, so its per-request settings read
   never touches the hash);
 * ``dashboard.setup_token`` — JSON ``{"hash", "expires_at"}`` of the one
-  pending single-use tablet setup token (only the SHA-256 is stored).
+  pending single-use tablet setup token (only the SHA-256 is stored);
+* ``dashboard.displays`` — JSON list of the paired wall panels
+  (:class:`DashboardDisplay`; only each bearer token's SHA-256 is
+  stored). Every epoch bump ("sign out all tablets", a new password)
+  empties it in the same write — panels are unpaired with the tablets.
+  The pairing flow itself lives in
+  :mod:`socialhome.services.dashboard_display_service`; this service
+  only stores the list, under the same lock as the epoch.
 
 Admin-only methods take ``actor_is_admin`` and raise
 :class:`PermissionError` when it is ``False``.
@@ -38,12 +45,16 @@ from urllib.parse import urlsplit
 
 from ..domain.household_dashboard import (
     IDLE_RETURN_CHOICES,
+    MAX_DISPLAYS,
     MAX_ADDRESS_LENGTH,
     MAX_PIN_LENGTH,
     MIN_PASSWORD_LENGTH,
     MIN_PIN_LENGTH,
     SETUP_TOKEN_TTL_SECONDS,
     SUPPORTED_DASHBOARD_LOCALES,
+    DashboardDisplay,
+    DashboardDisplayLimitError,
+    DashboardDisplayNotFoundError,
     DashboardPasswordRequiredError,
     DashboardPasswordTooShortError,
     DashboardPersonSettings,
@@ -67,6 +78,9 @@ KEY_EPOCH = "dashboard.epoch"
 KEY_SETUP_TOKEN = "dashboard.setup_token"
 KEY_PIN_HASH = "dashboard.pin_hash"
 KEY_PIN_SET_AT = "dashboard.pin_set_at"
+KEY_DISPLAYS = "dashboard.displays"
+#: The stored value of "no panels paired".
+_NO_DISPLAYS = "[]"
 
 _COOKIE_SECRET_BYTES = 32
 _COOKIE_SECRET_AAD = KEY_COOKIE_SECRET.encode("ascii")
@@ -264,6 +278,74 @@ def _settings_from_json(raw: str | None) -> DashboardSettings:
     return DashboardSettings(**fields, people=tuple(people))  # type: ignore[arg-type]
 
 
+_DISPLAY_STR_FIELDS = ("id", "name", "token_hash", "created_at")
+_DISPLAY_OPT_FIELDS = ("last_seen_at", "firmware", "model")
+
+
+def _display_to_dict(d: DashboardDisplay) -> dict[str, object]:
+    return {
+        "id": d.id,
+        "name": d.name,
+        "token_hash": d.token_hash,
+        "created_at": d.created_at,
+        "last_seen_at": d.last_seen_at,
+        "firmware": d.firmware,
+        "model": d.model,
+        "locked": d.locked,
+    }
+
+
+def _display_from_dict(raw: object) -> DashboardDisplay | None:
+    if not isinstance(raw, dict):
+        return None
+    for name in _DISPLAY_STR_FIELDS:
+        if not isinstance(raw.get(name), str) or not raw[name]:
+            return None
+    for name in _DISPLAY_OPT_FIELDS:
+        if raw.get(name) is not None and not isinstance(raw[name], str):
+            return None
+    locked = raw.get("locked", False)
+    if not isinstance(locked, bool):
+        return None
+    return DashboardDisplay(
+        id=raw["id"],
+        name=raw["name"],
+        token_hash=raw["token_hash"],
+        created_at=raw["created_at"],
+        last_seen_at=raw.get("last_seen_at"),
+        firmware=raw.get("firmware"),
+        model=raw.get("model"),
+        locked=locked,
+    )
+
+
+def _displays_from_json(raw: str | None) -> tuple[DashboardDisplay, ...]:
+    """Decode the stored panels. Corrupt storage fails closed (no panel
+    authenticates); a bad entry is skipped — each logged as a warning."""
+    if raw is None:
+        return ()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        log.warning("stored dashboard displays are not valid JSON — none paired")
+        return ()
+    if not isinstance(data, list):
+        log.warning("stored dashboard displays are not a list — none paired")
+        return ()
+    displays: list[DashboardDisplay] = []
+    for entry in data:
+        display = _display_from_dict(entry)
+        if display is None:
+            log.warning("stored dashboard display entry is invalid — skipped")
+            continue
+        displays.append(display)
+    return tuple(displays)
+
+
+def _displays_to_json(displays: tuple[DashboardDisplay, ...]) -> str:
+    return json.dumps([_display_to_dict(d) for d in displays])
+
+
 def _token_hash(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -280,6 +362,7 @@ class DashboardSettingsService:
         "_cookie_secret",
         "_cached",
         "_generation",
+        "_displays",
     )
 
     def __init__(
@@ -310,6 +393,9 @@ class DashboardSettingsService:
         # cached (only this service writes these keys).
         self._cached: DashboardSettings | None = None
         self._generation = 0
+        # The paired panels after the first load — a panel's every request
+        # looks its token up here. Read and written only under ``_lock``.
+        self._displays: tuple[DashboardDisplay, ...] | None = None
 
     def attach_key_manager(self, key_manager: KeyManager) -> None:
         """Late-wire the instance KEK — it only exists after startup."""
@@ -455,8 +541,10 @@ class DashboardSettingsService:
                     KEY_PASSWORD_HASH: hashed,
                     KEY_PASSWORD_SET_AT: datetime.now(timezone.utc).isoformat(),
                     KEY_EPOCH: str(await self._epoch_unlocked() + 1),
+                    KEY_DISPLAYS: _NO_DISPLAYS,
                 }
             )
+            self._displays = ()
             self._wrote(None)
 
     async def verify_password(self, password: str) -> bool:
@@ -534,10 +622,16 @@ class DashboardSettingsService:
             return fresh
 
     async def revoke_sessions(self, *, actor_is_admin: bool) -> None:
-        """Sign out every tablet."""
+        """Sign out every tablet and unpair every wall panel (one write)."""
         require_admin(actor_is_admin)
         async with self._lock:
-            await self._repo.set(KEY_EPOCH, str(await self._epoch_unlocked() + 1))
+            await self._repo.set_many(
+                {
+                    KEY_EPOCH: str(await self._epoch_unlocked() + 1),
+                    KEY_DISPLAYS: _NO_DISPLAYS,
+                }
+            )
+            self._displays = ()
 
     async def cookie_secret(self) -> bytes:
         """The tablet-cookie signing key, created on first use.
@@ -624,3 +718,82 @@ class DashboardSettingsService:
                 return False
             await self._repo.delete(KEY_SETUP_TOKEN)
             return True
+
+    # ── Wall panels (displays) ──────────────────────────────────────────
+    #
+    # Storage only, unguarded: the admin gate and the pairing rules live
+    # in :class:`~socialhome.services.dashboard_display_service.DashboardDisplayService`,
+    # the one caller. Under ``_lock`` with the epoch, so an epoch bump's
+    # wipe can't be undone by a write that read the list before it.
+
+    async def _displays_unlocked(self) -> tuple[DashboardDisplay, ...]:
+        if self._displays is None:
+            self._displays = _displays_from_json(await self._repo.get(KEY_DISPLAYS))
+        return self._displays
+
+    async def _save_displays_unlocked(
+        self, displays: tuple[DashboardDisplay, ...]
+    ) -> None:
+        self._displays = None
+        await self._repo.set(KEY_DISPLAYS, _displays_to_json(displays))
+        self._displays = displays
+
+    async def displays(self) -> tuple[DashboardDisplay, ...]:
+        """Every paired wall panel, oldest first."""
+        async with self._lock:
+            return await self._displays_unlocked()
+
+    async def add_display(self, display: DashboardDisplay) -> None:
+        """Store a newly paired panel; :class:`DashboardDisplayLimitError`
+        at :data:`MAX_DISPLAYS`."""
+        async with self._lock:
+            current = await self._displays_unlocked()
+            if len(current) >= MAX_DISPLAYS:
+                raise DashboardDisplayLimitError()
+            await self._save_displays_unlocked((*current, display))
+
+    async def _replace_display_unlocked(
+        self, display_id: str, change: Mapping[str, object]
+    ) -> DashboardDisplay | None:
+        current = await self._displays_unlocked()
+        for i, d in enumerate(current):
+            if d.id == display_id:
+                updated = replace(d, **change)  # type: ignore[arg-type]
+                await self._save_displays_unlocked(
+                    (*current[:i], updated, *current[i + 1 :])
+                )
+                return updated
+        return None
+
+    async def rename_display(self, display_id: str, name: str) -> DashboardDisplay:
+        async with self._lock:
+            updated = await self._replace_display_unlocked(display_id, {"name": name})
+        if updated is None:
+            raise DashboardDisplayNotFoundError()
+        return updated
+
+    async def remove_display(self, display_id: str) -> None:
+        async with self._lock:
+            current = await self._displays_unlocked()
+            kept = tuple(d for d in current if d.id != display_id)
+            if len(kept) == len(current):
+                raise DashboardDisplayNotFoundError()
+            await self._save_displays_unlocked(kept)
+
+    async def record_display_seen(
+        self,
+        display_id: str,
+        *,
+        at: str,
+        firmware: str | None,
+        model: str | None,
+    ) -> None:
+        """Note a panel's request: ``last_seen_at`` and, when the panel
+        sent them, its firmware / model. A removed panel is ignored."""
+        change: dict[str, object] = {"last_seen_at": at}
+        if firmware is not None:
+            change["firmware"] = firmware
+        if model is not None:
+            change["model"] = model
+        async with self._lock:
+            await self._replace_display_unlocked(display_id, change)

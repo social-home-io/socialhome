@@ -47,6 +47,7 @@ from socialhome.services.map_tile_service import (
 from socialhome.domain.household_dashboard import DashboardSticky
 from socialhome.domain.theme import HouseholdTheme
 from socialhome.i18n import Catalog
+from socialhome.services.dashboard_display_service import DashboardDisplayService
 
 from .conftest import PASSWORD, default_theme
 from .factories import (
@@ -133,6 +134,7 @@ async def bare_client(
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
+        displays=DashboardDisplayService(settings_service, auth),
         renderer=RENDERER,
         household_name=name,
         household_tz=tz,
@@ -934,6 +936,7 @@ async def race_client(aiohttp_client, settings_service, auth):
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
+        displays=DashboardDisplayService(settings_service, auth),
         renderer=RENDERER,
         household_name=name,
         household_tz=tz,
@@ -1345,6 +1348,7 @@ async def tiny_client(aiohttp_client, settings_service, clock):
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
+        displays=DashboardDisplayService(settings_service, auth),
         renderer=RENDERER,
         household_name=name,
         household_tz=tz,
@@ -3719,6 +3723,7 @@ async def test_no_tile_source_is_404(aiohttp_client, settings_service, auth, sna
     app = build_dashboard_app(
         settings_service=settings_service,
         auth=auth,
+        displays=DashboardDisplayService(settings_service, auth),
         renderer=RENDERER,
         household_name=lambda: _const("Home"),
         household_tz=lambda: _const("Europe/Berlin"),

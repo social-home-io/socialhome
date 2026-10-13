@@ -1419,10 +1419,12 @@ drives it) and is then served by a **separate aiohttp application on its own por
   `DashboardAuth` (throttle state) and `DashboardRenderer` (Jinja templates
   + preloaded static files, read from disk once at wiring time) are built
   once per process and survive a listener restart.
-- **None of the main pipeline.** No `auth_middleware`, no bearer tokens and
-  no HA ingress: on this port `X-Hass-Source` / `X-Remote-User-Name` come
-  straight from the network and would be spoofable, so the dashboard
-  never looks at them. The only credential is its own cookie.
+- **None of the main pipeline.** No `auth_middleware`, no main-app bearer
+  tokens and no HA ingress: on this port `X-Hass-Source` /
+  `X-Remote-User-Name` come straight from the network and would be
+  spoofable, so the dashboard never looks at them. The only credentials
+  are its own cookie and, under `/api/display/v1/`, a paired wall panel's
+  device token (below).
 - **Stateless signed cookie.** `sh_dash` = `b64url(payload).b64url(HMAC-SHA256)`
   over `{v, epoch, issued_at, keep, locked, n}`. `n` is a random
   **session id**: minted at sign-in, `/lock` and `/unlock`, carried
@@ -1443,6 +1445,32 @@ drives it) and is then served by a **separate aiohttp application on its own por
   the per-client limit. scrypt checks run one at a time (a semaphore) in a
   worker thread. The throttle table is bounded; a full table of locked-out
   clients fails closed.
+- **Wall panels (displays) + device tokens.** Small always-on screens
+  (an ESPHome panel) aren't browsers, so they don't use the cookie: they
+  pair with a code and then send `Authorization: Bearer <token>` to a JSON
+  API under `/api/display/v1/` on the same port
+  (`dashboard/display_api.py`). Pairing runs the other way round from a
+  tablet: the panel calls `POST /api/display/v1/pair` (anonymous,
+  10 / 10 min per client address) and shows a 6-character code (no
+  look-alikes); an admin types it with a name into **Admin › Dashboard ›
+  Wall panels**; `DashboardDisplayService`
+  (`services/dashboard_display_service.py`) compares every pending code in
+  constant time (wrong codes: one global 5 / 15 min bucket in
+  `DashboardAuth`'s failure table, never the login brake), mints a 256-bit
+  token, stores only its SHA-256 and parks the token on the pending entry,
+  which the panel collects exactly once by polling its random 128-bit
+  `pair_id`. Pending pairings live in memory (≤32, 10 min); the paired
+  panels (`DashboardDisplay`, ≤20) are a JSON list in `instance_config`
+  under `dashboard.displays`, written by `DashboardSettingsService` under
+  the same lock as the epoch — so every epoch bump ("Sign out all
+  tablets", a new password) empties the list in the same write, and no
+  in-flight write can bring a panel back. The session guard keeps the two
+  credentials apart: under the prefix only the bearer token is read
+  (cookies are ignored, so the same-origin `POST` check is skipped — no
+  ambient credential), everywhere else only the cookie. A panel's
+  `last_seen_at` / firmware / model (`X-Display-Firmware` /
+  `X-Display-Model`, printable ASCII, ≤64 chars) are written at most once a
+  minute. Tokens are never logged.
 - **Privacy lock.** When a guest is around, someone taps 🔒 and the
   tablet shows a neutral lock screen (household name, clock and date in
   the household time zone — no person, picture, presence, event or

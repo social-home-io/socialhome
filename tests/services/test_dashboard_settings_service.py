@@ -11,6 +11,10 @@ from unittest.mock import patch
 import pytest
 
 from socialhome.domain.household_dashboard import (
+    MAX_DISPLAYS,
+    DashboardDisplay,
+    DashboardDisplayLimitError,
+    DashboardDisplayNotFoundError,
     DashboardPasswordRequiredError,
     DashboardPasswordTooShortError,
     DashboardPersonSettings,
@@ -418,8 +422,11 @@ async def test_set_password_writes_atomically(svc, repo):
         "dashboard.password_hash",
         "dashboard.password_set_at",
         "dashboard.epoch",
+        # A new password unpairs every wall panel too.
+        "dashboard.displays",
     }
     assert batches[0]["dashboard.epoch"] == "1"
+    assert batches[0]["dashboard.displays"] == "[]"
 
 
 async def test_set_password_bumps_epoch(svc):
@@ -1050,3 +1057,164 @@ async def test_pin_set_is_never_stored_in_the_settings_json(svc, repo):
     await svc.set_pin(actor_is_admin=True, pin="1234")
     await svc.update(actor_is_admin=True, patch={"locale": "de"})
     assert "pin" not in repo.rows["dashboard.settings"]
+
+
+# ── wall panels (displays) ───────────────────────────────────────────────
+
+
+def _display(i: int = 1, **kw) -> DashboardDisplay:
+    fields = {
+        "id": f"d{i}",
+        "name": f"Panel {i}",
+        "token_hash": hashlib.sha256(f"tok{i}".encode()).hexdigest(),
+        "created_at": "2026-10-13T08:00:00+00:00",
+    }
+    fields.update(kw)
+    return DashboardDisplay(**fields)
+
+
+async def test_displays_empty_by_default(svc):
+    assert await svc.displays() == ()
+
+
+async def test_add_display_round_trips_through_storage(repo):
+    first = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    d = _display(firmware="1.0", model="esp32-s3", locked=True)
+    await first.add_display(d)
+    stored = json.loads(repo.rows["dashboard.displays"])
+    assert stored[0]["token_hash"] == d.token_hash
+    # A fresh service (restart) reads the same panel back.
+    second = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert await second.displays() == (d,)
+
+
+async def test_add_display_caps_the_household(svc):
+    for i in range(MAX_DISPLAYS):
+        await svc.add_display(_display(i))
+    with pytest.raises(DashboardDisplayLimitError):
+        await svc.add_display(_display(99))
+    assert len(await svc.displays()) == MAX_DISPLAYS
+
+
+async def test_rename_display(svc):
+    await svc.add_display(_display(1))
+    renamed = await svc.rename_display("d1", "Hallway")
+    assert renamed.name == "Hallway"
+    assert (await svc.displays())[0].name == "Hallway"
+
+
+async def test_rename_unknown_display(svc):
+    with pytest.raises(DashboardDisplayNotFoundError):
+        await svc.rename_display("nope", "x")
+
+
+async def test_remove_display(svc):
+    await svc.add_display(_display(1))
+    await svc.add_display(_display(2))
+    await svc.remove_display("d1")
+    assert [d.id for d in await svc.displays()] == ["d2"]
+
+
+async def test_remove_unknown_display(svc):
+    with pytest.raises(DashboardDisplayNotFoundError):
+        await svc.remove_display("nope")
+
+
+async def test_record_display_seen(svc):
+    await svc.add_display(_display(1, firmware="1.0"))
+    await svc.record_display_seen(
+        "d1", at="2026-10-13T09:00:00+00:00", firmware="1.1", model=None
+    )
+    d = (await svc.displays())[0]
+    assert d.last_seen_at == "2026-10-13T09:00:00+00:00"
+    assert d.firmware == "1.1"
+    # A header the panel didn't send keeps what we knew.
+    assert d.model is None
+    await svc.record_display_seen(
+        "d1", at="2026-10-13T09:01:00+00:00", firmware=None, model="m"
+    )
+    d = (await svc.displays())[0]
+    assert (d.firmware, d.model) == ("1.1", "m")
+
+
+async def test_record_seen_for_a_removed_display_is_a_no_op(svc, repo):
+    await svc.record_display_seen("gone", at="x", firmware=None, model=None)
+    assert "dashboard.displays" not in repo.rows
+
+
+async def test_revoke_sessions_unpairs_every_display(svc, repo):
+    await svc.add_display(_display(1))
+    batches: list[dict[str, str]] = []
+    real = repo.set_many
+
+    async def spy(items):
+        batches.append(dict(items))
+        await real(items)
+
+    repo.set_many = spy
+    await svc.revoke_sessions(actor_is_admin=True)
+    assert await svc.displays() == ()
+    # Epoch and panel list change in one batch — a crash can't keep panels.
+    assert batches == [{"dashboard.epoch": "1", "dashboard.displays": "[]"}]
+
+
+async def test_set_password_unpairs_every_display(svc):
+    await svc.add_display(_display(1))
+    await _with_password(svc)
+    assert await svc.displays() == ()
+
+
+async def test_corrupt_display_storage_fails_closed(repo):
+    repo.rows["dashboard.displays"] = "{not json"
+    svc = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert await svc.displays() == ()
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "x",
+        {"id": "d1"},
+        {"id": 1, "name": "n", "token_hash": "h", "created_at": "t"},
+        {
+            "id": "d1",
+            "name": "n",
+            "token_hash": "h",
+            "created_at": "t",
+            "locked": "yes",
+        },
+        {
+            "id": "d1",
+            "name": "n",
+            "token_hash": "h",
+            "created_at": "t",
+            "firmware": 3,
+        },
+    ],
+)
+async def test_invalid_stored_display_is_skipped(repo, entry):
+    good = {
+        "id": "d2",
+        "name": "Kitchen",
+        "token_hash": "ab" * 32,
+        "created_at": "2026-10-13T08:00:00+00:00",
+    }
+    repo.rows["dashboard.displays"] = json.dumps([entry, good])
+    svc = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert [d.id for d in await svc.displays()] == ["d2"]
+
+
+async def test_display_list_not_a_list_fails_closed(repo):
+    repo.rows["dashboard.displays"] = json.dumps({"id": "d1"})
+    svc = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert await svc.displays() == ()
+
+
+async def test_displays_are_cached_after_first_read(repo):
+    spy = _SpyRepo()
+    svc = DashboardSettingsService(spy, fixed_port=None, main_port=MAIN_PORT)
+    await svc.add_display(_display(1))
+    spy.read.clear()
+    await svc.displays()
+    await svc.displays()
+    assert "dashboard.displays" not in spy.read

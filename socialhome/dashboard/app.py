@@ -5,10 +5,14 @@ for a wall tablet. It shares nothing with the main app's request
 pipeline: no ``auth_middleware``, no bearer tokens and **no** HA ingress
 headers — on this port ``X-Hass-Source`` / ``X-Remote-User-Name`` come
 straight from the network and are spoofable. The only credential is the
-signed session cookie (:mod:`socialhome.dashboard.auth`).
+signed session cookie (:mod:`socialhome.dashboard.auth`) — except under
+``/api/display/v1/``, the wall-panel API, where the only credential is
+a paired panel's bearer token (:mod:`socialhome.dashboard.display_api`);
+the two never cross.
 
 Middleware order: ``Host`` allow-list (DNS rebinding) → body-size cap →
-same-origin check on ``POST`` → the session guard.
+same-origin check on ``POST`` (not for the panel API, which has no
+cookie authority) → the session guard.
 
 A privacy-locked session (``SessionClaims.locked``) reaches only
 ``/lock`` and ``/unlock``; the guard answers every other non-public
@@ -30,11 +34,18 @@ from urllib.parse import quote, urlsplit
 from aiohttp import web
 
 from ..hardening import build_body_size_middleware, install_security_headers
+from ..services.dashboard_display_service import DashboardDisplayService
 from ..services.dashboard_settings_service import DashboardSettingsService
 from .auth import COOKIE_NAME, REVOKED_LOCKED, REVOKED_SIGNED_OUT, DashboardAuth
+from .display_api import (
+    guard_display_request,
+    is_display_api,
+    register_display_routes,
+)
 from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
+    DISPLAYS_KEY,
     HOUSEHOLD_NAME_KEY,
     HOUSEHOLD_THEME_KEY,
     HOUSEHOLD_TZ_KEY,
@@ -234,7 +245,13 @@ def _same_origin(request: web.Request) -> bool:
 
 @web.middleware
 async def _csrf_middleware(request: web.Request, handler) -> web.StreamResponse:
-    if request.method == "POST" and not _same_origin(request):
+    # The panel API never reads the cookie (bearer token only), so a
+    # cross-site request has no ambient credential to ride on there.
+    if (
+        request.method == "POST"
+        and not is_display_api(request.path)
+        and not _same_origin(request)
+    ):
         log.info("household dashboard: refused cross-origin POST to %s", request.path)
         return web.Response(status=403, text="Forbidden")
     return await handler(request)
@@ -242,6 +259,9 @@ async def _csrf_middleware(request: web.Request, handler) -> web.StreamResponse:
 
 @web.middleware
 async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
+    if is_display_api(request.path):
+        # Bearer token only — the tablet cookie is never consulted here.
+        return await guard_display_request(request, handler)
     if _is_public(request.path):
         return await handler(request)
     auth = request.app[AUTH_KEY]
@@ -334,6 +354,7 @@ def build_dashboard_app(
     *,
     settings_service: DashboardSettingsService,
     auth: DashboardAuth,
+    displays: DashboardDisplayService,
     renderer: DashboardRenderer,
     household_name: HouseholdNameFn,
     household_tz: HouseholdTzFn,
@@ -367,6 +388,7 @@ def build_dashboard_app(
     )
     app[SETTINGS_KEY] = settings_service
     app[AUTH_KEY] = auth
+    app[DISPLAYS_KEY] = displays
     app[RENDERER_KEY] = renderer
     app[HOUSEHOLD_NAME_KEY] = household_name
     app[HOUSEHOLD_TZ_KEY] = household_tz
@@ -378,4 +400,5 @@ def build_dashboard_app(
     # After the shared hook (which only ``setdefault``s), so these win.
     app.on_response_prepare.append(_dashboard_headers)
     register_routes(app)
+    register_display_routes(app)
     return app

@@ -13,6 +13,8 @@ from unittest.mock import patch
 import pytest
 
 from socialhome.dashboard.auth import (
+    PAIR_MAX,
+    PAIR_WINDOW_S,
     ACK_MAX,
     ACK_WINDOW_S,
     TILE_MAX,
@@ -770,3 +772,17 @@ async def test_tile_limit_is_per_session_and_apart_from_acks(auth, clock):
     assert auth.begin_ack(a) == 0  # its own budget
     clock.advance(TILE_WINDOW_S + 1)
     assert auth.begin_tile(a) == 0
+
+
+def test_pair_start_limit_is_per_client(auth, clock):
+    """Anonymous pairing starts (a wall panel asking for a code) have a
+    small budget per client address, apart from the login throttle."""
+    for _ in range(PAIR_MAX):
+        assert auth.begin_pair("10.0.0.5") == 0
+    wait = auth.begin_pair("10.0.0.5")
+    assert 0 < wait <= PAIR_WINDOW_S
+    assert auth.begin_pair("10.0.0.6") == 0
+    assert auth.throttle_key_count == 0
+    assert auth.global_failure_count == 0
+    clock.advance(PAIR_WINDOW_S + 1)
+    assert auth.begin_pair("10.0.0.5") == 0
