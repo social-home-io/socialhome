@@ -1,0 +1,845 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/person.schema.json",
+  "title": "GET /api/display/v1/person/{user_id}",
+  "allOf": [
+    {
+      "$ref": "common.schema.json#/$defs/header"
+    }
+  ],
+  "type": "object",
+  "properties": {
+    "api_version": true,
+    "view": {
+      "const": "person"
+    },
+    "view_key": true,
+    "household": true,
+    "locale": true,
+    "dir": true,
+    "clock": true,
+    "settings": true,
+    "rail": true,
+    "people": true,
+    "is_night": true,
+    "night": true,
+    "person": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "avatar",
+        "color",
+        "id",
+        "initials",
+        "ink",
+        "name",
+        "picture_hash",
+        "status_emoji",
+        "status_text",
+        "where"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "initials": {
+          "type": "string"
+        },
+        "color": {
+          "$ref": "common.schema.json#/$defs/color"
+        },
+        "ink": {
+          "$ref": "common.schema.json#/$defs/color"
+        },
+        "avatar": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "picture_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status_emoji": {
+          "$ref": "common.schema.json#/$defs/emoji_or_null"
+        },
+        "status_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "where": {
+          "$ref": "common.schema.json#/$defs/where"
+        }
+      }
+    },
+    "mentions": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/mention"
+      }
+    },
+    "kind": {
+      "enum": [
+        "reader",
+        "picture"
+      ]
+    },
+    "reader": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "chores",
+        "day",
+        "next",
+        "now",
+        "school"
+      ],
+      "properties": {
+        "now": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "color",
+            "icon",
+            "label",
+            "meta",
+            "title",
+            "until"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "common.schema.json#/$defs/emoji_or_null"
+            },
+            "title": {
+              "type": "string"
+            },
+            "meta": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "until": {
+              "type": "string"
+            },
+            "color": {
+              "$ref": "common.schema.json#/$defs/color"
+            }
+          }
+        },
+        "next": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "color",
+            "icon",
+            "label",
+            "meta",
+            "rel",
+            "time",
+            "title"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "common.schema.json#/$defs/emoji_or_null"
+            },
+            "title": {
+              "type": "string"
+            },
+            "meta": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "time": {
+              "type": "string"
+            },
+            "rel": {
+              "type": "string"
+            },
+            "color": {
+              "$ref": "common.schema.json#/$defs/color"
+            }
+          }
+        },
+        "school": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "label",
+            "rows"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/agenda_row"
+              }
+            }
+          }
+        },
+        "day": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "empty",
+            "empty_icon",
+            "label",
+            "rows",
+            "tomorrow"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/agenda_row"
+              }
+            },
+            "empty": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "empty_icon": {
+              "$ref": "common.schema.json#/$defs/emoji_or_null"
+            },
+            "tomorrow": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "label",
+                "rows"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "rows": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "common.schema.json#/$defs/agenda_row"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "chores": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "label"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/chore"
+              }
+            }
+          }
+        }
+      }
+    },
+    "picture": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "clock",
+        "day",
+        "jobs",
+        "messages",
+        "next",
+        "next_label",
+        "next_pie",
+        "night",
+        "now",
+        "now_label",
+        "now_next_label",
+        "part_now",
+        "tomorrow",
+        "where"
+      ],
+      "properties": {
+        "clock": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "hour_deg",
+            "label",
+            "minute_deg",
+            "wedge"
+          ],
+          "properties": {
+            "hour_deg": {
+              "type": "number"
+            },
+            "minute_deg": {
+              "type": "number"
+            },
+            "label": {
+              "type": "string"
+            },
+            "wedge": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "color",
+                "full",
+                "minutes"
+              ],
+              "properties": {
+                "minutes": {
+                  "type": "integer"
+                },
+                "full": {
+                  "type": "boolean"
+                },
+                "color": {
+                  "$ref": "common.schema.json#/$defs/color"
+                }
+              }
+            }
+          }
+        },
+        "part_now": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "icon",
+            "key",
+            "label"
+          ],
+          "properties": {
+            "key": {
+              "enum": [
+                "morning",
+                "afternoon",
+                "evening",
+                "night"
+              ]
+            },
+            "icon": {
+              "$ref": "common.schema.json#/$defs/emoji"
+            },
+            "label": {
+              "type": "string"
+            }
+          }
+        },
+        "now_next_label": {
+          "type": "string"
+        },
+        "now_label": {
+          "type": "string"
+        },
+        "next_label": {
+          "type": "string"
+        },
+        "now": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cancelled",
+                "caption",
+                "color",
+                "current",
+                "icon",
+                "label",
+                "past"
+              ],
+              "properties": {
+                "icon": {
+                  "$ref": "common.schema.json#/$defs/emoji_or_null"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "caption": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "color": {
+                  "$ref": "common.schema.json#/$defs/color"
+                },
+                "past": {
+                  "type": "boolean"
+                },
+                "current": {
+                  "type": "boolean"
+                },
+                "cancelled": {
+                  "type": "boolean"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cancelled",
+                "caption",
+                "color",
+                "current",
+                "icon",
+                "label",
+                "past"
+              ],
+              "properties": {
+                "icon": {
+                  "$ref": "common.schema.json#/$defs/emoji_or_null"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "caption": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "color": {
+                  "$ref": "common.schema.json#/$defs/color"
+                },
+                "past": {
+                  "type": "boolean"
+                },
+                "current": {
+                  "type": "boolean"
+                },
+                "cancelled": {
+                  "type": "boolean"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_pie": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "full",
+            "minutes"
+          ],
+          "properties": {
+            "minutes": {
+              "type": "integer"
+            },
+            "full": {
+              "type": "boolean"
+            }
+          }
+        },
+        "day": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "empty",
+            "empty_icon",
+            "empty_label",
+            "label",
+            "parts"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "empty": {
+              "type": "boolean"
+            },
+            "empty_label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "empty_icon": {
+              "$ref": "common.schema.json#/$defs/emoji_or_null"
+            },
+            "parts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "icon",
+                  "key",
+                  "label",
+                  "state",
+                  "tiles"
+                ],
+                "properties": {
+                  "key": {
+                    "enum": [
+                      "morning",
+                      "afternoon",
+                      "evening",
+                      "night"
+                    ]
+                  },
+                  "icon": {
+                    "$ref": "common.schema.json#/$defs/emoji"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "enum": [
+                      "past",
+                      "now",
+                      "later"
+                    ]
+                  },
+                  "tiles": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "cancelled",
+                        "caption",
+                        "color",
+                        "current",
+                        "icon",
+                        "label",
+                        "past"
+                      ],
+                      "properties": {
+                        "icon": {
+                          "$ref": "common.schema.json#/$defs/emoji_or_null"
+                        },
+                        "label": {
+                          "type": "string"
+                        },
+                        "caption": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "color": {
+                          "$ref": "common.schema.json#/$defs/color"
+                        },
+                        "past": {
+                          "type": "boolean"
+                        },
+                        "current": {
+                          "type": "boolean"
+                        },
+                        "cancelled": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tomorrow": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "label",
+            "sleeps",
+            "sleeps_label",
+            "tiles"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "sleeps": {
+              "type": "integer"
+            },
+            "sleeps_label": {
+              "type": "string"
+            },
+            "tiles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "cancelled",
+                  "caption",
+                  "color",
+                  "current",
+                  "icon",
+                  "label",
+                  "past"
+                ],
+                "properties": {
+                  "icon": {
+                    "$ref": "common.schema.json#/$defs/emoji_or_null"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "caption": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "color": {
+                    "$ref": "common.schema.json#/$defs/color"
+                  },
+                  "past": {
+                    "type": "boolean"
+                  },
+                  "current": {
+                    "type": "boolean"
+                  },
+                  "cancelled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "jobs": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "label"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "caption",
+                  "done",
+                  "icon",
+                  "label"
+                ],
+                "properties": {
+                  "icon": {
+                    "$ref": "common.schema.json#/$defs/emoji"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "caption": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "done": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "where": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "away",
+            "home",
+            "label"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "home": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "icon",
+                "label",
+                "people"
+              ],
+              "properties": {
+                "icon": {
+                  "$ref": "common.schema.json#/$defs/emoji"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "people": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "away": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "icon",
+                "label",
+                "people"
+              ],
+              "properties": {
+                "icon": {
+                  "$ref": "common.schema.json#/$defs/emoji"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "people": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/message"
+          }
+        },
+        "night": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "caption",
+            "icon",
+            "label",
+            "moon",
+            "when"
+          ],
+          "properties": {
+            "when": {
+              "enum": [
+                "today",
+                "tomorrow"
+              ]
+            },
+            "moon": {
+              "$ref": "common.schema.json#/$defs/emoji"
+            },
+            "icon": {
+              "$ref": "common.schema.json#/$defs/emoji"
+            },
+            "label": {
+              "type": "string"
+            },
+            "caption": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "person",
+    "mentions",
+    "kind",
+    "reader",
+    "picture"
+  ],
+  "unevaluatedProperties": false
+}

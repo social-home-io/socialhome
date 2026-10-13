@@ -15,6 +15,9 @@ import pytest
 from socialhome.dashboard.auth import (
     PAIR_CODE_MAX_FAILURES,
     PAIR_CODE_WINDOW_S,
+    DISPLAY_IMAGE_MAX,
+    DISPLAY_READ_MAX,
+    DISPLAY_WINDOW_S,
     PAIR_MAX,
     PAIR_WINDOW_S,
     ACK_MAX,
@@ -856,3 +859,17 @@ def test_wrong_pairing_codes_never_hold_logins_back(settings_service, clock):
     assert auth.begin_attempt("10.0.0.1") == 0
     auth.record_pair_code_success()
     assert auth.failure_count("10.0.0.1") == 1
+
+
+def test_display_reads_are_budgeted_per_panel_and_kind(auth, clock):
+    for _ in range(DISPLAY_READ_MAX):
+        assert auth.begin_display_read("d1") == 0
+    wait = auth.begin_display_read("d1")
+    assert 0 < wait <= DISPLAY_WINDOW_S
+    assert auth.begin_display_read("d2") == 0
+    assert auth.begin_display_read("d1", image=True) == 0
+    for _ in range(DISPLAY_IMAGE_MAX - 1):
+        auth.begin_display_read("d1", image=True)
+    assert auth.begin_display_read("d1", image=True) > 0
+    clock.advance(DISPLAY_WINDOW_S + 1)
+    assert auth.begin_display_read("d1") == 0

@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/map.schema.json",
+  "title": "GET /api/display/v1/map",
+  "allOf": [
+    {
+      "$ref": "common.schema.json#/$defs/header"
+    }
+  ],
+  "type": "object",
+  "properties": {
+    "api_version": true,
+    "view": {
+      "const": "map"
+    },
+    "view_key": true,
+    "household": true,
+    "locale": true,
+    "dir": true,
+    "clock": true,
+    "settings": true,
+    "rail": true,
+    "people": true,
+    "is_night": true,
+    "night": true,
+    "tab": {
+      "enum": [
+        "overview",
+        "messages",
+        "notes",
+        "map"
+      ]
+    },
+    "tabs": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/tab"
+      }
+    },
+    "alerts": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/mention"
+      }
+    },
+    "map": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attribution",
+        "bubbles",
+        "label",
+        "pins",
+        "spots",
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "attribution": {
+          "type": "string"
+        },
+        "spots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "age_label",
+              "icon",
+              "iso",
+              "lat",
+              "lon",
+              "name",
+              "person",
+              "place",
+              "stale",
+              "when",
+              "zone"
+            ],
+            "properties": {
+              "person": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "icon": {
+                "$ref": "common.schema.json#/$defs/emoji"
+              },
+              "place": {
+                "type": "string"
+              },
+              "when": {
+                "type": "string"
+              },
+              "age_label": {
+                "type": "string"
+              },
+              "iso": {
+                "type": "string"
+              },
+              "stale": {
+                "type": "boolean"
+              },
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "lat": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "lon": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "bubbles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "age",
+              "away",
+              "caption",
+              "key",
+              "label",
+              "lat",
+              "lon",
+              "members",
+              "more",
+              "stale",
+              "zone"
+            ],
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "lat": {
+                "type": "number"
+              },
+              "lon": {
+                "type": "number"
+              },
+              "zone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "members": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "more": {
+                "type": "integer"
+              },
+              "caption": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "stale": {
+                "type": "boolean"
+              },
+              "age": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "away": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "pins": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "color",
+              "icon",
+              "id",
+              "is_home",
+              "lat",
+              "lon",
+              "name",
+              "occupied",
+              "radius_m"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "icon": {
+                "$ref": "common.schema.json#/$defs/emoji"
+              },
+              "lat": {
+                "type": "number"
+              },
+              "lon": {
+                "type": "number"
+              },
+              "radius_m": {
+                "type": "integer"
+              },
+              "color": {
+                "$ref": "common.schema.json#/$defs/color"
+              },
+              "is_home": {
+                "type": "boolean"
+              },
+              "occupied": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "tab",
+    "tabs",
+    "alerts",
+    "map"
+  ],
+  "unevaluatedProperties": false
+}

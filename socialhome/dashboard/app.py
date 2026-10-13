@@ -42,8 +42,12 @@ from .display_api import (
     is_display_api,
     register_display_routes,
 )
+from .avatars import AvatarImages
+from .emoji import EmojiImages
 from .keys import (
     AUTH_KEY,
+    AVATARS_KEY,
+    EMOJI_KEY,
     CLAIMS_KEY,
     DISPLAYS_KEY,
     HOUSEHOLD_NAME_KEY,
@@ -137,12 +141,12 @@ async def _dashboard_headers(
     if request.path.startswith(_STATIC_PREFIX):
         return
     if (
-        request.path.startswith(_ASSET_PREFIXES)
+        (request.path.startswith(_ASSET_PREFIXES) or is_display_api(request.path))
         and response.status in (200, 304)
         and "Cache-Control" in response.headers
     ):
-        # A shown person's picture (``private, no-cache``) or a map tile
-        # (``private``, a day): the view set it.
+        # A shown person's picture or a map tile (``private, no-cache``),
+        # or a panel API answer revalidated by ``ETag``: the view set it.
         return
     # Pages, redirects (which may carry Set-Cookie) and errors are
     # per-session — never cache them; only static files and avatars may be.
@@ -394,6 +398,8 @@ def build_dashboard_app(
     app[HOUSEHOLD_TZ_KEY] = household_tz
     app[HOUSEHOLD_THEME_KEY] = household_theme
     app[SNAPSHOTS_KEY] = snapshots
+    app[AVATARS_KEY] = AvatarImages()
+    app[EMOJI_KEY] = EmojiImages()
     if tiles is not None:
         app[TILES_KEY] = tiles
     install_security_headers(app)

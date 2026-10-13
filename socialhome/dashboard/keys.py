@@ -14,10 +14,14 @@ from ..services.dashboard_display_service import DashboardDisplayService
 from ..services.dashboard_settings_service import DashboardSettingsService
 from ..services.map_tile_service import Tile
 from .auth import DashboardAuth, SessionClaims
+from .avatars import AvatarImages
+from .emoji import EmojiImages
 from .render import DashboardRenderer
 
 __all__ = [
     "AUTH_KEY",
+    "AVATARS_KEY",
+    "EMOJI_KEY",
     "CLAIMS_KEY",
     "DISPLAY_KEY",
     "DISPLAYS_KEY",
@@ -91,3 +95,7 @@ DISPLAYS_KEY: web.AppKey[DashboardDisplayService] = web.AppKey("dashboard_displa
 #: The paired panel of the current ``/api/display/v1/`` request (set by
 #: the session guard from its bearer token).
 DISPLAY_KEY: web.RequestKey[DashboardDisplay] = web.RequestKey("dashboard_display")
+#: Transcoded avatars for wall panels (``/api/display/v1/avatar/…``).
+AVATARS_KEY: web.AppKey[AvatarImages] = web.AppKey("dashboard_display_avatars")
+#: The bundled emoji PNGs for wall panels (``/api/display/v1/emoji/…``).
+EMOJI_KEY: web.AppKey[EmojiImages] = web.AppKey("dashboard_display_emoji")

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/notes.schema.json",
+  "title": "GET /api/display/v1/notes",
+  "allOf": [
+    {
+      "$ref": "common.schema.json#/$defs/header"
+    }
+  ],
+  "type": "object",
+  "properties": {
+    "api_version": true,
+    "view": {
+      "const": "notes"
+    },
+    "view_key": true,
+    "household": true,
+    "locale": true,
+    "dir": true,
+    "clock": true,
+    "settings": true,
+    "rail": true,
+    "people": true,
+    "is_night": true,
+    "night": true,
+    "tab": {
+      "enum": [
+        "overview",
+        "messages",
+        "notes",
+        "map"
+      ]
+    },
+    "tabs": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/tab"
+      }
+    },
+    "alerts": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/mention"
+      }
+    },
+    "notes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "empty",
+        "items",
+        "more"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/note"
+          }
+        },
+        "more": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "empty": {
+          "$ref": "common.schema.json#/$defs/tab_empty"
+        }
+      }
+    }
+  },
+  "required": [
+    "tab",
+    "tabs",
+    "alerts",
+    "notes"
+  ],
+  "unevaluatedProperties": false
+}

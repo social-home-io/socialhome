@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/lock.schema.json",
+  "title": "423 Locked — any bearer endpoint of a locked panel",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "clock",
+    "dir",
+    "household",
+    "locale",
+    "locked",
+    "strings"
+  ],
+  "properties": {
+    "api_version": {
+      "$ref": "common.schema.json#/$defs/api_version"
+    },
+    "locked": {
+      "const": true
+    },
+    "household": {
+      "type": "string"
+    },
+    "locale": {
+      "type": "string"
+    },
+    "dir": {
+      "enum": [
+        "ltr",
+        "rtl"
+      ]
+    },
+    "clock": {
+      "$ref": "common.schema.json#/$defs/clock"
+    },
+    "strings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "delete",
+        "enter_pin",
+        "locked",
+        "pin_button",
+        "unlock",
+        "wrong_pin"
+      ],
+      "properties": {
+        "locked": {
+          "type": "string"
+        },
+        "pin_button": {
+          "type": "string"
+        },
+        "enter_pin": {
+          "type": "string"
+        },
+        "unlock": {
+          "type": "string"
+        },
+        "delete": {
+          "type": "string"
+        },
+        "wrong_pin": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

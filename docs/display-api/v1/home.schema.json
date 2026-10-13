@@ -1,0 +1,611 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/home.schema.json",
+  "title": "GET /api/display/v1/home",
+  "allOf": [
+    {
+      "$ref": "common.schema.json#/$defs/header"
+    }
+  ],
+  "type": "object",
+  "properties": {
+    "api_version": true,
+    "view": {
+      "const": "overview"
+    },
+    "view_key": true,
+    "household": true,
+    "locale": true,
+    "dir": true,
+    "clock": true,
+    "settings": true,
+    "rail": true,
+    "people": true,
+    "is_night": true,
+    "night": true,
+    "tab": {
+      "enum": [
+        "overview",
+        "messages",
+        "notes",
+        "map"
+      ]
+    },
+    "tabs": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/tab"
+      }
+    },
+    "alerts": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/mention"
+      }
+    },
+    "overview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chores",
+        "messages",
+        "next",
+        "notes",
+        "presence",
+        "shopping",
+        "today"
+      ],
+      "properties": {
+        "presence": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "away",
+            "home",
+            "label"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "home": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "icon",
+                "label",
+                "people"
+              ],
+              "properties": {
+                "icon": {
+                  "$ref": "common.schema.json#/$defs/emoji"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "people": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "away": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "icon",
+                "label",
+                "people"
+              ],
+              "properties": {
+                "icon": {
+                  "$ref": "common.schema.json#/$defs/emoji"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "people": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "zone"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "zone": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "next": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "color",
+            "icon",
+            "kind",
+            "label",
+            "people",
+            "rel",
+            "time",
+            "title"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "next",
+                "tomorrow"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "time": {
+              "type": "string"
+            },
+            "icon": {
+              "$ref": "common.schema.json#/$defs/emoji_or_null"
+            },
+            "title": {
+              "type": "string"
+            },
+            "rel": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "people": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "color": {
+              "$ref": "common.schema.json#/$defs/color"
+            }
+          }
+        },
+        "messages": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "label",
+            "see_all"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "see_all": {
+              "type": "boolean"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/message"
+              }
+            }
+          }
+        },
+        "today": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "at_school",
+            "changes",
+            "empty",
+            "empty_icon",
+            "label",
+            "list",
+            "mode",
+            "timeline"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "mode": {
+              "enum": [
+                "timeline",
+                "list",
+                "empty"
+              ]
+            },
+            "timeline": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "end_hour",
+                "label",
+                "lanes",
+                "now_label",
+                "now_x",
+                "start_hour",
+                "ticks"
+              ],
+              "properties": {
+                "start_hour": {
+                  "type": "integer"
+                },
+                "end_hour": {
+                  "type": "integer"
+                },
+                "now_x": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "now_label": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "ticks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "label",
+                      "minor",
+                      "x"
+                    ],
+                    "properties": {
+                      "label": {
+                        "type": "string"
+                      },
+                      "x": {
+                        "type": "integer"
+                      },
+                      "minor": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                },
+                "lanes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "all_day",
+                      "blocks",
+                      "color",
+                      "ink",
+                      "person",
+                      "rows"
+                    ],
+                    "properties": {
+                      "person": {
+                        "type": "string"
+                      },
+                      "color": {
+                        "$ref": "common.schema.json#/$defs/color"
+                      },
+                      "ink": {
+                        "$ref": "common.schema.json#/$defs/color"
+                      },
+                      "all_day": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "rows": {
+                        "type": "integer"
+                      },
+                      "blocks": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "icon",
+                            "kind",
+                            "label",
+                            "more",
+                            "narrow",
+                            "past",
+                            "row",
+                            "title",
+                            "w",
+                            "x"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "enum": [
+                                "event",
+                                "school"
+                              ]
+                            },
+                            "title": {
+                              "type": "string"
+                            },
+                            "label": {
+                              "type": "string"
+                            },
+                            "x": {
+                              "type": "integer"
+                            },
+                            "w": {
+                              "type": "integer"
+                            },
+                            "row": {
+                              "type": "integer"
+                            },
+                            "past": {
+                              "type": "boolean"
+                            },
+                            "narrow": {
+                              "type": "boolean"
+                            },
+                            "icon": {
+                              "$ref": "common.schema.json#/$defs/emoji_or_null"
+                            },
+                            "more": {
+                              "type": "integer"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "list": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/agenda_row"
+              }
+            },
+            "empty": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "empty_icon": {
+              "$ref": "common.schema.json#/$defs/emoji_or_null"
+            },
+            "at_school": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "items",
+                "label"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "icon",
+                      "people",
+                      "title",
+                      "until"
+                    ],
+                    "properties": {
+                      "people": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "icon": {
+                        "$ref": "common.schema.json#/$defs/emoji_or_null"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "until": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "changes": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "items",
+                "label"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "meta",
+                      "people",
+                      "status",
+                      "status_label",
+                      "title",
+                      "who"
+                    ],
+                    "properties": {
+                      "status": {
+                        "enum": [
+                          "cancelled",
+                          "changed",
+                          "added"
+                        ]
+                      },
+                      "status_label": {
+                        "type": "string"
+                      },
+                      "who": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "meta": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "people": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "chores": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "label"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/chore"
+              }
+            }
+          }
+        },
+        "shopping": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "label",
+            "more"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "more": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "notes": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "label",
+            "see_all"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "see_all": {
+              "type": "boolean"
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "common.schema.json#/$defs/note"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "tab",
+    "tabs",
+    "alerts",
+    "overview"
+  ],
+  "unevaluatedProperties": false
+}

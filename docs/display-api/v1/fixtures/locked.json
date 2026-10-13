@@ -1,0 +1,24 @@
+{
+  "api_version": 1,
+  "clock": {
+    "date": "Friday, January 15",
+    "day": "2027-01-15",
+    "iso": "2027-01-15T08:00:00+00:00",
+    "time": "08:00",
+    "tz": "UTC",
+    "unix": 1800000000,
+    "utc_offset_minutes": 0
+  },
+  "dir": "ltr",
+  "household": "Home",
+  "locale": "en",
+  "locked": true,
+  "strings": {
+    "delete": "Delete last digit",
+    "enter_pin": "Enter PIN",
+    "locked": "Screen locked",
+    "pin_button": "PIN",
+    "unlock": "Unlock",
+    "wrong_pin": "Wrong PIN"
+  }
+}

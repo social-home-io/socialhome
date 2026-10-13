@@ -68,6 +68,9 @@ dev = [
     "pytest-xdist>=3",
     "aiohttp[speedups]",
     "freezegun",
+    # Validates the wall-panel API payloads against their published JSON
+    # Schemas (``docs/display-api/v1/``).
+    "jsonschema>=4.18",
     "mypy>=2.4",
     "types-aiofiles>=23",
     # Keep the floor aligned with ``.pre-commit-config.yaml``'s

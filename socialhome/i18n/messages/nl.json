@@ -185,5 +185,10 @@
   "dashboard.map.away": "{names} onderweg",
   "dashboard.map.and": "{rest} en {last}",
   "dashboard.map.more_places": "+{n} plekken",
-  "dashboard.map.more_places_one": "+1 plek"
+  "dashboard.map.more_places_one": "+1 plek",
+  "dashboard.display.pair_title": "Dit paneel koppelen",
+  "dashboard.display.pair_hint": "Open in Social Home Admin › Dashboard en voer deze code in:",
+  "dashboard.display.pair_expired": "De code is verlopen — er komt een nieuwe…",
+  "dashboard.display.unpaired": "Dit paneel is niet meer gekoppeld. Koppel het opnieuw via Admin › Dashboard.",
+  "dashboard.display.connecting": "Verbinden met Social Home…"
 }

@@ -185,5 +185,10 @@
   "dashboard.map.away": "{names} fuera",
   "dashboard.map.and": "{rest} y {last}",
   "dashboard.map.more_places": "+{n} lugares",
-  "dashboard.map.more_places_one": "+1 lugar"
+  "dashboard.map.more_places_one": "+1 lugar",
+  "dashboard.display.pair_title": "Vincular este panel",
+  "dashboard.display.pair_hint": "En Social Home, abre Admin › Panel e introduce este código:",
+  "dashboard.display.pair_expired": "El código ha caducado — obteniendo uno nuevo…",
+  "dashboard.display.unpaired": "Este panel ya no está vinculado. Vuelve a vincularlo en Admin › Panel.",
+  "dashboard.display.connecting": "Conectando con Social Home…"
 }

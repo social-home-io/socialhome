@@ -185,5 +185,10 @@
   "dashboard.map.away": "{names} en déplacement",
   "dashboard.map.and": "{rest} et {last}",
   "dashboard.map.more_places": "+{n} lieux",
-  "dashboard.map.more_places_one": "+1 lieu"
+  "dashboard.map.more_places_one": "+1 lieu",
+  "dashboard.display.pair_title": "Associer cet écran",
+  "dashboard.display.pair_hint": "Dans Social Home, ouvre Admin › Tableau et saisis ce code :",
+  "dashboard.display.pair_expired": "Le code a expiré — un nouveau arrive…",
+  "dashboard.display.unpaired": "Cet écran n'est plus associé. Associe-le à nouveau dans Admin › Tableau.",
+  "dashboard.display.connecting": "Connexion à Social Home…"
 }
