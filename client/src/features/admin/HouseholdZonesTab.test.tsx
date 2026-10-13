@@ -254,6 +254,18 @@ describe('HouseholdZonesTab', () => {
     expect(mockApi.get).toHaveBeenCalledTimes(2)
   })
 
+  it('a quiet refetch that succeeds clears an earlier load error', async () => {
+    mockApi.get.mockRejectedValueOnce(new Error('offline'))
+    const { findByRole, findByText, queryByRole } = render(
+      <HouseholdZonesTab onOpenSettings={() => {}} />,
+    )
+    await findByRole('alert')
+    mockApi.get.mockResolvedValueOnce({ zones: [HOME] })
+    act(() => { wsHandlers.get('household_zones_changed')!() })
+    await findByText('Zürich flat')
+    expect(queryByRole('alert')).toBeNull()
+  })
+
   it('points to the presence toggle when the feature is off', async () => {
     mockApi.get.mockRejectedValue(new ApiError(403, '/api/household/zones', {
       code: 'FEATURE_DISABLED', detail: 'presence', section: 'presence',

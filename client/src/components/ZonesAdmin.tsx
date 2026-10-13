@@ -190,6 +190,9 @@ export function ZonesAdmin({
     try {
       const body = await api.get<ZonesResponse>(basePath)
       setZones(body.zones || [])
+      // A quiet refetch that works replaces an earlier failed load.
+      setError(null)
+      setFeatureOff(false)
     } catch (e) {
       if (quiet) return
       // Duck-typed: an ``ApiError`` carries the server's ``code``.
