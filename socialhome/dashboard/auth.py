@@ -55,6 +55,9 @@ global bucket of their own (:meth:`DashboardAuth.begin_pair_code`):
 :data:`PAIR_CODE_MAX_FAILURES` in :data:`PAIR_CODE_WINDOW_S`, fixed size,
 and fully separate from the login / PIN failure table — a flood of failed
 tablet logins can't hold pairing back, nor wrong codes hold back a login.
+A paired panel's reads are budgeted per panel
+(:meth:`DashboardAuth.begin_display_read`): :data:`DISPLAY_READ_MAX` JSON
+reads and :data:`DISPLAY_IMAGE_MAX` images per :data:`DISPLAY_WINDOW_S`.
 """
 
 from __future__ import annotations
@@ -92,6 +95,9 @@ __all__ = [
     "PAIR_CODE_MAX_FAILURES",
     "PAIR_CODE_WINDOW_S",
     "PAIR_MAX",
+    "DISPLAY_IMAGE_MAX",
+    "DISPLAY_READ_MAX",
+    "DISPLAY_WINDOW_S",
     "PAIR_WINDOW_S",
     "KEEP_TTL_S",
     "MAX_CLOCK_SKEW_S",
@@ -148,6 +154,12 @@ PAIR_WINDOW_S = 600
 #: (:meth:`DashboardAuth.begin_pair_code`).
 PAIR_CODE_MAX_FAILURES = 5
 PAIR_CODE_WINDOW_S = 15 * 60
+#: A paired wall panel's reads per window, per panel
+#: (:meth:`DashboardAuth.begin_display_read`). It polls a board every 30 s
+#: and opens a few more on a tap; images load when they change.
+DISPLAY_READ_MAX = 120
+DISPLAY_IMAGE_MAX = 600
+DISPLAY_WINDOW_S = 60
 
 #: Revocation reasons (:meth:`DashboardAuth.revoke`). ``locked``: the
 #: cookie was replaced by a locked one (``POST /lock``) — it now counts
@@ -265,6 +277,7 @@ class DashboardAuth:
         "_acks",
         "_tiles",
         "_pairs",
+        "_display_reads",
         "_pairs_pruned_at",
         "_pair_codes",
         "last_seen_at",
@@ -293,6 +306,7 @@ class DashboardAuth:
         self._acks = RateLimiter(monotonic=clock)
         self._tiles = RateLimiter(monotonic=clock)
         self._pairs = RateLimiter(monotonic=clock)
+        self._display_reads = RateLimiter(monotonic=clock)
         self._pairs_pruned_at = clock()
         # Wrong pairing codes: one global bucket, never the login table.
         self._pair_codes: deque[float] = deque(maxlen=PAIR_CODE_MAX_FAILURES)
@@ -477,6 +491,20 @@ class DashboardAuth:
         if self._tiles.is_allowed(key, limit=TILE_MAX, window_s=TILE_WINDOW_S):
             return 0
         return self._tiles.retry_after_s(key, window_s=TILE_WINDOW_S)
+
+    def begin_display_read(self, display_id: str, *, image: bool = False) -> int:
+        """Count one read by a paired panel: ``0`` when it may go ahead,
+        else the seconds to wait (nothing is counted then). JSON reads and
+        images (avatars, emoji) have separate budgets, keyed on the panel
+        id (at most :data:`~socialhome.domain.household_dashboard.MAX_DISPLAYS`
+        keys)."""
+        kind, limit = (
+            ("img", DISPLAY_IMAGE_MAX) if image else ("json", DISPLAY_READ_MAX)
+        )
+        key = f"display-{kind}:{display_id}"
+        if self._display_reads.is_allowed(key, limit=limit, window_s=DISPLAY_WINDOW_S):
+            return 0
+        return self._display_reads.retry_after_s(key, window_s=DISPLAY_WINDOW_S)
 
     def begin_pair(self, client_key: str) -> int:
         """Count one anonymous pairing start from ``client_key`` (a

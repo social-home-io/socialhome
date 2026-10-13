@@ -1,0 +1,709 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/common.schema.json",
+  "title": "Shared definitions",
+  "$defs": {
+    "api_version": {
+      "const": 1
+    },
+    "color": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^#[0-9a-f]{6}$",
+      "description": "A validated #rrggbb colour, or null (draw the neutral look)."
+    },
+    "emoji": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "text"
+      ],
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{2,6}(-[0-9a-f]{2,6}){0,9}$"
+        }
+      },
+      "description": "A glyph: draw /api/display/v1/emoji/{code}; code is null when the text is no emoji (e.g. a zone letter)."
+    },
+    "emoji_or_null": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/emoji"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "date",
+        "day",
+        "iso",
+        "time",
+        "tz",
+        "unix",
+        "utc_offset_minutes"
+      ],
+      "properties": {
+        "time": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "day": {
+          "type": "string",
+          "format": "date"
+        },
+        "iso": {
+          "type": "string"
+        },
+        "unix": {
+          "type": "integer"
+        },
+        "tz": {
+          "type": "string"
+        },
+        "utc_offset_minutes": {
+          "type": "integer"
+        }
+      },
+      "description": "The household clock, truncated to the minute."
+    },
+    "where": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "icon",
+        "label"
+      ],
+      "properties": {
+        "icon": {
+          "$ref": "#/$defs/emoji"
+        },
+        "label": {
+          "type": "string"
+        }
+      }
+    },
+    "person": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "avatar",
+        "badge",
+        "badge_label",
+        "color",
+        "id",
+        "initials",
+        "ink",
+        "name",
+        "picture_hash",
+        "picture_view",
+        "where"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "initials": {
+          "type": "string"
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        },
+        "ink": {
+          "$ref": "#/$defs/color"
+        },
+        "avatar": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "picture_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "picture_view": {
+          "type": "boolean"
+        },
+        "where": {
+          "$ref": "#/$defs/where"
+        },
+        "badge": {
+          "type": "integer"
+        },
+        "badge_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idle_return_minutes",
+        "keep_screen_on",
+        "mention_sound",
+        "night_end",
+        "night_start",
+        "pin_set"
+      ],
+      "properties": {
+        "idle_return_minutes": {
+          "type": "integer"
+        },
+        "keep_screen_on": {
+          "type": "boolean"
+        },
+        "mention_sound": {
+          "type": "boolean"
+        },
+        "night_start": {
+          "type": "string"
+        },
+        "night_end": {
+          "type": "string"
+        },
+        "pin_set": {
+          "type": "boolean"
+        }
+      }
+    },
+    "rail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current",
+        "many",
+        "shown"
+      ],
+      "properties": {
+        "shown": {
+          "type": "boolean"
+        },
+        "many": {
+          "type": "boolean"
+        },
+        "current": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "night_item": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "icon",
+        "people",
+        "time",
+        "title",
+        "when",
+        "when_label"
+      ],
+      "properties": {
+        "when": {
+          "enum": [
+            "today",
+            "tomorrow"
+          ]
+        },
+        "when_label": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "icon": {
+          "$ref": "#/$defs/emoji_or_null"
+        },
+        "people": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "night": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "date",
+        "item",
+        "time",
+        "wake_hint"
+      ],
+      "properties": {
+        "time": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "item": {
+          "$ref": "#/$defs/night_item"
+        },
+        "wake_hint": {
+          "type": "string"
+        }
+      }
+    },
+    "tab": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "badge",
+        "badge_label",
+        "current",
+        "key",
+        "label",
+        "path"
+      ],
+      "properties": {
+        "key": {
+          "enum": [
+            "overview",
+            "messages",
+            "notes",
+            "map"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "badge": {
+          "type": "integer"
+        },
+        "badge_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message_id",
+        "person_id"
+      ],
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "person_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "mention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ack",
+        "caption",
+        "from_label",
+        "id",
+        "iso",
+        "key",
+        "label",
+        "name",
+        "person",
+        "say",
+        "text",
+        "when"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "person": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "from_label": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "caption": {
+          "type": "string"
+        },
+        "say": {
+          "type": "string"
+        },
+        "when": {
+          "type": "string"
+        },
+        "iso": {
+          "type": "string"
+        },
+        "ack": {
+          "$ref": "#/$defs/ack"
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caption",
+        "from_label",
+        "icon",
+        "id",
+        "iso",
+        "name",
+        "new",
+        "person",
+        "say",
+        "text",
+        "when"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "person": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "from_label": {
+          "type": "string"
+        },
+        "icon": {
+          "$ref": "#/$defs/emoji_or_null"
+        },
+        "text": {
+          "type": "string"
+        },
+        "caption": {
+          "type": "string"
+        },
+        "say": {
+          "type": "string"
+        },
+        "new": {
+          "type": "boolean"
+        },
+        "when": {
+          "type": "string"
+        },
+        "iso": {
+          "type": "string"
+        }
+      }
+    },
+    "agenda_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "color",
+        "icon",
+        "is_break",
+        "kind",
+        "meta",
+        "now",
+        "past",
+        "people",
+        "status",
+        "status_label",
+        "time",
+        "title"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "event",
+            "lesson",
+            "school"
+          ]
+        },
+        "is_break": {
+          "type": "boolean"
+        },
+        "time": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "icon": {
+          "$ref": "#/$defs/emoji_or_null"
+        },
+        "status": {
+          "enum": [
+            "cancelled",
+            "changed",
+            "added",
+            null
+          ]
+        },
+        "status_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "now": {
+          "type": "boolean"
+        },
+        "past": {
+          "type": "boolean"
+        },
+        "meta": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        },
+        "people": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "chore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "due",
+        "late",
+        "people",
+        "state",
+        "state_label",
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "done",
+            "overdue",
+            "open"
+          ]
+        },
+        "state_label": {
+          "type": "string"
+        },
+        "late": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "due": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "people": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "note_colors": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "bg",
+        "ink"
+      ],
+      "properties": {
+        "bg": {
+          "$ref": "#/$defs/color"
+        },
+        "ink": {
+          "$ref": "#/$defs/color"
+        }
+      }
+    },
+    "note": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "color",
+        "dark",
+        "light",
+        "text"
+      ],
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        },
+        "light": {
+          "$ref": "#/$defs/note_colors"
+        },
+        "dark": {
+          "$ref": "#/$defs/note_colors"
+        }
+      }
+    },
+    "tab_empty": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "icon",
+        "text",
+        "title"
+      ],
+      "properties": {
+        "icon": {
+          "$ref": "#/$defs/emoji_or_null"
+        },
+        "title": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "header": {
+      "type": "object",
+      "required": [
+        "api_version",
+        "view",
+        "view_key",
+        "household",
+        "locale",
+        "dir",
+        "clock",
+        "settings",
+        "rail",
+        "people",
+        "is_night",
+        "night"
+      ],
+      "properties": {
+        "api_version": {
+          "$ref": "#/$defs/api_version"
+        },
+        "view": {
+          "enum": [
+            "overview",
+            "messages",
+            "notes",
+            "map",
+            "person"
+          ]
+        },
+        "view_key": {
+          "type": "string"
+        },
+        "household": {
+          "type": "string"
+        },
+        "locale": {
+          "type": "string"
+        },
+        "dir": {
+          "enum": [
+            "ltr",
+            "rtl"
+          ]
+        },
+        "clock": {
+          "$ref": "#/$defs/clock"
+        },
+        "settings": {
+          "$ref": "#/$defs/settings"
+        },
+        "rail": {
+          "$ref": "#/$defs/rail"
+        },
+        "people": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/person"
+          }
+        },
+        "is_night": {
+          "type": "boolean"
+        },
+        "night": {
+          "$ref": "#/$defs/night"
+        }
+      }
+    }
+  }
+}

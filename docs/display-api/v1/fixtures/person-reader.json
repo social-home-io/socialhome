@@ -1,0 +1,221 @@
+{
+  "api_version": 1,
+  "clock": {
+    "date": "Monday, October 12",
+    "day": "2026-10-12",
+    "iso": "2026-10-12T14:32:00+02:00",
+    "time": "14:32",
+    "tz": "Europe/Berlin",
+    "unix": 1791808320,
+    "utc_offset_minutes": 120
+  },
+  "dir": "ltr",
+  "household": "Home",
+  "is_night": false,
+  "kind": "reader",
+  "locale": "en",
+  "mentions": [],
+  "night": null,
+  "people": [
+    {
+      "avatar": null,
+      "badge": 0,
+      "badge_label": null,
+      "color": "#357bbb",
+      "id": "u-pascal",
+      "initials": "P",
+      "ink": "#000000",
+      "name": "Pascal",
+      "picture_hash": null,
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home"
+      }
+    },
+    {
+      "avatar": "/api/display/v1/avatar/u-anna?v=pic1",
+      "badge": 0,
+      "badge_label": null,
+      "color": "#c44d72",
+      "id": "u-anna",
+      "initials": "A",
+      "ink": "#000000",
+      "name": "Anna",
+      "picture_hash": "pic1",
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f4cd",
+          "text": "📍"
+        },
+        "label": "Work"
+      }
+    },
+    {
+      "avatar": null,
+      "badge": 1,
+      "badge_label": "New message for Mia",
+      "color": "#3f7d57",
+      "id": "u-mia",
+      "initials": "M",
+      "ink": "#ffffff",
+      "name": "Mia",
+      "picture_hash": null,
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home"
+      }
+    },
+    {
+      "avatar": null,
+      "badge": 1,
+      "badge_label": "New message for Leo",
+      "color": "#ad780c",
+      "id": "u-leo",
+      "initials": "L",
+      "ink": "#000000",
+      "name": "Leo",
+      "picture_hash": null,
+      "picture_view": true,
+      "where": {
+        "icon": {
+          "code": "1f697",
+          "text": "🚗"
+        },
+        "label": "Away"
+      }
+    }
+  ],
+  "person": {
+    "avatar": "/api/display/v1/avatar/u-anna?v=pic1",
+    "color": "#c44d72",
+    "id": "u-anna",
+    "initials": "A",
+    "ink": "#000000",
+    "name": "Anna",
+    "picture_hash": "pic1",
+    "status_emoji": {
+      "code": "1f634",
+      "text": "😴"
+    },
+    "status_text": null,
+    "where": {
+      "icon": {
+        "code": "1f4cd",
+        "text": "📍"
+      },
+      "label": "Work"
+    }
+  },
+  "picture": null,
+  "rail": {
+    "current": "u-anna",
+    "many": false,
+    "shown": true
+  },
+  "reader": {
+    "chores": {
+      "items": [
+        {
+          "due": null,
+          "late": null,
+          "people": [],
+          "state": "done",
+          "state_label": "Done",
+          "title": "Laundry"
+        }
+      ],
+      "label": "Chores"
+    },
+    "day": {
+      "empty": null,
+      "empty_icon": null,
+      "label": "Today",
+      "rows": [
+        {
+          "color": "#c44d72",
+          "icon": null,
+          "is_break": false,
+          "kind": "event",
+          "meta": null,
+          "now": true,
+          "past": false,
+          "people": [],
+          "status": null,
+          "status_label": null,
+          "time": "09:00–17:00",
+          "title": "Work"
+        },
+        {
+          "color": "#c44d72",
+          "icon": null,
+          "is_break": false,
+          "kind": "event",
+          "meta": null,
+          "now": false,
+          "past": false,
+          "people": [],
+          "status": null,
+          "status_label": null,
+          "time": "18:30–20:00",
+          "title": "Dinner with Gran"
+        }
+      ],
+      "tomorrow": {
+        "label": "Tomorrow",
+        "rows": [
+          {
+            "color": "#c44d72",
+            "icon": null,
+            "is_break": false,
+            "kind": "event",
+            "meta": null,
+            "now": false,
+            "past": false,
+            "people": [],
+            "status": null,
+            "status_label": null,
+            "time": "All day",
+            "title": "Mia's birthday"
+          }
+        ]
+      }
+    },
+    "next": {
+      "color": "#c44d72",
+      "icon": null,
+      "label": "Next",
+      "meta": null,
+      "rel": "in 3 h",
+      "time": "18:30",
+      "title": "Dinner with Gran"
+    },
+    "now": {
+      "color": "#c44d72",
+      "icon": null,
+      "label": "Now",
+      "meta": null,
+      "title": "Work",
+      "until": "until 17:00"
+    },
+    "school": null
+  },
+  "settings": {
+    "idle_return_minutes": 3,
+    "keep_screen_on": true,
+    "mention_sound": true,
+    "night_end": "06:00",
+    "night_start": "22:00",
+    "pin_set": false
+  },
+  "view": "person",
+  "view_key": "693621153c857eed"
+}

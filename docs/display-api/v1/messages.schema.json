@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/messages.schema.json",
+  "title": "GET /api/display/v1/messages",
+  "allOf": [
+    {
+      "$ref": "common.schema.json#/$defs/header"
+    }
+  ],
+  "type": "object",
+  "properties": {
+    "api_version": true,
+    "view": {
+      "const": "messages"
+    },
+    "view_key": true,
+    "household": true,
+    "locale": true,
+    "dir": true,
+    "clock": true,
+    "settings": true,
+    "rail": true,
+    "people": true,
+    "is_night": true,
+    "night": true,
+    "tab": {
+      "enum": [
+        "overview",
+        "messages",
+        "notes",
+        "map"
+      ]
+    },
+    "tabs": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/tab"
+      }
+    },
+    "alerts": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/mention"
+      }
+    },
+    "messages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "days",
+        "empty"
+      ],
+      "properties": {
+        "days": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "label",
+              "rows"
+            ],
+            "properties": {
+              "key": {
+                "enum": [
+                  "today",
+                  "yesterday"
+                ]
+              },
+              "label": {
+                "type": "string"
+              },
+              "rows": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "caption",
+                    "from_label",
+                    "icon",
+                    "id",
+                    "iso",
+                    "name",
+                    "new",
+                    "person",
+                    "playing",
+                    "rest",
+                    "say",
+                    "text",
+                    "time",
+                    "when"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "person": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "from_label": {
+                      "type": "string"
+                    },
+                    "icon": {
+                      "$ref": "common.schema.json#/$defs/emoji_or_null"
+                    },
+                    "text": {
+                      "type": "string"
+                    },
+                    "caption": {
+                      "type": "string"
+                    },
+                    "say": {
+                      "type": "string"
+                    },
+                    "new": {
+                      "type": "boolean"
+                    },
+                    "when": {
+                      "type": "string"
+                    },
+                    "iso": {
+                      "type": "string"
+                    },
+                    "rest": {
+                      "type": "boolean"
+                    },
+                    "time": {
+                      "type": "string"
+                    },
+                    "playing": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "empty": {
+          "$ref": "common.schema.json#/$defs/tab_empty"
+        }
+      }
+    }
+  },
+  "required": [
+    "tab",
+    "tabs",
+    "alerts",
+    "messages"
+  ],
+  "unevaluatedProperties": false
+}

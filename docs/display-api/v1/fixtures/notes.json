@@ -1,0 +1,188 @@
+{
+  "alerts": [
+    {
+      "ack": {
+        "message_id": "h1",
+        "person_id": null
+      },
+      "caption": "@here Dinner is <b>ready</b>!",
+      "from_label": "Message from Anna",
+      "id": "h1",
+      "iso": "2026-10-12T14:29:00+02:00",
+      "key": "h1:here",
+      "label": "Message for everyone",
+      "name": "Anna",
+      "person": "u-anna",
+      "say": "Anna says: @here Dinner is <b>ready</b>!",
+      "text": "@here Dinner is <b>ready</b>!",
+      "when": "3 min ago"
+    }
+  ],
+  "api_version": 1,
+  "clock": {
+    "date": "Monday, October 12",
+    "day": "2026-10-12",
+    "iso": "2026-10-12T14:32:00+02:00",
+    "time": "14:32",
+    "tz": "Europe/Berlin",
+    "unix": 1791808320,
+    "utc_offset_minutes": 120
+  },
+  "dir": "ltr",
+  "household": "Home",
+  "is_night": false,
+  "locale": "en",
+  "night": null,
+  "notes": {
+    "empty": null,
+    "items": [
+      {
+        "color": "#ffee88",
+        "dark": {
+          "bg": "#bdb168",
+          "ink": "#1f1d1a"
+        },
+        "light": {
+          "bg": "#fdef9d",
+          "ink": "#1f1d1a"
+        },
+        "text": "Plumber Tue 9am"
+      },
+      {
+        "color": null,
+        "dark": null,
+        "light": null,
+        "text": "Bad colour"
+      }
+    ],
+    "more": "+ 3 more"
+  },
+  "people": [
+    {
+      "avatar": null,
+      "badge": 0,
+      "badge_label": null,
+      "color": "#357bbb",
+      "id": "u-pascal",
+      "initials": "P",
+      "ink": "#000000",
+      "name": "Pascal",
+      "picture_hash": null,
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home"
+      }
+    },
+    {
+      "avatar": "/api/display/v1/avatar/u-anna?v=pic1",
+      "badge": 0,
+      "badge_label": null,
+      "color": "#c44d72",
+      "id": "u-anna",
+      "initials": "A",
+      "ink": "#000000",
+      "name": "Anna",
+      "picture_hash": "pic1",
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f697",
+          "text": "🚗"
+        },
+        "label": "Away"
+      }
+    },
+    {
+      "avatar": null,
+      "badge": 1,
+      "badge_label": "New message for Mia",
+      "color": "#3f7d57",
+      "id": "u-mia",
+      "initials": "M",
+      "ink": "#ffffff",
+      "name": "Mia",
+      "picture_hash": null,
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home"
+      }
+    },
+    {
+      "avatar": null,
+      "badge": 1,
+      "badge_label": "New message for Leo",
+      "color": "#ad780c",
+      "id": "u-leo",
+      "initials": "L",
+      "ink": "#000000",
+      "name": "Leo",
+      "picture_hash": null,
+      "picture_view": true,
+      "where": {
+        "icon": {
+          "code": "1f4cd",
+          "text": "📍"
+        },
+        "label": "School"
+      }
+    }
+  ],
+  "rail": {
+    "current": null,
+    "many": false,
+    "shown": true
+  },
+  "settings": {
+    "idle_return_minutes": 3,
+    "keep_screen_on": true,
+    "mention_sound": true,
+    "night_end": "06:00",
+    "night_start": "22:00",
+    "pin_set": false
+  },
+  "tab": "notes",
+  "tabs": [
+    {
+      "badge": 0,
+      "badge_label": null,
+      "current": false,
+      "key": "overview",
+      "label": "Overview",
+      "path": "/api/display/v1/home"
+    },
+    {
+      "badge": 1,
+      "badge_label": "1 new",
+      "current": false,
+      "key": "messages",
+      "label": "Messages",
+      "path": "/api/display/v1/messages"
+    },
+    {
+      "badge": 0,
+      "badge_label": null,
+      "current": true,
+      "key": "notes",
+      "label": "Notes",
+      "path": "/api/display/v1/notes"
+    },
+    {
+      "badge": 0,
+      "badge_label": null,
+      "current": false,
+      "key": "map",
+      "label": "Map",
+      "path": "/api/display/v1/map"
+    }
+  ],
+  "view": "notes",
+  "view_key": "e9300d0ed63b68e8"
+}

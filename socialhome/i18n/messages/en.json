@@ -195,5 +195,10 @@
   "dashboard.map.away": "{names} away",
   "dashboard.map.and": "{rest} and {last}",
   "dashboard.map.more_places": "+{n} places",
-  "dashboard.map.more_places_one": "+1 place"
+  "dashboard.map.more_places_one": "+1 place",
+  "dashboard.display.pair_title": "Pair this panel",
+  "dashboard.display.pair_hint": "In Social Home, open Admin › Dashboard and enter this code:",
+  "dashboard.display.pair_expired": "The code expired — getting a new one…",
+  "dashboard.display.unpaired": "This panel isn't paired any more. Pair it again in Admin › Dashboard.",
+  "dashboard.display.connecting": "Connecting to Social Home…"
 }

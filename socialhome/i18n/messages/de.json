@@ -185,5 +185,10 @@
   "dashboard.map.away": "{names} unterwegs",
   "dashboard.map.and": "{rest} und {last}",
   "dashboard.map.more_places": "+{n} Orte",
-  "dashboard.map.more_places_one": "+1 Ort"
+  "dashboard.map.more_places_one": "+1 Ort",
+  "dashboard.display.pair_title": "Dieses Panel koppeln",
+  "dashboard.display.pair_hint": "Öffne in Social Home Admin › Dashboard und gib diesen Code ein:",
+  "dashboard.display.pair_expired": "Der Code ist abgelaufen — ein neuer kommt…",
+  "dashboard.display.unpaired": "Dieses Panel ist nicht mehr gekoppelt. Kopple es erneut unter Admin › Dashboard.",
+  "dashboard.display.connecting": "Verbinde mit Social Home…"
 }

@@ -31,11 +31,6 @@ from aiohttp import web
 
 from ..domain.household_dashboard import (
     HERE_SHOWN,
-    SECTION_TIMETABLE,
-    here_alerts,
-    mentions_for,
-    DashboardAgendaItem,
-    DashboardEvent,
     DashboardPerson,
     HomeSnapshot,
     PersonSnapshot,
@@ -56,15 +51,8 @@ from .auth import (
     DashboardAuth,
 )
 from .clock import household_clock, resolve_zone
-from .messages import (
-    MentionCard,
-    card_rows,
-    chat_days,
-    chat_window,
-    mention_cards,
-    message_rows,
-    new_count,
-)
+from .boards import board_base, home_board, model_fields, person_board
+from .messages import MentionCard
 from .keys import (
     AUTH_KEY,
     CLAIMS_KEY,
@@ -76,23 +64,12 @@ from .keys import (
     SNAPSHOTS_KEY,
     TILES_KEY,
 )
-from .map_view import map_view
-from .picture import picture_view
 from .policy import build_dashboard_csp
 from .presenter import (
-    MAX_LANES,
-    SHOPPING_SHOWN,
-    STICKIES_SHOWN,
     ColorBook,
     Fmt,
-    build_timeline,
-    day_list,
     home_colors,
-    night_item,
     person_colors,
-    presence_groups,
-    school_changes,
-    school_now,
     theme_css,
     view_key,
 )
@@ -482,9 +459,6 @@ TILE_CACHE = "private, no-cache"
 #: Longest ``message_id`` / ``person_id`` ``POST /ack`` accepts.
 ACK_ID_MAX = 128
 
-#: Events listed under "Tomorrow" on a person page.
-TOMORROW_SHOWN = 3
-
 #: ``/fragment/…`` paths for live refresh (``dashboard.js``).
 HOME_FRAGMENT = "/fragment/home"
 
@@ -534,56 +508,37 @@ async def _board(
     current: str | None,
     fragment_url: str,
     template: str,
-    extra: dict[str, object],
     own_color: str | None = None,
     picture: bool = False,
     tab: str | None = None,
 ) -> _Board:
     """The context every dashboard board (Home, a person) shares: rail,
-    clock, night mode, the inline colour style and its view key.
-    ``picture`` (a picture-view person) is part of the key too: it
-    changes the rail and the night view, which a swap can't — and so is
-    Home's ``tab``, so a swap never crosses tabs."""
+    clock, night mode, the inline colour style and its view key
+    (:func:`~.boards.board_base`). ``picture`` (a picture-view person) is
+    part of the key too: it changes the rail and the night view, which a
+    swap can't — and so is Home's ``tab``, so a swap never crosses tabs."""
     app = request.app
     settings = await app[SETTINGS_KEY].get()
     t = app[RENDERER_KEY].translator(settings.locale)
     style = colors.css() + theme_css(await _theme_primary(app))
-    night = snapshot.is_night
+    base = board_base(snapshot, people=people, colors=colors, t=t, own_color=own_color)
+    night = base.night
     # Everything outside <main> a fragment swap can't change: the rail's
     # faces, <html lang>, the lock button, the data-* the script reads.
     rail = [(p.user_id, p.display_name, p.initials, p.picture_hash) for p in people]
-    fmt = Fmt(
-        now=snapshot.now,
-        today=snapshot.today,
-        t=t,
-        people=people,
-        colors=colors,
-        own_color=own_color,
-    )
-    # Every unacknowledged mention (never at night): the rail badges
-    # everyone with one waiting, and the script chimes for new ones.
-    show_rail = len(people) > 1
-    # The rail's badges (only where there is a rail): every person
-    # mention waiting. Home and the person board add what they render
-    # themselves — the script chimes only for what this page shows.
-    badged = (
-        []
-        if night or not show_rail
-        else [c for c in mention_cards(snapshot.mentions, fmt) if c.person_id]
-    )
     zone = snapshot.now.tzinfo
     assert zone is not None
     context: dict[str, object] = {
         "household": await app[HOUSEHOLD_NAME_KEY](),
-        "f": fmt,
+        "f": base.fmt,
         "people": people,
         "current": current,
-        "show_rail": show_rail,
-        "rail_many": len(people) > MAX_LANES,
+        "show_rail": base.show_rail,
+        "rail_many": base.rail_many,
         "pin_set": settings.pin_set,
         "clock": household_clock(snapshot.now.timestamp(), zone, t),
         "night": night,
-        "night_item": night_item(snapshot) if night else None,
+        "night_item": base.night_item,
         "style": style,
         "view_key": view_key(
             style,
@@ -614,11 +569,13 @@ async def _board(
         # never at night. New ones just swap in with the fragment — every
         # sender is a shown person, whose colour is in the style already.
         "messages": [],
-        # Mentions: the rail's badges, the marker the script reads after a
-        # swap (badges + chime), Home's ``@here`` banners and the person
-        # page's own (``mention_cards``).
-        "badges": frozenset(c.person_id for c in badged if c.person_id),
-        "mention_keys": " ".join(c.key for c in badged),
+        # Mentions: the rail's badges (every person mention waiting, only
+        # where there is a rail), the marker the script reads after a swap
+        # (badges + chime), Home's ``@here`` banners and the person page's
+        # own. Home and the person board add what they render themselves —
+        # the script chimes only for what this page shows.
+        "badges": base.badges,
+        "mention_keys": " ".join(c.key for c in base.badged),
         "mention_sound": settings.mention_sound,
         "here_cards": [],
         "my_mentions": [],
@@ -626,29 +583,24 @@ async def _board(
         "tab": tab,
         "tabs": (),
         "tab_new": 0,
-        **extra,
     }
     return _Board(locale=settings.locale, context=context, style=style)
 
 
-async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board | None:
-    """Home on ``tab`` — ``None`` when that tab doesn't show (:mod:`.tabs`).
+_HOME_TEMPLATES = {
+    TAB_OVERVIEW: "_home.html.j2",
+    TAB_MESSAGES: "_home_messages.html.j2",
+    TAB_NOTES: "_home_notes.html.j2",
+    TAB_MAP: "_home_map.html.j2",
+}
 
-    Every tab carries the tab bar (with the Messages badge: messages under
-    :data:`~.messages.NEW_FOR` old that the Messages tab lists, never on the
-    Messages tab itself) and the ``@here`` banners; a message on a banner
-    is left out of the Overview card, the Messages list and the badge
-    until someone taps "Got it"."""
+
+async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board | None:
+    """Home on ``tab`` — ``None`` when that tab doesn't show (:mod:`.tabs`);
+    the content is :func:`~.boards.home_board`'s."""
     snap = await request.app[SNAPSHOTS_KEY].home()
-    tabs = home_tabs(snap)
-    if tab not in {t.key for t in tabs}:
+    if tab not in {t.key for t in home_tabs(snap)}:
         return None
-    template = {
-        TAB_OVERVIEW: "_home.html.j2",
-        TAB_MESSAGES: "_home_messages.html.j2",
-        TAB_NOTES: "_home_notes.html.j2",
-        TAB_MAP: "_home_map.html.j2",
-    }[tab]
     board = await _board(
         request,
         snapshot=snap,
@@ -656,63 +608,27 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
         colors=home_colors(snap),
         current=None,
         fragment_url=home_tab(tab).fragment,
-        template=template,
-        extra={},
+        template=_HOME_TEMPLATES[tab],
         tab=tab,
     )
-    fmt = cast(Fmt, board.context["f"])
-    here_cards = (
-        []
-        if snap.is_night
-        else mention_cards(here_alerts(snap.mentions), fmt)[:HERE_SHOWN]
-    )
-    bannered = frozenset(c.id for c in here_cards)
-    # The tab's window again here (the read model bounds it already).
-    rows = (
-        [] if snap.is_night else chat_window(message_rows(snap.messages, fmt), snap.now)
-    )
-    listed = [r for r in rows if r.id not in bannered]
+    model = home_board(snap, cast(Fmt, board.context["f"]), tab)
+    assert model is not None  # the tab shows (checked above, same snapshot)
     board.context.update(
         snap=snap,
-        # Only Overview qualifying: no bar at all.
-        tabs=tabs if len(tabs) > 1 else (),
-        tab_new=new_count(listed),
-        here_cards=here_cards,
+        tabs=model.tabs,
+        tab_new=model.tab_new,
+        here_cards=model.here_cards,
     )
-    _add_keys(board, here_cards)
-    if tab == TAB_MESSAGES:
-        board.context["chat_days"] = chat_days(listed, fmt)
-    elif tab == TAB_NOTES:
-        board.context["notes"] = snap.stickies
-        board.context["notes_beyond"] = max(0, snap.stickies_total - len(snap.stickies))
+    _add_keys(board, model.here_cards)
+    if model.chat_days is not None:
+        board.context["chat_days"] = model.chat_days
+    elif model.notes is not None:
+        board.context.update(notes=model.notes, notes_beyond=model.notes_beyond)
     elif tab == TAB_MAP:
-        board.context["map"] = map_view(snap, fmt)
-        board.context["attribution"] = MAP_ATTRIBUTION_TEXT
+        board.context.update(map=model.map, attribution=MAP_ATTRIBUTION_TEXT)
     else:
-        card = card_rows(rows, snap.now, hide=bannered)
-        board.context.update(
-            timeline=build_timeline(snap, fmt),
-            day_rows=day_list(snap),
-            presence=presence_groups(snap),
-            at_school=(
-                school_now(snap.school, snap.now)
-                if SECTION_TIMETABLE in snap.sections
-                else []
-            ),
-            changes=(
-                school_changes(snap.school)
-                if SECTION_TIMETABLE in snap.sections
-                else []
-            ),
-            shopping_shown=snap.shopping[:SHOPPING_SHOWN],
-            shopping_more=max(0, snap.shopping_total - SHOPPING_SHOWN),
-            stickies=snap.stickies[:STICKIES_SHOWN],
-            # "See all ›" only where the tab holds more than the card.
-            notes_more=snap.stickies_total > STICKIES_SHOWN,
-            open_chores=sum(1 for c in snap.chores_today if not c.done),
-            messages=card,
-            messages_more=snap.messages_on and len(listed) > len(card),
-        )
+        assert model.overview is not None
+        board.context.update(model_fields(model.overview))
     return board
 
 
@@ -721,42 +637,22 @@ async def _person_board(request: web.Request) -> _Board | None:
     page = await request.app[SNAPSHOTS_KEY].person(user_id)
     if page is None:
         return None
-    people = page.people or (page.person,)
-    school_lessons = page.school.lessons if page.school is not None else ()
-    events_today = (
-        tuple(i for i in page.today_items if isinstance(i, DashboardEvent))
-        if page.school is not None
-        else page.today_items
-    )
-    tomorrow = _tomorrow(page)
     board = await _board(
         request,
         snapshot=page,
-        people=people,
+        people=page.people or (page.person,),
         colors=person_colors(page),
         current=page.person.user_id,
         own_color=page.person.color,
         fragment_url=f"/fragment/p/{quote(page.person.user_id, safe='')}",
         template="_person.html.j2",
         picture=page.person.picture_view,
-        extra={
-            "page": page,
-            "school_lessons": school_lessons,
-            "today_list": events_today,
-            "tomorrow_list": tomorrow,
-        },
     )
-    fmt = cast(Fmt, board.context["f"])
-    if not page.is_night:
-        mine = mention_cards(mentions_for(page.mentions, page.person.user_id), fmt)
-        board.context["my_mentions"] = mine
-        if not board.context["show_rail"]:
-            # No rail, so no badge listed them yet.
-            _add_keys(board, mine)
-    if page.person.picture_view:
-        board.context["picture"] = picture_view(page, fmt, tomorrow=tomorrow)
-        if not page.is_night:
-            board.context["messages"] = message_rows(page.messages, fmt)
+    model = person_board(page, cast(Fmt, board.context["f"]))
+    board.context.update(model_fields(model))
+    if not board.context["show_rail"]:
+        # No rail, so no badge listed them yet.
+        _add_keys(board, model.my_mentions)
     return board
 
 
@@ -766,22 +662,6 @@ def _add_keys(board: _Board, cards: list[MentionCard]) -> None:
     keys = [c.key for c in cards]
     rest = cast(str, board.context["mention_keys"])
     board.context["mention_keys"] = " ".join([*keys, *([rest] if rest else [])])
-
-
-def _tomorrow(page: PersonSnapshot) -> list[DashboardAgendaItem]:
-    """Tomorrow on a person page: the first few events, plus the first
-    lesson (school is said once, not lesson by lesson), in time order."""
-    events = [i for i in page.tomorrow_items if isinstance(i, DashboardEvent)]
-    items: list[DashboardAgendaItem] = list(events[:TOMORROW_SHOWN])
-    if page.school_tomorrow_first is not None:
-        items.append(page.school_tomorrow_first)
-    items.sort(
-        key=lambda i: (
-            0 if isinstance(i, DashboardEvent) and i.all_day else 1,
-            i.start,
-        )
-    )
-    return items
 
 
 class _BoardView(_DashboardView):

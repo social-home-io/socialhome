@@ -601,3 +601,12 @@ def test_stylesheet_has_every_step_the_presenter_can_emit():
         assert f".dash-r-{row} {{" in css
     for rows in range(2, MAX_LANE_ROWS + 1):
         assert f".dash-rows-{rows} {{" in css
+
+
+def test_color_book_color_of_reverses_cls():
+    book = ColorBook()
+    book.add("#C44D72")
+    book.add("#357bbb")
+    assert book.color_of(book.cls("#c44d72")) == "#c44d72"
+    assert book.color_of(book.cls("#357BBB")) == "#357bbb"
+    assert book.color_of("") is None and book.color_of("k99") is None

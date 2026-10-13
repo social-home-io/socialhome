@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/theme.schema.json",
+  "title": "GET /api/display/v1/theme",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "colors",
+    "dir",
+    "font",
+    "household_colors",
+    "locale",
+    "mode",
+    "strings"
+  ],
+  "properties": {
+    "api_version": {
+      "$ref": "common.schema.json#/$defs/api_version"
+    },
+    "locale": {
+      "type": "string"
+    },
+    "dir": {
+      "enum": [
+        "ltr",
+        "rtl"
+      ]
+    },
+    "font": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "household"
+      ],
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "household": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "mode": {
+      "enum": [
+        "light",
+        "dark",
+        "auto"
+      ]
+    },
+    "household_colors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accent",
+        "primary"
+      ],
+      "properties": {
+        "primary": {
+          "$ref": "common.schema.json#/$defs/color"
+        },
+        "accent": {
+          "$ref": "common.schema.json#/$defs/color"
+        }
+      }
+    },
+    "colors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dark",
+        "light",
+        "night"
+      ],
+      "properties": {
+        "light": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "accent",
+            "accent_text",
+            "bg",
+            "border",
+            "error_bg",
+            "error_text",
+            "focus",
+            "muted",
+            "surface",
+            "text"
+          ],
+          "properties": {
+            "bg": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "surface": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "muted": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "accent": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "accent_text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "border": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "error_bg": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "error_text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "focus": {
+              "$ref": "common.schema.json#/$defs/color"
+            }
+          }
+        },
+        "dark": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "accent",
+            "accent_text",
+            "bg",
+            "border",
+            "error_bg",
+            "error_text",
+            "focus",
+            "muted",
+            "surface",
+            "text"
+          ],
+          "properties": {
+            "bg": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "surface": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "muted": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "accent": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "accent_text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "border": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "error_bg": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "error_text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "focus": {
+              "$ref": "common.schema.json#/$defs/color"
+            }
+          }
+        },
+        "night": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "accent",
+            "accent_text",
+            "bg",
+            "border",
+            "error_bg",
+            "error_text",
+            "focus",
+            "muted",
+            "surface",
+            "text"
+          ],
+          "properties": {
+            "bg": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "surface": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "muted": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "accent": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "accent_text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "border": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "error_bg": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "error_text": {
+              "$ref": "common.schema.json#/$defs/color"
+            },
+            "focus": {
+              "$ref": "common.schema.json#/$defs/color"
+            }
+          }
+        }
+      }
+    },
+    "strings": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "required": [
+        "back_home",
+        "connecting",
+        "delete",
+        "empty_day",
+        "enter_pin",
+        "got_it",
+        "hear_rest",
+        "lock",
+        "locked",
+        "map_show_all",
+        "map_title",
+        "message_for_everyone",
+        "message_for_you",
+        "nav_home",
+        "nav_label",
+        "new",
+        "night_today",
+        "night_tomorrow",
+        "night_wake",
+        "not_found",
+        "offline",
+        "pair_expired",
+        "pair_hint",
+        "pair_title",
+        "pin_button",
+        "read_aloud",
+        "retry",
+        "see_all",
+        "tab_map",
+        "tab_messages",
+        "tab_notes",
+        "tab_overview",
+        "tabs_label",
+        "timeline_now",
+        "unlock",
+        "unpaired",
+        "wrong_pin"
+      ]
+    }
+  }
+}

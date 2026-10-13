@@ -1,0 +1,437 @@
+{
+  "api_version": 1,
+  "clock": {
+    "date": "Monday, October 12",
+    "day": "2026-10-12",
+    "iso": "2026-10-12T10:30:00+02:00",
+    "time": "10:30",
+    "tz": "Europe/Berlin",
+    "unix": 1791793800,
+    "utc_offset_minutes": 120
+  },
+  "dir": "ltr",
+  "household": "Home",
+  "is_night": false,
+  "kind": "picture",
+  "locale": "en",
+  "mentions": [
+    {
+      "ack": {
+        "message_id": "p1",
+        "person_id": "u-leo"
+      },
+      "caption": "@leo shoes on",
+      "from_label": "Message from Pascal for you",
+      "id": "p1",
+      "iso": "2026-10-12T14:22:00+02:00",
+      "key": "p1:u-leo",
+      "label": "Message for you",
+      "name": "Pascal",
+      "person": "u-pascal",
+      "say": "Pascal says: @leo shoes on",
+      "text": "@leo shoes on",
+      "when": "just now"
+    }
+  ],
+  "night": null,
+  "people": [
+    {
+      "avatar": null,
+      "badge": 0,
+      "badge_label": null,
+      "color": "#357bbb",
+      "id": "u-pascal",
+      "initials": "P",
+      "ink": "#000000",
+      "name": "Pascal",
+      "picture_hash": null,
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home"
+      }
+    },
+    {
+      "avatar": "/api/display/v1/avatar/u-anna?v=pic1",
+      "badge": 0,
+      "badge_label": null,
+      "color": "#c44d72",
+      "id": "u-anna",
+      "initials": "A",
+      "ink": "#000000",
+      "name": "Anna",
+      "picture_hash": "pic1",
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f4cd",
+          "text": "📍"
+        },
+        "label": "Work"
+      }
+    },
+    {
+      "avatar": null,
+      "badge": 1,
+      "badge_label": "New message for Mia",
+      "color": "#3f7d57",
+      "id": "u-mia",
+      "initials": "M",
+      "ink": "#ffffff",
+      "name": "Mia",
+      "picture_hash": null,
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home"
+      }
+    },
+    {
+      "avatar": null,
+      "badge": 1,
+      "badge_label": "New message for Leo",
+      "color": "#ad780c",
+      "id": "u-leo",
+      "initials": "L",
+      "ink": "#000000",
+      "name": "Leo",
+      "picture_hash": null,
+      "picture_view": true,
+      "where": {
+        "icon": {
+          "code": "1f697",
+          "text": "🚗"
+        },
+        "label": "Away"
+      }
+    }
+  ],
+  "person": {
+    "avatar": null,
+    "color": "#ad780c",
+    "id": "u-leo",
+    "initials": "L",
+    "ink": "#000000",
+    "name": "Leo",
+    "picture_hash": null,
+    "status_emoji": null,
+    "status_text": null,
+    "where": {
+      "icon": {
+        "code": "1f697",
+        "text": "🚗"
+      },
+      "label": "Away"
+    }
+  },
+  "picture": {
+    "clock": {
+      "hour_deg": 315.0,
+      "label": "It's 10:30",
+      "minute_deg": 180.0,
+      "wedge": {
+        "color": "#ad780c",
+        "full": true,
+        "minutes": 60
+      }
+    },
+    "day": {
+      "empty": false,
+      "empty_icon": null,
+      "empty_label": null,
+      "label": "My day",
+      "parts": [
+        {
+          "icon": {
+            "code": "1f305",
+            "text": "🌅"
+          },
+          "key": "morning",
+          "label": "Morning",
+          "state": "now",
+          "tiles": [
+            {
+              "cancelled": false,
+              "caption": "Lesen",
+              "color": "#5462c4",
+              "current": false,
+              "icon": {
+                "code": "1f4d6",
+                "text": "📖"
+              },
+              "label": "08:00–08:45 Lesen",
+              "past": true
+            },
+            {
+              "cancelled": false,
+              "caption": "Pause",
+              "color": "#5462c4",
+              "current": false,
+              "icon": {
+                "code": "1f9f8",
+                "text": "🧸"
+              },
+              "label": "08:45–09:00 Pause",
+              "past": true
+            },
+            {
+              "cancelled": true,
+              "caption": "Turnen",
+              "color": "#5462c4",
+              "current": false,
+              "icon": {
+                "code": "26bd",
+                "text": "⚽"
+              },
+              "label": "09:00–09:45 Turnen, cancelled",
+              "past": true
+            },
+            {
+              "cancelled": false,
+              "caption": "Kunst",
+              "color": "#5462c4",
+              "current": true,
+              "icon": {
+                "code": "1f3a8",
+                "text": "🎨"
+              },
+              "label": "10:00–11:00 Kunst",
+              "past": false
+            }
+          ]
+        },
+        {
+          "icon": {
+            "code": "2600",
+            "text": "☀️"
+          },
+          "key": "afternoon",
+          "label": "Afternoon",
+          "state": "later",
+          "tiles": [
+            {
+              "cancelled": false,
+              "caption": "Swimming",
+              "color": "#ad780c",
+              "current": false,
+              "icon": {
+                "code": "1f3ca",
+                "text": "🏊"
+              },
+              "label": "15:00–16:00 Swimming",
+              "past": false
+            }
+          ]
+        },
+        {
+          "icon": {
+            "code": "1f307",
+            "text": "🌇"
+          },
+          "key": "evening",
+          "label": "Evening",
+          "state": "later",
+          "tiles": [
+            {
+              "cancelled": false,
+              "caption": "Dinner with Gran",
+              "color": "#ad780c",
+              "current": false,
+              "icon": {
+                "code": "1f35d",
+                "text": "🍝"
+              },
+              "label": "18:30–20:00 Dinner with Gran",
+              "past": false
+            }
+          ]
+        },
+        {
+          "icon": {
+            "code": "1f319",
+            "text": "🌙"
+          },
+          "key": "night",
+          "label": "Night",
+          "state": "later",
+          "tiles": []
+        }
+      ]
+    },
+    "jobs": {
+      "items": [
+        {
+          "caption": "Katze füttern",
+          "done": false,
+          "icon": {
+            "code": "1f431",
+            "text": "🐱"
+          },
+          "label": "To do: Katze füttern"
+        },
+        {
+          "caption": "Zähneputzen",
+          "done": true,
+          "icon": {
+            "code": "1f9b7",
+            "text": "🦷"
+          },
+          "label": "Done: Zähneputzen"
+        }
+      ],
+      "label": "My jobs"
+    },
+    "messages": [
+      {
+        "caption": "Dinner at 7 <b>\"sharp\"</b> @Pascal",
+        "from_label": "Message from Anna",
+        "icon": null,
+        "id": "m1",
+        "iso": "2026-10-12T14:28:00+02:00",
+        "name": "Anna",
+        "new": true,
+        "person": "u-anna",
+        "say": "Anna says: Dinner at 7 <b>\"sharp\"</b> @Pascal",
+        "text": "Dinner at 7 <b>\"sharp\"</b> @Pascal",
+        "when": "just now"
+      },
+      {
+        "caption": "📷 Photo",
+        "from_label": "Message from Pascal",
+        "icon": {
+          "code": "1f4f7",
+          "text": "📷"
+        },
+        "id": "m2",
+        "iso": "2026-10-12T13:52:00+02:00",
+        "name": "Pascal",
+        "new": true,
+        "person": "u-pascal",
+        "say": "Pascal sent a photo.",
+        "text": "Photo",
+        "when": "just now"
+      },
+      {
+        "caption": "🎤 Can I go to Lena's?",
+        "from_label": "Message from Mia",
+        "icon": {
+          "code": "1f3a4",
+          "text": "🎤"
+        },
+        "id": "m3",
+        "iso": "2026-10-12T12:27:00+02:00",
+        "name": "Mia",
+        "new": true,
+        "person": "u-mia",
+        "say": "Mia says: Can I go to Lena's?",
+        "text": "Can I go to Lena's?",
+        "when": "just now"
+      }
+    ],
+    "next": {
+      "cancelled": false,
+      "caption": "Swimming · 15:00",
+      "color": "#ad780c",
+      "current": false,
+      "icon": {
+        "code": "1f3ca",
+        "text": "🏊"
+      },
+      "label": "Next: Swimming, in 4 h",
+      "past": false
+    },
+    "next_label": "Next",
+    "next_pie": {
+      "full": true,
+      "minutes": 60
+    },
+    "night": null,
+    "now": {
+      "cancelled": false,
+      "caption": "Kunst · 10:00",
+      "color": "#5462c4",
+      "current": true,
+      "icon": {
+        "code": "1f3a8",
+        "text": "🎨"
+      },
+      "label": "Now: Kunst",
+      "past": false
+    },
+    "now_label": "Now",
+    "now_next_label": "Now and next",
+    "part_now": {
+      "icon": {
+        "code": "1f305",
+        "text": "🌅"
+      },
+      "key": "morning",
+      "label": "Morning"
+    },
+    "tomorrow": {
+      "label": "Tomorrow",
+      "sleeps": 1,
+      "sleeps_label": "Sleeps until then: 1",
+      "tiles": [
+        {
+          "cancelled": false,
+          "caption": "School",
+          "color": "#5462c4",
+          "current": false,
+          "icon": {
+            "code": "1f392",
+            "text": "🎒"
+          },
+          "label": "08:00 School",
+          "past": false
+        }
+      ]
+    },
+    "where": {
+      "away": {
+        "icon": {
+          "code": "1f697",
+          "text": "🚗"
+        },
+        "label": "Away",
+        "people": [
+          "u-anna"
+        ]
+      },
+      "home": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home",
+        "people": [
+          "u-pascal",
+          "u-mia"
+        ]
+      },
+      "label": "Who's home"
+    }
+  },
+  "rail": {
+    "current": "u-leo",
+    "many": false,
+    "shown": true
+  },
+  "reader": null,
+  "settings": {
+    "idle_return_minutes": 3,
+    "keep_screen_on": true,
+    "mention_sound": true,
+    "night_end": "06:00",
+    "night_start": "22:00",
+    "pin_set": false
+  },
+  "view": "person",
+  "view_key": "76a6be3db04d7c23"
+}

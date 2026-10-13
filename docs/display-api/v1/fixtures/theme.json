@@ -1,0 +1,91 @@
+{
+  "api_version": 1,
+  "colors": {
+    "dark": {
+      "accent": "#6cc3a8",
+      "accent_text": "#0f1a16",
+      "bg": "#151412",
+      "border": "#3d3a35",
+      "error_bg": "#3a1a16",
+      "error_text": "#ffb4a9",
+      "focus": "#8ab4ff",
+      "muted": "#b3ada3",
+      "surface": "#22201d",
+      "text": "#f1eee9"
+    },
+    "light": {
+      "accent": "#2f6f5e",
+      "accent_text": "#ffffff",
+      "bg": "#f4f2ee",
+      "border": "#d6d1c8",
+      "error_bg": "#fbe9e7",
+      "error_text": "#8a1c12",
+      "focus": "#1d5fd1",
+      "muted": "#5f5a52",
+      "surface": "#ffffff",
+      "text": "#1f1d1a"
+    },
+    "night": {
+      "accent": "#6cc3a8",
+      "accent_text": "#0f1a16",
+      "bg": "#000000",
+      "border": "#2a2825",
+      "error_bg": "#3a1a16",
+      "error_text": "#ffb4a9",
+      "focus": "#8ab4ff",
+      "muted": "#7d786f",
+      "surface": "#121110",
+      "text": "#a8a298"
+    }
+  },
+  "dir": "ltr",
+  "font": {
+    "family": "system-ui",
+    "household": "system"
+  },
+  "household_colors": {
+    "accent": "#c8902f",
+    "primary": "#d2542a"
+  },
+  "locale": "en",
+  "mode": "auto",
+  "strings": {
+    "back_home": "Back to Home",
+    "connecting": "Connecting to Social Home…",
+    "delete": "Delete last digit",
+    "empty_day": "Nothing planned today",
+    "enter_pin": "Enter PIN",
+    "got_it": "Got it",
+    "hear_rest": "tap to hear the rest",
+    "lock": "Lock screen",
+    "locked": "Screen locked",
+    "map_show_all": "Show everyone",
+    "map_title": "Who's where",
+    "message_for_everyone": "Message for everyone",
+    "message_for_you": "Message for you",
+    "nav_home": "Home",
+    "nav_label": "People",
+    "new": "new",
+    "night_today": "Today",
+    "night_tomorrow": "Tomorrow",
+    "night_wake": "Tap to show the dashboard",
+    "not_found": "This page isn't on the dashboard.",
+    "offline": "Can't reach Social Home — showing info from {time}",
+    "pair_expired": "The code expired — getting a new one…",
+    "pair_hint": "In Social Home, open Admin › Dashboard and enter this code:",
+    "pair_title": "Pair this panel",
+    "pin_button": "PIN",
+    "read_aloud": "Read aloud",
+    "retry": "Try again",
+    "see_all": "See all",
+    "tab_map": "Map",
+    "tab_messages": "Messages",
+    "tab_notes": "Notes",
+    "tab_overview": "Overview",
+    "tabs_label": "Home",
+    "timeline_now": "now",
+    "unlock": "Unlock",
+    "unpaired": "This panel isn't paired any more. Pair it again in Admin › Dashboard.",
+    "wrong_pin": "Wrong PIN"
+  }
+}

@@ -1,0 +1,299 @@
+{
+  "api_version": 1,
+  "clock": {
+    "date": "Monday, October 12",
+    "day": "2026-10-12",
+    "iso": "2026-10-12T08:30:00+02:00",
+    "time": "08:30",
+    "tz": "Europe/Berlin",
+    "unix": 1791786600,
+    "utc_offset_minutes": 120
+  },
+  "dir": "ltr",
+  "household": "Home",
+  "is_night": false,
+  "kind": "reader",
+  "locale": "en",
+  "mentions": [],
+  "night": null,
+  "people": [
+    {
+      "avatar": null,
+      "badge": 0,
+      "badge_label": null,
+      "color": "#357bbb",
+      "id": "u-pascal",
+      "initials": "P",
+      "ink": "#000000",
+      "name": "Pascal",
+      "picture_hash": null,
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home"
+      }
+    },
+    {
+      "avatar": "/api/display/v1/avatar/u-anna?v=pic1",
+      "badge": 0,
+      "badge_label": null,
+      "color": "#c44d72",
+      "id": "u-anna",
+      "initials": "A",
+      "ink": "#000000",
+      "name": "Anna",
+      "picture_hash": "pic1",
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f4cd",
+          "text": "📍"
+        },
+        "label": "Work"
+      }
+    },
+    {
+      "avatar": null,
+      "badge": 0,
+      "badge_label": null,
+      "color": "#3f7d57",
+      "id": "u-mia",
+      "initials": "M",
+      "ink": "#ffffff",
+      "name": "Mia",
+      "picture_hash": null,
+      "picture_view": false,
+      "where": {
+        "icon": {
+          "code": "1f3e0",
+          "text": "🏠"
+        },
+        "label": "Home"
+      }
+    },
+    {
+      "avatar": null,
+      "badge": 0,
+      "badge_label": null,
+      "color": "#ad780c",
+      "id": "u-leo",
+      "initials": "L",
+      "ink": "#000000",
+      "name": "Leo",
+      "picture_hash": null,
+      "picture_view": true,
+      "where": {
+        "icon": {
+          "code": "1f697",
+          "text": "🚗"
+        },
+        "label": "Away"
+      }
+    }
+  ],
+  "person": {
+    "avatar": null,
+    "color": "#3f7d57",
+    "id": "u-mia",
+    "initials": "M",
+    "ink": "#ffffff",
+    "name": "Mia",
+    "picture_hash": null,
+    "status_emoji": null,
+    "status_text": null,
+    "where": {
+      "icon": {
+        "code": "1f3e0",
+        "text": "🏠"
+      },
+      "label": "Home"
+    }
+  },
+  "picture": null,
+  "rail": {
+    "current": "u-mia",
+    "many": false,
+    "shown": true
+  },
+  "reader": {
+    "chores": {
+      "items": [
+        {
+          "due": "today",
+          "late": null,
+          "people": [],
+          "state": "open",
+          "state_label": "To do",
+          "title": "Empty dishwasher"
+        }
+      ],
+      "label": "Chores"
+    },
+    "day": {
+      "empty": null,
+      "empty_icon": null,
+      "label": "Today",
+      "rows": [
+        {
+          "color": "#3f7d57",
+          "icon": null,
+          "is_break": false,
+          "kind": "event",
+          "meta": null,
+          "now": false,
+          "past": false,
+          "people": [],
+          "status": null,
+          "status_label": null,
+          "time": "18:30–20:00",
+          "title": "Dinner with Gran"
+        }
+      ],
+      "tomorrow": {
+        "label": "Tomorrow",
+        "rows": [
+          {
+            "color": "#5462c4",
+            "icon": {
+              "code": "1f392",
+              "text": "🎒"
+            },
+            "is_break": false,
+            "kind": "school",
+            "meta": null,
+            "now": false,
+            "past": false,
+            "people": [],
+            "status": null,
+            "status_label": null,
+            "time": "07:30",
+            "title": "First lesson"
+          }
+        ]
+      }
+    },
+    "next": {
+      "color": "#5462c4",
+      "icon": {
+        "code": "1f3a8",
+        "text": "🎨"
+      },
+      "label": "Next",
+      "meta": "Room B7",
+      "rel": "in 5 h",
+      "time": "14:00",
+      "title": "Art"
+    },
+    "now": {
+      "color": "#5462c4",
+      "icon": {
+        "code": "1f4d0",
+        "text": "📐"
+      },
+      "label": "Now",
+      "meta": "Room B12 · Keller",
+      "title": "Maths",
+      "until": "until 09:05"
+    },
+    "school": {
+      "label": "School today",
+      "rows": [
+        {
+          "color": "#5462c4",
+          "icon": {
+            "code": "1f4d0",
+            "text": "📐"
+          },
+          "is_break": false,
+          "kind": "lesson",
+          "meta": "Room B12 · Keller",
+          "now": true,
+          "past": false,
+          "people": [],
+          "status": null,
+          "status_label": null,
+          "time": "08:20–09:05",
+          "title": "Maths"
+        },
+        {
+          "color": "#5462c4",
+          "icon": null,
+          "is_break": true,
+          "kind": "lesson",
+          "meta": null,
+          "now": false,
+          "past": false,
+          "people": [],
+          "status": null,
+          "status_label": null,
+          "time": "09:05–09:20",
+          "title": "Break"
+        },
+        {
+          "color": "#5462c4",
+          "icon": {
+            "code": "26bd",
+            "text": "⚽"
+          },
+          "is_break": false,
+          "kind": "lesson",
+          "meta": null,
+          "now": false,
+          "past": false,
+          "people": [],
+          "status": "cancelled",
+          "status_label": "Cancelled",
+          "time": "10:15–11:00",
+          "title": "Sport"
+        },
+        {
+          "color": "#5462c4",
+          "icon": {
+            "code": "1f3a8",
+            "text": "🎨"
+          },
+          "is_break": false,
+          "kind": "lesson",
+          "meta": "Room B7",
+          "now": false,
+          "past": false,
+          "people": [],
+          "status": "changed",
+          "status_label": "Changed",
+          "time": "14:00–15:00",
+          "title": "Art"
+        },
+        {
+          "color": "#5462c4",
+          "icon": {
+            "code": "1f1ec-1f1e7",
+            "text": "🇬🇧"
+          },
+          "is_break": false,
+          "kind": "lesson",
+          "meta": null,
+          "now": false,
+          "past": false,
+          "people": [],
+          "status": "added",
+          "status_label": "Added",
+          "time": "15:05–15:50",
+          "title": "English"
+        }
+      ]
+    }
+  },
+  "settings": {
+    "idle_return_minutes": 3,
+    "keep_screen_on": true,
+    "mention_sound": true,
+    "night_end": "06:00",
+    "night_start": "22:00",
+    "pin_set": false
+  },
+  "view": "person",
+  "view_key": "0ccb8b80379e146e"
+}
