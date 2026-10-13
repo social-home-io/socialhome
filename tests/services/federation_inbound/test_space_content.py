@@ -3641,6 +3641,18 @@ async def test_zone_upserted_without_icon_key_keeps_the_stored_icon(zone_handler
     assert zones.upserted[-1].icon == "🏫"
 
 
+async def test_zone_upserted_without_icon_key_never_copies_another_spaces_icon(
+    zone_handlers,
+):
+    """The keep-the-stored-icon lookup is by zone id only: a row with the
+    same id in ANOTHER space must never lend this space its icon."""
+    handlers, zones = zone_handlers
+    zones.rows.space_of["z-1"] = "sp-other"
+    zones.stored["z-1"] = SimpleNamespace(id="z-1", space_id="sp-other", icon="🏫")
+    await _zone_up(handlers)  # no "icon" key, for sp-1
+    assert all(z.icon != "🏫" for z in zones.upserted)
+
+
 async def test_zone_upserted_without_icon_key_new_zone_has_none(zone_handlers):
     handlers, zones = zone_handlers
     await _zone_up(handlers)

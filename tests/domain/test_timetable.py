@@ -1904,17 +1904,21 @@ class TestIcon:
             validate(tt_(entries=(ent("e1", 0, "08:00", "08:45", icon=icon),)))
 
     def test_sixteen_code_points_is_the_cap(self):
-        # One pictograph (a tag-sequence flag) padded with tag characters.
-        at_cap = "🏴" + "\U000e0067" * 15
-        validate(tt_(entries=(ent("e1", 0, "08:00", "08:45", icon=at_cap),)))
+        # A ZWJ family is one pictograph; 17 code points is past the cap.
+        family = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
+        validate(tt_(entries=(ent("e1", 0, "08:00", "08:45", icon=family),)))
         with pytest.raises(TimetableValidationError, match="icon"):
             validate(
                 tt_(
-                    entries=(
-                        ent("e1", 0, "08:00", "08:45", icon=at_cap + "\U000e0067"),
-                    )
+                    entries=(ent("e1", 0, "08:00", "08:45", icon="🔢" + "\ufe0f" * 16),)
                 )
             )
+
+    def test_tag_text_after_a_flag_is_refused(self):
+        # Invisible tag characters would smuggle ASCII text.
+        smuggled = "🏴" + "\U000e0067" * 15
+        with pytest.raises(TimetableValidationError, match="icon"):
+            validate(tt_(entries=(ent("e1", 0, "08:00", "08:45", icon=smuggled),)))
 
     def test_mutator_turns_empty_into_none(self):
         out = with_entry(tt_(), ent("e1", 0, "08:00", "08:45", icon=""), now=NOW)

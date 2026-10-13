@@ -1219,6 +1219,18 @@ async def test_space_zones_missing_icon_keeps_the_stored_icon(setup):
     assert c.zones[-1].icon is None
 
 
+async def test_space_zones_missing_icon_never_copies_another_spaces_icon(setup):
+    """The keep-the-stored-icon lookup is by zone id only: a row with the
+    same id in ANOTHER space must never lend this space its icon."""
+    r, c, kp = setup
+    r._zone_repo.stored["z_ok"] = SimpleNamespace(
+        id="z_ok", space_id="sp-other", icon="🏫"
+    )
+    await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD)])
+    assert c.zones[-1].space_id == "sp-1"
+    assert c.zones[-1].icon is None
+
+
 async def test_space_zones_missing_icon_new_zone_has_none(setup):
     r, c, kp = setup
     await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD)])
