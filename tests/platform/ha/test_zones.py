@@ -167,8 +167,36 @@ async def test_source_lists_zones():
     ]
 
 
-async def test_source_empty_is_an_empty_list():
-    assert await HaZoneSource(_Adapter(_Client([]))).list_zones() == []
+async def test_source_with_only_home_is_just_home():
+    """Every user zone deleted in HA: only ``zone.home`` is left — a real
+    answer, so the sync removes the other synced zones."""
+    zones = await HaZoneSource(_Adapter(_Client([HOME]))).list_zones()
+    assert [z.external_id for z in zones] == ["zone.home"]
+
+
+@pytest.mark.parametrize(
+    "states",
+    [
+        [],  # zone integration not loaded yet (HA starting) / recovery mode
+        [WORK],  # zones mid-load, home not there yet
+        [{"entity_id": "light.kitchen", "state": "on", "attributes": {}}],
+    ],
+)
+async def test_source_without_zone_home_is_unavailable(states):
+    """HA's zone integration always creates ``zone.home``
+    (core ``zone/__init__.py`` ``async_setup``), and ``zone`` is a
+    default integration — an answer without it is HA still starting,
+    never "no zones", so the synced zones must not be wiped."""
+    with pytest.raises(ZoneSourceUnavailableError, match="zone.home"):
+        await HaZoneSource(_Adapter(_Client(states))).list_zones()
+
+
+async def test_source_passive_home_counts_as_loaded():
+    """A user-defined passive ``zone.home`` still proves the zones are
+    loaded — it's left out, the others sync."""
+    passive_home = _zone("zone.home", friendly_name="Home", passive=True)
+    zones = await HaZoneSource(_Adapter(_Client([passive_home, WORK]))).list_zones()
+    assert [z.external_id for z in zones] == ["zone.work"]
 
 
 async def test_source_failed_fetch_raises_not_empty():

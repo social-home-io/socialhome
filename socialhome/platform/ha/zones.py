@@ -19,7 +19,13 @@ HA contract — verified, not inferred:
   ``editable``; plus the standard entity attributes ``friendly_name`` and
   ``icon`` (an ``mdi:*`` name, e.g. ``mdi:home``).
 * ``zone.home`` is built from the core config (location name, latitude,
-  longitude, radius), carries ``mdi:home`` and is never passive.
+  longitude, radius) and carries ``mdi:home``. The zone integration's
+  ``async_setup`` always adds it (unless a user zone already took that
+  entity id), and ``zone`` is one of HA's default integrations
+  (``bootstrap.DEFAULT_INTEGRATIONS``) — so an ``/api/states`` answer
+  without ``zone.home`` means HA hasn't loaded its zones yet (startup,
+  recovery mode), never "HA has no zones". :meth:`HaZoneSource.list_zones`
+  reports it as unavailable so the sync keeps the synced zones.
 * HA core stores no zone colour (the HA frontend picks one) — synced
   zones get ``color=None`` and Social Home's deterministic palette.
 
@@ -215,4 +221,17 @@ class HaZoneSource:
         states = await client.fetch_states()
         if states is None:
             raise ZoneSourceUnavailableError("Home Assistant didn't answer /api/states")
+        # Checked before the passive filter: a (user-defined) passive
+        # ``zone.home`` still proves the zones are loaded.
+        if not any(
+            isinstance(s, dict) and s.get("entity_id") == HA_HOME_ZONE for s in states
+        ):
+            log.warning(
+                "household zones: Home Assistant has no %s yet (still starting?);"
+                " keeping the synced zones",
+                HA_HOME_ZONE,
+            )
+            raise ZoneSourceUnavailableError(
+                f"Home Assistant hasn't loaded its zones yet (no {HA_HOME_ZONE})"
+            )
         return zones_from_states(states)

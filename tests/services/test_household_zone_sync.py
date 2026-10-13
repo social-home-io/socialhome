@@ -178,10 +178,12 @@ async def test_empty_source_does_mirror_empty(sync, zones, source):
 
 
 async def test_mirror_failure_is_logged_and_kept(sync, zones, caplog):
-    zones.fail = RuntimeError("boom")
+    zones.fail = RuntimeError("boom /internal/path secret")
     await sync.sync_now()  # never raises
-    assert (await sync.status()).last_error == "boom"
+    # The admin API gets a fixed summary; the detail stays in the log.
+    assert (await sync.status()).last_error == "sync failed"
     assert "sync failed" in caplog.text
+    assert "/internal/path" in caplog.text
 
 
 # ── turning it off / on ──────────────────────────────────────────────────

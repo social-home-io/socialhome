@@ -55,6 +55,10 @@ async def ha_server(aiohttp_server):
             return web.json_response({}, status=captured["states_status"])
         if "states_body" in captured:
             return web.json_response(captured["states_body"])
+        if "states_raw" in captured:
+            return web.Response(
+                text=captured["states_raw"], content_type="application/json"
+            )
         return web.json_response(
             [
                 {"entity_id": "person.pascal", "attributes": {}},
@@ -208,6 +212,22 @@ async def test_fetch_states_is_none_on_a_non_list_body(client, ha_server, caplog
     assert await client.fetch_states() is None
     assert "non-list" in caplog.text
     assert await client.get_states() == []
+
+
+async def test_fetch_states_is_none_on_truncated_json(client, ha_server, caplog):
+    """A body cut off mid-array is a failed call, not an empty list."""
+    _, captured = ha_server
+    captured["states_raw"] = '[{"entity_id": "zone.home", "attri'
+    assert await client.fetch_states() is None
+    assert "get_states failed" in caplog.text
+
+
+async def test_fetch_states_401_logs_without_the_token(client, ha_server, caplog):
+    _, captured = ha_server
+    captured["states_status"] = 401
+    assert await client.fetch_states() is None
+    assert "401" in caplog.text
+    assert "secret-token" not in caplog.text
 
 
 async def test_fetch_states_is_none_when_unreachable(session):

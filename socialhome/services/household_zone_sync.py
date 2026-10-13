@@ -47,6 +47,10 @@ SYNC_ENABLED_KEY = "household_zones.sync_enabled"
 SYNC_INTERVAL_SECONDS = 300.0
 
 
+#: ``last_error`` for an unexpected failure — never the raw exception text.
+_SYNC_FAILED = "sync failed"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -144,7 +148,8 @@ class HouseholdZoneSync:
                             result.removed,
                         )
             except Exception as exc:
-                self._last_error = str(exc) or type(exc).__name__
+                # A fixed summary for the admin API; the detail is logged.
+                self._last_error = _SYNC_FAILED
                 log.warning("household zones: sync failed: %s", exc, exc_info=True)
 
     async def _pull(self, source: "ZoneSource") -> None:
