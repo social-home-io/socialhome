@@ -131,6 +131,12 @@ Frontend tests live in the client tree, not under `tests/`:
 - **Vitest + `@testing-library/preact`** for Preact components.
   Test files sit next to source: `client/src/components/Foo.test.tsx`
   next to `Foo.tsx`.
+- **The household dashboard's browser scripts** are plain files served
+  by the backend (`socialhome/dashboard/static/`), but their behaviour
+  is tested here too: `client/src/dashboardMapScript.test.ts` runs
+  `map.js` in a fresh jsdom window per test (no layout, so the map box
+  size is stubbed). Their markup and security guards stay in
+  `tests/dashboard/`.
 - **`tsc --noEmit`** for type checks.
 - **ESLint** for lint.
 - **`vite build`** at pre-push.
