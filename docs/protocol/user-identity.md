@@ -47,6 +47,13 @@ Each per-user entry may carry these fields on top of the legacy
 (`user_id` / `username` / `display_name` / `bio` / `picture_hash` / …)
 shape:
 
+(`picture_hash` is unsigned display metadata. A receiver keeps a peer's
+hash only when it is exactly 16 lowercase hex characters — the shape every
+household computes, `socialhome/domain/picture_hash.py` — and stores `NULL`
+otherwise; when picture bytes ship, the receiver's own digest of the
+re-encoded image wins. The same rule applies when a `UserIdentityAssertion`
+is parsed from the wire.)
+
 | Field | Content |
 |---|---|
 | `user_identity_public_key` | hex-encoded 32-byte Ed25519 **user** public key. Presence of this field is what gates binding verification on the receiver. |

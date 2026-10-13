@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import unicodedata
 
+from .picture_hash import clean_picture_hash
+
 
 # Usernames that a platform adapter must never provision, because the spec
 # (§4.1.9) reserves them for special routing or display semantics.
@@ -405,7 +407,8 @@ class UserIdentityAssertion:
             display_name=str(data["display_name"]),
             issued_at=str(data["issued_at"]),
             signature=str(data["signature"]),
-            picture_hash=data.get("picture_hash"),  # type: ignore[arg-type]
+            # Unsigned display metadata: kept only in our own 16-hex format.
+            picture_hash=clean_picture_hash(data.get("picture_hash")),
             public_key=data.get("public_key"),  # type: ignore[arg-type]
             public_key_version=int(data.get("public_key_version") or 0),  # type: ignore[call-overload]
             user_identity_public_key=data.get("user_identity_public_key"),  # type: ignore[arg-type]

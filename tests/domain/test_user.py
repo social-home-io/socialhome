@@ -116,7 +116,7 @@ def test_user_identity_assertion_wire_roundtrip_full_field_set():
         display_name="Alice",
         issued_at="2026-01-01T00:00:00+00:00",
         signature="instance-sig",
-        picture_hash="abc123",
+        picture_hash="0123456789abcdef",
         public_key="ecdh-pk",
         public_key_version=3,
         user_identity_public_key="deadbeefuserpk",

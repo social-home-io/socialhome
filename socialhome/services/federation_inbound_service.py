@@ -119,7 +119,7 @@ from ..federation.space_scope import (
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
 from ..media.image_processor import ImageProcessor
-from ..repositories.profile_picture_repo import compute_picture_hash
+from ..domain.picture_hash import clean_picture_hash, compute_picture_hash
 from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
 from ..domain.link_preview import card_survives_edit
 from ..domain.mention import Mention
@@ -3228,7 +3228,10 @@ class FederationInboundService(ProtectionGateMixin):
             # Unknown member on this side — skip silently; a membership
             # event will catch up eventually.
             return
-        picture_hash = p.get("picture_hash")
+        # A peer's hash is only ever a fallback for "no / rejected bytes" —
+        # never stored unless it is in our own 16-hex format (it lands in
+        # ``…/picture?v=`` URLs).
+        picture_hash = clean_picture_hash(p.get("picture_hash"))
         bytes_b64 = p.get("picture_webp_base64")
         if bytes_b64 and self._profile_picture_repo is not None:
             try:
@@ -4335,7 +4338,9 @@ class FederationInboundService(ProtectionGateMixin):
             instance_id, user_id, username, payload
         ):
             return
-        picture_hash = payload.get("picture_hash")
+        # The peer's own hash survives only in our 16-hex format — it is
+        # interpolated into ``…/picture?v=`` URLs (see ``clean_picture_hash``).
+        picture_hash = clean_picture_hash(payload.get("picture_hash"))
 
         # If the peer shipped fresh picture bytes, revalidate and store
         # locally. We trust the signature on the envelope (§24.11) but

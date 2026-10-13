@@ -15,15 +15,16 @@ dataclasses only carry the hash.
 
 from __future__ import annotations
 
-import hashlib
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.picture_hash import compute_picture_hash
 
-
-def compute_picture_hash(bytes_webp: bytes) -> str:
-    """Return the 16-char SHA-256 hex prefix for cache-busting URLs."""
-    return hashlib.sha256(bytes_webp).hexdigest()[:16]
+__all__ = [
+    "AbstractProfilePictureRepo",
+    "SqliteProfilePictureRepo",
+    "compute_picture_hash",
+]
 
 
 @runtime_checkable
