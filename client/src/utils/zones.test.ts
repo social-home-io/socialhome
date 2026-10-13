@@ -21,6 +21,16 @@ describe('sortZones', () => {
     expect(out).not.toBe(zones)
     expect(zones.map(z => z.name)).toEqual(['B', 'A'])
   })
+
+  it('puts the household Home zone first, then the rest by name', () => {
+    const zones = [
+      { name: 'Work', is_home: false },
+      { name: 'Zürich flat', is_home: true },
+      { name: 'gym', is_home: false },
+    ]
+    expect(sortZones(zones).map(z => z.name))
+      .toEqual(['Zürich flat', 'gym', 'Work'])
+  })
 })
 
 describe('ZONE_ICON_PRESETS', () => {

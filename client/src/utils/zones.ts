@@ -1,15 +1,20 @@
 /**
  * Zone helpers shared by every surface that lists space zones (§23.8.7):
- * the alphabetical order (as Home Assistant lists its zones) and the
- * icon presets the admin picks from.
+ * the alphabetical order (as Home Assistant lists its zones, with the
+ * household's Home zone on top) and the icon presets the admin picks from.
  */
 import type { IconPickerPreset } from '@/components/IconPicker'
 
 /** ``zones`` sorted by name — case- and accent-insensitive, in the
- *  viewer's locale. Returns a new array; the input is left untouched. */
-export function sortZones<T extends { name: string }>(zones: ReadonlyArray<T>): T[] {
+ *  viewer's locale — with a household Home zone (``is_home``) first,
+ *  matching the server's order. Space zones carry no ``is_home`` and
+ *  sort purely by name. Returns a new array; the input is left untouched. */
+export function sortZones<T extends { name: string; is_home?: boolean }>(
+  zones: ReadonlyArray<T>,
+): T[] {
   return [...zones].sort((a, b) =>
-    a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    Number(b.is_home === true) - Number(a.is_home === true)
+    || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
 }
 
 const preset = (emoji: string, key: string): IconPickerPreset =>
