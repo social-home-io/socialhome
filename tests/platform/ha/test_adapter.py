@@ -259,6 +259,16 @@ async def test_zone_source_wired_with_zone_sync_capability():
     assert Capability.ZONE_SYNC in adapter.capabilities
 
 
+async def test_display_directory_wired_with_its_capability():
+    """HA's device registry lists the ESPHome wall panels."""
+    from socialhome.platform.adapter import Capability
+    from socialhome.platform.ha.displays import HaDisplayDirectory
+
+    adapter = _build_adapter(client=_FakeHaClient())
+    assert isinstance(adapter.displays, HaDisplayDirectory)
+    assert Capability.HA_DISPLAY_DISCOVERY in adapter.capabilities
+
+
 async def test_local_password_login_round_trip(tmp_path):
     """Wire the credential store, set a password, and verify the bearer
     token authenticates."""

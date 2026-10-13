@@ -6,6 +6,7 @@ import pytest
 
 from socialhome.domain.household_dashboard import DEFAULT_DASHBOARD_PORT
 from socialhome.platform.adapter import Capability, DashboardHostPort
+from socialhome.platform.ha.displays import HaDisplayDirectory
 from socialhome.platform.ha.zones import HaZoneSource
 from socialhome.platform.haos.adapter import HaosAdapter
 from socialhome.platform.haos.supervisor import AddonInfo
@@ -547,3 +548,11 @@ async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(
         finally:
             await adapter.on_cleanup(app)
     await db.shutdown()
+
+
+async def test_display_directory_wired_with_its_capability():
+    """Same HA panel directory as ha mode — and the one way the App finds
+    panels, since its mDNS can't reach the LAN."""
+    adapter = _build_haos_adapter()
+    assert isinstance(adapter.displays, HaDisplayDirectory)
+    assert Capability.HA_DISPLAY_DISCOVERY in adapter.capabilities

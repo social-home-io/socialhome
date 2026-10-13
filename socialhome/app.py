@@ -2168,8 +2168,11 @@ def _build_household_dashboard(
     )
     auth = DashboardAuth(settings)
     # Wall panels: pending pairings live in memory, like the throttles —
-    # one for the process, so a listener restart keeps them.
-    displays = DashboardDisplayService(settings, auth)
+    # one for the process, so a listener restart keeps them. The
+    # platform's directory (Home Assistant) lists panels to connect.
+    displays = DashboardDisplayService(
+        settings, auth, directory=platform_adapter.displays
+    )
     renderer = DashboardRenderer(catalog)
     own_names = local_hostnames()
     snapshots = HouseholdDashboardService(

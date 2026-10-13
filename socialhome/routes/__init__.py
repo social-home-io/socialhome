@@ -351,6 +351,8 @@ from .moments_public import (
 from .admin_dashboard import (
     AdminDashboardDisplayView,
     AdminDashboardDisplaysView,
+    AdminDashboardHaPanelConnectView,
+    AdminDashboardHaPanelsView,
     AdminDashboardPasswordView,
     AdminDashboardPinView,
     AdminDashboardSessionsView,
@@ -529,6 +531,12 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/admin/dashboard/sessions", AdminDashboardSessionsView)
     app.router.add_view("/api/admin/dashboard/pin", AdminDashboardPinView)
     app.router.add_view("/api/admin/dashboard/displays", AdminDashboardDisplaysView)
+    # Before ``displays/{display_id}`` (a display id is 16 hex, never "ha").
+    app.router.add_view("/api/admin/dashboard/displays/ha", AdminDashboardHaPanelsView)
+    app.router.add_view(
+        "/api/admin/dashboard/displays/ha/{panel_id:[A-Za-z0-9_-]{1,64}}/connect",
+        AdminDashboardHaPanelConnectView,
+    )
     app.router.add_view(
         "/api/admin/dashboard/displays/{display_id}", AdminDashboardDisplayView
     )

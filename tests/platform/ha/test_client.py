@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from aiohttp import web
 
@@ -80,6 +82,11 @@ async def ha_server(aiohttp_server):
     async def call_service(request: web.Request) -> web.Response:
         body = await request.json()
         await _record(request, body)
+        if "service_status" in captured:
+            # HA's ``APIDomainServicesView``: unknown action → 400.
+            return web.json_response(
+                {"message": "Service not found."}, status=captured["service_status"]
+            )
         # Respond with a service_response when asked
         if "return_response" in request.query:
             return web.json_response({"service_response": {"data": "ok"}})
@@ -437,6 +444,42 @@ async def test_call_service_plain(client, ha_server):
     )
     assert result == {}
     assert captured["requests"][-1]["query"] == {}
+
+
+async def test_call_service_failure_is_a_warning_without_the_data(
+    client, ha_server, caplog
+):
+    """A failed HA action is diagnosable (WARNING, CLAUDE.md) but never logs
+    the service data — a wall panel's connect claim rides in it."""
+    _, captured = ha_server
+    captured["service_status"] = 400
+    with caplog.at_level(logging.WARNING, logger="socialhome.platform.ha.client"):
+        result = await client.call_service(
+            "esphome", "kitchen_connect_social_home", {"claim": "secret-claim"}
+        )
+    assert result is None
+    assert "esphome.kitchen_connect_social_home -> HTTP 400" in caplog.text
+    assert "secret-claim" not in caplog.text
+
+
+async def test_call_service_transport_error_is_a_warning(session, caplog):
+    c = HaClient(session, "http://127.0.0.1:1", "tok")
+    with caplog.at_level(logging.WARNING, logger="socialhome.platform.ha.client"):
+        assert await c.call_service("esphome", "x", {"claim": "secret-claim"}) is None
+    assert "call_service esphome.x failed" in caplog.text
+    assert "secret-claim" not in caplog.text
+
+
+async def test_ws_command_takes_a_registry_bigger_than_aiohttps_default(
+    client, ha_server
+):
+    """``config/entity_registry/list`` arrives as one frame; on a big install
+    it is over aiohttp's 4 MiB default."""
+    _, captured = ha_server
+    rows = [{"entity_id": f"sensor.s{i}", "pad": "x" * 200} for i in range(25_000)]
+    captured["ws_reply"] = {"id": 1, "type": "result", "success": True, "result": rows}
+    reply = await client.ws_command("config/entity_registry/list")
+    assert reply is not None and len(reply["result"]) == 25_000
 
 
 async def test_call_service_url_encodes_path_segments():

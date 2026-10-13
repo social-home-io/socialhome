@@ -15,13 +15,19 @@ import pytest
 
 from socialhome.app_keys import (
     dashboard_auth_key,
+    dashboard_display_service_key,
     dashboard_server_key,
     dashboard_settings_service_key,
     platform_adapter_key,
 )
 from socialhome.dashboard.auth import COOKIE_NAME
+from socialhome.domain.household_dashboard import (
+    DashboardAddressRequiredError,
+    DisplayDiscoveryFailedError,
+    ExternalDisplayPanel,
+)
 from socialhome.platform.adapter import DashboardHostPort
-from socialhome.routes.admin_dashboard import dashboard_base_url
+from socialhome.routes.admin_dashboard import dashboard_base_url, panel_url
 
 from .conftest import _auth
 
@@ -108,6 +114,8 @@ def test_dashboard_base_url(address, host, port, expected):
         ("PATCH", "/api/admin/dashboard/displays/d1", {"name": "K"}),
         ("PATCH", "/api/admin/dashboard/displays/d1", {"locked": False}),
         ("DELETE", "/api/admin/dashboard/displays/d1", None),
+        ("GET", "/api/admin/dashboard/displays/ha", None),
+        ("POST", "/api/admin/dashboard/displays/ha/dev-kitchen/connect", None),
     ],
 )
 async def test_non_admin_is_refused(client, method, path, body):
@@ -979,3 +987,259 @@ async def test_admin_unlock_unknown_display(client):
         f"{DISPLAYS}/nope", headers=_auth(client._tok), json={"locked": False}
     )
     assert resp.status == 404
+
+
+# ── Wall panels found in Home Assistant ─────────────────────────────────
+
+HA_PANELS = "/api/admin/dashboard/displays/ha"
+KITCHEN_MAC = "a0:b7:65:12:34:56"
+
+
+@pytest.mark.parametrize(
+    ("address", "guessed", "host_port", "expected"),
+    [
+        (
+            "https://dash.example.com",
+            "http://localhost:8100",
+            None,
+            "https://dash.example.com",
+        ),
+        (None, "http://192.168.1.5:8100", None, "http://192.168.1.5:8100"),
+        (
+            None,
+            "http://homeassistant.local:18100",
+            DashboardHostPort(18100),
+            "http://homeassistant.local:18100",
+        ),
+        # The App's port is published but not turned on — nothing reaches it.
+        (
+            None,
+            "http://homeassistant.local:8100",
+            DashboardHostPort(None),
+            "port_not_published",
+        ),
+        # Undeclared port (old App release): the listen-port guess stands.
+        (
+            None,
+            "http://homeassistant.local:8100",
+            DashboardHostPort(None, declared=False),
+            "http://homeassistant.local:8100",
+        ),
+        (None, "http://localhost:8100", None, "no_address"),
+        (None, "http://127.0.0.1:8100", None, "no_address"),
+        (None, "http://[::1]:8100", None, "no_address"),
+        (None, "http://box.localhost:8100", None, "no_address"),
+    ],
+)
+def test_panel_url(address, guessed, host_port, expected):
+    if expected.startswith("http"):
+        assert panel_url(address, guessed, host_port) == expected
+    else:
+        with pytest.raises(DashboardAddressRequiredError) as err:
+            panel_url(address, guessed, host_port)
+        assert err.value.params == {"reason": expected}
+
+
+class _HaDirectory:
+    """Home Assistant's panel directory, replaced at the platform boundary."""
+
+    def __init__(self) -> None:
+        self.panels = [
+            ExternalDisplayPanel(
+                id="dev-kitchen",
+                name="Kitchen panel",
+                mac=KITCHEN_MAC,
+                sw_version="2026.10.13 (ESPHome 2026.9.1)",
+                connect_action="kitchen_connect_social_home",
+            ),
+            ExternalDisplayPanel(
+                id="dev-old", name="Old", mac="a0:b7:65:00:00:09", connect_action=None
+            ),
+            ExternalDisplayPanel(
+                id="dev-off",
+                name="Off",
+                mac="a0:b7:65:00:00:0a",
+                connect_action=None,
+                online=False,
+            ),
+        ]
+        self.sent: list[tuple[str, str, str]] = []
+        self.fail = False
+
+    async def list_panels(self):
+        if self.fail:
+            raise DisplayDiscoveryFailedError()
+        return list(self.panels)
+
+    async def connect(self, panel, *, url, claim):
+        if self.fail:
+            raise DisplayDiscoveryFailedError()
+        self.sent.append((panel.id, url, claim))
+
+
+@pytest.fixture
+def ha(client, monkeypatch) -> _HaDirectory:
+    """The test app is standalone; give its display service an HA directory."""
+    directory = _HaDirectory()
+    monkeypatch.setattr(
+        client.app[dashboard_display_service_key], "_directory", directory
+    )
+    return directory
+
+
+async def test_standalone_has_no_ha_panels(client):
+    assert (await _state(client))["ha_display_discovery"] is False
+    resp = await client.get(HA_PANELS, headers=_auth(client._tok))
+    assert resp.status == 404
+    assert (await resp.json())["error"]["code"] == "DISPLAY_DISCOVERY_UNAVAILABLE"
+    resp = await client.post(
+        f"{HA_PANELS}/dev-kitchen/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 404
+
+
+async def test_list_ha_panels(client, ha):
+    assert (await _state(client))["ha_display_discovery"] is True
+    resp = await client.get(HA_PANELS, headers=_auth(client._tok))
+    assert resp.status == 200
+    body = await resp.json()
+    assert body == {
+        "panels": [
+            {
+                "id": "dev-kitchen",
+                "name": "Kitchen panel",
+                "sw_version": "2026.10.13 (ESPHome 2026.9.1)",
+                "status": "ready",
+                "can_connect": True,
+                "display_id": None,
+                "display_name": None,
+            },
+            {
+                "id": "dev-old",
+                "name": "Old",
+                "sw_version": None,
+                "status": "needs_update",
+                "can_connect": False,
+                "display_id": None,
+                "display_name": None,
+            },
+            {
+                "id": "dev-off",
+                "name": "Off",
+                "sw_version": None,
+                "status": "offline",
+                "can_connect": False,
+                "display_id": None,
+                "display_name": None,
+            },
+        ]
+    }
+    # Neither the MAC nor the HA action name leaves.
+    assert KITCHEN_MAC not in str(body) and "connect_social_home" not in str(body)
+
+
+async def test_ha_unreachable_is_502(client, ha):
+    ha.fail = True
+    resp = await client.get(HA_PANELS, headers=_auth(client._tok))
+    assert resp.status == 502
+    assert (await resp.json())["error"]["code"] == "DISPLAY_DISCOVERY_FAILED"
+
+
+async def test_connect_a_ha_panel_end_to_end(client, ha):
+    """Connect → HA gets {url, claim} for the panel → the panel spends the
+    claim on the dashboard port → it's paired and listed as connected; a
+    replayed claim is refused; removing it lists it as not connected."""
+    origin = await _running(client)
+    assert (await _put(client, {"address": origin})).status == 200
+    resp = await client.post(
+        f"{HA_PANELS}/dev-kitchen/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 202, await resp.text()
+    assert await resp.json() == {"expires_in": 600}
+    ((panel_id, url, claim),) = ha.sent
+    assert (panel_id, url) == ("dev-kitchen", origin)
+
+    async with aiohttp.ClientSession() as panel:
+        async with panel.post(
+            f"{url}/api/display/v1/pair/claim",
+            json={"claim": claim, "firmware": "2026.10.13"},
+            headers={"X-Display-Mac": KITCHEN_MAC.upper()},
+        ) as r:
+            assert r.status == 200
+            paired = await r.json()
+        async with panel.post(
+            f"{url}/api/display/v1/pair/claim",
+            json={"claim": claim},
+            headers={"X-Display-Mac": KITCHEN_MAC},
+        ) as r:
+            assert r.status == 404
+    status, who = await _panel_get(origin, "/api/display/v1/whoami", paired["token"])
+    assert (status, who) == (
+        200,
+        {"display_id": paired["display_id"], "name": "Kitchen panel"},
+    )
+
+    listed = (await (await client.get(HA_PANELS, headers=_auth(client._tok))).json())[
+        "panels"
+    ][0]
+    assert listed["status"] == "connected"
+    assert listed["display_id"] == paired["display_id"]
+    assert listed["display_name"] == "Kitchen panel"
+    assert listed["can_connect"] is True
+    state = await _state(client)
+    for text in (str(listed), str(state)):
+        assert claim not in text and paired["token"] not in text
+
+    resp = await client.delete(
+        f"{DISPLAYS}/{paired['display_id']}", headers=_auth(client._tok)
+    )
+    assert resp.status == 204
+    listed = (await (await client.get(HA_PANELS, headers=_auth(client._tok))).json())[
+        "panels"
+    ][0]
+    assert listed["status"] == "ready"
+
+
+async def test_connect_needs_the_dashboard_running(client, ha):
+    resp = await client.post(
+        f"{HA_PANELS}/dev-kitchen/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 409
+    assert (await resp.json())["error"]["code"] == "DASHBOARD_DISABLED"
+    assert ha.sent == []
+
+
+async def test_connect_without_a_usable_address(client, ha):
+    """The test admin reaches Social Home on 127.0.0.1 — a panel can't."""
+    await _running(client)
+    resp = await client.post(
+        f"{HA_PANELS}/dev-kitchen/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 409
+    body = await resp.json()
+    assert body["error"]["code"] == "DASHBOARD_ADDRESS_REQUIRED"
+    assert body["error"]["params"] == {"reason": "no_address"}
+    assert ha.sent == []
+
+
+async def test_connect_refusals(client, ha):
+    origin = await _running(client)
+    await _put(client, {"address": origin})
+    cases = {
+        "dev-gone": (404, "DISPLAY_PANEL_NOT_FOUND"),
+        "dev-old": (409, "DISPLAY_PANEL_NEEDS_UPDATE"),
+        "dev-off": (409, "DISPLAY_PANEL_OFFLINE"),
+    }
+    for panel_id, (status, code) in cases.items():
+        resp = await client.post(
+            f"{HA_PANELS}/{panel_id}/connect", headers=_auth(client._tok)
+        )
+        assert resp.status == status
+        assert (await resp.json())["error"]["code"] == code
+    ha.fail = True
+    resp = await client.post(
+        f"{HA_PANELS}/dev-kitchen/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 502
+    assert ha.sent == []
+    assert client.app[dashboard_display_service_key].claim_count == 0

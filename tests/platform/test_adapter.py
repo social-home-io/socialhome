@@ -14,6 +14,7 @@ from socialhome.platform.adapter import (
     InstanceConfig,
     PlatformAdapter,
     ZoneSource,
+    DisplayDirectory,
     _extract_bearer,
 )
 
@@ -188,6 +189,9 @@ async def test_build_platform_adapter_standalone(tmp_path):
         # Standalone has no platform zones to sync.
         assert adapter.zones is None
         assert Capability.ZONE_SYNC not in adapter.capabilities
+        # …and no Home Assistant to find wall panels in.
+        assert adapter.displays is None
+        assert Capability.HA_DISPLAY_DISCOVERY not in adapter.capabilities
     finally:
         await db.shutdown()
 
@@ -347,3 +351,30 @@ async def test_zone_source_protocol_is_runtime_checkable():
 
     assert isinstance(_Source(), ZoneSource)
     assert not isinstance(object(), ZoneSource)
+
+
+# ── displays (DisplayDirectory, ABC default) ────────────────────────────────
+
+
+def test_displays_defaults_to_none():
+    """A platform that says nothing lists no wall panels — Admin ›
+    Dashboard shows no "Found in Home Assistant" section."""
+    adapter = _MinimalAdapter()
+    assert adapter.displays is None
+    assert Capability.HA_DISPLAY_DISCOVERY not in adapter.capabilities
+
+
+def test_ha_display_discovery_is_a_spa_capability():
+    assert Capability.HA_DISPLAY_DISCOVERY.value == "ha_display_discovery"
+
+
+async def test_display_directory_protocol_is_runtime_checkable():
+    class _Directory:
+        async def list_panels(self):
+            return []
+
+        async def connect(self, panel, *, url, claim):
+            return None
+
+    assert isinstance(_Directory(), DisplayDirectory)
+    assert not isinstance(object(), DisplayDirectory)

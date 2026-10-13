@@ -46,6 +46,7 @@ from ..ha.providers import (
     HaSTTProvider,
     HaUserDirectory,
 )
+from ..ha.displays import HaDisplayDirectory
 from ..ha.zones import HaZoneSource
 from .bootstrap import HaBootstrap
 from .supervisor import SupervisorClient
@@ -134,6 +135,7 @@ class HaosAdapter(PlatformAdapter):
         "ai",
         "events",
         "zones",
+        "displays",
     )
 
     def __init__(
@@ -169,6 +171,8 @@ class HaosAdapter(PlatformAdapter):
         self.events = HaEventSink(self)
         # HA ``zone.*`` entities → the household-zone sync.
         self.zones = HaZoneSource(self)
+        # ESPHome wall panels in HA's device registry → Admin › Dashboard.
+        self.displays = HaDisplayDirectory(self)
 
     @property
     def capabilities(self) -> frozenset[Capability]:
@@ -177,6 +181,7 @@ class HaosAdapter(PlatformAdapter):
             Capability.AI,
             Capability.HA_PERSON_DIRECTORY,
             Capability.ZONE_SYNC,  # ``self.zones`` reads HA's zones
+            Capability.HA_DISPLAY_DISCOVERY,  # ``self.displays`` lists HA's panels
             Capability.INGRESS,  # always — that's the haos invariant
             # No MDNS_ADVERTISE: the App container sits on the Supervisor's
             # bridge network (no ``host_network``), so an mDNS announcement

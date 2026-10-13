@@ -49,7 +49,9 @@ __all__ = [
     "MAX_DISPLAYS",
     "MAX_DISPLAY_INFO_LENGTH",
     "MAX_DISPLAY_NAME_LENGTH",
+    "MAX_PENDING_CLAIMS",
     "MAX_PENDING_PAIRINGS",
+    "CLAIM_TTL_SECONDS",
     "PAIRING_CODE_ALPHABET",
     "PAIRING_CODE_LENGTH",
     "PAIRING_TTL_SECONDS",
@@ -75,8 +77,15 @@ __all__ = [
     "DashboardDisplayPinThrottledError",
     "DashboardDisplayPinWrongError",
     "DashboardDisplaySignedOutError",
+    "DashboardAddressRequiredError",
+    "DisplayDiscoveryFailedError",
+    "DisplayDiscoveryUnavailableError",
     "DisplayPairing",
     "DisplayPairingStatus",
+    "DisplayPanelNeedsUpdateError",
+    "DisplayPanelNotFoundError",
+    "DisplayPanelOfflineError",
+    "ExternalDisplayPanel",
     "DashboardEvent",
     "DashboardLesson",
     "DashboardMention",
@@ -110,6 +119,7 @@ __all__ = [
     "lesson_color_token",
     "mentioned_ids",
     "mentions_for",
+    "normalise_mac",
     "normalize_token_key",
     "picture_effective",
     "subject_color_tokens",
@@ -155,6 +165,12 @@ MAX_DISPLAYS = 20
 MAX_DISPLAY_NAME_LENGTH = 40
 #: Longest model / firmware string a panel may report.
 MAX_DISPLAY_INFO_LENGTH = 64
+#: A connect claim (a panel found through the platform, e.g. Home
+#: Assistant, pairs by spending it) stays valid this long — short: the
+#: platform may record it (HA's recorder keeps every service call's data).
+CLAIM_TTL_SECONDS = 600
+#: Claims waiting in memory at once (one per panel); the oldest is dropped.
+MAX_PENDING_CLAIMS = 20
 
 #: Household-chat messages on the wall (``show_household_messages``): the
 #: newest few, and none older than this (wall-clock age).
@@ -369,6 +385,64 @@ class DashboardDisplayPinThrottledError(CodedError):
         super().__init__(params={"retry_after": retry_after})
 
 
+class DisplayDiscoveryUnavailableError(CodedError):
+    """The platform can't list wall panels (no ``DisplayDirectory`` —
+    standalone has none)."""
+
+    status = 404
+    code = "DISPLAY_DISCOVERY_UNAVAILABLE"
+    detail = "This installation can't find wall panels."
+
+
+class DisplayDiscoveryFailedError(CodedError):
+    """The platform (Home Assistant) didn't answer — listing or sending a
+    connect request failed. Details are in the server log (WARNING)."""
+
+    status = 502
+    code = "DISPLAY_DISCOVERY_FAILED"
+    detail = "Home Assistant didn't answer. Try again."
+
+
+class DisplayPanelNotFoundError(CodedError):
+    """The platform no longer lists that panel."""
+
+    status = 404
+    code = "DISPLAY_PANEL_NOT_FOUND"
+    detail = "That panel isn't in Home Assistant any more."
+
+
+class DisplayPanelOfflineError(CodedError):
+    """Home Assistant has lost the panel (its entities are unavailable),
+    so it can't be sent a connect request now."""
+
+    status = 409
+    code = "DISPLAY_PANEL_OFFLINE"
+    detail = "The panel is offline in Home Assistant."
+
+
+class DisplayPanelNeedsUpdateError(CodedError):
+    """The panel can't be connected from here: its firmware has no
+    connect action (or the entity naming it is disabled)."""
+
+    status = 409
+    code = "DISPLAY_PANEL_NEEDS_UPDATE"
+    detail = "Update the panel's firmware, then try again."
+
+
+class DashboardAddressRequiredError(CodedError):
+    """There is no dashboard address a panel could use — the admin sets
+    one (``params.reason``: ``port_not_published`` — the Home Assistant
+    App's dashboard port isn't mapped; ``no_address`` — no address set and
+    the guessed one is a loopback name)."""
+
+    status = 409
+    code = "DASHBOARD_ADDRESS_REQUIRED"
+    detail = "Set the dashboard address first, so the panel can reach it."
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(params={"reason": reason})
+
+
 class DashboardDisplaySignedOutError(CodedError):
     """The panel is no longer paired: too many wrong PINs unpaired it
     (or it was removed meanwhile). It has to pair again."""
@@ -398,6 +472,51 @@ class DashboardDisplay:
     firmware: str | None = None
     model: str | None = None
     locked: bool = False
+    #: The panel's MAC (``aa:bb:cc:dd:ee:ff``) as it reports it in
+    #: ``X-Display-Mac`` — the key that ties it to a panel the platform
+    #: lists (Home Assistant's device registry carries the same MAC).
+    #: Self-reported, so only a matching hint, never an authorisation.
+    mac: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ExternalDisplayPanel:
+    """A wall panel the platform knows about (Home Assistant: an ESPHome
+    device running the Social Home dashboard firmware).
+
+    ``id`` is the platform's id for it (HA's device id); ``name`` its
+    name there (the user's rename first); ``sw_version`` the firmware it
+    reports. ``mac`` (normalised, see :func:`normalise_mac`) ties it to a
+    paired :class:`DashboardDisplay`. ``connect_action`` is the
+    platform's handle for sending it a connect request — ``None`` when it
+    can't be connected from here (firmware too old, or the entity that
+    names the action is disabled). ``online`` is ``False`` while the
+    platform has lost the panel (HA shows its entities unavailable).
+    """
+
+    id: str
+    name: str
+    mac: str | None
+    sw_version: str | None = None
+    connect_action: str | None = None
+    online: bool = True
+
+
+def normalise_mac(value: object) -> str | None:
+    """A MAC as ``aa:bb:cc:dd:ee:ff`` (lower case); ``None`` unless it is
+    12 hex digits, optionally grouped in pairs by ``:`` or ``-``."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if len(text) == 17 and (text.count(":") == 5 or text.count("-") == 5):
+        parts = text.replace("-", ":").split(":")
+        if any(len(p) != 2 for p in parts):
+            return None
+        text = "".join(parts)
+    if len(text) != 12 or any(ch not in "0123456789abcdefABCDEF" for ch in text):
+        return None
+    text = text.lower()
+    return ":".join(text[i : i + 2] for i in range(0, 12, 2))
 
 
 @dataclass(slots=True, frozen=True)

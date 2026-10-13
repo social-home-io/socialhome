@@ -29,6 +29,9 @@ slices of behaviour that vary across modes:
 * :class:`ExternalEventSink` — fire-and-forget event publication.
 * :class:`ZoneSource` — the platform's named places (Home Assistant's
   ``zone.*`` entities), mirrored into the household's zones.
+* :class:`DisplayDirectory` — wall panels the platform knows (Home
+  Assistant's ESPHome devices running the Social Home dashboard
+  firmware), and a way to send one a connect request.
 
 Each adapter wires the right concrete provider in its constructor. The
 adapter's high-level methods are thin pass-throughs. To add a new
@@ -59,6 +62,7 @@ from .federation_base import public_base_from_federation_base
 if TYPE_CHECKING:
     from aiohttp import web
 
+    from ..domain.household_dashboard import ExternalDisplayPanel
     from ..domain.household_zone import ExternalHouseholdZone
 
 log = logging.getLogger(__name__)
@@ -161,6 +165,10 @@ class Capability(StrEnum):
     #: App: its container sits on the Supervisor's bridge network
     #: (no ``host_network``), where multicast never reaches the LAN.
     MDNS_ADVERTISE = "mdns_advertise"
+    #: Adapter has a :class:`DisplayDirectory` — wall panels adopted in
+    #: Home Assistant show under Admin › Dashboard › Wall panels with a
+    #: Connect button (ha + haos; standalone has no platform to ask).
+    HA_DISPLAY_DISCOVERY = "ha_display_discovery"
 
 
 # ── Provider Protocols ───────────────────────────────────────────────────────
@@ -317,6 +325,36 @@ class ZoneSource(Protocol):
         ...
 
 
+@runtime_checkable
+class DisplayDirectory(Protocol):
+    """Wall panels the platform knows about, and how to reach them.
+
+    HA / HAOS: ESPHome devices in Home Assistant's device registry whose
+    firmware is the Social Home dashboard (``esphome.project``
+    ``social-home-io.esphome-dashboard``); a connect request is their
+    ``connect_social_home`` ESPHome action, called through HA.
+    Standalone: none (``PlatformAdapter.displays`` is ``None``).
+    """
+
+    async def list_panels(self) -> list["ExternalDisplayPanel"]:
+        """Every panel the platform has — ``[]`` when it has none.
+        Raises
+        :class:`~socialhome.domain.household_dashboard.DisplayDiscoveryFailedError`
+        when the platform couldn't be read."""
+        ...
+
+    async def connect(
+        self, panel: "ExternalDisplayPanel", *, url: str, claim: str
+    ) -> None:
+        """Ask ``panel`` to pair itself: it should spend ``claim`` at
+        ``url`` (the dashboard's address). Raises
+        :class:`~socialhome.domain.household_dashboard.DisplayDiscoveryFailedError`
+        when the platform didn't deliver it. The claim may end up in the
+        platform's history (HA's recorder) — callers make it single-use
+        and short-lived."""
+        ...
+
+
 class NoopEventSink:
     """Default :class:`ExternalEventSink` for adapters without an
     upstream event bus. Returns ``False`` for every call so callers
@@ -358,6 +396,9 @@ class PlatformAdapter(abc.ABC):
     #: Platform zones for the household-zone sync; ``None`` = the platform
     #: has none (adapters that set it also declare ``Capability.ZONE_SYNC``).
     zones: ZoneSource | None = None
+    #: Wall panels the platform knows; ``None`` = it knows none (adapters
+    #: that set it also declare ``Capability.HA_DISPLAY_DISCOVERY``).
+    displays: DisplayDirectory | None = None
 
     @property
     @abc.abstractmethod

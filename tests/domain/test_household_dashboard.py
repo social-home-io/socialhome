@@ -10,6 +10,7 @@ import pytest
 
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
+    normalise_mac,
     MAX_DISPLAYS,
     MAX_PENDING_PAIRINGS,
     PAIRING_CODE_ALPHABET,
@@ -557,3 +558,25 @@ def test_display_errors_are_coded(err, status, code, params):
 def test_pairing_status_repr_hides_the_token():
     st = DisplayPairingStatus(paired=True, token="s3cret-token", display_id="d1")
     assert "s3cret-token" not in repr(st)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:ff"),
+        ("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff"),
+        ("aa-bb-cc-dd-ee-ff", "aa:bb:cc:dd:ee:ff"),
+        (" AABBCCDDEEFF ", "aa:bb:cc:dd:ee:ff"),
+        ("aa:bb:cc:dd:ee", None),
+        ("aa:bb:cc:dd:ee:fg", None),
+        ("aab:bc:cd:de:ef:f0", None),
+        ("aa:bb-cc:dd:ee:ff", None),
+        ("", None),
+        (None, None),
+        (0xAABBCCDDEEFF, None),
+    ],
+)
+def test_normalise_mac(raw, expected):
+    """Home Assistant's device registry spells a MAC as ``format_mac`` does
+    (``homeassistant/helpers/device_registry.py``): lower case, ``:``."""
+    assert normalise_mac(raw) == expected

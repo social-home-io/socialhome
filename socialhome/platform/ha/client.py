@@ -39,6 +39,13 @@ log = logging.getLogger(__name__)
 #: a per-adapter singleton.
 _AUTH_LIST_TTL_SECONDS = 30
 
+#: Largest WebSocket message :meth:`HaClient.ws_command` accepts. aiohttp's
+#: 4 MiB default is too small for ``config/entity_registry/list`` on a big
+#: install (HA sends the whole registry in one ``result`` frame —
+#: ``homeassistant/components/config/entity_registry.py``
+#: ``websocket_list_entities``), so a busy home would fail the read.
+_WS_MAX_MSG_SIZE = 64 * 1024 * 1024
+
 
 class HaClient:
     """HTTP + WS client for the Home Assistant Core API."""
@@ -199,7 +206,9 @@ class HaClient:
         # ``http://supervisor/core/api/websocket`` works transparently
         # because Supervisor upgrades the connection on its side.
         try:
-            async with self._session.ws_connect(url) as ws:
+            async with self._session.ws_connect(
+                url, max_msg_size=_WS_MAX_MSG_SIZE
+            ) as ws:
                 hello = await ws.receive_json(timeout=5)
                 if hello.get("type") != "auth_required":
                     log.warning(
@@ -377,7 +386,9 @@ class HaClient:
                 json=data or {},
             ) as resp:
                 if resp.status not in (200, 201):
-                    log.debug(
+                    # WARNING, never the data (it may carry a secret, e.g.
+                    # a wall panel's connect claim): only the action name.
+                    log.warning(
                         "ha_client: call_service %s.%s -> HTTP %d",
                         domain,
                         service,
@@ -385,8 +396,8 @@ class HaClient:
                     )
                     return None
                 return await resp.json(content_type=None)
-        except aiohttp.ClientError as exc:
-            log.debug(
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            log.warning(
                 "ha_client: call_service %s.%s failed: %s",
                 domain,
                 service,

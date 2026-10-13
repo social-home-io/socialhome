@@ -1126,6 +1126,53 @@ async def test_add_display_caps_the_household(svc):
     assert len(await svc.displays()) == MAX_DISPLAYS
 
 
+async def test_display_mac_round_trips_and_old_records_load(repo):
+    first = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    await first.add_display(_display(1, mac="aa:bb:cc:dd:ee:01"))
+    stored = json.loads(repo.rows["dashboard.displays"])
+    assert stored[0]["mac"] == "aa:bb:cc:dd:ee:01"
+    # A record from before ``mac`` existed, and a garbled one, load mac-less.
+    del stored[0]["mac"]
+    stored.append({**stored[0], "id": "d2", "mac": "not-a-mac"})
+    repo.rows["dashboard.displays"] = json.dumps(stored)
+    second = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert [(d.id, d.mac) for d in await second.displays()] == [
+        ("d1", None),
+        ("d2", None),
+    ]
+
+
+async def test_add_display_can_replace_the_same_mac(svc):
+    mac = "aa:bb:cc:dd:ee:01"
+    await svc.add_display(_display(1, mac=mac))
+    await svc.add_display(_display(2, mac="aa:bb:cc:dd:ee:02"))
+    # Code pairing keeps both; a reconnect replaces the old record.
+    assert await svc.add_display(_display(3, mac=mac)) == ()
+    dropped = await svc.add_display(_display(4, mac=mac), replace_same_mac=True)
+    assert dropped == ("d1", "d3")
+    assert [d.id for d in await svc.displays()] == ["d2", "d4"]
+    # No MAC → nothing to match.
+    assert await svc.add_display(_display(5), replace_same_mac=True) == ()
+
+
+async def test_replacing_makes_room_at_the_limit(svc):
+    mac = "aa:bb:cc:dd:ee:01"
+    await svc.add_display(_display(0, mac=mac))
+    for i in range(1, MAX_DISPLAYS):
+        await svc.add_display(_display(i))
+    await svc.add_display(_display(99, mac=mac), replace_same_mac=True)
+    assert len(await svc.displays()) == MAX_DISPLAYS
+
+
+async def test_record_display_seen_keeps_a_reported_mac(svc):
+    await svc.add_display(_display(1))
+    await svc.record_display_seen(
+        "d1", at="x", firmware=None, model=None, mac="aa:bb:cc:dd:ee:01"
+    )
+    await svc.record_display_seen("d1", at="y", firmware=None, model=None)
+    assert (await svc.displays())[0].mac == "aa:bb:cc:dd:ee:01"
+
+
 async def test_rename_display(svc):
     await svc.add_display(_display(1))
     renamed = await svc.update_display("d1", {"name": "Hallway"})
