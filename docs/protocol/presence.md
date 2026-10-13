@@ -126,7 +126,13 @@ catalogues below.
   `zone.home`, …) is owned by a platform sync
   (`HouseholdZoneService.mirror_external`) and read-only through
   `/api/household/zones` (`409 ZONE_READ_ONLY`). A synced Home is never
-  taken over by a zone created in Social Home.
+  taken over by a zone created in Social Home; when a synced Home
+  arrives, a native Home stays as a plain zone (with the sync on — the
+  default — Home Assistant is the source of truth for Home). If the
+  sync later drops its Home, no zone is Home until an admin marks one.
+  The mirror keeps every real platform zone: an invalid icon or colour
+  is dropped and an out-of-range radius clamped into 25 m – 50 km (both
+  logged at WARNING); only an unusable id, name or centre skips a zone.
 - **Live updates.** Every change sends a content-free
   `household_zones_changed` WS frame to household members; clients
   refetch the list.

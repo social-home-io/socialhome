@@ -19,6 +19,7 @@ from socialhome.domain.household_zone import (
     HouseholdZoneReadOnlyError,
 )
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.household_zone_repo import SqliteHouseholdZoneRepo
 from socialhome.services.household_zone_service import HouseholdZoneService
 
 
@@ -354,13 +355,40 @@ async def test_mirror_external_skips_invalid_and_duplicates(svc):
     r = await svc.mirror_external(
         [
             _ext("zone.ok", "Ok"),
-            _ext("zone.bad", "Bad", radius_m=5),
+            _ext("zone.badname", ""),
+            _ext("zone.badcoord", "Far", latitude=123.0),
             _ext("zone.ok", "Ok again"),
             _ext("", "No id"),
         ]
     )
-    assert (r.upserted, r.skipped) == (1, 3)
+    assert (r.upserted, r.skipped) == (1, 4)
     assert [z.name for z in await svc.list_zones()] == ["Ok"]
+
+
+async def test_mirror_external_clamps_radius_instead_of_skipping(svc, caplog):
+    """A real Home Assistant zone is never dropped for its radius."""
+    r = await svc.mirror_external(
+        [
+            _ext("zone.home", "Home", is_home=True, radius_m=5),
+            _ext("zone.city", "City", radius_m=120_000),
+            _ext("zone.odd", "Odd", radius_m="wide"),
+        ]
+    )
+    assert (r.upserted, r.skipped) == (3, 0)
+    radius = {z.name: z.radius_m for z in await svc.list_zones()}
+    assert radius == {"Home": 25, "City": 50_000, "Odd": 100}
+    assert (await svc.list_zones())[0].is_home
+    assert "radius" in caplog.text
+
+
+async def test_mirror_external_drops_bad_cosmetics_keeps_zone(svc, caplog):
+    r = await svc.mirror_external(
+        [_ext("zone.gym", "Gym", icon="mdi:dumbbell", color="orange")]
+    )
+    assert (r.upserted, r.skipped) == (1, 0)
+    [gym] = await svc.list_zones()
+    assert gym.icon is None and gym.color is None
+    assert "icon" in caplog.text and "color" in caplog.text
 
 
 async def test_mirror_external_disambiguates_names(svc):
@@ -423,3 +451,58 @@ async def test_match_without_zones(svc):
 
 def test_service_without_bus_constructs(repo):
     assert HouseholdZoneService(repo) is not None
+
+
+async def test_mirror_external_unchanged_at_the_cap_is_a_no_op(svc, repo, events):
+    """With the household full of native zones (one of them Home) a synced
+    Home is trimmed by the cap — an unchanged sync must write nothing and
+    publish nothing."""
+    await _create(svc, name="Mine", is_home=True)
+    for i in range(MAX_HOUSEHOLD_ZONES - 1):
+        await _create(svc, name=f"N{i}")
+    before = dict(repo.rows)
+    events.clear()
+    for _ in range(2):
+        r = await svc.mirror_external([_ext("zone.home", "Home", is_home=True)])
+        assert r.changed is False and r.skipped == 1
+    assert repo.rows == before
+    assert events == []
+
+
+async def test_dropped_synced_home_leaves_no_home(svc):
+    """The native zone that lost the flag doesn't get it back."""
+    await _create(svc, name="Mine", is_home=True)
+    await svc.mirror_external([_ext("zone.home", "Home", is_home=True)])
+    await svc.mirror_external([])
+    zones = await svc.list_zones()
+    assert [z.name for z in zones] == ["Mine"]
+    assert not zones[0].is_home
+
+
+# ─── name race → 409, never 500 (real SQLite) ────────────────────────────
+
+
+@pytest.fixture
+async def sql_svc(db):
+    return HouseholdZoneService(SqliteHouseholdZoneRepo(db))
+
+
+async def _miss(_self, _name):
+    """Stand-in lookup that misses — a concurrent write slipped in
+    between the service's name check and its insert."""
+    return None
+
+
+async def test_create_name_race_is_name_taken(sql_svc, monkeypatch):
+    await _create(sql_svc, name="School")
+    monkeypatch.setattr(SqliteHouseholdZoneRepo, "get_by_name", _miss)
+    with pytest.raises(HouseholdZoneNameTakenError):
+        await _create(sql_svc, name="school")
+
+
+async def test_update_name_race_is_name_taken(sql_svc, monkeypatch):
+    await _create(sql_svc, name="School")
+    work = await _create(sql_svc, name="Work")
+    monkeypatch.setattr(SqliteHouseholdZoneRepo, "get_by_name", _miss)
+    with pytest.raises(HouseholdZoneNameTakenError):
+        await sql_svc.update_zone(work.id, actor_is_admin=True, name="SCHOOL")
