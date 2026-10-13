@@ -46,6 +46,7 @@ from ..ha.providers import (
     HaSTTProvider,
     HaUserDirectory,
 )
+from ..ha.zones import HaZoneSource
 from .bootstrap import HaBootstrap
 from .supervisor import SupervisorClient
 
@@ -132,6 +133,7 @@ class HaosAdapter(PlatformAdapter):
         "stt",
         "ai",
         "events",
+        "zones",
     )
 
     def __init__(
@@ -165,6 +167,8 @@ class HaosAdapter(PlatformAdapter):
         self.stt = HaSTTProvider(self)
         self.ai = HaAIProvider(self)
         self.events = HaEventSink(self)
+        # HA ``zone.*`` entities → the household-zone sync.
+        self.zones = HaZoneSource(self)
 
     @property
     def capabilities(self) -> frozenset[Capability]:
@@ -172,6 +176,7 @@ class HaosAdapter(PlatformAdapter):
             Capability.PUSH,
             Capability.AI,
             Capability.HA_PERSON_DIRECTORY,
+            Capability.ZONE_SYNC,  # ``self.zones`` reads HA's zones
             Capability.INGRESS,  # always — that's the haos invariant
         }
         if self._options.get("stt_entity_id"):

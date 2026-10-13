@@ -241,6 +241,16 @@ async def test_capabilities_include_password_auth():
     assert Capability.PASSWORD_AUTH in adapter.capabilities
 
 
+async def test_zone_source_wired_with_zone_sync_capability():
+    """HA's ``zone.*`` entities feed the household-zone sync."""
+    from socialhome.platform.adapter import Capability
+    from socialhome.platform.ha.zones import HaZoneSource
+
+    adapter = _build_adapter(client=_FakeHaClient())
+    assert isinstance(adapter.zones, HaZoneSource)
+    assert Capability.ZONE_SYNC in adapter.capabilities
+
+
 async def test_local_password_login_round_trip(tmp_path):
     """Wire the credential store, set a password, and verify the bearer
     token authenticates."""
