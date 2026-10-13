@@ -2740,7 +2740,7 @@
   "zones.home.default_name": "Casa",
   "zones.home.label": "Esta es nuestra zona Casa",
   "zones.home.hint": "Social Home usa la zona Casa para saber quién está en casa.",
-  "zones.home.move_hint": "Marcar esta zona como Casa sustituye a {name}.",
+  "zones.home.move_hint": "Marcar esta zona como Casa sustituye a «{name}».",
   "zones.home.current_hint": "Esta es tu zona Casa. Para moverla, marca otra zona como Casa.",
   "zones.home.synced_hint": "Tu zona Casa viene de Home Assistant, así que se cambia allí.",
   "zones.synced.badge": "De Home Assistant",

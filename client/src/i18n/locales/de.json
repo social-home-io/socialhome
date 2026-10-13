@@ -2718,7 +2718,7 @@
   "zones.home.default_name": "Zuhause",
   "zones.home.label": "Das ist unsere Zuhause-Zone",
   "zones.home.hint": "Social Home erkennt an der Zuhause-Zone, wer zu Hause ist.",
-  "zones.home.move_hint": "Wenn du diese Zone als Zuhause markierst, ersetzt sie {name}.",
+  "zones.home.move_hint": "Wenn du diese Zone als Zuhause markierst, ersetzt sie „{name}“.",
   "zones.home.current_hint": "Das ist deine Zuhause-Zone. Um Zuhause zu verschieben, markiere eine andere Zone als Zuhause.",
   "zones.home.synced_hint": "Deine Zuhause-Zone kommt aus Home Assistant und wird dort geändert.",
   "zones.synced.badge": "Aus Home Assistant",

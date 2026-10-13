@@ -168,7 +168,7 @@ describe('HouseholdZonesTab', () => {
     const toggle = getByLabelText('This is our Home zone') as HTMLInputElement
     expect(toggle.checked).toBe(false)
     expect(toggle.disabled).toBe(false)
-    getByText(/replaces Zürich flat/)
+    getByText(/replaces “Zürich flat”/)
     fireEvent.click(toggle)
     fireEvent.click(getByText('Save changes'))
     await waitFor(() => expect(mockApi.patch).toHaveBeenCalledTimes(1))

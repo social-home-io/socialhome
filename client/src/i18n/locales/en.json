@@ -3024,7 +3024,7 @@
   "zones.home.default_name": "Home",
   "zones.home.label": "This is our Home zone",
   "zones.home.hint": "Social Home uses the Home zone to tell who is home.",
-  "zones.home.move_hint": "Marking this zone as Home replaces {name}.",
+  "zones.home.move_hint": "Marking this zone as Home replaces “{name}”.",
   "zones.home.current_hint": "This is your Home zone. To move Home, mark another zone as Home.",
   "zones.home.synced_hint": "Your Home zone comes from Home Assistant, so it is changed there.",
   "zones.synced.badge": "From Home Assistant",

@@ -2713,7 +2713,7 @@
   "zones.home.default_name": "Maison",
   "zones.home.label": "C’est notre zone Maison",
   "zones.home.hint": "Social Home utilise la zone Maison pour savoir qui est à la maison.",
-  "zones.home.move_hint": "Marquer cette zone comme Maison remplace {name}.",
+  "zones.home.move_hint": "Marquer cette zone comme Maison remplace « {name} ».",
   "zones.home.current_hint": "C’est votre zone Maison. Pour la déplacer, marquez une autre zone comme Maison.",
   "zones.home.synced_hint": "Votre zone Maison vient de Home Assistant, elle se modifie là-bas.",
   "zones.synced.badge": "De Home Assistant",

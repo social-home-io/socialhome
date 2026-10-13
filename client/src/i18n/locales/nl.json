@@ -2713,7 +2713,7 @@
   "zones.home.default_name": "Thuis",
   "zones.home.label": "Dit is onze Thuis-zone",
   "zones.home.hint": "Social Home gebruikt de Thuis-zone om te zien wie er thuis is.",
-  "zones.home.move_hint": "Als je deze zone als Thuis markeert, vervangt hij {name}.",
+  "zones.home.move_hint": "Als je deze zone als Thuis markeert, vervangt hij ‘{name}’.",
   "zones.home.current_hint": "Dit is je Thuis-zone. Markeer een andere zone als Thuis om Thuis te verplaatsen.",
   "zones.home.synced_hint": "Je Thuis-zone komt uit Home Assistant en wordt daar gewijzigd.",
   "zones.synced.badge": "Uit Home Assistant",

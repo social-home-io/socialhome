@@ -22,8 +22,8 @@ export function HouseholdZonesTab({ onOpenSettings }: { onOpenSettings: () => vo
         refetchOn="household_zones_changed"
         household
         featureDisabled={
-          <div class="sh-empty-state">
-            <p>{t('zones.household.feature_off')}</p>
+          <div class="sh-zones-admin__off-body">
+            <p class="sh-muted">{t('zones.household.feature_off')}</p>
             <Button variant="secondary" onClick={onOpenSettings}>
               {t('zones.household.open_settings')}
             </Button>
