@@ -3,6 +3,7 @@ import {
   MERGE_DISTANCE_PX,
   bubbleSlots,
   groupBounds,
+  zoneBounds,
   groupByZone,
   matchZone,
   mergeOverlapping,
@@ -176,5 +177,46 @@ describe('groupBounds', () => {
     expect(w).toBeCloseTo(7.9, 6)
     expect(e).toBeGreaterThan(8.0)
     expect(e).toBeLessThan(8.01)
+  })
+})
+
+describe('zoneBounds', () => {
+  it('is the ±radius box around the zone centre', () => {
+    const [[s, w], [n, e]] = zoneBounds(home)
+    expect(n - 47).toBeCloseTo(200 / 111_320, 6)
+    expect(47 - s).toBeCloseTo(200 / 111_320, 6)
+    expect(e - 8).toBeGreaterThan(200 / 111_320) // longitude degrees are shorter
+    expect(8 - w).toBeCloseTo(e - 8, 9)
+  })
+})
+
+describe('mergeOverlapping with bubble extents', () => {
+  const project = (lat: number, lon: number) => ({ x: lon * 100, y: -lat * 100 })
+  // Boxes of 52 px; a zone bubble floats 60 px above its anchor (it clears
+  // the zone marker), a solo bubble only 12 px.
+  const extent = (g: MarkerGroup<MapPerson>) => ({
+    w: 52, h: 52, lift: g.zoneIds.length > 0 && !g.merged ? 60 : 12,
+  })
+  const zoned = () => groupByZone([person('a', null, null, 'z-home')], [home])[0]
+
+  it('merges a solo bubble that a lifted zone bubble would cover', () => {
+    // Solo anchor 80 px above the zone centre: further apart than the
+    // anchor threshold, but its bubble sits right on the zone bubble.
+    const solo = groupByZone([person('b', 47.8, 8.0)], [])[0]
+    expect(mergeOverlapping([zoned(), solo], project, 56)).toHaveLength(2)
+    expect(mergeOverlapping([zoned(), solo], project, 4, extent)).toHaveLength(1)
+  })
+
+  it('keeps bubbles apart when their boxes do not touch', () => {
+    const solo = groupByZone([person('b', 47.0, 9.0)], [])[0] // 100 px to the side
+    expect(mergeOverlapping([zoned(), solo], project, 4, extent)).toHaveLength(2)
+  })
+
+  it('keeps close anchors apart when their bubbles are lifted clear of each other', () => {
+    // Solo 30 px below the zone centre: anchor distance says merge, but
+    // the zone bubble floats 26 px clear above the solo bubble.
+    const solo = groupByZone([person('b', 46.7, 8.0)], [])[0]
+    expect(mergeOverlapping([zoned(), solo], project, 56)).toHaveLength(1)
+    expect(mergeOverlapping([zoned(), solo], project, 4, extent)).toHaveLength(2)
   })
 })

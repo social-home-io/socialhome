@@ -121,8 +121,17 @@ export function groupByZone<P extends MapPerson>(
   return out
 }
 
+/** A bubble's on-screen box: ``w`` × ``h`` px, its bottom edge ``lift``
+ *  px above the anchor (bubbles float above the point they mark). */
+export interface BubbleExtent {
+  w: number
+  h: number
+  lift: number
+}
+
 interface _Cluster<P extends MapPerson> {
   parts: MarkerGroup<P>[]
+  /** Anchor in screen px (mean of the parts' anchors). */
   x: number
   y: number
 }
@@ -140,14 +149,32 @@ function _combine<P extends MapPerson>(parts: MarkerGroup<P>[]): MarkerGroup<P> 
   }
 }
 
-/** Greedily merge groups whose projected anchors are closer than
- *  ``minDistancePx``; repeats until nothing overlaps. A merged group sits
- *  at the centroid of the anchors it absorbed. */
+/** Greedily merge groups whose bubbles would overlap; repeats until
+ *  nothing does. A merged group sits at the centroid of the anchors it
+ *  absorbed.
+ *
+ *  Without ``extent`` two groups overlap when their anchors are closer
+ *  than ``minDistancePx`` (in both axes). With ``extent`` each bubble is
+ *  its real box — width, height and how far it floats above the anchor
+ *  (a zone bubble floats higher than a solo one) — and ``minDistancePx``
+ *  is the clearance kept between boxes. */
 export function mergeOverlapping<P extends MapPerson>(
   groups: readonly MarkerGroup<P>[],
   project: (lat: number, lon: number) => { x: number, y: number },
   minDistancePx: number = MERGE_DISTANCE_PX,
+  extent?: (group: MarkerGroup<P>) => BubbleExtent,
 ): MarkerGroup<P>[] {
+  const box = (c: _Cluster<P>) => {
+    if (!extent) return { cx: c.x, cy: c.y, w: 0, h: 0 }
+    const { w, h, lift } = extent(_combine(c.parts))
+    return { cx: c.x, cy: c.y - lift - h / 2, w, h }
+  }
+  const overlaps = (a: _Cluster<P>, b: _Cluster<P>) => {
+    const p = box(a)
+    const q = box(b)
+    return Math.abs(p.cx - q.cx) < (p.w + q.w) / 2 + minDistancePx
+      && Math.abs(p.cy - q.cy) < (p.h + q.h) / 2 + minDistancePx
+  }
   let clusters: _Cluster<P>[] = groups.map((g) => {
     const { x, y } = project(g.lat, g.lon)
     return { parts: [g], x, y }
@@ -155,7 +182,7 @@ export function mergeOverlapping<P extends MapPerson>(
   for (;;) {
     const next: _Cluster<P>[] = []
     for (const c of clusters) {
-      const hit = next.find((n) => Math.hypot(n.x - c.x, n.y - c.y) < minDistancePx)
+      const hit = next.find((n) => overlaps(n, c))
       if (hit) {
         const k = hit.parts.length
         const m = c.parts.length
@@ -179,6 +206,13 @@ export function bubbleSlots<P>(
   return { shown: members.slice(0, max), overflow: Math.max(0, members.length - max) }
 }
 
+/** ``[[south, west], [north, east]]`` of a zone's whole circle. */
+export function zoneBounds(z: ZoneLike): [[number, number], [number, number]] {
+  const dLat = z.radius_m / 111_320
+  const dLon = z.radius_m / (111_320 * Math.max(0.01, Math.cos((z.latitude * Math.PI) / 180)))
+  return [[z.latitude - dLat, z.longitude - dLon], [z.latitude + dLat, z.longitude + dLon]]
+}
+
 /** ``[[south, west], [north, east]]`` around everything a bubble stands
  *  for: each folded zone's whole circle plus each solo member's point —
  *  what a click on a group bubble zooms the map to. */
@@ -193,10 +227,9 @@ export function groupBounds(
   for (const id of group.zoneIds) {
     const z = zones.find((zz) => zz.id === id)
     if (!z) continue
-    const dLat = z.radius_m / 111_320
-    const dLon = z.radius_m / (111_320 * Math.max(0.01, Math.cos((z.latitude * Math.PI) / 180)))
-    add(z.latitude - dLat, z.longitude - dLon)
-    add(z.latitude + dLat, z.longitude + dLon)
+    const [sw, ne] = zoneBounds(z)
+    add(...sw)
+    add(...ne)
   }
   for (const [lat, lon] of group.points) add(lat, lon)
   if (!Number.isFinite(s)) add(group.lat, group.lon)
