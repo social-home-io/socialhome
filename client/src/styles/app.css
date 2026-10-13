@@ -17686,6 +17686,28 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   font-size: var(--sh-font-size-sm);
   margin-bottom: 4px;
 }
+.sh-zone-form .sh-icon-picker { border: none; padding: 0; margin: 0; min-width: 0; }
+.sh-zone-form .sh-icon-picker legend { font-size: var(--sh-font-size-sm); margin-bottom: 4px; padding: 0; }
+/* A zone swatch that carries the zone's emoji: a round coloured badge
+   (admin list, legend). Without an icon the plain dot stays. */
+.sh-zones-admin__swatch.sh-zone-icon--has-icon,
+.sh-zone-legend__swatch.sh-zone-icon--has-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  font-size: 15px;
+  line-height: 1;
+  overflow: hidden;
+}
+/* Mixed lists: pad the plain dots to the badge width so names line up. */
+.sh-zones-admin__list:has(.sh-zone-icon--has-icon) .sh-zones-admin__swatch:not(.sh-zone-icon--has-icon) {
+  margin-inline: 5px;
+}
+.sh-zone-legend:has(.sh-zone-icon--has-icon) .sh-zone-legend__swatch:not(.sh-zone-icon--has-icon) {
+  margin-inline: 7px;
+}
 .sh-zone-swatch {
   width: 28px;
   height: 28px;
@@ -17869,6 +17891,7 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   border-radius: 50%;
   background: var(--zone-colour, #3b82f6);
 }
+.sh-zone-only-list__icon { font-size: 1rem; line-height: 1; }
 .sh-zone-only-list__empty {
   padding: var(--sh-space-md);
   text-align: center;
@@ -21265,14 +21288,14 @@ a.sh-btn--ghost:hover {
 .sh-timetable-swatch.is-on { box-shadow: inset 0 0 0 2px var(--sh-text); }
 .sh-timetable-swatch:has(input:focus-visible) { outline: 2px solid var(--sh-primary); outline-offset: 1px; }
 
-/* Icon picker — 44 px emoji tiles. */
-.sh-timetable-icons { display: flex; flex-direction: column; gap: var(--sh-space-xs); }
-.sh-timetable-icons__grid {
+/* Icon picker (shared: timetable slots, space zones) — 44 px emoji tiles. */
+.sh-icon-picker { display: flex; flex-direction: column; gap: var(--sh-space-xs); }
+.sh-icon-picker__grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
   gap: 4px;
 }
-.sh-timetable-icons__btn {
+.sh-icon-picker__btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -21286,21 +21309,30 @@ a.sh-btn--ghost:hover {
   cursor: pointer;
   transition: transform var(--sh-transition-fast), border-color var(--sh-transition-fast);
 }
-.sh-timetable-icons__btn:hover { transform: scale(1.06); border-color: var(--sh-border-strong); }
-.sh-timetable-icons__btn.is-on {
+.sh-icon-picker__btn:hover { transform: scale(1.06); border-color: var(--sh-border-strong); }
+.sh-icon-picker__btn.is-on {
   background: var(--sh-primary-soft);
   border-color: var(--sh-primary);
   box-shadow: 0 0 0 1px var(--sh-primary);
 }
-.sh-timetable-icons__btn:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
-.sh-timetable-icons__more {
+.sh-icon-picker__btn:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-icon-picker__more {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--sh-space-md);
   margin-top: var(--sh-space-xs);
 }
-.sh-timetable-icons__more .sh-emoji-field { flex: 1 1 220px; min-width: 0; }
+.sh-icon-picker__more .sh-emoji-field { flex: 1 1 220px; min-width: 0; }
+.sh-icon-picker__none { min-height: 36px; padding: 6px 12px; font-size: var(--sh-font-size-sm); }
+.sh-icon-picker__none:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+/* Phones: give the inline emoji chooser the full row instead of squeezing
+   it next to "No icon" (its frequent row bled past the dialog edge). */
+@media (max-width: 480px) {
+  .sh-icon-picker__more { flex-direction: column; align-items: stretch; }
+  .sh-icon-picker__none { align-self: flex-start; }
+  .sh-icon-picker__more .sh-emoji-field { flex: 0 0 auto; }
+}
 
 /* Entry dialog layout. */
 .sh-timetable-entry__times {

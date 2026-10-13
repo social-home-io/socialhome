@@ -57,7 +57,9 @@ async def env():
     return e
 
 
-def _upsert_event(zone_id: str = "z_office") -> SpaceZoneUpserted:
+def _upsert_event(
+    zone_id: str = "z_office", icon: str | None = None
+) -> SpaceZoneUpserted:
     return SpaceZoneUpserted(
         space_id="sp_test",
         zone_id=zone_id,
@@ -68,6 +70,7 @@ def _upsert_event(zone_id: str = "z_office") -> SpaceZoneUpserted:
         color="#3b82f6",
         created_by="u_admin",
         updated_at="2026-04-28T12:00:00+00:00",
+        icon=icon,
     )
 
 
@@ -85,6 +88,14 @@ async def test_upsert_broadcasts_to_space_members(env):
     assert p["name"] == "Office"
     assert p["radius_m"] == 150
     assert p["color"] == "#3b82f6"
+    assert "icon" in p and p["icon"] is None
+
+
+async def test_upsert_carries_the_icon(env):
+    """The icon rides the sealed payload; ``None`` is sent explicitly so a
+    receiver clears its stored icon (absence means "keep" — older senders)."""
+    await env.bus.publish(_upsert_event(icon="🏫"))
+    assert env.fed.broadcasts[0]["payload"]["icon"] == "🏫"
 
 
 # ─── Delete ─────────────────────────────────────────────────────────────

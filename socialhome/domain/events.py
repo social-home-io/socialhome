@@ -417,6 +417,7 @@ class SpaceZoneUpserted(DomainEvent):
     created_by: str
     updated_at: str
     occurred_at: datetime = field(default_factory=_now)
+    icon: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

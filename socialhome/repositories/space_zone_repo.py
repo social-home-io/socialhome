@@ -61,6 +61,7 @@ def _row_to_zone(row: dict | None) -> SpaceZone | None:
         longitude=float(row["longitude"]),
         radius_m=int(row["radius_m"]),
         color=row["color"],
+        icon=row["icon"],
         created_by=row["created_by"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -123,14 +124,15 @@ class SqliteSpaceZoneRepo:
             """
             INSERT INTO space_zones(
                 id, space_id, name, latitude, longitude,
-                radius_m, color, created_by, created_at, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                radius_m, color, icon, created_by, created_at, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 latitude = excluded.latitude,
                 longitude = excluded.longitude,
                 radius_m = excluded.radius_m,
                 color = excluded.color,
+                icon = excluded.icon,
                 updated_at = excluded.updated_at
              WHERE space_zones.space_id = excluded.space_id
                AND space_zones.deleted_at IS NULL
@@ -143,6 +145,7 @@ class SqliteSpaceZoneRepo:
                 zone.longitude,
                 zone.radius_m,
                 zone.color,
+                zone.icon,
                 zone.created_by,
                 zone.created_at,
                 zone.updated_at,
@@ -158,14 +161,15 @@ class SqliteSpaceZoneRepo:
         The row stays as a tombstone (migration 0085) — the §25.6
         ``space_zones_deleted`` resource streams it to a household that
         missed the delete, and no upsert brings the id back. Its name and
-        circle are content and go: the name becomes ``NUL`` + the id (a
+        circle and icon are content and go: the name becomes ``NUL`` + the id (a
         control character no zone name may hold, so the ``UNIQUE(space_id,
         name)`` slot is free again and no live name can collide), the
         coordinates 0.
         """
         n = await self._db.enqueue_rowcount(
             "UPDATE space_zones SET deleted_at=datetime('now'), deleted_by=?,"
-            " name=char(0) || id, latitude=0, longitude=0, color=NULL"
+            " name=char(0) || id, latitude=0, longitude=0, color=NULL,"
+            " icon=NULL"
             " WHERE id=? AND space_id=? AND deleted_at IS NULL",
             (deleted_by or None, zone_id, space_id),
         )

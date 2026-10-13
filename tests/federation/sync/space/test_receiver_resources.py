@@ -241,9 +241,14 @@ class _GalleryRepoStub:
 class _ZoneRepoStub:
     def __init__(self, collector):
         self._c = collector
+        self.stored: dict = {}
+
+    async def get(self, zone_id):
+        return self.stored.get(zone_id)
 
     async def upsert(self, zone, *, space_id):
         self._c.zones.append(zone)
+        self.stored[zone.id] = zone
         return True
 
     async def is_deleted(self, zone_id, *, space_id):
@@ -1194,6 +1199,57 @@ async def test_space_zones_normalises_valid_display_data(setup):
     )
     assert c.zones[0].name == "Office"
     assert c.zones[0].color == "#abcdef"
+
+
+async def test_space_zones_icon_applied(setup):
+    r, c, kp = setup
+    await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD, icon="🏫")])
+    assert c.zones[-1].icon == "🏫"
+
+
+async def test_space_zones_missing_icon_keeps_the_stored_icon(setup):
+    """A record from an older (pre-icon) provider carries no ``icon`` key:
+    the stored icon stays rather than being wiped. Explicit null clears."""
+    r, c, kp = setup
+    await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD, icon="🏫")])
+    await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD, radius_m=300)])
+    assert c.zones[-1].radius_m == 300
+    assert c.zones[-1].icon == "🏫"
+    await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD, icon=None)])
+    assert c.zones[-1].icon is None
+
+
+async def test_space_zones_missing_icon_never_copies_another_spaces_icon(setup):
+    """The keep-the-stored-icon lookup is by zone id only: a row with the
+    same id in ANOTHER space must never lend this space its icon."""
+    r, c, kp = setup
+    r._zone_repo.stored["z_ok"] = SimpleNamespace(
+        id="z_ok", space_id="sp-other", icon="🏫"
+    )
+    await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD)])
+    assert c.zones[-1].space_id == "sp-1"
+    assert c.zones[-1].icon is None
+
+
+async def test_space_zones_missing_icon_new_zone_has_none(setup):
+    r, c, kp = setup
+    await _send(r, kp, "space_zones", [dict(_GOOD_ZONE_RECORD)])
+    assert c.zones[-1].icon is None
+
+
+@pytest.mark.parametrize("icon", ["school", "🏫🏠", "", "<b>", 5])
+async def test_space_zones_invalid_icon_dropped(setup, caplog, icon):
+    r, c, kp = setup
+    with caplog.at_level("WARNING"):
+        await _send(
+            r,
+            kp,
+            "space_zones",
+            [dict(_GOOD_ZONE_RECORD, id="z_bad", icon=icon), dict(_GOOD_ZONE_RECORD)],
+        )
+    assert [z.id for z in c.zones] == ["z_ok"]
+    text = " ".join(x.getMessage() for x in caplog.records)
+    assert "z_bad" in text and "icon" in text
 
 
 async def test_space_zones_skipped_when_repo_not_wired(bus, peer):

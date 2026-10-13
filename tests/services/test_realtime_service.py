@@ -528,6 +528,7 @@ async def test_space_zone_upserted_fans_to_space_members(env):
             color="#3b82f6",
             created_by="u_admin",
             updated_at="2026-04-28T00:00:00+00:00",
+            icon="🏫",
         )
     )
     assert any("space_zone_changed" in m for m in sock.sent)
@@ -541,6 +542,7 @@ async def test_space_zone_upserted_fans_to_space_members(env):
     assert parsed["data"]["zone"]["name"] == "Office"
     assert parsed["data"]["zone"]["radius_m"] == 150
     assert parsed["data"]["zone"]["color"] == "#3b82f6"
+    assert parsed["data"]["zone"]["icon"] == "🏫"
 
 
 async def test_space_zone_deleted_fans_with_action_delete(env):

@@ -57,6 +57,7 @@ class SpaceZoneOutbound:
                 "longitude": event.longitude,
                 "radius_m": event.radius_m,
                 "color": event.color,
+                "icon": event.icon,
                 "created_by": event.created_by,
                 "updated_at": event.updated_at,
             },

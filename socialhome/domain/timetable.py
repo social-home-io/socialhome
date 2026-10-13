@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import copy
 import re
-import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -35,6 +34,7 @@ from typing import Any, Final
 import orjson
 
 from ..utils.timezones import is_valid_tz, local_instant
+from .emoji import MAX_EMOJI_CODEPOINTS, is_single_emoji
 
 
 class EntryKind(StrEnum):
@@ -92,7 +92,7 @@ MAX_ROOM = 30
 MAX_TEACHER = 60
 MAX_NOTE = 200
 MAX_LABEL = 8
-MAX_ICON = 16  # code points — room for ZWJ sequences and tag flags
+MAX_ICON = MAX_EMOJI_CODEPOINTS  # code points — room for ZWJ sequences and tag flags
 MAX_ID = 64  # timetable / entry / override ids and user ids
 MAX_TZ = 64
 #: Fits SQLite's INTEGER and orjson; stops a peer from pinning LWW forever
@@ -156,14 +156,6 @@ _REPLACEABLE: Final = (
 _CANCEL_EMPTY: Final = (*_TEXT_FIELDS, "start", "end")
 #: Lesson fields cleared by ``copy_day(with_subjects=False)``.
 _SUBJECT_FIELDS: Final = ("title", "room", "teacher", "note", "color", "icon")
-#: Non-symbol code points an emoji sequence may still contain: the
-#: zero-width joiner (👩‍🔬) and the tag characters of subdivision flags.
-_ZWJ: Final = 0x200D
-_ICON_JOINERS: Final = frozenset({_ZWJ, *range(0xE0020, 0xE0080)})
-_REGIONAL_INDICATORS: Final = range(0x1F1E6, 0x1F200)
-_SKIN_TONES: Final = range(0x1F3FB, 0x1F400)
-#: Keycaps (1️⃣ #️⃣ *⃣) are the one emoji built on an ASCII base.
-_KEYCAP_RE: Final = re.compile("[0-9#*]\ufe0f?\u20e3")
 
 
 # ─── Exceptions ──────────────────────────────────────────────────────────
@@ -431,57 +423,9 @@ def _check_color(value: str | None, where: str) -> None:
         raise TimetableValidationError(f"{where}: unknown color {_r(value)}")
 
 
-def _pictographs(value: str) -> int:
-    """Count visible pictographs, grapheme-ish.
-
-    A symbol starts a new one unless it follows a ZWJ (👩‍🔬 is one);
-    two regional indicators make one flag (🇬🇧); skin tones, variation
-    selectors, keycap marks and tag characters never start one.
-    """
-    count = 0
-    prev = 0
-    open_flag = False
-    for c in value:
-        o = ord(c)
-        if o in _REGIONAL_INDICATORS:
-            if open_flag:
-                open_flag = False  # second half of the flag
-            else:
-                count += prev != _ZWJ
-                open_flag = True
-        else:
-            open_flag = False
-            if unicodedata.category(c)[0] == "S" and o not in _SKIN_TONES:
-                count += prev != _ZWJ
-        prev = o
-    return count
-
-
 def _check_icon(value: object, where: str) -> None:
-    """``None`` or exactly one emoji of at most :data:`MAX_ICON` code points.
-
-    A keycap (1️⃣ #️⃣ *⃣) is matched explicitly. Anything else must start
-    with a symbol (``S*``, regional indicators included), consist only of
-    non-ASCII symbols, combining marks (``M*`` — variation selectors,
-    keycap marks) and ZWJ / tag joiners, and draw a single pictograph.
-    That admits 🔢 ✏️ 👩‍🔬 👍🏽 🇬🇧 but refuses words in any script, markup,
-    whitespace, invisible controls, bare joiners and ★★.
-    """
-    if value is None:
-        return
-    if isinstance(value, str) and _KEYCAP_RE.fullmatch(value):
-        return
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= MAX_ICON
-        or unicodedata.category(value[0])[0] != "S"
-        or not all(
-            ord(c) > 0x7F
-            and (ord(c) in _ICON_JOINERS or unicodedata.category(c)[0] in ("S", "M"))
-            for c in value
-        )
-        or _pictographs(value) != 1
-    ):
+    """``None`` or exactly one emoji — see :func:`.emoji.is_single_emoji`."""
+    if value is not None and not is_single_emoji(value):
         raise TimetableValidationError(f"{where}: icon must be a single emoji")
 
 

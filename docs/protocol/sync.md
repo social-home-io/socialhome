@@ -263,7 +263,7 @@ Covered — streamed row by row when changed:
 | `gallery`, `gallery_albums_deleted`, `gallery_items_deleted` | `gallery_albums`, `gallery_items` | the 0085 album trigger that tombstones an album's items |
 | `calendar`, `calendar_deleted` | `space_calendar_events` | the 0085 trigger dropping a tombstoned event's RSVPs needs nothing: RSVPs are not part of the record, the tombstone carries the delete |
 | `stickies`, `stickies_deleted` | `stickies` | |
-| `space_zones`, `space_zones_deleted` | `space_zones` | |
+| `space_zones`, `space_zones_deleted` | `space_zones` | an `icon` change (0096 recreates the update trigger with the column); a record without an `icon` key (an older provider) keeps the receiver's stored icon, an explicit `null` clears it |
 | `task_lists`, `task_lists_deleted` | `space_task_lists` (0088) | |
 | `tasks`, `tasks_archived`, `tasks_deleted` | `space_tasks` (0088) | an edit, a status / position change, a move to another list, archive and unarchive (`archived_at`), a delete; the 0069 / 0071 list-tombstone trigger tombstones — and so stamps — the list's tasks |
 | `pages`, `pages_deleted` | `space_pages` (0088) | a change to the page's draft base (`side='base'`) or open conflict sides (`conflict=1`) — rows of `space_page_snapshots`, part of the page's record — **touches** the page (insert, update, delete; household snapshots touch nothing). `page_edit_history` is in no record and stamps nothing |
@@ -291,7 +291,8 @@ taken while those rows could change without a stamp — falls back to one
 full stream. Shape 3: `calendar` streams its stored rows (a series once,
 with its rule) instead of a ±10-year expansion, and a held album takes the
 host's edits and recounts its items — one full stream heals the copies the
-old shape left wrong.)
+old shape left wrong. Shape 4: a `space_zones` record carries `icon`
+(migration 0096).)
 
 **Per-household watermark — on the provider.** `space_instances` (the
 provider's row for each (space, member household), which a BEGIN already

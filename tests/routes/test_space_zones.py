@@ -243,6 +243,75 @@ async def test_patch_zone_clear_color(client):
     assert (await r.json())["color"] is None
 
 
+# ─── Icon ───────────────────────────────────────────────────────────────
+
+
+async def test_create_zone_with_icon_round_trips(client):
+    space_id = await _create_space(client)
+    r = await client.post(
+        f"/api/spaces/{space_id}/zones",
+        json={
+            "name": "School",
+            "latitude": 47.0,
+            "longitude": 8.0,
+            "radius_m": 200,
+            "icon": "🏫",
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201, await r.text()
+    assert (await r.json())["icon"] == "🏫"
+    r = await client.get(f"/api/spaces/{space_id}/zones", headers=_auth(client._tok))
+    [zone] = (await r.json())["zones"]
+    assert zone["icon"] == "🏫"
+
+
+async def test_create_zone_without_icon_returns_null(client):
+    space_id = await _create_space(client)
+    zid = await _seed_zone(client, space_id)
+    r = await client.get(f"/api/spaces/{space_id}/zones", headers=_auth(client._tok))
+    [zone] = (await r.json())["zones"]
+    assert zone["id"] == zid and zone["icon"] is None
+
+
+async def test_patch_zone_sets_keeps_and_clears_icon(client):
+    space_id = await _create_space(client)
+    zid = await _seed_zone(client, space_id)
+    url = f"/api/spaces/{space_id}/zones/{zid}"
+    r = await client.patch(url, json={"icon": "⚽"}, headers=_auth(client._tok))
+    assert r.status == 200, await r.text()
+    assert (await r.json())["icon"] == "⚽"
+    r = await client.patch(url, json={"radius_m": 300}, headers=_auth(client._tok))
+    assert (await r.json())["icon"] == "⚽"  # omitted → untouched
+    r = await client.patch(url, json={"icon": None}, headers=_auth(client._tok))
+    assert r.status == 200
+    assert (await r.json())["icon"] is None
+
+
+@pytest.mark.parametrize("icon", ["school", "🏫🏠", "", "<b>", 5])
+async def test_zone_invalid_icon_422(client, icon):
+    space_id = await _create_space(client)
+    r = await client.post(
+        f"/api/spaces/{space_id}/zones",
+        json={
+            "name": "School",
+            "latitude": 47.0,
+            "longitude": 8.0,
+            "radius_m": 200,
+            "icon": icon,
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422, await r.text()
+    zid = await _seed_zone(client, space_id)
+    r = await client.patch(
+        f"/api/spaces/{space_id}/zones/{zid}",
+        json={"icon": icon},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 422, await r.text()
+
+
 async def test_patch_zone_unknown_id_404(client):
     space_id = await _create_space(client)
     r = await client.patch(

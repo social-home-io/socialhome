@@ -30,8 +30,10 @@ from socialhome.domain.space import (
     normalize_retention_exempt_types,
     restricted_access_changes,
     MAX_ZONE_NAME_LENGTH,
+    SpaceZone,
     validate_zone_color,
     validate_zone_coord,
+    validate_zone_icon,
     validate_zone_name,
     validate_zone_radius,
     InvalidSpaceLinkError,
@@ -708,6 +710,36 @@ def test_validate_zone_color_normalises_hex_and_passes_none():
 def test_validate_zone_color_rejects(bad):
     with pytest.raises(ValueError, match="color"):
         validate_zone_color(bad)
+
+
+def test_validate_zone_icon_accepts_single_emoji_and_passes_none():
+    assert validate_zone_icon("🏠") == "🏠"
+    assert validate_zone_icon("👩‍🔬") == "👩‍🔬"
+    assert validate_zone_icon(None) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "home", "🏠🏫", " 🏠", "<b>", 5, ["🏠"], "🏠" * 17],
+)
+def test_validate_zone_icon_rejects(bad):
+    with pytest.raises(ValueError, match="icon must be a single emoji or None"):
+        validate_zone_icon(bad)
+
+
+def test_space_zone_icon_defaults_to_none():
+    zone = SpaceZone(
+        id="z1",
+        space_id="sp1",
+        name="School",
+        latitude=1.0,
+        longitude=2.0,
+        radius_m=100,
+        created_by="u1",
+        created_at="t",
+        updated_at="t",
+    )
+    assert zone.icon is None
 
 
 # ─── Space quick links ──────────────────────────────────────────────────

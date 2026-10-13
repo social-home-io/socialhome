@@ -102,8 +102,11 @@ via two sealed federation events under the space content key:
 
 - `SPACE_ZONE_UPSERTED` — encrypted payload
   `{zone_id, space_id, name, latitude, longitude, radius_m, color,
-  created_by, updated_at}`. Inbound handler upserts into the local
-  `space_zones` table.
+  icon, created_by, updated_at}`. Inbound handler upserts into the local
+  `space_zones` table. `icon` (a single emoji or `null`) is optional; a
+  receiver keeps its stored icon when the key is absent (older senders),
+  and an explicit `null` clears it. No protocol-version bump: an older
+  receiver ignores the extra key.
 - `SPACE_ZONE_DELETED` — encrypted payload
   `{zone_id, space_id, deleted_by}`. Inbound handler deletes the
   matching row.
@@ -115,10 +118,11 @@ catalogue via the chunked `SPACE_SYNC_BEGIN/CHUNK` flow — the
 **Validation.** Every zone write — local REST, `SPACE_ZONE_UPSERTED`
 and the `space_zones` sync resource — passes the same checks
 (`domain/space.py:validate_zone_name` / `validate_zone_color` /
-`validate_zone_coord` / `validate_zone_radius`):
+`validate_zone_icon` / `validate_zone_coord` / `validate_zone_radius`):
 `name` is stripped, non-empty, at most 64 characters and free of
 control characters (Unicode `Cc`, `Zl`, `Zp`); `color` is `#RRGGBB` or
-`null`, stored lower-cased; `latitude` / `longitude` are finite numbers
+`null`, stored lower-cased; `icon` is exactly one emoji or `null`
+(`domain/emoji.py:is_single_emoji`); `latitude` / `longitude` are finite numbers
 within ±90 / ±180, stored truncated to 4 decimals; `radius_m` is a whole
 number of metres between 25 and 50 000. An inbound event or sync record that fails
 is dropped (the rest of a sync chunk still applies) with a WARNING

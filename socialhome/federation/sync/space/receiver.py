@@ -56,6 +56,7 @@ from ....domain.space import (
     parse_have_seq,
     validate_zone_color,
     validate_zone_coord,
+    validate_zone_icon,
     validate_zone_name,
     validate_zone_radius,
 )
@@ -1412,6 +1413,12 @@ class SpaceSyncReceiver:
                 if await self._zone_repo.is_deleted(zone.id, space_id=space_id):
                     log.debug("sync: zone %s was deleted here — skipped", zone.id)
                     continue
+                if "icon" not in r:
+                    # An older provider (pre-icon) streams no ``icon`` key:
+                    # keep the stored icon rather than wiping it.
+                    stored_zone = await self._zone_repo.get(zone.id)
+                    if stored_zone is not None and stored_zone.space_id == space_id:
+                        zone = replace(zone, icon=stored_zone.icon)
                 if not await self._zone_repo.upsert(zone, space_id=space_id):
                     log.warning(
                         "space sync: zone %s already exists in another space "
@@ -3364,7 +3371,7 @@ def _zone_from_record(
     the envelope signature, so the worst case is a peer with a buggy
     catalogue — log and drop the offending row, keep the others.
 
-    Name and colour pass the same validation as the local API
+    Name, colour and icon pass the same validation as the local API
     (§23.8.7) — a refused row is a WARNING naming the space and the
     provider, never the name.
     """
@@ -3379,6 +3386,7 @@ def _zone_from_record(
         latitude = validate_zone_coord(r.get("latitude"), name="latitude", limit=90)
         longitude = validate_zone_coord(r.get("longitude"), name="longitude", limit=180)
         radius_m = validate_zone_radius(r.get("radius_m"))
+        icon = validate_zone_icon(r.get("icon"))
     except ValueError as exc:
         log.warning(
             "space sync from %s: zone %s in space %s refused — %s",
@@ -3396,6 +3404,7 @@ def _zone_from_record(
         longitude=longitude,
         radius_m=radius_m,
         color=color,
+        icon=icon,
         created_by=str(r.get("created_by") or ""),
         created_at=str(r.get("created_at") or ""),
         updated_at=str(r.get("updated_at") or ""),

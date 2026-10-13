@@ -10,7 +10,7 @@
  *   │              │  to start the picker.          │
  *   └──────────────┴────────────────────────────────┘
  *
- * Add / edit modal: name, color picker, radius slider (25 m – 50 km),
+ * Add / edit modal: name, icon picker, color picker, radius slider (25 m – 50 km),
  * Leaflet click-to-place + drag-radius-handle picker, plus number-input
  * fallbacks for accessibility / keyboard-only users.
  *
@@ -27,8 +27,10 @@ import { api } from '@/api'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 import { escapeHtml } from '@/utils/html'
 import { ZONE_PALETTE, safeZoneHex, zoneColor } from '@/utils/zoneColor'
+import { ZONE_ICON_PRESETS, sortZones } from '@/utils/zones'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
+import { IconPicker } from './IconPicker'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
 import type { SpaceZone } from '@/types'
@@ -51,6 +53,8 @@ interface DraftZone {
   longitude: number | null
   radius_m: number
   color: string | null
+  /** One emoji, or null for "no icon". */
+  icon: string | null
 }
 
 const _BLANK_DRAFT: DraftZone = {
@@ -60,6 +64,7 @@ const _BLANK_DRAFT: DraftZone = {
   longitude: null,
   radius_m: 200,
   color: PALETTE[0],
+  icon: null,
 }
 
 /** Convert a slider value in [0, 1000] → radius in metres on a log
@@ -118,6 +123,7 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
     longitude: z.longitude,
     radius_m: z.radius_m,
     color: safeZoneHex(z.color) ?? PALETTE[0],
+    icon: z.icon ?? null,
   })
 
   const closeDraft = () => setDraft(null)
@@ -140,6 +146,7 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
         longitude: draft.longitude,
         radius_m: draft.radius_m,
         color: draft.color,
+        icon: draft.icon,
       }
       if (draft.id) {
         await api.patch(`/api/spaces/${spaceId}/zones/${draft.id}`, body)
@@ -200,13 +207,15 @@ export function SpaceZonesAdmin({ spaceId }: { spaceId: string }) {
               {t('zones.empty')}
             </li>
           )}
-          {zones.map((z) => (
+          {sortZones(zones).map((z) => (
             <li key={z.id} class="sh-zones-admin__item">
               <span
-                class="sh-zones-admin__swatch"
+                class={`sh-zones-admin__swatch${z.icon ? ' sh-zone-icon--has-icon' : ''}`}
                 style={{ background: zoneColor(z) }}
                 aria-hidden="true"
-              />
+              >
+                {z.icon}
+              </span>
               <div class="sh-zones-admin__meta">
                 <strong>{z.name}</strong>
                 <span class="sh-muted">
@@ -531,6 +540,17 @@ function ZoneEditDialog({
             })}
           />
         </label>
+
+        <IconPicker
+          value={draft.icon}
+          onChange={(icon) => onChange({ ...draftRef.current, icon })}
+          id={`zone-icon-${draft.id ?? 'new'}`}
+          groups={[{ label: t('zones.icon.places'), presets: ZONE_ICON_PRESETS }]}
+          legend={t('zones.icon.legend')}
+          noneLabel={t('zones.icon.none')}
+          customLabel={t('zones.icon.custom')}
+          customHint={t('zones.icon.custom_hint')}
+        />
 
         <fieldset class="sh-zone-form__palette" aria-label={t('zones.colour_aria')}>
           <legend>{t('zones.colour')}</legend>
