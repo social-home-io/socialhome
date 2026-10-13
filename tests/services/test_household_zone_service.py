@@ -9,6 +9,7 @@ import pytest
 
 from socialhome.domain.events import HouseholdZonesChanged
 from socialhome.domain.household_zone import (
+    HOME_ZONE_MANAGED_DETAIL,
     MAX_HOUSEHOLD_ZONES,
     ExternalHouseholdZone,
     HouseholdZone,
@@ -55,7 +56,19 @@ class _FakeRepo:
             if z.is_home and k != except_id:
                 self.rows[k] = replace(z, is_home=False)
 
-    async def create(self, zone):
+    def _refuse_synced_home(self, zone):
+        if not zone.is_home or zone.external_id is not None:
+            return
+        if any(
+            z.is_home and z.external_id is not None and z.id != zone.id
+            for z in self.rows.values()
+        ):
+            raise HouseholdZoneReadOnlyError(HOME_ZONE_MANAGED_DETAIL)
+
+    async def create(self, zone, *, max_zones=MAX_HOUSEHOLD_ZONES):
+        if len(self.rows) >= max_zones:
+            raise HouseholdZoneLimitError()
+        self._refuse_synced_home(zone)
         if zone.is_home:
             self._clear_home(zone.id)
         self.rows[zone.id] = zone
@@ -64,6 +77,7 @@ class _FakeRepo:
         old = self.rows.get(zone.id)
         if old is None:
             return False
+        self._refuse_synced_home(zone)
         if zone.is_home:
             self._clear_home(zone.id)
         self.rows[zone.id] = replace(
@@ -74,7 +88,11 @@ class _FakeRepo:
     async def delete(self, zone_id):
         return self.rows.pop(zone_id, None) is not None
 
-    async def mirror_external(self, zones: Sequence[HouseholdZone]):
+    async def mirror_external(
+        self, zones: Sequence[HouseholdZone], *, max_zones=MAX_HOUSEHOLD_ZONES
+    ):
+        native = sum(1 for z in self.rows.values() if z.external_id is None)
+        zones = list(zones)[: max(0, max_zones - native)]
         keep = {z.external_id for z in zones}
         removed = 0
         for k, z in list(self.rows.items()):
@@ -506,3 +524,74 @@ async def test_update_name_race_is_name_taken(sql_svc, monkeypatch):
     monkeypatch.setattr(SqliteHouseholdZoneRepo, "get_by_name", _miss)
     with pytest.raises(HouseholdZoneNameTakenError):
         await sql_svc.update_zone(work.id, actor_is_admin=True, name="SCHOOL")
+
+
+# ─── a mirror landing between the service's reads and its write ──────────
+
+
+def _mirror_mid_write(monkeypatch, sql_svc, zones):
+    """Patch the name lookup (the service's last read before it writes) to
+    run a platform mirror first — the sync interleaving with an admin's
+    write."""
+    real = SqliteHouseholdZoneRepo.get_by_name
+
+    async def _lookup(self, name):
+        monkeypatch.setattr(SqliteHouseholdZoneRepo, "get_by_name", real)
+        await sql_svc.mirror_external(zones)
+        return await real(self, name)
+
+    monkeypatch.setattr(SqliteHouseholdZoneRepo, "get_by_name", _lookup)
+
+
+async def test_create_home_refused_when_a_synced_home_lands_midway(
+    sql_svc, monkeypatch
+):
+    _mirror_mid_write(monkeypatch, sql_svc, [_ext("zone.home", "HA", is_home=True)])
+    with pytest.raises(HouseholdZoneReadOnlyError):
+        await _create(sql_svc, name="Mine", is_home=True)
+    zones = await sql_svc.list_zones()
+    assert [(z.external_id, z.is_home) for z in zones] == [("zone.home", True)]
+
+
+async def test_update_home_refused_when_a_synced_home_lands_midway(
+    sql_svc, monkeypatch
+):
+    school = await _create(sql_svc, name="School")
+    _mirror_mid_write(monkeypatch, sql_svc, [_ext("zone.home", "HA", is_home=True)])
+    with pytest.raises(HouseholdZoneReadOnlyError):
+        await sql_svc.update_zone(
+            school.id, actor_is_admin=True, name="Campus", is_home=True
+        )
+    zones = {z.id: z for z in await sql_svc.list_zones()}
+    assert not zones[school.id].is_home and zones[school.id].name == "School"
+
+
+async def test_create_cap_counts_zones_a_mirror_adds_midway(sql_svc, monkeypatch):
+    for i in range(MAX_HOUSEHOLD_ZONES - 1):
+        await _create(sql_svc, name=f"Z{i}")
+    _mirror_mid_write(monkeypatch, sql_svc, [_ext("zone.work", "Work")])
+    with pytest.raises(HouseholdZoneLimitError):
+        await _create(sql_svc, name="One too many")
+    assert await sql_svc.count_zones() == MAX_HOUSEHOLD_ZONES
+
+
+async def test_mirror_never_pushes_past_the_cap_after_a_late_create(
+    sql_svc, monkeypatch
+):
+    """A zone created after the mirror's snapshot still counts: the repo
+    trims the synced set in its own transaction."""
+    for i in range(MAX_HOUSEHOLD_ZONES - 1):
+        await _create(sql_svc, name=f"Z{i}")
+    real_list = SqliteHouseholdZoneRepo.list
+
+    async def _snapshot_then_create(self):
+        snapshot = await real_list(self)
+        monkeypatch.setattr(SqliteHouseholdZoneRepo, "list", real_list)
+        # An admin's zone lands after the mirror took its snapshot.
+        await _create(sql_svc, name="Late")
+        return snapshot
+
+    monkeypatch.setattr(SqliteHouseholdZoneRepo, "list", _snapshot_then_create)
+    await sql_svc.mirror_external([_ext("zone.work", "Work")])
+    assert await sql_svc.count_zones() == MAX_HOUSEHOLD_ZONES
+    assert all(z.external_id is None for z in await sql_svc.list_zones())

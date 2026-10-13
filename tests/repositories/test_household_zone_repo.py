@@ -7,7 +7,12 @@ import sqlite3
 
 import pytest
 
-from socialhome.domain.household_zone import HouseholdZone, HouseholdZoneNameTakenError
+from socialhome.domain.household_zone import (
+    HouseholdZone,
+    HouseholdZoneLimitError,
+    HouseholdZoneNameTakenError,
+    HouseholdZoneReadOnlyError,
+)
 from socialhome.repositories.household_zone_repo import (
     AbstractHouseholdZoneRepo,
     SqliteHouseholdZoneRepo,
@@ -201,3 +206,66 @@ async def test_other_integrity_errors_pass_through(repo):
     with pytest.raises(sqlite3.IntegrityError) as info:
         await repo.create(_zone("hz_1", "Other"))
     assert not isinstance(info.value, HouseholdZoneNameTakenError)
+
+
+# ─── invariants checked inside the write's transaction ───────────────────
+
+
+async def test_create_refuses_past_the_cap(repo):
+    await repo.create(_zone("hz_1", "A"), max_zones=2)
+    await repo.create(_zone("hz_2", "B", external_id="zone.b"), max_zones=2)
+    with pytest.raises(HouseholdZoneLimitError):
+        await repo.create(_zone("hz_3", "C"), max_zones=2)
+    assert await repo.count() == 2
+
+
+async def test_create_home_refused_while_home_is_synced(repo):
+    await repo.create(_zone("hz_ha", "Home", is_home=True, external_id="zone.home"))
+    with pytest.raises(HouseholdZoneReadOnlyError, match="managed by Home Assistant"):
+        await repo.create(_zone("hz_1", "Mine", is_home=True))
+    assert await repo.get("hz_1") is None
+    assert (await repo.get("hz_ha")).is_home
+    # A plain zone is fine.
+    await repo.create(_zone("hz_2", "School"))
+
+
+async def test_update_home_refused_while_home_is_synced(repo):
+    await repo.create(_zone("hz_ha", "Home", is_home=True, external_id="zone.home"))
+    await repo.create(_zone("hz_1", "School"))
+    with pytest.raises(HouseholdZoneReadOnlyError):
+        await repo.update(_zone("hz_1", "School", is_home=True))
+    assert not (await repo.get("hz_1")).is_home
+    assert (await repo.get("hz_ha")).is_home
+
+
+async def test_update_home_allowed_over_a_native_home(repo):
+    await repo.create(_zone("hz_old", "Old", is_home=True))
+    await repo.create(_zone("hz_1", "School"))
+    assert await repo.update(_zone("hz_1", "School", is_home=True))
+    assert not (await repo.get("hz_old")).is_home
+
+
+async def test_mirror_external_trims_to_the_room_left(repo):
+    """The room is counted in the mirror's transaction — a zone created
+    after the caller's snapshot still counts."""
+    await repo.create(_zone("hz_1", "A"))
+    await repo.create(_zone("hz_2", "B"))
+    upserted, _ = await repo.mirror_external(
+        [
+            _zone("hz_h", "Home", is_home=True, external_id="zone.home"),
+            _zone("hz_w", "Work", external_id="zone.work"),
+        ],
+        max_zones=3,
+    )
+    assert upserted == 1
+    assert [z.external_id for z in await repo.list() if z.external_id] == ["zone.home"]
+
+
+async def test_mirror_external_no_room_keeps_native_home(repo):
+    await repo.create(_zone("hz_1", "Mine", is_home=True))
+    upserted, _ = await repo.mirror_external(
+        [_zone("hz_h", "Home", is_home=True, external_id="zone.home")],
+        max_zones=1,
+    )
+    assert upserted == 0
+    assert (await repo.get("hz_1")).is_home

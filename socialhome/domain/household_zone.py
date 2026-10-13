@@ -20,6 +20,7 @@ from typing import Final
 from .errors import CodedError
 
 __all__ = [
+    "HOME_ZONE_MANAGED_DETAIL",
     "HOME_ZONE_PRESENCE_NAME",
     "MAX_HOUSEHOLD_ZONES",
     "ExternalHouseholdZone",
@@ -41,6 +42,11 @@ MAX_HOUSEHOLD_ZONES: Final = 50
 #: the zone is called — it is what makes the presence state ``home``
 #: (the Home Assistant integration sends HA's ``home`` state the same way).
 HOME_ZONE_PRESENCE_NAME: Final = "home"
+
+
+#: :class:`HouseholdZoneReadOnlyError` detail when a zone created here
+#: would take the Home flag from a synced Home.
+HOME_ZONE_MANAGED_DETAIL: Final = "The Home zone is managed by Home Assistant."
 
 
 @dataclass(slots=True, frozen=True)

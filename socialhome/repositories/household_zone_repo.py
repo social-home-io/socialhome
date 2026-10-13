@@ -7,7 +7,10 @@ unique ``external_id`` values; this module adds no business logic.
 Writes that touch more than one row (moving the Home flag, mirroring a
 platform's zone set) run in one ``BEGIN IMMEDIATE`` transaction via
 :meth:`AsyncDatabase.transact` so a reader never sees two Home zones or
-a half-applied sync.
+a half-applied sync. The two invariants the schema can't express — the
+zone cap and "a zone created here never takes a synced Home's flag" —
+are checked inside that same transaction, so a platform sync landing
+between a service's reads and its write can't slip past them.
 """
 
 from __future__ import annotations
@@ -18,7 +21,14 @@ from collections.abc import Awaitable
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.household_zone import HouseholdZone, HouseholdZoneNameTakenError
+from ..domain.household_zone import (
+    HOME_ZONE_MANAGED_DETAIL,
+    MAX_HOUSEHOLD_ZONES,
+    HouseholdZone,
+    HouseholdZoneLimitError,
+    HouseholdZoneNameTakenError,
+    HouseholdZoneReadOnlyError,
+)
 from .base import row_to_dict, rows_to_dicts
 
 __all__ = ["AbstractHouseholdZoneRepo", "SqliteHouseholdZoneRepo"]
@@ -37,24 +47,35 @@ class AbstractHouseholdZoneRepo(Protocol):
 
     async def get_by_external_id(self, external_id: str) -> HouseholdZone | None: ...
     async def count(self) -> int: ...
-    async def create(self, zone: HouseholdZone) -> None:
+    async def create(
+        self, zone: HouseholdZone, *, max_zones: int = MAX_HOUSEHOLD_ZONES
+    ) -> None:
         """Insert ``zone``; when it is the Home zone the old Home loses the
         flag in the same transaction. A name clash (any case) raises
         :class:`HouseholdZoneNameTakenError` — so do :meth:`update` and
-        :meth:`mirror_external`."""
+        :meth:`mirror_external`. In the same transaction: a household
+        already at ``max_zones`` raises :class:`HouseholdZoneLimitError`,
+        and a zone created here (no ``external_id``) taking Home while the
+        Home is synced raises :class:`HouseholdZoneReadOnlyError`."""
         ...
 
     async def update(self, zone: HouseholdZone) -> bool:
         """Rewrite the row with ``zone.id`` (``created_at`` and
-        ``external_id`` are kept). ``False`` = no such row."""
+        ``external_id`` are kept). ``False`` = no such row. Taking Home
+        from a synced Home raises :class:`HouseholdZoneReadOnlyError`
+        (checked in the write's transaction)."""
         ...
 
     async def delete(self, zone_id: str) -> bool: ...
-    async def mirror_external(self, zones: Sequence[HouseholdZone]) -> tuple[int, int]:
+    async def mirror_external(
+        self, zones: Sequence[HouseholdZone], *, max_zones: int = MAX_HOUSEHOLD_ZONES
+    ) -> tuple[int, int]:
         """Make the platform-synced rows exactly ``zones`` (matched on
         ``external_id``), atomically. Rows without an ``external_id`` are
         never touched, except that an incoming Home zone takes the Home
-        flag. Returns ``(upserted, removed)``."""
+        flag. ``zones`` past the room ``max_zones`` leaves next to the
+        zones created here (counted in the transaction) are dropped, in
+        order. Returns ``(upserted, removed)``."""
         ...
 
 
@@ -99,6 +120,19 @@ def _params(z: HouseholdZone) -> tuple[Any, ...]:
         z.created_at,
         z.updated_at,
     )
+
+
+def _refuse_synced_home(conn: sqlite3.Connection, zone: HouseholdZone) -> None:
+    """A zone created here may not take Home from a synced Home."""
+    if not zone.is_home or zone.external_id is not None:
+        return
+    synced_home = conn.execute(
+        "SELECT 1 FROM household_zones"
+        " WHERE is_home=1 AND external_id IS NOT NULL AND id<>?",
+        (zone.id,),
+    ).fetchone()
+    if synced_home is not None:
+        raise HouseholdZoneReadOnlyError(HOME_ZONE_MANAGED_DETAIL)
 
 
 def _clear_home(conn: sqlite3.Connection, *, except_id: str) -> None:
@@ -157,8 +191,14 @@ class SqliteHouseholdZoneRepo:
         row = await self._db.fetchone("SELECT COUNT(*) AS c FROM household_zones")
         return int(row["c"]) if row is not None else 0
 
-    async def create(self, zone: HouseholdZone) -> None:
+    async def create(
+        self, zone: HouseholdZone, *, max_zones: int = MAX_HOUSEHOLD_ZONES
+    ) -> None:
         def _run(conn: sqlite3.Connection) -> None:
+            (count,) = conn.execute("SELECT COUNT(*) FROM household_zones").fetchone()
+            if count >= max_zones:
+                raise HouseholdZoneLimitError()
+            _refuse_synced_home(conn, zone)
             if zone.is_home:
                 _clear_home(conn, except_id=zone.id)
             conn.execute(
@@ -176,6 +216,7 @@ class SqliteHouseholdZoneRepo:
             ).fetchone()
             if exists is None:
                 return False
+            _refuse_synced_home(conn, zone)
             if zone.is_home:
                 _clear_home(conn, except_id=zone.id)
             conn.execute(
@@ -205,10 +246,18 @@ class SqliteHouseholdZoneRepo:
         )
         return n > 0
 
-    async def mirror_external(self, zones: Sequence[HouseholdZone]) -> tuple[int, int]:
-        incoming = [z for z in zones if z.external_id is not None]
-
+    async def mirror_external(
+        self, zones: Sequence[HouseholdZone], *, max_zones: int = MAX_HOUSEHOLD_ZONES
+    ) -> tuple[int, int]:
         def _run(conn: sqlite3.Connection) -> tuple[int, int]:
+            # Room left next to the zones created here — counted now, so a
+            # zone created after the service's snapshot still counts.
+            (native,) = conn.execute(
+                "SELECT COUNT(*) FROM household_zones WHERE external_id IS NULL"
+            ).fetchone()
+            incoming = [z for z in zones if z.external_id is not None][
+                : max(0, max_zones - native)
+            ]
             keep = [z.external_id for z in incoming]
             marks = ",".join("?" * len(keep))
             removed = conn.execute(

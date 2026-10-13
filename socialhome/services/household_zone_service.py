@@ -49,7 +49,6 @@ from ..domain.household_zone import (
     ExternalHouseholdZone,
     HouseholdZone,
     HouseholdZoneIsHomeError,
-    HouseholdZoneLimitError,
     HouseholdZoneMirrorResult,
     HouseholdZoneNameTakenError,
     HouseholdZoneNotFoundError,
@@ -82,8 +81,6 @@ DEFAULT_SYNCED_RADIUS_M = 100
 
 #: Sentinel: PATCH field omitted (vs. an explicit ``None`` = clear).
 _UNSET: object = object()
-
-_HOME_MANAGED = "The Home zone is managed by Home Assistant."
 
 
 def _now_iso() -> str:
@@ -190,12 +187,11 @@ class HouseholdZoneService(BusPublisherMixin):
         clean_icon = validate_zone_icon(icon)
         clean_home = _validate_is_home(is_home)
 
-        if await self._zones.count() >= MAX_HOUSEHOLD_ZONES:
-            raise HouseholdZoneLimitError()
+        # The cap and "never take a synced Home" are checked by the repo
+        # inside the insert's transaction — a platform sync can land
+        # between these reads and the write.
         if await self._zones.get_by_name(clean_name) is not None:
             raise HouseholdZoneNameTakenError()
-        if clean_home:
-            await self._refuse_if_home_is_managed()
 
         now = _now_iso()
         zone = HouseholdZone(
@@ -211,7 +207,7 @@ class HouseholdZoneService(BusPublisherMixin):
             created_at=now,
             updated_at=now,
         )
-        await self._zones.create(zone)
+        await self._zones.create(zone, max_zones=MAX_HOUSEHOLD_ZONES)
         await self._emit(HouseholdZonesChanged())
         return zone
 
@@ -257,8 +253,8 @@ class HouseholdZoneService(BusPublisherMixin):
 
         if existing.is_home and not new_home:
             raise HouseholdZoneIsHomeError()
-        if new_home and not existing.is_home:
-            await self._refuse_if_home_is_managed()
+        # Taking Home from a synced Home is refused by the repo, inside
+        # the update's transaction.
         if new_name.lower() != existing.name.lower():
             clash = await self._zones.get_by_name(new_name)
             if clash is not None and clash.id != existing.id:
@@ -392,18 +388,15 @@ class HouseholdZoneService(BusPublisherMixin):
                 upserted=0, removed=0, skipped=skipped, changed=False
             )
 
-        upserted, removed = await self._zones.mirror_external(desired)
+        upserted, removed = await self._zones.mirror_external(
+            desired, max_zones=MAX_HOUSEHOLD_ZONES
+        )
         await self._emit(HouseholdZonesChanged())
         return HouseholdZoneMirrorResult(
             upserted=upserted, removed=removed, skipped=skipped, changed=True
         )
 
     # ── Internal ───────────────────────────────────────────────────────
-
-    async def _refuse_if_home_is_managed(self) -> None:
-        current = next((z for z in await self._zones.list() if z.is_home), None)
-        if current is not None and current.read_only:
-            raise HouseholdZoneReadOnlyError(_HOME_MANAGED)
 
     @staticmethod
     def _external_to_zone(ext: ExternalHouseholdZone, now: str) -> HouseholdZone | None:
