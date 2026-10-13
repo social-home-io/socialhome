@@ -520,6 +520,27 @@ export interface SpaceZone {
   updated_at: string
 }
 
+/** One household zone — ``GET /api/household/zones``. Admins edit the
+ *  native ones; ``read_only`` rows (``external_id`` set) are synced from
+ *  Home Assistant. At most one zone is the household's Home. */
+export interface HouseholdZone {
+  id: string
+  name: string
+  latitude: number
+  longitude: number
+  radius_m: number
+  color: string | null
+  /** One emoji shown with the zone, or null for none. */
+  icon: string | null
+  is_home: boolean
+  /** The platform entity it mirrors (``zone.work``), or null when the
+   *  zone was made in Social Home. */
+  external_id: string | null
+  read_only: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface ConversationMemberPreview {
   user_id: string
   username: string

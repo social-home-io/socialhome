@@ -150,6 +150,27 @@ describe('DashboardPage', () => {
     })
   })
 
+  it('says Home for the home zone, never the raw "home"', async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { default: DashboardPage } = await import('./DashboardPage')
+    const { api } = await import('@/api')
+    mapProps.length = 0
+    vi.mocked(api.get).mockImplementation(async (url: string) => (url === '/api/me/corner' ? {
+      unread_notifications: 0, unread_conversations: 0, upcoming_events: [],
+      presence: [{
+        user_id: 'u2', username: 'bob', display_name: 'Bob', state: 'home', zone_name: 'home',
+        latitude: 47.1, longitude: 8.2, gps_accuracy_m: 10, picture_url: null,
+      }],
+      tasks_due_today: [],
+      bazaar: { active_listings: 0, pending_offers: 0, ending_soon: 0 },
+      followed_space_ids: [], followed_spaces_feed: [], today_events: [], today_timetable: [],
+    } : []) as never)
+    const view = render(<DashboardPage />)
+    await waitFor(() => { expect(mapProps.length).toBeGreaterThan(0) })
+    expect(view.container.textContent).not.toMatch(/Bobhome/)
+    expect((mapProps.at(-1)!.markers as Array<Record<string, unknown>>)[0].sub_label).toBe('Home')
+  })
+
   it('module exports a default component', async () => {
     const mod = await import('./DashboardPage')
     expect(mod.default).toBeTruthy()

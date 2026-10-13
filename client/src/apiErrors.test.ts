@@ -123,6 +123,25 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('Only admins can add or edit pages here.')
   })
 
+  it('translates the zone codes, for space and household zones alike', () => {
+    expect(apiErrorMessage(409, '/api/household/zones', {
+      code: 'ZONE_LIMIT', detail: 'x', params: { max: 50 },
+    })).toBe('You have reached the limit of 50 zones. Delete one to add another.')
+    // A space zone's ZONE_LIMIT carries no params — the cap is the same.
+    expect(apiErrorMessage(409, '/api/spaces/s/zones', {
+      code: 'ZONE_LIMIT', detail: 'x',
+    })).toBe('You have reached the limit of 50 zones. Delete one to add another.')
+    expect(apiErrorMessage(409, '/api/household/zones', {
+      code: 'ZONE_NAME_TAKEN', detail: 'x',
+    })).toBe('A zone with this name already exists.')
+    expect(apiErrorMessage(409, '/api/household/zones/z', {
+      code: 'ZONE_READ_ONLY', detail: 'x',
+    })).toBe('This zone comes from Home Assistant. Change it in Home Assistant.')
+    expect(apiErrorMessage(409, '/api/household/zones/z', {
+      code: 'ZONE_IS_HOME', detail: 'x',
+    })).toBe("The Home zone can't be removed. Mark another zone as Home first.")
+  })
+
   it('translates the household dashboard codes, with their params', () => {
     expect(apiErrorMessage(409, '/api/admin/dashboard', {
       code: 'DASHBOARD_PORT_IN_USE', detail: 'x', params: { port: 8100 },

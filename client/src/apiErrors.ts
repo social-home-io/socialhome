@@ -159,6 +159,12 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   }),
   DASHBOARD_NOT_RUNNING: () => t('error.dashboard_not_running'),
   AI_AGENT_UNAVAILABLE: () => t('error.ai_unavailable'),
+  // Zones (space and household). A space's ZONE_LIMIT carries no
+  // params; both caps are 50.
+  ZONE_LIMIT: (_b, p) => t('error.zone_limit', { max: str(p, 'max') || '50' }),
+  ZONE_NAME_TAKEN: () => t('error.zone_name_taken'),
+  ZONE_READ_ONLY: () => t('error.zone_read_only'),
+  ZONE_IS_HOME: () => t('error.zone_is_home'),
 }
 
 /** The generic line for a status, or ``null`` when there is none. */

@@ -25,6 +25,7 @@ from socialhome.domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    HouseholdZonesChanged,
     PageConflictEmitted,
     PageProposalSettled,
     PeerTransportChanged,
@@ -563,6 +564,19 @@ async def test_space_zone_deleted_fans_with_action_delete(env):
     assert parsed["data"]["action"] == "delete"
     assert parsed["data"]["zone_id"] == "z_office"
     assert parsed["data"]["zone"] is None
+
+
+async def test_household_zones_changed_nudges_every_household_member(env):
+    """A household-zone edit sends a content-free ``household_zones_changed``
+    frame to every local user so open maps / settings refetch."""
+    svc, bus, ws = env
+    socks = {uid: _FakeWS() for uid in ("u1", "u2")}
+    for uid, sock in socks.items():
+        await ws.register(uid, sock)
+    await bus.publish(HouseholdZonesChanged())
+    for sock in socks.values():
+        [frame] = [m for m in sock.sent if "household_zones_changed" in m]
+        assert json.loads(frame) == {"type": "household_zones_changed", "data": {}}
 
 
 @pytest.mark.parametrize("federated", [False, True])

@@ -1,12 +1,19 @@
 """Presence service — household member presence + location (§23.21).
 
-Manages the ``presence`` table. In HA mode, location updates are pushed
-by the HA integration via ``POST /api/presence/location``. In standalone
-mode the user's browser shares location via the Geolocation API.
+Manages the ``presence`` table. Location updates arrive on
+``POST /api/presence/location``: the Home Assistant integration pushes
+each member's GPS together with HA's zone state as ``zone_name``; other
+clients (standalone mode, companion apps) push GPS alone — no
+``zone_name`` key, no state — and the server matches the point against
+the household zones
+(:meth:`HouseholdZoneService.match`) to fill ``zone_name`` — the Home
+zone becomes ``"home"`` (state ``home``), another zone its name (state
+``zone``), no zone leaves the update as sent (``away``).
 
 GPS coordinates are **always** truncated to 4 decimal places before
 storage (§25 / CLAUDE.md rule). Updates with ``gps_accuracy > 500m``
-have their coordinates nulled (zone name is still stored).
+have their coordinates nulled (zone name is still stored) — and no zone
+is guessed from such a point.
 """
 
 from __future__ import annotations
@@ -14,8 +21,10 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Protocol
 
 from ..domain.events import PresenceUpdated
+from ..domain.household_zone import HouseholdZone
 from ..domain.presence import (
     PRESENCE_STATES,
     LocationUpdate,
@@ -33,6 +42,15 @@ log = logging.getLogger(__name__)
 MAX_GPS_ACCURACY_M = 500.0
 
 
+class HouseholdZoneMatcher(Protocol):
+    """What :class:`PresenceService` needs from the household zones —
+    satisfied by :class:`~socialhome.services.household_zone_service.HouseholdZoneService`."""
+
+    async def match(
+        self, latitude: float, longitude: float
+    ) -> HouseholdZone | None: ...
+
+
 class UserNotFoundError(LookupError):
     """Raised when a presence update names a username that doesn't exist.
 
@@ -46,13 +64,15 @@ class UserNotFoundError(LookupError):
 class PresenceService(BusPublisherMixin):
     """Read and update household member presence."""
 
-    __slots__ = ("_repo", "_users", "_bus")
+    __slots__ = ("_repo", "_users", "_bus", "_zones")
 
     def __init__(
         self,
         repo: AbstractPresenceRepo,
         users: AbstractUserRepo,
         bus: EventBus | None = None,
+        *,
+        zone_matcher: HouseholdZoneMatcher | None = None,
     ) -> None:
         self._repo = repo
         # ``_users`` is used to short-circuit ``update_location`` for a
@@ -64,6 +84,9 @@ class PresenceService(BusPublisherMixin):
         # one (route handlers, tests) keep working — only the WS
         # publish path requires it.
         self._bus = bus
+        # Server-side GPS → household zone match for updates that carry
+        # no ``zone_name``; ``None`` = never guess a zone.
+        self._zones = zone_matcher
 
     def attach_event_bus(self, bus: EventBus) -> None:
         """Attach an :class:`EventBus` after construction."""
@@ -95,11 +118,20 @@ class PresenceService(BusPublisherMixin):
         ]
 
     async def update_location(self, update: LocationUpdate) -> None:
-        """Persist a location update from the HA integration or browser.
+        """Persist a location update (HA integration or another client).
 
         GPS coordinates are truncated to 4dp. If ``gps_accuracy_m``
         exceeds :data:`MAX_GPS_ACCURACY_M`, coordinates are nulled but
         the zone name is still stored.
+
+        When the client stated no zone at all (``update.zone_asserted`` is
+        ``False``: no ``zone_name`` key, no ``state``) and the GPS point is
+        usable (after the accuracy gate and the 4-dp truncation), the point
+        is matched against the household zones: a match sets ``zone_name``
+        and the state (Home zone → ``"home"`` / ``home``, another → its
+        name / ``zone``); no match keeps ``away``. A stated zone — Home
+        Assistant's, including ``None`` for not_home — or state is never
+        replaced.
 
         Raises :class:`UserNotFoundError` if ``update.username`` is not
         a local user — the FK on ``presence(username)`` would otherwise
@@ -129,11 +161,25 @@ class PresenceService(BusPublisherMixin):
         if lon is not None:
             lon = truncate_coord(lon)
 
+        state = update.state
+        zone_name = update.zone_name
+        if (
+            not update.zone_asserted
+            and not zone_name
+            and lat is not None
+            and lon is not None
+            and self._zones is not None
+        ):
+            zone = await self._zones.match(lat, lon)
+            if zone is not None:
+                zone_name = zone.presence_zone_name
+                state = "home" if zone.is_home else "zone"
+
         await self._repo.upsert_local(
             username=update.username,
             entity_id=update.username,
-            state=update.state,
-            zone_name=update.zone_name,
+            state=state,
+            zone_name=zone_name,
             latitude=lat,
             longitude=lon,
             gps_accuracy_m=acc,
@@ -149,8 +195,8 @@ class PresenceService(BusPublisherMixin):
         await self._emit(
             PresenceUpdated(
                 username=update.username,
-                state=update.state,
-                zone_name=update.zone_name,
+                state=state,
+                zone_name=zone_name,
                 latitude=lat,
                 longitude=lon,
                 gps_accuracy_m=acc,

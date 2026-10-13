@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from socialhome.domain.events import (
     DomainEvent,
+    HouseholdZonesChanged,
     LocalHomeLocationUpdated,
     PeerHomeChanged,
     PeerTransportChanged,
@@ -73,3 +74,11 @@ def test_app_challenge_received_is_frozen_slots():
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         e.app_id = "x"  # type: ignore[misc]
+
+
+def test_household_zones_changed_is_a_content_free_nudge():
+    """HouseholdZonesChanged carries no zone data — clients refetch."""
+    e = HouseholdZonesChanged()
+    assert isinstance(e, DomainEvent)
+    assert e.occurred_at is not None
+    assert set(HouseholdZonesChanged.__dataclass_fields__) == {"occurred_at"}

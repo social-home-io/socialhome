@@ -829,8 +829,8 @@ forward-derived from code with `§NN` backlinks to the spec.
 Latitude and longitude are truncated to **4 decimal places** before
 any storage or transmission. `round(float(lat), 4)` — never store raw
 device precision, never cap-at-runtime-but-store-precise. Applied
-uniformly: presence updates, space zones, household location, public-
-space discovery rows.
+uniformly: presence updates, space zones, household zones, household
+location, public-space discovery rows.
 
 ## One initial migration
 

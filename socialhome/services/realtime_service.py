@@ -66,6 +66,7 @@ from ..domain.events import (
     DmMessageReactionChanged,
     DmMessageUpdated,
     HouseholdConfigChanged,
+    HouseholdZonesChanged,
     LocalHomeLocationUpdated,
     NotificationCreated,
     NotificationReadChanged,
@@ -460,6 +461,11 @@ class RealtimeService:
             PeerHomeChanged,
             self._on_peer_home_changed,
         )
+        # Household zones — local-only; a refetch nudge to the household.
+        self._bus.subscribe(
+            HouseholdZonesChanged,
+            self._on_household_zones_changed,
+        )
         # User preferences — unicast to the owner only (not household-wide)
         self._bus.subscribe(
             UserPreferencesChanged,
@@ -719,6 +725,17 @@ class RealtimeService:
                 "longitude": event.longitude,
             }
         )
+
+    # ─── Household zones ──────────────────────────────────────────────────
+
+    async def _on_household_zones_changed(
+        self,
+        event: HouseholdZonesChanged,
+    ) -> None:
+        """Nudge every household member to refetch ``/api/household/zones``.
+        The frame carries no zone data — the list is admin-editable and
+        refetching keeps one source of truth."""
+        await self._broadcast_household({"type": "household_zones_changed", "data": {}})
 
     # ─── User preferences (§preferences) ─────────────────────────────────
 

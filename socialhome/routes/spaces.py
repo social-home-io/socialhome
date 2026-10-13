@@ -12,7 +12,6 @@ from aiohttp import web
 
 from aiohttp.multipart import BodyPartReader
 
-import math
 from urllib.parse import quote
 
 from ..app_keys import (
@@ -56,9 +55,9 @@ from ..domain.space import (
     SpaceFeatures,
     SpacePermissionError,
     SpaceRole,
-    SpaceZone,
 )
 from ..domain.space_proposal import ProposalAction
+from ..domain.zone_geo import match_zone
 from ..domain.user import SYSTEM_AUTHOR
 from ..domain.federation import PairingStatus
 from ..federation.invite_bootstrap import InviteBootstrapHint
@@ -122,34 +121,6 @@ def _features_from_body(
     if private_gfs is not None and not isinstance(private_gfs, bool):
         raise ValueError("private_gfs must be a boolean")
     return SpaceFeatures.from_wire_dict(raw, defaults=defaults)
-
-
-# Earth's mean radius — used by the zone-match helper. Mirrors the
-# constant in :mod:`services.space_location_outbound`.
-_EARTH_RADIUS_M = 6_371_000.0
-
-
-def _match_zone(
-    zones: "list[SpaceZone]", latitude: float, longitude: float
-) -> "SpaceZone | None":
-    """Return the closest zone whose great-circle distance to
-    ``(latitude, longitude)`` is within its ``radius_m``. Used by
-    :class:`SpacePresenceView` to render zone-only-mode responses
-    server-side. Mirrors the algorithm in
-    ``services/space_location_outbound._match_zone`` and the
-    client-side ``matchZoneName`` helper.
-    """
-    best: "tuple[float, SpaceZone] | None" = None
-    p1 = math.radians(latitude)
-    for z in zones:
-        p2 = math.radians(z.latitude)
-        dp = p2 - p1
-        dl = math.radians(z.longitude - longitude)
-        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-        d = 2 * _EARTH_RADIUS_M * math.asin(math.sqrt(a))
-        if d <= z.radius_m and (best is None or d < best[0]):
-            best = (d, z)
-    return best[1] if best is not None else None
 
 
 class SpaceCollectionView(BaseView):
@@ -2340,7 +2311,7 @@ class SpacePresenceView(BaseView):
             for p in entries:
                 if p.latitude is None or p.longitude is None:
                     continue
-                matched = _match_zone(zones, p.latitude, p.longitude)
+                matched = match_zone(zones, p.latitude, p.longitude)
                 if matched is None:
                     continue
                 response_entries.append(

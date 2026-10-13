@@ -21,6 +21,7 @@
  * choice.
  */
 import { presence } from '@/store/presence'
+import { presenceLabel } from '@/utils/presenceLabel'
 
 interface Props {
   user_id?: string | null
@@ -42,7 +43,9 @@ export function OnlinePill({ user_id, showZone = true, compact = false }: Props)
   if (!row || !row.is_online) return null
   const variant: 'online' | 'idle' = row.is_idle ? 'idle' : 'online'
   const label = variant === 'idle' ? 'Idle' : 'Online'
-  const zoneLabel = showZone && row.zone_name ? row.zone_name : null
+  const zoneLabel = showZone && row.zone_name
+    ? presenceLabel(row.state, row.zone_name)
+    : null
 
   if (compact) {
     return (
