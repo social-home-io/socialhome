@@ -78,6 +78,7 @@ from ....domain.events import (
 )
 from ....domain.timetable import (
     Timetable,
+    drop_invalid_icons,
     from_wire_dict,
     remote_version_refusal,
     validate,
@@ -3517,7 +3518,7 @@ def _timetable_from_record(r: dict[str, Any], space_id: str) -> Timetable | None
     its creator in this space — space timetables are owner-bound from their
     first release, so a legacy-shaped id is refused too."""
     try:
-        tt = from_wire_dict(r)
+        tt = drop_invalid_icons(from_wire_dict(r))
         validate(tt)
     except Exception as exc:  # hostile input: never raise out of the stream
         log.warning(
