@@ -31,11 +31,11 @@ import re
 import secrets
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ..dashboard.auth import DashboardAuth
+from ..dashboard.auth import THROTTLE_MAX_FAILURES, DashboardAuth
 from ..domain.household_dashboard import (
     MAX_DISPLAY_INFO_LENGTH,
     MAX_DISPLAY_NAME_LENGTH,
@@ -46,8 +46,13 @@ from ..domain.household_dashboard import (
     PAIRING_TTL_SECONDS,
     DashboardDisabledError,
     DashboardDisplay,
+    DashboardDisplayNotFoundError,
+    DashboardDisplayPinThrottledError,
+    DashboardDisplayPinWrongError,
+    DashboardDisplaySignedOutError,
     DashboardPairingCodeInvalidError,
     DashboardPairingThrottledError,
+    DashboardPinRequiredError,
     DashboardSettingsInvalidError,
     DisplayPairing,
     DisplayPairingStatus,
@@ -279,22 +284,119 @@ class DashboardDisplayService:
         require_admin(actor_is_admin)
         return await self._settings.displays()
 
-    async def rename(
-        self, *, actor_is_admin: bool, display_id: str, name: object
-    ) -> DashboardDisplay:
-        require_admin(actor_is_admin)
-        return await self._settings.rename_display(display_id, _clean_name(name))
-
     async def remove(self, *, actor_is_admin: bool, display_id: str) -> None:
         """Unpair a panel — its token stops working at once."""
         require_admin(actor_is_admin)
         await self._settings.remove_display(display_id)
+        self._forget(display_id)
+        log.info("household dashboard: removed display %s", display_id)
+
+    async def update(
+        self, *, actor_is_admin: bool, display_id: str, patch: Mapping[str, object]
+    ) -> DashboardDisplay:
+        """Admin › Dashboard's edit of a panel: ``name`` renames it,
+        ``locked: false`` lifts its privacy lock (recovery for a panel
+        nobody can unlock — only the panel itself locks). Validated before
+        anything is written; with neither key it is a rename (``name``
+        missing → :class:`DashboardSettingsInvalidError`)."""
+        require_admin(actor_is_admin)
+        unlock = "locked" in patch
+        if unlock and patch["locked"] is not False:
+            raise DashboardSettingsInvalidError("locked")
+        change: dict[str, object] = {}
+        if "name" in patch or not unlock:
+            change["name"] = _clean_name(patch.get("name"))
+        if unlock:
+            change["locked"] = False
+        display = await self._settings.update_display(display_id, change)
+        if unlock:
+            # A rescued panel starts with fresh PIN tries.
+            self._auth.record_success(
+                DashboardAuth.display_pin_throttle_key(display_id), count_global=False
+            )
+            log.info("household dashboard: admin unlocked display %s", display_id)
+        return display
+
+    def _forget(self, display_id: str) -> None:
         self._seen.pop(display_id, None)
         for pair_id in [
             p for p, e in self._pending.items() if e.display_id == display_id
         ]:
             del self._pending[pair_id]
-        log.info("household dashboard: removed display %s", display_id)
+
+    # ── Privacy lock (panel side) ───────────────────────────────────────
+    #
+    # The tablet keeps its lock in its signed cookie; a panel's lives on
+    # its stored record, so a reboot can't lift it. The PIN rules are the
+    # tablet's (``views.UnlockView``): five wrong PINs in the throttle
+    # window, then the next try — right or wrong — signs the panel out
+    # (here: unpairs it; only an admin pairing it again helps).
+
+    async def is_locked(self, display: DashboardDisplay) -> bool:
+        """``display`` is privacy-locked: its flag is set *and* a PIN
+        exists (with no PIN nothing can be locked — like a tablet's
+        locked cookie, which counts as unlocked then)."""
+        return display.locked and (await self._settings.get()).pin_set
+
+    async def lock(self, display: DashboardDisplay) -> None:
+        """Privacy-lock the panel. :class:`DashboardPinRequiredError`
+        while no PIN is set (nothing could unlock it)."""
+        if not (await self._settings.get()).pin_set:
+            raise DashboardPinRequiredError()
+        try:
+            await self._settings.update_display(display.id, {"locked": True})
+        except DashboardDisplayNotFoundError:
+            raise DashboardDisplaySignedOutError() from None
+        log.info("household dashboard: display %s locked", display.id)
+
+    async def unlock(self, display: DashboardDisplay, pin: object) -> None:
+        """Lift the panel's lock with the household PIN.
+
+        A panel that isn't locked is left alone — no PIN is checked, so
+        there is nothing to guess against. Otherwise the guess is counted
+        before the (slow, constant-time) scrypt check; a wrong one raises
+        :class:`DashboardDisplayPinWrongError` with the tries left. Once
+        the panel's wrong PINs are spent, the next try unpairs it and
+        raises :class:`DashboardDisplaySignedOutError`; any other
+        hold-back (a full throttle table) only asks it to wait
+        (:class:`DashboardDisplayPinThrottledError`).
+        """
+        # The stored record, not the request's snapshot: a /lock that
+        # landed after this request authenticated still needs the PIN.
+        stored = next(
+            (d for d in await self._settings.displays() if d.id == display.id), None
+        )
+        if stored is None:
+            raise DashboardDisplaySignedOutError()
+        if not await self.is_locked(stored):
+            return
+        auth = self._auth
+        key = DashboardAuth.display_pin_throttle_key(display.id)
+        wait = auth.begin_attempt(key, count_global=False)
+        if wait and auth.failure_count(key) >= THROTTLE_MAX_FAILURES:
+            log.warning(
+                "household dashboard: too many wrong PINs on display %s — unpaired",
+                display.id,
+            )
+            try:
+                await self._settings.remove_display(display.id)
+            except DashboardDisplayNotFoundError:
+                pass
+            self._forget(display.id)
+            raise DashboardDisplaySignedOutError()
+        if wait:
+            raise DashboardDisplayPinThrottledError(wait)
+        if not isinstance(pin, str) or not await auth.check_pin(pin):
+            log.info("household dashboard: wrong PIN on display %s", display.id)
+            raise DashboardDisplayPinWrongError(
+                max(0, THROTTLE_MAX_FAILURES - auth.failure_count(key))
+            )
+        auth.record_success(key, count_global=False)
+        try:
+            await self._settings.update_display(display.id, {"locked": False})
+        except DashboardDisplayNotFoundError:
+            raise DashboardDisplaySignedOutError() from None
+        log.info("household dashboard: display %s unlocked", display.id)
 
     # ── Device auth ─────────────────────────────────────────────────────
 

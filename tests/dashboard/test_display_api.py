@@ -9,7 +9,6 @@ from __future__ import annotations
 import io
 import json
 import os
-from dataclasses import replace
 from pathlib import Path
 
 import aiohttp
@@ -20,7 +19,13 @@ from referencing import Registry, Resource
 
 import socialhome.i18n as i18n_pkg
 from socialhome.dashboard.app import build_dashboard_app
-from socialhome.dashboard.auth import COOKIE_NAME, PAIR_MAX, DashboardAuth
+from socialhome.dashboard.auth import (
+    ACK_MAX,
+    COOKIE_NAME,
+    PAIR_MAX,
+    THROTTLE_MAX_FAILURES,
+    DashboardAuth,
+)
 from socialhome.dashboard.display_api import (
     DISPLAY_API_PREFIX,
     bearer_token,
@@ -37,6 +42,7 @@ from socialhome.services.dashboard_display_service import (
     SEEN_INTERVAL_S,
     DashboardDisplayService,
 )
+from socialhome.services.dashboard_settings_service import DashboardSettingsService
 
 from .conftest import PASSWORD, default_theme
 from .factories import (
@@ -53,6 +59,10 @@ RENDERER = DashboardRenderer(
 )
 PAIR = "/api/display/v1/pair"
 WHOAMI = "/api/display/v1/whoami"
+LOCK = "/api/display/v1/lock"
+UNLOCK = "/api/display/v1/unlock"
+ACK = "/api/display/v1/ack"
+PIN = "2468"
 
 
 async def _name() -> str:
@@ -115,6 +125,15 @@ async def _paired(client, displays, name: str = "Kitchen") -> tuple[str, str]:
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _locked(client, displays, settings_service) -> tuple[str, str]:
+    """A paired panel, locked over the API (a PIN is set first)."""
+    await settings_service.set_pin(actor_is_admin=True, pin=PIN)
+    display_id, token = await _paired(client, displays)
+    resp = await client.post(LOCK, headers=_bearer(token))
+    assert resp.status == 200, await resp.text()
+    return display_id, token
 
 
 # ── Pure helpers ─────────────────────────────────────────────────────────
@@ -493,17 +512,10 @@ async def test_tablet_cookie_opens_no_board_endpoint(client, auth, path):
 
 @pytest.mark.parametrize("path", [*BOARD_PATHS, WHOAMI])
 async def test_locked_display_gets_423_lock_payload(
-    client, displays, snapshots, path, monkeypatch
+    client, displays, snapshots, settings_service, path
 ):
     _seed(snapshots)
-    _, token = await _paired(client, displays)
-    real = DashboardDisplayService.authenticate
-
-    async def locked(self, value):
-        found = await real(self, value)
-        return None if found is None else replace(found, locked=True)
-
-    monkeypatch.setattr(DashboardDisplayService, "authenticate", locked)
+    _, token = await _locked(client, displays, settings_service)
     resp = await _get(client, path, token)
     assert resp.status == 423
     payload = await resp.json()
@@ -725,15 +737,10 @@ async def test_json_wording_matches_the_html_board(client, displays, snapshots, 
         assert spot["place"] in page and spot["when"] in page
 
 
-async def test_locked_display_is_rate_limited_too(client, displays, auth, monkeypatch):
-    display_id, token = await _paired(client, displays)
-    real = DashboardDisplayService.authenticate
-
-    async def locked(self, value):
-        found = await real(self, value)
-        return None if found is None else replace(found, locked=True)
-
-    monkeypatch.setattr(DashboardDisplayService, "authenticate", locked)
+async def test_locked_display_is_rate_limited_too(
+    client, displays, auth, settings_service
+):
+    display_id, token = await _locked(client, displays, settings_service)
     for _ in range(DISPLAY_READ_MAX):
         auth.begin_display_read(display_id)
     assert (await _get(client, "/api/display/v1/home", token)).status == 429
@@ -747,3 +754,225 @@ async def test_night_answers_409_even_for_a_tab_that_is_off(
     snapshots.home_snapshot = home(is_night=True, sections=frozenset({"calendar"}))
     for tab in ("messages", "notes", "map"):
         assert (await _get(client, f"/api/display/v1/{tab}", token)).status == 409
+
+
+# ── Lock / unlock / Got it ───────────────────────────────────────────────
+
+
+async def test_lock_needs_a_pin(client, displays):
+    _, token = await _paired(client, displays)
+    resp = await client.post(LOCK, headers=_bearer(token))
+    assert resp.status == 409
+    body = await resp.json()
+    _validate("error", body)
+    assert body["error"]["code"] == "DASHBOARD_PIN_REQUIRED"
+    assert (await client.get(WHOAMI, headers=_bearer(token))).status == 200
+
+
+async def test_lock_answers_the_lock_screen_and_locks_every_read(
+    client, displays, snapshots, settings_service
+):
+    _seed(snapshots)
+    await settings_service.set_pin(actor_is_admin=True, pin=PIN)
+    _, token = await _paired(client, displays)
+    resp = await client.post(LOCK, headers=_bearer(token))
+    assert resp.status == 200
+    payload = await resp.json()
+    _validate("lock", payload)
+    for path in [*BOARD_PATHS, WHOAMI, ACK]:
+        method = client.post if path == ACK else client.get
+        assert (await method(path, headers=_bearer(token))).status == 423, path
+    # Locking a locked panel is the lock screen too (no new state).
+    assert (await client.post(LOCK, headers=_bearer(token))).status == 423
+
+
+async def test_lock_and_unlock_need_a_token(client):
+    for path in (LOCK, UNLOCK, ACK):
+        resp = await client.post(path, json={"pin": PIN})
+        assert resp.status == 401
+        assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+
+async def test_tablet_cookie_cannot_lock_or_unlock_a_panel(client, auth):
+    cookie = {"Cookie": f"{COOKIE_NAME}={await auth.issue(True)}"}
+    for path in (LOCK, UNLOCK, ACK):
+        assert (await client.post(path, headers=cookie)).status == 401
+
+
+async def test_unlock_with_the_pin(client, displays, settings_service):
+    _, token = await _locked(client, displays, settings_service)
+    resp = await client.post(UNLOCK, json={"pin": PIN}, headers=_bearer(token))
+    assert resp.status == 200
+    body = await resp.json()
+    _validate("unlock", body)
+    assert body == {"api_version": 1, "locked": False}
+    _fixture("unlocked", body)
+    assert (await client.get(WHOAMI, headers=_bearer(token))).status == 200
+
+
+async def test_unlock_an_unlocked_panel_is_a_no_op(client, displays, settings_service):
+    await settings_service.set_pin(actor_is_admin=True, pin=PIN)
+    _, token = await _paired(client, displays)
+    resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
+    assert resp.status == 200
+    assert (await resp.json())["locked"] is False
+
+
+@pytest.mark.parametrize("body", [b"{not json", b"[]", b'"1234"'])
+async def test_unlock_bad_body_is_400(client, displays, settings_service, body):
+    _, token = await _locked(client, displays, settings_service)
+    resp = await client.post(
+        UNLOCK,
+        data=body,
+        headers={**_bearer(token), "Content-Type": "application/json"},
+    )
+    assert resp.status == 400
+    _validate("error", await resp.json())
+
+
+async def test_wrong_pins_then_the_panel_is_signed_out(
+    client, displays, settings_service
+):
+    display_id, token = await _locked(client, displays, settings_service)
+    for left in range(THROTTLE_MAX_FAILURES - 1, -1, -1):
+        resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
+        assert resp.status == 403
+        body = await resp.json()
+        _validate("error", body)
+        assert body["error"]["code"] == "DISPLAY_PIN_WRONG"
+        assert body["error"]["params"] == {"remaining": left}
+        if left == THROTTLE_MAX_FAILURES - 1:
+            _fixture("pin-wrong", body)
+    # The sixth try — even the right PIN — unpairs the panel.
+    resp = await client.post(UNLOCK, json={"pin": PIN}, headers=_bearer(token))
+    assert resp.status == 401
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+    body = await resp.json()
+    _validate("error", body)
+    assert body["error"]["code"] == "DISPLAY_SIGNED_OUT"
+    assert (await client.get(WHOAMI, headers=_bearer(token))).status == 401
+    assert display_id not in {d.id for d in await settings_service.displays()}
+
+
+async def test_a_wrong_pin_type_counts_as_wrong(client, displays, settings_service):
+    _, token = await _locked(client, displays, settings_service)
+    resp = await client.post(UNLOCK, json={"pin": 2468}, headers=_bearer(token))
+    assert resp.status == 403
+
+
+async def test_lock_survives_a_restart(
+    aiohttp_client, client, displays, settings_service, snapshots, clock
+):
+    _, token = await _locked(client, displays, settings_service)
+    # A fresh process over the same storage: services and app rebuilt.
+    fresh = DashboardSettingsService(
+        settings_service._repo,  # type: ignore[attr-defined]
+        fixed_port=None,
+        main_port=8080,
+    )
+    fresh.attach_key_manager(settings_service._key_manager)  # type: ignore[attr-defined]
+    auth = DashboardAuth(fresh, clock=clock)
+    app = build_dashboard_app(
+        settings_service=fresh,
+        auth=auth,
+        displays=DashboardDisplayService(fresh, auth, clock=clock),
+        renderer=RENDERER,
+        household_name=_name,
+        household_tz=_tz,
+        household_theme=default_theme,
+        snapshots=snapshots,
+    )
+    again = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+    assert (await again.get(WHOAMI, headers=_bearer(token))).status == 423
+
+
+async def test_removing_the_pin_lifts_every_panel_lock(
+    client, displays, settings_service
+):
+    _, token = await _locked(client, displays, settings_service)
+    await settings_service.delete_pin(actor_is_admin=True)
+    assert (await client.get(WHOAMI, headers=_bearer(token))).status == 200
+    # A new PIN doesn't lock it again.
+    await settings_service.set_pin(actor_is_admin=True, pin=PIN)
+    assert (await client.get(WHOAMI, headers=_bearer(token))).status == 200
+
+
+async def test_ack(client, displays, snapshots):
+    _seed(snapshots)
+    snapshots.ackable = {("h1", None), ("m2", "u-leo")}
+    _, token = await _paired(client, displays)
+    resp = await client.post(ACK, json={"message_id": "h1"}, headers=_bearer(token))
+    assert resp.status == 200
+    body = await resp.json()
+    _validate("ack", body)
+    assert body == {"api_version": 1, "acknowledged": True}
+    _fixture("ack", body)
+    resp = await client.post(
+        ACK,
+        json={"message_id": "m2", "person_id": "u-leo"},
+        headers=_bearer(token),
+    )
+    assert resp.status == 200
+    assert snapshots.acks == [("h1", None), ("m2", "u-leo")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"message_id": "m2"},  # a person's mention is no @here
+        {"message_id": "h1", "person_id": "u-anna"},  # not that person's
+        {"message_id": "nope"},  # no such message
+        {"message_id": "m2", "person_id": "u-hidden"},  # not shown
+        {"message_id": ""},
+        {"message_id": "x" * 129},
+        {"message_id": 7},
+        {"message_id": "h1", "person_id": 7},
+        {"message_id": "h1", "person_id": ""},
+        {},
+    ],
+)
+async def test_ack_of_anything_the_wall_does_not_show_is_404(
+    client, displays, snapshots, body
+):
+    _seed(snapshots)
+    snapshots.ackable = {("h1", None), ("m2", "u-leo")}
+    _, token = await _paired(client, displays)
+    resp = await client.post(ACK, json=body, headers=_bearer(token))
+    assert resp.status == 404
+    payload = await resp.json()
+    _validate("error", payload)
+    assert payload["error"]["code"] == "NOT_FOUND"
+    assert snapshots.acks == []
+
+
+async def test_ack_bad_json_is_400(client, displays):
+    _, token = await _paired(client, displays)
+    resp = await client.post(
+        ACK,
+        data=b"[1]",
+        headers={**_bearer(token), "Content-Type": "application/json"},
+    )
+    assert resp.status == 400
+
+
+async def test_ack_is_capped_per_display(client, displays, snapshots, auth):
+    snapshots.ackable = {("h1", None)}
+    display_id, token = await _paired(client, displays)
+    for _ in range(ACK_MAX):
+        assert auth.begin_display_ack(display_id) == 0
+    resp = await client.post(ACK, json={"message_id": "h1"}, headers=_bearer(token))
+    assert resp.status == 429
+    assert int(resp.headers["Retry-After"]) > 0
+    assert snapshots.acks == []
+    # Another panel has its own budget.
+    _, other = await _paired(client, displays, name="Hall")
+    resp = await client.post(ACK, json={"message_id": "h1"}, headers=_bearer(other))
+    assert resp.status == 200
+
+
+async def test_ack_refused_while_locked(client, displays, snapshots, settings_service):
+    snapshots.ackable = {("h1", None)}
+    _, token = await _locked(client, displays, settings_service)
+    resp = await client.post(ACK, json={"message_id": "h1"}, headers=_bearer(token))
+    assert resp.status == 423
+    assert snapshots.acks == []

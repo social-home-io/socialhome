@@ -17,8 +17,10 @@ Everything lives in the ``instance_config`` key/value table under the
   pending single-use tablet setup token (only the SHA-256 is stored);
 * ``dashboard.displays`` — JSON list of the paired wall panels
   (:class:`DashboardDisplay`; only each bearer token's SHA-256 is
-  stored). Every epoch bump ("sign out all tablets", a new password)
-  empties it in the same write — panels are unpaired with the tablets.
+  stored, plus each panel's privacy-lock flag — cleared for every panel
+  when the PIN is removed). Every epoch bump ("sign out all tablets", a
+  new password) empties it in the same write — panels are unpaired with
+  the tablets.
   The pairing flow itself lives in
   :mod:`socialhome.services.dashboard_display_service`; this service
   only stores the list, under the same lock as the epoch.
@@ -280,6 +282,8 @@ def _settings_from_json(raw: str | None) -> DashboardSettings:
 
 _DISPLAY_STR_FIELDS = ("id", "name", "token_hash", "created_at")
 _DISPLAY_OPT_FIELDS = ("last_seen_at", "firmware", "model")
+#: What :meth:`DashboardSettingsService.update_display` may change.
+_DISPLAY_EDITABLE = frozenset({"name", "locked"})
 
 
 def _display_to_dict(d: DashboardDisplay) -> dict[str, object]:
@@ -562,6 +566,10 @@ class DashboardSettingsService:
 
         Exactly 4–6 ASCII digits, else :class:`DashboardPinInvalidError`.
         Separate from the household password and signs nobody out.
+        Changing the PIN keeps every wall-panel lock; the *first* PIN
+        clears any lock flag left over from before (with no PIN nothing
+        can be locked — :meth:`delete_pin` lifts every lock, but a crash
+        between its writes could leave one behind).
         """
         require_admin(actor_is_admin)
         if not isinstance(pin, str) or _PIN.fullmatch(pin) is None:
@@ -569,6 +577,8 @@ class DashboardSettingsService:
         hashed = await asyncio.to_thread(hash_password, pin)
         async with self._lock:
             self._wrote(None)
+            if await self._repo.get(KEY_PIN_SET_AT) is None:
+                await self._unlock_displays_unlocked()
             await self._repo.set_many(
                 {
                     KEY_PIN_HASH: hashed,
@@ -578,15 +588,19 @@ class DashboardSettingsService:
             self._wrote(None)
 
     async def delete_pin(self, *, actor_is_admin: bool) -> None:
-        """Remove the PIN — locked tablets then count as unlocked.
+        """Remove the PIN — locked tablets then count as unlocked, and
+        every wall panel's lock is lifted (stored, so it stays lifted).
 
         The marker goes first: a crash in between leaves "no PIN" (what
-        was asked for), never "PIN set" with no hash able to unlock.
+        was asked for), never "PIN set" with no hash able to unlock. A
+        panel lock left behind by such a crash counts as unlocked while
+        no PIN is set and is cleared by the next :meth:`set_pin`.
         """
         require_admin(actor_is_admin)
         async with self._lock:
             self._wrote(None)
             await self._repo.delete(KEY_PIN_SET_AT)
+            await self._unlock_displays_unlocked()
             await self._repo.delete(KEY_PIN_HASH)
             self._wrote(None)
 
@@ -777,9 +791,23 @@ class DashboardSettingsService:
                 return updated
         return None
 
-    async def rename_display(self, display_id: str, name: str) -> DashboardDisplay:
+    async def _unlock_displays_unlocked(self) -> None:
+        current = await self._displays_unlocked()
+        if any(d.locked for d in current):
+            await self._save_displays_unlocked(
+                tuple(replace(d, locked=False) for d in current)
+            )
+
+    async def update_display(
+        self, display_id: str, change: Mapping[str, object]
+    ) -> DashboardDisplay:
+        """Change a panel's ``name`` and / or ``locked`` (its privacy lock
+        — stored, so a panel reboot or a server restart keeps it) in one
+        write. Values are the caller's to validate."""
+        if not change or not set(change) <= _DISPLAY_EDITABLE:
+            raise ValueError(f"not editable: {sorted(set(change))}")
         async with self._lock:
-            updated = await self._replace_display_unlocked(display_id, {"name": name})
+            updated = await self._replace_display_unlocked(display_id, change)
         if updated is None:
             raise DashboardDisplayNotFoundError()
         return updated

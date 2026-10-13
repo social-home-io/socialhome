@@ -20,6 +20,26 @@
         },
         "detail": {
           "type": "string"
+        },
+        "params": {
+          "type": "object",
+          "description": "Machine-readable details: DISPLAY_PIN_WRONG → {remaining} (wrong PINs left before the next try unpairs the panel); RATE_LIMITED from /unlock → {retry_after}; BAD_SIZE → {allowed}.",
+          "properties": {
+            "remaining": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "retry_after": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "allowed": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            }
+          }
         }
       }
     }

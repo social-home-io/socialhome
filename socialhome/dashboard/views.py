@@ -87,6 +87,7 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "ACK_ID_MAX",
+    "ack_id",
     "AVATAR_CACHE",
     "HERE_SHOWN",
     "HOME_FRAGMENT",
@@ -939,8 +940,9 @@ class UnlockView(_GoHomeOnGet):
         return response
 
 
-def _form_id(value: object) -> str | None:
-    """A form's id field if it is a plausible id, else ``None``."""
+def ack_id(value: object) -> str | None:
+    """A "Got it" id (tablet form field or panel JSON) if it is a
+    plausible id, else ``None``."""
     if isinstance(value, str) and 0 < len(value) <= ACK_ID_MAX:
         return value
     return None
@@ -973,9 +975,9 @@ class AckView(_GoHomeOnGet):
                 headers={"Retry-After": str(wait)},
             )
         form = await self.request.post()
-        message_id = _form_id(form.get("message_id"))
+        message_id = ack_id(form.get("message_id"))
         raw_person = form.get("person_id") or None
-        person_id = _form_id(raw_person)
+        person_id = ack_id(raw_person)
         snapshots = self.request.app[SNAPSHOTS_KEY]
         if (
             message_id is None

@@ -44,19 +44,38 @@ once a minute — keep the panel's own clock on SNTP and show it in
 layout itself must be rebuilt (night mode, the rail, locale, settings,
 theme colour).
 
-Budgets per panel: 120 JSON reads and 600 images a minute (`429` +
-`Retry-After`).
+Budgets per panel: 120 JSON requests and 600 images a minute, 30 "Got
+it" per 5 minutes (`429` + `Retry-After`).
+
+## Lock, unlock and "Got it"
+
+- `POST /api/display/v1/lock` — locks the panel (only while the household
+  has a PIN: else `409 DASHBOARD_PIN_REQUIRED`) and answers `200` with the
+  lock screen (`lock.schema.json`). The lock is stored server-side: a
+  reboot keeps it.
+- `POST /api/display/v1/unlock` `{"pin": "1234"}` — the only route a locked
+  panel reaches. `200` `unlock.schema.json` (also when it wasn't locked);
+  `403 DISPLAY_PIN_WRONG` with `params.remaining` (fixture
+  `pin-wrong.json`) — show it as "Wrong PIN"; after five wrong PINs in
+  15 minutes the next try unpairs the panel: `401 DISPLAY_SIGNED_OUT`
+  (forget the token, pair again). `429` + `Retry-After` only asks to wait.
+- `POST /api/display/v1/ack` `{"message_id", "person_id"}` — send a
+  mention's `ack` object as it came. `200` `ack.schema.json`;
+  `404 NOT_FOUND` when the wall no longer shows that mention (refresh the
+  board). 30 per 5 minutes per panel.
 
 ## Status codes a panel handles
 
 | Status | Meaning | What the panel does |
 |---|---|---|
-| `401` | No / unknown token (also after "Sign out all tablets" or removal) | Forget the token, pair again |
+| `401` | No / unknown token (also after "Sign out all tablets" or removal; `DISPLAY_SIGNED_OUT` after too many wrong PINs) | Forget the token, pair again |
+| `403 DISPLAY_PIN_WRONG` | `POST /unlock` with the wrong PIN (`params.remaining` tries left) | Say "Wrong PIN", stay locked |
+| `409 DASHBOARD_PIN_REQUIRED` | `POST /lock` while the household has no PIN | Hide the lock button (`settings.pin_set`) |
 | `404 TAB_OFF` | The tab doesn't show (chat off, stickies off, nobody located) | Go to Overview |
 | `404 NOT_FOUND` | Unknown or hidden person | Go to Overview |
 | `409 NIGHT` | A tab other than Overview at night | Go to Overview |
 | `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`) |
-| `429` | Over the read budget | Wait `Retry-After` seconds |
+| `429` | Over the request / ack budget, or the PIN can't be checked now | Wait `Retry-After` seconds |
 
 ## Versioning
 
@@ -75,7 +94,8 @@ Budgets per panel: 120 JSON reads and 600 images a minute (`429` +
 
 - [`v1/*.schema.json`](./v1/) — JSON Schema (draft 2020-12), one per
   endpoint plus `common.schema.json` (shared definitions) and
-  `error.schema.json` / `lock.schema.json`.
+  `error.schema.json` / `lock.schema.json` / `unlock.schema.json` /
+  `ack.schema.json`.
 - [`v1/fixtures/`](./v1/fixtures/) — real answers for a seeded household
   (four people, a school day, the chat on, mentions, people on the map).
   `tests/dashboard/test_display_api.py` validates every endpoint's real

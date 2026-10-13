@@ -106,6 +106,7 @@ def test_dashboard_base_url(address, host, port, expected):
         ("GET", "/api/admin/dashboard/displays", None),
         ("POST", "/api/admin/dashboard/displays", {"code": "ABCDEF", "name": "K"}),
         ("PATCH", "/api/admin/dashboard/displays/d1", {"name": "K"}),
+        ("PATCH", "/api/admin/dashboard/displays/d1", {"locked": False}),
         ("DELETE", "/api/admin/dashboard/displays/d1", None),
     ],
 )
@@ -856,4 +857,125 @@ async def test_rename_unknown_display(client):
 
 async def test_remove_unknown_display(client):
     resp = await client.delete(f"{DISPLAYS}/nope", headers=_auth(client._tok))
+    assert resp.status == 404
+
+
+# ── wall-panel privacy lock ──────────────────────────────────────────────
+
+
+async def _panel_post(origin: str, path: str, token: str, body: object = None):
+    async with aiohttp.ClientSession() as panel:
+        async with panel.post(
+            f"{origin}{path}",
+            json=body,
+            headers={"Authorization": f"Bearer {token}"},
+        ) as resp:
+            return resp.status, await resp.json()
+
+
+async def _paired_panel(client) -> tuple[str, str, str]:
+    """``(origin, display_id, token)`` of a panel paired end to end."""
+    origin = await _running(client)
+    started = await _panel_start(origin)
+    display = await (await _add(client, started["code"])).json()
+    _, body = await _panel_get(origin, f"/api/display/v1/pair/{started['pair_id']}")
+    return origin, display["id"], body["token"]
+
+
+async def _listed_locked(client, display_id: str) -> bool:
+    listed = await (await client.get(DISPLAYS, headers=_auth(client._tok))).json()
+    return next(d["locked"] for d in listed["displays"] if d["id"] == display_id)
+
+
+async def test_panel_lock_unlock_and_admin_recovery_end_to_end(client):
+    origin, display_id, token = await _paired_panel(client)
+    # No PIN yet: nothing could unlock it.
+    status, body = await _panel_post(origin, "/api/display/v1/lock", token)
+    assert status == 409 and body["error"]["code"] == "DASHBOARD_PIN_REQUIRED"
+
+    assert (await _put_pin(client, {"pin": "4829"})).status == 204
+    status, body = await _panel_post(origin, "/api/display/v1/lock", token)
+    assert status == 200 and body["locked"] is True
+    assert await _listed_locked(client, display_id)
+    assert (await _state(client))["displays"][0]["locked"] is True
+    status, _ = await _panel_get(origin, "/api/display/v1/home", token)
+    assert status == 423
+
+    status, body = await _panel_post(
+        origin, "/api/display/v1/unlock", token, {"pin": "0000"}
+    )
+    assert status == 403 and body["error"]["params"] == {"remaining": 4}
+    status, body = await _panel_post(
+        origin, "/api/display/v1/unlock", token, {"pin": "4829"}
+    )
+    assert (status, body) == (200, {"api_version": 1, "locked": False})
+    assert not await _listed_locked(client, display_id)
+
+    # Admin recovery: PATCH {locked: false}.
+    await _panel_post(origin, "/api/display/v1/lock", token)
+    resp = await client.patch(
+        f"{DISPLAYS}/{display_id}", headers=_auth(client._tok), json={"locked": False}
+    )
+    assert resp.status == 200
+    shown = await resp.json()
+    assert shown["locked"] is False and shown["name"] == "Kitchen"
+    status, _ = await _panel_get(origin, "/api/display/v1/whoami", token)
+    assert status == 200
+
+    # Removing the PIN lifts every lock; a new PIN doesn't bring it back.
+    await _panel_post(origin, "/api/display/v1/lock", token)
+    assert await _listed_locked(client, display_id)
+    resp = await client.delete("/api/admin/dashboard/pin", headers=_auth(client._tok))
+    assert resp.status == 204
+    assert not await _listed_locked(client, display_id)
+    assert (await _put_pin(client, {"pin": "1111"})).status == 204
+    status, _ = await _panel_get(origin, "/api/display/v1/whoami", token)
+    assert status == 200
+
+
+async def test_admin_patch_renames_and_unlocks_together(client):
+    origin, display_id, token = await _paired_panel(client)
+    await _put_pin(client, {"pin": "4829"})
+    await _panel_post(origin, "/api/display/v1/lock", token)
+    resp = await client.patch(
+        f"{DISPLAYS}/{display_id}",
+        headers=_auth(client._tok),
+        json={"name": "Hall", "locked": False},
+    )
+    assert resp.status == 200
+    shown = await resp.json()
+    assert (shown["name"], shown["locked"]) == ("Hall", False)
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ({"locked": True}, "locked"),
+        ({"locked": "false"}, "locked"),
+        ({"locked": None}, "locked"),
+        ({"name": "Hall", "locked": True}, "locked"),
+        ({}, "name"),
+    ],
+)
+async def test_admin_patch_refuses_anything_but_unlock(client, body, field):
+    origin, display_id, token = await _paired_panel(client)
+    resp = await client.patch(
+        f"{DISPLAYS}/{display_id}", headers=_auth(client._tok), json=body
+    )
+    assert resp.status == 422
+    err = (await resp.json())["error"]
+    assert err["code"] == "DASHBOARD_SETTINGS_INVALID"
+    assert err["params"] == {"field": field}
+    # Nothing was written — not even the name of a mixed body.
+    listed = await (await client.get(DISPLAYS, headers=_auth(client._tok))).json()
+    assert (listed["displays"][0]["name"], listed["displays"][0]["locked"]) == (
+        "Kitchen",
+        False,
+    )
+
+
+async def test_admin_unlock_unknown_display(client):
+    resp = await client.patch(
+        f"{DISPLAYS}/nope", headers=_auth(client._tok), json={"locked": False}
+    )
     assert resp.status == 404

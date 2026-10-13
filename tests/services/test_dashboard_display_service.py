@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -28,7 +29,11 @@ from socialhome.domain.household_dashboard import (
     DashboardDisplayLimitError,
     DashboardDisplayNotFoundError,
     DashboardPairingCodeInvalidError,
+    DashboardDisplayPinThrottledError,
+    DashboardDisplayPinWrongError,
+    DashboardDisplaySignedOutError,
     DashboardPairingThrottledError,
+    DashboardPinRequiredError,
     DashboardSettingsInvalidError,
 )
 from socialhome.infrastructure.key_manager import KeyManager
@@ -403,14 +408,16 @@ async def test_list(svc):
 
 async def test_rename(svc):
     d, _ = await _pair(svc)
-    renamed = await svc.rename(actor_is_admin=True, display_id=d.id, name=" Hall ")
+    renamed = await svc.update(
+        actor_is_admin=True, display_id=d.id, patch={"name": " Hall "}
+    )
     assert renamed.name == "Hall"
     with pytest.raises(PermissionError):
-        await svc.rename(actor_is_admin=False, display_id=d.id, name="x")
+        await svc.update(actor_is_admin=False, display_id=d.id, patch={"name": "x"})
     with pytest.raises(DashboardSettingsInvalidError):
-        await svc.rename(actor_is_admin=True, display_id=d.id, name="")
+        await svc.update(actor_is_admin=True, display_id=d.id, patch={"name": ""})
     with pytest.raises(DashboardDisplayNotFoundError):
-        await svc.rename(actor_is_admin=True, display_id="nope", name="x")
+        await svc.update(actor_is_admin=True, display_id="nope", patch={"name": "x"})
 
 
 async def test_remove(svc):
@@ -466,3 +473,219 @@ async def test_claim_name_refuses_line_separators(svc, name):
     pairing = await svc.start_pairing()
     with pytest.raises(DashboardSettingsInvalidError):
         await svc.claim(actor_is_admin=True, code=pairing.code, name=name)
+
+
+# ── privacy lock ────────────────────────────────────────────────────────
+
+PIN = "4321"
+
+
+async def _locked(svc, settings):
+    await settings.set_pin(actor_is_admin=True, pin=PIN)
+    display, token = await _pair(svc)
+    await svc.lock(display)
+    stored = await svc.authenticate(token)
+    assert stored is not None and stored.locked
+    return stored, token
+
+
+async def test_lock_needs_a_pin(svc, settings):
+    display, _ = await _pair(svc)
+    with pytest.raises(DashboardPinRequiredError) as exc:
+        await svc.lock(display)
+    assert exc.value.status == 409
+    assert not (await settings.displays())[0].locked
+
+
+async def test_lock_is_stored_and_survives_a_restart(svc, settings, repo):
+    display, token = await _locked(svc, settings)
+    fresh = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    again = DashboardDisplayService(fresh, DashboardAuth(fresh))
+    found = await again.authenticate(token)
+    assert found is not None and found.locked
+    assert await again.is_locked(found)
+
+
+async def test_is_locked_needs_a_pin(svc, settings):
+    display, _ = await _locked(svc, settings)
+    assert await svc.is_locked(display)
+    await settings.delete_pin(actor_is_admin=True)
+    # Even a stale flag (a crash mid-delete) counts as unlocked with no PIN.
+    assert not await svc.is_locked(replace(display, locked=True))
+
+
+async def test_unlock_with_the_pin(svc, settings, auth):
+    display, token = await _locked(svc, settings)
+    await svc.unlock(display, PIN)
+    found = await svc.authenticate(token)
+    assert found is not None and not found.locked
+    assert auth.failure_count(DashboardAuth.display_pin_throttle_key(display.id)) == 0
+
+
+async def test_unlock_an_unlocked_panel_checks_nothing(svc, settings, auth):
+    await settings.set_pin(actor_is_admin=True, pin=PIN)
+    display, _ = await _pair(svc)
+    # No PIN oracle and no throttle entry for a panel that isn't locked.
+    await svc.unlock(display, "0000")
+    assert auth.failure_count(DashboardAuth.display_pin_throttle_key(display.id)) == 0
+
+
+@pytest.mark.parametrize("pin", ["0000", "12", "abcd", None, 1234, ""])
+async def test_wrong_pin_counts_and_says_how_many_are_left(svc, settings, pin):
+    display, token = await _locked(svc, settings)
+    with pytest.raises(DashboardDisplayPinWrongError) as exc:
+        await svc.unlock(display, pin)
+    assert exc.value.status == 403
+    assert exc.value.params == {"remaining": THROTTLE_MAX_FAILURES - 1}
+    found = await svc.authenticate(token)
+    assert found is not None and found.locked
+
+
+async def test_sixth_wrong_try_unpairs_the_panel(svc, settings, auth, caplog):
+    display, token = await _locked(svc, settings)
+    for left in range(THROTTLE_MAX_FAILURES - 1, -1, -1):
+        with pytest.raises(DashboardDisplayPinWrongError) as exc:
+            await svc.unlock(display, "0000")
+        assert exc.value.params == {"remaining": left}
+    caplog.set_level(logging.WARNING)
+    # Even the right PIN: the budget is spent, the panel is signed out.
+    with pytest.raises(DashboardDisplaySignedOutError) as signed_out:
+        await svc.unlock(display, PIN)
+    assert signed_out.value.status == 401
+    assert await svc.authenticate(token) is None
+    assert await settings.displays() == ()
+    assert "too many wrong PINs" in caplog.text
+    assert token not in caplog.text
+
+
+async def test_wrong_pins_age_out(svc, settings, clock):
+    display, token = await _locked(svc, settings)
+    for _ in range(THROTTLE_MAX_FAILURES):
+        with pytest.raises(DashboardDisplayPinWrongError):
+            await svc.unlock(display, "0000")
+    clock.now += 15 * 60
+    await svc.unlock(display, PIN)
+    assert await svc.authenticate(token) is not None
+
+
+async def test_full_throttle_table_only_asks_to_wait(settings, clock):
+    auth = DashboardAuth(settings, clock=clock, max_throttle_keys=1)
+    svc = DashboardDisplayService(settings, auth, clock=clock)
+    # Someone else's locked-out bucket fills the only slot.
+    for _ in range(THROTTLE_MAX_FAILURES):
+        auth.begin_attempt("pin:other", count_global=False)
+    display, token = await _locked(svc, settings)
+    with pytest.raises(DashboardDisplayPinThrottledError) as exc:
+        await svc.unlock(display, PIN)
+    assert exc.value.status == 429 and exc.value.params["retry_after"] >= 1
+    assert await svc.authenticate(token) is not None
+
+
+async def test_unlock_of_a_removed_panel_is_signed_out(svc, settings):
+    display, _ = await _locked(svc, settings)
+    await svc.remove(actor_is_admin=True, display_id=display.id)
+    with pytest.raises(DashboardDisplaySignedOutError):
+        await svc.unlock(display, PIN)
+
+
+async def test_lock_of_a_removed_panel_is_signed_out(svc, settings):
+    await settings.set_pin(actor_is_admin=True, pin=PIN)
+    display, _ = await _pair(svc)
+    await svc.remove(actor_is_admin=True, display_id=display.id)
+    with pytest.raises(DashboardDisplaySignedOutError):
+        await svc.lock(display)
+
+
+async def test_admin_unlock(svc, settings):
+    display, token = await _locked(svc, settings)
+    with pytest.raises(PermissionError):
+        await svc.update(
+            actor_is_admin=False, display_id=display.id, patch={"locked": True}
+        )
+    unlocked = await svc.update(
+        actor_is_admin=True, display_id=display.id, patch={"locked": False}
+    )
+    assert unlocked.locked is False and unlocked.name == "Kitchen"
+    found = await svc.authenticate(token)
+    assert found is not None and not found.locked
+    with pytest.raises(DashboardDisplayNotFoundError):
+        await svc.update(
+            actor_is_admin=True, display_id="nope", patch={"locked": False}
+        )
+
+
+@pytest.mark.parametrize(
+    ("patch", "field"),
+    [
+        ({"locked": True}, "locked"),
+        ({"locked": 0}, "locked"),
+        ({"name": "Hall", "locked": True}, "locked"),
+        ({"name": "", "locked": False}, "name"),
+        ({}, "name"),
+    ],
+)
+async def test_update_validates_before_writing(svc, settings, patch, field):
+    display, _ = await _locked(svc, settings)
+    with pytest.raises(DashboardSettingsInvalidError) as exc:
+        await svc.update(actor_is_admin=True, display_id=display.id, patch=patch)
+    assert exc.value.params == {"field": field}
+    stored = (await settings.displays())[0]
+    assert (stored.name, stored.locked) == ("Kitchen", True)
+
+
+async def test_update_renames_and_unlocks(svc, settings):
+    display, _ = await _locked(svc, settings)
+    updated = await svc.update(
+        actor_is_admin=True,
+        display_id=display.id,
+        patch={"name": " Hall ", "locked": False},
+    )
+    assert (updated.name, updated.locked) == ("Hall", False)
+
+
+async def test_admin_unlock_gives_the_panel_fresh_pin_tries(svc, settings, auth):
+    display, token = await _locked(svc, settings)
+    for _ in range(THROTTLE_MAX_FAILURES):
+        with pytest.raises(DashboardDisplayPinWrongError):
+            await svc.unlock(display, "0000")
+    await svc.update(
+        actor_is_admin=True, display_id=display.id, patch={"locked": False}
+    )
+    assert auth.failure_count(DashboardAuth.display_pin_throttle_key(display.id)) == 0
+    # Locked again, one wrong PIN no longer unpairs it.
+    locked = await svc.authenticate(token)
+    assert locked is not None
+    await svc.lock(locked)
+    with pytest.raises(DashboardDisplayPinWrongError):
+        await svc.unlock(locked, "0000")
+
+
+async def test_unlock_reads_the_stored_lock_not_the_request_snapshot(
+    svc, settings, auth
+):
+    await settings.set_pin(actor_is_admin=True, pin=PIN)
+    display, token = await _pair(svc)
+    # Authenticated before a concurrent /lock landed: still checked.
+    await svc.lock(display)
+    with pytest.raises(DashboardDisplayPinWrongError):
+        await svc.unlock(display, "0000")
+    found = await svc.authenticate(token)
+    assert found is not None and found.locked
+
+
+async def test_rename_and_unlock_is_one_write(svc, settings, repo):
+    display, _ = await _locked(svc, settings)
+    writes: list[str] = []
+    real = repo.set
+
+    async def spy(key, value):
+        writes.append(key)
+        await real(key, value)
+
+    repo.set = spy
+    await svc.update(
+        actor_is_admin=True,
+        display_id=display.id,
+        patch={"name": "Hall", "locked": False},
+    )
+    assert writes == ["dashboard.displays"]

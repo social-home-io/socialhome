@@ -72,6 +72,9 @@ __all__ = [
     "DashboardDisplay",
     "DashboardDisplayLimitError",
     "DashboardDisplayNotFoundError",
+    "DashboardDisplayPinThrottledError",
+    "DashboardDisplayPinWrongError",
+    "DashboardDisplaySignedOutError",
     "DisplayPairing",
     "DisplayPairingStatus",
     "DashboardEvent",
@@ -86,6 +89,7 @@ __all__ = [
     "DashboardPerson",
     "DashboardPersonSettings",
     "DashboardPinInvalidError",
+    "DashboardPinRequiredError",
     "DashboardPortFixedError",
     "DashboardPortInUseError",
     "DashboardSchoolDay",
@@ -332,6 +336,48 @@ class DashboardDisplayLimitError(CodedError):
         super().__init__(params={"max": MAX_DISPLAYS})
 
 
+class DashboardPinRequiredError(CodedError):
+    """A wall panel can't lock while no PIN is set — nothing could
+    unlock it (the tablet's ``/lock`` answers ``409`` the same way)."""
+
+    status = 409
+    code = "DASHBOARD_PIN_REQUIRED"
+    detail = "Set a dashboard PIN before locking."
+
+
+class DashboardDisplayPinWrongError(CodedError):
+    """A locked panel sent the wrong PIN; ``remaining`` more wrong ones
+    are allowed before the next try unpairs the panel."""
+
+    status = 403
+    code = "DISPLAY_PIN_WRONG"
+    detail = "Wrong PIN."
+
+    def __init__(self, remaining: int) -> None:
+        super().__init__(params={"remaining": remaining})
+
+
+class DashboardDisplayPinThrottledError(CodedError):
+    """The PIN can't be checked right now (a full throttle table) —
+    wait ``retry_after`` seconds. The panel stays paired."""
+
+    status = 429
+    code = "RATE_LIMITED"
+    detail = "Too many tries. Try again later."
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(params={"retry_after": retry_after})
+
+
+class DashboardDisplaySignedOutError(CodedError):
+    """The panel is no longer paired: too many wrong PINs unpaired it
+    (or it was removed meanwhile). It has to pair again."""
+
+    status = 401
+    code = "DISPLAY_SIGNED_OUT"
+    detail = "This display was signed out. Pair it again."
+
+
 @dataclass(slots=True, frozen=True)
 class DashboardDisplay:
     """A paired wall panel (e.g. an ESPHome display).
@@ -340,7 +386,8 @@ class DashboardDisplay:
     bearer token; only the token's SHA-256 (hex) is kept. ``created_at``
     / ``last_seen_at`` are tz-aware UTC ISO 8601. ``firmware`` / ``model``
     are what the panel reports about itself (untrusted, length-capped).
-    ``locked`` is the panel's privacy lock (shown by its own data API).
+    ``locked`` is the panel's privacy lock (it counts only while a PIN
+    is set; a locked panel's data API answers ``423``).
     """
 
     id: str
