@@ -115,6 +115,12 @@ class MapBubble:
         """Faces folded into the "+N" chip."""
         return max(0, len(self.spots) - BUBBLE_FACES)
 
+    @property
+    def away(self) -> bool:
+        """One person away (outside every zone and named place) — a merged
+        bubble's caption says "🚗 Away" once, after its places."""
+        return self.zone is None and self.spots[0].icon == AWAY_ICON
+
 
 @dataclass(slots=True, frozen=True)
 class MapPin:

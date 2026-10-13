@@ -100,6 +100,7 @@ def test_zone_members_sit_at_the_zone_centre_never_their_own_point():
     assert (anna.latitude, anna.longitude) == (52.5232, 13.3961)
     assert anna.spots[0].latitude == 52.5232
     assert home.caption == "🏠 Home" and anna.caption == "🚗 Away"
+    assert anna.away and not home.away and not school.away
     assert anna.label == "Anna · 🚗 Away"
     assert home.label == "Mia, Pascal · 🏠 Home"
 
@@ -129,6 +130,7 @@ def test_a_zone_name_without_a_zone_on_the_wall_is_a_free_point():
     (spot,) = view.spots
     assert (spot.icon, spot.place) == (PLACE_ICON, "Gym")
     assert view.bubbles[0].key == "person:u-leo"
+    assert not view.bubbles[0].away  # a named place, not "away"
 
 
 def test_home_without_a_home_zone_is_a_free_point_called_home():

@@ -376,24 +376,32 @@
     }
   }
 
-  // "🏠 Home · 🏫 School", after two places "… · +1 place".
+  // "🏠 Home · 🏫 School", after two places "… · +1 place"; anyone
+  // away adds "🚗 Away" at the end.
   function caption(map, parts) {
     var places = [];
+    var away = null;
     parts.forEach(function (g) {
       var text = g.el.getAttribute("data-caption");
-      if (places.indexOf(text) < 0) {
+      if (g.el.hasAttribute("data-away")) {
+        away = text;
+      } else if (places.indexOf(text) < 0) {
         places.push(text);
       }
     });
-    if (places.length <= 2) {
-      return places.join(" · ");
+    var out = places.slice(0, 2);
+    var rest = places.length - out.length;
+    if (rest > 0) {
+      out.push(
+        rest === 1
+          ? map.getAttribute("data-more-one")
+          : (map.getAttribute("data-more-other") || "").replace("{n}", String(rest))
+      );
     }
-    var rest = places.length - 2;
-    var more =
-      rest === 1
-        ? map.getAttribute("data-more-one")
-        : (map.getAttribute("data-more-other") || "").replace("{n}", String(rest));
-    return places.slice(0, 2).join(" · ") + " · " + more;
+    if (away) {
+      out.push(away);
+    }
+    return out.join(" · ");
   }
 
   // One bubble for several: at their mean x, above the top-most anchor.
@@ -504,6 +512,14 @@
           }
         });
         var el = mergedBubble(map, parts);
+        // Selected (or holding the selected person behind "+N"): every
+        // face shows — a tap on a merged bubble always reveals who.
+        var keys = selectedKeys(groups);
+        var hidden = el.querySelector(".dash-mp-extra.dash-mp-selected");
+        var all = parts.every(function (g) {
+          return keys.indexOf(g.key) >= 0;
+        });
+        el.classList.toggle("dash-mp-expanded", Boolean(hidden) || (all && keys.length > 0));
         keepIn(el, map, w);
         return { parts: parts, el: el };
       });
@@ -537,9 +553,65 @@
     var size = chip.getBoundingClientRect();
     var hx = Math.max(1, w / 2 - size.width / 2 - EDGE_MARGIN);
     var hy = Math.max(1, h / 2 - size.height / 2 - EDGE_MARGIN);
-    var t = Math.min(hx / Math.max(Math.abs(dx), 1e-9), hy / Math.max(Math.abs(dy), 1e-9));
-    place(chip, { x: w / 2 + dx * t, y: h / 2 + dy * t });
+    var tx = hx / Math.max(Math.abs(dx), 1e-9);
+    var ty = hy / Math.max(Math.abs(dy), 1e-9);
+    var t = Math.min(tx, ty);
+    var at = { x: w / 2 + dx * t, y: h / 2 + dy * t };
     arrow.style.transform = "rotate(" + (Math.atan2(dy, dx) * 180) / Math.PI + "deg)";
+    // Slide along that edge to the nearest spot that covers no marker.
+    var alongY = tx < ty; // on the left / right edge: move up and down
+    var box = map.getBoundingClientRect();
+    var blockers = Array.prototype.filter.call(
+      map.querySelectorAll(".dash-mp-bubble, [data-edge], .dash-mp-zone"),
+      function (el) {
+        return el !== chip && !el.classList.contains("dash-mp-off");
+      }
+    );
+    var free = function () {
+      var r = rectIn(chip, box);
+      return blockers.every(function (el) {
+        return !overlap(r, rectIn(el, box));
+      });
+    };
+    for (var k = 0; k <= 60; k++) {
+      var step = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * 12;
+      var x = alongY ? at.x : Math.min(Math.max(at.x + step, size.width / 2 + EDGE_MARGIN), w - size.width / 2 - EDGE_MARGIN);
+      var y = alongY ? Math.min(Math.max(at.y + step, size.height / 2 + EDGE_MARGIN), h - size.height / 2 - EDGE_MARGIN) : at.y;
+      place(chip, { x: x, y: y });
+      if (free()) {
+        return;
+      }
+    }
+    place(chip, at);
+  }
+
+  // An empty zone is context only: it gives way when its pin would land
+  // on the people (a wide zoom) or be cut by the box edge.
+  function clearEmptyZones(map, w, h) {
+    var box = map.getBoundingClientRect();
+    var busy = Array.prototype.filter
+      .call(map.querySelectorAll(".dash-mp-bubble, .dash-mp-zone:not(.dash-mp-zone-empty), .dash-mp-dot"), function (el) {
+        return !el.classList.contains("dash-mp-off");
+      })
+      .map(function (el) {
+        return rectIn(el, box);
+      });
+    map.querySelectorAll(".dash-mp-zone-empty").forEach(function (zone) {
+      var r = rectIn(zone.querySelector(".dash-mp-pin") || zone, box);
+      var cut = r.x0 < 0 || r.y0 < 0 || r.x1 > w || r.y1 > h;
+      if (
+        cut ||
+        busy.some(function (b) {
+          return overlap(r, b);
+        })
+      ) {
+        zone.classList.add("dash-mp-off");
+        var area = map.querySelector('[data-area="' + escaped(zone.getAttribute("data-zone")) + '"]');
+        if (area) {
+          area.classList.add("dash-mp-off");
+        }
+      }
+    });
   }
 
   // ── Selection ─────────────────────────────────────────────────────────
@@ -712,7 +784,6 @@
     } else {
       far.forEach(function (g) {
         hideGroup(map, g);
-        edgeChip(map, g, frame, w, h);
       });
       groups.forEach(function (g) {
         if (!g.el.classList.contains("dash-mp-off")) {
@@ -721,6 +792,12 @@
       });
     }
     mergeOverlaps(map, groups, w);
+    if (!focus) {
+      far.forEach(function (g) {
+        edgeChip(map, g, frame, w, h);
+      });
+    }
+    clearEmptyZones(map, w, h);
     map.querySelectorAll(".dash-mp-zone-name").forEach(function (name) {
       var r = rectIn(name, box);
       if (r.x0 < 4 || r.y0 < 4 || r.x1 > w - 4 || r.y1 > h - 4) {

@@ -12,14 +12,14 @@
     <div class="dash-mp-map" role="img" aria-label="{{ map.label }}" data-map data-more-one="{{ t("dashboard.map.more_places_one") }}" data-more-other="{{ t("dashboard.map.more_places", n="{n}") }}">
       <div class="dash-mp-tiles" data-map-tiles></div>
       {% for pin in map.pins %}
-      <span class="dash-mp-area {{ f.kc(pin.zone.color) }}{% if not pin.occupied %} dash-mp-area-empty{% endif %}" data-lat="{{ pin.zone.latitude }}" data-lon="{{ pin.zone.longitude }}" data-radius="{{ pin.zone.radius_m }}"></span>
+      <span class="dash-mp-area {{ f.kc(pin.zone.color) }}{% if not pin.occupied %} dash-mp-area-empty{% endif %}" data-lat="{{ pin.zone.latitude }}" data-lon="{{ pin.zone.longitude }}" data-radius="{{ pin.zone.radius_m }}" data-area="{{ pin.zone.id }}"></span>
       <span class="dash-mp-zone {{ f.kc(pin.zone.color) }}{% if not pin.occupied %} dash-mp-zone-empty{% endif %}" data-lat="{{ pin.zone.latitude }}" data-lon="{{ pin.zone.longitude }}" data-zone="{{ pin.zone.id }}"><span class="dash-mp-pin">{{ pin.icon }}</span><span class="dash-mp-zone-name">{{ pin.zone.name }}</span></span>
       {% endfor %}
       {% for b in map.bubbles %}
       {% if not b.zone %}
       <span class="dash-mp-dot {{ f.kc(b.spots[0].person.color) }}{% if b.stale %} dash-mp-stale{% endif %}" data-lat="{{ b.latitude }}" data-lon="{{ b.longitude }}" data-dot="{{ b.key }}"></span>
       {% endif %}
-      <span class="dash-mp-bubble {{ "dash-mp-bubble-zone" if b.zone else "dash-mp-bubble-free" }}{% if b.stale %} dash-mp-stale{% endif %}" data-bubble="{{ b.key }}" data-lat="{{ b.latitude }}" data-lon="{{ b.longitude }}"{% if b.zone %} data-radius="{{ b.zone.radius_m }}" data-in-zone="{{ b.zone.id }}"{% if b.zone.is_home %} data-home{% endif %}{% endif %} data-members="{{ b.spots|map(attribute="person.user_id")|join(" ") }}" data-caption="{{ b.caption }}" data-label="{{ b.label }}">
+      <span class="dash-mp-bubble {{ "dash-mp-bubble-zone" if b.zone else "dash-mp-bubble-free" }}{% if b.stale %} dash-mp-stale{% endif %}" data-bubble="{{ b.key }}" data-lat="{{ b.latitude }}" data-lon="{{ b.longitude }}"{% if b.zone %} data-radius="{{ b.zone.radius_m }}" data-in-zone="{{ b.zone.id }}"{% if b.zone.is_home %} data-home{% endif %}{% endif %} data-members="{{ b.spots|map(attribute="person.user_id")|join(" ") }}" data-caption="{{ b.caption }}"{% if b.away %} data-away{% endif %} data-label="{{ b.label }}">
         <span class="dash-mp-faces">
           {%- for s in b.spots %}{{ map_face(s, extra=loop.index > 3) }}{% endfor -%}
           {%- if b.more %}<span class="dash-mp-more">+{{ b.more }}</span>{% endif -%}

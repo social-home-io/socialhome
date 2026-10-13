@@ -3729,6 +3729,10 @@ html:not(.dash-js) .dash-mp-box {
   .dash-mp-callout {
     font-size: 1.0625rem;
   }
+
+  .dash-mp-edge {
+    max-inline-size: 75%;
+  }
 }
 
 /* ── Timeline steps (generated: whole percent of the day's span) ────── */
