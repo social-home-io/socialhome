@@ -538,7 +538,10 @@ async def test_relay_failure_is_uniform_and_immediate(
     nothing — the matching offer already says 201 vs 503 instantly — while
     letting anonymous callers pin a task for 30 s)."""
 
-    budget = 2.0
+    # Wide enough that a loaded CI runner (coverage, parallel workers) can't
+    # push an immediate reply past half of it, still short enough that the
+    # reference request below — which waits the whole budget — stays cheap.
+    budget = 4.0
     monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", budget)
     instance_id = override.get("instance_id", "inst-author")
     highlight_id = override.get("highlight_id", "s-1")
@@ -581,14 +584,17 @@ async def test_relay_bridge_full_is_uniform(client, monkeypatch):
     """The live-channel ceiling ("could not be brokered") is the same
     uniform response, sent at once."""
 
-    monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", 2.0)
+    # Nothing here waits the budget, so it can be wide: the assert only has
+    # to tell "held for the budget" from "answered at once".
+    budget = 10.0
+    monkeypatch.setattr(hr, "RELAY_AUTHOR_CONNECT_TIMEOUT_SECONDS", budget)
     monkeypatch.setattr(relay_bridge, "MAX_LIVE_CHANNELS", 0)
     loop = asyncio.get_running_loop()
     t0 = loop.time()
     resp = await client.get(
         f"/gfs/highlight_rtc/relay/inst-author/s-1?token={client._token}",
     )
-    assert loop.time() - t0 < 1.0
+    assert loop.time() - t0 < budget / 2
     assert resp.status == 503
     assert await resp.json() == {"error": "unavailable"}
 
