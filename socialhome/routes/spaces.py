@@ -657,7 +657,9 @@ def _remote_member_to_dict(
         "personal_alias": personal_alias,
         "picture_hash": picture_hash,
         "picture_url": (
-            f"api/users/{rm.user_id}/picture?v={picture_hash}" if picture_hash else None
+            f"api/users/{rm.user_id}/picture?v={quote(picture_hash, safe='')}"
+            if picture_hash
+            else None
         ),
         "is_online": is_online,
         "is_idle": is_idle,

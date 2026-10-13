@@ -154,7 +154,7 @@ export default function PresencePage() {
               lon: p.longitude as number,
               accuracy_m: p.gps_accuracy_m ?? null,
               label: p.display_name,
-              sub_label: p.zone_name || presenceLabel(p.state),
+              sub_label: presenceLabel(p.state, p.zone_name),
               avatar_url: p.picture_url,
               state: p.state,
             }))}
@@ -199,7 +199,7 @@ export default function PresencePage() {
               <strong>{p.display_name}</strong>
               {p.dnd && <span class="sh-badge sh-badge--dnd">{t('presence.dnd_badge')}</span>}
               <span class={`sh-presence-state sh-presence-state--${p.state}`}>
-                {p.zone_name || presenceLabel(p.state)}
+                {presenceLabel(p.state, p.zone_name)}
               </span>
               <span class="sh-presence-online sh-muted">
                 {online === 'online' && `· ${t('dms.status.online')}`}

@@ -66,6 +66,29 @@ describe('PresencePage', () => {
     })
   })
 
+  it('words the home zone like every other surface, never the raw HA "home"', async () => {
+    mapProps.length = 0
+    vi.doMock('@/api', () => ({
+      api: {
+        get: vi.fn(async () => [
+          { ...row(null), zone_name: 'home', latitude: 47.1, longitude: 8.2 },
+          {
+            ...row(null), user_id: 'u3', username: 'cy', display_name: 'Cy',
+            state: 'zone', zone_name: 'School', latitude: 47.2, longitude: 8.3,
+          },
+        ]),
+      },
+    }))
+    const { default: PresencePage } = await import('./PresencePage')
+    const view = render(<PresencePage />)
+    await view.findByText('Bob')
+    expect(view.queryByText('home')).toBeNull()
+    expect(view.getAllByText('Home').length).toBeGreaterThan(0)
+    expect(view.getByText('School')).toBeTruthy()
+    const subs = mapProps.at(-1)!.markers.map(m => m.sub_label)
+    expect(subs).toEqual(['Home', 'School'])
+  })
+
   it("shows each member's status", async () => {
     vi.doMock('@/api', () => ({
       api: { get: vi.fn(async () => [row({ emoji: '🌴', text: 'On leave', expires_at: null })]) },
