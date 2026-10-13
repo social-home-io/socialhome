@@ -126,6 +126,7 @@ from .dashboard.auth import DashboardAuth
 from .dashboard.render import DashboardRenderer
 from .dashboard.server import DashboardServer
 from .repositories.instance_config_repo import SqliteInstanceConfigRepo
+from .services.dashboard_display_service import DashboardDisplayService
 from .services.dashboard_settings_service import DashboardSettingsService
 from .rate_limiter import RateLimiter, build_rate_limit_middleware
 from .webrtc_ice import build_ice_servers, warn_if_no_turn, warn_if_turn_unusable
@@ -2165,6 +2166,9 @@ def _build_household_dashboard(
         main_port=config.listen_port,
     )
     auth = DashboardAuth(settings)
+    # Wall panels: pending pairings live in memory, like the throttles —
+    # one for the process, so a listener restart keeps them.
+    displays = DashboardDisplayService(settings, auth)
     renderer = DashboardRenderer(catalog)
     own_names = local_hostnames()
     snapshots = HouseholdDashboardService(
@@ -2197,6 +2201,7 @@ def _build_household_dashboard(
         return build_dashboard_app(
             settings_service=settings,
             auth=auth,
+            displays=displays,
             renderer=renderer,
             household_name=household_name,
             household_tz=household_tz,
@@ -2212,6 +2217,7 @@ def _build_household_dashboard(
     return SimpleNamespace(
         settings=settings,
         auth=auth,
+        displays=displays,
         snapshots=snapshots,
         server=server,
         controller=controller,
@@ -3275,6 +3281,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.platform_adapter_key] = platform_adapter
     app[K.dashboard_settings_service_key] = dashboard.settings
     app[K.dashboard_auth_key] = dashboard.auth
+    app[K.dashboard_display_service_key] = dashboard.displays
     app[K.dashboard_server_key] = dashboard.server
     app[K.dashboard_controller_key] = dashboard.controller
     app[K.calendar_import_service_key] = calendar_import_service

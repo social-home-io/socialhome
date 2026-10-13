@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, ClassVar, Final
 
@@ -46,6 +46,13 @@ __all__ = [
     "MESSAGES_SHOWN",
     "MAP_DROP_AFTER",
     "MAP_STALE_AFTER",
+    "MAX_DISPLAYS",
+    "MAX_DISPLAY_INFO_LENGTH",
+    "MAX_DISPLAY_NAME_LENGTH",
+    "MAX_PENDING_PAIRINGS",
+    "PAIRING_CODE_ALPHABET",
+    "PAIRING_CODE_LENGTH",
+    "PAIRING_TTL_SECONDS",
     "MAX_ADDRESS_LENGTH",
     "MAX_PIN_LENGTH",
     "MIN_PASSWORD_LENGTH",
@@ -61,11 +68,19 @@ __all__ = [
     "SUPPORTED_DASHBOARD_LOCALES",
     "TIMETABLE_COLOR_HEX",
     "DashboardAgendaItem",
+    "DashboardDisabledError",
+    "DashboardDisplay",
+    "DashboardDisplayLimitError",
+    "DashboardDisplayNotFoundError",
+    "DisplayPairing",
+    "DisplayPairingStatus",
     "DashboardEvent",
     "DashboardLesson",
     "DashboardMention",
     "DashboardMessage",
     "DashboardNotRunningError",
+    "DashboardPairingCodeInvalidError",
+    "DashboardPairingThrottledError",
     "DashboardPasswordRequiredError",
     "DashboardPasswordTooShortError",
     "DashboardPerson",
@@ -119,6 +134,23 @@ MAX_ADDRESS_LENGTH = 200
 
 #: Lifetime of a one-time tablet setup token (QR / link pairing).
 SETUP_TOKEN_TTL_SECONDS = 600
+
+#: Wall panels ("displays", e.g. an ESPHome panel) pair with a short
+#: code shown on the panel and typed into Admin › Dashboard. The code
+#: alphabet has no look-alikes (no 0/O, 1/I/L, U/V).
+PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTWXYZ"
+PAIRING_CODE_LENGTH = 6
+#: How long a panel's pairing code (and, once paired, its one-time token
+#: pickup) stays valid.
+PAIRING_TTL_SECONDS = 600
+#: Pairings waiting in memory at once; the oldest is dropped beyond this.
+MAX_PENDING_PAIRINGS = 32
+#: Paired panels per household.
+MAX_DISPLAYS = 20
+#: Longest panel name (admin-set).
+MAX_DISPLAY_NAME_LENGTH = 40
+#: Longest model / firmware string a panel may report.
+MAX_DISPLAY_INFO_LENGTH = 64
 
 #: Household-chat messages on the wall (``show_household_messages``): the
 #: newest few, and none older than this (wall-clock age).
@@ -252,6 +284,93 @@ class DashboardNotRunningError(CodedError):
     status = 409
     code = "DASHBOARD_NOT_RUNNING"
     detail = "Turn the dashboard on before creating a sign-in link."
+
+
+class DashboardDisabledError(CodedError):
+    """Wall panels pair only while the dashboard is switched on."""
+
+    status = 409
+    code = "DASHBOARD_DISABLED"
+    detail = "Turn the dashboard on first."
+
+
+class DashboardPairingCodeInvalidError(CodedError):
+    """No panel is waiting with that pairing code (wrong, used or expired)."""
+
+    status = 404
+    code = "DASHBOARD_PAIRING_CODE_INVALID"
+    detail = "No display is waiting with that code."
+
+
+class DashboardPairingThrottledError(CodedError):
+    """Too many wrong pairing codes — wait ``retry_after`` seconds."""
+
+    status = 429
+    code = "DASHBOARD_PAIRING_THROTTLED"
+    detail = "Too many wrong codes. Try again later."
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(params={"retry_after": retry_after})
+
+
+class DashboardDisplayNotFoundError(CodedError):
+    """No paired panel has that id."""
+
+    status = 404
+    code = "DASHBOARD_DISPLAY_NOT_FOUND"
+    detail = "That display isn't paired."
+
+
+class DashboardDisplayLimitError(CodedError):
+    """The household already has :data:`MAX_DISPLAYS` panels."""
+
+    status = 409
+    code = "DASHBOARD_DISPLAY_LIMIT"
+    detail = "Too many displays are paired."
+
+    def __init__(self) -> None:
+        super().__init__(params={"max": MAX_DISPLAYS})
+
+
+@dataclass(slots=True, frozen=True)
+class DashboardDisplay:
+    """A paired wall panel (e.g. an ESPHome display).
+
+    It authenticates to the dashboard's ``/api/display/v1/`` API with a
+    bearer token; only the token's SHA-256 (hex) is kept. ``created_at``
+    / ``last_seen_at`` are tz-aware UTC ISO 8601. ``firmware`` / ``model``
+    are what the panel reports about itself (untrusted, length-capped).
+    ``locked`` is the panel's privacy lock (shown by its own data API).
+    """
+
+    id: str
+    name: str
+    token_hash: str = field(repr=False)
+    created_at: str
+    last_seen_at: str | None = None
+    firmware: str | None = None
+    model: str | None = None
+    locked: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class DisplayPairing:
+    """A pairing a wall panel just started: it shows ``code`` and polls
+    ``pair_id`` (a random 128-bit id) for its token."""
+
+    pair_id: str
+    code: str
+    expires_in: int
+
+
+@dataclass(slots=True, frozen=True)
+class DisplayPairingStatus:
+    """What a panel's poll sees: still waiting, or paired — then (exactly
+    once) its bearer ``token`` and ``display_id``."""
+
+    paired: bool
+    token: str | None = field(default=None, repr=False)
+    display_id: str | None = None
 
 
 class DashboardSettingsInvalidError(CodedError, ValueError):

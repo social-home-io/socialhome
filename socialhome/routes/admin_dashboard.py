@@ -6,7 +6,11 @@
   (only while the dashboard runs);
 * ``DELETE /api/admin/dashboard/sessions`` — sign out every tablet;
 * ``PUT / DELETE /api/admin/dashboard/pin`` — the tablets' privacy-lock
-  PIN (4–6 digits, separate from the password; never read back).
+  PIN (4–6 digits, separate from the password; never read back);
+* ``GET / POST /api/admin/dashboard/displays`` and ``PATCH / DELETE
+  /api/admin/dashboard/displays/{display_id}`` — wall panels: list, pair
+  one by the code it shows, rename, unpair. A panel's token (and its
+  hash) never appears here — the panel collects the token itself.
 
 Admin-only: every call goes through a
 :class:`~socialhome.services.dashboard_settings_service.DashboardSettingsService`
@@ -25,6 +29,7 @@ from aiohttp import web
 from ..app_keys import (
     dashboard_auth_key,
     dashboard_controller_key,
+    dashboard_display_service_key,
     media_signer_key,
     platform_adapter_key,
     preferences_service_key,
@@ -34,17 +39,21 @@ from ..dashboard.auth import DashboardAuth
 from ..dashboard.controller import DashboardController
 from ..domain.household_dashboard import (
     SETUP_TOKEN_TTL_SECONDS,
+    DashboardDisplay,
     DashboardSettings,
     picture_effective,
 )
 from ..domain.user import User, _picture_url
 from ..media_signer import sign_media_urls_in
 from ..platform.adapter import DashboardHostPort
+from ..services.dashboard_display_service import DashboardDisplayService
 from ..services.dashboard_settings_service import DashboardSettingsService
 from ..services.system_chat_policy import HOUSEHOLD_CHAT_SECTION
 from .base import BaseView
 
 __all__ = [
+    "AdminDashboardDisplayView",
+    "AdminDashboardDisplaysView",
     "AdminDashboardPasswordView",
     "AdminDashboardPinView",
     "AdminDashboardSessionsView",
@@ -111,6 +120,19 @@ def _person(user: User, settings: DashboardSettings) -> dict[str, Any]:
     }
 
 
+def _display(display: DashboardDisplay) -> dict[str, Any]:
+    """One wall panel as the admin UI sees it — never its token hash."""
+    return {
+        "id": display.id,
+        "name": display.name,
+        "model": display.model,
+        "firmware": display.firmware,
+        "created_at": display.created_at,
+        "last_seen_at": display.last_seen_at,
+        "locked": display.locked,
+    }
+
+
 def admin_request_host(request: web.BaseRequest) -> str:
     """The host the admin's browser used to reach Social Home.
 
@@ -139,6 +161,10 @@ class _DashboardAdminView(BaseView):
     @property
     def settings(self) -> DashboardSettingsService:
         return self.controller.settings
+
+    @property
+    def displays(self) -> DashboardDisplayService:
+        return self.svc(dashboard_display_service_key)
 
     @property
     def is_admin(self) -> bool:
@@ -179,6 +205,7 @@ class _DashboardAdminView(BaseView):
         host_port = await self.host_port()
         url = self.base_url(settings, host_port)
         prefs = await self.svc(preferences_service_key).get_household()
+        displays = await self.displays.list(actor_is_admin=self.is_admin)
         return self._json(
             {
                 "enabled": settings.enabled,
@@ -216,6 +243,7 @@ class _DashboardAdminView(BaseView):
                 "household_chat_enabled": prefs.is_enabled(HOUSEHOLD_CHAT_SECTION),
                 "last_seen_at": _iso(auth.last_seen_at),
                 "people": people,
+                "displays": [_display(d) for d in displays],
             }
         )
 
@@ -299,4 +327,45 @@ class AdminDashboardSessionsView(_DashboardAdminView):
 
     async def delete(self) -> web.Response:
         await self.settings.revoke_sessions(actor_is_admin=self.is_admin)
+        return web.Response(status=204)
+
+
+class AdminDashboardDisplaysView(_DashboardAdminView):
+    """``GET / POST /api/admin/dashboard/displays`` — list the wall panels;
+    pair the one showing ``code`` as ``name`` (``201``)."""
+
+    async def get(self) -> web.Response:
+        displays = await self.displays.list(actor_is_admin=self.is_admin)
+        return self._json({"displays": [_display(d) for d in displays]})
+
+    async def post(self) -> web.Response:
+        body = await self.body()
+        fields = body if isinstance(body, dict) else {}
+        display = await self.displays.claim(
+            actor_is_admin=self.is_admin,
+            code=fields.get("code"),
+            name=fields.get("name"),
+        )
+        return self._json(_display(display), status=201)
+
+
+class AdminDashboardDisplayView(_DashboardAdminView):
+    """``PATCH / DELETE /api/admin/dashboard/displays/{display_id}`` —
+    rename a panel; unpair it (its token stops working at once)."""
+
+    async def patch(self) -> web.Response:
+        body = await self.body()
+        fields = body if isinstance(body, dict) else {}
+        display = await self.displays.rename(
+            actor_is_admin=self.is_admin,
+            display_id=self.request.match_info["display_id"],
+            name=fields.get("name"),
+        )
+        return self._json(_display(display))
+
+    async def delete(self) -> web.Response:
+        await self.displays.remove(
+            actor_is_admin=self.is_admin,
+            display_id=self.request.match_info["display_id"],
+        )
         return web.Response(status=204)

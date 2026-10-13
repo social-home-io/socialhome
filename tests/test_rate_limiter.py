@@ -238,3 +238,15 @@ def test_client_bucket_missing_or_unparseable():
     assert client_bucket("") == "unknown"
     # Not an address (e.g. a unix-socket peer) — passed through, still a key.
     assert client_bucket("not-an-ip") == "not-an-ip"
+
+
+def test_prune_drops_keys_with_no_hit_in_the_window():
+    now = [1000.0]
+    rl = RateLimiter(monotonic=lambda: now[0])
+    assert rl.is_allowed("a", limit=5, window_s=60)
+    now[0] += 30
+    assert rl.is_allowed("b", limit=5, window_s=60)
+    now[0] += 40
+    rl.prune(window_s=60)
+    assert rl.key_count == 1
+    assert rl.is_allowed("b", limit=1, window_s=60) is False

@@ -158,6 +158,16 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     min: str(p, 'min') || '4', max: str(p, 'max') || '6',
   }),
   DASHBOARD_NOT_RUNNING: () => t('error.dashboard_not_running'),
+  // Wall panels (Admin › Dashboard › Wall panels).
+  DASHBOARD_DISABLED: () => t('error.dashboard_disabled'),
+  DASHBOARD_PAIRING_CODE_INVALID: () => t('error.dashboard_pairing_code_invalid'),
+  DASHBOARD_PAIRING_THROTTLED: (_b, p) => t('error.dashboard_pairing_throttled', {
+    minutes: String(Math.max(1, Math.ceil(Number(p.retry_after ?? 60) / 60))),
+  }),
+  DASHBOARD_DISPLAY_NOT_FOUND: () => t('error.dashboard_display_not_found'),
+  DASHBOARD_DISPLAY_LIMIT: (_b, p) => t('error.dashboard_display_limit', {
+    max: str(p, 'max') || '20',
+  }),
   AI_AGENT_UNAVAILABLE: () => t('error.ai_unavailable'),
   // Zones (space and household). A space's ZONE_LIMIT carries no
   // params; both caps are 50.

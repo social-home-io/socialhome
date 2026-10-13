@@ -142,6 +142,24 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("The Home zone can't be removed. Mark another zone as Home first.")
   })
 
+  it('translates the wall-panel pairing codes, with their params', () => {
+    expect(apiErrorMessage(409, '/api/admin/dashboard/displays', {
+      code: 'DASHBOARD_DISABLED', detail: 'x',
+    })).toBe('Turn the dashboard on first.')
+    expect(apiErrorMessage(404, '/api/admin/dashboard/displays', {
+      code: 'DASHBOARD_PAIRING_CODE_INVALID', detail: 'x',
+    })).toMatch(/^No panel is waiting with that code\./)
+    expect(apiErrorMessage(429, '/api/admin/dashboard/displays', {
+      code: 'DASHBOARD_PAIRING_THROTTLED', detail: 'x', params: { retry_after: 61 },
+    })).toBe('Too many wrong codes. Try again in 2 min.')
+    expect(apiErrorMessage(404, '/api/admin/dashboard/displays/d1', {
+      code: 'DASHBOARD_DISPLAY_NOT_FOUND', detail: 'x',
+    })).toBe("That panel isn't paired any more.")
+    expect(apiErrorMessage(409, '/api/admin/dashboard/displays', {
+      code: 'DASHBOARD_DISPLAY_LIMIT', detail: 'x', params: { max: 20 },
+    })).toBe('You can pair up to 20 panels. Remove one first.')
+  })
+
   it('translates the household dashboard codes, with their params', () => {
     expect(apiErrorMessage(409, '/api/admin/dashboard', {
       code: 'DASHBOARD_PORT_IN_USE', detail: 'x', params: { port: 8100 },

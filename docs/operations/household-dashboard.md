@@ -313,11 +313,40 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
 - It is a privacy screen, not a safe: anyone who knows the dashboard
   password can still sign a tablet in.
 
+## Wall panels (ESPHome)
+
+Besides tablets, the dashboard can feed small always-on **wall panels** —
+for example an ESPHome display. A panel doesn't sign in with the
+password; it pairs once with a short code and then uses its own device
+token.
+
+1. Turn the dashboard on (a panel can only ask for a code while it runs).
+2. Start pairing on the panel: it shows a **6-character code**, valid for
+   10 minutes.
+3. In **Admin › Dashboard › Wall panels**, choose **Add a panel**, type the
+   code (case doesn't matter) and give the panel a name, e.g. *Kitchen*.
+   *Headless:* `POST /api/admin/dashboard/displays` with `{code, name}`.
+4. The panel picks up its token by itself and starts working.
+
+The list shows each panel's model, firmware and when it was last seen.
+**Rename** changes the name; **Remove** unpairs a panel at once (pair it
+again with a new code to use it again). **Sign out all tablets** and a new
+dashboard password unpair every panel too.
+
+Five wrong codes in 15 minutes hold pairing back for a while — check the
+code on the panel. At most 20 panels can be paired.
+
+> **Firmware comes later.** This release adds pairing and device tokens
+> only; the panel firmware and the data the panels show arrive in a
+> later release. The panel API is documented in
+> [api.md](../api.md#hfs--household-dashboard).
+
 ## Signing tablets out
 
 - **Sign out all tablets** in **Admin › Dashboard** ends every tablet
   session at once. *Headless:* `DELETE /api/admin/dashboard/sessions`.
 - **Change password** under **Password** does the same. *Headless:*
   `PUT /api/admin/dashboard/password`.
+- Both also unpair every wall panel — pair them again with a new code.
 - A lost or stolen tablet: do either of the above, then sign the
   remaining tablets in again (password or a fresh setup link).

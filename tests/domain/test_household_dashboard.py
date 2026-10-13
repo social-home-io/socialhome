@@ -10,6 +10,18 @@ import pytest
 
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
+    MAX_DISPLAYS,
+    MAX_PENDING_PAIRINGS,
+    PAIRING_CODE_ALPHABET,
+    PAIRING_CODE_LENGTH,
+    PAIRING_TTL_SECONDS,
+    DashboardDisabledError,
+    DashboardDisplay,
+    DashboardDisplayLimitError,
+    DashboardDisplayNotFoundError,
+    DashboardPairingCodeInvalidError,
+    DashboardPairingThrottledError,
+    DisplayPairingStatus,
     MENTION_HERE,
     MENTION_PERSON,
     DashboardMention,
@@ -476,3 +488,72 @@ def test_people_and_home_carry_no_location_by_default():
         color="#3b82f6",
     )
     assert zone.icon is None and zone.is_home is False
+
+
+# ─── Wall panels ("displays") ────────────────────────────────────────────
+
+
+def test_pairing_code_alphabet_has_no_lookalikes():
+    for confusable in "01ILOU":
+        assert confusable not in PAIRING_CODE_ALPHABET
+    assert len(set(PAIRING_CODE_ALPHABET)) == len(PAIRING_CODE_ALPHABET)
+    assert PAIRING_CODE_ALPHABET == PAIRING_CODE_ALPHABET.upper()
+    assert PAIRING_CODE_LENGTH == 6
+
+
+def test_pairing_limits():
+    assert PAIRING_TTL_SECONDS == 600
+    assert MAX_PENDING_PAIRINGS == 32
+    assert MAX_DISPLAYS == 20
+
+
+def test_display_is_frozen_and_defaults():
+    d = DashboardDisplay(
+        id="d1",
+        name="Kitchen",
+        token_hash="ab" * 32,
+        created_at="2026-10-13T08:00:00+00:00",
+    )
+    assert d.last_seen_at is None
+    assert d.firmware is None
+    assert d.model is None
+    assert d.locked is False
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        d.name = "x"  # type: ignore[misc]
+
+
+def test_display_repr_hides_the_token_hash():
+    d = DashboardDisplay(
+        id="d1",
+        name="Kitchen",
+        token_hash="ab" * 32,
+        created_at="2026-10-13T08:00:00+00:00",
+    )
+    assert "ab" * 32 not in repr(d)
+
+
+@pytest.mark.parametrize(
+    ("err", "status", "code", "params"),
+    [
+        (DashboardDisabledError(), 409, "DASHBOARD_DISABLED", {}),
+        (DashboardPairingCodeInvalidError(), 404, "DASHBOARD_PAIRING_CODE_INVALID", {}),
+        (DashboardDisplayNotFoundError(), 404, "DASHBOARD_DISPLAY_NOT_FOUND", {}),
+        (DashboardDisplayLimitError(), 409, "DASHBOARD_DISPLAY_LIMIT", {"max": 20}),
+        (
+            DashboardPairingThrottledError(90),
+            429,
+            "DASHBOARD_PAIRING_THROTTLED",
+            {"retry_after": 90},
+        ),
+    ],
+)
+def test_display_errors_are_coded(err, status, code, params):
+    assert isinstance(err, CodedError)
+    assert err.status == status
+    assert err.code == code
+    assert err.params == params
+
+
+def test_pairing_status_repr_hides_the_token():
+    st = DisplayPairingStatus(paired=True, token="s3cret-token", display_id="d1")
+    assert "s3cret-token" not in repr(st)

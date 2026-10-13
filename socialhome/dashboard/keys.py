@@ -8,8 +8,9 @@ from typing import Protocol
 
 from aiohttp import web
 
-from ..domain.household_dashboard import HomeSnapshot, PersonSnapshot
+from ..domain.household_dashboard import DashboardDisplay, HomeSnapshot, PersonSnapshot
 from ..domain.theme import HouseholdTheme
+from ..services.dashboard_display_service import DashboardDisplayService
 from ..services.dashboard_settings_service import DashboardSettingsService
 from ..services.map_tile_service import Tile
 from .auth import DashboardAuth, SessionClaims
@@ -18,6 +19,8 @@ from .render import DashboardRenderer
 __all__ = [
     "AUTH_KEY",
     "CLAIMS_KEY",
+    "DISPLAY_KEY",
+    "DISPLAYS_KEY",
     "HOUSEHOLD_NAME_KEY",
     "HOUSEHOLD_THEME_KEY",
     "HOUSEHOLD_TZ_KEY",
@@ -83,3 +86,8 @@ SNAPSHOTS_KEY: web.AppKey[DashboardSnapshots] = web.AppKey("dashboard_snapshots"
 TILES_KEY: web.AppKey[DashboardTiles] = web.AppKey("dashboard_tiles")
 #: The verified session of the current request (set by the session guard).
 CLAIMS_KEY: web.RequestKey[SessionClaims] = web.RequestKey("dashboard_claims")
+#: Wall-panel pairing and device tokens (``/api/display/v1/…``).
+DISPLAYS_KEY: web.AppKey[DashboardDisplayService] = web.AppKey("dashboard_displays")
+#: The paired panel of the current ``/api/display/v1/`` request (set by
+#: the session guard from its bearer token).
+DISPLAY_KEY: web.RequestKey[DashboardDisplay] = web.RequestKey("dashboard_display")

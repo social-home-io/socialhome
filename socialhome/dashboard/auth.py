@@ -47,7 +47,9 @@ tiles (Home's Map tab) get a budget per session too
 (:meth:`DashboardAuth.begin_tile`): :data:`TILE_MAX` in
 :data:`TILE_WINDOW_S`, the main app's ``/api/map/tiles`` limit — every
 tile the wall can't serve from the shared cache is a fetch from the
-upstream tile server, whose policy we keep.
+upstream tile server, whose policy we keep. A wall panel asking for a
+pairing code (anonymous) is held to :data:`PAIR_MAX` per
+:data:`PAIR_WINDOW_S` per client address (:meth:`DashboardAuth.begin_pair`).
 """
 
 from __future__ import annotations
@@ -82,6 +84,8 @@ __all__ = [
     "TILE_WINDOW_S",
     "COOKIE_NAME",
     "GLOBAL_MAX_FAILURES",
+    "PAIR_MAX",
+    "PAIR_WINDOW_S",
     "KEEP_TTL_S",
     "MAX_CLOCK_SKEW_S",
     "PRUNE_INTERVAL_S",
@@ -125,6 +129,13 @@ ACK_WINDOW_S = 300
 #: — the main app's ``/api/map/tiles`` rate limit.
 TILE_MAX = 1200
 TILE_WINDOW_S = 60
+
+#: Wall-panel pairing starts (``POST /api/display/v1/pair``, anonymous)
+#: one client address may make per window (:meth:`DashboardAuth.begin_pair`)
+#: — a panel needs one per attempt; this only stops a flood from pushing
+#: real panels' codes out of the bounded pending list.
+PAIR_MAX = 10
+PAIR_WINDOW_S = 600
 
 #: Revocation reasons (:meth:`DashboardAuth.revoke`). ``locked``: the
 #: cookie was replaced by a locked one (``POST /lock``) — it now counts
@@ -241,6 +252,8 @@ class DashboardAuth:
         "_max_revoked",
         "_acks",
         "_tiles",
+        "_pairs",
+        "_pairs_pruned_at",
         "last_seen_at",
     )
 
@@ -266,6 +279,8 @@ class DashboardAuth:
         self._verify_slot = asyncio.Semaphore(1)
         self._acks = RateLimiter(monotonic=clock)
         self._tiles = RateLimiter(monotonic=clock)
+        self._pairs = RateLimiter(monotonic=clock)
+        self._pairs_pruned_at = clock()
         #: When a signed-in tablet last made a request (unix seconds).
         self.last_seen_at: float | None = None
 
@@ -447,6 +462,27 @@ class DashboardAuth:
         if self._tiles.is_allowed(key, limit=TILE_MAX, window_s=TILE_WINDOW_S):
             return 0
         return self._tiles.retry_after_s(key, window_s=TILE_WINDOW_S)
+
+    def begin_pair(self, client_key: str) -> int:
+        """Count one anonymous pairing start from ``client_key`` (a
+        :func:`~socialhome.rate_limiter.client_bucket`): ``0`` when it may
+        go ahead, else the seconds to wait (nothing is counted then).
+        Separate from the password / PIN failure table and never part of
+        the global login brake."""
+        now = self._clock()
+        if now - self._pairs_pruned_at > PAIR_WINDOW_S:
+            # Keyed on client addresses, which may never come back.
+            self._pairs.prune(window_s=PAIR_WINDOW_S)
+            self._pairs_pruned_at = now
+        key = f"pair:{client_key}"
+        if self._pairs.is_allowed(key, limit=PAIR_MAX, window_s=PAIR_WINDOW_S):
+            return 0
+        return self._pairs.retry_after_s(key, window_s=PAIR_WINDOW_S)
+
+    @property
+    def pair_key_count(self) -> int:
+        """Client addresses the pair-start limiter currently remembers."""
+        return self._pairs.key_count
 
     # ── Throttle ────────────────────────────────────────────────────────
     #

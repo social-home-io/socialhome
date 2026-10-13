@@ -7,7 +7,8 @@
  * First run reads top to bottom: 1 set a password (the on/off switch
  * stays greyed until then) → 2 open it on the tablet (address, a
  * one-time sign-in QR, the port) → 3 an optional privacy-lock PIN. Then
- * the display settings, "sign out all tablets" and who appears on it.
+ * the display settings, "sign out all tablets" (which unpairs wall panels
+ * too), the wall panels and who appears on it.
  *
  * Settings save as they change (optimistic, reverted on error). Every
  * call goes through the ``api`` client; the dashboard's own URL is a
@@ -25,10 +26,11 @@ import { t } from '@/i18n/i18n'
 import localeMeta from '@/i18n/locales/_meta.json'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { DashboardPasswordDialog, DashboardPinDialog } from './DashboardDialogs'
+import { DashboardPanelsCard } from './DashboardPanelsCard'
 import { TabletStep } from './DashboardTabletStep'
 import type { DashboardPerson, DashboardState, Patch, SaveFn, SaveOpts } from './dashboardTypes'
 
-export type { DashboardPerson, DashboardState } from './dashboardTypes'
+export type { DashboardDisplay, DashboardPerson, DashboardState } from './dashboardTypes'
 
 const ENDPOINT = '/api/admin/dashboard'
 /** ``SUPPORTED_DASHBOARD_LOCALES`` on the server. */
@@ -139,6 +141,7 @@ export function DashboardTab() {
       <TabletStep state={state} save={save} reload={load} />
       <PinStep state={state} reload={load} />
       <DisplaySection state={state} save={save} />
+      <DashboardPanelsCard state={state} reload={load} />
       <PeopleSection state={state} save={save} />
     </div>
   )

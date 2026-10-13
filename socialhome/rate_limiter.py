@@ -122,6 +122,17 @@ class RateLimiter:
         remaining = times[0] + window_s - self._monotonic()
         return max(1, math.ceil(remaining))
 
+    def prune(self, *, window_s: int) -> None:
+        """Forget every key with no hit in the last ``window_s`` seconds —
+        for limiters keyed on client addresses, which never repeat."""
+        cutoff = self._monotonic() - window_s
+        for key in [k for k, t in self._windows.items() if not t or t[-1] <= cutoff]:
+            del self._windows[key]
+
+    @property
+    def key_count(self) -> int:
+        return len(self._windows)
+
     def reset(self, bucket_or_key: str | None = None) -> None:
         """Reset a single bucket (or the whole limiter when ``None``)."""
         if bucket_or_key is None:
