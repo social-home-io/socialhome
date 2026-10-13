@@ -723,9 +723,9 @@ export function LocationMap({
     drawPeopleRef.current()
   }, [positionsKey, zonesKey])
 
-  // The viewport. ``data``: positions or zones changed — keep showing the
-  // selection when the view follows it, else fit everyone. ``selection``:
-  // the selection (or the panel over the map) changed — follow it, or
+  // The viewport. ``data``: positions, zones or the panel over the map
+  // changed — keep showing the selection when the view follows it, else
+  // fit everyone. ``selection``: the selection changed — follow it, or
   // fit everyone once it is cleared.
   fitViewRef.current = (reason) => {
     const map = mapRef.current
@@ -797,8 +797,15 @@ export function LocationMap({
     _inset(fitInsets?.bottom), _inset(fitInsets?.left),
   ])
   const viewMountedRef = useRef(false)
+  const lastInsetsKeyRef = useRef(insetsKey)
   useEffect(() => {
+    const insetsChanged = lastInsetsKeyRef.current !== insetsKey
+    lastInsetsKeyRef.current = insetsKey
     if (!viewMountedRef.current) { viewMountedRef.current = true; return }
+    // The panel changed: redo the current view (the selection, or
+    // everyone) for the strip now left visible — with nothing selected
+    // too, or opening a sheet leaves everyone under it.
+    if (insetsChanged) { fitViewRef.current('data'); return }
     if (!zoomToSelectionRef.current) return
     fitViewRef.current('selection')
   }, [selected, insetsKey])

@@ -1024,6 +1024,44 @@ describe('LocationMap fit insets', () => {
     expect(fakeMap.panBy).toHaveBeenCalledWith([0, 60], { animate: false })
   })
 
+  // Regression: opening the phone sheet with nothing selected left the
+  // view fitted for the collapsed sheet, so the family's bubbles sat
+  // under the open sheet.
+  it('refits everyone when the panel over the map grows with nothing selected', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(
+      <LocationMap markers={two} zoomToSelection selectedId={null} fitInsets={{ bottom: 90 }} />,
+    )
+    fakeMap.fitBounds.mockClear()
+    rerender(
+      <LocationMap markers={two} zoomToSelection selectedId={null} fitInsets={{ bottom: 264 }} />,
+    )
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+    const opts = fakeMap.fitBounds.mock.calls[0][1] as FitOpts
+    expect(opts.paddingBottomRight[1]).toBe(30 + 264)
+    expect(opts.maxZoom).toBe(16)
+  })
+
+  it('refits when the panel changes on a map that does not follow the selection', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(<LocationMap markers={two} fitInsets={{ bottom: 90 }} />)
+    fakeMap.fitBounds.mockClear()
+    rerender(<LocationMap markers={two} fitInsets={{ bottom: 264 }} />)
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+    expect((fakeMap.fitBounds.mock.calls[0][1] as FitOpts).paddingBottomRight[1]).toBe(30 + 264)
+  })
+
+  it('keeps a single anchor centred above the panel as it grows', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(<LocationMap markers={[two[0]]} fitInsets={{ bottom: 90 }} />)
+    fakeMap.panBy.mockClear()
+    rerender(<LocationMap markers={[two[0]]} fitInsets={{ bottom: 264 }} />)
+    expect(fakeMap.panBy).toHaveBeenCalledWith([0, 132], { animate: false })
+  })
+
   it('does not pan a single anchor without insets', async () => {
     const { render } = await import('@testing-library/preact')
     const { LocationMap } = await import('./LocationMap')
