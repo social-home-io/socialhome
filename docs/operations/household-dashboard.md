@@ -145,6 +145,20 @@ dashboard **address** — it always wins over the guess.
   nothing in the last day it says "No messages in the last day".
 - **Notes** (`/notes`): every household sticky note on a flat board in
   its own colour; "No notes yet" when there are none.
+- **Map** (`/map`): who is where — the household's zones (Admin ›
+  Zones; on Home Assistant mirrored from HA's zones) with everyone in a
+  zone in one bubble of photos at the zone, and anyone outside every
+  zone at their own position (the same ~11 m precision as the app). The
+  **Who's where** list beside it says each person's place and how long
+  ago it was updated; after an hour a face fades ("last seen 2 h ago"),
+  after a day the person drops off. Tap a name or a bubble to zoom to
+  them; "Show everyone", the same tap again or a minute without a touch
+  goes back. The tab only appears while someone shares their location
+  (or is in a known zone); it is hidden at night and behind the 🔒
+  privacy lock — **lock the tablet when guests are around**, since the
+  map shows where family members are. Map tiles are fetched by Social
+  Home (the tablet never contacts a map server); the map credits
+  OpenStreetMap.
 - **A person** (tap their face in the rail): what they're doing now and
   next, their school day with rooms and teachers (a cancelled lesson is
   struck through *and* says "Cancelled"), today's and tomorrow's plans
