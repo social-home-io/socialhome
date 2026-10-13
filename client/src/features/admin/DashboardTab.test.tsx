@@ -68,6 +68,7 @@ function state(over: Partial<DashboardState> = {}): DashboardState {
       { user_id: 'u3', username: 'leo', display_name: 'Leo', picture_url: null,
         show: true, picture: true, picture_effective: true },
     ],
+    displays: [],
     ...over,
   }
 }
@@ -166,7 +167,7 @@ describe('DashboardTab — password dialog', () => {
   it('says that changing the password signs every tablet out', async () => {
     await mount(state())
     fireEvent.click(screen.getByRole('button', { name: 'Change password' }))
-    expect(await screen.findByText('Changing it signs out every tablet.')).toBeTruthy()
+    expect(await screen.findByText('Changing it signs out every tablet and unpairs every wall panel.')).toBeTruthy()
   })
 
   it('isWeakPassword flags short single-kind passwords only', () => {
@@ -569,7 +570,7 @@ describe('DashboardTab — sessions', () => {
     expect(screen.getByText(/No tablet has opened it/)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Sign out all tablets' }))
     await waitFor(() => expect(mDelete).toHaveBeenCalledWith('/api/admin/dashboard/sessions'))
-    expect(vi.mocked(confirmDialog).mock.calls[0][0]).toBe('Every tablet will need the password again.')
+    expect(vi.mocked(confirmDialog).mock.calls[0][0]).toBe('Every tablet will need the password again, and every wall panel a new code.')
   })
 
   it('does nothing when the confirm is cancelled', async () => {

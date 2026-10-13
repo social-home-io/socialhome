@@ -15499,6 +15499,27 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-dashboard-person__picture .sh-link-button:disabled { color: var(--sh-text-muted); cursor: not-allowed; text-decoration: none; }
 .sh-dashboard-secret label { margin-top: var(--sh-space-sm); }
 .sh-dashboard-pin-input { max-width: 10rem; letter-spacing: 0.3em; }
+.sh-dashboard-code-input {
+  max-width: 12rem; letter-spacing: 0.3em; text-transform: uppercase;
+  font-family: var(--sh-font-family-mono);
+}
+.sh-dashboard-panels {
+  list-style: none; margin: 0 0 var(--sh-space-sm); padding: 0;
+  background: var(--sh-bg); border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg); overflow: hidden;
+}
+.sh-dashboard-panel {
+  display: flex; align-items: center; gap: var(--sh-space-md); flex-wrap: wrap;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-bottom: 1px solid var(--sh-border);
+}
+.sh-dashboard-panel:last-child { border-bottom: none; }
+.sh-dashboard-panel__text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 12rem; min-width: 0; }
+.sh-dashboard-panel__name,
+.sh-dashboard-panel__info { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-dashboard-panel__name { font-weight: 600; }
+.sh-dashboard-panel__info { font-size: var(--sh-font-size-sm); }
+.sh-dashboard-panel__actions { display: flex; gap: var(--sh-space-xs); flex: 0 0 auto; }
 @media (max-width: 480px) {
   /* Selects and the night-mode times drop under their label; switches
    * stay beside theirs. */
@@ -15810,7 +15831,7 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--sh-font-family-mono);
 }
 .sh-federation-public-url__link:hover {
   color: var(--sh-accent, var(--sh-text));

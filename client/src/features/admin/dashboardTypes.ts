@@ -17,6 +17,20 @@ export interface DashboardPerson {
   picture_effective: boolean
 }
 
+/** A paired wall panel (``GET /api/admin/dashboard/displays``). Its
+ *  token never reaches the admin UI. */
+export interface DashboardDisplay {
+  id: string
+  name: string
+  /** What the panel reports about itself (``null``: never said). */
+  model: string | null
+  firmware: string | null
+  /** ISO timestamps (UTC). */
+  created_at: string
+  last_seen_at: string | null
+  locked: boolean
+}
+
 /** ``GET /api/admin/dashboard``. */
 export interface DashboardState {
   enabled: boolean
@@ -49,9 +63,11 @@ export interface DashboardState {
   household_chat_enabled: boolean
   last_seen_at: string | null
   people: DashboardPerson[]
+  /** Paired wall panels, oldest first. */
+  displays: DashboardDisplay[]
 }
 
-export type Patch = Partial<Omit<DashboardState, 'people'>> & {
+export type Patch = Partial<Omit<DashboardState, 'people' | 'displays'>> & {
   people?: Record<string, { show: boolean, picture: boolean | null }>
 }
 
