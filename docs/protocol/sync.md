@@ -300,12 +300,42 @@ of the re-encoded bytes, so a provider can never plant a hash of its choosing
 joiner. A record naming one of the receiver's own people is skipped — their
 per-space picture is authored on their household, never taken from a copy.
 
-A `members` record never writes `space_members.picture_hash`: that column is
+A `members` record never *sets* `space_members.picture_hash`: that column is
 owned by the per-space picture paths above (and the member's own edit), and
 `save_member` keeps a held hash when a roster upsert carries none — so a
 catch-up no longer wipes a member's per-space avatar. The record's other
 columns (`role`, `history_visible_from`, `location_share_enabled`,
 `space_display_name`) are all carried and converge to the provider's roster.
+
+The one thing a `members` record's `picture_hash` does say is **"no
+picture"** (v_58, `FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC`).
+A member who reset their per-space picture while this household was offline
+leaves nothing in `member_pictures` (it skips seats with no picture), so
+without it the stale copy stayed forever. When the key is present and
+`null`, the receiver clears the seat's hash and deletes the held blob
+(`space_member_profile_pictures`) — only when:
+
+- the provider speaks for the member: the space's owner, or the member's
+  own household (a live seat for them on the provider —
+  `SpaceAuthorship.acts_for(..., any_role=True)`); a delegated admin
+  household's roster is otherwise taken like the host's, but its `null` for
+  another household's member is no reset;
+- the provider is at v_58 or later (its `remote_instances` row, else its
+  mesh version claim) — before it a provider's own roster upsert could wipe
+  a seat's hash (fixed in #910), so an older provider's `null` may be
+  damage, not a reset; an older or unknown provider is never trusted with
+  one (the stale picture waits for the member's next live
+  `SPACE_MEMBER_PROFILE_UPDATED`, as before);
+- the member is not one of the receiver's own people (their picture is
+  authored here).
+
+A non-null provider hash is never taken (it is untrusted — the receiver only
+stores its own digest of bytes it re-encoded), and a record without the key
+(an older shape) says nothing. A picture that *changed* while offline
+therefore carries a non-null hash — a no-op here — and is replaced by the
+`member_pictures` record that streams right after `members` in the same
+session. A member who left is not in the roster stream at all and is not
+touched by this.
 
 (History: 0086 covered posts, comments, chat, gallery, calendar and the
 0085 tombstones; 0088 added task lists, tasks, pages, timetables and moved

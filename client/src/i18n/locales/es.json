@@ -2462,6 +2462,7 @@
   "capability.space_chat": "Chat en los espacios",
   "capability.synced_recurring_events": "Eventos periódicos al ponerse al día en espacios",
   "capability.multi_gfs_posting": "Publicar en cada GFS donde aparece un espacio",
+  "capability.synced_picture_resets": "Fotos de perfil quitadas al sincronizar espacios",
   "settings.tab.security": "Seguridad",
   "settings.could_not_save": "No se pudo guardar: {error}",
   "settings.profile.save_failed": "Error al guardar: {error}",

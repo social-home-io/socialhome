@@ -1536,7 +1536,8 @@ class SqliteSpaceRepo:
         On an existing seat a ``None`` ``picture_hash`` keeps the held one:
         the per-space picture is owned by :meth:`set_member_profile` (the
         member's own edit, ``SPACE_MEMBER_PROFILE_UPDATED``, the §25.6
-        ``member_pictures`` resource), the only path that clears it. A
+        ``member_pictures`` resource, a v_58 ``members`` reset), the only
+        path that clears it. A
         roster write — a re-seat, or the §25.6 ``members`` catch-up, whose
         record carries no hash of ours — must never wipe it.
         """

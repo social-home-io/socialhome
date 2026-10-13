@@ -32,6 +32,7 @@ from ....crypto import derive_instance_id
 from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
 from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
+from ....domain.federation_capabilities import FederationCapability
 from ....domain.page import Page
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
@@ -985,6 +986,96 @@ class SpaceSyncReceiver:
             )
         return held_back
 
+    async def _apply_picture_resets(
+        self,
+        space_id: str,
+        records: list[dict[str, Any]],
+        *,
+        provider: str,
+    ) -> None:
+        """Drop the per-space picture of a member whose ``members`` record
+        says they have none (``picture_hash`` present and ``null``) — a
+        reset this household missed while offline, which the
+        ``member_pictures`` resource cannot tell (it skips seats with no
+        picture). Only on the word of a provider that speaks for the member
+        — the owner, or the member's own household — at
+        :attr:`~FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC`
+        (an older provider's ``null`` may be its pre-#910 roster-upsert
+        wipe, not a reset). Never for our own people, whose pictures are
+        authored here. A non-null provider hash is never taken (it is
+        untrusted; ``member_pictures`` ships and re-hashes the bytes), and
+        a record without the key (an older shape) says nothing."""
+        reset = [
+            uid
+            for r in records
+            if "picture_hash" in r
+            and r["picture_hash"] is None
+            and (uid := str(r.get("user_id") or ""))
+        ]
+        if not reset:
+            return
+        if await self._provider_version(provider) < (
+            FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC
+        ):
+            return
+        ours = set(await self._space_repo.list_local_member_user_ids(space_id))
+        space = await self._space_repo.get(space_id)
+        is_owner = space is not None and space.owner_instance_id == provider
+        event = FederationEvent(
+            msg_id=f"sync:{space_id}:members",
+            event_type=FederationEventType.SPACE_SYNC_CHUNK,
+            from_instance=provider,
+            to_instance="",
+            timestamp="",
+            payload={},
+            space_id=space_id,
+        )
+        for uid in reset:
+            if uid in ours:
+                continue
+            seat = await self._space_repo.get_member(space_id, uid)
+            held_blob = (
+                await self._profile_picture_repo.get_member_picture(space_id, uid)
+                if self._profile_picture_repo is not None
+                else None
+            )
+            if seat is None or (seat.picture_hash is None and held_blob is None):
+                continue
+            if not is_owner and (
+                self._authorship is None
+                or not await self._authorship.acts_for(
+                    event, space_id, uid, any_role=True
+                )
+            ):
+                continue
+            if held_blob is not None and self._profile_picture_repo is not None:
+                await self._profile_picture_repo.clear_member_picture(space_id, uid)
+            if seat.picture_hash is not None:
+                await self._space_repo.set_member_profile(
+                    space_id, uid, picture_hash=None
+                )
+            log.info(
+                "space sync: %s reset %s's per-space picture in %s — dropped "
+                "the stale copy held here",
+                provider,
+                uid,
+                space_id,
+            )
+
+    async def _provider_version(self, provider: str) -> int:
+        """The provider's protocol version: its ``remote_instances`` row's,
+        else the version claim it made over the mesh (a mesh-only host),
+        else ``0`` (unknown — trusted with nothing version-gated)."""
+        try:
+            peer = await self._federation_repo.get_instance(provider)
+            if peer is not None:
+                return int(peer.proto_version)
+            claim = await self._federation_repo.get_space_member_version(provider)
+        except Exception:  # pragma: no cover — defensive
+            log.debug("space sync: version of %s unreadable", provider)
+            return 0
+        return int(claim[0]) if claim is not None else 0
+
     async def _keep_owner_statement(self, space_id: str, statement: object) -> None:
         if not isinstance(statement, dict):
             return
@@ -1074,6 +1165,7 @@ class SpaceSyncReceiver:
                         space_display_name=r.get("space_display_name"),
                     )
                 )
+            await self._apply_picture_resets(space_id, records, provider=provider)
         elif resource == "member_pictures":
             # F6: persist per-member avatar bytes so the SPA stops
             # rendering broken <img> for every existing member after a
@@ -1126,8 +1218,9 @@ class SpaceSyncReceiver:
                     height=PROFILE_PICTURE_MAX_DIMENSION,
                 )
                 # Point the seat at the blob we hold (the ``members``
-                # resource never writes ``picture_hash``), so the picture
-                # renders — a no-op for someone not seated here.
+                # resource never sets ``picture_hash`` — it only clears a
+                # reset one), so the picture renders — a no-op for someone
+                # not seated here.
                 await self._space_repo.set_member_profile(
                     space_id, uid, picture_hash=local_hash
                 )

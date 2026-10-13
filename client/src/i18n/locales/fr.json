@@ -2435,6 +2435,7 @@
   "capability.space_chat": "Discussion dans les espaces",
   "capability.synced_recurring_events": "Événements récurrents au rattrapage des espaces",
   "capability.multi_gfs_posting": "Publication sur chaque GFS où un espace est listé",
+  "capability.synced_picture_resets": "Photos de profil retirées au rattrapage des espaces",
   "settings.tab.security": "Sécurité",
   "settings.could_not_save": "Impossible d'enregistrer : {error}",
   "settings.profile.save_failed": "Échec de l'enregistrement : {error}",
