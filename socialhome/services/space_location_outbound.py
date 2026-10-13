@@ -31,7 +31,6 @@ two different consumers, one PresenceUpdated event.
 from __future__ import annotations
 
 import logging
-import math
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -43,6 +42,7 @@ from ..domain.events import (
 )
 from ..domain.federation import FederationEventType
 from ..domain.space import Space, SpaceZone
+from ..domain.zone_geo import match_zone
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
 from ..repositories.presence_repo import AbstractPresenceRepo
@@ -54,9 +54,6 @@ if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
 
 log = logging.getLogger(__name__)
-
-#: Earth's mean radius in metres — used by the haversine zone matcher.
-_EARTH_RADIUS_M = 6_371_000.0
 
 
 class SpaceLocationOutbound:
@@ -328,12 +325,7 @@ class SpaceLocationOutbound:
                 exc,
             )
             return None
-        best: tuple[float, SpaceZone] | None = None
-        for z in zones:
-            d = _haversine_m(latitude, longitude, z.latitude, z.longitude)
-            if d <= z.radius_m and (best is None or d < best[0]):
-                best = (d, z)
-        return best[1] if best is not None else None
+        return match_zone(zones, latitude, longitude)
 
     # ── Fan-out helpers ────────────────────────────────────────────────
 
@@ -368,18 +360,3 @@ class SpaceLocationOutbound:
                 space_id,
                 exc,
             )
-
-
-def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in metres between two ``(lat, lon)``
-    pairs. Mirrors the client-side ``matchZoneName`` helper in
-    ``client/src/components/SpaceLocationCard.tsx`` so origin-side
-    matching agrees with what the receiving browser would compute on
-    GPS payloads.
-    """
-    p1 = math.radians(lat1)
-    p2 = math.radians(lat2)
-    dp = p2 - p1
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * _EARTH_RADIUS_M * math.asin(math.sqrt(a))
