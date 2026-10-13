@@ -19,6 +19,12 @@ vi.mock('@/store/auth', () => ({
   logout: vi.fn(),
 }))
 
+/** Props of every LocationMap render — Leaflet itself isn't needed. */
+const mapProps = vi.hoisted(() => [] as Array<Record<string, unknown>>)
+vi.mock('@/components/LocationMap', () => ({
+  LocationMap: (p: Record<string, unknown>) => { mapProps.push(p); return null },
+}))
+
 const wsTypes: string[] = []
 vi.mock('@/ws', () => ({
   ws: { on: (type: string) => { wsTypes.push(type); return () => {} }, send: vi.fn() },
@@ -118,6 +124,30 @@ describe('DashboardPage', () => {
     })
     expect(container.textContent).toContain('Up next')
     expect(container.textContent).toContain('Dinner')
+  })
+
+  it('draws the corner map as a still picture inside its link', async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { default: DashboardPage } = await import('./DashboardPage')
+    const { api } = await import('@/api')
+    mapProps.length = 0
+    vi.mocked(api.get).mockImplementation(async (url: string) => (url === '/api/me/corner' ? {
+      unread_notifications: 0, unread_conversations: 0, upcoming_events: [],
+      presence: [{
+        user_id: 'u2', username: 'bob', display_name: 'Bob', state: 'away', zone_name: null,
+        latitude: 47.1, longitude: 8.2, gps_accuracy_m: 10, picture_url: null,
+      }],
+      tasks_due_today: [],
+      bazaar: { active_listings: 0, pending_offers: 0, ending_soon: 0 },
+      followed_space_ids: [], followed_spaces_feed: [], today_events: [], today_timetable: [],
+    } : []) as never)
+    render(<DashboardPage />)
+    await waitFor(() => { expect(mapProps.length).toBeGreaterThan(0) })
+    const props = mapProps.at(-1)!
+    expect(props.readOnly).toBe(true)
+    expect((props.markers as Array<Record<string, unknown>>)[0]).toMatchObject({
+      id: 'u2', user_id: 'u2', sub_label: 'Away',
+    })
   })
 
   it('module exports a default component', async () => {

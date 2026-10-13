@@ -290,6 +290,9 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
           }))}
           height={220}
           emptyLabel={t('dashboard.no_gps')}
+          // The whole card is one link to the presence page: the map is
+          // a picture here, not a control.
+          readOnly
         />
       )}
       <span class="sh-welcome-card__more">{t('dashboard.open_presence')}</span>
