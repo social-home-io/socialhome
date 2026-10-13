@@ -427,6 +427,9 @@ async def test_presence_includes_remote_member_picture_url(client):
     # The signer ran — the URL carries the cache-busting hash and
     # the signature query the SPA needs for <img> loads under ingress.
     assert "v=feedface" in jacqueline["picture_url"]
+    # Signed exactly once — a second pass appended a second exp/sig pair.
+    assert jacqueline["picture_url"].count("sig=") == 1
+    assert jacqueline["picture_url"].count("exp=") == 1
 
 
 async def test_presence_skips_remote_pin_without_member_row(client):

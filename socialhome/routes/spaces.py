@@ -2190,7 +2190,9 @@ async def _remote_member_pin_entries(
     member_repo = request.app.get(space_remote_member_repo_key)
     if repo is None or member_repo is None:
         return []
-    signer = request.app.get(media_signer_key)
+    # ``picture_url`` stays unsigned here: the view signs the whole
+    # response once (``_signed``) — a second pass appends a second
+    # ``exp``/``sig`` pair.
     locs = await repo.list_for_space(space_id)
     if not locs:
         return []
@@ -2246,8 +2248,6 @@ async def _remote_member_pin_entries(
         else:  # zone_only
             entry["zone_id"] = loc.zone_id
             entry["zone_name"] = loc.zone_name
-        if signer is not None and entry.get("picture_url"):
-            sign_media_urls_in(entry, signer)
         out.append(entry)
     return out
 
