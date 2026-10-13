@@ -34,6 +34,7 @@ const fakeMap = {
   setView: vi.fn(),
   fitBounds: vi.fn(),
   getZoom: vi.fn(() => 4),
+  getSize: vi.fn(() => ({ x: 800, y: 400 })),
   latLngToContainerPoint: vi.fn((ll: [number, number]) => ({
     x: ll[1] * view.scale, y: -ll[0] * view.scale,
   })),
@@ -502,5 +503,44 @@ describe('LocationMap person and zone markers', () => {
       expect(el.querySelector('b')).toBeNull()
       expect(el.querySelector('i')).toBeNull()
     }
+  })
+})
+
+describe('LocationMap viewport', () => {
+  it('fits all bubble anchors with headroom for the bubbles above them', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        markers={[
+          { id: 'a', label: 'Anna', lat: 47, lon: 8 },
+          { id: 'b', label: 'Ben', lat: 47.1, lon: 8.1 },
+        ]}
+      />,
+    )
+    const opts = fakeMap.fitBounds.mock.calls.at(-1)![1] as {
+      paddingTopLeft: [number, number], paddingBottomRight: [number, number],
+    }
+    // More room on top (bubbles rise above their anchor) than below.
+    expect(opts.paddingTopLeft[1]).toBeGreaterThan(opts.paddingBottomRight[1])
+  })
+
+  it('caps the headroom on a short map so the anchors still fit', async () => {
+    fakeMap.getSize.mockReturnValue({ x: 360, y: 160 })
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        markers={[
+          { id: 'a', label: 'Anna', lat: 47, lon: 8 },
+          { id: 'b', label: 'Ben', lat: 47.1, lon: 8.1 },
+        ]}
+      />,
+    )
+    const opts = fakeMap.fitBounds.mock.calls.at(-1)![1] as {
+      paddingTopLeft: [number, number], paddingBottomRight: [number, number],
+    }
+    expect(opts.paddingTopLeft[1] + opts.paddingBottomRight[1]).toBeLessThan(160 * 0.7)
+    fakeMap.getSize.mockReturnValue({ x: 800, y: 400 })
   })
 })

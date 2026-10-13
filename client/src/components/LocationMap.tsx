@@ -135,6 +135,11 @@ function _avatarHtml(m: LocationMarker, selected: boolean): string {
   )
 }
 
+/** Space kept around the fitted anchors, and the height a bubble
+ *  rises above its anchor (avatar + padding + tail + zone gap). */
+const FIT_PADDING_PX = 32
+const BUBBLE_HEIGHT_PX = 80
+
 type _Kind = 'zone' | 'solo' | 'group'
 
 function _kind(g: MarkerGroup<LocationMarker>): _Kind {
@@ -341,7 +346,7 @@ export function LocationMap({
       const title = t('location.map.zone_marker', { name: z.name })
       const isSel = selected === `zone:${z.id}`
       const centre = L.marker([z.latitude, z.longitude], {
-        icon: _icon(_zoneHtml(z, isSel), ' sh-map-icon--zone'),
+        icon: _icon(_zoneHtml(z, isSel), ' sh-map-icon--zone-centre'),
         title,
         keyboard: true,
         zIndexOffset: isSel ? 500 : 0,
@@ -479,7 +484,19 @@ export function LocationMap({
       const zoom = onPickRef.current ? Math.max(map.getZoom(), 14) : 14
       map.setView(anchors[0], zoom)
     } else if (anchors.length > 1) {
-      map.fitBounds(L.latLngBounds(anchors).pad(0.3), { maxZoom: 15 })
+      // Bubbles float above their anchor, so leave room at the top
+      // for a whole bubble — otherwise the northernmost one is clipped.
+      // Capped at 40 % of the map so a short (dashboard / phone) map
+      // still has room left for the anchors themselves.
+      const height = map.getSize?.()?.y ?? 0
+      const top = Math.min(
+        FIT_PADDING_PX + BUBBLE_HEIGHT_PX, Math.max(FIT_PADDING_PX, height * 0.4),
+      )
+      map.fitBounds(L.latLngBounds(anchors), {
+        paddingTopLeft: [FIT_PADDING_PX, top],
+        paddingBottomRight: [FIT_PADDING_PX, FIT_PADDING_PX],
+        maxZoom: 15,
+      })
     }
     // Draw after the view settles so the merge sees the final zoom.
     drawPeopleRef.current()

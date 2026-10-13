@@ -13386,11 +13386,12 @@ a.sh-welcome-card:hover {
   margin-bottom: var(--sh-space-md);
 }
 .sh-presence-map {
-  aspect-ratio: 16/9;
+  /* No fixed aspect ratio: the card holds a heading, a 360px map and a
+   * footer, and a 16:9 box cropped them on phones (and left a gap on
+   * wide screens). */
   border-radius: var(--sh-radius-lg);
   background: var(--sh-bg-secondary);
   border: 1px solid var(--sh-border);
-  overflow: hidden;
   margin-top: var(--sh-space-md);
 }
 .sh-presence-mini {
