@@ -17902,6 +17902,26 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   margin-top: var(--sh-space-sm);
 }
 
+/* Household zones: Home / Home Assistant badges, the synced-row note,
+   the Home toggle in the edit dialog. */
+.sh-zones-admin__intro { margin: 0 0 var(--sh-space-md); }
+.sh-zones-admin__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0;
+}
+.sh-zones-admin__note { font-size: var(--sh-font-size-sm); font-style: italic; }
+.sh-zone-form__home p { margin: 0; font-size: var(--sh-font-size-sm); }
+.sh-zone-form label.sh-zone-form__check {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  min-height: 36px;
+  font-size: var(--sh-font-size-base);
+}
+.sh-zone-form__check input { width: 18px; height: 18px; margin: 0; }
+
 @media (max-width: 720px) {
   .sh-zones-admin__split { grid-template-columns: 1fr; }
   .sh-zones-admin__map,

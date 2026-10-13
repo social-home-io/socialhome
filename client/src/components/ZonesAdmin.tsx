@@ -20,7 +20,12 @@
  * through ``{basePath}`` / ``{basePath}/{id}``; the central exception
  * map turns backend errors (radius out-of-bounds, duplicate name,
  * 50-zones cap) into translated toasts.
+ *
+ * ``household`` turns on the household extras: one Home zone (listed
+ * first with a badge, never deleted — Home moves only by marking another
+ * zone as Home) and read-only rows synced from Home Assistant.
  */
+import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -35,6 +40,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { IconPicker } from './IconPicker'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
+import { ws } from '@/ws'
 import { t } from '@/i18n/i18n'
 
 /** The fields the editor reads — a :type:`SpaceZone` or a
@@ -47,6 +53,10 @@ export interface AdminZone {
   radius_m: number
   color: string | null
   icon: string | null
+  /** Household zones only: the household's Home. */
+  is_home?: boolean
+  /** Household zones only: synced from Home Assistant, not editable here. */
+  read_only?: boolean
 }
 
 interface ZonesResponse {
@@ -60,6 +70,15 @@ export interface ZonesAdminProps {
   title: string
   /** Shown in the list when there are no zones yet. */
   emptyText: string
+  /** One explanatory line under the heading. */
+  intro?: string
+  /** WS frame type meaning "this list changed" — refetched quietly. */
+  refetchOn?: string
+  /** Household zones: Home zone + read-only synced rows. */
+  household?: boolean
+  /** Shown instead of the editor when the load answers 403
+   *  ``FEATURE_DISABLED``; without it that is a plain load error. */
+  featureDisabled?: ComponentChildren
 }
 
 const PALETTE = ZONE_PALETTE
@@ -79,6 +98,8 @@ interface DraftZone {
   color: string | null
   /** One emoji, or null for "no icon". */
   icon: string | null
+  /** Household zones: this zone is (or becomes) the Home zone. */
+  is_home: boolean
 }
 
 const _BLANK_DRAFT: DraftZone = {
@@ -89,6 +110,25 @@ const _BLANK_DRAFT: DraftZone = {
   radius_m: 200,
   color: PALETTE[0],
   icon: null,
+  is_home: false,
+}
+
+/** How the edit dialog shows the household Home toggle. */
+interface HomeControl {
+  /** The toggle can't change: this zone is Home already, or Home is
+   *  synced from Home Assistant. */
+  locked: boolean
+  /** One line under the toggle saying what it does / why it's locked. */
+  hint: string
+}
+
+/** The Home toggle for ``draft`` given the household's current zones. */
+function _homeControl(zones: AdminZone[], draft: DraftZone): HomeControl {
+  const home = zones.find((z) => z.is_home)
+  if (home?.read_only) return { locked: true, hint: t('zones.home.synced_hint') }
+  if (home && home.id === draft.id) return { locked: true, hint: t('zones.home.current_hint') }
+  if (home) return { locked: false, hint: t('zones.home.move_hint', { name: home.name }) }
+  return { locked: false, hint: t('zones.home.hint') }
 }
 
 /** Convert a slider value in [0, 1000] → radius in metres on a log
@@ -114,10 +154,13 @@ function _fmtRadius(m: number): string {
   return `${(m / 1000).toFixed(m < 10_000 ? 1 : 0)} km`
 }
 
-export function ZonesAdmin({ basePath, title, emptyText }: ZonesAdminProps) {
+export function ZonesAdmin({
+  basePath, title, emptyText, intro, refetchOn, household = false, featureDisabled,
+}: ZonesAdminProps) {
   const [zones, setZones] = useState<AdminZone[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [featureOff, setFeatureOff] = useState(false)
   const [draft, setDraft] = useState<DraftZone | null>(null)
   const [pendingDelete, setPendingDelete] = useState<AdminZone | null>(null)
   const [busy, setBusy] = useState(false)
@@ -126,20 +169,48 @@ export function ZonesAdmin({ basePath, title, emptyText }: ZonesAdminProps) {
     void reload()
   }, [basePath])
 
-  const reload = async () => {
-    setLoading(true)
-    setError(null)
+  // Another admin (or a Home Assistant sync) changed the list: refetch
+  // without the "Loading…" swap, so an open dialog and the map stay put.
+  // Read through a ref so the subscription sees the current ``basePath``
+  // without re-subscribing on every render.
+  const reloadRef = useRef<(quiet?: boolean) => Promise<void>>(async () => {})
+  useEffect(() => {
+    if (!refetchOn) return
+    return ws.on(refetchOn, () => { void reloadRef.current(true) })
+  }, [refetchOn])
+
+  /** Fetch the list. ``quiet`` keeps the current list on screen (and on
+   *  a failure) instead of flashing the loading / error state. */
+  const reload = async (quiet = false) => {
+    if (!quiet) {
+      setLoading(true)
+      setError(null)
+      setFeatureOff(false)
+    }
     try {
       const body = await api.get<ZonesResponse>(basePath)
       setZones(body.zones || [])
     } catch (e) {
-      setError((e as Error).message)
+      if (quiet) return
+      // Duck-typed: an ``ApiError`` carries the server's ``code``.
+      if (featureDisabled && (e as { code?: unknown }).code === 'FEATURE_DISABLED') {
+        setFeatureOff(true)
+      } else {
+        setError((e as Error).message)
+      }
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
   }
 
-  const startCreate = () => setDraft({ ..._BLANK_DRAFT })
+  reloadRef.current = reload
+
+  const homeZone = household ? zones.find((z) => z.is_home) : undefined
+  // The first zone a household adds is its Home — pre-fill it.
+  const startsAsHome = household && homeZone === undefined
+  const startCreate = () => setDraft(startsAsHome
+    ? { ..._BLANK_DRAFT, name: t('zones.home.default_name'), icon: '🏠', is_home: true }
+    : { ..._BLANK_DRAFT })
   const startEdit = (z: AdminZone) => setDraft({
     id: z.id,
     name: z.name,
@@ -148,6 +219,7 @@ export function ZonesAdmin({ basePath, title, emptyText }: ZonesAdminProps) {
     radius_m: z.radius_m,
     color: safeZoneHex(z.color) ?? PALETTE[0],
     icon: z.icon ?? null,
+    is_home: z.is_home === true,
   })
 
   const closeDraft = () => setDraft(null)
@@ -171,6 +243,7 @@ export function ZonesAdmin({ basePath, title, emptyText }: ZonesAdminProps) {
         radius_m: draft.radius_m,
         color: draft.color,
         icon: draft.icon,
+        ...(household ? { is_home: draft.is_home } : {}),
       }
       if (draft.id) {
         await api.patch(`${basePath}/${draft.id}`, body)
@@ -204,6 +277,7 @@ export function ZonesAdmin({ basePath, title, emptyText }: ZonesAdminProps) {
   }
 
   if (loading) return <div class="sh-muted">{t('zones.loading')}</div>
+  if (featureOff) return <div class="sh-zones-admin__off">{featureDisabled}</div>
   if (error) {
     return (
       <div class="sh-error-state" role="alert">
@@ -220,9 +294,10 @@ export function ZonesAdmin({ basePath, title, emptyText }: ZonesAdminProps) {
           {t('zones.used', { n: String(zones.length), max: String(MAX_ZONES) })}
         </div>
         <Button variant="primary" onClick={startCreate} disabled={zones.length >= MAX_ZONES}>
-          + {t('zones.add')}
+          + {startsAsHome ? t('zones.add_home') : t('zones.add')}
         </Button>
       </header>
+      {intro && <p class="sh-muted sh-zones-admin__intro">{intro}</p>}
 
       <div class="sh-zones-admin__split">
         <ul class="sh-zones-admin__list" data-testid="zone-list">
@@ -242,15 +317,33 @@ export function ZonesAdmin({ basePath, title, emptyText }: ZonesAdminProps) {
               </span>
               <div class="sh-zones-admin__meta">
                 <strong>{z.name}</strong>
+                {(z.is_home || z.read_only) && (
+                  <span class="sh-zones-admin__badges">
+                    {z.is_home && (
+                      <span class="sh-badge sh-badge--success sh-zones-admin__badge--home">
+                        🏠 {t('zones.home.badge')}
+                      </span>
+                    )}
+                    {z.read_only && <span class="sh-badge">{t('zones.synced.badge')}</span>}
+                  </span>
+                )}
                 <span class="sh-muted">
                   {_fmtRadius(z.radius_m)} ·{' '}
                   {z.latitude.toFixed(4)}, {z.longitude.toFixed(4)}
                 </span>
+                {z.read_only && (
+                  <span class="sh-muted sh-zones-admin__note">{t('zones.synced.hint')}</span>
+                )}
               </div>
-              <div class="sh-zones-admin__actions">
-                <Button variant="secondary" onClick={() => startEdit(z)}>{t('common.edit')}</Button>
-                <Button variant="danger" onClick={() => setPendingDelete(z)}>{t('common.delete')}</Button>
-              </div>
+              {!z.read_only && (
+                <div class="sh-zones-admin__actions">
+                  <Button variant="secondary" onClick={() => startEdit(z)}>{t('common.edit')}</Button>
+                  {/* Home can't be deleted — it moves when another zone is marked Home. */}
+                  {!z.is_home && (
+                    <Button variant="danger" onClick={() => setPendingDelete(z)}>{t('common.delete')}</Button>
+                  )}
+                </div>
+              )}
             </li>
           ))}
         </ul>
@@ -262,6 +355,7 @@ export function ZonesAdmin({ basePath, title, emptyText }: ZonesAdminProps) {
         <ZoneEditDialog
           draft={draft}
           existingZones={zones}
+          homeControl={household ? _homeControl(zones, draft) : null}
           onChange={setDraft}
           onCancel={closeDraft}
           onSave={saveDraft}
@@ -414,13 +508,15 @@ function ZonesPreviewMap({
 
 
 function ZoneEditDialog({
-  draft, existingZones, onChange, onCancel, onSave, busy,
+  draft, existingZones, homeControl, onChange, onCancel, onSave, busy,
 }: {
   draft: DraftZone
   /** Every zone currently configured in this catalogue. The picker draws
    *  the OTHERS (excluding the one being edited, if any) as faint
    *  ghost circles so the admin can avoid accidental overlap. */
   existingZones: AdminZone[]
+  /** The household Home toggle, or null (space zones have no Home). */
+  homeControl: HomeControl | null
   onChange: (next: DraftZone) => void
   onCancel: () => void
   onSave: () => void
@@ -565,6 +661,25 @@ function ZoneEditDialog({
             })}
           />
         </label>
+
+        {homeControl && (
+          <div class="sh-zone-form__home">
+            <label class="sh-zone-form__check">
+              <input
+                type="checkbox"
+                checked={draft.is_home}
+                disabled={homeControl.locked}
+                aria-describedby="zone-home-hint"
+                onChange={(e) => onChange({
+                  ...draft,
+                  is_home: (e.target as HTMLInputElement).checked,
+                })}
+              />
+              {t('zones.home.label')}
+            </label>
+            <p id="zone-home-hint" class="sh-muted">{homeControl.hint}</p>
+          </div>
+        )}
 
         <IconPicker
           value={draft.icon}

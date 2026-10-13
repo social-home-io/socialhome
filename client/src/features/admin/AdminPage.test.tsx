@@ -238,3 +238,31 @@ describe('ModerationTab', () => {
     expect(api.get).toHaveBeenCalledWith('/api/admin/reports')
   })
 })
+
+describe('Zones tab', () => {
+  afterEach(async () => {
+    const { api } = await import('@/api')
+    ;(api.get as ReturnType<typeof vi.fn>).mockReset()
+    ;(api.get as ReturnType<typeof vi.fn>).mockResolvedValue([])
+  })
+
+  it('shows admins a Zones tab that loads the household zones', async () => {
+    const { api } = await import('@/api')
+    const get = api.get as ReturnType<typeof vi.fn>
+    get.mockImplementation((path: string) => {
+      if (path === '/api/household/zones') {
+        // Presence off: the tab explains and links to Settings instead of
+        // mounting the map.
+        return Promise.reject(Object.assign(new Error('Forbidden'), { code: 'FEATURE_DISABLED' }))
+      }
+      if (path === '/api/admin/tokens') return Promise.resolve({ tokens: [] })
+      return Promise.resolve([])
+    })
+    const mod = await import('./AdminPage')
+    const view = render(<mod.default />)
+    fireEvent.click(await view.findByRole('tab', { name: 'Zones' }))
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/api/household/zones'))
+    fireEvent.click(await view.findByText('Open Settings'))
+    expect(view.getByRole('tab', { name: 'Settings' }).getAttribute('aria-selected')).toBe('true')
+  })
+})
