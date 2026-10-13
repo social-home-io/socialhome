@@ -15,11 +15,14 @@ against the REAL SQLite repos.
 
 from __future__ import annotations
 
+import base64
+import io
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from PIL import Image
 
 from socialhome.crypto import derive_user_id
 from socialhome.db.database import AsyncDatabase
@@ -270,17 +273,21 @@ async def test_member_profile_update_keeps_valid_hash(stack):
 # ── Space sync ``member_pictures`` ──────────────────────────────────────
 
 
-@pytest.mark.parametrize("bad", HOSTILE)
-async def test_member_pictures_sync_never_stores_the_peer_hash(stack, bad):
-    blob = b"RIFF\x00\x00\x00\x00WEBPVP8 "
+def _png(size: int = 64) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (size, size), color="green").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def _sync_member_picture(stack, raw: bytes, picture_hash: object = VALID):
     await stack.receiver._persist(
         "member_pictures",
         SPACE_ID,
         [
             {
                 "user_id": MEMBER,
-                "picture_webp_base64": "UklGRgAAAABXRUJQVlA4IA==",
-                "picture_hash": bad,
+                "picture_webp_base64": base64.b64encode(raw).decode("ascii"),
+                "picture_hash": picture_hash,
                 "width": 1,
                 "height": 1,
             }
@@ -288,12 +295,58 @@ async def test_member_pictures_sync_never_stores_the_peer_hash(stack, bad):
         provider=PEER,
         held_back=HeldBack(),
     )
+
+
+@pytest.mark.parametrize("bad", HOSTILE)
+async def test_member_pictures_sync_never_stores_the_peer_hash(stack, bad):
+    await _sync_member_picture(stack, _png(), bad)
     got = await stack.pictures.get_member_picture(SPACE_ID, MEMBER)
     assert got is not None
     stored_bytes, stored_hash = got
-    assert stored_bytes == blob
     # The hash is always our own digest of the bytes we hold.
-    assert stored_hash == compute_picture_hash(blob)
+    assert stored_hash == compute_picture_hash(stored_bytes)
+    assert await _member_hash(stack) == stored_hash
+
+
+#: Bytes a peer might plant in the blob table that are not a picture: an
+#: SVG (script-capable), HTML, a bare WebP header, plain garbage.
+NOT_IMAGES = [
+    b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+    b"<!DOCTYPE html><html><script>alert(1)</script></html>",
+    b"RIFF\x00\x00\x00\x00WEBPVP8 ",
+    b"\x00garbage" * 10,
+]
+
+
+@pytest.mark.parametrize("raw", NOT_IMAGES)
+async def test_member_pictures_sync_refuses_bytes_that_are_not_an_image(
+    stack, raw, caplog
+):
+    """The live handlers re-encode a peer's picture so it cannot plant
+    arbitrary bytes in the blob table; the §25.6 stream holds the same line:
+    a record whose bytes do not decode as an image is dropped (WARNING
+    names provider / space / member, never the bytes)."""
+    await _sync_member_picture(stack, raw)
+    assert await stack.pictures.get_member_picture(SPACE_ID, MEMBER) is None
+    assert await _member_hash(stack) is None
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "a refused picture must be logged at WARNING"
+    msg = warnings[-1].getMessage()
+    assert PEER in msg and SPACE_ID in msg and MEMBER in msg
+    assert "script" not in msg
+
+
+async def test_member_pictures_sync_strips_a_polyglot_payload(stack):
+    """An image with markup riding after it (a polyglot) lands as a freshly
+    encoded WebP — the trailing payload is gone."""
+    raw = _png() + b"<html><script>alert(1)</script></html>"
+    await _sync_member_picture(stack, raw)
+    got = await stack.pictures.get_member_picture(SPACE_ID, MEMBER)
+    assert got is not None
+    stored, stored_hash = got
+    assert b"<script>" not in stored
+    assert Image.open(io.BytesIO(stored)).format == "WEBP"
+    assert stored_hash == compute_picture_hash(stored)
 
 
 # ── UserIdentityAssertion wire parse ────────────────────────────────────

@@ -337,3 +337,50 @@ async def test_link_preview_refuses_decompression_bomb(monkeypatch):
     monkeypatch.setattr(image_processor, "LINK_PREVIEW_MAX_SOURCE_PIXELS", 100)
     with pytest.raises(ValueError, match="too large"):
         await ImageProcessor().link_preview(_encoded("PNG", size=(20, 20)))
+
+
+def _solid(fmt: str, size: tuple[int, int]) -> bytes:
+    buf = _io.BytesIO()
+    _Image.new("RGB", size, color="green").save(buf, format=fmt)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _solid("PNG", (500, 500))[:200],
+        _solid("PNG", (100, 100))[:120],
+        _solid("JPEG", (300, 300))[:400],
+    ],
+    ids=["png-500-truncated", "png-100-truncated", "jpeg-truncated"],
+)
+async def test_generate_thumbnail_truncated_image_is_unreadable(data):
+    """Pillow's open is lazy (header only): a truncated body only fails on
+    the decode in resize / save — with ``OSError``. That still surfaces as
+    :class:`ImageUnreadableError` (a ``ValueError``), never a raw Pillow
+    error."""
+    with pytest.raises(ImageUnreadableError):
+        await ImageProcessor().generate_thumbnail(data, size=384)
+
+
+async def test_generate_thumbnail_refuses_a_source_over_the_pixel_cap():
+    """The cap is checked on the header — before any pixel is decoded."""
+    data = _solid("PNG", (100, 100))
+    with pytest.raises(ImageUnreadableError):
+        await ImageProcessor().generate_thumbnail(
+            data, size=384, max_source_pixels=100 * 100 - 1
+        )
+    # At the cap it still works.
+    out = await ImageProcessor().generate_thumbnail(
+        data, size=384, max_source_pixels=100 * 100
+    )
+    assert _Image.open(_io.BytesIO(out)).format == "WEBP"
+
+
+async def test_generate_thumbnail_does_not_mask_programming_errors():
+    """Only malformed-input errors become ``ImageUnreadableError``."""
+    with pytest.raises(TypeError):
+        await ImageProcessor().generate_thumbnail(
+            _solid("PNG", (10, 10)),
+            size="384",  # type: ignore[arg-type]
+        )

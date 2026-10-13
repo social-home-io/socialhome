@@ -1531,6 +1531,15 @@ class SqliteSpaceRepo:
     # ── Members ────────────────────────────────────────────────────────
 
     async def save_member(self, member: SpaceMember) -> SpaceMember:
+        """Seat ``member`` or update the seat's roster columns.
+
+        On an existing seat a ``None`` ``picture_hash`` keeps the held one:
+        the per-space picture is owned by :meth:`set_member_profile` (the
+        member's own edit, ``SPACE_MEMBER_PROFILE_UPDATED``, the §25.6
+        ``member_pictures`` resource), the only path that clears it. A
+        roster write — a re-seat, or the §25.6 ``members`` catch-up, whose
+        record carries no hash of ours — must never wipe it.
+        """
         await self._db.enqueue(
             """
             INSERT INTO space_members(
@@ -1543,7 +1552,7 @@ class SqliteSpaceRepo:
                 history_visible_from=excluded.history_visible_from,
                 location_share_enabled=excluded.location_share_enabled,
                 space_display_name=excluded.space_display_name,
-                picture_hash=excluded.picture_hash
+                picture_hash=COALESCE(excluded.picture_hash, picture_hash)
             """,
             (
                 member.space_id,

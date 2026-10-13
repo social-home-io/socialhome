@@ -18,7 +18,6 @@ catch-up finished.
 
 from __future__ import annotations
 
-import base64
 import logging
 import pathlib
 from collections import OrderedDict
@@ -34,7 +33,6 @@ from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
 from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.page import Page
-from ....domain.picture_hash import compute_picture_hash
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
@@ -87,6 +85,10 @@ from ....domain.timetable import (
 from ....infrastructure.event_bus import EventBus
 from ....utils.timezones import coerce_tz
 from ....media.cleanup import unlink_unreferenced
+from ....media.profile_picture import (
+    PROFILE_PICTURE_MAX_DIMENSION,
+    reencode_peer_picture,
+)
 from ...host_equivalence import touches_owner_household
 from ...owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -1085,43 +1087,50 @@ class SpaceSyncReceiver:
                     len(records),
                 )
                 return
+            # Our own people's per-space pictures are authored here — a
+            # provider's copy never replaces them.
+            ours = set(await self._space_repo.list_local_member_user_ids(space_id))
             for r in records:
                 uid = str(r.get("user_id") or "")
                 pic_b64 = r.get("picture_webp_base64")
-                if not uid or not pic_b64:
+                if not uid or not pic_b64 or uid in ours:
                     log.debug(
-                        "member_picture record missing field for %s/%s",
+                        "member_picture record for %s/%s skipped (missing "
+                        "field, or one of our people)",
                         space_id,
                         uid,
                     )
                     continue
+                # Re-encoded exactly like the live profile events, so a
+                # provider cannot plant arbitrary bytes (SVG, HTML, a
+                # polyglot) in the blob table; the hash is our own digest
+                # of the re-encoded bytes — never the provider's
+                # ``picture_hash`` (it is untrusted).
                 try:
-                    pic_bytes = base64.b64decode(pic_b64)
-                except Exception:  # pragma: no cover
-                    log.debug(
-                        "member_picture base64 decode failed for %s/%s",
+                    webp, local_hash = await reencode_peer_picture(pic_b64)
+                except ValueError:
+                    log.warning(
+                        "space sync: refused member_picture from %s for %s/%s "
+                        "— not a decodable image",
+                        provider,
                         space_id,
                         uid,
                     )
                     continue
-                try:
-                    await self._profile_picture_repo.set_member_picture(
-                        space_id,
-                        uid,
-                        bytes_webp=pic_bytes,
-                        # Our own digest of the bytes we hold — never the
-                        # provider's ``picture_hash`` (it is untrusted).
-                        hash=compute_picture_hash(pic_bytes),
-                        width=int(r.get("width") or 0),
-                        height=int(r.get("height") or 0),
-                    )
-                except Exception as exc:  # pragma: no cover
-                    log.debug(
-                        "member_picture set_member_picture failed for %s/%s: %s",
-                        space_id,
-                        uid,
-                        exc,
-                    )
+                await self._profile_picture_repo.set_member_picture(
+                    space_id,
+                    uid,
+                    bytes_webp=webp,
+                    hash=local_hash,
+                    width=PROFILE_PICTURE_MAX_DIMENSION,
+                    height=PROFILE_PICTURE_MAX_DIMENSION,
+                )
+                # Point the seat at the blob we hold (the ``members``
+                # resource never writes ``picture_hash``), so the picture
+                # renders — a no-op for someone not seated here.
+                await self._space_repo.set_member_profile(
+                    space_id, uid, picture_hash=local_hash
+                )
         elif resource == "bans":
             for r in records:
                 user_id = str(r.get("user_id") or "")
