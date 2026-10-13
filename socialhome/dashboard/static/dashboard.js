@@ -254,14 +254,20 @@
     fetch(fragmentUrl, {
       credentials: "same-origin",
       cache: "no-store",
-      // A redirect is never followed into the swap: it means "this tab
-      // is gone" (the Map with nobody on it, or night) — go Home.
+      // A redirect is never followed into the swap. On a tab it means
+      // "this tab is gone" (the Map with nobody on it, or night) — go
+      // Home. Overview's own fragment never redirects: one there (a
+      // misconfigured proxy) is a failed refresh, never a reload loop.
       redirect: "manual",
       headers: { Accept: "text/html" },
     })
       .then(function (res) {
         if (res.type === "opaqueredirect") {
-          go("/");
+          if (fragmentUrl === HOME_PROBE) {
+            failed();
+          } else {
+            go("/");
+          }
           return null;
         }
         if (res.headers.get("X-Dashboard-Locked")) {

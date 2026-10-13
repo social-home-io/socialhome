@@ -47,6 +47,8 @@
   var MERGE_PAD = 8;
   var EDGE_MARGIN = 10;
   var IDLE_RESET_MS = 60000;
+  var TILE_RETRY_MS = 30000;
+  var TILE_RETRY_MAX_MS = 600000;
   var FACES = 3;
   var FOCUS_DROP = 30; // the focused anchor sits a little below the centre
 
@@ -59,6 +61,7 @@
     tilesEl: null,
     tiles: {},
     tileZ: -1,
+    failed: {}, // tile key → {at, wait}: when to ask a failed tile again
     idle: null,
   };
 
@@ -244,10 +247,40 @@
 
   // ── Tiles ─────────────────────────────────────────────────────────────
 
-  // A tile that can't load stays the page colour (the markers and the
-  // list still work; the offline banner covers a dead server).
-  function hideSelf(event) {
-    event.target.hidden = true;
+  // A tile that can't load stays the page colour meanwhile (the markers
+  // and the list still work; the offline banner covers a dead server) and
+  // is asked for again on a later layout — every refresh — once its wait
+  // is over: 30 s, doubling to 10 min while it keeps failing, so an
+  // unattended wall heals after an upstream blip without hammering a
+  // dead one.
+  function tileFailed(key) {
+    var before = state.failed[key];
+    state.failed[key] = {
+      at: Date.now(),
+      wait: before ? Math.min(before.wait * 2, TILE_RETRY_MAX_MS) : TILE_RETRY_MS,
+    };
+  }
+
+  function retryDue(key) {
+    var f = state.failed[key];
+    return !f || Date.now() - f.at >= f.wait;
+  }
+
+  function newTile(key, src) {
+    var img = document.createElement("img");
+    img.className = "dash-mp-tile";
+    img.alt = "";
+    img.decoding = "async";
+    img.draggable = false;
+    img.addEventListener("error", function () {
+      img.hidden = true;
+      tileFailed(key);
+    });
+    img.addEventListener("load", function () {
+      delete state.failed[key];
+    });
+    img.src = src;
+    return img;
   }
 
   function drawTiles(map, frame, w, h) {
@@ -277,14 +310,12 @@
         var key = frame.z + "/" + tx + "/" + ty;
         want[key] = true;
         var img = state.tiles[key];
+        if (img && img.hidden && retryDue(key)) {
+          img.remove(); // failed before: ask again
+          img = null;
+        }
         if (!img) {
-          img = document.createElement("img");
-          img.className = "dash-mp-tile";
-          img.alt = "";
-          img.decoding = "async";
-          img.draggable = false;
-          img.addEventListener("error", hideSelf);
-          img.src = "/tiles/" + frame.z + "/" + (((tx % n) + n) % n) + "/" + ty;
+          img = newTile(key, "/tiles/" + frame.z + "/" + (((tx % n) + n) % n) + "/" + ty);
           state.tiles[key] = img;
           holder.appendChild(img);
         }

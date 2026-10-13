@@ -3761,6 +3761,12 @@ def test_dashboard_js_follows_a_fragment_redirect_home_and_tells_map_js():
     refresh = refresh[: refresh.index("\n  }\n")]
     assert 'redirect: "manual"' in refresh
     assert 'res.type === "opaqueredirect"' in refresh
+    # Review M-4: Overview never follows one (no reload loop behind a
+    # redirecting proxy) — it counts as a failed refresh.
+    follow = refresh[refresh.index('res.type === "opaqueredirect"') :]
+    follow = follow[: follow.index("return null;")]
+    assert "if (fragmentUrl === HOME_PROBE) {\n            failed();" in follow
+    assert follow.index("failed();") < follow.index('go("/")')
     swap = js[js.index("function swap(") :]
     swap = swap[: swap.index("\n  }\n")]
     assert 'new window.CustomEvent("dash:swap")' in swap
