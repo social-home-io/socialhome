@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +27,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.services.federation_inbound.space_content import _deleter
+from socialhome.domain.timetable import Timetable, TimetableEntry, to_wire_dict
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.federation.owner_bound_id import (
     GALLERY_ALBUM_KIND,
@@ -4853,6 +4854,36 @@ async def test_timetable_handlers_register_only_with_a_repo(bus, repos):
     fed = _FakeFederationService()
     _timetable_handlers(bus, repos, None).attach_to(fed)
     assert not types & {t for t, _ in fed._event_registry.registered}
+
+
+async def test_timetable_with_an_icon_the_emoji_rule_now_refuses_still_parses():
+    """An older peer may send an icon the looser pre-2026.10 emoji rule
+    accepted: only that icon is dropped, never the whole timetable."""
+    at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    lesson = TimetableEntry(
+        id="e1",
+        weekday=0,
+        start=time(8, 0),
+        end=time(8, 45),
+        title="Mathe",
+        icon="🏫" + "\U000e0067" * 3,
+    )
+    wire = to_wire_dict(
+        Timetable(
+            id="tt-1",
+            name="5b",
+            created_by="u-adm",
+            created_at=at,
+            updated_at=at,
+            entries=(lesson,),
+        )
+    )
+    tt = SpaceContentInboundHandlers._parse_timetable(
+        _event(FederationEventType.SPACE_TIMETABLE_UPSERTED, {"timetable": wire}),
+        "sp-1",
+    )
+    assert tt is not None
+    assert (tt.entries[0].title, tt.entries[0].icon) == ("Mathe", None)
 
 
 async def test_timetable_payload_without_a_space_or_timetable_is_dropped(bus, repos):

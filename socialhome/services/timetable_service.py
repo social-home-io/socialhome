@@ -605,7 +605,7 @@ class TimetableService(BusPublisherMixin, TimetableEditorMixin):
         tt = await self._repo.get(timetable_id)
         if tt is None:
             raise KeyError("timetable not found")
-        return tt
+        return td.drop_invalid_icons(tt)
 
     async def _store(self, tt: Timetable, *, expected_version: int) -> bool:
         return await self._repo.save(tt, expected_version=expected_version)
@@ -890,7 +890,7 @@ class SpaceTimetableScope(BusPublisherMixin, TimetableEditorMixin):
         got = await self._svc._repo.get(timetable_id)
         if got is None or got[0] != self._space_id:
             raise KeyError("timetable not found")
-        return got[1]
+        return td.drop_invalid_icons(got[1])
 
     async def _store(self, tt: Timetable, *, expected_version: int) -> bool:
         return await self._svc._repo.save(

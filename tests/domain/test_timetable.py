@@ -11,6 +11,7 @@ import pytest
 
 from socialhome.domain import timetable as tt_mod
 from socialhome.domain.timetable import (
+    drop_invalid_icons,
     MAX_WIRE_BYTES,
     OVERRIDE_RETENTION_DAYS,
     TIMETABLE_COLORS,
@@ -2323,3 +2324,39 @@ class TestWireTimestampsAndVersions:
         assert tt_mod.remote_version_refusal(2 + jump, 1) is not None
         assert tt_mod.remote_version_refusal(cap - jump, None) is not None
         assert tt_mod.remote_version_refusal(cap - jump - 1, None) is None
+
+
+# ─── Stored icons the current emoji rule refuses ─────────────────────────
+
+#: Accepted by the pre-2026.10 rule (tag characters after any flag base),
+#: refused since — an icon stored back then must not block later edits.
+LEGACY_ICON = "🏫" + "\U000e0067" * 3
+
+
+def test_drop_invalid_icons_clears_only_refused_icons():
+    tt = tt_(
+        entries=(
+            ent("e1", 0, "08:00", "08:45", icon=LEGACY_ICON),
+            ent("e2", 0, "09:00", "09:45", icon="🏫"),
+        ),
+        overrides=(
+            TimetableOverride(
+                id="o1",
+                date=date(2026, 6, 1),
+                kind=OverrideKind.CANCEL,
+                entry_id="e2",
+                icon=LEGACY_ICON,
+            ),
+        ),
+    )
+    with pytest.raises(TimetableValidationError, match="icon"):
+        validate(tt)
+    out = drop_invalid_icons(tt)
+    assert [e.icon for e in out.entries] == [None, "🏫"]
+    assert out.overrides[0].icon is None
+    validate(out)
+
+
+def test_drop_invalid_icons_returns_the_same_object_when_clean():
+    tt = tt_(entries=(ent("e1", 0, "08:00", "08:45", icon="🏫"),))
+    assert drop_invalid_icons(tt) is tt

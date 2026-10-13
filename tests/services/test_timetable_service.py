@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import orjson
 import pytest
 
 from socialhome.db.database import AsyncDatabase
@@ -436,6 +437,33 @@ async def test_entry_crud(env):
         await env.svc.delete_entry(tt.id, "nope", version=3, by="u-anna")
     tt = await env.svc.delete_entry(tt.id, e.id, version=3, by="u-anna")
     assert tt.entries == ()
+
+
+async def test_a_stored_icon_the_emoji_rule_now_refuses_never_blocks_edits(env):
+    """An icon stored under the older, looser emoji rule (tag text after a
+    non-flag base) is dropped on load, so editing ANOTHER lesson doesn't
+    fail validation of the whole timetable with 422."""
+    tt = await _empty(env)
+    for v, start, end in ((1, "08:00", "08:45"), (2, "09:00", "09:45")):
+        tt = await env.svc.add_entry(
+            tt.id,
+            version=v,
+            by="u-anna",
+            fields={"weekday": 0, "start": start, "end": end, "icon": "🏫"},
+        )
+    first, second = tt.entries
+    legacy = "🏫" + "\U000e0067" * 3
+    stored = [td_entry_to_dict(first), td_entry_to_dict(second)]
+    stored[0]["icon"] = legacy
+    await env.db.enqueue(
+        "UPDATE timetables SET entries_json=? WHERE id=?",
+        (orjson.dumps(stored).decode(), tt.id),
+    )
+    tt = await env.svc.update_entry(
+        tt.id, second.id, version=3, by="u-anna", fields={"title": "Mathe"}
+    )
+    assert [e.icon for e in tt.entries] == [None, "🏫"]
+    assert tt.entries[1].title == "Mathe"
 
 
 async def test_add_entry_overlap_rejected(env):

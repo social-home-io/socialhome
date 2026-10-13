@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from types import SimpleNamespace
 
 import orjson
@@ -20,7 +20,12 @@ from socialhome.domain.events import (
     TimetableSaved,
 )
 from socialhome.domain.task import Task, TaskPriority, TaskStatus
-from socialhome.domain.timetable import Timetable, to_wire_dict
+from socialhome.domain.timetable import (
+    Timetable,
+    TimetableEntry,
+    entry_to_dict,
+    to_wire_dict,
+)
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.owner_bound_id import (
     SPACE_CHAT_MESSAGE_KIND,
@@ -1670,6 +1675,26 @@ async def test_timetables_apply_last_writer_wins_and_publish(bus, peer):
     assert (space_id, tt.id, tt.assignees) == ("sp-1", good["id"], ())
     [ev] = seen
     assert (ev.space_id, ev.origin_instance_id) == ("sp-1", "peer-a")
+
+
+async def test_a_timetable_with_an_icon_the_emoji_rule_now_refuses_still_applies(
+    bus, peer
+):
+    """An older peer may stream an icon the looser pre-2026.10 emoji rule
+    accepted: only that icon is dropped, never the whole timetable."""
+    repo = _TimetableRepoStub()
+    r = _timetable_receiver(bus, peer, repo)
+    lesson = TimetableEntry(
+        id="e1",
+        weekday=0,
+        start=time(8, 0),
+        end=time(8, 45),
+        title="Mathe",
+        icon="🏫" + "\U000e0067" * 3,
+    )
+    await _send(r, peer[1], "timetables", [_tt_record(entries=[entry_to_dict(lesson)])])
+    [(_space_id, tt)] = repo.applied
+    assert (tt.entries[0].title, tt.entries[0].icon) == ("Mathe", None)
 
 
 async def test_a_stale_timetable_copy_is_not_published(bus, peer):

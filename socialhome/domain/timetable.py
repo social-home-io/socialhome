@@ -429,6 +429,34 @@ def _check_icon(value: object, where: str) -> None:
         raise TimetableValidationError(f"{where}: icon must be a single emoji")
 
 
+def drop_invalid_icons(tt: Timetable) -> Timetable:
+    """``tt`` with every icon the current emoji rule refuses set to ``None``.
+
+    The rule tightened (tag text and stray combining marks are refused now),
+    so a timetable stored — or streamed by an older peer — under the looser
+    rule could carry an icon :func:`validate` refuses: every later edit
+    would fail on a lesson nobody touched, and a remote copy would drop
+    whole. Losing just that icon is the right trade. Returns ``tt`` itself
+    when nothing changes.
+    """
+
+    def _clean[T: (TimetableEntry, TimetableOverride)](
+        items: tuple[T, ...],
+    ) -> tuple[T, ...]:
+        return tuple(
+            copy.replace(o, icon=None)
+            if o.icon is not None and not is_single_emoji(o.icon)
+            else o
+            for o in items
+        )
+
+    entries = _clean(tt.entries)
+    overrides = _clean(tt.overrides)
+    if entries == tt.entries and overrides == tt.overrides:
+        return tt
+    return copy.replace(tt, entries=entries, overrides=overrides)
+
+
 def _check_texts(obj: TimetableEntry | TimetableOverride, where: str) -> None:
     for name, limit in _TEXT_LIMITS:
         value = getattr(obj, name)

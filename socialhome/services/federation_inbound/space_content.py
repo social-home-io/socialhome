@@ -115,6 +115,7 @@ from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_w
 from ...domain.timetable import (
     Timetable,
     TimetableValidationError,
+    drop_invalid_icons,
     from_wire_dict,
     remote_version_refusal,
     validate,
@@ -2601,7 +2602,7 @@ class SpaceContentInboundHandlers:
         try:
             if not isinstance(raw, dict):
                 raise TypeError("timetable must be an object")
-            tt = from_wire_dict(raw)
+            tt = drop_invalid_icons(from_wire_dict(raw))
             validate(tt)
         except Exception as exc:  # hostile input: never raise out of here
             log.warning(
