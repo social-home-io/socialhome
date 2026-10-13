@@ -282,9 +282,26 @@ what every other resource is admitted against: a receiver checks each
 content record's author against the roster it holds, so the roster must be
 complete on every stream, not just its changes. Nothing else is kept full.
 
-A `member_pictures` record's `picture_hash` is ignored: the receiver stores
-its own `compute_picture_hash` of the bytes it was sent, so a provider can
-never plant a hash of its choosing (it ends up in picture URLs).
+A `member_pictures` record's bytes are never stored as sent: the receiver
+re-encodes them (`media/profile_picture.py:reencode_peer_picture` — decode,
+bound to 384 px, encode WebP, off the event loop) exactly like the live
+`USER_UPDATED` / `USERS_SYNC` / `SPACE_MEMBER_PROFILE_UPDATED` handlers, so a
+provider cannot plant arbitrary bytes (an SVG, HTML, a polyglot) in the
+blob table. Bytes that do not decode as an image drop the record (WARNING
+naming provider, space and member — never the bytes). The record's
+`picture_hash` is ignored: the receiver stores its own `compute_picture_hash`
+of the re-encoded bytes, so a provider can never plant a hash of its choosing
+(it ends up in picture URLs), and points the seat's
+`space_members.picture_hash` at it so the picture renders for a fresh
+joiner. A record naming one of the receiver's own people is skipped — their
+per-space picture is authored on their household, never taken from a copy.
+
+A `members` record never writes `space_members.picture_hash`: that column is
+owned by the per-space picture paths above (and the member's own edit), and
+`save_member` keeps a held hash when a roster upsert carries none — so a
+catch-up no longer wipes a member's per-space avatar. The record's other
+columns (`role`, `history_visible_from`, `location_share_enabled`,
+`space_display_name`) are all carried and converge to the provider's roster.
 
 (History: 0086 covered posts, comments, chat, gallery, calendar and the
 0085 tombstones; 0088 added task lists, tasks, pages, timetables and moved

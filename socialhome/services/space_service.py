@@ -219,7 +219,10 @@ from ..domain.media_constraints import (
     SPACE_IMAGE_EMBED_MAX_BYTES,
     SPACE_ICON_SNAPSHOT_MAX_BYTES,
 )
-from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
+from ..media.profile_picture import (
+    PROFILE_PICTURE_MAX_DIMENSION,
+    normalize_profile_picture,
+)
 from .gfs_connection_service import GfsConnectionError
 from ..federation.invite_link_forward import (
     FORWARDED_INVITE_LINK_ACTION,
@@ -4462,11 +4465,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             member=member,
             actor_user_id=actor_user_id,
         )
-        webp = await ImageProcessor().generate_thumbnail(
-            raw_bytes,
-            size=PROFILE_PICTURE_MAX_DIMENSION,
-        )
-        hash_ = compute_picture_hash(webp)
+        webp, hash_ = await normalize_profile_picture(raw_bytes)
         await self._pictures.set_member_picture(
             space_id,
             user_id,

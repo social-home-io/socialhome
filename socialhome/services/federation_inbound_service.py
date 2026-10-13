@@ -118,9 +118,11 @@ from ..federation.space_scope import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.hlc import HLC, HLC_MAX_DRIFT_MS
-from ..media.image_processor import ImageProcessor
-from ..domain.picture_hash import clean_picture_hash, compute_picture_hash
-from ..services.user_service import PROFILE_PICTURE_MAX_DIMENSION
+from ..domain.picture_hash import clean_picture_hash
+from ..media.profile_picture import (
+    PROFILE_PICTURE_MAX_DIMENSION,
+    reencode_peer_picture,
+)
 from ..domain.link_preview import card_survives_edit
 from ..domain.mention import Mention
 from .link_preview_service import wire_link_preview
@@ -3235,12 +3237,7 @@ class FederationInboundService(ProtectionGateMixin):
         bytes_b64 = p.get("picture_webp_base64")
         if bytes_b64 and self._profile_picture_repo is not None:
             try:
-                raw = base64.b64decode(bytes_b64)
-                webp = await ImageProcessor().generate_thumbnail(
-                    raw,
-                    size=PROFILE_PICTURE_MAX_DIMENSION,
-                )
-                local_hash = compute_picture_hash(webp)
+                webp, local_hash = await reencode_peer_picture(bytes_b64)
                 await self._profile_picture_repo.set_member_picture(
                     space_id,
                     user_id,
@@ -4344,17 +4341,12 @@ class FederationInboundService(ProtectionGateMixin):
 
         # If the peer shipped fresh picture bytes, revalidate and store
         # locally. We trust the signature on the envelope (§24.11) but
-        # still re-run the image through ImageProcessor so a malicious
+        # still re-encode the image (``reencode_peer_picture``) so a malicious
         # peer can't plant arbitrary bytes in the blob table.
         bytes_b64 = payload.get("picture_webp_base64")
         if bytes_b64 and self._profile_picture_repo is not None:
             try:
-                raw = base64.b64decode(bytes_b64)
-                webp = await ImageProcessor().generate_thumbnail(
-                    raw,
-                    size=PROFILE_PICTURE_MAX_DIMENSION,
-                )
-                local_hash = compute_picture_hash(webp)
+                webp, local_hash = await reencode_peer_picture(bytes_b64)
                 await self._profile_picture_repo.set_user_picture(
                     user_id,
                     bytes_webp=webp,

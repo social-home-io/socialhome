@@ -101,6 +101,8 @@ THIRD = "house-third"  # a member household uninvolved in the row (u-t)
 LOCAL_USER = "u-local"  # one of OUR users — a remote household never acts for it
 
 _NOW = "2026-06-01T10:00:00+00:00"
+#: A 2x2 PNG, base64 — a decodable ``member_pictures`` payload.
+_TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDAxMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg=="
 _OCC = "2026-06-10T18:00:00+00:00"
 _END = "2026-06-10T19:00:00+00:00"
 _FAR = "2099-01-01T00:00:00"
@@ -1995,7 +1997,9 @@ SYNC_CASES: list[tuple[str, str, list, tuple[str, ...], tuple[str, ...]]] = [
         [
             {
                 "user_id": "u-a",
-                "picture_webp_base64": "UklGRg==",
+                # A real (tiny) image: the receiver re-encodes the bytes and
+                # drops a record that does not decode as one.
+                "picture_webp_base64": _TINY_PNG_B64,
                 "picture_hash": "h1",
                 "width": 1,
                 "height": 1,

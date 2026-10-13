@@ -43,10 +43,12 @@ from ..domain.user import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..infrastructure.key_manager import KeyManager
-from ..media.image_processor import ImageProcessor
+from ..media.profile_picture import (
+    PROFILE_PICTURE_MAX_DIMENSION,
+    normalize_profile_picture,
+)
 from ..repositories.profile_picture_repo import (
     AbstractProfilePictureRepo,
-    compute_picture_hash,
 )
 from ..repositories.user_repo import AbstractUserRepo
 from .protection_gate import ProtectionGateMixin
@@ -54,12 +56,6 @@ from .protection_gate import ProtectionGateMixin
 log = logging.getLogger(__name__)
 
 _USERNAME_MAX_LENGTH = 32
-
-#: Largest side of a stored profile picture (square WebP). 384 px keeps
-#: avatars sharp at 3× retina (128 dp) so the UI never has to upscale —
-#: covers watch faces and TV apps too. The previous 256 px was a
-#: 2018-era target that was already getting upscaled in some surfaces.
-PROFILE_PICTURE_MAX_DIMENSION = 384
 
 #: Display-name / bio length caps applied by :meth:`patch_profile`.
 DISPLAY_NAME_MAX_LENGTH = 64
@@ -515,11 +511,7 @@ class UserService(ProtectionGateMixin):
         user = await self._repo.get_by_user_id(user_id)
         if user is None:
             raise KeyError(f"user_id {user_id!r} not found")
-        webp_bytes = await ImageProcessor().generate_thumbnail(
-            raw_bytes,
-            size=PROFILE_PICTURE_MAX_DIMENSION,
-        )
-        hash_ = compute_picture_hash(webp_bytes)
+        webp_bytes, hash_ = await normalize_profile_picture(raw_bytes)
         await self._pictures.set_user_picture(
             user_id,
             bytes_webp=webp_bytes,

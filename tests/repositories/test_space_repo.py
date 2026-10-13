@@ -547,6 +547,37 @@ async def test_save_and_get_member(env):
     assert fetched.role == "owner"
 
 
+async def test_save_member_upsert_keeps_the_per_space_picture_hash(env):
+    """A re-save of a seated member (a §25.6 ``members`` catch-up, a
+    re-seat) never wipes the per-space picture: ``picture_hash`` is owned by
+    ``set_member_profile`` (the member's own edit, the live profile event,
+    the ``member_pictures`` sync), and only that path clears it."""
+    await env.repo.save(_space("sp-pic"))
+    await env.repo.save_member(_member("sp-pic", "uid-bob"))
+    await env.repo.set_member_profile(
+        "sp-pic", "uid-bob", space_display_name="Bobby", picture_hash="0123456789abcdef"
+    )
+    await env.repo.save_member(
+        SpaceMember(
+            space_id="sp-pic",
+            user_id="uid-bob",
+            role="admin",
+            joined_at="2025-01-01T00:00:00",
+            space_display_name="Bob B.",
+        )
+    )
+    fetched = await env.repo.get_member("sp-pic", "uid-bob")
+    assert fetched is not None
+    assert fetched.role == "admin"
+    assert fetched.space_display_name == "Bob B."
+    assert fetched.picture_hash == "0123456789abcdef"
+    # The owning path still clears it.
+    await env.repo.set_member_profile("sp-pic", "uid-bob", picture_hash=None)
+    fetched = await env.repo.get_member("sp-pic", "uid-bob")
+    assert fetched is not None
+    assert fetched.picture_hash is None
+
+
 async def test_list_members(env):
     """list_members returns all members of a space."""
     await env.repo.save(_space("sp-lm"))
