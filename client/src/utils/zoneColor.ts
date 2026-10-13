@@ -24,15 +24,19 @@ export function safeZoneHex(value: unknown): string | null {
 }
 
 /** The colour to paint ``zone`` with: its own when valid, otherwise a
- *  stable palette pick hashed from its id (``ZONE_PALETTE[0]`` when
- *  there is no zone at all). */
+ *  stable palette pick hashed from its ``external_id`` when it has one
+ *  (a household zone synced from Home Assistant — the row is re-created
+ *  under a new id after the sync is turned off and on, the entity id
+ *  stays) and from its id otherwise (zones made here, space zones).
+ *  ``ZONE_PALETTE[0]`` when there is no zone at all. */
 export function zoneColor(
-  zone: { id: string, color: string | null } | undefined,
+  zone: { id: string, color: string | null, external_id?: string | null } | undefined,
 ): string {
   if (!zone) return ZONE_PALETTE[0]
   const own = safeZoneHex(zone.color)
   if (own) return own
+  const key = zone.external_id || zone.id
   let hash = 0
-  for (const ch of zone.id) hash = (hash * 31 + ch.charCodeAt(0)) | 0
+  for (const ch of key) hash = (hash * 31 + ch.charCodeAt(0)) | 0
   return ZONE_PALETTE[Math.abs(hash) % ZONE_PALETTE.length]
 }

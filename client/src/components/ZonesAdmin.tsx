@@ -57,6 +57,9 @@ export interface AdminZone {
   is_home?: boolean
   /** Household zones only: synced from Home Assistant, not editable here. */
   read_only?: boolean
+  /** Household zones only: the platform entity a synced zone mirrors —
+   *  its fallback colour hashes on this, stable across re-creation. */
+  external_id?: string | null
 }
 
 interface ZonesResponse {

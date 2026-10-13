@@ -157,6 +157,25 @@ describe('HouseholdZonesTab', () => {
     expect(work.querySelectorAll('button')).toHaveLength(0)
   })
 
+  it('keeps a synced zone\'s colour when the sync re-creates it under a new id', async () => {
+    // Sync off → on re-creates the HA rows with fresh ids; the swatch
+    // colour hashes on the entity id, so it doesn't jump.
+    const swatch = async (id: string) => {
+      mockApi.get.mockResolvedValue({ zones: [{ ...WORK, id, color: null }] })
+      const { container, findByText, unmount } = render(
+        <HouseholdZonesTab onOpenSettings={() => {}} />,
+      )
+      await findByText('Work')
+      const bg = (container.querySelector('.sh-zones-admin__swatch') as HTMLElement)
+        .style.background
+      unmount()
+      return bg
+    }
+    const first = await swatch('hz_work_1')
+    expect(first).not.toBe('')
+    expect(await swatch('hz_work_2')).toBe(first)
+  })
+
   it('invites the Home zone first when there are none, and pre-fills it', async () => {
     mockApi.get.mockResolvedValue({ zones: [] })
     mockApi.post.mockResolvedValueOnce(HOME)
