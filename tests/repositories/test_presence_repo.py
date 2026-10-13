@@ -12,7 +12,7 @@ async def repo(db):
     await db.enqueue(
         "INSERT INTO users(username, user_id, display_name, picture_hash)"
         " VALUES(?,?,?,?)",
-        ("anna", "uid-anna", "Anna", "abc123"),
+        ("anna", "uid-anna", "Anna", "abc123abc123abc1"),
     )
     await db.enqueue(
         "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
@@ -39,7 +39,7 @@ async def test_list_active_carries_updated_at_and_picture(repo):
     await _upsert(repo, "ben", "2026-10-13T09:00:00+00:00")
     rows = {p.username: p for p in await repo.list_active()}
     assert rows["anna"].updated_at == "2026-10-13T08:00:00+00:00"
-    assert rows["anna"].picture_url == "api/users/uid-anna/picture?v=abc123"
+    assert rows["anna"].picture_url == "api/users/uid-anna/picture?v=abc123abc123abc1"
     assert rows["ben"].updated_at == "2026-10-13T09:00:00+00:00"
     assert rows["ben"].picture_url is None
 

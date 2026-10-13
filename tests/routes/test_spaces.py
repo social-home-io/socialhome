@@ -1192,7 +1192,7 @@ async def test_remote_member_surfaces_picture_url_when_users_sync_delivered_byte
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
-    await _seed_remote_member_with_picture(db, sid, "deadbeef")
+    await _seed_remote_member_with_picture(db, sid, "deadbeefdeadbeef")
 
     resp = await client.get(
         f"/api/spaces/{sid}/members",
@@ -1200,7 +1200,7 @@ async def test_remote_member_surfaces_picture_url_when_users_sync_delivered_byte
     )
     members = await resp.json()
     remote = next(m for m in members if m.get("instance_id"))
-    assert remote["picture_hash"] == "deadbeef"
+    assert remote["picture_hash"] == "deadbeefdeadbeef"
     assert remote["picture_url"] is not None
     assert "api/users/uid-bob/picture" in remote["picture_url"]
     assert "v=deadbeef" in remote["picture_url"]
@@ -1216,6 +1216,9 @@ async def test_remote_member_picture_hash_is_url_encoded(client):
         headers=_auth(client._admin_token),
     )
     sid = (await r.json())["id"]
+    # Migration 0098's trigger refuses such a hash; drop it to model a
+    # writer that slips past — the URL builder must still encode it.
+    await db.enqueue("DROP TRIGGER remote_users_picture_hash_insert_check")
     await _seed_remote_member_with_picture(db, sid, "ab&sig=evil")
     resp = await client.get(
         f"/api/spaces/{sid}/members",
