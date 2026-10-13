@@ -25,6 +25,7 @@ __all__ = [
     "ExternalHouseholdZone",
     "HouseholdZone",
     "HouseholdZoneIsHomeError",
+    "HouseholdZoneMirrorResult",
     "HouseholdZoneLimitError",
     "HouseholdZoneNameTakenError",
     "HouseholdZoneNotFoundError",
@@ -94,6 +95,18 @@ class ExternalHouseholdZone:
     is_home: bool = False
     icon: str | None = None
     color: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class HouseholdZoneMirrorResult:
+    """What :meth:`HouseholdZoneService.mirror_external` did: rows written,
+    synced rows removed, incoming zones skipped (invalid, duplicate or
+    over the cap), and whether anything changed at all."""
+
+    upserted: int
+    removed: int
+    skipped: int
+    changed: bool
 
 
 class HouseholdZoneNotFoundError(CodedError, LookupError):

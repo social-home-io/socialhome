@@ -14,6 +14,7 @@ from socialhome.domain.household_zone import (
     HouseholdZone,
     HouseholdZoneIsHomeError,
     HouseholdZoneLimitError,
+    HouseholdZoneMirrorResult,
     HouseholdZoneNameTakenError,
     HouseholdZoneNotFoundError,
     HouseholdZoneReadOnlyError,
@@ -97,3 +98,8 @@ def test_limit_error_carries_the_cap():
 
 def test_not_found_is_a_lookup_error():
     assert isinstance(HouseholdZoneNotFoundError(), LookupError)
+
+
+def test_mirror_result_shape():
+    r = HouseholdZoneMirrorResult(upserted=2, removed=1, skipped=0, changed=True)
+    assert (r.upserted, r.removed, r.skipped, r.changed) == (2, 1, 0, True)

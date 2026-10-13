@@ -384,6 +384,7 @@ from .services.space_post_moderation import PostModerationHandler, SpacePostAtta
 from .services.poll_service import PollService
 from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
+from .services.household_zone_service import HouseholdZoneService
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_relay_inbound import GfsRelayInbound
@@ -2886,6 +2887,9 @@ def create_app(config: Config | None = None) -> web.Application:
         conflict_service=page_conflict_service,
     )
 
+    # ── Household zones (local-only; GPS→zone match for presence) ──────
+    household_zone_service = HouseholdZoneService(repos.household_zone, bus=bus)
+
     # ── Presence service (local + remote) ──────────────────────────────
     presence_service = PresenceService(repos.presence, repos.user, bus)
 
@@ -3315,6 +3319,8 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.online_status_service_key] = online_status_service
     app[K.space_zone_service_key] = space_zone_service
     app[K.space_zone_repo_key] = repos.space_zone
+    app[K.household_zone_service_key] = household_zone_service
+    app[K.household_zone_repo_key] = repos.household_zone
     app[K.poll_service_key] = poll_service
     app[K.space_poll_service_key] = space_poll_service
     app[K.bazaar_service_key] = bazaar_service
