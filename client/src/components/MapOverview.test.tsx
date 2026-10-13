@@ -210,6 +210,18 @@ describe('MapOverview selection', () => {
     expect(tabButtons(container)[1].getAttribute('aria-pressed')).toBe('true')
   })
 
+  it('Back from a person picked in a zone returns to that zone', () => {
+    const { container, getByTestId, getByRole } = render(<Harness initial="zone:z-school" />)
+    fireEvent.click(rows(container)[0])
+    expect(getByTestId('map').dataset.selected).toBe('u-ben')
+    fireEvent.click(getByRole('button', { name: 'Back to School' }))
+    expect(getByTestId('map').dataset.selected).toBe('zone:z-school')
+    expect(container.querySelector('h3.sh-map-overview__title')!.textContent).toBe('School')
+    // A second Back leaves the zone as usual.
+    fireEvent.click(getByRole('button', { name: 'Back to zones' }))
+    expect(getByTestId('map').dataset.selected).toBe('')
+  })
+
   it('Back from a person picked on the map lands on their row in People', () => {
     const { container, getByTestId, getByRole } = render(<Harness />)
     fireEvent.click(tabButtons(container)[1])
@@ -230,14 +242,16 @@ describe('MapOverview selection', () => {
 describe('MapOverview sheet', () => {
   it('starts collapsed and the grabber toggles it with aria-expanded', () => {
     const { container, getByRole } = render(<Harness />)
-    const grabber = getByRole('button', { name: 'Show list' })
+    // One stable name; aria-expanded alone says open or closed (a
+    // changing label would announce the state twice).
+    const grabber = getByRole('button', { name: 'Who is where list' })
     expect(grabber.getAttribute('aria-expanded')).toBe('false')
     const body = container.querySelector('.sh-map-overview__body')!
     expect(grabber.getAttribute('aria-controls')).toBe(body.id)
     expect(container.querySelector('.sh-map-overview')!.classList.contains('is-expanded')).toBe(false)
     fireEvent.click(grabber)
     expect(grabber.getAttribute('aria-expanded')).toBe('true')
-    expect(grabber.getAttribute('aria-label')).toBe('Hide list')
+    expect(grabber.getAttribute('aria-label')).toBe('Who is where list')
     expect(container.querySelector('.sh-map-overview')!.classList.contains('is-expanded')).toBe(true)
   })
 
