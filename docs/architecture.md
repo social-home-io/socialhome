@@ -103,8 +103,9 @@ Admin › Zones. In `ha` / `haos` mode `platform/ha/zones.py:HaZoneSource`
 reads Home Assistant's `zone.*` entities from `GET /api/states`
 (passive zones left out, `zone.home` = the Home zone, `mdi:*` icons
 mapped to one emoji, no colour — HA stores none) and raises
-`ZoneSourceUnavailableError` when HA can't be read, so a failed call is
-never mistaken for "no zones". `services/household_zone_sync.py:
+`ZoneSourceUnavailableError` when HA can't be read — or answers without
+`zone.home`, which HA's zone integration always creates, i.e. HA is
+still starting — so a failed call is never mistaken for "no zones". `services/household_zone_sync.py:
 HouseholdZoneSync` mirrors them via `HouseholdZoneService.mirror_external`
 at startup and every 5 minutes while the household's option is on (the
 default; `instance_config` key `household_zones.sync_enabled`); turning

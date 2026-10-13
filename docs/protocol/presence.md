@@ -143,8 +143,9 @@ catalogues below.
   an emoji for HA's `mdi:*` icon (📍 when unmapped) and no colour (HA
   stores none). Passive zones are left out; `zone.home` is the Home
   zone. Zones created in Social Home stay next to them. A sync that
-  can't read HA keeps the synced zones (a failed call is never "HA has
-  no zones") and reports `last_error`. Turning the option off removes
+  can't read HA — or gets an answer without `zone.home`, which HA always
+  has once its zones are loaded — keeps the synced zones (a failed call
+  is never "HA has no zones") and reports `last_error`. Turning the option off removes
   the synced zones once — the household's own zones stay — and the
   sync idles until it's turned back on, which pulls HA's zones at once.
   The zones still never leave the household.
