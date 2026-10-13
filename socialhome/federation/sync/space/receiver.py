@@ -34,6 +34,7 @@ from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
 from ....domain.events import SpaceSyncComplete
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.page import Page
+from ....domain.picture_hash import compute_picture_hash
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
     FEED_POST_MAX_IMAGES,
@@ -1087,9 +1088,12 @@ class SpaceSyncReceiver:
             for r in records:
                 uid = str(r.get("user_id") or "")
                 pic_b64 = r.get("picture_webp_base64")
-                pic_hash = str(r.get("picture_hash") or "")
-                if not uid or not pic_b64 or not pic_hash:
-                    log.debug("member_picture record missing field: %r", r)
+                if not uid or not pic_b64:
+                    log.debug(
+                        "member_picture record missing field for %s/%s",
+                        space_id,
+                        uid,
+                    )
                     continue
                 try:
                     pic_bytes = base64.b64decode(pic_b64)
@@ -1105,7 +1109,9 @@ class SpaceSyncReceiver:
                         space_id,
                         uid,
                         bytes_webp=pic_bytes,
-                        hash=pic_hash,
+                        # Our own digest of the bytes we hold — never the
+                        # provider's ``picture_hash`` (it is untrusted).
+                        hash=compute_picture_hash(pic_bytes),
                         width=int(r.get("width") or 0),
                         height=int(r.get("height") or 0),
                     )

@@ -282,6 +282,10 @@ what every other resource is admitted against: a receiver checks each
 content record's author against the roster it holds, so the roster must be
 complete on every stream, not just its changes. Nothing else is kept full.
 
+A `member_pictures` record's `picture_hash` is ignored: the receiver stores
+its own `compute_picture_hash` of the bytes it was sent, so a provider can
+never plant a hash of its choosing (it ends up in picture URLs).
+
 (History: 0086 covered posts, comments, chat, gallery, calendar and the
 0085 tombstones; 0088 added task lists, tasks, pages, timetables and moved
 the live stickies / zones over — they already carried a stamp, and with

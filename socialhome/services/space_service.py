@@ -138,7 +138,7 @@ from .protection_gate import ProtectionGateMixin
 from .content_access import ContentAccessMixin
 from ..domain.link_preview import card_survives_edit
 from ..media.image_processor import ImageProcessor
-from ..repositories.profile_picture_repo import compute_picture_hash
+from ..domain.picture_hash import compute_picture_hash
 from ..domain.post import (
     FEED_POST_MAX_IMAGES,
     Comment,

@@ -27,6 +27,12 @@ and picture. A receiver applies it only when its own roster mirror
 (`space_remote_members`) holds a live seat for that user on the sending
 household (looked up under the envelope's authenticated `from_instance`);
 otherwise the event is dropped.
+Its `picture_hash` is untrusted: when the event ships picture bytes the
+receiver re-encodes them and uses its own digest; otherwise it keeps the
+peer's hash only when it is exactly 16 lowercase hex characters (the shape
+`compute_picture_hash` produces — `socialhome/domain/picture_hash.py`) and
+stores `NULL` for anything else, because the hash is interpolated into
+`…/picture?v={hash}` URLs.
 
 From v_23, `SPACE_MEMBER_JOINED` / `SPACE_MEMBER_LEFT` are the
 **peer-replicated, space-authority-signed roster gossip** — the host emits
