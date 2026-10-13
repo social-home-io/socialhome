@@ -177,6 +177,7 @@ from .repositories.space_cover_repo import SqliteSpaceCoverRepo
 from .repositories.space_icon_repo import SqliteSpaceIconRepo
 from .repositories.space_sync_watermark_repo import SqliteSpaceSyncWatermarkRepo
 from .repositories.space_zone_repo import SqliteSpaceZoneRepo
+from .repositories.household_zone_repo import SqliteHouseholdZoneRepo
 from .repositories.moment_repo import SqliteMomentRepo
 from .repositories.highlight_repo import SqliteHighlightRepo
 from .repositories.presence_repo import SqlitePresenceRepo
@@ -1175,6 +1176,7 @@ def _build_repos(db: AsyncDatabase):
         alias=SqliteAliasRepo(db),
         pairing_relay=SqlitePairingRelayRepo(db),
         space_zone=SqliteSpaceZoneRepo(db),
+        household_zone=SqliteHouseholdZoneRepo(db),
         space_sync_watermark=SqliteSpaceSyncWatermarkRepo(db),
         password_reset=SqlitePasswordResetRepo(db),
         auth_audit_log=SqliteAuthAuditLogRepo(db),
