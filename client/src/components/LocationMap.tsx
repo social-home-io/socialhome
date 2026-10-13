@@ -33,7 +33,6 @@ import {
   groupByZone,
   mergeOverlapping,
   personColorToken,
-  zoneBounds,
   type BubbleExtent,
   type MarkerGroup,
 } from '@/utils/mapMarkers'
@@ -141,12 +140,16 @@ function _avatarHtml(m: LocationMarker, selected: boolean): string {
   )
 }
 
-/** Space kept around the fitted anchors, and the height a bubble
- *  rises above its anchor (avatar + padding + tail + zone gap). */
-const FIT_PADDING_PX = 32
-const BUBBLE_HEIGHT_PX = 80
 /** Avatar edge (desktop; phones draw 36 px — 40 keeps merging safe). */
 const AVATAR_PX = 40
+/** A bubble body's padding + border around its avatars (CSS 5 + 1, ×2). */
+const BUBBLE_CHROME_PX = 12
+/** Full-size zone centre marker (CSS ``.sh-map-zone``). */
+const ZONE_MARKER_PX = 36
+/** Breathing room between a fitted marker and the map edge. */
+const EDGE_PX = 12
+/** Side padding when fitting the view. */
+const FIT_SIDE_PX = 32
 /** Clearance kept between two bubbles before they merge. */
 const BUBBLE_GAP_PX = 6
 /** How far above its anchor a bubble's box ends (CSS ``--sh-map-gap``
@@ -159,6 +162,16 @@ const COMPACT_ZONE_PX = 26
  *  zone counts as already shown). */
 const GROUP_MAX_ZOOM = 18
 const GROUP_FIT_PADDING: [number, number] = [48, 48]
+/** Pixel room when fitting the view: above the anchors a whole zone
+ *  bubble (it floats highest), below them half a zone marker. */
+const FIT_PADDING_TOP_LEFT: [number, number] = [
+  FIT_SIDE_PX, LIFT_PX.zone + AVATAR_PX + BUBBLE_CHROME_PX + EDGE_PX,
+]
+const FIT_PADDING_BOTTOM_RIGHT: [number, number] = [
+  FIT_SIDE_PX, ZONE_MARKER_PX / 2 + EDGE_PX,
+]
+/** Closest the initial fit zooms in. */
+const FIT_MAX_ZOOM = 16
 
 type _Kind = 'zone' | 'solo' | 'group'
 
@@ -206,8 +219,8 @@ function _bubbleHtml(
 function _extent(g: MarkerGroup<LocationMarker>, selected: string | null): BubbleExtent {
   const { shown, overflow } = bubbleSlots(g.members)
   const n = shown.length
-  const w = 12 + n * AVATAR_PX + (n - 1) * 4 + (overflow > 0 ? 40 : 0)
-  const h = AVATAR_PX + 12 + (g.members.some((m) => m.id === selected) ? 28 : 0)
+  const w = BUBBLE_CHROME_PX + n * AVATAR_PX + (n - 1) * 4 + (overflow > 0 ? 40 : 0)
+  const h = AVATAR_PX + BUBBLE_CHROME_PX + (g.members.some((m) => m.id === selected) ? 28 : 0)
   return { w, h, lift: LIFT_PX[_kind(g)] }
 }
 
@@ -618,13 +631,16 @@ export function LocationMap({
     }
 
     // Fit to where the bubbles point (zone centres for zoned people, own
-    // points for everyone else) plus every zone's whole circle.
+    // points for everyone else) plus every zone's centre. A zone's radius
+    // only matters once zoomed to that zone (the zone-click path fits the
+    // whole circle); fitting every circle here zoomed a level too far out
+    // and merged everyone.
     const anchors: Array<[number, number]> = [
       ...groupByZone(current.filter((m) => !_isPlace(m)), zoneList)
         .map((g): [number, number] => [g.lat, g.lon]),
       ...current.filter((m) => _isPlace(m) && _finite(m.lat) && _finite(m.lon))
         .map((m): [number, number] => [m.lat as number, m.lon as number]),
-      ...zoneList.flatMap((z) => zoneBounds(z)),
+      ...zoneList.map((z): [number, number] => [z.latitude, z.longitude]),
     ]
     if (anchors.length === 1) {
       // In pick mode keep the user's zoom when they move the pin — a
@@ -632,18 +648,12 @@ export function LocationMap({
       const zoom = onPickRef.current ? Math.max(map.getZoom(), 14) : 14
       map.setView(anchors[0], zoom)
     } else if (anchors.length > 1) {
-      // Bubbles float above their anchor, so leave room at the top for a
-      // whole bubble — otherwise the northernmost one is clipped. Capped
-      // at 40 % of the map so a short (dashboard / phone) map still has
-      // room left for the anchors themselves.
-      const mapHeight = map.getSize?.()?.y ?? 0
-      const top = Math.min(
-        FIT_PADDING_PX + BUBBLE_HEIGHT_PX, Math.max(FIT_PADDING_PX, mapHeight * 0.4),
-      )
+      // Pixel padding, no ``pad()`` inflation: room above for a whole
+      // bubble (they float above their anchor), below for a zone marker.
       map.fitBounds(L.latLngBounds(anchors), {
-        paddingTopLeft: [FIT_PADDING_PX, top],
-        paddingBottomRight: [FIT_PADDING_PX, FIT_PADDING_PX],
-        maxZoom: 15,
+        paddingTopLeft: FIT_PADDING_TOP_LEFT,
+        paddingBottomRight: FIT_PADDING_BOTTOM_RIGHT,
+        maxZoom: FIT_MAX_ZOOM,
       })
     }
     // Draw after the view settles so the merge sees the final zoom.

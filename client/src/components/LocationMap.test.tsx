@@ -589,23 +589,45 @@ describe('LocationMap viewport', () => {
     expect(opts.paddingTopLeft[1]).toBeGreaterThan(opts.paddingBottomRight[1])
   })
 
-  it('caps the headroom on a short map so the anchors still fit', async () => {
-    fakeMap.getSize.mockReturnValue({ x: 360, y: 160 })
+  it('fits the seeded family layout with fixed pixel padding at zone centres', async () => {
     const { render } = await import('@testing-library/preact')
+    const L = (await import('leaflet')).default
     const { LocationMap } = await import('./LocationMap')
-    render(
-      <LocationMap
-        markers={[
-          { id: 'a', label: 'Anna', lat: 47, lon: 8 },
-          { id: 'b', label: 'Ben', lat: 47.1, lon: 8.1 },
-        ]}
-      />,
-    )
-    const opts = fakeMap.fitBounds.mock.calls.at(-1)![1] as {
+    // Four zones ~1.5 km apart, five people at Home, two at School, one
+    // out and about — the layout of the visual check.
+    const zone = (id: string, lat: number, lon: number, r: number) => ({
+      id, name: id, latitude: lat, longitude: lon, radius_m: r, color: null,
+    })
+    const zones = [
+      zone('home', 47.3769, 8.5417, 250), zone('school', 47.39, 8.515, 250),
+      zone('work', 47.36, 8.53, 300), zone('gym', 47.366, 8.555, 200),
+    ]
+    const people = [
+      ...['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, label: id, lat: 47.377, lon: 8.5418 })),
+      ...['f', 'g'].map((id) => ({ id, label: id, lat: 47.39, lon: 8.515 })),
+      { id: 'h', label: 'h', lat: 47.37, lon: 8.508 },
+    ]
+    const bounds = { pad: vi.fn(), extend: vi.fn() }
+    vi.mocked(L.latLngBounds).mockReturnValueOnce(bounds as never)
+    render(<LocationMap markers={people} zones={zones} />)
+    const anchors = vi.mocked(L.latLngBounds).mock.calls[0][0] as unknown as Array<[number, number]>
+    // Zone centres, never the radius corners (a radius only matters once
+    // zoomed to that zone).
+    for (const z of zones) expect(anchors).toContainEqual([z.latitude, z.longitude])
+    const lats = anchors.map((a) => a[0])
+    expect(Math.max(...lats)).toBe(47.39)
+    expect(Math.min(...lats)).toBe(47.36)
+    const [b, opts] = fakeMap.fitBounds.mock.calls.at(-1)! as [unknown, {
       paddingTopLeft: [number, number], paddingBottomRight: [number, number],
-    }
-    expect(opts.paddingTopLeft[1] + opts.paddingBottomRight[1]).toBeLessThan(160 * 0.7)
-    fakeMap.getSize.mockReturnValue({ x: 800, y: 400 })
+      maxZoom: number, padding?: unknown,
+    }]
+    // The bounds go in as-is — no ``pad()`` inflation on top of the
+    // pixel padding.
+    expect(b).toBe(bounds)
+    expect(bounds.pad).not.toHaveBeenCalled()
+    expect(opts.paddingTopLeft).toEqual([32, 83])
+    expect(opts.paddingBottomRight).toEqual([32, 30])
+    expect(opts.maxZoom).toBe(16)
   })
 })
 
@@ -762,7 +784,7 @@ describe('LocationMap zones', () => {
     color: null, icon: '💼',
   }
 
-  it('fits the view to the people and every zone', async () => {
+  it('fits the view to the people and every zone centre', async () => {
     const { render } = await import('@testing-library/preact')
     const L = (await import('leaflet')).default
     const { LocationMap } = await import('./LocationMap')
@@ -770,9 +792,9 @@ describe('LocationMap zones', () => {
     expect(fakeMap.fitBounds).toHaveBeenCalled()
     const anchors = vi.mocked(L.latLngBounds).mock.calls.at(-1)![0] as Array<[number, number]>
     const lats = anchors.map((a) => a[0])
-    // Anna plus the far edge of the Work zone's circle.
+    // Anna plus the Work zone's centre.
     expect(lats).toContain(47)
-    expect(Math.max(...lats)).toBeGreaterThan(47.3)
+    expect(anchors).toContainEqual([47.3, 8.3])
     expect(fakeMap.setView).not.toHaveBeenCalled()
   })
 
