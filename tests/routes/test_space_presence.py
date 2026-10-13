@@ -582,3 +582,27 @@ async def test_zone_only_entries_carry_a_signed_picture_url(client):
     [e] = (await r.json())["entries"]
     assert e["picture_url"].startswith(f"api/users/{client._uid}/picture?v=cafe02")
     assert "sig=" in e["picture_url"]
+
+
+async def test_remote_pin_picture_hash_is_url_encoded(client):
+    """A remote ``picture_hash`` arrives over federation: a ``&`` in it
+    must not smuggle an extra query parameter into the picture URL."""
+    space_id = await _create_space(client)
+    await _enable_feature_location(client, space_id, enabled=True)
+    await _seed_remote_member(
+        client, space_id, instance_id="peer-x", user_id="uid-x", display_name="X"
+    )
+    await client._db.enqueue(
+        "INSERT INTO remote_users"
+        "(user_id, instance_id, remote_username, display_name,"
+        " picture_hash, synced_at, deprovisioned_at)"
+        " VALUES(?,?,?,?,?, datetime('now'), NULL)",
+        ("uid-x", "peer-x", "x", "X", "ab&sig=evil"),
+    )
+    await _seed_remote_pin(
+        client, space_id, instance_id="peer-x", user_id="uid-x", lat=48.1, lon=11.5
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    entry = next(e for e in (await r.json())["entries"] if e["user_id"] == "uid-x")
+    assert "v=ab%26sig%3Devil" in entry["picture_url"]
+    assert entry["picture_url"].count("sig=") == 1

@@ -13,6 +13,7 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
 import math
+from urllib.parse import quote
 
 from ..app_keys import (
     alias_resolver_key,
@@ -2229,7 +2230,9 @@ async def _remote_member_pin_entries(
         # on another household").
         picture_hash = remote_user.picture_hash if remote_user is not None else None
         picture_url = (
-            f"api/users/{loc.user_id}/picture?v={picture_hash}"
+            # The hash comes over federation — encode it so it can't add
+            # query parameters of its own.
+            f"api/users/{loc.user_id}/picture?v={quote(picture_hash, safe='')}"
             if picture_hash
             else None
         )
