@@ -1245,6 +1245,25 @@ per panel (429 + `Retry-After`, see Rate limits).
 | GET | `/api/display/v1/avatar/{user_id}?size=N` | Bearer. The person's picture as an N × N PNG (`N` ∈ 48, 64, 96, 128, 192; default 96; 400 `BAD_SIZE` otherwise), transcoded off the event loop and cached by picture hash. Same rule as `/avatar/{user_id}`: 404 for anyone hidden, inactive or unknown and for no picture. `ETag` `"<picture hash>-<N>"`. |
 | GET | `/api/display/v1/emoji/{code}?size=N` | Bearer. A bundled Twemoji PNG (`code` is the Twemoji code the payloads carry, e.g. `1f3ca`; `N` ∈ 24, 32, 48, 64, 72, 96, 128; default 72). An emoji the bundle lacks is 📍 (`1f4cd`). Graphics: Twemoji v17.0.3, CC-BY 4.0. |
 
+**Finding the dashboard (mDNS).** Where the platform shares the host's
+network (standalone, `ha` mode — not the Home Assistant App), the running
+dashboard announces itself on the LAN as a DNS-SD service, so a panel can
+find it without a typed address. The announcement follows the listener
+(on with the dashboard, moved on a port change, withdrawn when it stops).
+
+| Field | Value |
+|---|---|
+| Service type | `_socialhome-dash._tcp.local.` |
+| Instance name | `Social Home <id>` (`<id>`: 6 hex characters of a domain-separated SHA-256 of the instance's secret identity seed — stable, and not computable from the public instance id, so paired households or a GFS can't recognise the household on a shared network). On a name clash the responder appends a suffix (`Social Home <id> (2)`). |
+| Host / port | `socialhome-<id>.local.`, the dashboard port; A/AAAA = the host's LAN addresses (loopback, link-local and container / VPN interfaces skipped) |
+| TXT `api` | `1` — major version of the API under `path` |
+| TXT `id` | `<id>` — tells two households apart |
+| TXT `path` | `/api/display/v1/` |
+
+Nothing else is announced — no household name, member data or software
+version. A panel must ignore unknown TXT keys and accept only `api`
+versions it speaks.
+
 **A locked tablet** (cookie lock claim, while a PIN is set) reaches only `/lock`, `/unlock` and the public paths (`/login`, `/enter`, `/logout`, `/static/…`, `/healthz`). Everything else is answered by the session guard: a page view (`GET` / `HEAD`, e.g. `/`, `/p/{id}`) gets **200 with the lock screen** (household name, clock, date, PIN form — nothing about any person; a 200, not a redirect, so a reload stays locked); `/fragment/…` gets **200 with header `X-Dashboard-Locked: 1` and the body `<div data-dashboard-locked="1"></div>`** — page JS must check the header and reload into the lock screen instead of painting it; `/avatar/…` and any other method get **423**.
 
 Every page loads `/static/dashboard.js`, which reloads a page restored from the browser's back/forward cache (`pageshow` with `persisted`), so a page rendered before the lock is never shown again. Only page loads renew the session cookie — an allow-list: `GET` / `HEAD` of `/` and `/p/{id}`; never `/fragment/…`, `/avatar/…`, `/static/…` or a `POST`, whose response could land after a `/lock` and overwrite the locked cookie. Midnight reloads and the idle return first probe the server and stay on the page while it is unreachable. On `/` and `/p/{id}` the script also polls the matching `/fragment/…` every 30 s: `X-Dashboard-Locked` → `location.replace('/')` (the lock screen), 401 → `/login?next=<path>`, 404 → `/`.

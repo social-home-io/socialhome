@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import Protocol
 
 from aiohttp import web
 
@@ -19,7 +20,20 @@ from ..domain.household_dashboard import DashboardPortInUseError, DashboardSetti
 
 log = logging.getLogger(__name__)
 
-__all__ = ["DashboardServer"]
+__all__ = ["DashboardServer", "PortAdvertiser"]
+
+
+class PortAdvertiser(Protocol):
+    """Announces the listening port on the network
+    (:class:`~socialhome.dashboard.advertiser.DisplayAdvertiser`).
+
+    Both methods are fail-soft: they never raise, so a broken multicast
+    setup can't take the dashboard down with it.
+    """
+
+    async def advertise(self, port: int) -> None: ...
+
+    async def withdraw(self) -> None: ...
 
 
 class DashboardServer:
@@ -28,13 +42,23 @@ class DashboardServer:
     ``build_app`` is called inside the async start path, so it must do no
     blocking work (no filesystem reads) — pass it a pre-built
     :class:`~socialhome.dashboard.render.DashboardRenderer`.
+
+    ``advertiser`` (when the platform can announce on the LAN) follows the
+    listener: announced on every successful bind, withdrawn on stop.
     """
 
-    __slots__ = ("_build_app", "_host", "_runner", "_port", "_lock")
+    __slots__ = ("_build_app", "_host", "_advertiser", "_runner", "_port", "_lock")
 
-    def __init__(self, build_app: Callable[[], web.Application], host: str) -> None:
+    def __init__(
+        self,
+        build_app: Callable[[], web.Application],
+        host: str,
+        *,
+        advertiser: PortAdvertiser | None = None,
+    ) -> None:
         self._build_app = build_app
         self._host = host
+        self._advertiser = advertiser
         self._runner: web.AppRunner | None = None
         self._port: int | None = None
         # Serialises start / stop / apply so two settings changes can't
@@ -82,6 +106,8 @@ class DashboardServer:
         if old is not None:
             await old.cleanup()
         log.info("household dashboard listening on %s:%d", self._host, port)
+        if self._advertiser is not None:
+            await self._advertiser.advertise(port)
 
     async def _bind(self, port: int) -> web.AppRunner:
         """A set-up runner listening on ``port``; nothing changes on failure."""
@@ -106,5 +132,7 @@ class DashboardServer:
     async def _stop_unlocked(self) -> None:
         runner, self._runner, self._port = self._runner, None, None
         if runner is not None:
+            if self._advertiser is not None:
+                await self._advertiser.withdraw()
             await runner.cleanup()
             log.info("household dashboard stopped")

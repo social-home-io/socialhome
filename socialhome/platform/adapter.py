@@ -155,6 +155,12 @@ class Capability(StrEnum):
     #: Adapter has a :class:`ZoneSource` — the household's zones can be
     #: synced from the platform (Admin › Zones shows the sync toggle).
     ZONE_SYNC = "zone_sync"
+    #: The process shares the host's network, so an mDNS announcement
+    #: reaches the LAN — the household dashboard announces itself to wall
+    #: panels (``_socialhome-dash._tcp``). Off for the Home Assistant
+    #: App: its container sits on the Supervisor's bridge network
+    #: (no ``host_network``), where multicast never reaches the LAN.
+    MDNS_ADVERTISE = "mdns_advertise"
 
 
 # ── Provider Protocols ───────────────────────────────────────────────────────

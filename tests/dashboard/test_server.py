@@ -146,3 +146,66 @@ async def test_start_on_the_running_port_restarts(server):
     assert server.running_port == p1
     assert server._runner is not runner
     assert await _get(p1) == "hi"
+
+
+class RecordingAdvertiser:
+    """Records the advertise / withdraw calls the server makes."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+
+    async def advertise(self, port: int) -> None:
+        self.calls.append(("advertise", port))
+
+    async def withdraw(self) -> None:
+        self.calls.append(("withdraw", None))
+
+
+async def test_apply_drives_the_advertiser():
+    adv = RecordingAdvertiser()
+    srv = DashboardServer(_build, HOST, advertiser=adv)
+    p1, p2 = _free_port(), _free_port()
+    try:
+        await srv.apply(DashboardSettings(enabled=True, port=p1))
+        await srv.apply(DashboardSettings(enabled=True, port=p1))  # no-op
+        await srv.apply(DashboardSettings(enabled=True, port=p2))  # rebind
+        await srv.apply(DashboardSettings(enabled=False, port=p2))
+        await srv.apply(DashboardSettings(enabled=False, port=p2))  # already off
+    finally:
+        await srv.stop()
+    assert adv.calls == [
+        ("advertise", p1),
+        ("advertise", p2),
+        ("withdraw", None),
+    ]
+
+
+async def test_failed_bind_does_not_touch_the_advertiser():
+    adv = RecordingAdvertiser()
+    srv = DashboardServer(_build, HOST, advertiser=adv)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
+            blocker.bind((HOST, 0))
+            blocker.listen()
+            with pytest.raises(DashboardPortInUseError):
+                await srv.start(blocker.getsockname()[1])
+    finally:
+        await srv.stop()
+    assert adv.calls == []
+
+
+async def test_restart_on_same_port_reannounces():
+    adv = RecordingAdvertiser()
+    srv = DashboardServer(_build, HOST, advertiser=adv)
+    p1 = _free_port()
+    try:
+        await srv.start(p1)
+        await srv.start(p1)
+    finally:
+        await srv.stop()
+    assert adv.calls == [
+        ("advertise", p1),
+        ("withdraw", None),
+        ("advertise", p1),
+        ("withdraw", None),
+    ]

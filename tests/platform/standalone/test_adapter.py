@@ -21,6 +21,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.post import Post, PostType
+from socialhome.platform.adapter import Capability
 from socialhome.platform.standalone.adapter import StandaloneAdapter
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.services.space_public_author import (
@@ -545,3 +546,9 @@ async def test_issue_bearer_token_invalid_credentials_returns_none(db, adapter):
     await adapter.provision_admin(username="admin", password="pw-1")
     assert await adapter.issue_bearer_token("admin", "wrong") is None
     assert await adapter.issue_bearer_token("ghost", "pw-1") is None
+
+
+def test_capabilities_include_mdns_advertise(adapter):
+    """Standalone runs on the host's network — the dashboard announces
+    itself to wall panels over mDNS."""
+    assert Capability.MDNS_ADVERTISE in adapter.capabilities
