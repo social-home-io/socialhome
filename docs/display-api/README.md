@@ -1,0 +1,96 @@
+# Wall-panel JSON API (`/api/display/v1/`)
+
+A wall panel — an ESPHome LVGL display such as the 1280 × 800 panels the
+[esphome-dashboard](https://github.com/social-home-io/esphome-dashboard)
+firmware drives — shows the same household dashboard as the wall tablet,
+but draws it itself from JSON. It talks to the **dashboard port** (default
+`8100`), pairs with a short code and then sends
+`Authorization: Bearer <token>` on every request. The endpoint reference
+(status codes, rate limits) is in [api.md](../api.md#hfs--household-dashboard).
+
+## What the JSON is
+
+- **The tablet's boards, spelled as data.** `socialhome/dashboard/boards.py`
+  builds the view models once; the HTML templates and
+  `socialhome/dashboard/display_json.py` both spell them. A panel shows
+  exactly what the tablet shows — the read model has already applied
+  hidden people, child protection, night mode and the household-chat
+  opt-in. Nothing the tablet doesn't show is in the JSON (no event
+  locations, lesson notes, shopping stores, DMs or notifications).
+- **Pre-formatted, in the household's words.** Every string a person reads
+  comes from the server: times in the household time zone, relative
+  phrases ("in 20 min", "4 min ago"), labels from the dashboard catalog in
+  the dashboard locale. The firmware is locale-free and only lays things
+  out. `GET /theme` carries the few static UI strings (tabs, PIN screen,
+  "Got it", night, offline, pairing) — `{time}` in `offline` is the one
+  placeholder the panel fills.
+- **People once, then ids.** Each board lists the shown `people` (name,
+  initials, colour + ink, avatar path, where they are — never coordinates
+  — and a mention badge); items reference them by id.
+- **Emoji are pictures.** An emoji is `{"text", "code"}`; draw
+  `GET /api/display/v1/emoji/{code}?size=N`. `code` is `null` when the
+  text is not an emoji (a zone without an emoji shows its first letter).
+- **Colours** are validated `#rrggbb` (or `null` for the neutral look),
+  with `ink` (black / white) where text sits on them; notes carry their
+  softened light / dark fill and ink, as on the tablet.
+
+## Polling and caching
+
+Every answer has an `ETag` and `Cache-Control: private, no-cache`. Send
+the tag back in `If-None-Match`; an unchanged board is a `304` with no
+body. The `clock` is truncated to the minute so a board changes at most
+once a minute — keep the panel's own clock on SNTP and show it in
+`clock.tz` / `clock.utc_offset_minutes`. `view_key` changes when the
+layout itself must be rebuilt (night mode, the rail, locale, settings,
+theme colour).
+
+Budgets per panel: 120 JSON reads and 600 images a minute (`429` +
+`Retry-After`).
+
+## Status codes a panel handles
+
+| Status | Meaning | What the panel does |
+|---|---|---|
+| `401` | No / unknown token (also after "Sign out all tablets" or removal) | Forget the token, pair again |
+| `404 TAB_OFF` | The tab doesn't show (chat off, stickies off, nobody located) | Go to Overview |
+| `404 NOT_FOUND` | Unknown or hidden person | Go to Overview |
+| `409 NIGHT` | A tab other than Overview at night | Go to Overview |
+| `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`) |
+| `429` | Over the read budget | Wait `Retry-After` seconds |
+
+## Versioning
+
+- The path carries the major version (`/api/display/v1/`) and every JSON
+  body carries `"api_version": 1`.
+- **Additive changes keep v1**: a new field, a new optional section, a new
+  enum value the schema documents. Panels must ignore fields they don't
+  know. The schemas here are strict (`additionalProperties: false`) so a
+  new field can't ship without being documented — they describe what the
+  server sends, they don't ask panels to reject extras.
+- **Breaking changes move to `/api/display/v2/`**: removing or renaming a
+  field, changing a type or a meaning. v1 then stays served until the
+  firmware that needs it is gone.
+
+## Contract files
+
+- [`v1/*.schema.json`](./v1/) — JSON Schema (draft 2020-12), one per
+  endpoint plus `common.schema.json` (shared definitions) and
+  `error.schema.json` / `lock.schema.json`.
+- [`v1/fixtures/`](./v1/fixtures/) — real answers for a seeded household
+  (four people, a school day, the chat on, mentions, people on the map).
+  `tests/dashboard/test_display_api.py` validates every endpoint's real
+  payload against its schema and compares it with these fixtures;
+  regenerate them after an intended change with
+  `SH_UPDATE_DISPLAY_FIXTURES=1 pytest tests/dashboard/test_display_api.py`.
+  The firmware repository pins the same fixtures for its screenshot tests.
+
+## Emoji attribution
+
+The emoji images are **Twemoji** (<https://github.com/jdecked/twemoji>,
+v17.0.3, 72 × 72 PNGs), © Twitter, Inc and other contributors, © jdecked
+and other contributors, licensed under
+[CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). Only the subset
+the dashboard can show is bundled (`socialhome/dashboard/static/emoji/`,
+licence note alongside); `scripts/fetch_twemoji.py` refreshes it. Nothing
+is fetched at runtime. Panels showing these images should credit Twemoji
+(e.g. on their about / settings screen).

@@ -1474,6 +1474,23 @@ drives it) and is then served by a **separate aiohttp application on its own por
   `last_seen_at` / firmware / model (`X-Display-Firmware` /
   `X-Display-Model`, printable ASCII, ≤64 chars) are written at most once a
   minute. Tokens are never logged.
+- **Wall-panel JSON (API v1).** A panel renders the same boards as the
+  tablet, from JSON: `GET /api/display/v1/home` · `messages` · `notes` ·
+  `map` · `person/{id}` · `theme`. There is one source for what a board
+  shows — `dashboard/boards.py` builds the view models (tabs, banners,
+  Overview, timeline, person page, picture view, map) once, and both the
+  Jinja templates and `dashboard/display_json.py` spell them, so the panel
+  can't drift from the wall. Every string a person reads is pre-formatted
+  on the server (household-zone times, "in 20 min", the dashboard i18n
+  catalog), so the firmware is locale-free and layout-only. Responses carry
+  an `ETag` (`If-None-Match` → 304, so the 30 s poll is cheap; the clock is
+  truncated to the minute for that reason). Images: WebP avatars are
+  transcoded to PNG (`dashboard/avatars.py`) and emoji are served from a
+  bundled Twemoji subset (`dashboard/emoji.py`, CC-BY 4.0) — Pillow runs in
+  `asyncio.to_thread`, nothing is fetched from a third party. A panel whose
+  record is `locked` gets `423` with only the lock-screen data. The contract
+  is the JSON Schemas in `docs/display-api/v1/`; see
+  [display-api/README.md](./display-api/README.md) for versioning.
 - **Privacy lock.** When a guest is around, someone taps 🔒 and the
   tablet shows a neutral lock screen (household name, clock and date in
   the household time zone — no person, picture, presence, event or

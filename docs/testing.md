@@ -124,6 +124,16 @@ code:
 pytest tests/protocol/ -m security
 ```
 
+## Contract tests (wall-panel API)
+
+`tests/dashboard/test_display_api.py` validates the real
+`/api/display/v1/` payloads against the JSON Schemas in
+`docs/display-api/v1/` (with `jsonschema`, a dev dependency) and compares
+them with the documented fixtures in `docs/display-api/v1/fixtures/`.
+After an intended payload change, regenerate the fixtures with
+`SH_UPDATE_DISPLAY_FIXTURES=1 pytest tests/dashboard/test_display_api.py`
+and review the diff — the firmware pins the same files.
+
 ## Frontend tests
 
 Frontend tests live in the client tree, not under `tests/`:
