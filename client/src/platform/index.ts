@@ -40,6 +40,9 @@ export const supportsPush = (): boolean => hasCapability('push')
  *  surfaces the HA-users import panel instead of local user creation. */
 export const usesHaUserDirectory = (): boolean =>
   hasCapability('ha_person_directory')
+/** The platform has zones of its own (Home Assistant's `zone.*`) that
+ *  Admin › Zones can sync into the household's zones. */
+export const supportsZoneSync = (): boolean => hasCapability('zone_sync')
 
 // ── Mode-shaped accessors (intent over raw string compares) ──────────────
 

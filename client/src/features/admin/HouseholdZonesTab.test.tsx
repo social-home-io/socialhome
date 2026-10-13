@@ -69,10 +69,11 @@ vi.mock('@/ws', () => ({
 
 const showToast = vi.hoisted(() => vi.fn())
 vi.mock('@/components/Toast', () => ({ showToast }))
-const platform = vi.hoisted(() => ({ ha: false }))
+const platform = vi.hoisted(() => ({ ha: false, zoneSync: false }))
 vi.mock('@/platform', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/platform')>()),
   usesHaUserDirectory: () => platform.ha,
+  supportsZoneSync: () => platform.zoneSync,
 }))
 
 import { ApiError } from '@/api'
@@ -110,6 +111,7 @@ describe('HouseholdZonesTab', () => {
     showToast.mockReset()
     wsHandlers.clear()
     platform.ha = false
+    platform.zoneSync = false
   })
 
   it('tells a Home Assistant household that HA decides who is in which zone', async () => {
@@ -297,5 +299,55 @@ describe('HouseholdZonesTab', () => {
     await findByText(/Presence is turned off/)
     fireEvent.click(getByText('Open Settings'))
     expect(onOpenSettings).toHaveBeenCalled()
+  })
+
+  describe('Home Assistant zone sync', () => {
+    const SYNC_ON = {
+      available: true, enabled: true,
+      last_synced_at: new Date().toISOString(), last_error: null,
+    }
+    const SYNCED_HOME = _zone({
+      id: 'hz_ha_home', name: 'Home', is_home: true, icon: '🏠',
+      external_id: 'zone.home', read_only: true,
+    })
+    const route = (zones: unknown[]) => (path: string) => Promise.resolve(
+      path.endsWith('/sync') ? SYNC_ON : { zones },
+    )
+
+    it('shows the sync switch above the list when the platform has zones', async () => {
+      platform.ha = true
+      platform.zoneSync = true
+      mockApi.get.mockImplementation(route([SYNCED_HOME, WORK]))
+      const { findByRole, findByText } = render(<HouseholdZonesTab onOpenSettings={() => {}} />)
+      await findByText('Work')
+      const toggle = await findByRole('switch', { name: 'Sync zones from Home Assistant' })
+      expect((toggle as HTMLInputElement).checked).toBe(true)
+    })
+
+    it('has no sync switch on a standalone household', async () => {
+      mockApi.get.mockResolvedValue({ zones: [HOME] })
+      const { findByText, queryByRole } = render(<HouseholdZonesTab onOpenSettings={() => {}} />)
+      await findByText('Zürich flat')
+      expect(queryByRole('switch')).toBeNull()
+      expect(mockApi.get).not.toHaveBeenCalledWith('/api/household/zones/sync')
+    })
+
+    it('turning the sync off (after the question) refetches the list', async () => {
+      platform.ha = true
+      platform.zoneSync = true
+      mockApi.get.mockImplementation(route([SYNCED_HOME, WORK, _zone()]))
+      mockApi.patch.mockResolvedValueOnce({ ...SYNC_ON, enabled: false, last_synced_at: null })
+      const { findByRole, findByText, getByText, queryByText } = render(
+        <HouseholdZonesTab onOpenSettings={() => {}} />,
+      )
+      await findByText('Work')
+      fireEvent.click(await findByRole('switch'))
+      getByText(/Your own zones stay/)
+      mockApi.get.mockImplementation(route([_zone()]))
+      fireEvent.click(getByText('Turn off and remove'))
+      await waitFor(() => expect(queryByText('Work')).toBeNull())
+      getByText('School')
+      expect(mockApi.patch).toHaveBeenCalledWith('/api/household/zones/sync', { enabled: false })
+    })
   })
 })
