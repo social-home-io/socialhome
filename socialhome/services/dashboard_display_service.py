@@ -111,7 +111,8 @@ def _clean_name(value: object) -> str:
         raise DashboardSettingsInvalidError("name")
     name = value.strip()
     if not 0 < len(name) <= MAX_DISPLAY_NAME_LENGTH or any(
-        unicodedata.category(ch).startswith("C") and ch not in _NAME_JOINERS
+        (unicodedata.category(ch)[0] == "C" and ch not in _NAME_JOINERS)
+        or unicodedata.category(ch) in ("Zl", "Zp")
         for ch in name
     ):
         raise DashboardSettingsInvalidError("name")
@@ -186,7 +187,14 @@ class DashboardDisplayService:
         now = self._clock()
         self._prune(now)
         while len(self._pending) >= MAX_PENDING_PAIRINGS:
-            del self._pending[next(iter(self._pending))]
+            # The oldest still waiting for its code — never one whose token
+            # is parked for pickup (that would orphan a stored panel); only
+            # when every entry is parked, the oldest of all.
+            victim = next(
+                (p for p, e in self._pending.items() if e.token is None),
+                next(iter(self._pending)),
+            )
+            del self._pending[victim]
             log.info("household dashboard: pairing list full — dropped the oldest")
         pair_id = secrets.token_urlsafe(_PAIR_ID_BYTES)
         code = self._new_code()
@@ -200,17 +208,22 @@ class DashboardDisplayService:
             pair_id=pair_id, code=code, expires_in=PAIRING_TTL_SECONDS
         )
 
-    def poll(self, pair_id: str) -> DisplayPairingStatus | None:
+    async def poll(self, pair_id: str) -> DisplayPairingStatus | None:
         """The pairing's state; ``None`` when unknown or expired. Once
         paired, the token is handed out exactly once and the entry
-        dropped."""
+        dropped — and only while the panel is still paired (removed, or
+        unpaired by an epoch bump, before pickup → ``None``)."""
         self._prune(self._clock())
         entry = self._pending.get(pair_id)
         if entry is None:
             return None
         if entry.token is None:
             return DisplayPairingStatus(paired=False)
-        del self._pending[pair_id]
+        stored = {d.id for d in await self._settings.displays()}
+        if self._pending.pop(pair_id, None) is None:
+            return None  # a concurrent poll collected it during the await
+        if entry.display_id not in stored:
+            return None
         return DisplayPairingStatus(
             paired=True, token=entry.token, display_id=entry.display_id
         )
@@ -279,6 +292,10 @@ class DashboardDisplayService:
         require_admin(actor_is_admin)
         await self._settings.remove_display(display_id)
         self._seen.pop(display_id, None)
+        for pair_id in [
+            p for p, e in self._pending.items() if e.display_id == display_id
+        ]:
+            del self._pending[pair_id]
         log.info("household dashboard: removed display %s", display_id)
 
     # ── Device auth ─────────────────────────────────────────────────────

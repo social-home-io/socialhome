@@ -60,7 +60,11 @@ def is_display_api(path: str) -> bool:
 
 def is_public_display_path(path: str) -> bool:
     """The pairing endpoints — a panel has no token yet."""
-    return path == PAIR_PATH or path.startswith(PAIR_PATH + "/")
+    if path == PAIR_PATH:
+        return True
+    rest = path.removeprefix(PAIR_PATH + "/")
+    # Exactly one non-empty segment — nothing nested below is public.
+    return rest != path and bool(rest) and "/" not in rest
 
 
 def bearer_token(headers: Mapping[str, str]) -> str | None:
@@ -144,7 +148,9 @@ class DisplayPairStatusView(web.View):
     """``GET /api/display/v1/pair/{pair_id}`` — the panel polls for its token."""
 
     async def get(self) -> web.Response:
-        status = self.request.app[DISPLAYS_KEY].poll(self.request.match_info["pair_id"])
+        status = await self.request.app[DISPLAYS_KEY].poll(
+            self.request.match_info["pair_id"]
+        )
         if status is None:
             return error_response(404, "NOT_FOUND", "No such pairing.")
         if not status.paired:

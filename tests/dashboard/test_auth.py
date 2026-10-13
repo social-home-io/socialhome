@@ -786,3 +786,12 @@ def test_pair_start_limit_is_per_client(auth, clock):
     assert auth.global_failure_count == 0
     clock.advance(PAIR_WINDOW_S + 1)
     assert auth.begin_pair("10.0.0.5") == 0
+
+
+def test_pair_limiter_forgets_quiet_addresses(auth, clock):
+    for i in range(50):
+        auth.begin_pair(f"10.0.0.{i}")
+    assert auth.pair_key_count == 50
+    clock.advance(PAIR_WINDOW_S + 1)
+    auth.begin_pair("10.0.1.1")
+    assert auth.pair_key_count == 1

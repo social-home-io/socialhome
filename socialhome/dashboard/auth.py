@@ -253,6 +253,7 @@ class DashboardAuth:
         "_acks",
         "_tiles",
         "_pairs",
+        "_pairs_pruned_at",
         "last_seen_at",
     )
 
@@ -279,6 +280,7 @@ class DashboardAuth:
         self._acks = RateLimiter(monotonic=clock)
         self._tiles = RateLimiter(monotonic=clock)
         self._pairs = RateLimiter(monotonic=clock)
+        self._pairs_pruned_at = clock()
         #: When a signed-in tablet last made a request (unix seconds).
         self.last_seen_at: float | None = None
 
@@ -467,10 +469,20 @@ class DashboardAuth:
         go ahead, else the seconds to wait (nothing is counted then).
         Separate from the password / PIN failure table and never part of
         the global login brake."""
+        now = self._clock()
+        if now - self._pairs_pruned_at > PAIR_WINDOW_S:
+            # Keyed on client addresses, which may never come back.
+            self._pairs.prune(window_s=PAIR_WINDOW_S)
+            self._pairs_pruned_at = now
         key = f"pair:{client_key}"
         if self._pairs.is_allowed(key, limit=PAIR_MAX, window_s=PAIR_WINDOW_S):
             return 0
         return self._pairs.retry_after_s(key, window_s=PAIR_WINDOW_S)
+
+    @property
+    def pair_key_count(self) -> int:
+        """Client addresses the pair-start limiter currently remembers."""
+        return self._pairs.key_count
 
     # ── Throttle ────────────────────────────────────────────────────────
     #

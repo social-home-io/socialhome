@@ -5,6 +5,7 @@ In-memory: a fake ``instance_config`` repo and a settable clock.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -95,7 +96,7 @@ async def _pair(svc: DashboardDisplayService, name: str = "Kitchen"):
     """Start, claim and collect: ``(display, token)``."""
     pairing = await svc.start_pairing(model="esp32-s3-box", firmware="0.1.0")
     display = await svc.claim(actor_is_admin=True, code=pairing.code, name=name)
-    status = svc.poll(pairing.pair_id)
+    status = await svc.poll(pairing.pair_id)
     assert status is not None and status.paired
     assert status.token is not None
     return display, status.token
@@ -120,20 +121,20 @@ async def test_codes_and_ids_are_unique(svc):
 
 async def test_poll_pending(svc):
     pairing = await svc.start_pairing()
-    status = svc.poll(pairing.pair_id)
+    status = await svc.poll(pairing.pair_id)
     assert status is not None
     assert status.paired is False
     assert status.token is None
 
 
 async def test_poll_unknown_is_none(svc):
-    assert svc.poll("nope") is None
+    assert await svc.poll("nope") is None
 
 
 async def test_pending_pairing_expires(svc, clock):
     pairing = await svc.start_pairing()
     clock.now += PAIRING_TTL_SECONDS + 1
-    assert svc.poll(pairing.pair_id) is None
+    assert await svc.poll(pairing.pair_id) is None
     with pytest.raises(DashboardPairingCodeInvalidError):
         await svc.claim(actor_is_admin=True, code=pairing.code, name="Kitchen")
 
@@ -142,7 +143,7 @@ async def test_oldest_pending_is_evicted(svc):
     first = await svc.start_pairing()
     for _ in range(MAX_PENDING_PAIRINGS):
         await svc.start_pairing()
-    assert svc.poll(first.pair_id) is None
+    assert await svc.poll(first.pair_id) is None
     assert svc.pending_count == MAX_PENDING_PAIRINGS
 
 
@@ -177,12 +178,12 @@ async def test_claim_pairs_and_token_is_collected_once(svc, settings):
     assert (display.model, display.firmware) == ("m", "f")
     assert display.last_seen_at is None
     assert display.created_at.endswith("+00:00")
-    status = svc.poll(pairing.pair_id)
+    status = await svc.poll(pairing.pair_id)
     assert status is not None and status.paired
     assert status.display_id == display.id
     assert status.token is not None and len(status.token) >= 43
     # Exactly once: the entry is gone after the token was handed out.
-    assert svc.poll(pairing.pair_id) is None
+    assert await svc.poll(pairing.pair_id) is None
     # Only the SHA-256 is stored.
     stored = (await settings.displays())[0]
     assert stored.token_hash == hashlib.sha256(status.token.encode()).hexdigest()
@@ -283,7 +284,7 @@ async def test_display_limit(svc):
     with pytest.raises(DashboardDisplayLimitError):
         await svc.claim(actor_is_admin=True, code=pairing.code, name="One more")
     # Nothing to collect for the refused panel.
-    status = svc.poll(pairing.pair_id)
+    status = await svc.poll(pairing.pair_id)
     assert status is not None and not status.paired
 
 
@@ -292,7 +293,7 @@ async def test_paired_token_pickup_gets_a_fresh_window(svc, clock):
     clock.now += PAIRING_TTL_SECONDS - 5
     await svc.claim(actor_is_admin=True, code=pairing.code, name="K")
     clock.now += 60
-    status = svc.poll(pairing.pair_id)
+    status = await svc.poll(pairing.pair_id)
     assert status is not None and status.paired
 
 
@@ -398,3 +399,48 @@ async def test_remove(svc):
     assert await svc.list(actor_is_admin=True) == ()
     with pytest.raises(DashboardDisplayNotFoundError):
         await svc.remove(actor_is_admin=True, display_id=d.id)
+
+
+# ── review regressions ──────────────────────────────────────────────────
+
+
+async def test_parked_token_is_dropped_when_the_display_is_removed(svc):
+    pairing = await svc.start_pairing()
+    display = await svc.claim(actor_is_admin=True, code=pairing.code, name="K")
+    await svc.remove(actor_is_admin=True, display_id=display.id)
+    # The panel never gets a token that can't work.
+    assert await svc.poll(pairing.pair_id) is None
+
+
+async def test_parked_token_is_dropped_after_sign_out_all(svc, settings):
+    pairing = await svc.start_pairing()
+    await svc.claim(actor_is_admin=True, code=pairing.code, name="K")
+    await settings.revoke_sessions(actor_is_admin=True)
+    assert await svc.poll(pairing.pair_id) is None
+
+
+async def test_eviction_spares_claimed_pairings(svc):
+    first = await svc.start_pairing()
+    await svc.claim(actor_is_admin=True, code=first.code, name="K")
+    second = await svc.start_pairing()
+    for _ in range(MAX_PENDING_PAIRINGS):
+        await svc.start_pairing()
+    status = await svc.poll(first.pair_id)
+    assert status is not None and status.paired
+    assert await svc.poll(second.pair_id) is None
+
+
+async def test_seen_racing_remove_never_resurrects(svc, settings):
+    display, _ = await _pair(svc)
+    await asyncio.gather(
+        svc.seen(display, firmware="9", model=None),
+        svc.remove(actor_is_admin=True, display_id=display.id),
+    )
+    assert await settings.displays() == ()
+
+
+@pytest.mark.parametrize("name", ["a\u2028b", "a\u2029b"])
+async def test_claim_name_refuses_line_separators(svc, name):
+    pairing = await svc.start_pairing()
+    with pytest.raises(DashboardSettingsInvalidError):
+        await svc.claim(actor_is_admin=True, code=pairing.code, name=name)

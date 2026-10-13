@@ -99,6 +99,9 @@ def test_path_helpers():
     assert not is_display_api("/api/display/v1")
     assert is_public_display_path(PAIR)
     assert is_public_display_path(f"{PAIR}/abc")
+    # Only the pairing routes themselves — never anything nested below.
+    assert not is_public_display_path(f"{PAIR}/abc/def")
+    assert not is_public_display_path(f"{PAIR}/")
     assert not is_public_display_path(f"{PAIR}x")
     assert not is_public_display_path(WHOAMI)
 
