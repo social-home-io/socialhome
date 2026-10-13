@@ -45,6 +45,7 @@ const fakeMap = {
   remove: vi.fn(),
   invalidateSize: vi.fn(),
   setView: vi.fn(),
+  panBy: vi.fn(),
   fitBounds: vi.fn(),
   closePopup: vi.fn(),
   getZoom: vi.fn(() => view.zoom),
@@ -992,5 +993,154 @@ describe('LocationMap read-only attribution', () => {
     const opts = vi.mocked(L.map).mock.calls[0][1] as Record<string, unknown>
     expect(opts.attributionControl).toBe(true)
     expect(container.querySelector('.sh-location-map__attribution')).toBeNull()
+  })
+})
+
+describe('LocationMap fit insets', () => {
+  const two = [
+    { id: 'a', label: 'Anna', lat: 47, lon: 8 },
+    { id: 'b', label: 'Ben', lat: 47.1, lon: 8.1 },
+  ]
+  type FitOpts = {
+    paddingTopLeft: [number, number], paddingBottomRight: [number, number], maxZoom: number,
+  }
+
+  it('adds the insets of a panel over the map to the fit padding', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(<LocationMap markers={two} fitInsets={{ bottom: 120, right: 10 }} />)
+    const opts = fakeMap.fitBounds.mock.calls.at(-1)![1] as FitOpts
+    // Same as without insets ([76, 83] / [32, 30]) plus the panel.
+    expect(opts.paddingTopLeft).toEqual([32 + 44, 83])
+    expect(opts.paddingBottomRight).toEqual([32 + 10, 30 + 120])
+  })
+
+  it('keeps a single anchor centred in the part of the map left visible', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(<LocationMap markers={[two[0]]} fitInsets={{ bottom: 120 }} />)
+    expect(fakeMap.setView).toHaveBeenCalledWith([47, 8], 14)
+    // Content moves up by half the covered strip.
+    expect(fakeMap.panBy).toHaveBeenCalledWith([0, 60], { animate: false })
+  })
+
+  it('does not pan a single anchor without insets', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(<LocationMap markers={[two[0]]} />)
+    expect(fakeMap.panBy).not.toHaveBeenCalled()
+  })
+})
+
+describe('LocationMap zoom to selection', () => {
+  const home = {
+    id: 'z-home', name: 'Home', latitude: 47, longitude: 8, radius_m: 200,
+    color: null, icon: '🏠',
+  }
+  const people = [
+    { id: 'a', label: 'Anna', lat: 47.0001, lon: 8.0001 },
+    { id: 'c', label: 'Cara', lat: 46.5, lon: 7.5 },
+  ]
+  type FitOpts = {
+    paddingTopLeft: [number, number], paddingBottomRight: [number, number], maxZoom: number,
+  }
+  const lastBounds = async () => {
+    const L = (await import('leaflet')).default
+    return vi.mocked(L.latLngBounds).mock.calls.at(-1)![0] as unknown as Array<[number, number]>
+  }
+
+  it('zooms to street level on a selected person, clear of the panel', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(
+      <LocationMap markers={people} zones={[home]} zoomToSelection selectedId={null}
+                   fitInsets={{ bottom: 200 }} />,
+    )
+    fakeMap.fitBounds.mockClear()
+    rerender(
+      <LocationMap markers={people} zones={[home]} zoomToSelection selectedId="c"
+                   fitInsets={{ bottom: 200 }} />,
+    )
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+    expect(await lastBounds()).toEqual([[46.5, 7.5], [46.5, 7.5]])
+    const opts = fakeMap.fitBounds.mock.calls[0][1] as FitOpts
+    expect(opts.maxZoom).toBe(17)
+    expect(opts.paddingBottomRight[1]).toBe(30 + 200)
+  })
+
+  it('zooms a person inside a zone to where their bubble is drawn', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(
+      <LocationMap markers={people} zones={[home]} zoomToSelection selectedId={null} />,
+    )
+    rerender(<LocationMap markers={people} zones={[home]} zoomToSelection selectedId="a" />)
+    // The zone centre — the shared bubble's anchor.
+    expect(await lastBounds()).toEqual([[47, 8], [47, 8]])
+  })
+
+  it('fits a selected zone with its whole radius', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(
+      <LocationMap markers={people} zones={[home]} zoomToSelection selectedId={null} />,
+    )
+    fakeMap.fitBounds.mockClear()
+    rerender(<LocationMap markers={people} zones={[home]} zoomToSelection selectedId="zone:z-home" />)
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+    const [[s, w], [n, e]] = await lastBounds()
+    expect(s).toBeLessThan(47)
+    expect(n).toBeGreaterThan(47)
+    expect(w).toBeLessThan(8)
+    expect(e).toBeGreaterThan(8)
+  })
+
+  it('fits everyone again once the selection is cleared', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(
+      <LocationMap markers={people} zones={[home]} zoomToSelection selectedId="c" />,
+    )
+    fakeMap.fitBounds.mockClear()
+    rerender(<LocationMap markers={people} zones={[home]} zoomToSelection selectedId={null} />)
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+    expect((fakeMap.fitBounds.mock.calls[0][1] as FitOpts).maxZoom).toBe(16)
+  })
+
+  it('stays on the selected person when positions update', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(
+      <LocationMap markers={people} zones={[home]} zoomToSelection selectedId="c" />,
+    )
+    fakeMap.fitBounds.mockClear()
+    const moved = [people[0], { ...people[1], lat: 46.6 }]
+    rerender(<LocationMap markers={moved} zones={[home]} zoomToSelection selectedId="c" />)
+    expect(await lastBounds()).toEqual([[46.6, 7.5], [46.6, 7.5]])
+  })
+
+  it('leaves the view alone on selection without zoomToSelection', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { rerender } = render(<LocationMap markers={people} zones={[home]} selectedId={null} />)
+    fakeMap.fitBounds.mockClear()
+    rerender(<LocationMap markers={people} zones={[home]} selectedId="c" />)
+    rerender(<LocationMap markers={people} zones={[home]} selectedId={null} />)
+    expect(fakeMap.fitBounds).not.toHaveBeenCalled()
+  })
+
+  it('a zone bubble click leaves the zoom to the selection', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const two = [people[0], { id: 'b', label: 'Ben', lat: 47.0002, lon: 8.0002 }]
+    const onSelect = vi.fn()
+    render(
+      <LocationMap markers={two} zones={[home]} zoomToSelection selectedId={null}
+                   onSelect={onSelect} />,
+    )
+    fakeMap.fitBounds.mockClear()
+    bubbles()[0].handlers.click()
+    expect(onSelect).toHaveBeenCalledWith('zone:z-home')
+    expect(fakeMap.fitBounds).not.toHaveBeenCalled()
   })
 })
