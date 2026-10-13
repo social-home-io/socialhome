@@ -704,6 +704,15 @@ def _remote_member_to_dict_signed(
     return payload
 
 
+def _signed(request: web.Request, payload: dict) -> dict:
+    """Sign every ``picture_url`` in ``payload`` for direct ``<img src>``
+    use — the picture route answers 401 to an unsigned URL."""
+    signer = request.app.get(media_signer_key)
+    if signer is not None:
+        sign_media_urls_in(payload, signer)
+    return payload
+
+
 def _member_to_dict_signed(
     request: web.Request,
     m,
@@ -2352,13 +2361,16 @@ class SpacePresenceView(BaseView):
                 )
             )
             return web.json_response(
-                {
-                    "feature_enabled": True,
-                    "location_mode": "zone_only",
-                    "entries": response_entries,
-                    "total_members": total_members,
-                    "sharing_count": sharing_count,
-                },
+                _signed(
+                    self.request,
+                    {
+                        "feature_enabled": True,
+                        "location_mode": "zone_only",
+                        "entries": response_entries,
+                        "total_members": total_members,
+                        "sharing_count": sharing_count,
+                    },
+                ),
             )
 
         # gps mode (default)
@@ -2377,13 +2389,16 @@ class SpacePresenceView(BaseView):
         ]
         remote_entries = await _remote_member_pin_entries(self.request, space_id)
         return web.json_response(
-            {
-                "feature_enabled": True,
-                "location_mode": "gps",
-                "entries": local_entries + remote_entries,
-                "total_members": total_members,
-                "sharing_count": sharing_count,
-            }
+            _signed(
+                self.request,
+                {
+                    "feature_enabled": True,
+                    "location_mode": "gps",
+                    "entries": local_entries + remote_entries,
+                    "total_members": total_members,
+                    "sharing_count": sharing_count,
+                },
+            )
         )
 
 

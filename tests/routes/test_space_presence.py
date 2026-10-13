@@ -538,3 +538,44 @@ async def test_presence_total_members_excludes_share_state(client):
     body = await r.json()
     assert body["total_members"] == 2
     assert body["sharing_count"] == 1
+
+
+async def _seed_local_picture(client, picture_hash: str) -> None:
+    await client._db.enqueue(
+        "UPDATE users SET picture_hash=? WHERE username=?",
+        (picture_hash, "admin"),
+    )
+
+
+async def test_gps_entries_carry_a_signed_picture_url(client):
+    """The map pin loads ``picture_url`` straight into ``<img src>``; the
+    picture route answers 401 to an unsigned URL, so it must be signed."""
+    space_id = await _create_space(client)
+    await _enable_feature_location(client, space_id, enabled=True)
+    await _set_member_opt_in(client, space_id, client._uid, enabled=True)
+    await _seed_local_picture(client, "cafe01")
+    await _seed_presence(
+        client, username="admin", user_id=client._uid, lat=47.3769, lon=8.5417
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    [e] = (await r.json())["entries"]
+    assert e["picture_url"].startswith(f"api/users/{client._uid}/picture?v=cafe01")
+    assert "sig=" in e["picture_url"] and "exp=" in e["picture_url"]
+
+
+async def test_zone_only_entries_carry_a_signed_picture_url(client):
+    space_id = await _create_space(client)
+    await _enable_feature_location(client, space_id, enabled=True)
+    await _set_location_mode(client, space_id, "zone_only")
+    await _set_member_opt_in(client, space_id, client._uid, enabled=True)
+    await _seed_local_picture(client, "cafe02")
+    await _seed_zone(
+        client, space_id, zid="z_home", name="Home", lat=47.3769, lon=8.5417
+    )
+    await _seed_presence(
+        client, username="admin", user_id=client._uid, lat=47.3769, lon=8.5417
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    [e] = (await r.json())["entries"]
+    assert e["picture_url"].startswith(f"api/users/{client._uid}/picture?v=cafe02")
+    assert "sig=" in e["picture_url"]
