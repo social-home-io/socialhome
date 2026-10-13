@@ -38,3 +38,12 @@ def test_person_presence_fields():
         zone_name="Home",
     )
     assert pp.zone_name == "Home"
+
+
+def test_location_update_zone_asserted_by_default():
+    """A caller that doesn't say otherwise has stated its zone (``None`` =
+    not in a zone) — the server only matches GPS when told the client
+    stated nothing."""
+    assert LocationUpdate(username="a", state="away").zone_asserted is True
+    lu = LocationUpdate(username="a", state="away", zone_asserted=False)
+    assert lu.zone_asserted is False

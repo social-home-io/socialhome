@@ -317,3 +317,16 @@ async def test_poor_accuracy_guesses_nothing(zoned):
 async def test_non_object_body_is_422(client):
     r = await client.post(_URL, json=[1, 2], headers=_auth(client._tok))
     assert r.status == 422
+
+
+async def test_null_zone_name_key_means_not_in_a_zone(zoned):
+    """The HA integration always sends the ``zone_name`` key — null for
+    HA's not_home / unknown / unavailable. That is a statement, not a
+    gap: no server-side match."""
+    me = await _push(zoned, latitude=52.5201, longitude=13.405, zone_name=None)
+    assert (me["state"], me["zone_name"]) == ("away", None)
+
+
+async def test_explicit_state_is_kept(zoned):
+    me = await _push(zoned, latitude=52.5201, longitude=13.405, state="away")
+    assert (me["state"], me["zone_name"]) == ("away", None)

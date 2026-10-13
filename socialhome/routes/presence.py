@@ -122,9 +122,11 @@ class PresenceLocationView(BaseView):
     and POSTs canonical ``{username, latitude, longitude, accuracy_m,
     zone_name}`` bodies here. The core derives :class:`PresenceState`
     from ``zone_name`` (``home`` / ``zone`` / ``away``) and returns
-    204 No Content. A body without ``zone_name`` (standalone mode, other
-    clients) gets its zone from the server-side match against the
-    household zones in :meth:`PresenceService.update_location`.
+    204 No Content. A body with neither a ``zone_name`` key nor a
+    ``state`` (standalone mode, other clients) gets its zone from the
+    server-side match against the household zones in
+    :meth:`PresenceService.update_location`; ``"zone_name": null`` means
+    "not in a zone" and is kept.
     """
 
     async def post(self) -> web.Response:
@@ -151,7 +153,16 @@ class PresenceLocationView(BaseView):
             )
 
         zone_name = body.get("zone_name")
-        state: PresenceState = body.get("state") or _derive_state(zone_name)
+        explicit_state = body.get("state")
+        state: PresenceState = explicit_state or _derive_state(zone_name)
+        # Did the client state its zone? The HA integration always does:
+        # socialhome-client 2026.5.11 ``client.py:291-299`` ``post_location``
+        # sends the ``zone_name`` key on every push, ``null`` for HA's
+        # not_home / unknown / unavailable (ha-integration
+        # ``custom_components/socialhome/presence.py:89-91,176``) — a
+        # statement "not in a zone", never a gap. Only a body with neither
+        # the key nor a ``state`` gets the server-side household-zone match.
+        zone_asserted = "zone_name" in body or bool(explicit_state)
         lat = body.get("latitude")
         lon = body.get("longitude")
         accuracy = body.get("accuracy_m")
@@ -164,6 +175,7 @@ class PresenceLocationView(BaseView):
                 latitude=float(lat) if lat is not None else None,
                 longitude=float(lon) if lon is not None else None,
                 gps_accuracy_m=float(accuracy) if accuracy is not None else None,
+                zone_asserted=zone_asserted,
             )
         )
         return web.Response(status=204)

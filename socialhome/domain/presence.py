@@ -58,8 +58,10 @@ class PersonPresence:
 @dataclass(slots=True, frozen=True)
 class LocationUpdate:
     """Location push payload for ``POST /api/presence/location`` — from
-    the HA integration (with HA's ``zone_name``) or another client (GPS
-    only; the server then matches the household zones).
+    the HA integration (always with HA's ``zone_name``, ``None`` when HA
+    says not_home) or another client that sends GPS alone
+    (``zone_asserted=False``; the server then matches the household
+    zones).
 
     :class:`PresenceService` truncates coordinates to 4 dp and nulls them
     when ``gps_accuracy_m > 500`` whatever the sender did.
@@ -71,6 +73,10 @@ class LocationUpdate:
     latitude: float | None = None
     longitude: float | None = None
     gps_accuracy_m: float | None = None
+    #: ``True`` when the sender stated its zone — a ``zone_name`` (``None``
+    #: = "not in a zone") or an explicit state. Only an update that stated
+    #: neither (``False``) is matched against the household zones.
+    zone_asserted: bool = True
 
 
 def truncate_coord(value: float | None) -> float | None:

@@ -103,15 +103,19 @@ catalogues below.
 - **Local, never federated.** No federation event carries a household
   zone, and the zone names stay in the household: the space-bound
   payloads above strip `zone_name` as before.
-- **Server-side GPS matching.** `POST /api/presence/location` without a
-  `zone_name` (standalone mode, other clients) but with a usable GPS
-  point — after the 500 m accuracy gate and the 4-decimal truncation —
+- **Server-side GPS matching.** `POST /api/presence/location` with
+  neither a `zone_name` key nor a `state` (standalone mode, other
+  clients) but with a usable GPS point — after the 500 m accuracy gate and the 4-decimal truncation —
   is matched against the household zones: the nearest zone centre
   whose haversine distance is within the zone's radius
   (`domain/zone_geo.py:match_zone`, the same helper the space
-  `zone_only` mode uses). A `zone_name` sent by the client (the Home
-  Assistant integration sends HA's zone state) is never replaced, and
-  a point too inaccurate to store never guesses a zone.
+  `zone_only` mode uses). A stated zone is never replaced: the Home
+  Assistant integration always sends the `zone_name` key
+  (socialhome-client 2026.5.11 `client.py` `post_location`), `null` for
+  HA's not_home / unknown / unavailable (ha-integration
+  `custom_components/socialhome/presence.py`) — that `null` means "not in
+  a zone" and stays `away`. An explicit `state` is kept too, and a point
+  too inaccurate to store never guesses a zone.
 - **The Home zone.** At most one zone is the Home zone (`is_home`; the
   DB allows one). A member inside it gets `zone_name: "home"` and state
   `home` whatever the zone is called; any other zone gives its name and

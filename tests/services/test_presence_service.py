@@ -273,7 +273,12 @@ async def zoned(env):
     return env
 
 
-async def _post_gps(env, lat, lon, *, accuracy=10.0, zone_name=None, state=None):
+async def _post_gps(
+    env, lat, lon, *, accuracy=10.0, zone_name=None, state=None, asserted=None
+):
+    """Default: the client stated no zone (key absent, no state)."""
+    if asserted is None:
+        asserted = zone_name is not None or state is not None
     await env.svc.update_location(
         LocationUpdate(
             username="anna",
@@ -282,6 +287,7 @@ async def _post_gps(env, lat, lon, *, accuracy=10.0, zone_name=None, state=None)
             latitude=lat,
             longitude=lon,
             gps_accuracy_m=accuracy,
+            zone_asserted=asserted,
         )
     )
     return await env.svc.get_presence("anna")
@@ -325,3 +331,15 @@ async def test_match_uses_the_truncated_point(zoned):
     """The match runs on the stored 4-dp point, not raw device precision."""
     p = await _post_gps(zoned, 52.520049999, 13.405049999)
     assert p.latitude == 52.52 and p.zone_name == "home"
+
+
+async def test_asserted_null_zone_stays_away(zoned):
+    """``"zone_name": null`` = the client says "not in a zone" (HA's
+    not_home) — never second-guessed by the server."""
+    p = await _post_gps(zoned, 52.5200, 13.4050, asserted=True)
+    assert (p.state, p.zone_name) == ("away", None)
+
+
+async def test_explicit_state_is_never_overridden(zoned):
+    p = await _post_gps(zoned, 52.5301, 13.4050, state="unavailable")
+    assert (p.state, p.zone_name) == ("unavailable", None)

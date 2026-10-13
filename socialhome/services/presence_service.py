@@ -3,8 +3,9 @@
 Manages the ``presence`` table. Location updates arrive on
 ``POST /api/presence/location``: the Home Assistant integration pushes
 each member's GPS together with HA's zone state as ``zone_name``; other
-clients (standalone mode, companion apps) push GPS alone, and the
-server matches the point against the household zones
+clients (standalone mode, companion apps) push GPS alone — no
+``zone_name`` key, no state — and the server matches the point against
+the household zones
 (:meth:`HouseholdZoneService.match`) to fill ``zone_name`` — the Home
 zone becomes ``"home"`` (state ``home``), another zone its name (state
 ``zone``), no zone leaves the update as sent (``away``).
@@ -123,12 +124,14 @@ class PresenceService(BusPublisherMixin):
         exceeds :data:`MAX_GPS_ACCURACY_M`, coordinates are nulled but
         the zone name is still stored.
 
-        Without a ``zone_name`` but with a usable GPS point (after the
-        accuracy gate and the 4-dp truncation), the point is matched
-        against the household zones: a match sets ``zone_name`` and the
-        state (Home zone → ``"home"`` / ``home``, another → its name /
-        ``zone``). No match keeps the update's state. A ``zone_name``
-        from the client (Home Assistant's zone state) is never replaced.
+        When the client stated no zone at all (``update.zone_asserted`` is
+        ``False``: no ``zone_name`` key, no ``state``) and the GPS point is
+        usable (after the accuracy gate and the 4-dp truncation), the point
+        is matched against the household zones: a match sets ``zone_name``
+        and the state (Home zone → ``"home"`` / ``home``, another → its
+        name / ``zone``); no match keeps ``away``. A stated zone — Home
+        Assistant's, including ``None`` for not_home — or state is never
+        replaced.
 
         Raises :class:`UserNotFoundError` if ``update.username`` is not
         a local user — the FK on ``presence(username)`` would otherwise
@@ -161,7 +164,8 @@ class PresenceService(BusPublisherMixin):
         state = update.state
         zone_name = update.zone_name
         if (
-            not zone_name
+            not update.zone_asserted
+            and not zone_name
             and lat is not None
             and lon is not None
             and self._zones is not None
