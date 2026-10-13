@@ -1,4 +1,15 @@
-import { useEffect } from 'preact/hooks'
+/**
+ * PresencePage — the household's "who is where": your status, the map
+ * with the household zones (people in a zone share its bubble) and the
+ * :component:`MapOverview` beside it (People / Zones; a bottom sheet on
+ * phones), then a card per member.
+ *
+ * A member is placed in a household zone by the zone the server stored
+ * for them (``zone_name``; ``state: home`` is the Home zone), else by the
+ * zone their point is in — the same zone on the map and in the overview's
+ * counts (both use ``personZone``).
+ */
+import { useEffect, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
@@ -9,9 +20,11 @@ import { StatusEditor, formatClearsAt } from '@/components/StatusEditor'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
 import { LocationMap, type LocationMarker } from '@/components/LocationMap'
+import { MapOverview, type OverviewPerson } from '@/components/MapOverview'
 import { currentUser } from '@/store/auth'
 import { presenceLabel } from '@/utils/presenceLabel'
-import type { UserStatus } from '@/types'
+import { personZone } from '@/utils/mapMarkers'
+import type { HouseholdZone, UserStatus } from '@/types'
 
 interface PresenceEntry {
   username: string
@@ -48,6 +61,7 @@ function humanizeAgo(iso: string | null | undefined): string | null {
 }
 
 const presenceList = signal<PresenceEntry[]>([])
+const householdZones = signal<HouseholdZone[]>([])
 const loading = signal(true)
 const showStatusEditor = signal(false)
 
@@ -78,10 +92,38 @@ function loadPresenceList(): Promise<void> {
   })
 }
 
+/** Refetch the household zones (drawn on the map, listed in the
+ *  overview). The endpoint answers 403 while presence is off; the map
+ *  then simply shows no zones. */
+function loadHouseholdZones(): Promise<void> {
+  return api.get<{ zones: HouseholdZone[] }>('/api/household/zones')
+    .then((body) => { householdZones.value = body.zones || [] })
+    .catch(() => { /* keep the last zones */ })
+}
+
+/** The household zone a member is in: the Home zone for ``home``, else
+ *  the zone whose name matches their ``zone_name`` (any case). */
+function memberZone(
+  p: Pick<PresenceEntry, 'state' | 'zone_name'>, zones: readonly HouseholdZone[],
+): HouseholdZone | null {
+  if (p.state === 'home') return zones.find((z) => z.is_home) ?? null
+  const name = p.zone_name?.trim().toLocaleLowerCase()
+  if (!name) return null
+  return zones.find((z) => !z.is_home && z.name.trim().toLocaleLowerCase() === name) ?? null
+}
+
+function _hasPosition(p: PresenceEntry): boolean {
+  return typeof p.latitude === 'number' && typeof p.longitude === 'number'
+}
+
 export default function PresencePage() {
   useTitle(t('nav.presence'))
+  // Person id or ``zone:<id>`` — shared by the map and the overview.
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   useEffect(() => {
     void loadPresenceList()
+    void loadHouseholdZones()
+    const offZones = ws.on('household_zones_changed', () => { void loadHouseholdZones() })
     // Live refresh: presence frames (physical state + GPS) and the
     // session-presence frames (online / idle / offline) both move the
     // roster, so refetch on any of them. Refetch-on-frame keeps this
@@ -105,13 +147,47 @@ export default function PresencePage() {
       }
       refresh()
     })
-    return () => { offUpdated(); offOnline(); offIdle(); offOffline(); offStatus() }
+    return () => { offUpdated(); offOnline(); offIdle(); offOffline(); offStatus(); offZones() }
   }, [])
 
   if (loading.value) return <Spinner />
 
   const myStatus = currentUser.value?.status
   const myLine = statusLine(myStatus)
+  const zones = householdZones.value
+
+  // Everyone the map can place: a GPS point, or (no point) a known zone.
+  const placed = presenceList.value
+    .map((p) => ({ p, zone: memberZone(p, zones) }))
+    .filter(({ p, zone }) => _hasPosition(p) || zone != null)
+  const markers = placed.map<LocationMarker>(({ p, zone }) => ({
+    id: p.user_id,
+    user_id: p.user_id,
+    lat: _hasPosition(p) ? p.latitude : null,
+    lon: _hasPosition(p) ? p.longitude : null,
+    // The stored zone wins over the point, so the bubble and the
+    // overview's count agree.
+    zone_id: zone?.id ?? null,
+    accuracy_m: p.gps_accuracy_m ?? null,
+    label: p.display_name,
+    sub_label: presenceLabel(p.state, p.zone_name),
+    avatar_url: p.picture_url,
+    state: p.state,
+  }))
+  // Counted in the zone the map draws them in: the stored zone, else
+  // the zone their point is in (Home Assistant can say not_home while
+  // the point sits inside a household zone).
+  const people = placed.map<OverviewPerson>(({ p }, i) => ({
+    id: p.user_id,
+    user_id: p.user_id,
+    name: p.display_name,
+    avatar_url: p.picture_url,
+    status: presenceLabel(p.state, p.zone_name),
+    zone_id: personZone(markers[i], zones)?.id ?? null,
+    updated_at: p.updated_at ?? null,
+    online: p.is_online ? (p.is_idle ? 'idle' : 'online') : 'offline',
+    last_seen_at: p.last_seen_at ?? null,
+  }))
 
   return (
     <div class="sh-presence">
@@ -142,31 +218,28 @@ export default function PresencePage() {
 
       <div class="sh-presence-map">
         <h2>{t('presence.who_is_where')}</h2>
-        <LocationMap
-          markers={presenceList.value
-            .filter((p) =>
-              typeof p.latitude === 'number' && typeof p.longitude === 'number',
-            )
-            .map<LocationMarker>((p) => ({
-              id: p.user_id,
-              user_id: p.user_id,
-              lat: p.latitude as number,
-              lon: p.longitude as number,
-              accuracy_m: p.gps_accuracy_m ?? null,
-              label: p.display_name,
-              sub_label: presenceLabel(p.state, p.zone_name),
-              avatar_url: p.picture_url,
-              state: p.state,
-            }))}
-          height={360}
-          emptyLabel={t('presence.no_location')}
+        <MapOverview
+          people={people}
+          zones={zones}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          renderMap={(insets) => (
+            <LocationMap
+              markers={markers}
+              zones={zones}
+              height={360}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              fitInsets={insets}
+              zoomToSelection
+              emptyLabel={t('presence.no_location')}
+            />
+          )}
         />
         <div class="sh-location-map-footer sh-muted">
           <span>
             {t('presence.sharing_count', {
-              n: String(presenceList.value.filter((p) =>
-                typeof p.latitude === 'number' && typeof p.longitude === 'number',
-              ).length),
+              n: String(presenceList.value.filter(_hasPosition).length),
               total: String(presenceList.value.length),
             })}
           </span>

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import en from '@/i18n/locales/en.json'
-import { ZONE_ICON_PRESETS, sortZones } from './zones'
+import { ZONE_ICON_PRESETS, formatRadius, sortZones } from './zones'
 
 describe('sortZones', () => {
   it('orders by name, ignoring case and accents, like Home Assistant', () => {
@@ -59,5 +59,13 @@ describe('ZONE_ICON_PRESETS', () => {
         if (/\p{M}/u.test(ch)) expect([0xFE0E, 0xFE0F, 0x20E3]).toContain(cp)
       }
     }
+  })
+})
+
+describe('formatRadius', () => {
+  it('reads metres below a kilometre, one decimal below ten, whole above', () => {
+    expect(formatRadius(25)).toBe('25 m')
+    expect(formatRadius(1200)).toBe('1.2 km')
+    expect(formatRadius(50_000)).toBe('50 km')
   })
 })

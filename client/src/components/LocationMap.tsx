@@ -33,6 +33,7 @@ import {
   groupByZone,
   mergeOverlapping,
   personColorToken,
+  zoneBounds,
   type BubbleExtent,
   type MarkerGroup,
 } from '@/utils/mapMarkers'
@@ -79,10 +80,19 @@ export interface LocationZoneOverlay {
   icon?: string | null
 }
 
+/** Pixels of the map covered by something drawn over it (the map
+ *  overview's bottom sheet): a fit keeps markers out of that strip. */
+export interface MapInsets {
+  top?: number
+  right?: number
+  bottom?: number
+  left?: number
+}
+
 export interface LocationMapProps {
   markers: LocationMarker[]
-  /** Per-space zones to draw. Optional — household surfaces don't pass
-   *  any. */
+  /** Zones to draw (a space's, or the household's on the presence
+   *  page). Optional. */
   zones?: LocationZoneOverlay[]
   /** Height in CSS pixels. Falls back to 320. */
   height?: number
@@ -105,6 +115,13 @@ export interface LocationMapProps {
    *  markers, no zoom buttons — for a map inside a link (the corner
    *  card stays one link). Read once, on mount. */
   readOnly?: boolean
+  /** Room taken by a panel over the map — added to every fit's padding
+   *  so nothing lands underneath it. Defaults to none. */
+  fitInsets?: MapInsets
+  /** Move the view to the selection: a person at street level, a zone
+   *  with its whole radius; clearing the selection fits everyone again.
+   *  Off by default (the selection only highlights). */
+  zoomToSelection?: boolean
 }
 
 function _initials(name: string): string {
@@ -175,6 +192,8 @@ const FIT_PADDING_BOTTOM_RIGHT: [number, number] = [
 ]
 /** Closest the initial fit zooms in. */
 const FIT_MAX_ZOOM = 16
+/** Street level — where a selected person is shown. */
+const STREET_ZOOM = 17
 
 type _Kind = 'zone' | 'solo' | 'group'
 
@@ -322,9 +341,32 @@ function _icon(html: string, extra = ''): L.DivIcon {
   })
 }
 
+function _inset(v: number | undefined): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0
+}
+
+/** Fit padding: room above for a whole bubble (they float above their
+ *  anchor), below for a zone marker, the zoom buttons on the left, plus
+ *  whatever a panel covers. */
+function _fitPadding(
+  still: boolean, insets: MapInsets | undefined,
+): { paddingTopLeft: [number, number], paddingBottomRight: [number, number] } {
+  return {
+    paddingTopLeft: [
+      FIT_PADDING_TOP_LEFT[0] + (still ? 0 : ZOOM_CONTROL_PX) + _inset(insets?.left),
+      FIT_PADDING_TOP_LEFT[1] + _inset(insets?.top),
+    ],
+    paddingBottomRight: [
+      FIT_PADDING_BOTTOM_RIGHT[0] + _inset(insets?.right),
+      FIT_PADDING_BOTTOM_RIGHT[1] + _inset(insets?.bottom),
+    ],
+  }
+}
+
 export function LocationMap({
   markers, zones, height = 320, emptyLabel,
   onPick, ariaLabel, selectedId, onSelect, readOnly = false,
+  fitInsets, zoomToSelection = false,
 }: LocationMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
@@ -355,6 +397,19 @@ export function LocationMap({
   const selectedRef = useRef(selected)
   selectedRef.current = selected
   const readOnlyRef = useRef(readOnly)
+  const insetsRef = useRef(fitInsets)
+  insetsRef.current = fitInsets
+  const zoomToSelectionRef = useRef(zoomToSelection)
+  zoomToSelectionRef.current = zoomToSelection
+  /** True while the view shows a selection (not everyone): clearing the
+   *  selection then fits everyone again. */
+  const showsSelectionRef = useRef(false)
+  const fitViewRef = useRef((_reason: 'data' | 'selection') => {})
+  /** A zoom animation is running: Leaflet drops a new view until it
+   *  ends, so a fit asked for meanwhile waits here (the panel over the
+   *  map often resizes right after a selection started zooming). */
+  const zoomingRef = useRef(false)
+  const pendingFitRef = useRef<'data' | 'selection' | null>(null)
   const selectRef = useRef((_id: string | null) => {})
   selectRef.current = (id: string | null) => {
     if (selectedId === undefined) setOwnSelected(id)
@@ -421,9 +476,14 @@ export function LocationMap({
       }
     })
     // Screen distances and zone sizes change with the zoom.
+    map.on('zoomstart', () => { zoomingRef.current = true })
     map.on('zoomend', () => {
+      zoomingRef.current = false
       styleZonesRef.current()
       drawPeopleRef.current()
+      const pending = pendingFitRef.current
+      pendingFitRef.current = null
+      if (pending) fitViewRef.current(pending)
     })
 
     // Leaflet measures its container lazily — if the parent was
@@ -552,7 +612,13 @@ export function LocationMap({
           const bounds = L.latLngBounds(groupBounds(g, zoneList))
           // A zone bubble selects its zone (who's there); a merged
           // bubble is no single place, so it selects nothing.
-          if (kind === 'zone') selectRef.current(`zone:${g.zoneIds[0]}`)
+          if (kind === 'zone') {
+            const key = `zone:${g.zoneIds[0]}`
+            const fresh = selectedRef.current !== key
+            selectRef.current(key)
+            // The selection moves the view itself (to the zone's circle).
+            if (fresh && zoomToSelectionRef.current) return
+          }
           // The first click zooms in. Once the group already fills the
           // view, zooming can't split it (a crowded zone, or people
           // standing a few metres apart), so list who's there instead.
@@ -618,7 +684,6 @@ export function LocationMap({
     placeLayer.clearLayers()
     const still = readOnlyRef.current
     const current = markersRef.current
-    const zoneList = zonesRef.current ?? []
     for (const m of current) {
       if (!_isPlace(m) || !_finite(m.lat) || !_finite(m.lon)) continue
       const html = (
@@ -652,14 +717,59 @@ export function LocationMap({
       }
     }
 
+    fitViewRef.current('data')
+    // Draw after the view settles so the merge sees the final zoom.
+    styleZonesRef.current()
+    drawPeopleRef.current()
+  }, [positionsKey, zonesKey])
+
+  // The viewport. ``data``: positions or zones changed — keep showing the
+  // selection when the view follows it, else fit everyone. ``selection``:
+  // the selection (or the panel over the map) changed — follow it, or
+  // fit everyone once it is cleared.
+  fitViewRef.current = (reason) => {
+    const map = mapRef.current
+    if (!map) return
+    if (zoomingRef.current) {
+      // A data refit outranks a selection one (it also follows the
+      // selection).
+      if (pendingFitRef.current !== 'data') pendingFitRef.current = reason
+      return
+    }
+    const still = readOnlyRef.current
+    const current = markersRef.current
+    const zoneList = zonesRef.current ?? []
+    const people = current.filter((m) => !_isPlace(m))
+    const padding = _fitPadding(still, insetsRef.current)
+    const sel = zoomToSelectionRef.current ? selectedRef.current : null
+    if (sel) {
+      let target: [[number, number], [number, number]] | null = null
+      let maxZoom = STREET_ZOOM
+      if (sel.startsWith('zone:')) {
+        const z = zoneList.find((zz) => `zone:${zz.id}` === sel)
+        if (z) { target = zoneBounds(z); maxZoom = GROUP_MAX_ZOOM }
+      } else {
+        // Where the person's bubble is drawn: their zone's centre when
+        // they share a zone bubble, else their own point.
+        const g = groupByZone(people, zoneList).find((gg) => gg.members.some((m) => m.id === sel))
+        if (g) target = [[g.lat, g.lon], [g.lat, g.lon]]
+      }
+      if (target) {
+        map.fitBounds(L.latLngBounds(target), { ...padding, maxZoom })
+        showsSelectionRef.current = true
+        return
+      }
+    }
+    if (reason === 'selection' && !showsSelectionRef.current) return
+    showsSelectionRef.current = false
+
     // Fit to where the bubbles point (zone centres for zoned people, own
     // points for everyone else) plus every zone's centre. A zone's radius
     // only matters once zoomed to that zone (the zone-click path fits the
     // whole circle); fitting every circle here zoomed a level too far out
     // and merged everyone.
     const anchors: Array<[number, number]> = [
-      ...groupByZone(current.filter((m) => !_isPlace(m)), zoneList)
-        .map((g): [number, number] => [g.lat, g.lon]),
+      ...groupByZone(people, zoneList).map((g): [number, number] => [g.lat, g.lon]),
       ...current.filter((m) => _isPlace(m) && _finite(m.lat) && _finite(m.lon))
         .map((m): [number, number] => [m.lat as number, m.lon as number]),
       ...zoneList.map((z): [number, number] => [z.latitude, z.longitude]),
@@ -669,22 +779,29 @@ export function LocationMap({
       // re-centre on every tap must not yank the map out from under them.
       const zoom = onPickRef.current ? Math.max(map.getZoom(), 14) : 14
       map.setView(anchors[0], zoom)
+      // Centre it in the part a panel leaves visible.
+      const insets = insetsRef.current
+      const dx = (_inset(insets?.right) - _inset(insets?.left)) / 2
+      const dy = (_inset(insets?.bottom) - _inset(insets?.top)) / 2
+      if (dx !== 0 || dy !== 0) map.panBy([dx, dy], { animate: false })
     } else if (anchors.length > 1) {
-      // Pixel padding, no ``pad()`` inflation: room above for a whole
-      // bubble (they float above their anchor), below for a zone marker.
-      map.fitBounds(L.latLngBounds(anchors), {
-        paddingTopLeft: [
-          FIT_PADDING_TOP_LEFT[0] + (still ? 0 : ZOOM_CONTROL_PX),
-          FIT_PADDING_TOP_LEFT[1],
-        ],
-        paddingBottomRight: FIT_PADDING_BOTTOM_RIGHT,
-        maxZoom: FIT_MAX_ZOOM,
-      })
+      // Pixel padding, no ``pad()`` inflation.
+      map.fitBounds(L.latLngBounds(anchors), { ...padding, maxZoom: FIT_MAX_ZOOM })
     }
-    // Draw after the view settles so the merge sees the final zoom.
-    styleZonesRef.current()
-    drawPeopleRef.current()
-  }, [positionsKey, zonesKey])
+  }
+
+  // Follow the selection, and the panel over the map growing or
+  // shrinking. Skipped on mount: the positions effect has just fitted.
+  const insetsKey = JSON.stringify([
+    _inset(fitInsets?.top), _inset(fitInsets?.right),
+    _inset(fitInsets?.bottom), _inset(fitInsets?.left),
+  ])
+  const viewMountedRef = useRef(false)
+  useEffect(() => {
+    if (!viewMountedRef.current) { viewMountedRef.current = true; return }
+    if (!zoomToSelectionRef.current) return
+    fitViewRef.current('selection')
+  }, [selected, insetsKey])
 
   const hasMarkers = markers.some((m) => _isPlace(m) && _finite(m.lat) && _finite(m.lon))
     || groupByZone(markers.filter((m) => !_isPlace(m)), zones ?? []).length > 0

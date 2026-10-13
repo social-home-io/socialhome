@@ -34,7 +34,7 @@ import { api } from '@/api'
 import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
 import { escapeHtml } from '@/utils/html'
 import { ZONE_PALETTE, safeZoneHex, zoneColor } from '@/utils/zoneColor'
-import { ZONE_ICON_PRESETS, sortZones } from '@/utils/zones'
+import { ZONE_ICON_PRESETS, formatRadius, sortZones } from '@/utils/zones'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { IconPicker } from './IconPicker'
@@ -154,12 +154,6 @@ function _radiusToSlider(radius_m: number): number {
   const max = Math.log(MAX_RADIUS_M)
   const t = (Math.log(Math.max(MIN_RADIUS_M, Math.min(MAX_RADIUS_M, radius_m))) - min) / (max - min)
   return Math.round(t * 1000)
-}
-
-/** Format metres for display: 25 m, 1.2 km, 50 km. */
-function _fmtRadius(m: number): string {
-  if (m < 1000) return `${m} m`
-  return `${(m / 1000).toFixed(m < 10_000 ? 1 : 0)} km`
 }
 
 export function ZonesAdmin({
@@ -345,7 +339,7 @@ export function ZonesAdmin({
                   </span>
                 )}
                 <span class="sh-muted">
-                  {_fmtRadius(z.radius_m)} ·{' '}
+                  {formatRadius(z.radius_m)} ·{' '}
                   {z.latitude.toFixed(4)}, {z.longitude.toFixed(4)}
                 </span>
                 {z.read_only && (
@@ -738,7 +732,7 @@ function ZoneEditDialog({
               ),
             })}
           />
-          <span class="sh-muted">{_fmtRadius(draft.radius_m)}</span>
+          <span class="sh-muted">{formatRadius(draft.radius_m)}</span>
         </label>
 
         <div class="sh-zone-form__picker-row">

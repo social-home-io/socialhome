@@ -609,3 +609,45 @@ async def test_remote_pin_picture_hash_is_url_encoded(client):
     entry = next(e for e in (await r.json())["entries"] if e["user_id"] == "uid-x")
     assert "v=ab%26sig%3Devil" in entry["picture_url"]
     assert entry["picture_url"].count("sig=") == 1
+
+
+async def test_entries_carry_the_last_update(client):
+    """Every entry carries ``updated_at`` (the map overview's "last
+    update"): a local member's presence row time in gps and zone_only
+    mode, a remote member's pin time."""
+    space_id = await _create_space(client)
+    await _enable_feature_location(client, space_id, enabled=True)
+    await _set_member_opt_in(client, space_id, client._uid, enabled=True)
+    await _seed_presence(
+        client, username="admin", user_id=client._uid, lat=47.3769, lon=8.5417
+    )
+    await client._db.enqueue(
+        "UPDATE presence SET updated_at=? WHERE username=?",
+        ("2026-10-13T10:00:00+00:00", "admin"),
+    )
+    await _seed_remote_member(
+        client,
+        space_id,
+        instance_id="peer-j",
+        user_id="uid-j",
+        display_name="J",
+    )
+    await _seed_remote_pin(
+        client, space_id, instance_id="peer-j", user_id="uid-j", lat=48.1, lon=11.5
+    )
+    await client._db.enqueue(
+        "UPDATE space_remote_member_locations SET updated_at=? WHERE user_id=?",
+        ("2026-10-13T09:00:00+00:00", "uid-j"),
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    by_id = {e["user_id"]: e for e in (await r.json())["entries"]}
+    assert by_id[client._uid]["updated_at"] == "2026-10-13T10:00:00+00:00"
+    assert by_id["uid-j"]["updated_at"] == "2026-10-13T09:00:00+00:00"
+
+    await _set_location_mode(client, space_id, "zone_only")
+    await _seed_zone(
+        client, space_id, zid="z_office", name="Office", lat=47.3769, lon=8.5417
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    [local] = [e for e in (await r.json())["entries"] if e["user_id"] == client._uid]
+    assert local["updated_at"] == "2026-10-13T10:00:00+00:00"

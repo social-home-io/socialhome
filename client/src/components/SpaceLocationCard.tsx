@@ -14,6 +14,10 @@
  * zone names never reach this component (the server strips them at the
  * household boundary).
  *
+ * Beside the map (a bottom sheet on phones) the :component:`MapOverview`
+ * lists the members on the map and the space's zones with who is in each;
+ * picking one there or on the map shows its detail and moves the map to it.
+ *
  * The persistent **sharing chip** above the map shows the current
  * user's own opt-in state and exposes a one-tap toggle that calls
  * PATCH /api/spaces/{id}/members/me/location-sharing (§23.8.8).
@@ -26,27 +30,15 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Spinner } from './Spinner'
-import { Avatar } from './Avatar'
 import { Button } from './Button'
 import { LocationMap, type LocationMarker } from './LocationMap'
+import { MapOverview, type OverviewPerson } from './MapOverview'
 import { Modal } from './Modal'
 import { showToast } from './Toast'
-import { ZoneLegend } from './ZoneLegend'
-import { zoneColor } from '@/utils/zoneColor'
 import { matchZone } from '@/utils/mapMarkers'
 import { presenceLabel } from '@/utils/presenceLabel'
 import type { SpaceZone } from '@/types'
 import { isOne, t } from '@/i18n/i18n'
-
-function _stateDotClass(state: string | undefined): string {
-  switch (state) {
-    case 'home':     return 'sh-dot sh-dot--home'
-    case 'away':     return 'sh-dot sh-dot--away'
-    case 'not_home': return 'sh-dot sh-dot--not-home'
-    case 'zone':     return 'sh-dot sh-dot--home'
-    default:         return 'sh-dot sh-dot--unknown'
-  }
-}
 
 interface SpacePresenceEntry {
   user_id: string
@@ -63,6 +55,9 @@ interface SpacePresenceEntry {
   zone_id?: string
   zone_name?: string
   picture_url: string | null
+  /** When the member's location last changed (UTC). Optional on older
+   *  backends. */
+  updated_at?: string | null
   /** Set on another household's member. Their ``state`` is a server
    *  placeholder (the pin carries no state), so it is never shown. */
   instance_id?: string | null
@@ -122,7 +117,7 @@ export function SpaceLocationCard({
   const [zones, setZones] = useState<SpaceZone[]>([])
   const [sharingMe, setSharingMe] = useState<boolean>(false)
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false)
-  // Person id or ``zone:<id>``; highlights the marker for now.
+  // Person id or ``zone:<id>`` — shared by the map and the overview.
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -276,45 +271,56 @@ export function SpaceLocationCard({
 
   const isZoneOnly = data.location_mode === 'zone_only'
 
-  const markers: LocationMarker[] = isZoneOnly
+  // Everyone the map can place: zone-only members at their zone (no
+  // coordinates exist), GPS members at their point — in the zone bubble
+  // of the space zone they stand in.
+  const placed = isZoneOnly
     ? data.entries
         .filter((p) => p.zone_id != null)
-        .map((p) => ({
-          id: p.user_id,
-          user_id: p.user_id,
-          zone_id: p.zone_id,
-          label: p.display_name,
-          sub_label: p.zone_name ?? null,
-          avatar_url: p.picture_url,
-          state: p.state,
-        }))
+        .map((p) => ({ p, zone: zones.find((z) => z.id === p.zone_id) ?? null }))
     : data.entries
         .filter((p) => p.latitude != null && p.longitude != null)
         .map((p) => ({
-          id: p.user_id,
-          user_id: p.user_id,
+          p, zone: matchZone(zones, p.latitude as number, p.longitude as number),
+        }))
+
+  const markers: LocationMarker[] = placed.map(({ p, zone }) => ({
+    id: p.user_id,
+    user_id: p.user_id,
+    ...(isZoneOnly
+      ? { zone_id: p.zone_id }
+      : {
           lat: p.latitude as number,
           lon: p.longitude as number,
           accuracy_m: p.gps_accuracy_m ?? null,
-          label: p.display_name,
-          sub_label:
-            matchZone(zones, p.latitude as number, p.longitude as number)?.name
-            ?? _stateLabel(p),
-          avatar_url: p.picture_url,
-          state: p.state,
-        }))
+        }),
+    label: p.display_name,
+    sub_label: isZoneOnly ? (p.zone_name ?? null) : (zone?.name ?? _stateLabel(p)),
+    avatar_url: p.picture_url,
+    state: p.state,
+  }))
+
+  const people: OverviewPerson[] = placed.map(({ p, zone }) => ({
+    id: p.user_id,
+    user_id: p.user_id,
+    name: p.display_name,
+    avatar_url: p.picture_url,
+    status: zone?.name ?? (isZoneOnly ? (p.zone_name ?? null) : _stateLabel(p)),
+    zone_id: zone?.id ?? null,
+    updated_at: p.updated_at ?? null,
+  }))
 
   // "X sharing / Y members" — Y is the full space roster (locals +
   // remote members from other households), not just the active-GPS
   // subset. Pre-server-side-count fallback: if the API didn't ship
   // total_members / sharing_count (older backend), derive from
   // entries — keeps mixed-version deployments sane during rollout.
-  const sharing = data.sharing_count
-    ?? (
-      isZoneOnly
-        ? data.entries.filter((p) => p.zone_id != null).length
-        : markers.length
-    )
+  // Zone-only says "N in a zone": count who is in one (the server drops
+  // members outside every zone), not everyone who opted in — the two
+  // differ as soon as someone sharing is outside the zones.
+  const sharing = isZoneOnly
+    ? placed.length
+    : (data.sharing_count ?? markers.length)
   const total = data.total_members ?? data.entries.length
 
   return (
@@ -345,54 +351,33 @@ export function SpaceLocationCard({
           </Button>
         </div>
       )}
-      <LocationMap
-        markers={markers}
+      <MapOverview
+        people={people}
         zones={zones}
-        height={380}
         selectedId={selectedId}
         onSelect={setSelectedId}
-        emptyLabel={
-          isZoneOnly
-            // Members are in zones we can't place (zones failed to load,
-            // or a zone was deleted): the list below says who — the map
-            // stays quiet rather than claim nobody is anywhere.
-            ? (data.entries.length === 0 ? t('location.card.no_one_in_zone') : '')
-            : total === 0
-              ? t('location.card.no_gps_yet')
-              : t('location.card.no_gps_now')
-        }
+        renderMap={(insets) => (
+          <LocationMap
+            markers={markers}
+            zones={zones}
+            height={380}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            fitInsets={insets}
+            zoomToSelection
+            emptyLabel={
+              isZoneOnly
+                // Members are in zones we can't place (zones failed to
+                // load, or a zone was deleted): the overview says who —
+                // the map stays quiet rather than claim nobody is anywhere.
+                ? (data.entries.length === 0 ? t('location.card.no_one_in_zone') : '')
+                : total === 0
+                  ? t('location.card.no_gps_yet')
+                  : t('location.card.no_gps_now')
+            }
+          />
+        )}
       />
-      {zones.length > 0 && <ZoneLegend zones={zones} />}
-      {isZoneOnly && data.entries.length > 0 && (
-        <ul class="sh-zone-only-list" data-testid="zone-only-list">
-          {data.entries.map((p) => {
-            const zone = zones.find((z) => z.id === p.zone_id)
-            const colour = zoneColor(zone)
-            return (
-              <li key={p.user_id} class="sh-zone-only-list__row">
-                <span class="sh-zone-only-list__avatar">
-                  <Avatar name={p.display_name} src={p.picture_url} size={32} />
-                  {!p.instance_id && <span class={_stateDotClass(p.state)} />}
-                </span>
-                <div class="sh-zone-only-list__meta">
-                  <strong>{p.display_name}</strong>
-                  {_stateLabel(p) && <span class="sh-muted">{_stateLabel(p)}</span>}
-                </div>
-                <span
-                  class="sh-zone-only-list__chip"
-                  style={{ '--zone-colour': colour }}
-                  title={t('location.card.zone_title', { zone: p.zone_name ?? t('location.card.unknown') })}
-                >
-                  {zone?.icon
-                    ? <span class="sh-zone-only-list__icon" aria-hidden="true">{zone.icon}</span>
-                    : <span class="sh-zone-only-list__swatch" aria-hidden="true" />}
-                  {p.zone_name ?? t('location.card.unknown_zone')}
-                </span>
-              </li>
-            )
-          })}
-        </ul>
-      )}
       <div class="sh-location-map-footer sh-muted">
         <span>
           {isZoneOnly

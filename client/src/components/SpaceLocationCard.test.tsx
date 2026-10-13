@@ -5,10 +5,12 @@
  *   * ``location_mode === 'gps'`` — markers handed to LocationMap.
  *   * ``location_mode === 'zone_only'`` — members drawn as bubbles at
  *     their zone centres (no coordinates exist — the originating
- *     instance already matched GPS to zones) plus the zone-label list.
+ *     instance already matched GPS to zones).
+ *
+ * Both list the members and zones in the map overview beside the map.
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
-import { act, render, waitFor } from '@testing-library/preact'
+import { act, fireEvent, render, waitFor } from '@testing-library/preact'
 
 beforeAll(() => {
   globalThis.ResizeObserver = class {
@@ -109,6 +111,15 @@ import { ws as wsModule } from '@/ws'
 const mockWs = wsModule as unknown as { on: ReturnType<typeof vi.fn> }
 
 
+/** Rows listed in the map overview (people or zones). */
+const overviewRows = (c: Element) =>
+  Array.from(c.querySelectorAll<HTMLElement>('.sh-map-overview__body .sh-map-overview__row'))
+const rowName = (r: HTMLElement) => r.querySelector('.sh-map-overview__row-name')!.textContent
+const rowSub = (r: HTMLElement) => r.querySelector('.sh-map-overview__row-sub')?.textContent ?? null
+/** The overview's People / Zones switch. */
+const tabs = (c: Element) =>
+  Array.from(c.querySelectorAll<HTMLButtonElement>('.sh-map-overview__tabs button'))
+
 describe('SpaceLocationCard', () => {
   beforeEach(() => {
     icons.length = 0
@@ -157,11 +168,11 @@ describe('SpaceLocationCard', () => {
     await findByText(/sharing GPS/i)
     // The Leaflet container is rendered (sh-location-map class is on the map widget).
     expect(container.querySelector('.sh-location-map')).toBeTruthy()
-    // The zone-only list is NOT rendered.
-    expect(container.querySelector('[data-testid="zone-only-list"]')).toBeNull()
+    // The member is listed beside the map.
+    expect(overviewRows(container).map(rowName)).toEqual(['Pascal'])
   })
 
-  it('renders the map and a zone-label list when location_mode === "zone_only"', async () => {
+  it('lists zone-only members in the overview with their zone', async () => {
     mockApi.get.mockImplementation((url: string) => {
       if (url.includes('/presence')) {
         return Promise.resolve({
@@ -206,18 +217,37 @@ describe('SpaceLocationCard', () => {
         ],
       })
     })
-    const { container, findByText, findAllByText } = render(
+    const { container, findByText } = render(
       <SpaceLocationCard spaceId="sp_test" />,
     )
-    await findAllByText('Office')
-    await findByText('The Workshop')
-    // The flat list is still rendered, under the map.
-    expect(
-      container.querySelector('[data-testid="zone-only-list"]'),
-    ).toBeTruthy()
+    await findByText('Pascal')
+    // A zone that isn't in the catalogue (deleted) still names it.
+    expect(overviewRows(container).map(rowSub)).toEqual(['The Workshop', 'Office'])
     expect(container.querySelector('.sh-location-map')).toBeTruthy()
     // Footer counts members in zones.
     await findByText(/2 of 2 in a zone/i)
+  })
+
+  it('counts only the members placed in a zone in the zone-only footer', async () => {
+    // Six share, but the server drops the two outside every zone: the
+    // footer must not claim six are in a zone.
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'zone_only',
+          total_members: 6,
+          sharing_count: 6,
+          entries: ['a', 'b', 'c', 'd'].map((n) => ({
+            user_id: `u_${n}`, username: n, display_name: n.toUpperCase(),
+            state: 'zone', zone_id: 'z_office', zone_name: 'Office', picture_url: null,
+          })),
+        })
+      }
+      return Promise.resolve({ zones: [] })
+    })
+    const { findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByText(/4 of 6 in a zone/i)
   })
 
   const office = {
@@ -310,20 +340,25 @@ describe('SpaceLocationCard', () => {
     expect(titles.some((t) => t.startsWith('Rita ·'))).toBe(false)
   })
 
-  it('words local states in the zone-only list and leaves remote ones out', async () => {
+  it('words each member in the overview: zone, state, or nothing for another household', async () => {
     mockApi.get.mockImplementation((url: string) => {
       if (url.includes('/presence')) {
         return Promise.resolve({
           feature_enabled: true,
-          location_mode: 'zone_only',
+          location_mode: 'gps',
           entries: [
             {
-              user_id: 'u_local', username: 'anna', display_name: 'Anna', state: 'zone',
-              zone_id: 'z_office', zone_name: 'Office', picture_url: null,
+              user_id: 'u_local', username: 'anna', display_name: 'Anna',
+              state: 'not_home', latitude: 46.0, longitude: 7.0, picture_url: null,
             },
             {
-              user_id: 'u_remote', username: null, display_name: 'Rita', state: 'home',
-              zone_id: 'z_office', zone_name: 'Office', picture_url: null,
+              user_id: 'u_pascal', username: 'pascal', display_name: 'Pascal',
+              state: 'home', latitude: 47.3770, longitude: 8.5418, picture_url: null,
+              updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+            },
+            {
+              user_id: 'u_remote', username: null, display_name: 'Rita',
+              state: 'home', latitude: 45.0, longitude: 6.0, picture_url: null,
               instance_id: 'peer-1',
             },
           ],
@@ -331,11 +366,37 @@ describe('SpaceLocationCard', () => {
       }
       return Promise.resolve({ zones: [office] })
     })
-    const { findByTestId } = render(<SpaceLocationCard spaceId="sp_test" />)
-    const list = await findByTestId('zone-only-list')
-    const rows = list.querySelectorAll('.sh-zone-only-list__meta')
-    expect(rows[0].textContent).toBe('AnnaIn zone')
-    expect(rows[1].textContent).toBe('Rita')
+    const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByText('Rita')
+    expect(overviewRows(container).map(rowName)).toEqual(['Anna', 'Pascal', 'Rita'])
+    expect(overviewRows(container).map(rowSub)).toEqual(['Not home', 'Office · 5 min ago', null])
+    // Zones tab: Pascal is the one in the office.
+    fireEvent.click(tabs(container)[1])
+    expect(overviewRows(container).map((r) => r.querySelector('.sh-map-overview__count')!.textContent))
+      .toEqual(['1 person'])
+  })
+
+  it('shares one selection between the overview and the map', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'gps',
+          entries: [{
+            user_id: 'u_anna', username: 'anna', display_name: 'Anna',
+            state: 'not_home', latitude: 46.0, longitude: 7.0, picture_url: null,
+          }],
+        })
+      }
+      return Promise.resolve({ zones: [office] })
+    })
+    const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByText('Anna')
+    icons.length = 0
+    fireEvent.click(overviewRows(container)[0])
+    expect(container.querySelector('h3.sh-map-overview__title')!.textContent).toBe('Anna')
+    // The map redrew Anna's bubble as selected, named in its caption.
+    expect(icons.some((h) => h.includes('sh-map-bubble--solo') && h.includes('is-selected'))).toBe(true)
   })
 
   it('shows no "nobody in a zone" text when members exist but their zones are unknown', async () => {
@@ -352,8 +413,8 @@ describe('SpaceLocationCard', () => {
       }
       return Promise.reject(new Error('zones down'))
     })
-    const { findByTestId, queryByText } = render(<SpaceLocationCard spaceId="sp_test" />)
-    await findByTestId('zone-only-list')
+    const { findByText, queryByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByText('Anna')
     expect(queryByText(EMPTY_ZONE_TEXT)).toBeNull()
   })
 
@@ -371,7 +432,7 @@ describe('SpaceLocationCard', () => {
     expect(hits).toHaveLength(1)
   })
 
-  it('never lets a hostile zone colour inject extra CSS into the zone chip', async () => {
+  it('never lets a hostile zone colour inject extra CSS into the zone badge', async () => {
     mockApi.get.mockImplementation((url: string) => {
       if (url.includes('/presence')) {
         return Promise.resolve({
@@ -395,14 +456,15 @@ describe('SpaceLocationCard', () => {
     })
     const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
     await findByText('Pascal')
-    const chip = container.querySelector('.sh-zone-only-list__chip') as HTMLElement
+    fireEvent.click(tabs(container)[1])
+    const chip = container.querySelector('.sh-map-overview__zone-badge') as HTMLElement
     expect(chip.style.position).toBe('')
     expect(chip.style.backgroundImage).not.toContain('url')
     expect(chip.getAttribute('style') ?? '').not.toContain('evil')
     expect(chip.style.getPropertyValue('--zone-colour')).toMatch(/^#[0-9a-f]{6}$/i)
   })
 
-  it('shows the zone icon before the zone name in the zone-only chip', async () => {
+  it('shows the zone icon on its row in the overview', async () => {
     mockApi.get.mockImplementation((url: string) => {
       if (url.includes('/presence')) {
         return Promise.resolve({
@@ -426,12 +488,12 @@ describe('SpaceLocationCard', () => {
     })
     const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
     await findByText('Pascal')
-    const chip = container.querySelector('.sh-zone-only-list__chip') as HTMLElement
-    const icon = chip.querySelector('.sh-zone-only-list__icon') as HTMLElement
+    fireEvent.click(tabs(container)[1])
+    const row = overviewRows(container)[0]
+    const icon = row.querySelector('.sh-map-overview__zone-badge') as HTMLElement
     expect(icon.textContent).toBe('🏫')
     expect(icon.getAttribute('aria-hidden')).toBe('true')
-    expect(chip.querySelector('.sh-zone-only-list__swatch')).toBeNull()
-    expect(chip.textContent).toBe('🏫School')
+    expect(rowName(row)).toBe('School')
   })
 
   it('hydrates the sharing chip from /members on cold load', async () => {
@@ -522,7 +584,7 @@ describe('SpaceLocationCard', () => {
       data: { space_id: 'sp_test', action: 'upsert', zone_id: z.id, zone: z },
     })
 
-    it('lists a newly upserted zone in name order in the legend', async () => {
+    it('lists a newly upserted zone in name order in the overview', async () => {
       mockApi.get.mockImplementation((url: string) => {
         if (url.includes('/presence')) {
           return Promise.resolve({ feature_enabled: true, location_mode: 'gps', entries: [] })
@@ -533,12 +595,10 @@ describe('SpaceLocationCard', () => {
       await findByText('Office')
       act(() => { zoneHandler()(upsert(zone('z_aardvark', 'Aardvark', '🐜'))) })
       await findByText('Aardvark')
-      const names = Array.from(container.querySelectorAll('.sh-zone-legend__name'))
-        .map(n => n.textContent)
-      expect(names).toEqual(['Aardvark', 'Office'])
+      expect(overviewRows(container).map(rowName)).toEqual(['Aardvark', 'Office'])
     })
 
-    it('shows the new icon in the zone-only chip when a zone is re-iconed', async () => {
+    it('shows the new icon in the overview when a zone is re-iconed', async () => {
       mockApi.get.mockImplementation((url: string) => {
         if (url.includes('/presence')) {
           return Promise.resolve({
@@ -554,7 +614,8 @@ describe('SpaceLocationCard', () => {
       })
       const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
       await findByText('Pascal')
-      const icon = () => container.querySelector('.sh-zone-only-list__icon')?.textContent
+      fireEvent.click(tabs(container)[1])
+      const icon = () => container.querySelector('.sh-map-overview__zone-badge')?.textContent
       await waitFor(() => expect(icon()).toBe('🏫'))
       act(() => { zoneHandler()(upsert(zone('z_school', 'School', '🎒'))) })
       await waitFor(() => expect(icon()).toBe('🎒'))

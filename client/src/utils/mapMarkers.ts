@@ -87,6 +87,18 @@ function _finite(v: number | null | undefined): v is number {
   return typeof v === 'number' && Number.isFinite(v)
 }
 
+/** The zone a person's bubble sits in: the zone they state
+ *  (``zone_id``), else the one their point is in — ``null`` for neither.
+ *  The overview counts people with this too, so its numbers match the
+ *  map's bubbles. */
+export function personZone<Z extends ZoneLike>(
+  p: MapPerson, zones: readonly Z[],
+): Z | null {
+  const stated = p.zone_id ? zones.find((z) => z.id === p.zone_id) ?? null : null
+  if (stated) return stated
+  return _finite(p.lat) && _finite(p.lon) ? matchZone(zones, p.lat, p.lon) : null
+}
+
 /** One group per occupied zone (at its centre) plus one solo group per
  *  person outside every zone. A given ``zone_id`` wins over coordinates
  *  (zone-only mode carries no coordinates at all). People with neither a
@@ -97,9 +109,7 @@ export function groupByZone<P extends MapPerson>(
   const out: MarkerGroup<P>[] = []
   const byZone = new Map<string, MarkerGroup<P>>()
   for (const p of people) {
-    let zone: ZoneLike | null = null
-    if (p.zone_id) zone = zones.find((z) => z.id === p.zone_id) ?? null
-    if (!zone && _finite(p.lat) && _finite(p.lon)) zone = matchZone(zones, p.lat, p.lon)
+    const zone = personZone(p, zones)
     if (zone) {
       let g = byZone.get(zone.id)
       if (!g) {
