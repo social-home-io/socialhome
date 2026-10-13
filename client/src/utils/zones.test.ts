@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import en from '@/i18n/locales/en.json'
+import { locale } from '@/i18n/i18n'
 import { ZONE_ICON_PRESETS, formatRadius, sortZones } from './zones'
 
 describe('sortZones', () => {
@@ -67,5 +68,18 @@ describe('formatRadius', () => {
     expect(formatRadius(25)).toBe('25 m')
     expect(formatRadius(1200)).toBe('1.2 km')
     expect(formatRadius(50_000)).toBe('50 km')
+  })
+})
+
+describe('formatRadius in the UI language', () => {
+  it('uses the locale decimal separator', () => {
+    const before = locale.value
+    try {
+      locale.value = 'de'
+      expect(formatRadius(1200)).toBe('1,2 km')
+      expect(formatRadius(250)).toBe('250 m')
+    } finally {
+      locale.value = before
+    }
   })
 })

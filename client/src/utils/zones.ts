@@ -4,6 +4,7 @@
  * household's Home zone on top) and the icon presets the admin picks from.
  */
 import type { IconPickerPreset } from '@/components/IconPicker'
+import { formatLocale } from '@/i18n/i18n'
 
 /** ``zones`` sorted by name — case- and accent-insensitive, in the
  *  viewer's locale — with a household Home zone (``is_home``) first,
@@ -20,7 +21,11 @@ export function sortZones<T extends { name: string; is_home?: boolean }>(
 /** A zone radius for display: 25 m, 1.2 km, 50 km. */
 export function formatRadius(m: number): string {
   if (m < 1000) return `${m} m`
-  return `${(m / 1000).toFixed(m < 10_000 ? 1 : 0)} km`
+  const digits = m < 10_000 ? 1 : 0
+  const km = new Intl.NumberFormat(formatLocale(), {
+    minimumFractionDigits: digits, maximumFractionDigits: digits,
+  }).format(m / 1000)
+  return `${km} km`
 }
 
 const preset = (emoji: string, key: string): IconPickerPreset =>

@@ -225,11 +225,23 @@ export function MapOverview({ people, zones, selectedId, onSelect, renderMap }: 
     return () => ro.disconnect()
   }, [hasPanel])
 
+  /** A person opened from a zone's "here now" list: Back returns there. */
+  const fromZoneRef = useRef<{ zone: string, person: string } | null>(null)
   const pick = (id: string) => {
     focusDetailRef.current = true
+    fromZoneRef.current = selectedZone && selectedId ? { zone: selectedId, person: id } : null
     onSelect(id)
   }
+  const backZone = fromZoneRef.current && fromZoneRef.current.person === selectedId
+    ? zones.find((z) => `zone:${z.id}` === fromZoneRef.current!.zone) ?? null
+    : null
   const back = () => {
+    if (backZone) {
+      fromZoneRef.current = null
+      focusDetailRef.current = true
+      onSelect(`zone:${backZone.id}`)
+      return
+    }
     returnFocusRef.current = selectedId
     onSelect(null)
   }
@@ -255,7 +267,9 @@ export function MapOverview({ people, zones, selectedId, onSelect, renderMap }: 
     header = (
       <div class="sh-map-overview__detail-head">
         <button type="button" class="sh-map-overview__back" onClick={back}
-                aria-label={t('location.overview.back_to_people')}>
+                aria-label={backZone
+                  ? t('location.overview.back_to_zone', { zone: backZone.name })
+                  : t('location.overview.back_to_people')}>
           <span aria-hidden="true">‹</span>
         </button>
         <PersonAvatar p={p} />
@@ -364,7 +378,7 @@ export function MapOverview({ people, zones, selectedId, onSelect, renderMap }: 
               class="sh-map-overview__grabber"
               aria-expanded={expanded}
               aria-controls={bodyId}
-              aria-label={expanded ? t('location.overview.hide_list') : t('location.overview.show_list')}
+              aria-label={t('location.overview.list_label')}
               onClick={() => setExpanded(!expanded)}
             >
               <span class="sh-map-overview__grabber-bar" aria-hidden="true" />
