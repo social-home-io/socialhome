@@ -367,6 +367,24 @@ code on the panel. This limit is separate from tablet sign-in: failed
 password tries on the dashboard never hold pairing back, and wrong codes
 never hold a tablet's sign-in back. At most 20 panels can be paired.
 
+**Privacy lock on a panel.** A panel locks with the same household PIN as
+the tablets (it needs a PIN to be set) and then shows only the lock
+screen until someone types the PIN on it. Each panel locks on its own,
+and the lock is stored on the server, so restarting the panel — or Social
+Home — doesn't unlock it. **Five wrong PINs unpair the panel**: after five
+wrong tries within 15 minutes, the next try signs it out (like a tablet)
+and it has to be paired again with a new code. A locked panel shows
+**Locked** in **Admin › Dashboard › Wall panels**; **Unlock** there lifts
+the lock without the PIN (*headless:* `PATCH
+/api/admin/dashboard/displays/{id}` with `{"locked": false}`). **Remove
+PIN** unlocks every panel too; setting a new PIN afterwards doesn't lock
+them again.
+
+**Got it on a panel.** A panel that shows household-chat mentions can
+send "Got it" like the tablet — the same rules (only what the wall shows
+right now, never at night or while locked) and the same limit of 30 per
+5 minutes, per panel.
+
 > **Firmware comes later.** This release adds pairing and device tokens
 > only; the panel firmware and the data the panels show arrive in a
 > later release. The panel API is documented in

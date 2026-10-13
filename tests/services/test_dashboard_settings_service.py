@@ -1128,14 +1128,14 @@ async def test_add_display_caps_the_household(svc):
 
 async def test_rename_display(svc):
     await svc.add_display(_display(1))
-    renamed = await svc.rename_display("d1", "Hallway")
+    renamed = await svc.update_display("d1", {"name": "Hallway"})
     assert renamed.name == "Hallway"
     assert (await svc.displays())[0].name == "Hallway"
 
 
 async def test_rename_unknown_display(svc):
     with pytest.raises(DashboardDisplayNotFoundError):
-        await svc.rename_display("nope", "x")
+        await svc.update_display("nope", {"name": "x"})
 
 
 async def test_remove_display(svc):
@@ -1248,3 +1248,65 @@ async def test_displays_are_cached_after_first_read(repo):
     await svc.displays()
     await svc.displays()
     assert "dashboard.displays" not in spy.read
+
+
+# ── wall-panel privacy lock ──────────────────────────────────────────────
+
+
+async def test_set_display_locked_persists_across_a_restart(repo):
+    first = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    await first.add_display(_display(1))
+    locked = await first.update_display("d1", {"locked": True})
+    assert locked.locked is True
+    # A panel reboot (or a server restart) must not lift the lock.
+    second = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert (await second.displays())[0].locked is True
+    unlocked = await second.update_display("d1", {"locked": False})
+    assert unlocked.locked is False
+    assert (await second.displays())[0].locked is False
+
+
+async def test_set_display_locked_unknown_display(svc):
+    with pytest.raises(DashboardDisplayNotFoundError):
+        await svc.update_display("nope", {"locked": True})
+
+
+async def test_seen_keeps_the_lock(svc):
+    await svc.add_display(_display(1))
+    await svc.update_display("d1", {"locked": True})
+    await svc.record_display_seen("d1", at="t", firmware="2", model=None)
+    assert (await svc.displays())[0].locked is True
+
+
+async def test_delete_pin_lifts_every_panel_lock(svc):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    await svc.add_display(_display(1))
+    await svc.add_display(_display(2))
+    await svc.update_display("d1", {"locked": True})
+    await svc.delete_pin(actor_is_admin=True)
+    assert [d.locked for d in await svc.displays()] == [False, False]
+    assert not (await svc.get()).pin_set
+
+
+async def test_changing_the_pin_keeps_panel_locks(svc):
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    await svc.add_display(_display(1))
+    await svc.update_display("d1", {"locked": True})
+    await svc.set_pin(actor_is_admin=True, pin="5678")
+    assert (await svc.displays())[0].locked is True
+
+
+async def test_first_pin_clears_a_stale_panel_lock(svc):
+    # No PIN means nothing can be locked: a flag left from a removed PIN
+    # (a crash mid-delete) must not come back to life with a new one.
+    await svc.add_display(_display(1, locked=True))
+    await svc.set_pin(actor_is_admin=True, pin="1234")
+    assert (await svc.displays())[0].locked is False
+
+
+@pytest.mark.parametrize("change", [{}, {"token_hash": "x"}, {"name": "a", "id": "b"}])
+async def test_update_display_only_changes_name_and_lock(svc, change):
+    await svc.add_display(_display(1))
+    with pytest.raises(ValueError):
+        await svc.update_display("d1", change)
+    assert (await svc.displays())[0] == _display(1)

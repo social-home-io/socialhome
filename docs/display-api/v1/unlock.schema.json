@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/unlock.schema.json",
+  "title": "200 — POST /unlock: the panel is unlocked (or wasn't locked)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "locked"
+  ],
+  "properties": {
+    "api_version": {
+      "$ref": "common.schema.json#/$defs/api_version"
+    },
+    "locked": {
+      "const": false
+    }
+  }
+}

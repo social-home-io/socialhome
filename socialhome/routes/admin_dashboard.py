@@ -351,15 +351,16 @@ class AdminDashboardDisplaysView(_DashboardAdminView):
 
 class AdminDashboardDisplayView(_DashboardAdminView):
     """``PATCH / DELETE /api/admin/dashboard/displays/{display_id}`` —
-    rename a panel; unpair it (its token stops working at once)."""
+    rename a panel (``name``) and / or lift its privacy lock (``locked:
+    false`` — only the panel itself locks, with the PIN set); unpair it
+    (its token stops working at once)."""
 
     async def patch(self) -> web.Response:
         body = await self.body()
-        fields = body if isinstance(body, dict) else {}
-        display = await self.displays.rename(
+        display = await self.displays.update(
             actor_is_admin=self.is_admin,
             display_id=self.request.match_info["display_id"],
-            name=fields.get("name"),
+            patch=body if isinstance(body, dict) else {},
         )
         return self._json(_display(display))
 

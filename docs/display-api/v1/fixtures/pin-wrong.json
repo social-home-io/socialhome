@@ -1,0 +1,9 @@
+{
+  "error": {
+    "code": "DISPLAY_PIN_WRONG",
+    "detail": "Wrong PIN.",
+    "params": {
+      "remaining": 4
+    }
+  }
+}

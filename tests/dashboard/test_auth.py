@@ -873,3 +873,27 @@ def test_display_reads_are_budgeted_per_panel_and_kind(auth, clock):
     assert auth.begin_display_read("d1", image=True) > 0
     clock.advance(DISPLAY_WINDOW_S + 1)
     assert auth.begin_display_read("d1") == 0
+
+
+# ─── wall panels: "Got it" budget and PIN bucket ──────────────────────────
+
+
+async def test_display_ack_limit_is_per_panel_and_apart_from_tablets(auth, clock):
+    tablet = await auth.verify(await auth.issue(True))
+    assert tablet is not None
+    for _ in range(ACK_MAX):
+        assert auth.begin_display_ack("d1") == 0
+    wait = auth.begin_display_ack("d1")
+    assert 0 < wait <= ACK_WINDOW_S
+    assert auth.begin_display_ack("d2") == 0  # another panel
+    assert auth.begin_ack(tablet) == 0  # a tablet session
+    assert auth.throttle_key_count == 0
+    clock.advance(ACK_WINDOW_S + 1)
+    assert auth.begin_display_ack("d1") == 0
+
+
+def test_display_pin_bucket_is_per_panel_and_apart_from_tablets():
+    key = DashboardAuth.display_pin_throttle_key("d1")
+    assert key != DashboardAuth.display_pin_throttle_key("d2")
+    claims = SessionClaims(epoch=0, issued_at=0, keep=True, session_id="d1")
+    assert key != DashboardAuth.pin_throttle_key(claims)

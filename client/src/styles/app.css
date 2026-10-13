@@ -15517,9 +15517,10 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-dashboard-panel__text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 12rem; min-width: 0; }
 .sh-dashboard-panel__name,
 .sh-dashboard-panel__info { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sh-dashboard-panel__name { font-weight: 600; }
+.sh-dashboard-panel__name { font-weight: 600; min-width: 0; }
+.sh-dashboard-panel__title { display: flex; align-items: center; gap: var(--sh-space-xs); min-width: 0; }
 .sh-dashboard-panel__info { font-size: var(--sh-font-size-sm); }
-.sh-dashboard-panel__actions { display: flex; gap: var(--sh-space-xs); flex: 0 0 auto; }
+.sh-dashboard-panel__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); flex: 0 1 auto; }
 @media (max-width: 480px) {
   /* Selects and the night-mode times drop under their label; switches
    * stay beside theirs. */

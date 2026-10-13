@@ -228,3 +228,44 @@ describe('DashboardPanelsCard — rename / remove', () => {
     expect(showToast).not.toHaveBeenCalled()
   })
 })
+
+describe('DashboardPanelsCard — unlock', () => {
+  const LOCKED: DashboardDisplay = { ...KITCHEN, id: 'd2', name: 'Hallway', locked: true }
+
+  it('shows "Locked" and an Unlock button only for a locked panel', () => {
+    mount(state({ displays: [KITCHEN, LOCKED] }))
+    expect(screen.getAllByText('Locked')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Unlock Hallway' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Unlock Kitchen' })).toBeNull()
+  })
+
+  it('lifts the lock with a PATCH, toasts and reloads', async () => {
+    mPatch.mockResolvedValue({ ...LOCKED, locked: false })
+    mount(state({ displays: [LOCKED] }))
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock Hallway' }))
+    await waitFor(() => expect(mPatch).toHaveBeenCalledWith(
+      '/api/admin/dashboard/displays/d2', { locked: false },
+    ))
+    await waitFor(() => expect(reload).toHaveBeenCalled())
+    expect(showToast).toHaveBeenCalledWith('Hallway is unlocked', 'success')
+    expect(confirmDialog).not.toHaveBeenCalled()
+  })
+
+  it('a panel removed meanwhile just refreshes, no toast', async () => {
+    mPatch.mockRejectedValueOnce(new ApiError(404, '/api/admin/dashboard/displays/d2', {
+      code: 'DASHBOARD_DISPLAY_NOT_FOUND', detail: 'x',
+    }))
+    mount(state({ displays: [LOCKED] }))
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock Hallway' }))
+    await waitFor(() => expect(reload).toHaveBeenCalled())
+    expect(showToast).not.toHaveBeenCalled()
+  })
+
+  it('any other failure toasts the message and still reloads', async () => {
+    mPatch.mockRejectedValueOnce(new Error('Server is down'))
+    mount(state({ displays: [LOCKED] }))
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock Hallway' }))
+    await waitFor(() => expect(reload).toHaveBeenCalled())
+    expect(showToast).toHaveBeenCalledWith('Server is down', 'error')
+  })
+})

@@ -117,6 +117,8 @@ async def stack(aiohttp_client, tmp_path):
     assert resp.status == 200, await resp.text()
     assert (await resp.json())["running"]
     tc._users = users
+    tc._admin = admin
+    tc._admin_uid = admin_uid
     tc._dash = f"http://127.0.0.1:{port}"
     yield tc
     await app[dashboard_server_key].stop()
@@ -203,3 +205,68 @@ async def test_got_it_reacts_and_clears_the_wall(stack):
         )
         assert resp.status == 404
         assert await _reactions(stack, chat_id, for_leo) == [(leo_id, ACK_EMOJI)]
+
+
+async def _pair_panel(tc, s: aiohttp.ClientSession) -> str:
+    """Pair a wall panel through the real flow; its bearer token."""
+    base = tc._dash
+    resp = await s.post(f"{base}/api/display/v1/pair", json={})
+    assert resp.status == 201
+    started = await resp.json()
+    resp = await tc.post(
+        "/api/admin/dashboard/displays",
+        json={"code": started["code"], "name": "Kitchen"},
+        headers=_auth(tc._admin),
+    )
+    assert resp.status == 201, await resp.text()
+    resp = await s.get(f"{base}/api/display/v1/pair/{started['pair_id']}")
+    return (await resp.json())["token"]
+
+
+async def test_panel_got_it_reacts_and_refuses_what_it_does_not_show(stack):
+    chat = await (
+        await stack.get("/api/household/chat", headers=_auth(stack._users["anna"][1]))
+    ).json()
+    chat_id = chat["conversation_id"]
+    here = await _send(stack, "anna", chat_id, "@here Dinner is ready")
+    for_leo = await _send(stack, "anna", chat_id, "@leo Shoes on please")
+    for_admin = await _send(stack, "anna", chat_id, "@admin Call back")
+    leo_id = stack._users["leo"][0]
+    anna_id = stack._users["anna"][0]
+    base = stack._dash
+    async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as s:
+        token = await _pair_panel(stack, s)
+        bearer = {"Authorization": f"Bearer {token}"}
+        ack = f"{base}/api/display/v1/ack"
+
+        home = await (await s.get(f"{base}/api/display/v1/home", headers=bearer)).json()
+        assert [a["ack"] for a in home["alerts"]] == [
+            {"message_id": here, "person_id": None}
+        ]
+
+        refused = [
+            {"message_id": for_leo},  # a person mention is no @here
+            {"message_id": for_leo, "person_id": anna_id},  # not Anna's
+            {"message_id": here, "person_id": leo_id},  # @here is no person's
+            {"message_id": "no-such-message"},
+            {"message_id": for_admin, "person_id": stack._admin_uid},  # hidden
+        ]
+        for body in refused:
+            resp = await s.post(ack, json=body, headers=bearer)
+            assert resp.status == 404, body
+            assert (await resp.json())["error"]["code"] == "NOT_FOUND"
+        assert await _reactions(stack, chat_id, for_leo) == []
+        assert await _reactions(stack, chat_id, here) == []
+
+        resp = await s.post(ack, json={"message_id": here}, headers=bearer)
+        assert resp.status == 200
+        assert await resp.json() == {"api_version": 1, "acknowledged": True}
+        assert await _reactions(stack, chat_id, here) == [(DASHBOARD_AUTHOR, ACK_EMOJI)]
+
+        resp = await s.post(
+            ack, json={"message_id": for_leo, "person_id": leo_id}, headers=bearer
+        )
+        assert resp.status == 200
+        assert await _reactions(stack, chat_id, for_leo) == [(leo_id, ACK_EMOJI)]
+        home = await (await s.get(f"{base}/api/display/v1/home", headers=bearer)).json()
+        assert home["alerts"] == []

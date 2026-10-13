@@ -1474,6 +1474,23 @@ drives it) and is then served by a **separate aiohttp application on its own por
   `last_seen_at` / firmware / model (`X-Display-Firmware` /
   `X-Display-Model`, printable ASCII, ≤64 chars) are written at most once a
   minute. Tokens are never logged.
+- **Wall-panel privacy lock + "Got it".** A panel has no cookie, so its
+  lock is the `locked` flag on its stored `DashboardDisplay` record
+  (`POST /api/display/v1/lock`, only while a PIN is set) — a reboot or a
+  restart keeps it. The session guard answers a locked panel with the 423
+  lock screen on everything but `POST /unlock`, and treats a flag with no
+  PIN as unlocked (like a tablet's locked cookie); removing the PIN clears
+  every flag in the same critical section, the first new PIN clears any
+  left behind. `DashboardDisplayService.unlock` mirrors the tablet's
+  `UnlockView`: the guess is counted before the scrypt check in the shared
+  failure table, keyed on the panel id
+  (`DashboardAuth.display_pin_throttle_key`, never the global brake); once
+  five wrong PINs in 15 min are spent the next try unpairs the panel (the
+  tablet's sign-out), so a new bucket takes an admin pairing it again.
+  `POST /api/display/v1/ack` calls the same
+  `HouseholdDashboardService.acknowledge` as the tablet (every eligibility
+  rule re-derived) under the same 30 / 5 min budget, per panel. Admins can
+  lift a panel's lock (`PATCH …/displays/{id}` `{"locked": false}`).
 - **Wall-panel JSON (API v1).** A panel renders the same boards as the
   tablet, from JSON: `GET /api/display/v1/home` · `messages` · `notes` ·
   `map` · `person/{id}` · `theme`. There is one source for what a board

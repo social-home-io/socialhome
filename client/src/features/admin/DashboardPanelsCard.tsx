@@ -7,6 +7,9 @@
  * /api/admin/dashboard/displays``) and the panel then collects its token
  * by itself — the token never reaches this page. Rename / remove go
  * through ``PATCH`` / ``DELETE /api/admin/dashboard/displays/{id}``.
+ * A panel privacy-locked with the household PIN shows "Locked"; Unlock
+ * (``PATCH … {"locked": false}``) lifts it from here — no confirm, the
+ * panel can lock itself again.
  * "Sign out all tablets" unpairs every panel too.
  */
 import { useEffect, useState } from 'preact/hooks'
@@ -67,6 +70,22 @@ export function DashboardPanelsCard({ state, reload }: {
     }
   }
 
+  const unlock = async (d: DashboardDisplay) => {
+    setBusyId(d.id)
+    try {
+      await api.patch(`${ENDPOINT}/${encodeURIComponent(d.id)}`, { locked: false })
+      showToast(t('admin.dashboard.panels.unlocked', { name: d.name }), 'success')
+    } catch (e: unknown) {
+      // Removed meanwhile: nothing left to unlock, the reload shows it.
+      if (!(e instanceof ApiError && e.code === 'DASHBOARD_DISPLAY_NOT_FOUND')) {
+        showToast((e as Error).message, 'error')
+      }
+    } finally {
+      setBusyId(null)
+      await reload()
+    }
+  }
+
   return (
     <section class="sh-admin-section" aria-labelledby="sh-dash-panels">
       <h3 id="sh-dash-panels">{t('admin.dashboard.panels.heading')}</h3>
@@ -80,7 +99,10 @@ export function DashboardPanelsCard({ state, reload }: {
             return (
               <li key={d.id} class="sh-dashboard-panel">
                 <div class="sh-dashboard-panel__text">
-                  <span class="sh-dashboard-panel__name" title={d.name}>{d.name}</span>
+                  <span class="sh-dashboard-panel__title">
+                    <span class="sh-dashboard-panel__name" title={d.name}>{d.name}</span>
+                    {d.locked && <span class="sh-badge">{t('admin.dashboard.panels.locked')}</span>}
+                  </span>
                   {info && <span class="sh-muted sh-dashboard-panel__info" title={info}>{info}</span>}
                   <span class="sh-form-hint">
                     {d.last_seen_at
@@ -89,6 +111,13 @@ export function DashboardPanelsCard({ state, reload }: {
                   </span>
                 </div>
                 <div class="sh-dashboard-panel__actions">
+                  {d.locked && (
+                    <Button variant="secondary" disabled={busyId === d.id}
+                      aria-label={t('admin.dashboard.panels.unlock_aria', { name: d.name })}
+                      onClick={() => void unlock(d)}>
+                      {t('admin.dashboard.panels.unlock')}
+                    </Button>
+                  )}
                   <Button variant="secondary" disabled={busyId === d.id}
                     aria-label={t('admin.dashboard.panels.rename_aria', { name: d.name })}
                     onClick={() => setRenaming(d)}>

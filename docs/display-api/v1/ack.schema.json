@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/ack.schema.json",
+  "title": "200 — POST /ack: the mention is acknowledged (\"Got it\")",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "acknowledged",
+    "api_version"
+  ],
+  "properties": {
+    "api_version": {
+      "$ref": "common.schema.json#/$defs/api_version"
+    },
+    "acknowledged": {
+      "const": true
+    }
+  }
+}

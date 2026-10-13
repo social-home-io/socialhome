@@ -23,10 +23,17 @@ short code and then authenticates every request with
   ``/emoji/{code}?size=N`` (bearer) — PNGs (:mod:`.avatars`,
   :mod:`.emoji`).
 
-A panel whose record is ``locked`` gets ``423`` with the lock payload
-(household name, clock, PIN strings — never a person) for everything but
-pairing. Reads are budgeted per panel (:meth:`DashboardAuth.begin_display_read`,
-``429`` + ``Retry-After``).
+* ``POST /api/display/v1/lock`` · ``/unlock`` (``{pin}``) · ``/ack``
+  (``{message_id, person_id?}``) (bearer) — the privacy lock (stored on
+  the panel's record, :meth:`DashboardDisplayService.lock` / ``unlock``:
+  the tablet's PIN rules, the 6th wrong try unpairs the panel) and "Got
+  it" (the tablet's :meth:`acknowledge` rules and budget, per panel).
+
+A panel that is locked (its record's ``locked``, while a PIN is set) gets
+``423`` with the lock payload (household name, clock, PIN strings — never
+a person) for everything but pairing and ``/unlock``. Requests are
+budgeted per panel (:meth:`DashboardAuth.begin_display_read`, ``429`` +
+``Retry-After``).
 
 The two credentials never cross: under this prefix the session guard
 reads only the bearer token (a tablet cookie opens nothing here), and on
@@ -57,6 +64,7 @@ from .avatars import AVATAR_SIZES, DEFAULT_AVATAR_SIZE
 from .boards import BoardBase, board_base, home_board, person_board
 from .clock import resolve_zone
 from .display_json import (
+    API_VERSION,
     board_header,
     display_clock,
     home_payload,
@@ -83,6 +91,7 @@ from .keys import (
 )
 from .presenter import home_colors, person_colors, view_key
 from .tabs import TAB_MAP, TAB_MESSAGES, TAB_NOTES, TAB_OVERVIEW
+from .views import ack_id
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +99,9 @@ __all__ = [
     "DISPLAY_API_PREFIX",
     "DISPLAY_CACHE",
     "IMAGE_PREFIXES",
+    "LOCK_PATH",
     "PAIR_PATH",
+    "UNLOCK_PATH",
     "bearer_token",
     "guard_display_request",
     "is_display_api",
@@ -100,6 +111,8 @@ __all__ = [
 
 DISPLAY_API_PREFIX = "/api/display/v1/"
 PAIR_PATH = "/api/display/v1/pair"
+LOCK_PATH = "/api/display/v1/lock"
+UNLOCK_PATH = "/api/display/v1/unlock"
 #: Panels report themselves in these headers (untrusted, length-capped).
 FIRMWARE_HEADER = "X-Display-Firmware"
 MODEL_HEADER = "X-Display-Model"
@@ -137,12 +150,34 @@ def bearer_token(headers: Mapping[str, str]) -> str | None:
 
 
 def _coded(exc: CodedError) -> web.Response:
-    return error_response(
+    response = error_response(
         exc.status,
         exc.code,
         exc.detail,
         extra={"params": exc.params} if exc.params else None,
     )
+    if exc.status == 401:
+        response.headers["WWW-Authenticate"] = "Bearer"
+    retry_after = exc.params.get("retry_after")
+    if exc.status == 429 and retry_after is not None:
+        response.headers["Retry-After"] = str(retry_after)
+    return response
+
+
+async def _json_object(request: web.Request) -> dict[str, object] | None:
+    """The request body as a JSON object (``{}`` when empty), else ``None``."""
+    raw = await request.read()
+    if not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _bad_request() -> web.Response:
+    return error_response(400, "BAD_REQUEST", "Expected a JSON object.")
 
 
 async def guard_display_request(
@@ -172,14 +207,16 @@ async def guard_display_request(
         response = error_response(429, "RATE_LIMITED", "Too many requests.")
         response.headers["Retry-After"] = str(wait)
         return response
-    if display.locked:
+    # The PIN is the one way out of the lock, so ``/unlock`` passes.
+    if request.path != UNLOCK_PATH and await displays.is_locked(display):
         return await _locked(request)
     return await handler(request)
 
 
-async def _locked(request: web.Request) -> web.Response:
+async def _locked(request: web.Request, *, status: int = 423) -> web.Response:
     """``423`` for a privacy-locked panel: what the tablet lock screen
-    shows (household name, clock, the PIN strings) — never a person."""
+    shows (household name, clock, the PIN strings) — never a person.
+    ``POST /lock`` answers the same body with ``200``."""
     app = request.app
     locale = (await app[SETTINGS_KEY].get()).locale
     zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
@@ -190,7 +227,7 @@ async def _locked(request: web.Request) -> web.Response:
         clock=display_clock(app[AUTH_KEY].now(), zone, t),
         t=t,
     )
-    return web.json_response(payload, status=423, dumps=_dumps)
+    return web.json_response(payload, status=status, dumps=_dumps)
 
 
 def _dumps(value: object) -> str:
@@ -229,15 +266,9 @@ class DisplayPairView(web.View):
             )
             response.headers["Retry-After"] = str(wait)
             return response
-        raw = await self.request.read()
-        body: object = {}
-        if raw.strip():
-            try:
-                body = json.loads(raw)
-            except ValueError:
-                body = None
-        if not isinstance(body, dict):
-            return error_response(400, "BAD_REQUEST", "Expected a JSON object.")
+        body = await _json_object(self.request)
+        if body is None:
+            return _bad_request()
         try:
             pairing = await self.request.app[DISPLAYS_KEY].start_pairing(
                 model=body.get("model"), firmware=body.get("firmware")
@@ -280,6 +311,78 @@ class DisplayWhoamiView(web.View):
     async def get(self) -> web.Response:
         display = self.request[DISPLAY_KEY]
         return web.json_response({"display_id": display.id, "name": display.name})
+
+
+class DisplayLockView(web.View):
+    """``POST /api/display/v1/lock`` — privacy-lock this panel: ``200``
+    with the lock screen (:func:`~.display_json.lock_payload`), stored
+    on the panel's record so a reboot keeps it. ``409
+    DASHBOARD_PIN_REQUIRED`` while no PIN is set (nothing could unlock
+    it); a locked panel gets the guard's ``423``."""
+
+    async def post(self) -> web.Response:
+        try:
+            await self.request.app[DISPLAYS_KEY].lock(self.request[DISPLAY_KEY])
+        except CodedError as exc:
+            return _coded(exc)
+        return await _locked(self.request, status=200)
+
+
+class DisplayUnlockView(web.View):
+    """``POST /api/display/v1/unlock`` ``{"pin": "1234"}`` — lift this
+    panel's lock (the one route a locked panel reaches besides the lock
+    screen). ``200 {"locked": false}`` (also when it wasn't locked —
+    nothing is checked then); ``403 DISPLAY_PIN_WRONG`` with
+    ``params.remaining``; once those are spent the next try unpairs the
+    panel: ``401 DISPLAY_SIGNED_OUT``
+    (:meth:`DashboardDisplayService.unlock`)."""
+
+    async def post(self) -> web.Response:
+        body = await _json_object(self.request)
+        if body is None:
+            return _bad_request()
+        try:
+            await self.request.app[DISPLAYS_KEY].unlock(
+                self.request[DISPLAY_KEY], body.get("pin")
+            )
+        except CodedError as exc:
+            return _coded(exc)
+        return web.json_response({"api_version": API_VERSION, "locked": False})
+
+
+class DisplayAckView(web.View):
+    """``POST /api/display/v1/ack`` ``{"message_id", "person_id"?}`` —
+    "Got it" on a mention the panel shows (each mention's ``ack``).
+
+    The tablet's ``POST /ack`` rules: nothing the panel sends is trusted —
+    :meth:`HouseholdDashboardService.acknowledge` re-derives that the
+    wall shows exactly that mention right now (opt-in, chat on, not
+    night, shown sender, really ``@here`` / really naming that shown
+    person); anything else is ``404 NOT_FOUND``, never saying why. A
+    locked panel gets the guard's ``423``. Capped per panel
+    (:meth:`DashboardAuth.begin_display_ack`, ``429`` + ``Retry-After``).
+    """
+
+    async def post(self) -> web.Response:
+        app = self.request.app
+        wait = app[AUTH_KEY].begin_display_ack(self.request[DISPLAY_KEY].id)
+        if wait:
+            response = error_response(429, "RATE_LIMITED", "Too many requests.")
+            response.headers["Retry-After"] = str(wait)
+            return response
+        body = await _json_object(self.request)
+        if body is None:
+            return _bad_request()
+        message_id = ack_id(body.get("message_id"))
+        raw_person = body.get("person_id")
+        person_id = ack_id(raw_person)
+        if (
+            message_id is None
+            or (raw_person is not None and person_id is None)
+            or not await app[SNAPSHOTS_KEY].acknowledge(message_id, person_id=person_id)
+        ):
+            return error_response(404, "NOT_FOUND", "Nothing to acknowledge.")
+        return web.json_response({"api_version": API_VERSION, "acknowledged": True})
 
 
 async def _theme(app: web.Application) -> HouseholdTheme | None:
@@ -511,6 +614,9 @@ def register_display_routes(app: web.Application) -> None:
         PAIR_PATH + "/{pair_id:[A-Za-z0-9_-]{1,64}}", DisplayPairStatusView
     )
     app.router.add_view(DISPLAY_API_PREFIX + "whoami", DisplayWhoamiView)
+    app.router.add_view(LOCK_PATH, DisplayLockView)
+    app.router.add_view(UNLOCK_PATH, DisplayUnlockView)
+    app.router.add_view(DISPLAY_API_PREFIX + "ack", DisplayAckView)
     app.router.add_view(DISPLAY_API_PREFIX + "home", DisplayHomeView)
     app.router.add_view(
         DISPLAY_API_PREFIX + f"{{tab:{TAB_MESSAGES}|{TAB_NOTES}|{TAB_MAP}}}",

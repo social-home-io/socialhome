@@ -58,6 +58,9 @@ tablet logins can't hold pairing back, nor wrong codes hold back a login.
 A paired panel's reads are budgeted per panel
 (:meth:`DashboardAuth.begin_display_read`): :data:`DISPLAY_READ_MAX` JSON
 reads and :data:`DISPLAY_IMAGE_MAX` images per :data:`DISPLAY_WINDOW_S`.
+A panel's PIN guesses use the tablet PIN limit, keyed on the panel id
+(:meth:`DashboardAuth.display_pin_throttle_key`), and its "Got it" taps
+the tablet's ack budget (:meth:`DashboardAuth.begin_display_ack`).
 """
 
 from __future__ import annotations
@@ -473,15 +476,31 @@ class DashboardAuth:
         """
         return f"pin:{claims.session_id}"
 
+    @staticmethod
+    def display_pin_throttle_key(display_id: str) -> str:
+        """The throttle bucket for a wall panel's PIN guesses: the panel
+        id, the panel's lasting identity — a bearer token has no session
+        to rotate, and a fresh id (a fresh bucket) takes an admin pairing
+        it again. Same limit and ``count_global=False`` as
+        :meth:`pin_throttle_key`."""
+        return f"pin-display:{display_id}"
+
+    def begin_display_ack(self, display_id: str) -> int:
+        """Count one "Got it" write by a wall panel — the same budget as a
+        tablet session's (:meth:`begin_ack`), keyed on the panel id."""
+        return self._begin_ack(f"ack-display:{display_id}")
+
+    def _begin_ack(self, key: str) -> int:
+        if self._acks.is_allowed(key, limit=ACK_MAX, window_s=ACK_WINDOW_S):
+            return 0
+        return self._acks.retry_after_s(key, window_s=ACK_WINDOW_S)
+
     def begin_ack(self, claims: SessionClaims) -> int:
         """Count one "Got it" write for this session: ``0`` when it may go
         ahead, else the seconds to wait (nothing is counted then). Keyed
         on the session id, like the PIN throttle; separate from the
         password / PIN failure table."""
-        key = f"ack:{claims.session_id}"
-        if self._acks.is_allowed(key, limit=ACK_MAX, window_s=ACK_WINDOW_S):
-            return 0
-        return self._acks.retry_after_s(key, window_s=ACK_WINDOW_S)
+        return self._begin_ack(f"ack:{claims.session_id}")
 
     def begin_tile(self, claims: SessionClaims) -> int:
         """Count one map tile for this session: ``0`` when it may load,

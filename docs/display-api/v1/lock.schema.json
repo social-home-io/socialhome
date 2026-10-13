@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://social-home.io/schemas/display-api/v1/lock.schema.json",
-  "title": "423 Locked — any bearer endpoint of a locked panel",
+  "title": "The lock screen — 423 from any bearer endpoint of a locked panel, 200 from POST /lock",
   "type": "object",
   "additionalProperties": false,
   "required": [
