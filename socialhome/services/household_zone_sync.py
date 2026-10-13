@@ -100,7 +100,7 @@ class HouseholdZoneSync:
         raw = await self._config.get(SYNC_ENABLED_KEY)
         return raw is None or raw.strip() not in ("0", "false")
 
-    async def set_enabled(self, enabled: bool) -> HouseholdZoneSyncStatus:
+    async def set_enabled(self, enabled: object) -> HouseholdZoneSyncStatus:
         """Store the option and sync right away (on: pull the platform's
         zones; off: remove the synced ones). Returns the new status."""
         if not isinstance(enabled, bool):

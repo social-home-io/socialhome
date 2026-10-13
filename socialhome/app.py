@@ -385,6 +385,7 @@ from .services.poll_service import PollService
 from .services.online_status_service import OnlineStatusService
 from .services.presence_service import PresenceService
 from .services.household_zone_service import HouseholdZoneService
+from .services.household_zone_sync import HouseholdZoneSync
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_envelope_sender import GfsEnvelopeSender
 from .services.gfs_relay_inbound import GfsRelayInbound
@@ -3068,6 +3069,11 @@ def create_app(config: Config | None = None) -> web.Application:
     platform_adapter = build_platform_adapter(
         config.mode, db, config, instance_config=repos.instance_config
     )
+    # Platform zones (Home Assistant's ``zone.*``) → household zones. With
+    # no ``adapter.zones`` the sync never starts and reports unavailable.
+    household_zone_sync = HouseholdZoneSync(
+        household_zone_service, repos.instance_config, platform_adapter.zones
+    )
 
     # ── Household dashboard (wall tablet, own port) ──────────────────────
     dashboard = _build_household_dashboard(
@@ -3323,6 +3329,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.space_zone_repo_key] = repos.space_zone
     app[K.household_zone_service_key] = household_zone_service
     app[K.household_zone_repo_key] = repos.household_zone
+    app[K.household_zone_sync_key] = household_zone_sync
     app[K.poll_service_key] = poll_service
     app[K.space_poll_service_key] = space_poll_service
     app[K.bazaar_service_key] = bazaar_service
@@ -4726,6 +4733,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # Wire any extra services the adapter provides into the app dict.
         for key, svc in platform_adapter.get_extra_services().items():
             app[key] = svc
+        # After the adapter's startup — its zone source reads the client
+        # built there. First run right away, then every 5 minutes.
+        await household_zone_sync.start()
 
         # 7b. One-shot post-restore peer reconnect. Runs after the adapter's
         #     federation base is set (above) and after the federation stack is
@@ -4810,6 +4820,8 @@ def create_app(config: Config | None = None) -> web.Application:
         log.info("socialhome: shutting down")
         # First: the dashboard listener reads the database.
         await dashboard.controller.stop()
+        # Before the adapter closes its HA client.
+        await household_zone_sync.stop()
         await platform_adapter.on_cleanup(app)
         if outbox_processor is not None:
             await outbox_processor.stop()

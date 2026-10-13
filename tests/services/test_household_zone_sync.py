@@ -135,7 +135,7 @@ async def test_without_a_source_nothing_runs(zones, config):
 
 async def test_set_enabled_refuses_a_non_bool(sync):
     with pytest.raises(ValueError):
-        await sync.set_enabled("yes")  # type: ignore[arg-type]
+        await sync.set_enabled("yes")
 
 
 # ── a run ────────────────────────────────────────────────────────────────
