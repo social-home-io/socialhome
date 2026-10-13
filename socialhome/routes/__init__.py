@@ -304,7 +304,11 @@ from .spaces import (
     SpaceUnbanView,
 )
 from .space_zones import SpaceZoneDetailView, SpaceZonesCollectionView
-from .household_zones import HouseholdZoneDetailView, HouseholdZonesCollectionView
+from .household_zones import (
+    HouseholdZoneDetailView,
+    HouseholdZonesCollectionView,
+    HouseholdZoneSyncView,
+)
 from .stickies import (
     SpaceStickyCollectionView,
     SpaceStickyDetailView,
@@ -1254,6 +1258,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     app.router.add_view("/api/household/preferences", HouseholdPreferencesView)
     app.router.add_view("/api/household/chat", HouseholdChatView)
     app.router.add_view("/api/household/zones", HouseholdZonesCollectionView)
+    # Before ``{zone_id}`` — aiohttp matches in registration order.
+    app.router.add_view("/api/household/zones/sync", HouseholdZoneSyncView)
     app.router.add_view("/api/household/zones/{zone_id}", HouseholdZoneDetailView)
 
     # ── User preferences ─────────────────────────────────────────────────

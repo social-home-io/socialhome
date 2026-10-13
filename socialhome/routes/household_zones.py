@@ -13,6 +13,10 @@ the presence routes. Domain errors map centrally in
 * ``HouseholdZoneReadOnlyError`` (synced zone)     → 409 ``ZONE_READ_ONLY``
 * ``HouseholdZoneIsHomeError``                     → 409 ``ZONE_IS_HOME``
 * ``ValueError`` (name / centre / radius / colour / icon / is_home) → 422
+
+``/api/household/zones/sync`` reads and sets the platform zone sync
+(:class:`HouseholdZoneSync` — Home Assistant's zones, on by default);
+household admins only.
 """
 
 from __future__ import annotations
@@ -21,12 +25,17 @@ from typing import Any
 
 from aiohttp import web
 
-from ..app_keys import household_zone_service_key
-from ..domain.household_zone import HouseholdZone
+from ..app_keys import household_zone_service_key, household_zone_sync_key
+from ..domain.household_zone import HouseholdZone, HouseholdZoneSyncStatus
 from ..services.household_zone_service import HouseholdZoneService
+from ..services.household_zone_sync import HouseholdZoneSync
 from .base import BaseView
 
-__all__ = ["HouseholdZoneDetailView", "HouseholdZonesCollectionView"]
+__all__ = [
+    "HouseholdZoneDetailView",
+    "HouseholdZoneSyncView",
+    "HouseholdZonesCollectionView",
+]
 
 #: Body fields a PATCH may carry; an omitted one stays unchanged.
 _PATCH_FIELDS = (
@@ -55,6 +64,16 @@ def household_zone_to_dict(z: HouseholdZone) -> dict[str, Any]:
         "read_only": z.read_only,
         "created_at": z.created_at,
         "updated_at": z.updated_at,
+    }
+
+
+def household_zone_sync_to_dict(s: HouseholdZoneSyncStatus) -> dict[str, Any]:
+    """The API shape of the zone-sync status."""
+    return {
+        "available": s.available,
+        "enabled": s.enabled,
+        "last_synced_at": s.last_synced_at,
+        "last_error": s.last_error,
     }
 
 
@@ -127,3 +146,34 @@ class HouseholdZoneDetailView(_HouseholdZoneView):
             self.match("zone_id"), actor_is_admin=self.is_admin
         )
         return web.Response(status=204)
+
+
+class HouseholdZoneSyncView(_HouseholdZoneView):
+    """``GET`` / ``PATCH /api/household/zones/sync`` — household admins.
+
+    GET answers ``{available, enabled, last_synced_at, last_error}``;
+    PATCH ``{"enabled": bool}`` stores the option, syncs right away (on:
+    pull the platform's zones; off: remove the synced ones) and answers
+    the new status. Without a platform zone source PATCH is a 422.
+    """
+
+    @property
+    def sync(self) -> HouseholdZoneSync:
+        svc: HouseholdZoneSync = self.svc(household_zone_sync_key)
+        return svc
+
+    def _require_admin(self) -> None:
+        if not self.is_admin:
+            raise PermissionError("Only household admins can change zone sync.")
+
+    async def get(self) -> web.Response:
+        await self._gate()
+        self._require_admin()
+        return self._json(household_zone_sync_to_dict(await self.sync.status()))
+
+    async def patch(self) -> web.Response:
+        await self._gate()
+        self._require_admin()
+        body = await self._object_body()
+        status = await self.sync.set_enabled(body.get("enabled"))
+        return self._json(household_zone_sync_to_dict(status))

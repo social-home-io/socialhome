@@ -6,14 +6,20 @@
  * The zones belong to the household's presence feature; with it off the
  * API answers 403 ``FEATURE_DISABLED`` and the tab points to the toggle
  * under Settings. On a Home Assistant household a note says HA reports
- * who is in which zone.
+ * who is in which zone, and — when the platform has zones of its own —
+ * the "Sync zones from Home Assistant" switch sits above the list.
  */
+import { useState } from 'preact/hooks'
+
 import { Button } from '@/components/Button'
 import { ZonesAdmin } from '@/components/ZonesAdmin'
 import { t } from '@/i18n/i18n'
-import { usesHaUserDirectory } from '@/platform'
+import { supportsZoneSync, usesHaUserDirectory } from '@/platform'
+import { HouseholdZoneSyncPanel } from './HouseholdZoneSyncPanel'
 
 export function HouseholdZonesTab({ onOpenSettings }: { onOpenSettings: () => void }) {
+  // Bumped after the sync switch changed — the list refetches quietly.
+  const [reloadSignal, setReloadSignal] = useState(0)
   return (
     <section class="sh-admin-section">
       <ZonesAdmin
@@ -26,6 +32,12 @@ export function HouseholdZonesTab({ onOpenSettings }: { onOpenSettings: () => vo
             ? `${t('zones.household.intro')} ${t('zones.household.ha_note')}`
             : t('zones.household.intro')
         }
+        toolbar={
+          supportsZoneSync()
+            ? <HouseholdZoneSyncPanel onChanged={() => setReloadSignal((n) => n + 1)} />
+            : undefined
+        }
+        reloadSignal={reloadSignal}
         emptyText={t('zones.household.empty')}
         refetchOn="household_zones_changed"
         household

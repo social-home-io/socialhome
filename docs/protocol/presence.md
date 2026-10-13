@@ -133,6 +133,22 @@ catalogues below.
   The mirror keeps every real platform zone: an invalid icon or colour
   is dropped and an out-of-range radius clamped into 25 m – 50 km (both
   logged at WARNING); only an unusable id, name or centre skips a zone.
+- **Sync from Home Assistant.** On `ha` / `haos` (the adapter's
+  `ZoneSource`, capability `zone_sync`) the household's zones follow
+  Home Assistant's `zone.*` entities — an option, **on by default**,
+  under Admin › Zones (`GET` / `PATCH /api/household/zones/sync`).
+  While on, `HouseholdZoneSync` mirrors HA's zones at startup and every
+  5 minutes: each carries its entity id as `external_id` (`zone.work`),
+  is read-only here, keeps HA's `friendly_name`, centre and radius, gets
+  an emoji for HA's `mdi:*` icon (📍 when unmapped) and no colour (HA
+  stores none). Passive zones are left out; `zone.home` is the Home
+  zone. Zones created in Social Home stay next to them. A sync that
+  can't read HA — or gets an answer without `zone.home`, which HA always
+  has once its zones are loaded — keeps the synced zones (a failed call
+  is never "HA has no zones") and reports `last_error`. Turning the option off removes
+  the synced zones once — the household's own zones stay — and the
+  sync idles until it's turned back on, which pulls HA's zones at once.
+  The zones still never leave the household.
 - **Live updates.** Every change sends a content-free
   `household_zones_changed` WS frame to household members; clients
   refetch the list.

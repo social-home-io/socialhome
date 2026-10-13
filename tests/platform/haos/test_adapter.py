@@ -6,6 +6,7 @@ import pytest
 
 from socialhome.domain.household_dashboard import DEFAULT_DASHBOARD_PORT
 from socialhome.platform.adapter import Capability, DashboardHostPort
+from socialhome.platform.ha.zones import HaZoneSource
 from socialhome.platform.haos.adapter import HaosAdapter
 from socialhome.platform.haos.supervisor import AddonInfo
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
@@ -111,6 +112,13 @@ async def test_capabilities_always_include_ingress():
     assert Capability.INGRESS in caps
     assert Capability.HA_PERSON_DIRECTORY in caps
     assert Capability.PUSH in caps
+
+
+async def test_zone_source_wired_with_zone_sync_capability():
+    """Same HA zone source as ha mode — both talk to HA Core."""
+    adapter = _build_haos_adapter()
+    assert isinstance(adapter.zones, HaZoneSource)
+    assert Capability.ZONE_SYNC in adapter.capabilities
 
 
 async def test_capabilities_add_stt_when_entity_configured():

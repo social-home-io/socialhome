@@ -95,6 +95,24 @@ no auto-derived default — an unset value skips HA-app push for that user,
 and a configured-but-wrong service is logged at WARNING (not silently
 dropped).
 
+Household zones (§23.8) can follow the platform's own places through
+the optional `ZoneSource` Provider (`adapter.zones`; `None` on
+standalone). Adapters that wire one also advertise `Capability.ZONE_SYNC`
+(`zone_sync` in `/api/instance/config`), which shows the sync switch in
+Admin › Zones. In `ha` / `haos` mode `platform/ha/zones.py:HaZoneSource`
+reads Home Assistant's `zone.*` entities from `GET /api/states`
+(passive zones left out, `zone.home` = the Home zone, `mdi:*` icons
+mapped to one emoji, no colour — HA stores none) and raises
+`ZoneSourceUnavailableError` when HA can't be read — or answers without
+`zone.home`, which HA's zone integration always creates, i.e. HA is
+still starting — so a failed call is never mistaken for "no zones". `services/household_zone_sync.py:
+HouseholdZoneSync` mirrors them via `HouseholdZoneService.mirror_external`
+at startup and every 5 minutes while the household's option is on (the
+default; `instance_config` key `household_zones.sync_enabled`); turning
+it off removes the synced zones once and the loop idles. The app starts
+it after the adapter's `on_startup` and stops it before `on_cleanup`,
+for whichever adapter has a zone source — no mode branching.
+
 ## Identity (§4.1)
 
 Every identity in Social Home — instance and user — is bound to an

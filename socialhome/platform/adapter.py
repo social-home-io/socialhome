@@ -27,6 +27,8 @@ slices of behaviour that vary across modes:
 * :class:`STTProvider` — speech-to-text (buffered + streaming).
 * :class:`AIProvider` — text generation via an external service.
 * :class:`ExternalEventSink` — fire-and-forget event publication.
+* :class:`ZoneSource` — the platform's named places (Home Assistant's
+  ``zone.*`` entities), mirrored into the household's zones.
 
 Each adapter wires the right concrete provider in its constructor. The
 adapter's high-level methods are thin pass-throughs. To add a new
@@ -56,6 +58,8 @@ from .federation_base import public_base_from_federation_base
 
 if TYPE_CHECKING:
     from aiohttp import web
+
+    from ..domain.household_zone import ExternalHouseholdZone
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +152,9 @@ class Capability(StrEnum):
     #: locally-managed table; user-management UI shows enable/disable
     #: rather than create/delete.
     HA_PERSON_DIRECTORY = "ha_person_directory"
+    #: Adapter has a :class:`ZoneSource` — the household's zones can be
+    #: synced from the platform (Admin › Zones shows the sync toggle).
+    ZONE_SYNC = "zone_sync"
 
 
 # ── Provider Protocols ───────────────────────────────────────────────────────
@@ -286,6 +293,24 @@ class ExternalEventSink(Protocol):
     async def fire(self, event_type: str, data: dict) -> bool: ...
 
 
+@runtime_checkable
+class ZoneSource(Protocol):
+    """The platform's named places, read for the household-zone sync.
+
+    HA / HAOS: the ``zone.*`` entities from ``GET /api/states``
+    (passive zones left out; ``zone.home`` is the Home zone).
+    Standalone: none (``PlatformAdapter.zones`` is ``None``).
+    """
+
+    async def list_zones(self) -> list["ExternalHouseholdZone"]:
+        """Every zone the platform has right now — ``[]`` when it truly
+        has none. Raises
+        :class:`~socialhome.domain.household_zone.ZoneSourceUnavailableError`
+        when the platform couldn't be read, so a sync never mistakes a
+        failed call for an empty list."""
+        ...
+
+
 class NoopEventSink:
     """Default :class:`ExternalEventSink` for adapters without an
     upstream event bus. Returns ``False`` for every call so callers
@@ -324,6 +349,9 @@ class PlatformAdapter(abc.ABC):
     stt: STTProvider | None
     ai: AIProvider | None
     events: ExternalEventSink
+    #: Platform zones for the household-zone sync; ``None`` = the platform
+    #: has none (adapters that set it also declare ``Capability.ZONE_SYNC``).
+    zones: ZoneSource | None = None
 
     @property
     @abc.abstractmethod

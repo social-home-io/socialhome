@@ -17905,6 +17905,19 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 /* Household zones: Home / Home Assistant badges, the synced-row note,
    the Home toggle in the edit dialog. */
 .sh-zones-admin__intro { margin: 0 0 var(--sh-space-md); }
+/* Admin › Zones: the "Sync zones from Home Assistant" switch + its
+ * inline turn-off question. */
+.sh-zone-sync { display: flex; flex-direction: column; gap: var(--sh-space-sm); margin: 0 0 var(--sh-space-md); }
+.sh-conn-setting__text span.sh-zone-sync__error { color: color-mix(in srgb, var(--sh-warning) 30%, var(--sh-text)); }
+.sh-zone-sync__confirm {
+  padding: var(--sh-space-md);
+  border-radius: var(--sh-radius-lg);
+  border: 1px solid color-mix(in srgb, var(--sh-danger) 45%, var(--sh-border));
+  background: color-mix(in srgb, var(--sh-danger) 6%, var(--sh-bg));
+}
+.sh-zone-sync__confirm:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; }
+.sh-zone-sync__confirm p { margin: 0 0 var(--sh-space-sm); font-size: var(--sh-font-size-sm); }
+.sh-zone-sync__confirm-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sh-space-sm); }
 /* Presence off: one explanatory line + the way to Settings. */
 .sh-zones-admin__off-body {
   display: flex;

@@ -100,6 +100,19 @@ class HaClient:
 
     async def get_states(self) -> list[dict]:
         """``GET /api/states`` — list every entity state. ``[]`` on error."""
+        return await self.fetch_states() or []
+
+    async def fetch_states(self) -> list[dict] | None:
+        """``GET /api/states`` — every entity state, or ``None`` when the
+        call failed (transport error, non-2xx, a body that isn't a JSON
+        list). Callers that must tell "HA has none" from "HA didn't
+        answer" (the household-zone sync) use this; the WARNING is
+        logged here.
+
+        Contract (developers.home-assistant.io/docs/api/rest,
+        ``GET /api/states``): a JSON array of state objects
+        ``{entity_id, state, attributes, last_changed, last_updated}``.
+        """
         try:
             async with self._session.get(
                 f"{self._base_url}/api/states",
@@ -107,10 +120,13 @@ class HaClient:
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
             log.warning("ha_client: get_states failed: %s", exc)
-            return []
-        return data if isinstance(data, list) else []
+            return None
+        if not isinstance(data, list):
+            log.warning("ha_client: get_states answered a non-list body")
+            return None
+        return data
 
     async def get_state(self, entity_id: str) -> dict | None:
         """``GET /api/states/{entity_id}`` — ``None`` on 404 or error."""

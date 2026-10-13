@@ -51,6 +51,14 @@ async def ha_server(aiohttp_server):
 
     async def states_list(request: web.Request) -> web.Response:
         await _record(request)
+        if "states_status" in captured:
+            return web.json_response({}, status=captured["states_status"])
+        if "states_body" in captured:
+            return web.json_response(captured["states_body"])
+        if "states_raw" in captured:
+            return web.Response(
+                text=captured["states_raw"], content_type="application/json"
+            )
         return web.json_response(
             [
                 {"entity_id": "person.pascal", "attributes": {}},
@@ -180,6 +188,51 @@ async def test_get_states_sends_bearer_token(client, ha_server):
     states = await client.get_states()
     assert len(states) == 2
     assert captured["requests"][-1]["headers"]["Authorization"] == "Bearer secret-token"
+
+
+async def test_fetch_states_returns_the_list(client):
+    states = await client.fetch_states()
+    assert [s["entity_id"] for s in states] == ["person.pascal", "light.kitchen"]
+
+
+async def test_fetch_states_is_none_on_http_error(client, ha_server, caplog):
+    """A failed call is ``None`` — not ``[]`` — so the zone sync can tell
+    "HA didn't answer" from "HA has no zones"."""
+    _, captured = ha_server
+    captured["states_status"] = 500
+    assert await client.fetch_states() is None
+    assert "get_states failed" in caplog.text
+    # The lenient variant keeps its ``[]`` contract.
+    assert await client.get_states() == []
+
+
+async def test_fetch_states_is_none_on_a_non_list_body(client, ha_server, caplog):
+    _, captured = ha_server
+    captured["states_body"] = {"message": "nope"}
+    assert await client.fetch_states() is None
+    assert "non-list" in caplog.text
+    assert await client.get_states() == []
+
+
+async def test_fetch_states_is_none_on_truncated_json(client, ha_server, caplog):
+    """A body cut off mid-array is a failed call, not an empty list."""
+    _, captured = ha_server
+    captured["states_raw"] = '[{"entity_id": "zone.home", "attri'
+    assert await client.fetch_states() is None
+    assert "get_states failed" in caplog.text
+
+
+async def test_fetch_states_401_logs_without_the_token(client, ha_server, caplog):
+    _, captured = ha_server
+    captured["states_status"] = 401
+    assert await client.fetch_states() is None
+    assert "401" in caplog.text
+    assert "secret-token" not in caplog.text
+
+
+async def test_fetch_states_is_none_when_unreachable(session):
+    dead = HaClient(session, "http://127.0.0.1:9", "t")
+    assert await dead.fetch_states() is None
 
 
 async def test_get_state_handles_404(client):

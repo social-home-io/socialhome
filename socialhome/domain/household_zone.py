@@ -20,6 +20,7 @@ from typing import Final
 from .errors import CodedError
 
 __all__ = [
+    "HOME_ZONE_MANAGED_DETAIL",
     "HOME_ZONE_PRESENCE_NAME",
     "MAX_HOUSEHOLD_ZONES",
     "ExternalHouseholdZone",
@@ -30,6 +31,8 @@ __all__ = [
     "HouseholdZoneNameTakenError",
     "HouseholdZoneNotFoundError",
     "HouseholdZoneReadOnlyError",
+    "HouseholdZoneSyncStatus",
+    "ZoneSourceUnavailableError",
 ]
 
 #: Same cap as a space's zone catalogue — keeps the per-GPS-update match
@@ -40,6 +43,11 @@ MAX_HOUSEHOLD_ZONES: Final = 50
 #: the zone is called — it is what makes the presence state ``home``
 #: (the Home Assistant integration sends HA's ``home`` state the same way).
 HOME_ZONE_PRESENCE_NAME: Final = "home"
+
+
+#: :class:`HouseholdZoneReadOnlyError` detail when a zone created here
+#: would take the Home flag from a synced Home.
+HOME_ZONE_MANAGED_DETAIL: Final = "The Home zone is managed by Home Assistant."
 
 
 @dataclass(slots=True, frozen=True)
@@ -109,6 +117,23 @@ class HouseholdZoneMirrorResult:
     changed: bool
 
 
+@dataclass(slots=True, frozen=True)
+class HouseholdZoneSyncStatus:
+    """The platform zone sync as Admin › Zones shows it.
+
+    * ``available`` — the platform has a zone source (Home Assistant).
+    * ``enabled`` — the household's option (default on).
+    * ``last_synced_at`` — UTC ISO 8601 of the last run that read the
+      platform, this process lifetime; ``None`` before the first one.
+    * ``last_error`` — why the last run failed, ``None`` when it worked.
+    """
+
+    available: bool
+    enabled: bool
+    last_synced_at: str | None = None
+    last_error: str | None = None
+
+
 class HouseholdZoneNotFoundError(CodedError, LookupError):
     """No household zone with that id."""
 
@@ -152,3 +177,11 @@ class HouseholdZoneIsHomeError(CodedError):
     status = 409
     code = "ZONE_IS_HOME"
     detail = "The Home zone can't be removed. Mark another zone as Home first."
+
+
+class ZoneSourceUnavailableError(Exception):
+    """A platform zone source (Home Assistant) couldn't be read this time.
+
+    Distinct from an empty answer: a sync run that gets this skips the
+    mirror and keeps the synced zones it already has — a flaky HA
+    connection must never look like "HA has no zones" and wipe them."""

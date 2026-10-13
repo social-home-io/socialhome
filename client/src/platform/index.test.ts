@@ -11,6 +11,7 @@ import {
   supportsStt,
   supportsAi,
   supportsPush,
+  supportsZoneSync,
 } from './index'
 
 function set(mode: 'standalone' | 'ha' | 'haos' | null, caps: string[] = []) {
@@ -57,7 +58,8 @@ describe('platform adapter', () => {
   })
 
   it('capability accessors read the capabilities array', () => {
-    set('ha', ['stt', 'ai', 'push', 'ha_person_directory'])
+    set('ha', ['stt', 'ai', 'push', 'ha_person_directory', 'zone_sync'])
+    expect(supportsZoneSync()).toBe(true)
     expect(supportsStt()).toBe(true)
     expect(supportsAi()).toBe(true)
     expect(supportsPush()).toBe(true)
@@ -65,6 +67,7 @@ describe('platform adapter', () => {
     set('standalone', [])
     expect(supportsStt()).toBe(false)
     expect(usesHaUserDirectory()).toBe(false)
+    expect(supportsZoneSync()).toBe(false)
   })
 
   it('all accessors are safe before config loads', () => {

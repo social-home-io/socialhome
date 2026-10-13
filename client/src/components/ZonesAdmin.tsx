@@ -57,6 +57,9 @@ export interface AdminZone {
   is_home?: boolean
   /** Household zones only: synced from Home Assistant, not editable here. */
   read_only?: boolean
+  /** Household zones only: the platform entity a synced zone mirrors —
+   *  its fallback colour hashes on this, stable across re-creation. */
+  external_id?: string | null
 }
 
 interface ZonesResponse {
@@ -79,6 +82,11 @@ export interface ZonesAdminProps {
   /** Shown instead of the editor when the load answers 403
    *  ``FEATURE_DISABLED``; without it that is a plain load error. */
   featureDisabled?: ComponentChildren
+  /** Extra controls under the intro (household: the Home Assistant sync
+   *  switch). Rendered only once the list has loaded. */
+  toolbar?: ComponentChildren
+  /** Bump to refetch the list quietly (e.g. after a sync was toggled). */
+  reloadSignal?: number
 }
 
 const PALETTE = ZONE_PALETTE
@@ -156,6 +164,7 @@ function _fmtRadius(m: number): string {
 
 export function ZonesAdmin({
   basePath, title, emptyText, intro, refetchOn, household = false, featureDisabled,
+  toolbar, reloadSignal = 0,
 }: ZonesAdminProps) {
   const [zones, setZones] = useState<AdminZone[]>([])
   const [loading, setLoading] = useState(true)
@@ -207,6 +216,10 @@ export function ZonesAdmin({
   }
 
   reloadRef.current = reload
+
+  useEffect(() => {
+    if (reloadSignal > 0) void reloadRef.current(true)
+  }, [reloadSignal])
 
   const homeZone = household ? zones.find((z) => z.is_home) : undefined
   // The first zone a household adds is its Home — pre-fill it.
@@ -301,6 +314,7 @@ export function ZonesAdmin({
         </Button>
       </header>
       {intro && <p class="sh-muted sh-zones-admin__intro">{intro}</p>}
+      {toolbar}
 
       <div class="sh-zones-admin__split">
         <ul class="sh-zones-admin__list" data-testid="zone-list">

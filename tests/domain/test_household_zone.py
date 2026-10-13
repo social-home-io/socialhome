@@ -18,6 +18,8 @@ from socialhome.domain.household_zone import (
     HouseholdZoneNameTakenError,
     HouseholdZoneNotFoundError,
     HouseholdZoneReadOnlyError,
+    HouseholdZoneSyncStatus,
+    ZoneSourceUnavailableError,
 )
 
 
@@ -103,3 +105,18 @@ def test_not_found_is_a_lookup_error():
 def test_mirror_result_shape():
     r = HouseholdZoneMirrorResult(upserted=2, removed=1, skipped=0, changed=True)
     assert (r.upserted, r.removed, r.skipped, r.changed) == (2, 1, 0, True)
+
+
+def test_zone_source_unavailable_is_not_a_coded_api_error():
+    """A failed platform read is an internal sync signal, never an HTTP
+    error shape — the sync catches it and keeps the synced zones."""
+    exc = ZoneSourceUnavailableError("HA down")
+    assert not isinstance(exc, CodedError)
+    assert str(exc) == "HA down"
+
+
+def test_sync_status_defaults_and_frozen():
+    status = HouseholdZoneSyncStatus(available=True, enabled=True)
+    assert status.last_synced_at is None and status.last_error is None
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        status.enabled = False  # type: ignore[misc]
