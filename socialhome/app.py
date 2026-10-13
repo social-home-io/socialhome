@@ -1601,7 +1601,7 @@ def _wire_federation_stack(
     sync_windows = SyncWindows(space_repo)
     exporters: dict = {
         "bans": BansExporter(space_repo),
-        "members": MembersExporter(space_repo),
+        "members": MembersExporter(space_repo, profile_picture_repo),
         "member_pictures": MemberPicturesExporter(
             space_repo,
             profile_picture_repo,
@@ -1689,6 +1689,8 @@ def _wire_federation_stack(
         page_conflicts=page_conflict_service,
         # §25.6 echo (0087): a clean stream records the provider's snapshot.
         applied_seqs=space_sync_watermark_repo,
+        # v_58: whether a provider's ``members`` picture reset is trusted.
+        peer_version=federation_service.space_member_version,
     )
     federation_service.attach_space_sync(
         service=space_sync_service,

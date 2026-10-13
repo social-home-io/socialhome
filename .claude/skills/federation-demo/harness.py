@@ -7583,6 +7583,17 @@ def cmd_verify() -> None:
         print(
             "  (v_57 private multi-GFS check skipped — run 'gfs-private-channel-multi')"
         )
+    # v_58 — a §25.6 ``members`` record's ``picture_hash: null`` from a v_58
+    # provider that speaks for the member resets a stale per-space picture.
+    # Receiver-side gate on the provider: the OURS round-trip above proves
+    # every pair advertises >= v_58, so a host's reset is trusted. Pin it.
+    if int(_Cap.MIN_FOR_MEMBER_PICTURE_RESET_SYNC) != 58 or _OURS < 58:
+        failures.append(
+            "MIN_FOR_MEMBER_PICTURE_RESET_SYNC moved off v_58 (or OURS fell "
+            "below it) — a picture reset missed offline would never converge"
+        )
+    else:
+        print("  v_58 member picture reset in space catch-up gate in place ✓")
 
     # 0c. v_29 round-trip on the §D2b BOOTSTRAP wire. The capability
     #     integer normally travels in INSTANCE_CAPABILITIES_UPDATED, over a

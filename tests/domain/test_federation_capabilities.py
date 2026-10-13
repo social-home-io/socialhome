@@ -8,7 +8,24 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 57
+    assert fc.OURS == 58
+
+
+def test_member_picture_reset_sync_capability_threshold():
+    """v_58 — a §25.6 ``members`` record's ``null`` picture hash is an
+    authoritative reset from a v_58 provider. Receiver-side, degraded
+    fallback (an older provider's ``null`` is ignored): labelled, not
+    space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC == 58
+    assert fc.FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(57) == [
+        "Removed profile pictures in space catch-up"
+    ]
+    assert fc.features_missing_below(58) == []
+    assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
 
 def test_multi_gfs_publish_capability_threshold():
@@ -21,9 +38,12 @@ def test_multi_gfs_publish_capability_threshold():
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
     assert fc.features_missing_below(56) == [
-        "Posting to every GFS a space is listed on"
+        "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
-    assert fc.features_missing_below(57) == []
+    assert "Posting to every GFS a space is listed on" not in (
+        fc.features_missing_below(57)
+    )
     assert fc.CAPABILITY_FEATURE_KEYS[57] == "multi_gfs_posting"
 
 
@@ -39,6 +59,7 @@ def test_sync_series_rows_capability_threshold():
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -53,10 +74,12 @@ def test_space_chat_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
     assert fc.space_features_missing_below(54) == ["Chat in spaces"]
     assert fc.space_feature_keys_missing_below(54) == ["space_chat"]
@@ -76,11 +99,13 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -98,12 +123,14 @@ def test_gfs_relay_routes_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -120,6 +147,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -154,6 +182,7 @@ def test_space_authority_rotation_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -167,6 +196,7 @@ def test_space_authority_rotation_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -197,6 +227,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -706,6 +737,7 @@ def test_forwarded_role_change_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -731,6 +763,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -751,6 +784,7 @@ def test_member_gfs_publish_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -770,6 +804,7 @@ def test_strict_member_publish_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -789,6 +824,7 @@ def test_private_channels_capability_threshold():
         "Chat in spaces",
         "Recurring events in space catch-up",
         "Posting to every GFS a space is listed on",
+        "Removed profile pictures in space catch-up",
     ]
 
 
@@ -851,6 +887,7 @@ _PINNED_FEATURE_KEYS = {
     55: "space_chat",
     56: "synced_recurring_events",
     57: "multi_gfs_posting",
+    58: "synced_picture_resets",
 }
 
 

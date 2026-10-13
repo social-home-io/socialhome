@@ -872,7 +872,20 @@ from __future__ import annotations
 #:   writer key is pinned in every mode and handed to v_57 writers in
 #:   trusted spaces too, and key holders send ``publish-anon`` to every
 #:   chosen server their grant names.
-OURS: int = 57
+#: * **v_58** (2026-10-13) — a §25.6 ``members`` record's ``picture_hash:
+#:   null`` from a provider at v_58+ is AUTHORITATIVE for a member that
+#:   provider seats (the member's own household — the live profile rule): the
+#:   member has no per-space picture, so the receiver drops a stale one it
+#:   still holds (hash and blob) — a reset missed while offline converges on
+#:   the next catch-up. No wire change and no new event type: the record
+#:   always carried the field, but before v_58 a provider's roster upsert
+#:   could wipe a seat's hash (fixed in #910, which shipped at v_57), so an
+#:   older provider's ``null`` may be damage, not a reset. **Gated, degraded
+#:   fallback**: a provider below v_58 (or of unknown version) is never
+#:   trusted with a reset — the stale picture stays until the member's next
+#:   live ``SPACE_MEMBER_PROFILE_UPDATED``, as before. Not space-scoped;
+#:   labelled "Removed profile pictures in space catch-up".
+OURS: int = 58
 
 
 class FederationCapability:
@@ -1346,6 +1359,13 @@ class FederationCapability:
     #: v_50): a lagging household still publishes, through fewer servers.
     MIN_FOR_MULTI_GFS_PUBLISH = 57
 
+    #: v_58 — a §25.6 ``members`` record's ``picture_hash: null`` is an
+    #: authoritative per-space picture reset when the provider seats the
+    #: member (the member's own household). Read by the
+    #: RECEIVER about the provider: below it the ``null`` is ignored (it may
+    #: be the pre-#910 roster-upsert wipe). Not space-scoped.
+    MIN_FOR_MEMBER_PICTURE_RESET_SYNC = 58
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1562,6 +1582,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH,
         "Posting to every GFS a space is listed on",
     ),
+    (
+        FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC,
+        "Removed profile pictures in space catch-up",
+    ),
 ]
 
 
@@ -1630,6 +1654,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_CHAT: "space_chat",
     FederationCapability.MIN_FOR_SYNC_SERIES_ROWS: "synced_recurring_events",
     FederationCapability.MIN_FOR_MULTI_GFS_PUBLISH: "multi_gfs_posting",
+    FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC: "synced_picture_resets",
 }
 
 

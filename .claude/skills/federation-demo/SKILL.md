@@ -904,6 +904,9 @@ route), and the log names neither d (id, key hex / base64url) nor the
 content. Clean-up: a and d restart normally, e reconnects to A. ``verify``
 then pins ``MIN_FOR_MULTI_GFS_PUBLISH`` at v_57 and checks d's writer key,
 d's two-server list and e's copy of the post.
+``verify`` also pins ``MIN_FOR_MEMBER_PICTURE_RESET_SYNC`` at v_58 (a
+§25.6 ``members`` record's ``picture_hash: null`` resets a stale per-space
+picture when a v_58 provider speaks for the member).
 
 ### ``gfs-private-channel-multi`` — a private channel on the owner's chosen GFSs (v_57)
 

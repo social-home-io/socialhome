@@ -17,6 +17,7 @@ import pytest
 from PIL import Image
 
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.domain.space import (
     JoinMode,
@@ -26,15 +27,21 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
+from socialhome.federation.space_authorship import SpaceAuthorship
 from socialhome.federation.sync.space.receiver import HeldBack, SpaceSyncReceiver
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.media.profile_picture import PROFILE_PICTURE_MAX_DIMENSION
 from socialhome.repositories.profile_picture_repo import SqliteProfilePictureRepo
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 
 HOST = "host-household"
 SPACE_ID = "sp-sync-pic"
 MEMBER = "u-remote"
+MEMBER_HOME = "member-household"
 LOCAL = "u-local"
 
 
@@ -76,6 +83,26 @@ async def stack(tmp_dir):
                 joined_at="2026-01-01T00:00:00+00:00",
             )
         )
+    remote_members = SqliteSpaceRemoteMemberRepo(db)
+    # MEMBER's own household (MEMBER_HOME) holds their seat; the host
+    # household holds none for them.
+    await remote_members.add(
+        space_id=SPACE_ID,
+        instance_id=MEMBER_HOME,
+        user_id=MEMBER,
+        user_pk=None,
+        display_name=None,
+    )
+    authorship = SpaceAuthorship(
+        space_repo=spaces,
+        remote_member_repo=remote_members,
+        user_repo=SqliteUserRepo(db),
+    )
+    # Every provider is at the current protocol version unless a test says
+    # not (``FederationService.space_member_version`` in production).
+    peer_version = AsyncMock(
+        return_value=FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC
+    )
     receiver = SpaceSyncReceiver(
         bus=EventBus(),
         encoder=MagicMock(),
@@ -89,8 +116,17 @@ async def stack(tmp_dir):
         space_calendar_repo=AsyncMock(),
         gallery_repo=AsyncMock(),
         profile_picture_repo=pictures,
+        authorship=authorship,
+        peer_version=peer_version,
     )
-    yield SimpleNamespace(db=db, spaces=spaces, pictures=pictures, receiver=receiver)
+    yield SimpleNamespace(
+        db=db,
+        spaces=spaces,
+        pictures=pictures,
+        receiver=receiver,
+        remote_members=remote_members,
+        peer_version=peer_version,
+    )
     await db.shutdown()
 
 
@@ -232,3 +268,219 @@ async def test_a_truncated_picture_is_dropped_and_the_rest_of_the_chunk_lands(
     b64 = _picture_record(truncated)["picture_webp_base64"]
     for r in caplog.records:
         assert b64[:40] not in r.getMessage()
+
+
+# ── Bug 3: a picture reset missed while offline converges on catch-up ──
+
+
+async def _stale_picture(stack, user_id: str = MEMBER) -> str:
+    """Seat ``user_id`` with a per-space picture we hold (hash + blob), as
+    a live ``SPACE_MEMBER_PROFILE_UPDATED`` left it before we went offline."""
+    webp = b"RIFF-stale-webp"
+    hash_ = compute_picture_hash(webp)
+    await stack.pictures.set_member_picture(
+        SPACE_ID, user_id, bytes_webp=webp, hash=hash_, width=1, height=1
+    )
+    await stack.spaces.set_member_profile(
+        SPACE_ID, user_id, space_display_name="Remy", picture_hash=hash_
+    )
+    return hash_
+
+
+def _members_record(user_id: str = MEMBER, **extra) -> dict:
+    record = asdict(
+        SpaceMember(
+            space_id=SPACE_ID,
+            user_id=user_id,
+            role=SpaceRole.MEMBER.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+            space_display_name="Remy",
+        )
+    )
+    record.update(extra)
+    return record
+
+
+async def _members_from(stack, provider: str, records: list[dict]) -> None:
+    """A ``members`` chunk through admission and persistence, as streamed."""
+    await stack.receiver._apply("members", SPACE_ID, records, provider=provider)
+
+
+async def _still_stale(stack, hash_: str, user_id: str = MEMBER) -> None:
+    member = await stack.spaces.get_member(SPACE_ID, user_id)
+    assert member is not None
+    assert member.picture_hash == hash_
+    assert await stack.pictures.get_member_picture(SPACE_ID, user_id) is not None
+
+
+async def _cleared(stack, user_id: str = MEMBER) -> None:
+    member = await stack.spaces.get_member(SPACE_ID, user_id)
+    assert member is not None
+    assert member.picture_hash is None
+    # The display name is not part of the reset.
+    assert member.space_display_name == "Remy"
+    assert await stack.pictures.get_member_picture(SPACE_ID, user_id) is None
+
+
+async def test_the_members_own_household_resets_a_stale_picture(stack):
+    """The member reset their per-space picture while we were offline: a
+    ``members`` record from their own household says ``picture_hash: null``
+    (and ``member_pictures`` ships nothing for them) — our copy goes."""
+    await _stale_picture(stack)
+    await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
+    await _cleared(stack)
+    stack.peer_version.assert_awaited_with(MEMBER_HOME)
+
+
+async def test_a_member_households_roster_is_still_refused(stack):
+    """The member's own household is not the roster authority: its
+    ``members`` chunk seats nobody and changes no role — only the picture
+    reset of a member it holds the seat of is taken from it."""
+    await _stale_picture(stack)
+    await _members_from(
+        stack,
+        MEMBER_HOME,
+        [
+            _members_record(picture_hash=None, role=SpaceRole.ADMIN.value),
+            _members_record("u-stranger", picture_hash=None),
+        ],
+    )
+    await _cleared(stack)
+    member = await stack.spaces.get_member(SPACE_ID, MEMBER)
+    assert member is not None and member.role == SpaceRole.MEMBER.value
+    assert await stack.spaces.get_member(SPACE_ID, "u-stranger") is None
+
+
+async def test_another_co_member_household_does_not_reset_the_member(stack):
+    """Household K is a co-member (it seats its own person) but not the
+    member's home: its ``null`` for household L's member is no reset."""
+    hash_ = await _stale_picture(stack)
+    await stack.remote_members.add(
+        space_id=SPACE_ID,
+        instance_id="k-household",
+        user_id="u-k",
+        user_pk=None,
+        display_name=None,
+    )
+    await _members_from(stack, "k-household", [_members_record(picture_hash=None)])
+    await _still_stale(stack, hash_)
+
+
+async def test_a_provider_with_no_seat_at_all_does_not_reset(stack):
+    hash_ = await _stale_picture(stack)
+    await _members_from(stack, "stranger", [_members_record(picture_hash=None)])
+    await _still_stale(stack, hash_)
+
+
+async def test_the_owner_does_not_reset_another_households_member(stack):
+    """The owner's knowledge of another household's member picture is
+    second-hand (a missed fan-out leaves it NULL) — like the live
+    ``SPACE_MEMBER_PROFILE_UPDATED`` rule, only the member's own household
+    resets it."""
+    hash_ = await _stale_picture(stack)
+    await _members_from(stack, HOST, [_members_record(picture_hash=None)])
+    await _still_stale(stack, hash_)
+
+
+async def test_the_owner_resets_its_own_household_member(stack):
+    """The owner household's own people are seated on it in our mirror:
+    the owner speaks for them."""
+    await stack.remote_members.add(
+        space_id=SPACE_ID,
+        instance_id=HOST,
+        user_id="u-host-kid",
+        user_pk=None,
+        display_name=None,
+    )
+    await stack.spaces.save_member(
+        SpaceMember(
+            space_id=SPACE_ID,
+            user_id="u-host-kid",
+            role=SpaceRole.MEMBER.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    await _stale_picture(stack, "u-host-kid")
+    await _members_from(stack, HOST, [_members_record("u-host-kid", picture_hash=None)])
+    await _cleared(stack, "u-host-kid")
+
+
+async def test_reset_from_a_provider_below_the_capability_is_not_trusted(stack):
+    """Before v_58 a provider's roster upsert could wipe a seat's hash
+    (#910), so its ``null`` may be damage, not a reset: keep ours (degraded
+    fallback — a live event still converges it)."""
+    hash_ = await _stale_picture(stack)
+    stack.peer_version.return_value = (
+        FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC - 1
+    )
+    await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
+    await _still_stale(stack, hash_)
+
+
+async def test_reset_without_a_version_source_is_not_trusted(stack):
+    hash_ = await _stale_picture(stack)
+    stack.receiver._peer_version = None
+    await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
+    await _still_stale(stack, hash_)
+
+
+async def test_reset_without_an_authorship_binder_is_not_trusted(stack):
+    hash_ = await _stale_picture(stack)
+    stack.receiver._authorship = None
+    await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
+    await _still_stale(stack, hash_)
+
+
+async def test_reset_never_touches_our_own_people(stack):
+    hash_ = await _stale_picture(stack, LOCAL)
+    await stack.remote_members.add(
+        space_id=SPACE_ID,
+        instance_id=MEMBER_HOME,
+        user_id=LOCAL,
+        user_pk=None,
+        display_name=None,
+    )
+    await _members_from(stack, MEMBER_HOME, [_members_record(LOCAL, picture_hash=None)])
+    await _still_stale(stack, hash_, LOCAL)
+
+
+async def test_members_record_without_a_picture_key_changes_nothing(stack):
+    """A provider shape with no ``picture_hash`` key (older, or a seat the
+    provider holds bytes for but no hash) says nothing about the picture."""
+    hash_ = await _stale_picture(stack)
+    record = _members_record()
+    del record["picture_hash"]
+    await _members_from(stack, MEMBER_HOME, [record])
+    await _still_stale(stack, hash_)
+
+
+async def test_a_non_null_provider_hash_is_never_taken(stack):
+    """A provider's hash is untrusted: non-null is a no-op here (the
+    ``member_pictures`` resource ships and re-hashes the bytes)."""
+    hash_ = await _stale_picture(stack)
+    await _members_from(
+        stack, MEMBER_HOME, [_members_record(picture_hash="fedcba9876543210")]
+    )
+    await _still_stale(stack, hash_)
+
+
+async def test_a_changed_picture_still_lands_through_member_pictures(stack):
+    """The picture changed (not cleared) while we were offline: ``members``
+    carries the provider's non-null hash (no-op), then ``member_pictures``
+    in the same session replaces the blob and points the seat at it."""
+    stale = await _stale_picture(stack)
+    await _members_from(
+        stack, MEMBER_HOME, [_members_record(picture_hash="fedcba9876543210")]
+    )
+    await _persist(stack, "member_pictures", [_picture_record(_png(color="blue"))])
+    member = await stack.spaces.get_member(SPACE_ID, MEMBER)
+    got = await stack.pictures.get_member_picture(SPACE_ID, MEMBER)
+    assert member is not None and got is not None
+    assert member.picture_hash == got[1] != stale
+
+
+async def test_reset_of_a_member_without_a_picture_is_a_no_op(stack):
+    await _members_from(stack, MEMBER_HOME, [_members_record(picture_hash=None)])
+    member = await stack.spaces.get_member(SPACE_ID, MEMBER)
+    assert member is not None and member.picture_hash is None
+    assert await stack.pictures.get_member_picture(SPACE_ID, MEMBER) is None

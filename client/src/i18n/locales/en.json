@@ -2746,6 +2746,7 @@
   "capability.space_chat": "Chat in spaces",
   "capability.synced_recurring_events": "Recurring events in space catch-up",
   "capability.multi_gfs_posting": "Posting to every GFS a space is listed on",
+  "capability.synced_picture_resets": "Removed profile pictures in space catch-up",
   "settings.tab.security": "Security",
   "settings.could_not_save": "Could not save: {error}",
   "settings.profile.save_failed": "Save failed: {error}",

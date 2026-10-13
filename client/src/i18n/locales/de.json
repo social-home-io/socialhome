@@ -2440,6 +2440,7 @@
   "capability.space_chat": "Chat in Räumen",
   "capability.synced_recurring_events": "Wiederkehrende Termine beim Raum-Abgleich",
   "capability.multi_gfs_posting": "Beiträge an jeden GFS, auf dem ein Raum gelistet ist",
+  "capability.synced_picture_resets": "Entfernte Profilbilder beim Raum-Abgleich",
   "settings.tab.security": "Sicherheit",
   "settings.could_not_save": "Speichern fehlgeschlagen: {error}",
   "settings.profile.save_failed": "Speichern fehlgeschlagen: {error}",

@@ -66,6 +66,7 @@ class AbstractProfilePictureRepo(Protocol):
         space_id: str,
         user_id: str,
     ) -> None: ...
+    async def list_member_picture_user_ids(self, space_id: str) -> set[str]: ...
 
 
 class SqliteProfilePictureRepo:
@@ -168,3 +169,12 @@ class SqliteProfilePictureRepo:
             "DELETE FROM space_member_profile_pictures WHERE space_id=? AND user_id=?",
             (space_id, user_id),
         )
+
+    async def list_member_picture_user_ids(self, space_id: str) -> set[str]:
+        """The members of ``space_id`` this household holds a per-space
+        picture blob for — presence only, the bytes are never read."""
+        rows = await self._db.fetchall(
+            "SELECT user_id FROM space_member_profile_pictures WHERE space_id=?",
+            (space_id,),
+        )
+        return {str(r["user_id"]) for r in rows}
