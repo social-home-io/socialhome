@@ -10,8 +10,10 @@
  *     household day changing reloads the page;
  *   - every 30 s the matching /fragment/… is fetched and swapped into
  *     <main>. A locked marker reloads (the server shows the lock screen),
- *     401 goes to the login form, 404 (person hidden) goes Home, a new
- *     view key (colours, night, rail changed) reloads the whole page;
+ *     401 goes to the login form, 404 (person hidden) or a redirect (the
+ *     Map tab with nobody on it, or at night) goes Home, a new view key
+ *     (colours, night, rail changed) reloads the whole page; after a swap
+ *     a "dash:swap" event tells a tab's own script (map.js);
  *   - two failed refreshes in a row show the offline banner, hide
  *     relative times and grey "now" until a refresh works again;
  *   - a person page, or Home's Messages / Notes tab, returns to Home's
@@ -133,7 +135,7 @@
   // underneath instead of a broken-image icon — for pictures that failed
   // before this deferred script ran, and for later ones.
   function dropBroken(root) {
-    root.querySelectorAll(".dash-face img").forEach(function (img) {
+    root.querySelectorAll(".dash-face img, .dash-mp-av img").forEach(function (img) {
       if (img.complete && img.naturalWidth === 0) {
         img.remove();
       }
@@ -144,7 +146,7 @@
     "error",
     function (event) {
       var el = event.target;
-      if (el && el.tagName === "IMG" && el.closest(".dash-face")) {
+      if (el && el.tagName === "IMG" && el.closest(".dash-face, .dash-mp-av")) {
         el.remove();
       }
     },
@@ -233,6 +235,7 @@
     tick();
     sayAfterSwap();
     syncMentions();
+    document.dispatchEvent(new window.CustomEvent("dash:swap"));
   }
 
   // A refresh asked for while one is in flight runs right after it (a
@@ -251,10 +254,22 @@
     fetch(fragmentUrl, {
       credentials: "same-origin",
       cache: "no-store",
-      redirect: "error",
+      // A redirect is never followed into the swap. On a tab it means
+      // "this tab is gone" (the Map with nobody on it, or night) — go
+      // Home. Overview's own fragment never redirects: one there (a
+      // misconfigured proxy) is a failed refresh, never a reload loop.
+      redirect: "manual",
       headers: { Accept: "text/html" },
     })
       .then(function (res) {
+        if (res.type === "opaqueredirect") {
+          if (fragmentUrl === HOME_PROBE) {
+            failed();
+          } else {
+            go("/");
+          }
+          return null;
+        }
         if (res.headers.get("X-Dashboard-Locked")) {
           go("/");
           return null;

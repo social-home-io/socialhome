@@ -14,6 +14,7 @@ icon), so both zone kinds accept exactly the same values.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Final
 
@@ -32,7 +33,9 @@ __all__ = [
     "HouseholdZoneNotFoundError",
     "HouseholdZoneReadOnlyError",
     "HouseholdZoneSyncStatus",
+    "ZONE_PALETTE",
     "ZoneSourceUnavailableError",
+    "zone_color",
 ]
 
 #: Same cap as a space's zone catalogue — keeps the per-GPS-update match
@@ -132,6 +135,46 @@ class HouseholdZoneSyncStatus:
     enabled: bool
     last_synced_at: str | None = None
     last_error: str | None = None
+
+
+#: Zone colours for a zone without a usable one of its own — the SPA's
+#: ``ZONE_PALETTE`` (``client/src/utils/zoneColor.ts``), same order.
+ZONE_PALETTE: Final[tuple[str, ...]] = (
+    "#3b82f6",
+    "#f97316",
+    "#10b981",
+    "#a855f7",
+    "#ec4899",
+    "#facc15",
+    "#14b8a6",
+    "#ef4444",
+    "#6366f1",
+    "#84cc16",
+)
+
+_ZONE_HEX = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def zone_color(zone: HouseholdZone) -> str:
+    """The colour a household zone is painted with — the SPA's
+    ``zoneColor`` server-side, so the wall tablet and the app agree.
+
+    Its own ``#RRGGBB`` when valid; otherwise a stable palette pick
+    hashed from its ``external_id`` (a zone synced from Home Assistant
+    keeps its colour when the row is re-created) or else its ``id``. The
+    hash walks the key like JS ``for … of`` + ``charCodeAt(0)`` (code
+    points; an astral one counts as its high surrogate) with ``| 0``'s
+    signed 32-bit wrap.
+    """
+    if zone.color is not None and _ZONE_HEX.fullmatch(zone.color):
+        return zone.color
+    h = 0
+    for ch in zone.external_id or zone.id:
+        unit = ord(ch)
+        if unit > 0xFFFF:
+            unit = 0xD800 + ((unit - 0x10000) >> 10)
+        h = (h * 31 + unit + 0x80000000) % 0x100000000 - 0x80000000
+    return ZONE_PALETTE[abs(h) % len(ZONE_PALETTE)]
 
 
 class HouseholdZoneNotFoundError(CodedError, LookupError):

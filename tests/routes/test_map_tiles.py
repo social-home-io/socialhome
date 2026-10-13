@@ -216,3 +216,11 @@ async def test_tile_budget_survives_a_full_map_session(client, stub):
     for i in range(150):
         r = await client.get(template.format(z=10, x=i, y=i))
         assert r.status == 200, f"tile #{i + 1} was rejected with {r.status}"
+
+
+def test_the_attribution_html_is_built_from_the_shared_text():
+    """One credit for the SPA and the wall (MAP_ATTRIBUTION_TEXT)."""
+    assert MAP_ATTRIBUTION == (
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        " contributors"
+    )

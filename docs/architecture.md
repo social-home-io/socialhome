@@ -1459,7 +1459,7 @@ drives it) and is then served by a **separate aiohttp application on its own por
   makes locked cookies count as unlocked (nothing could unlock them
   otherwise).
   - **Races.** Only page loads renew the cookie — an allow-list of `GET` /
-    `HEAD` `/`, `/messages`, `/notes` and `/p/{id}` (with a 200); never `/fragment/…`, `/avatar/…`, static files or
+    `HEAD` `/`, `/messages`, `/notes`, `/map` and `/p/{id}` (with a 200); never `/fragment/…`, `/avatar/…`, `/tiles/…`, static files or
     a `POST` — and `POST /lock` revokes the incoming unlocked cookie as
     *locked* — by session id, so every renewed copy of it too: if a
     slow response still lands one, it shows the lock screen (not a
@@ -1529,7 +1529,9 @@ shopping, household stickies, today's school timetables, night-mode
 `domain/household_dashboard.py`. It only reads the owning services, never
 anything with side effects — the one write is a "Got it" on a mention
 (below) — and is *household-safe*: presence is home /
-away / a zone name (never coordinates), events come from members' personal
+away / a zone name — plus, on Home only, each shown member's shared 4-dp
+point and when it last changed, and the household's own zones, for the
+Map tab (below; a person page never carries a location) — events come from members' personal
 calendars (recurring ones as occurrences, a shared household event once),
 and DMs, notifications, space chats and polls never appear (the
 household chat only as the opt-in glance below). School is only the
@@ -1548,6 +1550,46 @@ household zone (`HouseholdPreferences.tz`). Each slice fails soft — logged
 at WARNING, empty — so one broken service never blanks the tablet. The
 picture-view default (on for child-protected minors) is one shared rule,
 `picture_effective`, used by the admin API too.
+
+**Home › Map: who is where** (`dashboard/map_view.py`, `static/map.js`).
+The owner reversed the earlier "no map on the wall" rule: the Map tab
+shows live photo markers in Home Assistant 2026.10's people/zone style.
+`HouseholdDashboardService.home` adds each shown member's GPS point (4 dp,
+as stored — no extra rounding), `located_at` (the presence row's
+`updated_at` in the household zone) and the household zones
+(`HouseholdZoneService.list_zones`, Home first; colour via
+`domain.household_zone.zone_color`, the SPA's `zoneColor` hash on
+`external_id || id`) — only while the presence section is on, and never
+on a person page. `map_view` puts a member a presence row places in a
+zone (`home` → the Home zone, `zone` → the zone of that name) in that
+zone's bubble at the zone centre — their own point is never drawn —
+and everyone else at their own point (a zone name the household has no
+zone for is such a point, named after it); a location over an hour old
+is stale (faded, "last seen 2 h ago", never red), over a day gone;
+someone sharing neither a point nor a known zone is not shown, nor is a
+point whose presence is unknown (HA `unavailable` — it would read
+"Away"). Visibility is the dashboard's: shown members only (minors
+included, by the owner's decision) and the presence toggle; per-viewer
+blocks don't apply on a wall with no viewer. The tab
+exists while anyone is located; otherwise `/map` (and its fragment) 303
+to Overview, as at night. The privacy lock answers `/map` with the lock
+screen and `/tiles/…` with 423 like every other route (the guard, not
+the view); unlock lands on Overview. Person frames are `--kf` in the
+page style (`contrast.frame_color`: the person colour nudged toward
+black / white until 3:1 on the light / lifted-dark bubble). The browser
+draws it without Leaflet: `map.js` fits everyone at an integer Web
+Mercator zoom (insets for bubbles and names, at most zoom 16; beyond
+regional zoom 9 the household keeps the frame and far people get an edge
+chip), keeps the frame across 30 s refreshes unless someone leaves it,
+merges overlapping bubbles (screen-pixel rule) with a place caption,
+places markers through the CSSOM (no style attributes — the CSP holds)
+and handles selection (ring, callout, "Show everyone", 60 s reset). Tiles
+come from the dashboard's own `/tiles/{z}/{x}/{y}`, which reuses the main
+app's `MapTileService` (one upstream, one cache, one identifying
+`User-Agent`) behind the dashboard session — the tablet never fetches
+from a third party. The "Who's where" list is the accessible equivalent
+of the map (`role="img"` with a spoken summary; bubbles are
+`aria-hidden`).
 
 **Household messages (opt-in glance).** With the admin's
 `show_household_messages` (default off) and `feat_household_chat` on,
@@ -1586,7 +1628,7 @@ characters by `clip`), and a tap reads the whole message. Every sender is a show
 person whose colour is already in the page style, so a new or deleted
 message just swaps in with the next fragment (no view-key change).
 
-**Home tabs: Overview · Messages · Notes** (`dashboard/tabs.py`).
+**Home tabs: Overview · Messages · Notes · Map** (`dashboard/tabs.py`).
 Home is three views behind one rail entry (Home stays current on all
 three): `/` (Overview — the glance above), `/messages` (the household
 chat of the last day, grouped Today / Yesterday by the household's day,

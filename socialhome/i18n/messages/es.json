@@ -173,5 +173,17 @@
   "dashboard.messages.empty": "No hay mensajes del último día",
   "dashboard.messages.empty_hint": "Escribe uno en la app de Social Home.",
   "dashboard.notes.empty": "Aún no hay notas",
-  "dashboard.notes.empty_hint": "Añade una en la app de Social Home."
+  "dashboard.notes.empty_hint": "Añade una en la app de Social Home.",
+  "dashboard.rel.hours_ago": "hace {n} h",
+  "dashboard.tabs.map": "Mapa",
+  "dashboard.map.list": "Quién está dónde",
+  "dashboard.map.updated": "actualizado",
+  "dashboard.map.last_seen": "visto {rel}",
+  "dashboard.map.show_all": "Mostrar a todos",
+  "dashboard.map.label": "Mapa: {summary}",
+  "dashboard.map.at": "{names} en {place}",
+  "dashboard.map.away": "{names} fuera",
+  "dashboard.map.and": "{rest} y {last}",
+  "dashboard.map.more_places": "+{n} lugares",
+  "dashboard.map.more_places_one": "+1 lugar"
 }

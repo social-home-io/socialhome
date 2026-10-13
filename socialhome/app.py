@@ -2129,6 +2129,7 @@ def _build_household_dashboard(
     *,
     user_service: UserService,
     presence_service: PresenceService,
+    household_zone_service: HouseholdZoneService,
     calendar_service: CalendarService,
     task_service: TaskService,
     shopping_service: ShoppingService,
@@ -2138,6 +2139,7 @@ def _build_household_dashboard(
     household_chat_service: HouseholdChatService,
     child_protection_service: ChildProtectionService,
     dm_service: DmService,
+    map_tile_service: MapTileService,
 ) -> SimpleNamespace:
     """Settings service, cookie auth, snapshot service and own-port
     listener of the household dashboard (``socialhome/dashboard/``).
@@ -2146,7 +2148,9 @@ def _build_household_dashboard(
     household chat only through its read-only glances, filtered by the
     child-protection guardian blocks); the theme service gives the accent
     colour. ``dm_service`` takes the one write: a "Got it" on a mention
-    (a ✅ reaction to the household-chat message).
+    (a ✅ reaction to the household-chat message). ``map_tile_service``
+    is the main app's tile proxy, reused for Home's Map tab (``/tiles/…``
+    on the dashboard's port) — one upstream, one cache.
 
     One :class:`DashboardAuth` and one :class:`DashboardRenderer` for the
     process: the login throttle must survive a listener restart (port
@@ -2164,6 +2168,7 @@ def _build_household_dashboard(
     snapshots = HouseholdDashboardService(
         user_service=user_service,
         presence_service=presence_service,
+        household_zones=household_zone_service,
         calendar_service=calendar_service,
         task_service=task_service,
         shopping_service=shopping_service,
@@ -2195,6 +2200,7 @@ def _build_household_dashboard(
             household_tz=household_tz,
             household_theme=theme_service.get_household_theme,
             snapshots=snapshots,
+            tiles=map_tile_service,
             extra_hosts=extra_hosts,
             local_hostnames=own_names,
         )
@@ -3084,6 +3090,7 @@ def create_app(config: Config | None = None) -> web.Application:
         i18n,
         user_service=user_service,
         presence_service=presence_service,
+        household_zone_service=household_zone_service,
         calendar_service=calendar_service,
         task_service=task_service,
         shopping_service=shopping_service,
@@ -3093,6 +3100,7 @@ def create_app(config: Config | None = None) -> web.Application:
         household_chat_service=household_chat_service,
         child_protection_service=child_protection_service,
         dm_service=dm_service,
+        map_tile_service=map_tile_service,
     )
 
     # Voice-note transcription depends on ``adapter.stt``; fail-silent

@@ -19,7 +19,9 @@ from socialhome.domain.household_zone import (
     HouseholdZoneNotFoundError,
     HouseholdZoneReadOnlyError,
     HouseholdZoneSyncStatus,
+    ZONE_PALETTE,
     ZoneSourceUnavailableError,
+    zone_color,
 )
 
 
@@ -120,3 +122,39 @@ def test_sync_status_defaults_and_frozen():
     assert status.last_synced_at is None and status.last_error is None
     with pytest.raises(dataclasses.FrozenInstanceError):
         status.enabled = False  # type: ignore[misc]
+
+
+# ─── zone_color: the SPA's zoneColor, server-side ────────────────────────
+
+
+def test_zone_color_keeps_a_valid_own_colour():
+    assert zone_color(_zone(color="#10b981")) == "#10b981"
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        # Reference values from client/src/utils/zoneColor.ts (node).
+        ("zone.home", "#84cc16"),
+        ("zone.work", "#facc15"),
+        ("zone.school", "#6366f1"),
+        ("hz_abc", "#f97316"),
+        ("hz_XyZ-_123", "#6366f1"),
+        ("zone.grandma_s_house", "#ef4444"),
+        ("ü😀x", "#84cc16"),
+        ("a" * 40, "#10b981"),
+    ],
+)
+def test_zone_color_hashes_like_the_spa(key, expected):
+    """Same palette pick as the SPA, so the wall and the app agree —
+    including the int32 wrap and an astral character's high surrogate."""
+    assert zone_color(_zone(id=key)) == expected
+    assert zone_color(_zone(id="hz_other", external_id=key)) == expected
+
+
+def test_zone_color_prefers_the_external_id_and_refuses_bad_colours():
+    synced = _zone(id="hz_new", external_id="zone.work")
+    assert zone_color(synced) == zone_color(_zone(id="zone.work"))
+    assert zone_color(_zone(id="hz_abc", color="red;x:y")) == "#f97316"
+    assert zone_color(_zone(id="hz_abc", color="#fff")) == "#f97316"
+    assert ZONE_PALETTE[0] == "#3b82f6" and len(ZONE_PALETTE) == 10

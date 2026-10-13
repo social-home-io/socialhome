@@ -15,6 +15,8 @@ import pytest
 from socialhome.dashboard.auth import (
     ACK_MAX,
     ACK_WINDOW_S,
+    TILE_MAX,
+    TILE_WINDOW_S,
     COOKIE_NAME,
     GLOBAL_MAX_FAILURES,
     PRUNE_INTERVAL_S,
@@ -754,3 +756,17 @@ async def test_ack_limit_is_per_session_and_frees_up_after_the_window(auth, cloc
     assert auth.throttle_key_count == 0
     clock.advance(ACK_WINDOW_S + 1)
     assert auth.begin_ack(a) == 0
+
+
+async def test_tile_limit_is_per_session_and_apart_from_acks(auth, clock):
+    a = await auth.verify(await auth.issue(True))
+    b = await auth.verify(await auth.issue(True))
+    assert a is not None and b is not None
+    for _ in range(TILE_MAX):
+        assert auth.begin_tile(a) == 0
+    wait = auth.begin_tile(a)
+    assert 0 < wait <= TILE_WINDOW_S
+    assert auth.begin_tile(b) == 0
+    assert auth.begin_ack(a) == 0  # its own budget
+    clock.advance(TILE_WINDOW_S + 1)
+    assert auth.begin_tile(a) == 0

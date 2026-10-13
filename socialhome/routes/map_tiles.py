@@ -23,7 +23,7 @@ from aiohttp import web
 
 from ..app_keys import map_tile_service_key, media_signer_key
 from ..security import error_response
-from ..services.map_tile_service import MAX_ZOOM
+from ..services.map_tile_service import MAP_ATTRIBUTION_TEXT, MAX_ZOOM
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -41,9 +41,9 @@ TILE_URL_TTL_SECONDS: int = 7 * 24 * 3600
 #: Attribution the SPA renders under every map. OSM's licence requires
 #: it, and the string must reach the client byte-identical — Leaflet
 #: injects it as HTML.
-MAP_ATTRIBUTION: str = (
-    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-    " contributors"
+MAP_ATTRIBUTION: str = MAP_ATTRIBUTION_TEXT.replace("©", "&copy;").replace(
+    "OpenStreetMap",
+    '<a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
 )
 
 #: Browsers may keep a tile for a week — the OSMF tile policy asks

@@ -20,6 +20,7 @@ from socialhome.dashboard.app import build_dashboard_app, build_dashboard_csp
 from socialhome.dashboard.auth import (
     ACK_MAX,
     ACK_WINDOW_S,
+    TILE_MAX,
     COOKIE_NAME,
     RENEW_AFTER_S,
     REVOKED_LOCKED,
@@ -37,6 +38,12 @@ from socialhome.dashboard.views import (
     safe_next,
 )
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
+from socialhome.services.map_tile_service import (
+    MAP_ATTRIBUTION_TEXT,
+    MapTileService,
+    Tile,
+    TileUnavailableError,
+)
 from socialhome.domain.household_dashboard import DashboardSticky
 from socialhome.domain.theme import HouseholdTheme
 from socialhome.i18n import Catalog
@@ -48,6 +55,7 @@ from .factories import (
     FOR_MIA,
     HERE,
     LEO,
+    MIA,
     DINNER,
     MENTIONS,
     MESSAGES,
@@ -63,6 +71,8 @@ from .factories import (
     at,
     event,
     leo_page,
+    located,
+    map_home,
     mention,
     message,
     person,
@@ -83,8 +93,30 @@ def household():
     return {"name": "Home"}
 
 
+class FakeTiles:
+    """Stands in for :class:`MapTileService` (the main app's tile proxy)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int, int]] = []
+        self.fail: Exception | None = None
+
+    async def fetch(self, z: int, x: int, y: int) -> Tile:
+        self.calls.append((z, x, y))
+        if self.fail is not None:
+            raise self.fail
+        MapTileService._validate(z, x, y)
+        return Tile(body=b"\x89PNG\r\n\x1a\ntile", content_type="image/png")
+
+
 @pytest.fixture
-async def bare_client(aiohttp_client, settings_service, auth, household, snapshots):
+def tiles() -> FakeTiles:
+    return FakeTiles()
+
+
+@pytest.fixture
+async def bare_client(
+    aiohttp_client, settings_service, auth, household, snapshots, tiles
+):
     async def name() -> str:
         return household["name"]
 
@@ -106,6 +138,7 @@ async def bare_client(aiohttp_client, settings_service, auth, household, snapsho
         household_tz=tz,
         household_theme=theme,
         snapshots=snapshots,
+        tiles=tiles,
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
 
@@ -3439,3 +3472,313 @@ async def test_tab_pages_send_a_signed_out_tablet_to_login(client, path):
     resp = await client.get(path, allow_redirects=False)
     assert resp.status == 302
     assert resp.headers["Location"] == f"/login?next=%2F{path[1:]}"
+
+
+# ─── Home › Map ──────────────────────────────────────────────────────────
+
+
+def _map_on(snapshots, **kw) -> None:
+    snapshots.home_snapshot = map_home(messages_on=True, **kw)
+
+
+def _map_main(html: str) -> str:
+    start = html.index('<div class="dash-mp-tab"')
+    return html[start : html.index("</section>", start)]
+
+
+async def test_map_tab_in_the_bar_while_someone_is_located(client, auth, snapshots):
+    _map_on(snapshots)
+    for path in ("/", "/messages", "/notes", "/map"):
+        bar = _tab_bar(await (await _get(client, auth, path)).text())
+        assert re.findall(r'href="([^"]+)"', bar) == [
+            "/",
+            "/messages",
+            "/notes",
+            "/map",
+        ]
+        assert ">Map<" in bar
+
+
+async def test_map_page(client, auth, snapshots, settings_service):
+    await settings_service.update(
+        actor_is_admin=True, patch={"idle_return_minutes": 10}
+    )
+    _map_on(snapshots)
+    resp = await _get(client, auth, "/map")
+    assert resp.status == 200
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    assert _current_tab(html) == "/map"
+    assert 'data-fragment="/fragment/home/map"' in html
+    assert 'data-idle-minutes="10"' in html  # back to Overview
+    assert '<script src="/static/map.js" defer></script>' in html
+    main = _map_main(html)
+    # The list — the accessible equivalent of the map — in order.
+    rows = re.findall(r'data-select="([^"]+)" aria-pressed="false"', main)
+    assert rows == ["u-mia", "u-pascal", "u-leo", "u-anna"]
+    assert ">Who&#39;s where</h2>" in main
+    assert '<span class="dash-mp-row-name">Leo</span>' in main
+    assert '<span aria-hidden="true">🏫</span> School</span>' in main
+    assert '<span aria-hidden="true">🚗</span> Away</span>' in main
+    assert '<span class="dash-visually-hidden">updated </span>2 min ago' in main
+    # The map: one img with the spoken summary; bubbles are aria-hidden.
+    assert (
+        'role="img" aria-label="Map: Mia and Pascal at Home, Leo at School, '
+        'Anna away"' in main
+    )
+    assert re.findall(r'data-bubble="([^"]+)"', main) == [
+        "zone:hz_home",
+        "zone:hz_school",
+        "person:u-anna",
+    ]
+    # Zone members sit at the zone centre; only Anna's own point is drawn.
+    assert 'data-lat="52.5232" data-lon="13.3961"' in main
+    assert "52.5201" not in main  # Pascal's point, inside Home
+    assert re.findall(r'data-zone="([^"]+)"', main).count("hz_work") == 1
+    assert f'<span class="dash-mp-attrib">{MAP_ATTRIBUTION_TEXT}</span>' in main
+    assert 'data-map-reset hidden><span aria-hidden="true">⤢</span> Show everyone' in (
+        main
+    )
+    # Zone colours and person frames come from the one inline style.
+    style = _board_style(html)[0]
+    assert "--kc:#1f8a9e" in style and "--kf:" in style
+
+
+async def test_map_fragment(client, auth, snapshots):
+    _map_on(snapshots)
+    page = await (await _get(client, auth, "/map")).text()
+    resp = await _get(client, auth, "/fragment/home/map")
+    assert resp.status == 200
+    frag = await resp.text()
+    assert frag.lstrip().startswith('<div class="dash-view" data-view-key=')
+    assert _attr(frag, "data-view-key") == _attr(page, "data-view-key")
+    assert 'data-select="u-anna"' in frag and "<html" not in frag
+
+
+async def test_map_with_nobody_located_goes_to_overview(client, auth, snapshots):
+    """Sharing flips at runtime: 303 to Overview, never a 404 page."""
+    _tabs_on(snapshots, people=PEOPLE)
+    html = await (await _get(client, auth, "/")).text()
+    assert 'href="/map"' not in html
+    for path in ("/map", "/fragment/home/map"):
+        resp = await _get(client, auth, path, allow_redirects=False)
+        assert resp.status == 303 and resp.headers["Location"] == "/"
+    _map_on(snapshots, people=(located(PASCAL, 24 * 60, presence="home"),))
+    resp = await _get(client, auth, "/map", allow_redirects=False)
+    assert resp.status == 303
+
+
+async def test_map_at_night_goes_to_overview(client, auth, snapshots):
+    _map_on(snapshots, is_night=True, now=at(22, 47))
+    for path in ("/map", "/fragment/home/map"):
+        resp = await _get(client, auth, path, allow_redirects=False)
+        assert resp.status == 303 and resp.headers["Location"] == "/"
+    resp = await client.head("/map", headers=await _cookie(auth), allow_redirects=False)
+    assert resp.status == 303
+
+
+@pytest.mark.parametrize("path", ["/map", "/fragment/home/map"])
+async def test_a_locked_map_shows_no_location(pin_client, auth, snapshots, path):
+    _map_on(snapshots)
+    resp = await pin_client.get(path, headers=await _locked(auth))
+    assert resp.status == 200
+    html = await resp.text()
+    for text in ("Anna", "Mia", "Pascal", "School", "Work", "52.", "13.", "data-lat"):
+        assert text not in html, text
+    if path.startswith("/fragment/"):
+        assert resp.headers["X-Dashboard-Locked"] == "1"
+    else:
+        assert "data-lock" in html
+    assert snapshots.calls == []
+
+
+async def test_unlock_from_the_map_lands_on_overview(pin_client, auth, snapshots):
+    _map_on(snapshots)
+    headers = await _locked(auth)
+    resp = await _unlock(pin_client, headers)
+    assert resp.status == 303 and resp.headers["Location"] == "/"
+
+
+async def test_the_map_page_renews_the_cookie(pin_client, auth, clock, snapshots):
+    _map_on(snapshots)
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 60)
+    resp = await pin_client.get("/map", headers=headers, allow_redirects=False)
+    assert resp.status == 200 and COOKIE_NAME in resp.cookies
+    resp = await pin_client.head("/map", headers=headers, allow_redirects=False)
+    assert resp.status == 200 and COOKIE_NAME in resp.cookies
+    for path in ("/fragment/home/map", "/tiles/3/1/2"):
+        resp = await pin_client.get(path, headers=headers, allow_redirects=False)
+        assert COOKIE_NAME not in resp.cookies, path
+    # A 303 (nobody located) renews nothing.
+    _tabs_on(snapshots, people=PEOPLE)
+    resp = await pin_client.get("/map", headers=headers, allow_redirects=False)
+    assert resp.status == 303 and COOKIE_NAME not in resp.cookies
+
+
+async def test_stale_rows_say_last_seen(client, auth, snapshots):
+    _map_on(
+        snapshots,
+        people=(
+            located(PASCAL, 130, presence="home"),
+            located(MIA, 5, presence="home"),
+        ),
+    )
+    main = _map_main(await (await _get(client, auth, "/map")).text())
+    assert 'class="dash-mp-row dash-mp-stale" data-select="u-pascal"' in main
+    assert '<span aria-hidden="true">⏱</span> last seen 2 h ago' in main
+
+
+async def test_a_crowded_bubble_folds_into_plus_n(client, auth, snapshots):
+    people = tuple(
+        located(replace(p, user_id=f"u{i}", display_name=f"P{i}"), presence="home")
+        for i, p in enumerate((PASCAL, PASCAL, PASCAL, PASCAL, PASCAL))
+    )
+    _map_on(snapshots, people=people)
+    main = _map_main(await (await _get(client, auth, "/map")).text())
+    bubble = main[main.index('data-bubble="zone:hz_home"') :]
+    bubble = bubble[: bubble.index('<span class="dash-mp-callout')]
+    assert bubble.count('data-face="') == 5
+    assert bubble.count("dash-mp-extra") == 2
+    assert '<span class="dash-mp-more">+2</span>' in bubble
+
+
+async def test_map_markup_escapes_names(client, auth, snapshots):
+    evil = located(
+        replace(PASCAL, display_name='<b>"x"</b>'),
+        presence="zone",
+        zone_name='<i>"Gym"</i>',
+        lat=52.5,
+        lon=13.4,
+    )
+    _map_on(snapshots, people=(evil,))
+    html = await (await _get(client, auth, "/map")).text()
+    assert '<b>"x"</b>' not in html and "<i>" not in html
+    assert "&lt;i&gt;&#34;Gym&#34;&lt;/i&gt;" in html
+    assert "<b>&lt;b&gt;&#34;x&#34;&lt;/b&gt;</b>" in html  # the callout
+
+
+# ─── Map tiles ───────────────────────────────────────────────────────────
+
+
+async def test_tiles_come_from_the_shared_proxy(client, auth, tiles):
+    resp = await _get(client, auth, "/tiles/12/2200/1343")
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "image/png"
+    # Review M-2: revalidated on every use, so a lock (423) wins at once;
+    # the ETag makes that a 304 from the shared in-memory tile cache.
+    assert resp.headers["Cache-Control"] == "private, no-cache"
+    etag = resp.headers["ETag"]
+    assert await resp.read() == b"\x89PNG\r\n\x1a\ntile"
+    assert tiles.calls == [(12, 2200, 1343)]
+    again = await client.get(
+        "/tiles/12/2200/1343", headers={**await _cookie(auth), "If-None-Match": etag}
+    )
+    assert again.status == 304 and await again.read() == b""
+    assert again.headers["Cache-Control"] == "private, no-cache"
+
+
+async def test_tiles_need_a_session(client, tiles):
+    resp = await client.get("/tiles/1/0/0", allow_redirects=False)
+    assert resp.status == 401  # an <img> load: no login redirect
+    assert tiles.calls == []
+
+
+async def test_a_locked_tablet_gets_no_tiles(pin_client, auth, tiles):
+    """Tiles say which area the wall looks at — none while locked."""
+    resp = await pin_client.get("/tiles/1/0/0", headers=await _locked(auth))
+    assert resp.status == 423
+    assert tiles.calls == []
+
+
+@pytest.mark.parametrize(
+    "path", ["/tiles/20/0/0", "/tiles/2/4/0", "/tiles/a/0/0", "/tiles/1/0", "/tiles/"]
+)
+async def test_bad_tile_coordinates_are_404(client, auth, path):
+    assert (await _get(client, auth, path)).status == 404
+
+
+async def test_upstream_failure_is_503(client, auth, tiles):
+    tiles.fail = TileUnavailableError("down")
+    resp = await _get(client, auth, "/tiles/1/0/0")
+    assert resp.status == 503
+
+
+async def test_tiles_are_rate_limited_per_session(client, auth, tiles):
+    headers = await _cookie(auth)
+    for _ in range(TILE_MAX):
+        assert (await client.get("/tiles/0/0/0", headers=headers)).status == 200
+    resp = await client.get("/tiles/0/0/0", headers=headers)
+    assert resp.status == 429 and int(resp.headers["Retry-After"]) > 0
+    # Another tablet has its own budget.
+    assert (await _get(client, auth, "/tiles/0/0/0")).status == 200
+
+
+async def test_no_tile_source_is_404(aiohttp_client, settings_service, auth, snapshots):
+    await settings_service.set_password(actor_is_admin=True, password=PASSWORD)
+    app = build_dashboard_app(
+        settings_service=settings_service,
+        auth=auth,
+        renderer=RENDERER,
+        household_name=lambda: _const("Home"),
+        household_tz=lambda: _const("Europe/Berlin"),
+        household_theme=default_theme,
+        snapshots=snapshots,
+    )
+    client = await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
+    assert (await _get(client, auth, "/tiles/0/0/0")).status == 404
+
+
+async def _const(value: str) -> str:
+    return value
+
+
+# ─── Map scripts ─────────────────────────────────────────────────────────
+
+
+def test_map_js_draws_only_from_this_origin_and_never_injects_markup():
+    """The wall's map fetches nothing but this dashboard's own /tiles (the
+    CSP's img-src 'self'), builds every element with createElement /
+    textContent (never HTML from data), and places them through the
+    CSSOM — never a style attribute, which the CSP forbids."""
+    js = RENDERER.static_asset("map.js").body.decode()
+    assert '"/tiles/" + frame.z + "/"' in js
+    assert "http:" not in js and "https:" not in js and "//tile" not in js
+    for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "eval(", "fetch("):
+        assert bad not in js, bad
+    assert 'setAttribute("style"' not in js and ".cssText" not in js
+    assert "el.style.left = " in js and "img.style.top = " in js
+    # The framing rules of the approved design.
+    assert "var MAX_ZOOM = 16;" in js and "var MIN_FIT_ZOOM = 9;" in js
+    assert "var INSET_TOP = 140;" in js and "var INSET_BOTTOM = 60;" in js
+    assert "var IDLE_RESET_MS = 60000;" in js and "var FACES = 3;" in js
+    assert 'addEventListener("dash:swap"' in js
+
+
+def test_dashboard_js_follows_a_fragment_redirect_home_and_tells_map_js():
+    js = RENDERER.static_asset("dashboard.js").body.decode()
+    refresh = js[js.index("function refresh()") :]
+    refresh = refresh[: refresh.index("\n  }\n")]
+    assert 'redirect: "manual"' in refresh
+    assert 'res.type === "opaqueredirect"' in refresh
+    # Review M-4: Overview never follows one (no reload loop behind a
+    # redirecting proxy) — it counts as a failed refresh.
+    follow = refresh[refresh.index('res.type === "opaqueredirect"') :]
+    follow = follow[: follow.index("return null;")]
+    assert "if (fragmentUrl === HOME_PROBE) {\n            failed();" in follow
+    assert follow.index("failed();") < follow.index('go("/")')
+    swap = js[js.index("function swap(") :]
+    swap = swap[: swap.index("\n  }\n")]
+    assert 'new window.CustomEvent("dash:swap")' in swap
+    assert ".dash-face img, .dash-mp-av img" in js
+
+
+async def test_only_the_map_page_loads_map_js(client, auth, snapshots):
+    _map_on(snapshots)
+    for path in ("/", "/messages", "/notes", "/p/u-anna"):
+        assert "map.js" not in await (await _get(client, auth, path)).text()
+    resp = await client.get("/static/map.js")
+    assert resp.status == 200
+    assert resp.headers["Content-Type"].startswith(
+        ("text/javascript", "application/javascript")
+    )

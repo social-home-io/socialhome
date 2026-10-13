@@ -10,7 +10,15 @@ from pathlib import Path
 import pytest
 
 import socialhome.i18n as i18n_pkg
-from socialhome.dashboard.contrast import contrast_ratio, note_colors
+from socialhome.dashboard.contrast import (
+    BLACK,
+    BUBBLE_DARK,
+    BUBBLE_LIGHT,
+    WHITE,
+    contrast_ratio,
+    frame_color,
+    note_colors,
+)
 from socialhome.dashboard.presenter import (
     MAX_LANE_ROWS,
     MAX_LANES,
@@ -96,17 +104,29 @@ def test_color_book_classes_and_css():
     assert book.cls("red;}body{x:y") == ""
     assert book.cls("#abcdef") == ""  # never registered
     # --kt for faces and lanes; note cards get their softened fill (--kb)
-    # and an ink picked against it (--kn) — light, then dark and night.
+    # and an ink picked against it (--kn); map markers a frame that reads
+    # on their bubble (--kf) — light, then dark and night.
     y, d = note_colors("#ffee88"), note_colors("#112233")
-    assert book.css() == (
-        f".k0{{--kc:#ffee88;--kt:#000000;--kn:{y.light_ink};--kb:{y.light_bg}}}"
-        f".k1{{--kc:#112233;--kt:#ffffff;--kn:{d.light_ink};--kb:{d.light_bg}}}"
-        "@media (prefers-color-scheme:dark){"
-        f".k0{{--kn:{y.dark_ink};--kb:{y.dark_bg}}}"
-        f".k1{{--kn:{d.dark_ink};--kb:{d.dark_bg}}}}}"
-        f".dash-night .k0{{--kn:{y.dark_ink};--kb:{y.dark_bg}}}"
-        f".dash-night .k1{{--kn:{d.dark_ink};--kb:{d.dark_bg}}}"
+    yf = (
+        frame_color("#ffee88", BUBBLE_LIGHT, BLACK),
+        frame_color("#ffee88", BUBBLE_DARK, WHITE),
     )
+    df = (
+        frame_color("#112233", BUBBLE_LIGHT, BLACK),
+        frame_color("#112233", BUBBLE_DARK, WHITE),
+    )
+    assert book.css() == (
+        f".k0{{--kc:#ffee88;--kt:#000000;--kn:{y.light_ink};--kb:{y.light_bg};"
+        f"--kf:{yf[0]}}}"
+        f".k1{{--kc:#112233;--kt:#ffffff;--kn:{d.light_ink};--kb:{d.light_bg};"
+        f"--kf:{df[0]}}}"
+        "@media (prefers-color-scheme:dark){"
+        f".k0{{--kn:{y.dark_ink};--kb:{y.dark_bg};--kf:{yf[1]}}}"
+        f".k1{{--kn:{d.dark_ink};--kb:{d.dark_bg};--kf:{df[1]}}}}}"
+        f".dash-night .k0{{--kn:{y.dark_ink};--kb:{y.dark_bg};--kf:{yf[1]}}}"
+        f".dash-night .k1{{--kn:{d.dark_ink};--kb:{d.dark_bg};--kf:{df[1]}}}"
+    )
+    assert yf == ("#998f52", "#ffee88")  # pale yellow darkens on white
 
 
 def test_color_book_note_inks_read_on_the_drawn_fill():

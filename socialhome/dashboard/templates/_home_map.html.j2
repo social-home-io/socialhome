@@ -1,0 +1,55 @@
+{#- Home's Map tab (map_view.py): the map box — drawn by map.js from the
+    data-* below (tiles from our own /tiles, markers placed in px; hidden
+    without JS) — and "Who's where", the list that is the accessible
+    equivalent of the map (complete on its own, keyboard and screen
+    reader route). Bubbles and pins are aria-hidden: the map is one img
+    with a spoken summary. Map geometry is physical (a map never mirrors
+    under RTL); a zone member is drawn at the zone centre only. -#}
+{% from "_macros.html.j2" import map_face with context %}
+<div class="dash-mp-tab">
+  <h1 class="dash-visually-hidden">{{ t("dashboard.tabs.map") }}</h1>
+  <div class="dash-mp-box" data-map-box>
+    <div class="dash-mp-map" role="img" aria-label="{{ map.label }}" data-map data-more-one="{{ t("dashboard.map.more_places_one") }}" data-more-other="{{ t("dashboard.map.more_places", n="{n}") }}">
+      <div class="dash-mp-tiles" data-map-tiles></div>
+      {% for pin in map.pins %}
+      <span class="dash-mp-area {{ f.kc(pin.zone.color) }}{% if not pin.occupied %} dash-mp-area-empty{% endif %}" data-lat="{{ pin.zone.latitude }}" data-lon="{{ pin.zone.longitude }}" data-radius="{{ pin.zone.radius_m }}" data-area="{{ pin.zone.id }}"></span>
+      <span class="dash-mp-zone {{ f.kc(pin.zone.color) }}{% if not pin.occupied %} dash-mp-zone-empty{% endif %}" data-lat="{{ pin.zone.latitude }}" data-lon="{{ pin.zone.longitude }}" data-zone="{{ pin.zone.id }}"><span class="dash-mp-pin">{{ pin.icon }}</span><span class="dash-mp-zone-name">{{ pin.zone.name }}</span></span>
+      {% endfor %}
+      {% for b in map.bubbles %}
+      {% if not b.zone %}
+      <span class="dash-mp-dot {{ f.kc(b.spots[0].person.color) }}{% if b.stale %} dash-mp-stale{% endif %}" data-lat="{{ b.latitude }}" data-lon="{{ b.longitude }}" data-dot="{{ b.key }}"></span>
+      {% endif %}
+      <span class="dash-mp-bubble {{ "dash-mp-bubble-zone" if b.zone else "dash-mp-bubble-free" }}{% if b.stale %} dash-mp-stale{% endif %}" data-bubble="{{ b.key }}" data-lat="{{ b.latitude }}" data-lon="{{ b.longitude }}"{% if b.zone %} data-radius="{{ b.zone.radius_m }}" data-in-zone="{{ b.zone.id }}"{% if b.zone.is_home %} data-home{% endif %}{% endif %} data-members="{{ b.spots|map(attribute="person.user_id")|join(" ") }}" data-caption="{{ b.caption }}"{% if b.away %} data-away{% endif %} data-label="{{ b.label }}">
+        <span class="dash-mp-faces">
+          {%- for s in b.spots %}{{ map_face(s, extra=loop.index > 3) }}{% endfor -%}
+          {%- if b.more %}<span class="dash-mp-more">+{{ b.more }}</span>{% endif -%}
+        </span>
+        {%- if b.age %}<span class="dash-mp-age">{{ b.age }}</span>{% endif %}
+      </span>
+      {% endfor %}
+      {% for s in map.spots %}
+      <span class="dash-mp-callout{% if s.zone %} dash-mp-callout-zone{% endif %}" data-callout="{{ s.person.user_id }}" hidden><b>{{ s.person.display_name }}</b> {{ s.icon }} {{ s.place }} <span class="dash-mp-callout-age">· {{ s.when }}</span></span>
+      {% endfor %}
+    </div>
+    <button type="button" class="dash-mp-reset" data-map-reset hidden><span aria-hidden="true">⤢</span> {{ t("dashboard.map.show_all") }}</button>
+    <span class="dash-mp-attrib">{{ attribution }}</span>
+  </div>
+  <section class="dash-mp-side" aria-labelledby="dash-mp-list-label">
+    <h2 class="dash-label" id="dash-mp-list-label">{{ t("dashboard.map.list") }}</h2>
+    <ul class="dash-mp-list">
+      {% for s in map.spots %}
+      <li><button type="button" class="dash-mp-row{% if s.stale %} dash-mp-stale{% endif %}" data-select="{{ s.person.user_id }}" aria-pressed="false">
+        {{- map_face(s) -}}
+        <span class="dash-mp-row-body">
+          <span class="dash-mp-row-name">{{ s.person.display_name }}</span>
+          <span class="dash-mp-row-place"><span aria-hidden="true">{{ s.icon }}</span> {{ s.place }}</span>
+          <span class="dash-mp-row-age" data-rel>
+            {%- if s.stale %}<span aria-hidden="true">⏱</span> {{ t("dashboard.map.last_seen", rel=s.when) }}
+            {%- else %}<span class="dash-visually-hidden">{{ t("dashboard.map.updated") }} </span>{{ s.when }}{% endif -%}
+          </span>
+        </span>
+      </button></li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>

@@ -18,6 +18,7 @@ from socialhome.domain.household_dashboard import (
     DashboardShoppingItem,
     DashboardSticky,
     DashboardTask,
+    DashboardZone,
     HomeSnapshot,
     PersonSnapshot,
 )
@@ -386,3 +387,72 @@ def leo_page(**kw) -> PersonSnapshot:
         school_tomorrow_first=first,
     )
     return replace(base, **kw)
+
+
+# ─── Map tab ─────────────────────────────────────────────────────────────
+
+ZONE_HOME = DashboardZone(
+    id="hz_home",
+    name="Home",
+    latitude=52.52,
+    longitude=13.405,
+    radius_m=100,
+    color="#84cc16",
+    icon="🏠",
+    is_home=True,
+)
+ZONE_SCHOOL = DashboardZone(
+    id="hz_school",
+    name="School",
+    latitude=52.5262,
+    longitude=13.4103,
+    radius_m=80,
+    color="#1F8A9E",
+    icon="🏫",
+)
+ZONE_WORK = DashboardZone(
+    id="hz_work",
+    name="Work",
+    latitude=52.5121,
+    longitude=13.4199,
+    radius_m=120,
+    color="#6366f1",
+    icon=None,
+)
+ZONES = (ZONE_HOME, ZONE_SCHOOL, ZONE_WORK)
+
+
+def located(
+    who: DashboardPerson,
+    minutes_ago: float = 5,
+    *,
+    lat: float | None = None,
+    lon: float | None = None,
+    presence: str | None = None,
+    zone_name: str | None = None,
+) -> DashboardPerson:
+    """``who`` with a location seen ``minutes_ago`` before :data:`NOW`."""
+    return replace(
+        who,
+        latitude=lat,
+        longitude=lon,
+        located_at=NOW - timedelta(minutes=minutes_ago),
+        presence=presence if presence is not None else who.presence,
+        zone_name=zone_name if zone_name is not None else who.zone_name,
+    )
+
+
+#: The design's household: Pascal and Mia at Home, Anna (zone "Work" in
+#: HA terms, but she is out at a point) away, Leo at School.
+MAP_PEOPLE = (
+    located(PASCAL, 2, lat=52.5201, lon=13.4049),
+    located(ANNA, 5, lat=52.5232, lon=13.3961, presence="away", zone_name=""),
+    located(MIA, 5),
+    located(LEO, 8, presence="zone", zone_name="School"),
+)
+
+
+def map_home(**kw) -> HomeSnapshot:
+    kw.setdefault("people", MAP_PEOPLE)
+    kw.setdefault("zones", ZONES)
+    return home(**kw)

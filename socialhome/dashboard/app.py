@@ -14,7 +14,8 @@ A privacy-locked session (``SessionClaims.locked``) reaches only
 ``/lock`` and ``/unlock``; the guard answers every other non-public
 route itself — the lock screen for a page view, a marker for a
 ``/fragment/…`` (:data:`~.views.LOCKED_FRAGMENT`), ``423`` for anything
-else (``/avatar/…``, writes) — so no view can leak a person.
+else (``/avatar/…``, ``/tiles/…``, writes) — so no view can leak a
+person, nor a map tile the area the wall was looking at.
 """
 
 from __future__ import annotations
@@ -40,7 +41,9 @@ from .keys import (
     RENDERER_KEY,
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
+    TILES_KEY,
     DashboardSnapshots,
+    DashboardTiles,
     HouseholdNameFn,
     HouseholdThemeFn,
     HouseholdTzFn,
@@ -91,6 +94,10 @@ PUBLIC_PATHS = frozenset({"/login", "/enter", "/logout", "/healthz"})
 _STATIC_PREFIX = "/static/"
 _FRAGMENT_PREFIX = "/fragment/"
 _AVATAR_PREFIX = "/avatar/"
+_TILES_PREFIX = "/tiles/"
+#: Loaded by ``<img>`` / page JS: a missing session is a plain 401, never
+#: the login redirect, and a locked tablet gets 423 / the marker.
+_ASSET_PREFIXES = (_AVATAR_PREFIX, _TILES_PREFIX)
 #: The only non-public routes a privacy-locked tablet reaches.
 _LOCK_PATHS = frozenset({"/lock", "/unlock"})
 
@@ -119,11 +126,12 @@ async def _dashboard_headers(
     if request.path.startswith(_STATIC_PREFIX):
         return
     if (
-        request.path.startswith(_AVATAR_PREFIX)
+        request.path.startswith(_ASSET_PREFIXES)
         and response.status in (200, 304)
         and "Cache-Control" in response.headers
     ):
-        # A shown person's picture: the view set ``private, no-cache``.
+        # A shown person's picture (``private, no-cache``) or a map tile
+        # (``private``, a day): the view set it.
         return
     # Pages, redirects (which may carry Set-Cookie) and errors are
     # per-session — never cache them; only static files and avatars may be.
@@ -241,7 +249,9 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
     if claims is None:
         # Only a page view (GET) is sent to the login form; HEAD, POST and
         # ``/fragment/`` requests (fetched by page JS) get a plain 401.
-        if request.method == "GET" and not request.path.startswith(_FRAGMENT_PREFIX):
+        if request.method == "GET" and not request.path.startswith(
+            (_FRAGMENT_PREFIX, _TILES_PREFIX)
+        ):
             return redirect(
                 "/login?next=" + quote(request.raw_path, safe=""), status=302
             )
@@ -275,19 +285,20 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
 
 
 #: The page routes whose loads renew the cookie (an allow-list): Home,
-#: its Messages and Notes tabs, a person page.
-_RENEWING_PATH = re.compile(r"/(?:p/[^/]+|messages|notes)?")
+#: its Messages, Notes and Map tabs, a person page.
+_RENEWING_PATH = re.compile(r"/(?:p/[^/]+|messages|notes|map)?")
 
 
 def _may_renew(request: web.Request, response: web.StreamResponse) -> bool:
     """Only a ``200`` page load (``GET`` / ``HEAD`` of ``/``,
-    ``/messages``, ``/notes`` or ``/p/{id}``) renews the cookie — an
-    allow-list by path and status. Never a ``/fragment/`` fetch, an
-    avatar, a static file or a form ``POST``: such a response can land
+    ``/messages``, ``/notes``, ``/map`` or ``/p/{id}``) renews the cookie
+    — an allow-list by path and status. Never a ``/fragment/`` fetch, an
+    avatar, a map tile, a static file or a form ``POST``: such a response can land
     after a ``/lock`` (sent with the pre-lock cookie) and must not
     overwrite the locked cookie. Never a non-``200`` answer: an unlocked
     tablet's 404 (an unknown or hidden person, a tab that is off) or a
-    tab's 303 at night. And never over a cookie the view set itself.
+    tab's 303 (at night; Map also with nobody located). And never over a
+    cookie the view set itself.
 
     A *locked* tablet is answered by the guard with the lock screen, a
     ``200`` on any of these paths (even ``/p/<unknown>`` or a tab that is
@@ -312,7 +323,7 @@ async def _locked_response(request: web.Request) -> web.StreamResponse:
             headers={LOCKED_HEADER: "1"},
         )
     if request.method in ("GET", "HEAD") and not request.path.startswith(
-        _AVATAR_PREFIX
+        _ASSET_PREFIXES
     ):
         # 200, not a redirect: a reload keeps showing the lock screen.
         return await render_lock_screen(request)
@@ -328,6 +339,7 @@ def build_dashboard_app(
     household_tz: HouseholdTzFn,
     household_theme: HouseholdThemeFn,
     snapshots: DashboardSnapshots,
+    tiles: DashboardTiles | None = None,
     extra_hosts: ExtraHosts = (),
     local_hostnames: frozenset[str] = frozenset(),
 ) -> web.Application:
@@ -360,6 +372,8 @@ def build_dashboard_app(
     app[HOUSEHOLD_TZ_KEY] = household_tz
     app[HOUSEHOLD_THEME_KEY] = household_theme
     app[SNAPSHOTS_KEY] = snapshots
+    if tiles is not None:
+        app[TILES_KEY] = tiles
     install_security_headers(app)
     # After the shared hook (which only ``setdefault``s), so these win.
     app.on_response_prepare.append(_dashboard_headers)

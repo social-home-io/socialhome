@@ -12,8 +12,10 @@ House rules:
   household-chat summary). The one write is :meth:`acknowledge`: a
   "Got it" tapped on a mention, which re-derives from scratch that the
   wall shows that mention before it reacts ✅ to the chat message.
-* **Household-safe.** Presence is home / away / a zone name, never
-  coordinates; calendar events come from members' personal calendars;
+* **Household-safe.** Presence is home / away / a zone name, plus — for
+  Home's Map tab — a member's shared 4-dp GPS point, when it last
+  changed, and the household's own zones (never federated); calendar
+  events come from members' personal calendars;
   chores, the shopping list, today's timetables and household stickies.
   Never DMs, notifications, space chats or polls.
 * **Household chat, only when asked.** With the admin's
@@ -103,6 +105,7 @@ from ..domain.household_dashboard import (
     DashboardShoppingItem,
     DashboardSticky,
     DashboardTask,
+    DashboardZone,
     HomeSnapshot,
     PersonSnapshot,
     in_night_window,
@@ -113,6 +116,7 @@ from ..domain.household_dashboard import (
     subject_color_tokens,
     token_hex,
 )
+from ..domain.household_zone import HouseholdZone, zone_color
 from ..domain.preferences import HouseholdPreferences
 from ..domain.presence import PersonPresence
 from ..domain.task import Task, TaskList, TaskStatus
@@ -126,6 +130,7 @@ from .dashboard_settings_service import DashboardSettingsService
 from .dm_mentions import MENTIONABLE_TYPES
 from .dm_service import DmService
 from .household_chat_service import HouseholdChatService
+from .household_zone_service import HouseholdZoneService
 from .preferences_service import PreferencesService
 from .presence_service import PresenceService
 from .shopping_service import ShoppingService
@@ -234,6 +239,20 @@ async def _safe[T](label: str, aw: Awaitable[T], default: T) -> T:
         return default
 
 
+def _located_at(raw: str | None, ctx: _Context) -> datetime | None:
+    """A presence row's ``updated_at`` in the household zone — ``None``
+    when missing or unreadable. Both stored UTC shapes are read: aware
+    ISO 8601 and SQLite's naive ``datetime('now')``."""
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        log.warning("household dashboard: unreadable presence time %r", raw)
+        return None
+    return as_utc(stamp).astimezone(ctx.now.tzinfo)
+
+
 def _agenda_key(item: DashboardAgendaItem) -> tuple[int, datetime, datetime]:
     all_day = isinstance(item, DashboardEvent) and item.all_day
     return (0 if all_day else 1, item.start, item.end)
@@ -302,6 +321,7 @@ class HouseholdDashboardService:
     __slots__ = (
         "_users",
         "_presence",
+        "_zones",
         "_calendar",
         "_tasks",
         "_shopping",
@@ -319,6 +339,7 @@ class HouseholdDashboardService:
         *,
         user_service: UserService,
         presence_service: PresenceService,
+        household_zones: HouseholdZoneService,
         calendar_service: CalendarService,
         task_service: TaskService,
         shopping_service: ShoppingService,
@@ -332,6 +353,7 @@ class HouseholdDashboardService:
     ) -> None:
         self._users = user_service
         self._presence = presence_service
+        self._zones = household_zones
         self._calendar = calendar_service
         self._tasks = task_service
         self._shopping = shopping_service
@@ -354,8 +376,10 @@ class HouseholdDashboardService:
         )
         colors = self._person_colors(ctx, calendars)
         senders = await self._chat_senders(ctx)
-        people, events, chores, shopping, notes, chat = await asyncio.gather(
-            self._people(ctx, colors),
+        located, events, chores, shopping, notes, chat = await asyncio.gather(
+            asyncio.gather(
+                self._people(ctx, colors, located=True), self._zone_slice(ctx)
+            ),
             self._events(ctx, calendars, colors),
             self._chores(ctx, due_to=ctx.today),
             self._shopping_slice(),
@@ -365,6 +389,7 @@ class HouseholdDashboardService:
                 self._mentions(ctx, senders),
             ),
         )
+        people, zones = located
         messages, mentions = chat
         school = [self._school(ctx, user.user_id, timetables) for user in ctx.shown]
         shopping_items, shopping_total = shopping
@@ -397,6 +422,7 @@ class HouseholdDashboardService:
             messages=messages,
             mentions=mentions,
             messages_on=self._messages_on(ctx),
+            zones=zones,
         )
 
     async def person(
@@ -618,13 +644,16 @@ class HouseholdDashboardService:
         return {r.user_id: r for r in rows}
 
     async def _people(
-        self, ctx: _Context, colors: Mapping[str, str]
+        self, ctx: _Context, colors: Mapping[str, str], *, located: bool = False
     ) -> tuple[DashboardPerson, ...]:
+        """The shown members. Only Home (``located``) carries where each
+        one is — the Map tab's point and time; a person page never does."""
         presence = await self._presence_rows(ctx)
         out: list[DashboardPerson] = []
         for user in ctx.shown:
             row = presence.get(user.user_id)
             state = _PRESENCE.get(row.state, "unknown") if row else "unknown"
+            where = row if located else None
             status = user.status
             live = status.is_set and not status.is_expired(ctx.now)
             out.append(
@@ -651,9 +680,33 @@ class HouseholdDashboardService:
                         if live and ctx.settings.show_status_text
                         else None
                     ),
+                    latitude=where.latitude if where else None,
+                    longitude=where.longitude if where else None,
+                    located_at=_located_at(where.updated_at, ctx) if where else None,
                 )
             )
         return tuple(out)
+
+    async def _zone_slice(self, ctx: _Context) -> tuple[DashboardZone, ...]:
+        """The household zones for the Map tab — Home first, then by name;
+        ``()`` without calling the zone service while presence is off."""
+        if not ctx.on(SECTION_PRESENCE):
+            return ()
+        rows = await _safe("zones", self._zones.list_zones(), list[HouseholdZone]())
+        rows.sort(key=lambda z: (not z.is_home, z.name.casefold()))
+        return tuple(
+            DashboardZone(
+                id=z.id,
+                name=z.name,
+                latitude=z.latitude,
+                longitude=z.longitude,
+                radius_m=z.radius_m,
+                color=zone_color(z),
+                icon=z.icon,
+                is_home=z.is_home,
+            )
+            for z in rows
+        )
 
     # ── Calendar ─────────────────────────────────────────────────────────
 

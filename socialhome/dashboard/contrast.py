@@ -23,6 +23,9 @@ from dataclasses import dataclass
 __all__ = [
     "AA_TEXT",
     "BLACK",
+    "BUBBLE_DARK",
+    "BUBBLE_LIGHT",
+    "NON_TEXT",
     "NOTE_DARK_BG",
     "NOTE_LIGHT_BG",
     "NOTE_MIX_DARK",
@@ -31,9 +34,11 @@ __all__ = [
     "WHITE",
     "NoteColors",
     "contrast_ratio",
+    "frame_color",
     "hex_color",
     "ink_on",
     "mix_oklab",
+    "mix_srgb",
     "note_colors",
     "note_ink",
     "readable_on",
@@ -42,6 +47,8 @@ __all__ = [
 
 #: WCAG AA minimum contrast for normal-size text.
 AA_TEXT = 4.5
+#: WCAG 1.4.11 minimum contrast for a graphical object (a marker frame).
+NON_TEXT = 3.0
 BLACK = "#000000"
 WHITE = "#ffffff"
 #: The board's text colour (``--dash-text``): a softer black for notes.
@@ -184,3 +191,30 @@ def readable_on(color: str, surfaces: Iterable[str], minimum: float = AA_TEXT) -
     """Does ``color`` reach ``minimum`` contrast as text on every one of
     ``surfaces``?"""
     return all(contrast_ratio(color, s) >= minimum for s in surfaces)
+
+
+#: The Map tab's marker bubble (``--dash-mp-bubble``): the light surface,
+#: and the lifted dark one (the dark surface melts into dark tiles).
+BUBBLE_LIGHT = "#ffffff"
+BUBBLE_DARK = "#3d3a35"
+
+
+def mix_srgb(color: str, toward: str, weight: float) -> str:
+    """``color`` moved ``weight`` (0 … 1) of the way to ``toward``,
+    channel by channel in sRGB."""
+    a = [int(color[i : i + 2], 16) for i in (1, 3, 5)]
+    b = [int(toward[i : i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(
+        f"{round(x + (y - x) * weight):02x}" for x, y in zip(a, b, strict=True)
+    )
+
+
+def frame_color(color: str, surface: str, toward: str) -> str:
+    """A person's Map marker frame (``--kf``): their colour, nudged toward
+    ``toward`` (black on the light bubble, white on the dark one) in 5 %
+    steps until it reaches :data:`NON_TEXT` against ``surface``."""
+    for step in range(21):
+        frame = mix_srgb(color, toward, step / 20)
+        if contrast_ratio(frame, surface) >= NON_TEXT:
+            return frame
+    return toward
