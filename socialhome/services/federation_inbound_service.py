@@ -3254,6 +3254,12 @@ class FederationInboundService(ProtectionGateMixin):
                     space_id,
                     exc,
                 )
+        if picture_hash is None and self._profile_picture_repo is not None:
+            # A reset leaves no picture behind — like the local reset
+            # (``SpaceService.clear_member_picture``) — so "no hash" honestly
+            # means "no picture": the v_58 §25.6 ``members`` record tells
+            # co-members exactly that, and they drop their copy.
+            await self._profile_picture_repo.clear_member_picture(space_id, user_id)
         await self._space_repo.set_member_profile(
             space_id,
             user_id,

@@ -874,7 +874,7 @@ from __future__ import annotations
 #:   chosen server their grant names.
 #: * **v_58** (2026-10-13) — a §25.6 ``members`` record's ``picture_hash:
 #:   null`` from a provider at v_58+ is AUTHORITATIVE for a member that
-#:   provider speaks for (the owner, or the member's own household): the
+#:   provider seats (the member's own household — the live profile rule): the
 #:   member has no per-space picture, so the receiver drops a stale one it
 #:   still holds (hash and blob) — a reset missed while offline converges on
 #:   the next catch-up. No wire change and no new event type: the record
@@ -1360,8 +1360,8 @@ class FederationCapability:
     MIN_FOR_MULTI_GFS_PUBLISH = 57
 
     #: v_58 — a §25.6 ``members`` record's ``picture_hash: null`` is an
-    #: authoritative per-space picture reset when the provider speaks for
-    #: the member (the owner, or the member's own household). Read by the
+    #: authoritative per-space picture reset when the provider seats the
+    #: member (the member's own household). Read by the
     #: RECEIVER about the provider: below it the ``null`` is ignored (it may
     #: be the pre-#910 roster-upsert wipe). Not space-scoped.
     MIN_FOR_MEMBER_PICTURE_RESET_SYNC = 58

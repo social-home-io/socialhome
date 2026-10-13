@@ -143,6 +143,43 @@ async def test_members_exporter():
     assert recs[0]["role"] == "member"
 
 
+class _FakePictureRepo:
+    def __init__(self, held: set[str]):
+        self._held = held
+
+    async def list_member_picture_user_ids(self, space_id):
+        return set(self._held)
+
+
+async def test_members_exporter_says_no_picture_only_without_a_blob():
+    """v_58 receivers read ``picture_hash: null`` as a reset. A seat whose
+    hash is NULL while this household still holds the blob (an old wipe
+    whose blob hash was not repairable) must not say "no picture": the key
+    is left out. A seat with no blob says ``null``; a hash ships as is."""
+    from socialhome.federation.sync.space.exporters import MembersExporter
+
+    rows = [
+        SpaceMember(space_id="sp-1", user_id="u-none", role="member", joined_at="t"),
+        SpaceMember(space_id="sp-1", user_id="u-blob", role="member", joined_at="t"),
+        SpaceMember(
+            space_id="sp-1",
+            user_id="u-pic",
+            role="member",
+            joined_at="t",
+            picture_hash="0123456789abcdef",
+        ),
+    ]
+    ex = MembersExporter(
+        _FakeSpaceRepo(members=rows), _FakePictureRepo({"u-blob", "u-pic"})
+    )
+    recs = {r["user_id"]: r for r in await ex.list_records("sp-1")}
+    assert "picture_hash" in recs["u-none"]
+    assert recs["u-none"]["picture_hash"] is None
+    assert "picture_hash" not in recs["u-blob"]
+    assert recs["u-blob"]["role"] == "member"
+    assert recs["u-pic"]["picture_hash"] == "0123456789abcdef"
+
+
 async def test_pre_moderator_members_exporter_downgrades_only_moderators():
     from socialhome.federation.sync.space.exporters import MembersExporter
     from socialhome.federation.sync.space.exporters.members import (
@@ -987,3 +1024,11 @@ def test_the_roster_stays_full():
     """Admission depends on the whole roster: never incremental."""
     for exporter in (MembersExporter(None), BansExporter(None)):
         assert not isinstance(exporter, IncrementalExporter)
+
+
+async def test_members_exporter_without_a_picture_repo_never_claims_a_reset():
+    from socialhome.federation.sync.space.exporters import MembersExporter
+
+    member = SpaceMember(space_id="sp-1", user_id="u-1", role="member", joined_at="t")
+    recs = await MembersExporter(_FakeSpaceRepo(members=[member])).list_records("sp-1")
+    assert "picture_hash" not in recs[0]

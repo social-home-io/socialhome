@@ -311,31 +311,48 @@ The one thing a `members` record's `picture_hash` does say is **"no
 picture"** (v_58, `FederationCapability.MIN_FOR_MEMBER_PICTURE_RESET_SYNC`).
 A member who reset their per-space picture while this household was offline
 leaves nothing in `member_pictures` (it skips seats with no picture), so
-without it the stale copy stayed forever. When the key is present and
-`null`, the receiver clears the seat's hash and deletes the held blob
-(`space_member_profile_pictures`) — only when:
+without it the stale copy stayed forever.
 
-- the provider speaks for the member: the space's owner, or the member's
-  own household (a live seat for them on the provider —
-  `SpaceAuthorship.acts_for(..., any_role=True)`); a delegated admin
-  household's roster is otherwise taken like the host's, but its `null` for
-  another household's member is no reset;
-- the provider is at v_58 or later (its `remote_instances` row, else its
-  mesh version claim) — before it a provider's own roster upsert could wipe
-  a seat's hash (fixed in #910), so an older provider's `null` may be
-  damage, not a reset; an older or unknown provider is never trusted with
-  one (the stale picture waits for the member's next live
-  `SPACE_MEMBER_PROFILE_UPDATED`, as before);
+**Provider side.** `MembersExporter` ships `picture_hash: null` only for a
+seat it holds **no** picture blob for (`space_member_profile_pictures`).
+A seat with no hash but a blob — an old wipe whose blob hash could not be
+repaired — leaves the key out ("says nothing"), so a provider never claims a
+reset it did not see. Every reset path deletes the blob along with the hash
+(the member's own reset, the live inbound `SPACE_MEMBER_PROFILE_UPDATED`
+with no picture, and this sync reset), and migration `0099` re-pointed the
+seats that the pre-#910 roster-upsert wipe (or `0098`'s repair) had left NULL
+next to their blob. "No hash" therefore means "no picture".
+
+**Receiver side.** When the key is present and `null`, the receiver clears
+the seat's hash and deletes the held blob. This runs **before roster
+admission**, on every provider's `members` chunk, because the §25.6
+scheduler streams from every co-member household and the reset is the
+member's own household's to make. The roster itself (seats, roles) is still
+taken from the host alone. The reset applies only when all of these hold:
+
+- the provider holds the member's seat (their own household —
+  `SpaceAuthorship.acts_for(..., any_role=True)`), the same rule as the live
+  `SPACE_MEMBER_PROFILE_UPDATED`. The owner speaks for its own people only:
+  its view of another household's member is second-hand (a missed fan-out
+  leaves it NULL), and that `null` is no reset;
+- the provider is at v_58 or later (`FederationService.space_member_version`
+  — its `remote_instances` row, else its mesh version claim). Before v_58 a
+  provider's own roster upsert could wipe a seat's hash (fixed in #910), so
+  an older provider's `null` may be damage, not a reset. An older or unknown
+  provider is never trusted with one: the stale picture waits for the
+  member's next live `SPACE_MEMBER_PROFILE_UPDATED`, as before;
 - the member is not one of the receiver's own people (their picture is
   authored here).
 
-A non-null provider hash is never taken (it is untrusted — the receiver only
-stores its own digest of bytes it re-encoded), and a record without the key
-(an older shape) says nothing. A picture that *changed* while offline
-therefore carries a non-null hash — a no-op here — and is replaced by the
-`member_pictures` record that streams right after `members` in the same
-session. A member who left is not in the roster stream at all and is not
-touched by this.
+A non-null provider hash is never taken: it is untrusted, and the receiver
+only stores its own digest of bytes it re-encoded. A record without the key
+(an older shape) says nothing. A picture that *changed* while offline carries
+a non-null hash, so this step does nothing, and the `member_pictures` record
+that streams right after `members` in the same session replaces it. A member
+who left is not in the roster stream at all and is not touched by this.
+Follow-up: an open SPA is not nudged when a sync changes a picture (it shows
+on the next load). Republishing `SpaceMemberProfileUpdated` would echo the
+change back out over federation, so any nudge must be WebSocket-only.
 
 (History: 0086 covered posts, comments, chat, gallery, calendar and the
 0085 tombstones; 0088 added task lists, tasks, pages, timetables and moved
