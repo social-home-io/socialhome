@@ -1,8 +1,8 @@
 /* Household dashboard — login, lock screen and the boards (Home, a person).
    System fonts only: the dashboard never fetches from a third-party host.
    No inline style attributes anywhere (the CSP forbids them): per-person /
-   per-item colours arrive as classes (.kN sets --kc / --kt, and --kb / --kn
-   for note cards) in the page's
+   per-item colours arrive as classes (.kN sets --kc / --kt, --kb / --kn
+   for note cards and --kf for map markers) in the page's
    one hash-admitted <style>; timeline geometry uses the .x-N / .w-N steps
    at the end of this file. Logical properties throughout, so RTL flips. */
 
@@ -3056,6 +3056,678 @@ h3.dash-sublabel {
 
   .dash-tab-empty-text {
     font-size: 1.25rem;
+  }
+}
+
+/* ── Home › Map: who is where (map_view.py, map.js) ─────────────────────
+   Home Assistant 2026.10's people/zone style: rounded-square photo
+   markers framed in each person's colour (--kf, 3:1 on the bubble), one
+   bubble per occupied zone with its tail on the zone pin, merged bubbles
+   when zoomed out. Map geometry is physical (left/top, set by map.js
+   through the CSSOM — the CSP forbids style attributes): a map never
+   mirrors under RTL; everything around it uses logical properties. */
+
+:root {
+  --dash-mp-av: 56px;          /* avatar in a bubble */
+  --dash-mp-av-radius: 14px;   /* rounded square */
+  --dash-mp-frame: 4px;        /* person-colour frame */
+  --dash-mp-pin: 44px;         /* zone emoji circle */
+  --dash-mp-tail: 12px;
+  /* Quiet tiles so the faces win: desaturated, a touch lighter. */
+  --dash-mp-tile-filter: saturate(0.4) brightness(1.04) contrast(0.88);
+  --dash-mp-bubble: var(--dash-surface);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Light OSM tiles inverted to a dark map. */
+    --dash-mp-tile-filter: invert(1) hue-rotate(180deg) saturate(0.3) brightness(0.8) contrast(0.85);
+    /* A lifted bubble: the dark surface would melt into dark tiles
+       (contrast.BUBBLE_DARK — the frames are checked against it). */
+    --dash-mp-bubble: #3d3a35;
+  }
+}
+
+/* Layout: the map + the side list. */
+
+.dash-mp-tab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 21rem;
+  gap: var(--dash-gap);
+  block-size: calc(100dvh - 104px);
+  min-block-size: 420px;
+}
+
+/* Without the script there is no map: the list is complete on its own. */
+html:not(.dash-js) .dash-mp-tab {
+  grid-template-columns: minmax(0, 1fr);
+  block-size: auto;
+  min-block-size: 0;
+}
+
+html:not(.dash-js) .dash-mp-box {
+  display: none;
+}
+
+.dash-mp-box {
+  position: relative;
+  min-block-size: 0;
+  overflow: hidden;
+  background: var(--dash-bg);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius);
+  /* Read-only: no pan, no pinch — a child's swipe can't lose the map. */
+  touch-action: none;
+}
+
+.dash-mp-map {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.dash-mp-tiles {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  filter: var(--dash-mp-tile-filter);
+}
+
+.dash-mp-tile {
+  position: absolute;
+  inline-size: 256px;
+  block-size: 256px;
+  max-inline-size: none;
+  user-select: none;
+}
+
+/* Anything placed but outside the box (a zoomed-in view) is not drawn —
+   never half a bubble at the edge. */
+.dash-mp-off {
+  visibility: hidden;
+}
+
+/* Zones: emoji circle + the radius as a light fill and a crisp border. */
+
+.dash-mp-area {
+  position: absolute;
+  aspect-ratio: 1;
+  background: color-mix(in srgb, var(--kc, var(--dash-muted)) 16%, transparent);
+  border: 2px solid var(--kc, var(--dash-muted));
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.dash-mp-area-empty {
+  background: color-mix(in srgb, var(--kc, var(--dash-muted)) 8%, transparent);
+  border-style: dashed;
+}
+
+.dash-mp-zone {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform: translate(-50%, calc(var(--dash-mp-pin) / -2));
+  pointer-events: none;
+}
+
+.dash-mp-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--dash-mp-pin);
+  block-size: var(--dash-mp-pin);
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1;
+  /* A first-letter pin (no emoji) reads on its zone colour. */
+  color: var(--kt, #ffffff);
+  background: var(--kc, var(--dash-muted));
+  border: 3px solid #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35);
+}
+
+.dash-mp-zone-name {
+  margin-block-start: 4px;
+  padding-inline: 10px;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.6;
+  color: var(--dash-text);
+  white-space: nowrap;
+  background: var(--dash-surface);
+  border-radius: 999px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
+}
+
+.dash-mp-zone-empty {
+  --dash-mp-pin: 36px;
+}
+
+.dash-mp-zone-empty .dash-mp-pin {
+  font-size: 1.125rem;
+}
+
+.dash-mp-zone-empty .dash-mp-zone-name {
+  font-weight: 600;
+  color: var(--dash-muted);
+}
+
+/* Merged away (zoomed out): a small pin, no name — the merged bubble's
+   caption names the places. */
+.dash-mp-zone-mini {
+  --dash-mp-pin: 30px;
+}
+
+.dash-mp-zone-mini .dash-mp-pin {
+  font-size: 0.9375rem;
+  border-width: 2px;
+}
+
+.dash-mp-zone-mini .dash-mp-zone-name,
+.dash-mp-zone-name.dash-mp-cut {
+  display: none;
+}
+
+/* Bubbles: up to 3 faces + "+N", the tail pointing at the anchor. */
+
+.dash-mp-bubble {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  inline-size: max-content;
+  padding: 8px;
+  background: var(--dash-mp-bubble);
+  border-radius: 22px;
+  box-shadow:
+    0 2px 6px rgb(0 0 0 / 0.25),
+    0 8px 20px rgb(0 0 0 / 0.12);
+  cursor: pointer;
+  /* Anchor = the tail tip; --dash-mp-lift clears the zone pin / dot. */
+  transform: translate(-50%, calc(-100% - var(--dash-mp-tail) - var(--dash-mp-lift, 0px)));
+  -webkit-tap-highlight-color: transparent;
+}
+
+.dash-mp-bubble::after {
+  position: absolute;
+  inset-block-end: calc(var(--dash-mp-tail) * -1 + 1px);
+  left: 50%;
+  inline-size: calc(var(--dash-mp-tail) * 1.6);
+  block-size: var(--dash-mp-tail);
+  content: "";
+  background: var(--dash-mp-bubble);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  transform: translateX(-50%);
+}
+
+.dash-mp-bubble-zone {
+  --dash-mp-lift: calc(var(--dash-mp-pin) / 2 + 4px);
+}
+
+.dash-mp-bubble-free {
+  --dash-mp-lift: 12px;
+}
+
+/* Over merged zones: their pins are minis. */
+.dash-mp-bubble-merged.dash-mp-bubble-zone {
+  --dash-mp-lift: 19px;
+}
+
+.dash-mp-faces {
+  display: flex;
+  gap: 6px;
+}
+
+/* A person outside every zone: a dot at their (4-dp) point. */
+.dash-mp-dot {
+  position: absolute;
+  z-index: 1;
+  inline-size: 18px;
+  block-size: 18px;
+  background: var(--kf, var(--kc, var(--dash-muted)));
+  border: 3px solid #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.4);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.dash-mp-av {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--dash-mp-av);
+  block-size: var(--dash-mp-av);
+  overflow: hidden;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--kt, #ffffff);
+  background: var(--kc, var(--dash-muted));
+  border: var(--dash-mp-frame) solid var(--kf, var(--kc, var(--dash-muted)));
+  border-radius: var(--dash-mp-av-radius);
+}
+
+.dash-mp-av img {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+}
+
+/* Past the first three: behind "+N" until the bubble is tapped open. */
+.dash-mp-extra {
+  display: none;
+}
+
+.dash-mp-expanded .dash-mp-extra {
+  display: inline-flex;
+}
+
+.dash-mp-expanded .dash-mp-more {
+  display: none;
+}
+
+.dash-mp-more {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--dash-mp-av);
+  block-size: var(--dash-mp-av);
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--dash-text);
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-mp-av-radius);
+}
+
+/* Selected (tapped on the map or in the list): the rail's ring. */
+.dash-mp-av.dash-mp-selected {
+  overflow: visible;
+  box-shadow:
+    0 0 0 3px var(--dash-mp-bubble),
+    0 0 0 7px var(--dash-accent);
+}
+
+.dash-mp-av.dash-mp-selected img {
+  border-radius: calc(var(--dash-mp-av-radius) - var(--dash-mp-frame));
+}
+
+.dash-mp-bubble:has(.dash-mp-selected),
+.dash-mp-bubble.dash-mp-expanded {
+  z-index: 3;
+}
+
+.dash-mp-caption {
+  padding-block: 2px 0;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* The selected person's name on the map, under their marker. */
+.dash-mp-callout {
+  position: absolute;
+  z-index: 3;
+  display: inline-flex;
+  gap: 8px;
+  align-items: baseline;
+  padding-block: 6px;
+  padding-inline: 14px;
+  font-size: 1.25rem;
+  white-space: nowrap;
+  background: var(--dash-surface);
+  border: 2px solid var(--dash-accent);
+  border-radius: 999px;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.2);
+  transform: translate(-50%, 18px);
+  pointer-events: none;
+}
+
+.dash-mp-callout[hidden] {
+  display: none;
+}
+
+/* Under a zone pin and its name. */
+.dash-mp-callout-zone {
+  transform: translate(-50%, 46px);
+}
+
+.dash-mp-callout b {
+  font-weight: 700;
+}
+
+.dash-mp-callout-age {
+  font-size: 1rem;
+  color: var(--dash-muted);
+}
+
+/* Stale (over an hour): faded, and the age on the bubble — never red. */
+.dash-mp-av.dash-mp-stale,
+.dash-mp-dot.dash-mp-stale {
+  opacity: 0.5;
+  filter: grayscale(0.8);
+}
+
+.dash-mp-age {
+  position: absolute;
+  inset-block-start: -10px;
+  inset-inline-end: -10px;
+  padding-inline: 8px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.6;
+  color: var(--dash-text);
+  white-space: nowrap;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: 999px;
+}
+
+/* Someone far beyond the frame: a chip on the edge pointing at them. */
+.dash-mp-edge {
+  position: absolute;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-inline-size: 60%;
+  min-block-size: 48px;
+  padding-block: 4px;
+  padding-inline: 4px 14px;
+  font-size: 1rem;
+  font-weight: 700;
+  white-space: nowrap;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: 999px;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.2);
+  cursor: pointer;
+  transform: translate(-50%, -50%);
+}
+
+.dash-mp-edge .dash-mp-av {
+  --dash-mp-av: 40px;
+  --dash-mp-av-radius: 12px;
+  --dash-mp-frame: 3px;
+  font-size: 1.125rem;
+}
+
+.dash-mp-edge-arrow {
+  display: inline-block;
+  font-size: 1.25rem;
+  color: var(--dash-accent);
+}
+
+.dash-mp-edge-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Map chrome. */
+
+.dash-mp-reset {
+  position: absolute;
+  inset-block-start: 12px;
+  inset-inline-end: 12px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-block-size: 56px;
+  padding-inline: 20px;
+  font: inherit;
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--dash-text);
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: 999px;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.2);
+  cursor: pointer;
+}
+
+.dash-mp-reset[hidden] {
+  display: none;
+}
+
+.dash-mp-attrib {
+  position: absolute;
+  inset-block-end: 0;
+  inset-inline-end: 0;
+  z-index: 5;
+  padding-block: 2px;
+  padding-inline: 8px;
+  font-size: 0.75rem;
+  color: var(--dash-muted);
+  background: color-mix(in srgb, var(--dash-surface) 85%, transparent);
+  border-start-start-radius: 8px;
+}
+
+/* Side list: the accessible equivalent of the map. */
+
+.dash-mp-side {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  min-block-size: 0;
+  padding-block: 16px 8px;
+  padding-inline: 12px;
+  overflow-y: auto;
+  background: var(--dash-surface);
+  border: 1px solid var(--dash-border);
+  border-radius: var(--dash-radius);
+}
+
+.dash-mp-side .dash-label {
+  padding-inline: 8px;
+}
+
+.dash-mp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dash-mp-row {
+  /* Positioned, so the visually hidden "updated" inside stays clipped by
+     the strip's scroller (else it widens the page sideways). */
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  inline-size: 100%;
+  min-block-size: 80px;
+  padding-block: 8px;
+  padding-inline: 8px;
+  font: inherit;
+  color: inherit;
+  text-align: start;
+  background: transparent;
+  border: 0;
+  border-inline-start: 6px solid transparent;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.dash-mp-row[aria-pressed="true"] {
+  background: color-mix(in oklab, var(--dash-accent) 12%, var(--dash-surface));
+  border-inline-start-color: var(--dash-accent);
+}
+
+.dash-mp-row:focus-visible,
+.dash-mp-reset:focus-visible {
+  outline: 3px solid var(--dash-focus);
+  outline-offset: -3px;
+}
+
+.dash-mp-row .dash-mp-av {
+  --dash-mp-av: 64px;
+  --dash-mp-av-radius: 16px;
+}
+
+.dash-mp-row-body {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+}
+
+.dash-mp-row-name {
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.dash-mp-row-place {
+  font-size: 1.125rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.dash-mp-row-age {
+  font-size: 1rem;
+  color: var(--dash-muted);
+}
+
+.dash-mp-row.dash-mp-stale .dash-mp-row-age {
+  font-weight: 700;
+}
+
+/* Portrait tablet: the list becomes one strip of cards under the map. */
+
+@media (max-width: 900px), (orientation: portrait) {
+  .dash-mp-tab {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    block-size: calc(100dvh - 246px);
+  }
+
+  .dash-mp-side {
+    padding-block: 8px;
+    padding-inline: 8px;
+    overflow: visible;
+  }
+
+  .dash-mp-side .dash-label {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* One row of compact cards; more than fit scroll sideways and snap. */
+  .dash-mp-list {
+    display: grid;
+    grid-auto-columns: minmax(10.5rem, 1fr);
+    grid-auto-flow: column;
+    gap: 4px;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+  }
+
+  .dash-mp-list > li {
+    scroll-snap-align: start;
+  }
+
+  .dash-mp-row {
+    gap: 10px;
+    min-block-size: 76px;
+    padding-inline: 6px;
+  }
+
+  .dash-mp-row .dash-mp-av {
+    --dash-mp-av: 52px;
+    --dash-mp-av-radius: 14px;
+  }
+
+  .dash-mp-row-name {
+    font-size: 1.25rem;
+  }
+
+  .dash-mp-row-place {
+    font-size: 1.0625rem;
+  }
+
+  .dash-mp-row-age {
+    font-size: 0.9375rem;
+  }
+}
+
+/* Phone: two columns under the map. */
+
+@media (max-width: 600px) {
+  :root {
+    --dash-mp-av: 48px;
+    --dash-mp-av-radius: 12px;
+    --dash-mp-frame: 3px;
+    --dash-mp-pin: 40px;
+  }
+
+  .dash-mp-tab {
+    grid-template-rows: minmax(360px, 1fr) auto;
+    block-size: calc(100dvh - 216px);
+    min-block-size: 520px;
+  }
+
+  .dash-mp-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-flow: row;
+    overflow-x: visible;
+  }
+
+  .dash-mp-row {
+    min-block-size: 64px;
+  }
+
+  .dash-mp-row .dash-mp-av {
+    --dash-mp-av: 44px;
+    --dash-mp-av-radius: 12px;
+  }
+
+  .dash-mp-row-name {
+    font-size: 1.125rem;
+  }
+
+  .dash-mp-row-place {
+    font-size: 1rem;
+  }
+
+  .dash-mp-row-age {
+    font-size: 0.875rem;
+  }
+
+  /* Empty zones lose their label on a phone (the pin stays). */
+  .dash-mp-zone-empty .dash-mp-zone-name {
+    display: none;
+  }
+
+  .dash-mp-reset {
+    min-block-size: 48px;
+    padding-inline: 16px;
+    font-size: 1rem;
+  }
+
+  .dash-mp-callout {
+    font-size: 1.0625rem;
   }
 }
 

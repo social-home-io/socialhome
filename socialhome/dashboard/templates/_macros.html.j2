@@ -235,3 +235,14 @@
 {{ ack_form(m, round=True) }}
 </li>
 {%- endmacro %}
+
+{#- A face on Home's Map tab: a rounded square framed in the person's
+    colour (--kf, 3:1 on the bubble) — their picture, else initials. A
+    stale location fades it; `extra` faces hide behind "+N" until the
+    bubble is tapped open. -#}
+{% macro map_face(s, extra=False) -%}
+{%- set url = f.avatar(s.person) -%}
+<span class="dash-mp-av {{ f.kc(s.person.color) }}{% if s.stale %} dash-mp-stale{% endif %}{% if extra %} dash-mp-extra{% endif %}" data-face="{{ s.person.user_id }}" aria-hidden="true"><span class="dash-initials">{{ s.person.initials }}</span>
+{%- if url %}<img src="{{ url }}" alt="" decoding="async">{% endif -%}
+</span>
+{%- endmacro %}

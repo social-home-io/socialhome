@@ -180,6 +180,8 @@ def home_colors(snapshot: HomeSnapshot) -> ColorBook:
         *_agenda_colors(ls for day in snapshot.school for ls in day.lessons),
         *_agenda_colors(x for x in (snapshot.next_up, snapshot.tomorrow_first) if x),
         *(s.color for s in snapshot.stickies),
+        # Last, so they never shift the other classes: the Map tab's zones.
+        *(z.color for z in snapshot.zones),
     ):
         book.add(value)
     return book

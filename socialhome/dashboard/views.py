@@ -1,7 +1,8 @@
 """Household dashboard pages — login, setup link, logout, lock, and the
-boards: Home (its Overview · Messages · Notes tabs, :mod:`.tabs`), a
-person, their ``/fragment/…`` refreshes and avatars — plus ``POST /ack``, the "Got it" on a household-chat mention (the
-dashboard's one data write).
+boards: Home (its Overview · Messages · Notes · Map tabs, :mod:`.tabs`),
+a person, their ``/fragment/…`` refreshes, avatars and the Map tab's
+tiles — plus ``POST /ack``, the "Got it" on a household-chat mention
+(the dashboard's one data write).
 
 Every view is server-rendered HTML; the session guard in
 :mod:`socialhome.dashboard.app` has already decided whether the request
@@ -41,6 +42,7 @@ from ..domain.household_dashboard import (
 )
 from ..rate_limiter import client_bucket
 from ..services.dashboard_settings_service import DashboardSettingsService
+from ..services.map_tile_service import TileCoordinateError, TileUnavailableError
 from .auth import (
     COOKIE_NAME,
     KEEP_TTL_S,
@@ -68,7 +70,9 @@ from .keys import (
     RENDERER_KEY,
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
+    TILES_KEY,
 )
+from .map_view import map_view
 from .picture import picture_view
 from .policy import build_dashboard_csp
 from .presenter import (
@@ -89,7 +93,14 @@ from .presenter import (
     view_key,
 )
 from .render import DashboardRenderer
-from .tabs import TAB_MESSAGES, TAB_NOTES, TAB_OVERVIEW, home_tab, home_tabs
+from .tabs import (
+    TAB_MAP,
+    TAB_MESSAGES,
+    TAB_NOTES,
+    TAB_OVERVIEW,
+    home_tab,
+    home_tabs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +119,8 @@ __all__ = [
     "EnterView",
     "HealthView",
     "HomeFragmentView",
+    "HomeMapFragmentView",
+    "HomeMapView",
     "HomeTabFragmentView",
     "HomeTabView",
     "HomeView",
@@ -117,6 +130,8 @@ __all__ = [
     "PersonFragmentView",
     "PersonView",
     "StaticView",
+    "TILE_CACHE",
+    "TileView",
     "UnlockView",
     "clear_session_cookie",
     "cookie_secure",
@@ -455,6 +470,10 @@ class LogoutView(_DashboardView):
 #: load passes the session guard again (423 locked, 404 once hidden).
 AVATAR_CACHE = "private, no-cache"
 
+#: A map tile is public map data, kept a day by the tablet only (it
+#: says which area the wall shows, so never by a shared cache).
+TILE_CACHE = "private, max-age=86400"
+
 #: Longest ``message_id`` / ``person_id`` ``POST /ack`` accepts.
 ACK_ID_MAX = 128
 
@@ -623,6 +642,7 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
         TAB_OVERVIEW: "_home.html.j2",
         TAB_MESSAGES: "_home_messages.html.j2",
         TAB_NOTES: "_home_notes.html.j2",
+        TAB_MAP: "_home_map.html.j2",
     }[tab]
     board = await _board(
         request,
@@ -660,6 +680,8 @@ async def _home_board(request: web.Request, tab: str = TAB_OVERVIEW) -> _Board |
     elif tab == TAB_NOTES:
         board.context["notes"] = snap.stickies
         board.context["notes_beyond"] = max(0, snap.stickies_total - len(snap.stickies))
+    elif tab == TAB_MAP:
+        board.context["map"] = map_view(snap, fmt)
     else:
         card = card_rows(rows, snap.now, hide=bannered)
         board.context.update(
@@ -826,6 +848,67 @@ class HomeTabFragmentView(_BoardView):
         if board is None:
             return web.Response(status=404, text="Not Found")
         return await self.fragment(board)
+
+
+class HomeMapView(_PageView):
+    """``GET /map`` — Home's Map tab: who is where (:mod:`.map_view`).
+
+    ``303`` to ``/`` while nobody is located — sharing flips at runtime,
+    so a wall must never land on a not-found page — and at night."""
+
+    async def get(self) -> web.Response:
+        board = await _home_board(self.request, TAB_MAP)
+        if board is None or board.context["night"]:
+            return redirect("/")
+        return await self.page(board)
+
+
+class HomeMapFragmentView(_BoardView):
+    """``GET /fragment/home/map`` — the Map tab's ``<main>`` content; a
+    ``303`` to ``/`` like the page (the script follows it to Overview)."""
+
+    async def get(self) -> web.Response:
+        board = await _home_board(self.request, TAB_MAP)
+        if board is None or board.context["night"]:
+            return redirect("/")
+        return await self.fragment(board)
+
+
+class TileView(_DashboardView):
+    """``GET /tiles/{z}/{x}/{y}`` — one map tile for the Map tab, from the
+    main app's shared tile proxy (same upstream, same cache), so the
+    tablet's browser never fetches from a third party (CSP
+    ``img-src 'self'``).
+
+    The session guard has already required an unlocked session (``401``
+    / ``423``). Each session has a tile budget
+    (:meth:`DashboardAuth.begin_tile`, ``429``). ``404`` for coordinates
+    off the grid (or no tile source), ``503`` when the upstream fails and
+    nothing is cached — the tablet keeps the empty square."""
+
+    async def get(self) -> web.Response:
+        tiles = self.request.app.get(TILES_KEY)
+        if tiles is None:
+            raise web.HTTPNotFound()
+        wait = self.auth.begin_tile(self.request[CLAIMS_KEY])
+        if wait:
+            return web.Response(
+                status=429,
+                text="Too Many Requests",
+                headers={"Retry-After": str(wait)},
+            )
+        info = self.request.match_info
+        try:
+            tile = await tiles.fetch(int(info["z"]), int(info["x"]), int(info["y"]))
+        except TileCoordinateError:
+            raise web.HTTPNotFound() from None
+        except TileUnavailableError:
+            return web.Response(status=503, text="Service Unavailable")
+        return web.Response(
+            body=tile.body,
+            content_type=tile.content_type,
+            headers={"Cache-Control": TILE_CACHE},
+        )
 
 
 class PersonView(_PageView):
@@ -1049,12 +1132,15 @@ class StaticView(_DashboardView):
 def register_routes(app: web.Application) -> None:
     app.router.add_view("/", HomeView)
     app.router.add_view(f"/{{tab:{TAB_MESSAGES}|{TAB_NOTES}}}", HomeTabView)
+    app.router.add_view(f"/{TAB_MAP}", HomeMapView)
     app.router.add_view("/p/{user_id}", PersonView)
     app.router.add_view("/fragment/home", HomeFragmentView)
     app.router.add_view(
         f"/fragment/home/{{tab:{TAB_MESSAGES}|{TAB_NOTES}}}", HomeTabFragmentView
     )
+    app.router.add_view(f"/fragment/home/{TAB_MAP}", HomeMapFragmentView)
     app.router.add_view("/fragment/p/{user_id}", PersonFragmentView)
+    app.router.add_view(r"/tiles/{z:\d{1,2}}/{x:\d{1,7}}/{y:\d{1,7}}", TileView)
     app.router.add_view("/avatar/{user_id}", AvatarView)
     app.router.add_view("/login", LoginView)
     app.router.add_view("/enter", EnterView)

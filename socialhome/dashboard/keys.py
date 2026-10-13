@@ -11,6 +11,7 @@ from aiohttp import web
 from ..domain.household_dashboard import HomeSnapshot, PersonSnapshot
 from ..domain.theme import HouseholdTheme
 from ..services.dashboard_settings_service import DashboardSettingsService
+from ..services.map_tile_service import Tile
 from .auth import DashboardAuth, SessionClaims
 from .render import DashboardRenderer
 
@@ -21,12 +22,14 @@ __all__ = [
     "HOUSEHOLD_THEME_KEY",
     "HOUSEHOLD_TZ_KEY",
     "DashboardSnapshots",
+    "DashboardTiles",
     "HouseholdNameFn",
     "HouseholdThemeFn",
     "HouseholdTzFn",
     "RENDERER_KEY",
     "SETTINGS_KEY",
     "SNAPSHOTS_KEY",
+    "TILES_KEY",
 ]
 
 #: Returns the household's display name (``HouseholdPreferences``).
@@ -59,6 +62,14 @@ class DashboardSnapshots(Protocol):
     ) -> bool: ...
 
 
+class DashboardTiles(Protocol):
+    """Map tiles for Home's Map tab — the main app's shared tile proxy
+    (:class:`~socialhome.services.map_tile_service.MapTileService`): one
+    upstream template, one LRU, one polite ``User-Agent``."""
+
+    async def fetch(self, z: int, x: int, y: int) -> Tile: ...
+
+
 AUTH_KEY: web.AppKey[DashboardAuth] = web.AppKey("dashboard_auth")
 SETTINGS_KEY: web.AppKey[DashboardSettingsService] = web.AppKey("dashboard_settings")
 RENDERER_KEY: web.AppKey[DashboardRenderer] = web.AppKey("dashboard_renderer")
@@ -68,5 +79,7 @@ HOUSEHOLD_THEME_KEY: web.AppKey[HouseholdThemeFn] = web.AppKey(
     "dashboard_household_theme"
 )
 SNAPSHOTS_KEY: web.AppKey[DashboardSnapshots] = web.AppKey("dashboard_snapshots")
+#: The tile source; absent (``/tiles/…`` is 404) when none is wired.
+TILES_KEY: web.AppKey[DashboardTiles] = web.AppKey("dashboard_tiles")
 #: The verified session of the current request (set by the session guard).
 CLAIMS_KEY: web.RequestKey[SessionClaims] = web.RequestKey("dashboard_claims")

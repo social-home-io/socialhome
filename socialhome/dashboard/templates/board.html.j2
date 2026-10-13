@@ -10,6 +10,9 @@
 {% endif %}
 {% endblock %}
 {% block head %}
+{% if tab == "map" %}
+<script src="/static/map.js" defer></script>
+{% endif %}
 <noscript><meta http-equiv="refresh" content="120"></noscript>
 {% endblock %}
 {% block body_class %}dash-board{% if night %} dash-night{% endif %}{% endblock %}

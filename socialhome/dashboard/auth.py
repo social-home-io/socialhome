@@ -42,7 +42,12 @@ shares the scrypt slot.
 "Got it" taps on a mention (the dashboard's one data write) have their
 own small budget per session (:meth:`DashboardAuth.begin_ack`):
 :data:`ACK_MAX` in :data:`ACK_WINDOW_S` — far above any real household,
-but a stuck or scripted tablet can't flood the chat with writes.
+but a stuck or scripted tablet can't flood the chat with writes. Map
+tiles (Home's Map tab) get a budget per session too
+(:meth:`DashboardAuth.begin_tile`): :data:`TILE_MAX` in
+:data:`TILE_WINDOW_S`, the main app's ``/api/map/tiles`` limit — every
+tile the wall can't serve from the shared cache is a fetch from the
+upstream tile server, whose policy we keep.
 """
 
 from __future__ import annotations
@@ -73,6 +78,8 @@ log = logging.getLogger(__name__)
 __all__ = [
     "ACK_MAX",
     "ACK_WINDOW_S",
+    "TILE_MAX",
+    "TILE_WINDOW_S",
     "COOKIE_NAME",
     "GLOBAL_MAX_FAILURES",
     "KEEP_TTL_S",
@@ -113,6 +120,11 @@ PRUNE_INTERVAL_S = 10.0
 #: "Got it" writes one session may make per window (:meth:`DashboardAuth.begin_ack`).
 ACK_MAX = 30
 ACK_WINDOW_S = 300
+
+#: Map tiles one session may load per window (:meth:`DashboardAuth.begin_tile`)
+#: — the main app's ``/api/map/tiles`` rate limit.
+TILE_MAX = 1200
+TILE_WINDOW_S = 60
 
 #: Revocation reasons (:meth:`DashboardAuth.revoke`). ``locked``: the
 #: cookie was replaced by a locked one (``POST /lock``) — it now counts
@@ -228,6 +240,7 @@ class DashboardAuth:
         "_revoked",
         "_max_revoked",
         "_acks",
+        "_tiles",
         "last_seen_at",
     )
 
@@ -252,6 +265,7 @@ class DashboardAuth:
         self._no_room_until = 0.0
         self._verify_slot = asyncio.Semaphore(1)
         self._acks = RateLimiter(monotonic=clock)
+        self._tiles = RateLimiter(monotonic=clock)
         #: When a signed-in tablet last made a request (unix seconds).
         self.last_seen_at: float | None = None
 
@@ -424,6 +438,15 @@ class DashboardAuth:
         if self._acks.is_allowed(key, limit=ACK_MAX, window_s=ACK_WINDOW_S):
             return 0
         return self._acks.retry_after_s(key, window_s=ACK_WINDOW_S)
+
+    def begin_tile(self, claims: SessionClaims) -> int:
+        """Count one map tile for this session: ``0`` when it may load,
+        else the seconds to wait (nothing is counted then). Keyed on the
+        session id, like :meth:`begin_ack`."""
+        key = f"tile:{claims.session_id}"
+        if self._tiles.is_allowed(key, limit=TILE_MAX, window_s=TILE_WINDOW_S):
+            return 0
+        return self._tiles.retry_after_s(key, window_s=TILE_WINDOW_S)
 
     # ── Throttle ────────────────────────────────────────────────────────
     #
