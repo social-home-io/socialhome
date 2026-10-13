@@ -74,6 +74,10 @@ _CODE_CHARS = frozenset(PAIRING_CODE_ALPHABET)
 #: Typed between code groups, ignored ("ABC-DEF", "abc def").
 _CODE_SEPARATORS = re.compile(r"[\s-]+")
 _PRINTABLE_ASCII = re.compile(r"[^ -~]+")
+#: Format characters a name may keep: the zero-width (non-)joiners emoji
+#: sequences need. Every other control / format character (bidi
+#: overrides, BOM…) is refused.
+_NAME_JOINERS = frozenset("\u200c\u200d")
 
 
 @dataclass(slots=True)
@@ -107,7 +111,8 @@ def _clean_name(value: object) -> str:
         raise DashboardSettingsInvalidError("name")
     name = value.strip()
     if not 0 < len(name) <= MAX_DISPLAY_NAME_LENGTH or any(
-        unicodedata.category(ch).startswith("C") for ch in name
+        unicodedata.category(ch).startswith("C") and ch not in _NAME_JOINERS
+        for ch in name
     ):
         raise DashboardSettingsInvalidError("name")
     return name

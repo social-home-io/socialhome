@@ -228,6 +228,20 @@ async def test_claim_invalid_name(svc, name):
     assert exc.value.params == {"field": "name"}
 
 
+async def test_claim_name_allows_emoji_sequences(svc):
+    pairing = await svc.start_pairing()
+    family = "Kids \U0001f468\u200d\U0001f469\u200d\U0001f467 room"
+    display = await svc.claim(actor_is_admin=True, code=pairing.code, name=family)
+    assert display.name == family
+
+
+@pytest.mark.parametrize("name", ["evil\u202eexe.txt", "a\u2066b", "a\ufeffb"])
+async def test_claim_name_refuses_bidi_and_invisible_format_chars(svc, name):
+    pairing = await svc.start_pairing()
+    with pytest.raises(DashboardSettingsInvalidError):
+        await svc.claim(actor_is_admin=True, code=pairing.code, name=name)
+
+
 async def test_claim_name_is_trimmed(svc):
     pairing = await svc.start_pairing()
     display = await svc.claim(actor_is_admin=True, code=pairing.code, name="  Hall ")
