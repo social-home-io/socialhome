@@ -18000,10 +18000,6 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   background: var(--zone-colour, #3b82f6);
 }
 .sh-zone-only-list__icon { font-size: 1rem; line-height: 1; }
-.sh-zone-only-list__empty {
-  padding: var(--sh-space-md);
-  text-align: center;
-}
 
 /* Picker row — "use my location" button next to the help text. */
 .sh-zone-form__picker-row {

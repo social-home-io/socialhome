@@ -87,7 +87,8 @@ export interface LocationMapProps {
   /** Height in CSS pixels. Falls back to 320. */
   height?: number
   /** When true + no markers, shows a muted fallback pane instead of
-   *  an empty map — keeps the layout stable on dashboards. */
+   *  an empty map — keeps the layout stable on dashboards. An empty
+   *  string shows no pane at all. */
   emptyLabel?: string
   /** Pick mode: every click / tap on the map reports its coordinates,
    *  and the empty-state pane is suppressed (an empty map *is* the
@@ -517,7 +518,7 @@ export function LocationMap({
         <div class="sh-map-error">
           {tileErrorMessage()}
         </div>
-      ) : !hasMarkers && !onPick && (
+      ) : !hasMarkers && !onPick && emptyLabel !== '' && (
         <div class="sh-location-map__empty sh-muted">
           {emptyLabel ?? t('location.map_empty')}
         </div>

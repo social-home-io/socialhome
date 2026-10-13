@@ -145,6 +145,13 @@ describe('LocationMap', () => {
     expect(getByText('Nothing here yet.')).toBeTruthy()
   })
 
+  it('shows no pane at all for an empty-string label', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    const { container } = render(<LocationMap markers={[]} emptyLabel="" />)
+    expect(container.querySelector('.sh-location-map__empty')).toBeNull()
+  })
+
   it('asks the shared helper for the proxied tile layer', async () => {
     const { render } = await import('@testing-library/preact')
     const { LocationMap } = await import('./LocationMap')

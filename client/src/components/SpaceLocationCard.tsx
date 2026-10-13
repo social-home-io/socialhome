@@ -34,6 +34,7 @@ import { showToast } from './Toast'
 import { ZoneLegend } from './ZoneLegend'
 import { zoneColor } from '@/utils/zoneColor'
 import { matchZone } from '@/utils/mapMarkers'
+import { presenceLabel } from '@/utils/presenceLabel'
 import type { SpaceZone } from '@/types'
 import { isOne, t } from '@/i18n/i18n'
 
@@ -62,6 +63,15 @@ interface SpacePresenceEntry {
   zone_id?: string
   zone_name?: string
   picture_url: string | null
+  /** Set on another household's member. Their ``state`` is a server
+   *  placeholder (the pin carries no state), so it is never shown. */
+  instance_id?: string | null
+}
+
+/** What to say about a member's state — nothing for another
+ *  household's member, whose state the server can't know. */
+function _stateLabel(p: SpacePresenceEntry): string | null {
+  return p.instance_id ? null : presenceLabel(p.state)
 }
 
 interface SpacePresenceResponse {
@@ -289,7 +299,7 @@ export function SpaceLocationCard({
           label: p.display_name,
           sub_label:
             matchZone(zones, p.latitude as number, p.longitude as number)?.name
-            || p.state,
+            ?? _stateLabel(p),
           avatar_url: p.picture_url,
           state: p.state,
         }))
@@ -343,20 +353,18 @@ export function SpaceLocationCard({
         onSelect={setSelectedId}
         emptyLabel={
           isZoneOnly
-            ? t('location.card.no_one_in_zone')
+            // Members are in zones we can't place (zones failed to load,
+            // or a zone was deleted): the list below says who — the map
+            // stays quiet rather than claim nobody is anywhere.
+            ? (data.entries.length === 0 ? t('location.card.no_one_in_zone') : '')
             : total === 0
               ? t('location.card.no_gps_yet')
               : t('location.card.no_gps_now')
         }
       />
       {zones.length > 0 && <ZoneLegend zones={zones} />}
-      {isZoneOnly && (
+      {isZoneOnly && data.entries.length > 0 && (
         <ul class="sh-zone-only-list" data-testid="zone-only-list">
-          {data.entries.length === 0 && (
-            <li class="sh-zone-only-list__empty sh-muted">
-              {t('location.card.no_one_in_zone')}
-            </li>
-          )}
           {data.entries.map((p) => {
             const zone = zones.find((z) => z.id === p.zone_id)
             const colour = zoneColor(zone)
@@ -364,11 +372,11 @@ export function SpaceLocationCard({
               <li key={p.user_id} class="sh-zone-only-list__row">
                 <span class="sh-zone-only-list__avatar">
                   <Avatar name={p.display_name} src={p.picture_url} size={32} />
-                  <span class={_stateDotClass(p.state)} />
+                  {!p.instance_id && <span class={_stateDotClass(p.state)} />}
                 </span>
                 <div class="sh-zone-only-list__meta">
                   <strong>{p.display_name}</strong>
-                  <span class="sh-muted">{p.state}</span>
+                  {_stateLabel(p) && <span class="sh-muted">{_stateLabel(p)}</span>}
                 </div>
                 <span
                   class="sh-zone-only-list__chip"

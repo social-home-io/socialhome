@@ -10,6 +10,7 @@ import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
 import { LocationMap, type LocationMarker } from '@/components/LocationMap'
 import { currentUser } from '@/store/auth'
+import { presenceLabel } from '@/utils/presenceLabel'
 import type { UserStatus } from '@/types'
 
 interface PresenceEntry {
@@ -63,15 +64,6 @@ function presenceDot(state: string): string {
     case 'away': return 'sh-dot sh-dot--away'
     case 'not_home': return 'sh-dot sh-dot--not-home'
     default: return 'sh-dot sh-dot--unknown'
-  }
-}
-
-function presenceLabel(state: string): string {
-  switch (state) {
-    case 'home': return t('presence.state.home')
-    case 'away': return t('presence.state.away')
-    case 'not_home': return t('presence.state.not_home')
-    default: return state
   }
 }
 
