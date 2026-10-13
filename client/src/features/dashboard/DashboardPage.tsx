@@ -285,6 +285,7 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
         <LocationMap
           markers={withCoords.map((p) => ({
             id: p.user_id,
+            user_id: p.user_id,
             lat: p.latitude as number,
             lon: p.longitude as number,
             accuracy_m: p.gps_accuracy_m ?? null,

@@ -14,6 +14,7 @@ import type { UserStatus } from '@/types'
 
 interface PresenceEntry {
   username: string
+  user_id: string
   display_name: string
   picture_url: string | null
   state: string
@@ -21,6 +22,8 @@ interface PresenceEntry {
   latitude?: number | null
   longitude?: number | null
   gps_accuracy_m?: number | null
+  /** When the presence row last changed (UTC). */
+  updated_at?: string | null
   last_seen_at?: string | null
   is_online?: boolean
   is_idle?: boolean
@@ -153,7 +156,8 @@ export default function PresencePage() {
               typeof p.latitude === 'number' && typeof p.longitude === 'number',
             )
             .map<LocationMarker>((p) => ({
-              id: p.username,
+              id: p.user_id,
+              user_id: p.user_id,
               lat: p.latitude as number,
               lon: p.longitude as number,
               accuracy_m: p.gps_accuracy_m ?? null,

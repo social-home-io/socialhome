@@ -3,7 +3,11 @@ import { render, waitFor } from '@testing-library/preact'
 import { signal } from '@preact/signals'
 import type { User } from '@/types'
 
-vi.mock('@/components/LocationMap', () => ({ LocationMap: () => null }))
+/** Props of every LocationMap render — the map itself is Leaflet-heavy. */
+const mapProps = vi.hoisted(() => [] as Array<{ markers: Array<Record<string, unknown>> }>)
+vi.mock('@/components/LocationMap', () => ({
+  LocationMap: (p: { markers: Array<Record<string, unknown>> }) => { mapProps.push(p); return null },
+}))
 
 type Handler = (e: { type: string; data: Record<string, unknown> }) => void
 const handlers = new Map<string, Set<Handler>>()
@@ -39,6 +43,27 @@ describe('PresencePage', () => {
         },
       },
     }))
+  })
+
+  it('hands the map each member with their picture and user id', async () => {
+    mapProps.length = 0
+    vi.doMock('@/api', () => ({
+      api: {
+        get: vi.fn(async () => [{
+          ...row(null), latitude: 47.1, longitude: 8.2, gps_accuracy_m: 12,
+          picture_url: 'api/users/u2/picture?v=1&exp=1&sig=x',
+        }]),
+      },
+    }))
+    const { default: PresencePage } = await import('./PresencePage')
+    const view = render(<PresencePage />)
+    await view.findByText('Bob')
+    const markers = mapProps.at(-1)!.markers
+    expect(markers).toHaveLength(1)
+    expect(markers[0]).toMatchObject({
+      id: 'u2', user_id: 'u2', lat: 47.1, lon: 8.2, label: 'Bob',
+      avatar_url: 'api/users/u2/picture?v=1&exp=1&sig=x',
+    })
   })
 
   it("shows each member's status", async () => {
