@@ -315,12 +315,12 @@ export function SpaceLocationCard({
   // subset. Pre-server-side-count fallback: if the API didn't ship
   // total_members / sharing_count (older backend), derive from
   // entries — keeps mixed-version deployments sane during rollout.
-  const sharing = data.sharing_count
-    ?? (
-      isZoneOnly
-        ? data.entries.filter((p) => p.zone_id != null).length
-        : markers.length
-    )
+  // Zone-only says "N in a zone": count who is in one (the server drops
+  // members outside every zone), not everyone who opted in — the two
+  // differ as soon as someone sharing is outside the zones.
+  const sharing = isZoneOnly
+    ? placed.length
+    : (data.sharing_count ?? markers.length)
   const total = data.total_members ?? data.entries.length
 
   return (

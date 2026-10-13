@@ -228,6 +228,28 @@ describe('SpaceLocationCard', () => {
     await findByText(/2 of 2 in a zone/i)
   })
 
+  it('counts only the members placed in a zone in the zone-only footer', async () => {
+    // Six share, but the server drops the two outside every zone: the
+    // footer must not claim six are in a zone.
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'zone_only',
+          total_members: 6,
+          sharing_count: 6,
+          entries: ['a', 'b', 'c', 'd'].map((n) => ({
+            user_id: `u_${n}`, username: n, display_name: n.toUpperCase(),
+            state: 'zone', zone_id: 'z_office', zone_name: 'Office', picture_url: null,
+          })),
+        })
+      }
+      return Promise.resolve({ zones: [] })
+    })
+    const { findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByText(/4 of 6 in a zone/i)
+  })
+
   const office = {
     id: 'z_office', space_id: 'sp_test', name: 'Office',
     latitude: 47.3769, longitude: 8.5417, radius_m: 200,
