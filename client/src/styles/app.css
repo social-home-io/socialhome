@@ -16610,6 +16610,225 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-space-location {
   display: flex; flex-direction: column; gap: var(--sh-space-xs);
 }
+/* ─── Map overview (People / Zones beside the map) ─────────────────
+ * Home Assistant 2026.10's map overview. The host is a size container:
+ * at 640 px and up the panel sits beside the map and scrolls on its
+ * own; narrower it is a bottom sheet over the lower part of the map,
+ * collapsed to its tab strip until the grabber opens it. */
+.sh-map-overview-host {
+  container: sh-map-overview / inline-size;
+}
+.sh-map-overview {
+  position: relative;
+  --sh-map-avatar: 36px;
+}
+.sh-map-overview__map { min-width: 0; }
+/* Keep the tile licence and the empty-state text clear of the sheet. */
+.sh-map-overview .leaflet-bottom { bottom: var(--sh-map-overview-inset, 0px); }
+.sh-map-overview .sh-location-map__empty { padding-bottom: var(--sh-map-overview-inset, 0px); }
+.sh-map-overview__panel {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  /* Above the map (its Leaflet panes are confined by ``isolation``). */
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  max-height: 62%;
+  overflow: hidden;
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-xl) var(--sh-radius-xl) var(--sh-radius-lg) var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-lg);
+}
+.sh-map-overview__grabber {
+  flex: none;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%;
+  min-height: 36px;
+  margin: 0; padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.sh-map-overview__grabber-bar {
+  width: 40px; height: 5px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-border-strong);
+}
+.sh-map-overview__grabber:hover .sh-map-overview__grabber-bar { background: var(--sh-text-muted); }
+.sh-map-overview__grabber:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -4px;
+  border-radius: var(--sh-radius-lg);
+}
+.sh-map-overview__head {
+  flex: none;
+  padding: 0 var(--sh-space-sm) var(--sh-space-sm);
+}
+.sh-map-overview__tabs { display: flex; width: 100%; }
+.sh-map-overview__tabs .sh-timetable-seg__btn { flex: 1; min-height: 36px; font-size: var(--sh-font-size-sm); }
+.sh-map-overview__single {
+  margin: 0;
+  padding: 6px var(--sh-space-xs);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 700;
+  color: var(--sh-text);
+}
+.sh-map-overview__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--sh-space-xs) var(--sh-space-sm);
+}
+.sh-map-overview__list {
+  list-style: none;
+  margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.sh-map-overview__row {
+  display: flex; align-items: center; gap: var(--sh-space-sm);
+  width: 100%;
+  min-height: 48px;
+  padding: 6px var(--sh-space-xs);
+  border: 0;
+  border-radius: var(--sh-radius-md);
+  background: none;
+  color: var(--sh-text);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.sh-map-overview__row:hover { background: var(--sh-bg-secondary); }
+.sh-map-overview__row:focus-visible,
+.sh-map-overview__back:focus-visible,
+.sh-map-overview__title:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+}
+.sh-map-overview__title:focus:not(:focus-visible) { outline: none; }
+.sh-map-overview__row-text {
+  display: flex; flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.sh-map-overview__row-name {
+  font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sh-map-overview__row-sub {
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sh-map-overview__count {
+  flex: none;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+  white-space: nowrap;
+}
+/* The zone's look on the map: its colour ring around its icon. */
+.sh-map-overview__zone-badge {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 3px solid var(--zone-colour);
+  background: color-mix(in srgb, var(--zone-colour) 22%, var(--sh-bg));
+  color: var(--sh-text);
+  font-size: 17px; font-weight: 700; line-height: 1;
+}
+.sh-map-overview__detail-head {
+  display: flex; align-items: center; gap: var(--sh-space-sm);
+  min-width: 0;
+}
+.sh-map-overview__back {
+  flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px;
+  padding: 0;
+  border: 1px solid var(--sh-border);
+  border-radius: 50%;
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+  font-size: 22px; line-height: 1;
+  cursor: pointer;
+}
+.sh-map-overview__back:hover { background: var(--sh-bg-tertiary); }
+.sh-map-overview__title {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--sh-font-size-md);
+  font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border-radius: var(--sh-radius-sm);
+}
+.sh-map-overview__facts {
+  display: flex; flex-direction: column; gap: var(--sh-space-sm);
+  margin: 0;
+  padding: var(--sh-space-xs);
+}
+.sh-map-overview__facts dt {
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+}
+.sh-map-overview__facts dd {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0;
+  font-weight: 600;
+}
+.sh-map-overview__online {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--sh-text-muted);
+}
+.sh-map-overview__online--online { background: var(--sh-success); }
+.sh-map-overview__online--idle { background: var(--sh-warning); }
+.sh-map-overview__zone-meta {
+  margin: 0;
+  padding: 0 var(--sh-space-xs);
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+.sh-map-overview__subhead {
+  margin: var(--sh-space-sm) 0 2px;
+  padding: 0 var(--sh-space-xs);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  color: var(--sh-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.sh-map-overview__empty {
+  margin: 0;
+  padding: var(--sh-space-xs);
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+@container sh-map-overview (max-width: 639px) {
+  /* Collapsed sheet: just the grabber and the tab strip (or the
+   * detail's title row). */
+  .sh-map-overview:not(.is-expanded) .sh-map-overview__body { display: none; }
+}
+@container sh-map-overview (min-width: 640px) {
+  .sh-map-overview.has-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: var(--sh-space-sm);
+  }
+  .sh-map-overview__panel {
+    position: relative;
+    max-height: none;
+    /* The map sets the row height; the panel fills it and scrolls. */
+    contain: size;
+    border-radius: var(--sh-radius-lg);
+    box-shadow: none;
+    padding-top: var(--sh-space-sm);
+  }
+  .sh-map-overview__grabber { display: none; }
+}
+
 .sh-space-location__mode-banner {
   padding: var(--sh-space-sm);
   background: color-mix(in srgb, var(--sh-accent, var(--sh-primary)) 8%, transparent);
@@ -17687,8 +17906,7 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
  * piled up as "white squares" on top of the colored circles and
  * obscured the map. Now the circles speak for themselves; the
  * tooltip only surfaces on hover (touch users get the tap popup
- * bound alongside), and a colour-coded legend (.sh-zone-legend)
- * underneath the map lists every zone with its details. */
+ * bound alongside). */
 .sh-zone-tooltip.leaflet-tooltip {
   background: rgba(26, 24, 20, 0.78);
   color: #fff;
@@ -17702,66 +17920,6 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 }
 .sh-zone-tooltip.leaflet-tooltip::before {
   display: none;
-}
-
-/* Below-the-map legend used by both the member-facing space map
- * and the admin preview pane. Each row shows a colored swatch +
- * zone name + radius so the map circles stay decluttered. */
-.sh-zone-legend {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--sh-space-xs) var(--sh-space-sm);
-  margin-top: var(--sh-space-sm);
-  padding: var(--sh-space-sm);
-  background: var(--sh-bg-secondary);
-  border-radius: var(--sh-radius-md);
-  border: 1px solid var(--sh-border);
-}
-.sh-zone-legend__row {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-xs);
-  font-size: var(--sh-font-size-sm);
-  min-height: 36px;
-}
-.sh-zone-legend__swatch {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  border: 2px solid var(--sh-bg);
-  box-shadow: 0 0 0 1px var(--sh-border);
-}
-.sh-zone-legend__text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.sh-zone-legend__name {
-  font-weight: 600;
-  color: var(--sh-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sh-zone-legend__coords {
-  font-family: var(--sh-font-family-mono);
-  font-size: calc(var(--sh-font-size-xs) - 1px);
-  color: var(--sh-text-muted);
-  letter-spacing: 0.02em;
-  line-height: 1.2;
-}
-.sh-zone-legend__meta {
-  color: var(--sh-text-muted);
-  font-size: var(--sh-font-size-xs);
-  margin-left: auto;
-  flex-shrink: 0;
-}
-.sh-zone-legend__empty {
-  grid-column: 1 / -1;
-  color: var(--sh-text-muted);
-  font-size: var(--sh-font-size-sm);
-  font-style: italic;
 }
 
 /* Two-pane admin layout. */
@@ -17852,9 +18010,8 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-zone-form .sh-icon-picker { border: none; padding: 0; margin: 0; min-width: 0; }
 .sh-zone-form .sh-icon-picker legend { font-size: var(--sh-font-size-sm); margin-bottom: 4px; padding: 0; }
 /* A zone swatch that carries the zone's emoji: a round coloured badge
-   (admin list, legend). Without an icon the plain dot stays. */
-.sh-zones-admin__swatch.sh-zone-icon--has-icon,
-.sh-zone-legend__swatch.sh-zone-icon--has-icon {
+   (admin list). Without an icon the plain dot stays. */
+.sh-zones-admin__swatch.sh-zone-icon--has-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -17867,9 +18024,6 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 /* Mixed lists: pad the plain dots to the badge width so names line up. */
 .sh-zones-admin__list:has(.sh-zone-icon--has-icon) .sh-zones-admin__swatch:not(.sh-zone-icon--has-icon) {
   margin-inline: 5px;
-}
-.sh-zone-legend:has(.sh-zone-icon--has-icon) .sh-zone-legend__swatch:not(.sh-zone-icon--has-icon) {
-  margin-inline: 7px;
 }
 .sh-zone-swatch {
   width: 28px;
@@ -17953,27 +18107,6 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   .sh-zones-admin__canvas { height: 280px; }
 }
 
-/* Zone-only mode (§23.8.6) — when the space privacy tier is set to
- * zone_only, SpaceLocationCard renders members as a flat list with
- * their matched zone label instead of a Leaflet map. */
-.sh-zone-only-list {
-  list-style: none;
-  margin: 0 0 var(--sh-space-xs);
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
-}
-.sh-zone-only-list__row {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg);
-}
-
 /* Privacy-mode radios in SpaceSettings. */
 .sh-radio-row {
   display: grid;
@@ -18051,55 +18184,6 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-sharing-chip__text .sh-muted {
   font-size: var(--sh-font-size-xs);
 }
-
-/* Zone-only members list — beefed up from the bare-text version. */
-.sh-zone-only-list__row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg);
-}
-.sh-zone-only-list__avatar {
-  position: relative;
-  display: inline-flex;
-}
-.sh-zone-only-list__avatar .sh-dot {
-  position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 2px solid var(--sh-bg);
-}
-.sh-zone-only-list__meta {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.sh-zone-only-list__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sh-space-xs);
-  padding: 2px var(--sh-space-sm);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--zone-colour, #3b82f6) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--zone-colour, #3b82f6) 35%, transparent);
-  font-size: var(--sh-font-size-sm);
-  font-weight: 600;
-  white-space: nowrap;
-}
-.sh-zone-only-list__swatch {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--zone-colour, #3b82f6);
-}
-.sh-zone-only-list__icon { font-size: 1rem; line-height: 1; }
 
 /* Picker row — "use my location" button next to the help text. */
 .sh-zone-form__picker-row {

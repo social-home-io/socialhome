@@ -17,6 +17,12 @@ export function sortZones<T extends { name: string; is_home?: boolean }>(
     || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
 }
 
+/** A zone radius for display: 25 m, 1.2 km, 50 km. */
+export function formatRadius(m: number): string {
+  if (m < 1000) return `${m} m`
+  return `${(m / 1000).toFixed(m < 10_000 ? 1 : 0)} km`
+}
+
 const preset = (emoji: string, key: string): IconPickerPreset =>
   ({ emoji, key, label: `zones.icon.${key}` })
 
