@@ -139,6 +139,12 @@ class ColorBook:
         color = hex_color(value)
         return "" if color is None else self._classes.get(color, "")
 
+    def color_of(self, cls: str) -> str | None:
+        """The colour behind class ``cls`` (what :meth:`cls` gave) — for the
+        panel JSON, which carries colours, not classes; ``None`` for ``""``
+        or an unknown class."""
+        return next((c for c, name in self._classes.items() if name == cls), None)
+
     def css(self) -> str:
         notes = {color: note_colors(color) for color in self._classes}
         light = "".join(
