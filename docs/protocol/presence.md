@@ -94,6 +94,39 @@ When `lat`/`lon` is `None` (accuracy gate fired upstream) we skip
 both space fan-outs entirely. The household dashboard still receives
 `zone_name`, so the member stays visible there.
 
+## Household zones (local only)
+
+The household keeps its own zone list — Home, School, Work… — in
+`household_zones` (migration 0097), separate from the per-space
+catalogues below.
+
+- **Local, never federated.** No federation event carries a household
+  zone, and the zone names stay in the household: the space-bound
+  payloads above strip `zone_name` as before.
+- **Server-side GPS matching.** `POST /api/presence/location` without a
+  `zone_name` (standalone mode, other clients) but with a usable GPS
+  point — after the 500 m accuracy gate and the 4-decimal truncation —
+  is matched against the household zones: the nearest zone centre
+  whose haversine distance is within the zone's radius
+  (`domain/zone_geo.py:match_zone`, the same helper the space
+  `zone_only` mode uses). A `zone_name` sent by the client (the Home
+  Assistant integration sends HA's zone state) is never replaced, and
+  a point too inaccurate to store never guesses a zone.
+- **The Home zone.** At most one zone is the Home zone (`is_home`; the
+  DB allows one). A member inside it gets `zone_name: "home"` and state
+  `home` whatever the zone is called; any other zone gives its name and
+  state `zone`; no zone leaves state `away`. The Home zone is listed
+  first and can't be deleted or un-marked — marking another zone as
+  Home moves the flag.
+- **Synced zones.** A row with `external_id` set (Home Assistant's
+  `zone.home`, …) is owned by a platform sync
+  (`HouseholdZoneService.mirror_external`) and read-only through
+  `/api/household/zones` (`409 ZONE_READ_ONLY`). A synced Home is never
+  taken over by a zone created in Social Home.
+- **Live updates.** Every change sends a content-free
+  `household_zones_changed` WS frame to household members; clients
+  refetch the list.
+
 ## Per-space zones (§23.8.7)
 
 Each space owns a catalogue of named display circles (lat, lon,
@@ -203,6 +236,12 @@ calendar and app invites are not shown. `tests/protocol/test_user_sync_scope.py`
   ride the chunked sync for late-joining remote members.
 - `socialhome/repositories/space_zone_repo.py`.
 - `socialhome/routes/space_zones.py` — REST CRUD.
+- `socialhome/services/household_zone_service.py`,
+  `socialhome/repositories/household_zone_repo.py`,
+  `socialhome/routes/household_zones.py` — household zones (local
+  only): admin CRUD, the platform mirror and the GPS match.
+- `socialhome/domain/zone_geo.py` — the one haversine
+  nearest-zone-within-radius helper (household + space zones).
 - `socialhome/routes/spaces.py` —
   `PATCH /api/spaces/{id}/members/me/location-sharing` (§23.8.8).
 
