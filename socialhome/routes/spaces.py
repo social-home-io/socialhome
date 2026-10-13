@@ -2216,6 +2216,7 @@ async def _remote_member_pin_entries(
             "state": "home",
             "picture_url": picture_url,
             "instance_id": loc.instance_id,
+            "updated_at": loc.updated_at,
         }
         if mode_filter == "gps":
             entry["latitude"] = loc.latitude
@@ -2323,6 +2324,7 @@ class SpacePresenceView(BaseView):
                         "zone_id": matched.id,
                         "zone_name": matched.name,
                         "picture_url": p.picture_url,
+                        "updated_at": p.updated_at,
                     },
                 )
             # Remote member pins are added as ``zone_only`` entries
@@ -2360,6 +2362,7 @@ class SpacePresenceView(BaseView):
                 "longitude": p.longitude,
                 "gps_accuracy_m": p.gps_accuracy_m,
                 "picture_url": p.picture_url,
+                "updated_at": p.updated_at,
             }
             for p in entries
         ]
