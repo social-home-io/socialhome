@@ -23,7 +23,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { addTileLayer, tileErrorMessage } from '@/utils/mapTiles'
+import { addTileLayer, loadTileConfig, tileErrorMessage } from '@/utils/mapTiles'
 import { escapeHtml } from '@/utils/html'
 import { zoneColor } from '@/utils/zoneColor'
 import { colorClass } from '@/utils/tokenColor'
@@ -303,6 +303,14 @@ function _membersList(
   return list
 }
 
+/** The tile source's attribution HTML as plain text (tags dropped,
+ *  entities decoded). ``DOMParser`` builds an inert document — nothing
+ *  loads or runs — and only its text is used. */
+function _plainText(html: string): string {
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  return (doc.body.textContent ?? '').replace(/\s+/g, ' ').trim()
+}
+
 /** A zero-size divIcon: the bubble positions itself from the anchor
  *  point in CSS, so variable-width bubbles need no size maths here. */
 function _icon(html: string, extra = ''): L.DivIcon {
@@ -328,6 +336,10 @@ export function LocationMap({
   const peopleMarkersRef = useRef(new Map<string, L.Marker>())
   const zoneMarkersRef = useRef(new Map<string, L.Marker>())
   const [tileError, setTileError] = useState(false)
+  /** Read-only maps show the tile licence as a plain caption instead of
+   *  Leaflet's attribution control (its links would nest inside the
+   *  link the map sits in). */
+  const [attribution, setAttribution] = useState<string | null>(null)
   // Uncontrolled fallback: callers that don't pass ``selectedId`` still
   // get click-to-show-name.
   const [ownSelected, setOwnSelected] = useState<string | null>(null)
@@ -357,7 +369,7 @@ export function LocationMap({
     const still = readOnlyRef.current
     const map = L.map(containerRef.current, {
       zoomControl: !still,
-      attributionControl: true,
+      attributionControl: !still,
       // Sensible defaults — fitBounds overrides these on first paint.
       center: [52.0, 5.0],
       zoom: 4,
@@ -386,6 +398,12 @@ export function LocationMap({
     ).catch(() => {
       if (!cancelled) setTileError(true)
     })
+    if (still) {
+      // Same cached config the tile layer used — no extra request.
+      void loadTileConfig()
+        .then((cfg) => { if (!cancelled) setAttribution(_plainText(cfg.attribution)) })
+        .catch(() => { /* the tile error overlay covers this */ })
+    }
     // Zones go below the people layer so bubbles always sit on top of
     // their zone overlay.
     zoneLayerRef.current = L.layerGroup().addTo(map)
@@ -532,33 +550,34 @@ export function LocationMap({
             return
           }
           const bounds = L.latLngBounds(groupBounds(g, zoneList))
-          if (kind === 'zone') {
-            // A crowded zone: the first click shows the zone; once it
-            // already fills the view, zooming can't split the bubble, so
-            // list who's there to pick from.
-            selectRef.current(`zone:${g.zoneIds[0]}`)
-            const target = Math.min(
-              map.getBoundsZoom(bounds, false, L.point(
-                GROUP_FIT_PADDING[0] * 2, GROUP_FIT_PADDING[1] * 2,
-              )),
-              GROUP_MAX_ZOOM,
-            )
-            if (map.getZoom() >= target && map.getBounds().contains(bounds)) {
-              const list = _membersList(g.members, (id) => {
-                map.closePopup()
-                selectRef.current(id)
-              })
-              L.popup({
-                closeButton: false,
-                className: 'sh-map-members-popup',
-                offset: [0, -(LIFT_PX.zone + AVATAR_PX + 24)],
-              })
-                .setLatLng([g.lat, g.lon])
-                .setContent(list)
-                .openOn(map)
-              list.querySelector('button')?.focus({ preventScroll: true })
-              return
-            }
+          // A zone bubble selects its zone (who's there); a merged
+          // bubble is no single place, so it selects nothing.
+          if (kind === 'zone') selectRef.current(`zone:${g.zoneIds[0]}`)
+          // The first click zooms in. Once the group already fills the
+          // view, zooming can't split it (a crowded zone, or people
+          // standing a few metres apart), so list who's there instead.
+          const target = Math.min(
+            map.getBoundsZoom(bounds, false, L.point(
+              GROUP_FIT_PADDING[0] * 2, GROUP_FIT_PADDING[1] * 2,
+            )),
+            GROUP_MAX_ZOOM,
+          )
+          if (map.getZoom() >= target && map.getBounds().contains(bounds)) {
+            const list = _membersList(g.members, (id) => {
+              map.closePopup()
+              selectRef.current(id)
+            })
+            L.popup({
+              closeButton: false,
+              className: 'sh-map-members-popup',
+              // Float above this bubble's own height.
+              offset: [0, -(LIFT_PX[kind] + AVATAR_PX + 24)],
+            })
+              .setLatLng([g.lat, g.lon])
+              .setContent(list)
+              .openOn(map)
+            list.querySelector('button')?.focus({ preventScroll: true })
+            return
           }
           map.fitBounds(bounds, { padding: GROUP_FIT_PADDING, maxZoom: GROUP_MAX_ZOOM })
         })
@@ -610,7 +629,7 @@ export function LocationMap({
       )
       const pin = L.marker([m.lat, m.lon], {
         icon: _icon(html, ' sh-map-icon--solo'),
-        title: m.label,
+        title: _title(m),
         keyboard: !still,
         interactive: !still,
       }).addTo(placeLayer)
@@ -620,7 +639,7 @@ export function LocationMap({
           + (m.sub_label ? `<br /><span>${escapeHtml(m.sub_label)}</span>` : ''),
         )
       }
-      _finishIcon(pin, m.label, `place:${m.id}`, !still)
+      _finishIcon(pin, _title(m), `place:${m.id}`, !still)
       if (m.accuracy_m && m.accuracy_m > 0) {
         L.circle([m.lat, m.lon], {
           radius: m.accuracy_m,
@@ -678,6 +697,9 @@ export function LocationMap({
       aria-label={ariaLabel}
     >
       <div ref={containerRef} class="sh-location-map__canvas" />
+      {readOnly && attribution && (
+        <div class="sh-location-map__attribution">{attribution}</div>
+      )}
       {tileError ? (
         <div class="sh-map-error">
           {tileErrorMessage()}

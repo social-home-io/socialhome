@@ -16378,6 +16378,21 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
   width: 100%;
   height: 100%;
 }
+/* Read-only maps: the tile licence as a plain caption where Leaflet's
+ * attribution control would sit (its links can't nest in a card link). */
+.sh-location-map__attribution {
+  position: absolute; right: 0; bottom: 0;
+  z-index: 1000;
+  max-width: 100%;
+  padding: 1px 6px;
+  background: color-mix(in srgb, var(--sh-bg) 80%, transparent);
+  color: var(--sh-text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-top-left-radius: var(--sh-radius-sm);
+  pointer-events: none;
+}
 .sh-location-map__empty {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;

@@ -158,9 +158,11 @@ const addTileLayer = vi.fn<
     onError?: () => void,
   ) => Promise<void>
 >()
+const loadTileConfig = vi.fn<() => Promise<{ tile_url: string, attribution: string, max_zoom: number }>>()
 vi.mock('@/utils/mapTiles', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/utils/mapTiles')>()),
   get addTileLayer() { return addTileLayer },
+  get loadTileConfig() { return loadTileConfig },
 }))
 
 beforeEach(() => {
@@ -176,6 +178,12 @@ beforeEach(() => {
   for (const k of Object.keys(mapHandlers)) delete mapHandlers[k]
   addTileLayer.mockReset()
   addTileLayer.mockResolvedValue(undefined)
+  loadTileConfig.mockReset()
+  loadTileConfig.mockResolvedValue({
+    tile_url: 'api/map/tiles?z={z}&x={x}&y={y}',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    max_zoom: 19,
+  })
 })
 
 describe('LocationMap', () => {
@@ -686,26 +694,73 @@ describe('LocationMap crowded zones', () => {
     expect(fakeMap.closePopup).toHaveBeenCalled()
   })
 
-  it('keeps zooming a merged multi-zone bubble, never a member list', async () => {
+  it('zooms a merged zone + solo bubble first, then lists its members without selecting a zone', async () => {
     const { render, act } = await import('@testing-library/preact')
     const { LocationMap } = await import('./LocationMap')
+    const onSelect = vi.fn()
     render(
       <LocationMap
         markers={[at('a', 'Anna'), { id: 'b', label: 'Ben', lat: 47, lon: 8.01 }]}
         zones={[home]}
+        selectedId={null}
+        onSelect={onSelect}
       />,
     )
     view.scale = 1_000
     act(() => { mapHandlers.zoomend?.({}) })
     const [merged] = bubbles()
     expect(merged.opts.icon!.html).toContain('sh-map-bubble--group')
+    // Not yet fitted: zoom in.
+    fakeMap.fitBounds.mockClear()
+    merged.handlers.click()
+    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
+    expect(mapPopups).toHaveLength(0)
+    // Fitted already and still merged: list who's in it.
     view.contains = true
     view.zoom = 16
     view.boundsZoom = 16
     fakeMap.fitBounds.mockClear()
     merged.handlers.click()
-    expect(fakeMap.fitBounds).toHaveBeenCalledTimes(1)
-    expect(mapPopups).toHaveLength(0)
+    expect(fakeMap.fitBounds).not.toHaveBeenCalled()
+    expect([...mapPopups[0].querySelectorAll('button')].map((b) => b.textContent))
+      .toEqual(['Anna', 'Ben'])
+    // A merged bubble is no zone: nothing selected until a name is picked.
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('lists two people standing together once zooming in cannot split them', async () => {
+    const { render, act } = await import('@testing-library/preact')
+    const L = (await import('leaflet')).default
+    const { LocationMap } = await import('./LocationMap')
+    const onSelect = vi.fn()
+    // ~5 m apart, no zones (the household presence page).
+    render(
+      <LocationMap
+        markers={[
+          { id: 'a', label: 'Anna', lat: 47.37690, lon: 8.54170 },
+          { id: 'b', label: 'Ben', lat: 47.37694, lon: 8.54172 },
+        ]}
+        selectedId={null}
+        onSelect={onSelect}
+      />,
+    )
+    act(() => { mapHandlers.zoomend?.({}) })
+    const [merged] = bubbles()
+    expect(merged.opts.icon!.html).toContain('sh-map-bubble--group')
+    view.zoom = 18
+    view.boundsZoom = 22 // Leaflet would go further; capped at 18
+    view.contains = true
+    fakeMap.fitBounds.mockClear()
+    vi.mocked(L.popup).mockClear()
+    merged.handlers.click()
+    expect(fakeMap.fitBounds).not.toHaveBeenCalled()
+    // The popup floats above a solo-height bubble, not a zone bubble.
+    const popupOpts = vi.mocked(L.popup).mock.calls[0][0] as { offset: [number, number] }
+    expect(popupOpts.offset[1]).toBeGreaterThan(-80)
+    const buttons = [...mapPopups[0].querySelectorAll('button')]
+    expect(buttons.map((b) => b.textContent)).toEqual(['Anna', 'Ben'])
+    buttons[1].click()
+    expect(onSelect).toHaveBeenCalledWith('b')
   })
 
   it('names the selected member on the zone bubble even when hidden in +N', async () => {
@@ -888,5 +943,54 @@ describe('LocationMap read-only', () => {
     expect(popups).toHaveLength(0)
     mapHandlers.click?.({ latlng: { lat: 1, lng: 2 } })
     expect(onSelect).not.toHaveBeenCalled()
+  })
+})
+
+describe('LocationMap places', () => {
+  it('reads a place pin out with its sub label', async () => {
+    const { render } = await import('@testing-library/preact')
+    const { LocationMap } = await import('./LocationMap')
+    render(
+      <LocationMap
+        markers={[{ id: 'h', label: 'The Meiers', sub_label: '4 people · paired 2 d ago', lat: 47, lon: 8, glyph: '🏠' }]}
+      />,
+    )
+    const [pin] = liveMarkers
+    expect(pin.el.getAttribute('aria-label')).toBe('The Meiers · 4 people · paired 2 d ago')
+  })
+})
+
+describe('LocationMap read-only attribution', () => {
+  it('drops the attribution control and shows the licence as plain text', async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const L = (await import('leaflet')).default
+    const { LocationMap } = await import('./LocationMap')
+    loadTileConfig.mockResolvedValue({
+      tile_url: 'x', max_zoom: 19,
+      attribution: '&copy; <a href="https://osm.org/copyright">OpenStreetMap</a> contributors <img src=x onerror=alert(1)>',
+    })
+    const { container } = render(
+      <LocationMap readOnly markers={[{ id: 'c', label: 'Cara', lat: 46, lon: 7 }]} />,
+    )
+    const opts = vi.mocked(L.map).mock.calls[0][1] as Record<string, unknown>
+    expect(opts.attributionControl).toBe(false)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-location-map__attribution')).not.toBeNull()
+    })
+    const caption = container.querySelector('.sh-location-map__attribution')!
+    expect(caption.textContent).toBe('© OpenStreetMap contributors')
+    // No link inside the card's link, nothing injected.
+    expect(caption.querySelector('a')).toBeNull()
+    expect(caption.querySelector('img')).toBeNull()
+  })
+
+  it('keeps the attribution control on an interactive map', async () => {
+    const { render } = await import('@testing-library/preact')
+    const L = (await import('leaflet')).default
+    const { LocationMap } = await import('./LocationMap')
+    const { container } = render(<LocationMap markers={[]} />)
+    const opts = vi.mocked(L.map).mock.calls[0][1] as Record<string, unknown>
+    expect(opts.attributionControl).toBe(true)
+    expect(container.querySelector('.sh-location-map__attribution')).toBeNull()
   })
 })
