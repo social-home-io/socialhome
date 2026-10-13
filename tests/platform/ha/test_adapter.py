@@ -20,6 +20,7 @@ from socialhome.app_keys import (
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.platform.adapter import Capability
 from socialhome.platform.ha.adapter import HomeAssistantAdapter
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
@@ -239,6 +240,13 @@ async def test_capabilities_include_password_auth():
 
     adapter = _build_adapter(client=_FakeHaClient())
     assert Capability.PASSWORD_AUTH in adapter.capabilities
+
+
+async def test_capabilities_include_mdns_advertise():
+    """ha mode runs on the host's network — the dashboard can announce
+    itself to wall panels over mDNS."""
+    adapter = _build_adapter(client=_FakeHaClient())
+    assert Capability.MDNS_ADVERTISE in adapter.capabilities
 
 
 async def test_zone_source_wired_with_zone_sync_capability():

@@ -130,6 +130,8 @@ class HaAdapter(PlatformAdapter):
             # picked HA owner so the user can log in via /api/auth/token
             # in addition to X-Remote-User-Name and HA bearer tokens.
             Capability.PASSWORD_AUTH,
+            # Runs beside HA Core on the host's network, like standalone.
+            Capability.MDNS_ADVERTISE,
         }
         if self._options.get("stt_entity_id"):
             caps.add(Capability.STT)

@@ -333,6 +333,35 @@ The list shows each panel's model, firmware and when it was last seen.
 again with a new code to use it again). **Sign out all tablets** and a new
 dashboard password unpair every panel too.
 
+### How a panel finds Social Home
+
+While the dashboard is on, Social Home announces it on your home network
+(mDNS / Bonjour, service `_socialhome-dash._tcp`), so a panel can find
+it by itself — you don't type an address. The announcement says only
+"a Social Home dashboard is here": a short random-looking id, the port
+and the API version. It never carries your household's name, anyone's
+name or what the dashboard shows. It stops as soon as you switch the
+dashboard off.
+
+- **Firewall:** the host must allow multicast DNS — UDP port `5353` to and
+  from `224.0.0.251` (and `ff02::fb` for IPv6) — on the home network. If
+  it doesn't, panels can still use the address shown in **Admin ›
+  Dashboard**.
+- **Docker:** run the container with `network_mode: host` (or
+  `--network host`). On Docker's default bridge network the announcement
+  never leaves the container: the log says it announced the container's
+  internal address (`172.17.x.x` or similar), but no panel can see it —
+  the dashboard itself keeps working, and panels need the address typed in.
+- **Home Assistant App:** the App doesn't announce itself — it runs on
+  Home Assistant's internal network, where multicast doesn't reach your
+  home network. Enter the address shown in **Admin › Dashboard** on the
+  panel (for example `homeassistant.local:8100`).
+- **Bound to one address:** if `listen_host` is a specific address only
+  that address is announced; `127.0.0.1` announces nothing.
+- **Changed IP address:** the addresses are read when the dashboard
+  starts. If the host gets a new address while running, switch the
+  dashboard off and on (or restart Social Home).
+
 Five wrong codes in 15 minutes hold pairing back for a while — check the
 code on the panel. This limit is separate from tablet sign-in: failed
 password tries on the dashboard never hold pairing back, and wrong codes

@@ -121,6 +121,7 @@ from .infrastructure.highlight_retention_scheduler import HighlightRetentionSche
 from .platform import build_platform_adapter
 from .platform.adapter import Capability, PlatformAdapter
 from .dashboard.app import build_dashboard_app
+from .dashboard.advertiser import DisplayAdvertiser
 from .dashboard.controller import DashboardController, address_hosts, local_hostnames
 from .dashboard.auth import DashboardAuth
 from .dashboard.render import DashboardRenderer
@@ -2212,13 +2213,23 @@ def _build_household_dashboard(
             local_hostnames=own_names,
         )
 
-    server = DashboardServer(build_app=build_app, host=config.listen_host)
+    # Wall panels find the dashboard over mDNS — only where an announcement
+    # can reach the LAN (not from the Home Assistant App's bridge network).
+    advertiser = (
+        DisplayAdvertiser(host=config.listen_host)
+        if Capability.MDNS_ADVERTISE in platform_adapter.capabilities
+        else None
+    )
+    server = DashboardServer(
+        build_app=build_app, host=config.listen_host, advertiser=advertiser
+    )
     controller = DashboardController(settings, server, local_hostnames=own_names)
     return SimpleNamespace(
         settings=settings,
         auth=auth,
         displays=displays,
         snapshots=snapshots,
+        advertiser=advertiser,
         server=server,
         controller=controller,
     )
@@ -3438,6 +3449,10 @@ def create_app(config: Config | None = None) -> web.Application:
         )
 
         identity_seed = identity.identity_seed
+        if dashboard.advertiser is not None:
+            # The mDNS name + ``id`` TXT key derive from the secret seed (not
+            # the public instance id); the listener starts (step 10) after.
+            dashboard.advertiser.attach_identity(identity_seed)
         identity_pk = identity.identity_public_key
         real_instance_id = identity.instance_id
         app[K.instance_id_key] = real_instance_id

@@ -359,6 +359,7 @@ import pytest  # noqa: E402
 
 from socialhome.config import Config  # noqa: E402
 from socialhome.crypto import generate_identity_keypair, derive_instance_id  # noqa: E402
+from socialhome.dashboard import advertiser as _advertiser_module  # noqa: E402
 from socialhome.db import database as _db_module  # noqa: E402
 from socialhome.db.database import AsyncDatabase  # noqa: E402
 from socialhome.global_server.config import GfsConfig  # noqa: E402
@@ -410,6 +411,32 @@ def _test_write_window_ms(requested: int) -> int:
     if requested <= _FAST_WINDOW_CEILING_MS or requested in _PRODUCTION_WINDOWS_MS:
         return TEST_WRITE_WINDOW_MS
     return requested
+
+
+class _InertZeroconf:
+    """Stands in for ``AsyncZeroconf`` suite-wide: an app test that enables
+    the dashboard must not send real mDNS announcements from the test host.
+    ``tests/dashboard/test_advertiser.py`` patches its own recording fake."""
+
+    def __init__(self, *_a, **_kw) -> None:
+        pass
+
+    async def async_register_service(self, *_a, **_kw) -> None:
+        return None
+
+    async def async_unregister_service(self, *_a, **_kw) -> None:
+        return None
+
+    async def async_close(self) -> None:
+        return None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_real_mdns():
+    original = _advertiser_module.AsyncZeroconf
+    _advertiser_module.AsyncZeroconf = _InertZeroconf  # type: ignore[misc,assignment]
+    yield
+    _advertiser_module.AsyncZeroconf = original  # type: ignore[misc]
 
 
 @pytest.fixture(scope="session", autouse=True)

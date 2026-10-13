@@ -178,6 +178,10 @@ class HaosAdapter(PlatformAdapter):
             Capability.HA_PERSON_DIRECTORY,
             Capability.ZONE_SYNC,  # ``self.zones`` reads HA's zones
             Capability.INGRESS,  # always — that's the haos invariant
+            # No MDNS_ADVERTISE: the App container sits on the Supervisor's
+            # bridge network (no ``host_network``), so an mDNS announcement
+            # would never reach the LAN. Panels find the App through Home
+            # Assistant or a typed address instead.
         }
         if self._options.get("stt_entity_id"):
             caps.add(Capability.STT)

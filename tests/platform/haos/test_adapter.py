@@ -114,6 +114,13 @@ async def test_capabilities_always_include_ingress():
     assert Capability.PUSH in caps
 
 
+async def test_capabilities_omit_mdns_advertise():
+    """The Home Assistant App container is on the Supervisor's bridge
+    network (no ``host_network``) — an mDNS announcement can't reach the
+    LAN, so the dashboard doesn't try."""
+    assert Capability.MDNS_ADVERTISE not in _build_haos_adapter().capabilities
+
+
 async def test_zone_source_wired_with_zone_sync_capability():
     """Same HA zone source as ha mode — both talk to HA Core."""
     adapter = _build_haos_adapter()

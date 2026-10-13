@@ -1491,6 +1491,30 @@ drives it) and is then served by a **separate aiohttp application on its own por
   record is `locked` gets `423` with only the lock-screen data. The contract
   is the JSON Schemas in `docs/display-api/v1/`; see
   [display-api/README.md](./display-api/README.md) for versioning.
+- **Discovery over mDNS.** `DisplayAdvertiser` (`dashboard/advertiser.py`,
+  python-zeroconf) announces the dashboard as `_socialhome-dash._tcp`
+  so panels find it without a typed address. `DashboardServer` drives it:
+  announce after every successful bind, re-announce on a port change,
+  withdraw (goodbye packets) on stop — the TXT contract is in
+  [api.md](./api.md#hfs--household-dashboard). The name and `id` are 6
+  hex characters of a domain-separated hash of the secret identity seed
+  (attached at identity bootstrap, before the listener starts) — not of
+  the instance id, which paired households and the GFS know and could
+  match against; no household name or member data. A port change
+  re-publishes the SRV record in place (`async_update_service`: no
+  goodbye, no second probe). Addresses are the
+  host's routable LAN addresses for the bind (`listen_host`): loopback,
+  link-local and container / VM / VPN interfaces (`docker*`, `br-*`,
+  `veth*`, `hassio`, `wg*`, …) are skipped, and the responder joins
+  multicast only on those addresses. A loopback bind announces nothing.
+  Gated on `Capability.MDNS_ADVERTISE` (standalone and `ha`; not `haos` —
+  the Home Assistant App has no `host_network`, so multicast from its
+  bridge network never reaches the LAN; panels there use a typed address
+  or Home Assistant). Fail-soft: any error (no multicast, socket refused,
+  a 10 s probe timeout) logs one WARNING until the next success and never
+  touches the listener. The address set is scanned when the responder
+  starts (each enable / restart); a DHCP change while it runs isn't
+  followed yet.
 - **Privacy lock.** When a guest is around, someone taps 🔒 and the
   tablet shows a neutral lock screen (household name, clock and date in
   the household time zone — no person, picture, presence, event or

@@ -264,8 +264,11 @@ class StandaloneAdapter(PlatformAdapter):
     def capabilities(self) -> frozenset[Capability]:
         # Standalone supports password auth + push (when notify_endpoint
         # is configured per-user). No ingress, no STT, no AI, no
-        # HA-person directory.
-        return frozenset({Capability.PASSWORD_AUTH, Capability.PUSH})
+        # HA-person directory. Runs on the host's network (or a container
+        # the operator gave ``network_mode: host``), so mDNS reaches the LAN.
+        return frozenset(
+            {Capability.PASSWORD_AUTH, Capability.PUSH, Capability.MDNS_ADVERTISE}
+        )
 
     # ── Authentication ────────────────────────────────────────────────────
 

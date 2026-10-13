@@ -7,6 +7,7 @@ import logging
 import socket
 import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
@@ -30,6 +31,9 @@ from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
 )
 from socialhome.config import Config
+from socialhome.dashboard.advertiser import DisplayAdvertiser, display_short_id
+from socialhome.platform.adapter import Capability
+from socialhome.platform.standalone.adapter import StandaloneAdapter
 from socialhome.outbound_fetch import open_pinned_session
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
@@ -731,6 +735,37 @@ async def test_enabled_dashboard_listens_after_startup_and_stops_on_cleanup(
     async with aiohttp.ClientSession() as session:
         with pytest.raises(aiohttp.ClientConnectionError):
             await session.get(f"http://127.0.0.1:{port}/healthz")
+
+
+async def test_enabled_dashboard_is_announced_and_withdrawn(tmp_dir):
+    """Standalone has ``MDNS_ADVERTISE``: the listener announces its port
+    under an id from the identity seed (attached at identity bootstrap) and withdraws
+    the announcement on cleanup."""
+    port = _free_dashboard_port()
+    cfg = _dashboard_cfg(tmp_dir)
+    await _seed_enabled_dashboard(cfg.db_path, port)
+    with (
+        patch.object(DisplayAdvertiser, "advertise", AsyncMock()) as advertise,
+        patch.object(DisplayAdvertiser, "withdraw", AsyncMock()) as withdraw,
+    ):
+        app = create_app(cfg)
+        async with TestClient(TestServer(app)):
+            advertiser = app[K.dashboard_server_key]._advertiser
+            assert isinstance(advertiser, DisplayAdvertiser)
+            # Derived from the secret seed, never from the public instance id.
+            assert advertiser._short_id == display_short_id(
+                app[K.instance_signing_key_key]
+            )
+            advertise.assert_awaited_once_with(port)
+            withdraw.assert_not_awaited()
+        withdraw.assert_awaited_once_with()
+
+
+async def test_dashboard_without_mdns_capability_has_no_advertiser(tmp_dir):
+    caps = frozenset({Capability.PASSWORD_AUTH})
+    with patch.object(StandaloneAdapter, "capabilities", property(lambda _s: caps)):
+        app = create_app(_dashboard_cfg(tmp_dir))
+    assert app[K.dashboard_server_key]._advertiser is None
 
 
 async def test_disabled_dashboard_does_not_listen(tmp_dir):

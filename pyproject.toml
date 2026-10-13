@@ -53,6 +53,14 @@ dependencies = [
     # It also vendors libdatachannel v0.24.5
     # (social-home-io/aiolibdatachannel#21).
     "aiolibdatachannel>=2026.9.8",
+    # mDNS announcement of the household dashboard to wall panels
+    # (``socialhome/dashboard/advertiser.py``). LGPL-2.1-or-later, used as
+    # an unmodified, dynamically imported library — compatible with
+    # MPL-2.0. Pure ``asyncio`` API; cp314 wheels on every arch we ship.
+    "zeroconf>=0.151.5",
+    # Interface scan for the addresses the dashboard announces (also a
+    # zeroconf dependency; declared because we import it directly). MIT.
+    "ifaddr>=0.2",
 ]
 
 [project.optional-dependencies]
