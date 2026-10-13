@@ -73,6 +73,7 @@ EXPORTABLE_TABLES: tuple[str, ...] = (
     "shopping_stores",
     "preferences",
     "household_theme",
+    "household_zones",
     "space_themes",
     "space_links",
     "post_drafts",
