@@ -57,9 +57,36 @@ describe('IconPicker', () => {
     expect(container.querySelector('.sh-emoji-field')?.textContent).toContain('🦄')
   })
 
-  it('gives every preset tile a 44 px tap-target class', () => {
+  it('renders one tile per preset', () => {
     const { container } = renderPicker(null)
-    const tiles = container.querySelectorAll('.sh-icon-picker__btn')
+    expect(container.querySelectorAll('.sh-icon-picker__grid button').length).toBe(3)
+  })
+
+  it('gives every preset tile the class the 44 px tap-target rule targets', () => {
+    const { container } = renderPicker(null)
+    const tiles = Array.from(container.querySelectorAll('.sh-icon-picker__grid button'))
     expect(tiles.length).toBe(3)
+    for (const tile of tiles) {
+      expect(tile.classList.contains('sh-icon-picker__btn')).toBe(true)
+    }
+  })
+
+  it('reports a non-preset emoji chosen through the custom field', () => {
+    const { container, onChange } = renderPicker(null)
+    fireEvent.click(container.querySelector('.sh-emoji-field-tile')!)
+    fireEvent.input(container.querySelector('.sh-reaction-search')!, { target: { value: 'fire' } })
+    const fire = Array.from(container.querySelectorAll('.sh-reaction-grid .sh-emoji-btn'))
+      .find(b => b.textContent === '🔥')!
+    fireEvent.click(fire)
+    expect(onChange).toHaveBeenCalledWith('🔥')
+    // Clean up the module-level picker search for later tests.
+    fireEvent.click(container.querySelector('.sh-emoji-field-tile')!)
+    fireEvent.input(container.querySelector('.sh-reaction-search')!, { target: { value: '' } })
+  })
+
+  it('clears a custom emoji to null via the field\'s Remove', () => {
+    const { container, onChange } = renderPicker('🦄')
+    fireEvent.click(container.querySelector('.sh-emoji-field-clear')!)
+    expect(onChange).toHaveBeenCalledWith(null)
   })
 })

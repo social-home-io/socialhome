@@ -6,14 +6,11 @@
  * a preset from a subject title in en / de / es / fr / nl so a parent
  * who types "Mathe" gets 🔢 without opening the picker.
  */
+import type { IconPickerPreset } from '@/components/IconPicker'
 import { normalizeSubject } from './colors'
 
-export interface IconPreset {
-  emoji: string
-  key: string
-  /** i18n key of the localised name (``timetable.icon.<key>``). */
-  label: string
-}
+/** A timetable preset; its ``label`` is ``timetable.icon.<key>``. */
+export type IconPreset = IconPickerPreset
 
 const preset = (emoji: string, key: string): IconPreset =>
   ({ emoji, key, label: `timetable.icon.${key}` })

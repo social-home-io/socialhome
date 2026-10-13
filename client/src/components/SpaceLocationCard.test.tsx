@@ -8,7 +8,7 @@
  *     already matched GPS to zones server-side).
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { act, render, waitFor } from '@testing-library/preact'
 
 beforeAll(() => {
   globalThis.ResizeObserver = class {
@@ -336,6 +336,62 @@ describe('SpaceLocationCard', () => {
     expect(
       mockWs.on.mock.calls.some((c: any[]) => c[0] === 'space_zone_changed'),
     ).toBe(true)
+  })
+
+  describe('live space_zone_changed upserts', () => {
+    const zone = (id: string, name: string, icon: string | null = null) => ({
+      id, space_id: 'sp_test', name,
+      latitude: 47.3769, longitude: 8.5417, radius_m: 200,
+      color: '#3b82f6', icon,
+      created_by: 'u_admin', created_at: '2026-04-28T00:00:00Z',
+      updated_at: '2026-04-28T00:00:00Z',
+    })
+    const zoneHandler = () => {
+      const call = mockWs.on.mock.calls.find((c: unknown[]) => c[0] === 'space_zone_changed')
+      return (call as unknown as [string, (e: unknown) => void])[1]
+    }
+    const upsert = (z: ReturnType<typeof zone>) => ({
+      type: 'space_zone_changed',
+      data: { space_id: 'sp_test', action: 'upsert', zone_id: z.id, zone: z },
+    })
+
+    it('lists a newly upserted zone in name order in the legend', async () => {
+      mockApi.get.mockImplementation((url: string) => {
+        if (url.includes('/presence')) {
+          return Promise.resolve({ feature_enabled: true, location_mode: 'gps', entries: [] })
+        }
+        return Promise.resolve({ zones: [zone('z_office', 'Office')] })
+      })
+      const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+      await findByText('Office')
+      act(() => { zoneHandler()(upsert(zone('z_aardvark', 'Aardvark', '🐜'))) })
+      await findByText('Aardvark')
+      const names = Array.from(container.querySelectorAll('.sh-zone-legend__name'))
+        .map(n => n.textContent)
+      expect(names).toEqual(['Aardvark', 'Office'])
+    })
+
+    it('shows the new icon in the zone-only chip when a zone is re-iconed', async () => {
+      mockApi.get.mockImplementation((url: string) => {
+        if (url.includes('/presence')) {
+          return Promise.resolve({
+            feature_enabled: true,
+            location_mode: 'zone_only',
+            entries: [{
+              user_id: 'u_pascal', username: 'pascal', display_name: 'Pascal',
+              state: 'zone', zone_id: 'z_school', zone_name: 'School', picture_url: null,
+            }],
+          })
+        }
+        return Promise.resolve({ zones: [zone('z_school', 'School', '🏫')] })
+      })
+      const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+      await findByText('Pascal')
+      const icon = () => container.querySelector('.sh-zone-only-list__icon')?.textContent
+      await waitFor(() => expect(icon()).toBe('🏫'))
+      act(() => { zoneHandler()(upsert(zone('z_school', 'School', '🎒'))) })
+      await waitFor(() => expect(icon()).toBe('🎒'))
+    })
   })
 
   describe('live space_location_updated pins', () => {

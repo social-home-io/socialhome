@@ -64,8 +64,8 @@ export function IconPicker({
   return (
     <fieldset class="sh-icon-picker">
       <legend>{legend}</legend>
-      {groups.map(g => (
-        <div key={g.label} class="sh-icon-picker__grid" role="group" aria-label={g.label}>
+      {groups.map((g, i) => (
+        <div key={i} class="sh-icon-picker__grid" role="group" aria-label={g.label}>
           {g.presets.map(p => (
             <button key={p.key} type="button" aria-pressed={value === p.emoji}
                     aria-label={t(p.label)} title={t(p.label)}

@@ -2,8 +2,8 @@
  * Timetable IconPicker — the emoji a slot shows (big, in Picture view)
  * so a child who can't read yet still finds "swimming".
  *
- * Thin wrapper over the shared :component:`IconPicker` with the
- * lesson + break presets and timetable copy.
+ * Thin wrapper over the shared `IconPicker` (`@/components/IconPicker`)
+ * with the lesson + break presets and timetable copy.
  */
 import { IconPicker as SharedIconPicker } from '@/components/IconPicker'
 import { t } from '@/i18n/i18n'
