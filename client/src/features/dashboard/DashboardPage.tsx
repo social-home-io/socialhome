@@ -271,7 +271,7 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
             <span class={presenceDotClass(p.state)} />
             <Avatar name={p.display_name} src={p.picture_url} size={28} />
             <span>{p.display_name}</span>
-            <span class="sh-muted">{p.zone_name || presenceLabel(p.state)}</span>
+            <span class="sh-muted">{presenceLabel(p.state, p.zone_name)}</span>
           </div>
         ))}
       </div>
@@ -284,7 +284,7 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
             lon: p.longitude as number,
             accuracy_m: p.gps_accuracy_m ?? null,
             label: p.display_name,
-            sub_label: p.zone_name || presenceLabel(p.state),
+            sub_label: presenceLabel(p.state, p.zone_name),
             avatar_url: p.picture_url,
             state: p.state,
           }))}

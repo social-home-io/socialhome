@@ -2725,6 +2725,7 @@
   "zones.synced.hint": "Bearbeite diese Zone in Home Assistant.",
   "zones.household.title": "Zonen des Haushalts",
   "zones.household.intro": "Orte wie Zuhause, Schule oder Arbeit. Ist jemand in einer Zone, sieht der Haushalt die Person dort mit dem Namen der Zone – auf der Karte und in der Mitgliederliste.",
+  "zones.household.ha_note": "Home Assistant meldet, wer in welcher Zone ist, und seine Zonen erscheinen hier. Selbst angelegte Zonen gelten für Apps, die einen Standort ohne Zone teilen.",
   "zones.household.empty": "Noch keine Zonen. Füge zuerst deine Zuhause-Zone hinzu, damit Social Home erkennt, wer zu Hause ist.",
   "zones.household.feature_off": "Anwesenheit ist für diesen Haushalt ausgeschaltet, und Zonen gehören dazu. Schalte Anwesenheit unter Einstellungen ein, um Zonen zu verwalten.",
   "zones.household.open_settings": "Einstellungen öffnen",

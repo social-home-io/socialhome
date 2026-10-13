@@ -5,11 +5,13 @@
  *
  * The zones belong to the household's presence feature; with it off the
  * API answers 403 ``FEATURE_DISABLED`` and the tab points to the toggle
- * under Settings.
+ * under Settings. On a Home Assistant household a note says HA reports
+ * who is in which zone.
  */
 import { Button } from '@/components/Button'
 import { ZonesAdmin } from '@/components/ZonesAdmin'
 import { t } from '@/i18n/i18n'
+import { usesHaUserDirectory } from '@/platform'
 
 export function HouseholdZonesTab({ onOpenSettings }: { onOpenSettings: () => void }) {
   return (
@@ -17,7 +19,13 @@ export function HouseholdZonesTab({ onOpenSettings }: { onOpenSettings: () => vo
       <ZonesAdmin
         basePath="/api/household/zones"
         title={t('zones.household.title')}
-        intro={t('zones.household.intro')}
+        intro={
+          // On Home Assistant, HA reports each person's zone; native zones
+          // only count for clients that post a location without one.
+          usesHaUserDirectory()
+            ? `${t('zones.household.intro')} ${t('zones.household.ha_note')}`
+            : t('zones.household.intro')
+        }
         emptyText={t('zones.household.empty')}
         refetchOn="household_zones_changed"
         household

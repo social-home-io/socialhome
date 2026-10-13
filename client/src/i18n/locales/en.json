@@ -3031,6 +3031,7 @@
   "zones.synced.hint": "Edit this zone in Home Assistant.",
   "zones.household.title": "Household zones",
   "zones.household.intro": "Places like home, school or work. When someone is inside a zone, the household sees them there by the zone's name — on the map and in the member list.",
+  "zones.household.ha_note": "Home Assistant reports who is in which zone, and its zones show up here. Zones you add yourself count for apps that share a location without naming a zone.",
   "zones.household.empty": "No zones yet. Add your Home zone first so Social Home can tell when people are home.",
   "zones.household.feature_off": "Presence is turned off for this household, and zones belong to it. Turn on Presence under Settings to manage zones.",
   "zones.household.open_settings": "Open Settings",

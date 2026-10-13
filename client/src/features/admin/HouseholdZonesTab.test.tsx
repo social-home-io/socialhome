@@ -69,6 +69,11 @@ vi.mock('@/ws', () => ({
 
 const showToast = vi.hoisted(() => vi.fn())
 vi.mock('@/components/Toast', () => ({ showToast }))
+const platform = vi.hoisted(() => ({ ha: false }))
+vi.mock('@/platform', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/platform')>()),
+  usesHaUserDirectory: () => platform.ha,
+}))
 
 import { ApiError } from '@/api'
 import { HouseholdZonesTab } from './HouseholdZonesTab'
@@ -104,6 +109,21 @@ describe('HouseholdZonesTab', () => {
     mockApi.delete.mockReset()
     showToast.mockReset()
     wsHandlers.clear()
+    platform.ha = false
+  })
+
+  it('tells a Home Assistant household that HA decides who is in which zone', async () => {
+    platform.ha = true
+    mockApi.get.mockResolvedValue({ zones: [HOME] })
+    const { findByText } = render(<HouseholdZonesTab onOpenSettings={() => {}} />)
+    expect(await findByText(/Home Assistant reports who is in which zone/)).toBeTruthy()
+  })
+
+  it('shows no Home Assistant note on a standalone household', async () => {
+    mockApi.get.mockResolvedValue({ zones: [HOME] })
+    const { findByText, queryByText } = render(<HouseholdZonesTab onOpenSettings={() => {}} />)
+    await findByText('Zürich flat')
+    expect(queryByText(/Home Assistant reports who is in which zone/)).toBeNull()
   })
 
   it('loads /api/household/zones and lists Home first with a Home badge', async () => {

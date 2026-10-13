@@ -34,6 +34,18 @@ describe('OnlinePill', () => {
     expect(pill!.textContent).toContain('@ Home')
   })
 
+  it('words the home zone as Home, never the raw "home"', () => {
+    presence.value = {
+      anna: {
+        username: 'anna', user_id: 'u-anna', state: 'home',
+        is_online: true, is_idle: false, zone_name: 'home',
+      },
+    }
+    const { container } = render(<OnlinePill user_id="u-anna" showZone />)
+    expect(container.textContent).toContain('@ Home')
+    expect(container.textContent).not.toContain('@ home')
+  })
+
   it('renders idle styling when is_idle is true', () => {
     presence.value = {
       anna: {
