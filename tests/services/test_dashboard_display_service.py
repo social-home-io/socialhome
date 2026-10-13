@@ -13,7 +13,11 @@ import re
 
 import pytest
 
-from socialhome.dashboard.auth import THROTTLE_MAX_FAILURES, DashboardAuth
+from socialhome.dashboard.auth import (
+    PAIR_CODE_MAX_FAILURES,
+    THROTTLE_MAX_FAILURES,
+    DashboardAuth,
+)
 from socialhome.domain.household_dashboard import (
     MAX_DISPLAYS,
     MAX_PENDING_PAIRINGS,
@@ -258,23 +262,41 @@ async def test_claim_refused_while_dashboard_is_off(svc, settings):
 
 async def test_wrong_codes_are_throttled_globally(svc, auth):
     pairing = await svc.start_pairing()
-    for _ in range(THROTTLE_MAX_FAILURES):
+    for _ in range(PAIR_CODE_MAX_FAILURES):
         with pytest.raises(DashboardPairingCodeInvalidError):
             await svc.claim(actor_is_admin=True, code="ZZZZZZ", name="K")
     # Even the right code waits now — guesses can't race the limit.
     with pytest.raises(DashboardPairingThrottledError) as exc:
         await svc.claim(actor_is_admin=True, code=pairing.code, name="K")
     assert exc.value.params["retry_after"] > 0
-    # Never the login brake: tablets still sign in.
+    # Never the login brake nor the login table: tablets still sign in.
     assert auth.global_failure_count == 0
+    assert auth.throttle_key_count == 0
+    assert auth.begin_attempt("10.0.0.1") == 0
+
+
+async def test_locked_out_logins_never_throttle_pairing(settings, clock):
+    """A login table full of locked-out clients (and a tripped global
+    brake) must not turn an admin's code entry into a 429."""
+    auth = DashboardAuth(settings, clock=clock, max_throttle_keys=2)
+    svc = DashboardDisplayService(settings, auth, clock=clock)
+    for client in ("10.0.0.1", "10.0.0.2"):
+        for _ in range(THROTTLE_MAX_FAILURES):
+            auth.begin_attempt(client)
+    for _ in range(40):
+        auth.begin_attempt("10.0.0.1")
+    assert auth.begin_attempt("10.0.0.3") > 0
+    with pytest.raises(DashboardPairingCodeInvalidError):
+        await svc.claim(actor_is_admin=True, code="ZZZZZZ", name="K")
+    await _pair(svc)
 
 
 async def test_right_code_clears_the_failures(svc, auth):
-    for _ in range(THROTTLE_MAX_FAILURES - 1):
+    for _ in range(PAIR_CODE_MAX_FAILURES - 1):
         with pytest.raises(DashboardPairingCodeInvalidError):
             await svc.claim(actor_is_admin=True, code="ZZZZZZ", name="K")
     await _pair(svc)
-    assert auth.throttle_key_count == 0
+    assert auth.pair_code_failure_count == 0
 
 
 async def test_display_limit(svc):

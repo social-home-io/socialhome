@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, act } from '@testing-library/preact'
-import { BackToTop, touchesStickyBar } from './BackToTop'
+import { BackToTop, touchesModal, touchesStickyBar } from './BackToTop'
+import { Modal } from './Modal'
 
 // Run rAF callbacks synchronously so a scroll measures in the same act().
 beforeEach(() => {
@@ -125,5 +126,75 @@ describe('BackToTop re-measures when a sticky bar mounts', () => {
     })
     expect(btn.style.getPropertyValue('--sh-back-to-top-lift')).toBe('68px')
     bar.remove()
+  })
+})
+
+describe('BackToTop stays out of open dialogs', () => {
+  const scrollPastFold = () => act(() => {
+    Object.defineProperty(window, 'scrollY', { value: 900, writable: true, configurable: true })
+    window.dispatchEvent(new Event('scroll'))
+  })
+  const flush = () => act(async () => { await new Promise(res => setTimeout(res, 0)) })
+
+  it('touchesModal: a modal mounting / unmounting or an aria-modal flip counts', () => {
+    const sheet = document.createElement('div'); sheet.setAttribute('aria-modal', 'true')
+    const wrap = document.createElement('div'); wrap.appendChild(sheet.cloneNode())
+    const rec = (added: Node[], removed: Node[] = [], type = 'childList') =>
+      ({ type, addedNodes: added, removedNodes: removed } as unknown as MutationRecord)
+    expect(touchesModal([rec([sheet])])).toBe(true)
+    expect(touchesModal([rec([], [wrap])])).toBe(true)
+    expect(touchesModal([rec([], [], 'attributes')])).toBe(true)
+    expect(touchesModal([rec([document.createElement('p')])])).toBe(false)
+  })
+
+  it('is not rendered while a Modal (bottom sheet on a phone) is open', async () => {
+    function Page({ open }: { open: boolean }) {
+      return (
+        <>
+          <Modal open={open} onClose={() => {}} title="Add a wall panel">
+            <input aria-label="Name" />
+          </Modal>
+          <BackToTop />
+        </>
+      )
+    }
+    const { container, rerender } = render(<Page open={false} />)
+    scrollPastFold()
+    expect(container.querySelector('.sh-back-to-top')).toBeTruthy()
+
+    rerender(<Page open />)
+    await flush()
+    expect(container.querySelector('[aria-modal="true"]')).toBeTruthy()
+    expect(container.querySelector('.sh-back-to-top')).toBeNull()
+
+    rerender(<Page open={false} />)
+    await flush()
+    expect(container.querySelector('.sh-back-to-top')).toBeTruthy()
+  })
+
+  it('stays hidden when scrolled past the fold with a dialog already open', () => {
+    const sheet = document.createElement('div')
+    sheet.setAttribute('aria-modal', 'true')
+    document.body.appendChild(sheet)
+    const { container } = render(<BackToTop />)
+    scrollPastFold()
+    expect(container.querySelector('.sh-back-to-top')).toBeNull()
+    sheet.remove()
+  })
+
+  it('hides when an element turns into a modal (mobile nav drawer)', async () => {
+    const drawer = document.createElement('nav')
+    drawer.setAttribute('aria-modal', 'false')
+    document.body.appendChild(drawer)
+    const { container } = render(<BackToTop />)
+    scrollPastFold()
+    expect(container.querySelector('.sh-back-to-top')).toBeTruthy()
+    drawer.setAttribute('aria-modal', 'true')
+    await flush()
+    expect(container.querySelector('.sh-back-to-top')).toBeNull()
+    drawer.setAttribute('aria-modal', 'false')
+    await flush()
+    expect(container.querySelector('.sh-back-to-top')).toBeTruthy()
+    drawer.remove()
   })
 })

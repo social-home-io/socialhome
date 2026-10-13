@@ -1455,15 +1455,18 @@ drives it) and is then served by a **separate aiohttp application on its own por
   look-alikes); an admin types it with a name into **Admin › Dashboard ›
   Wall panels**; `DashboardDisplayService`
   (`services/dashboard_display_service.py`) compares every pending code in
-  constant time (wrong codes: one global 5 / 15 min bucket in
-  `DashboardAuth`'s failure table, never the login brake), mints a 256-bit
+  constant time (wrong codes: one global 5 / 15 min bucket of their own,
+  `DashboardAuth.begin_pair_code` — fixed size and fully separate from the
+  login / PIN failure table and the login brake, so failed tablet logins
+  can't hold pairing back), mints a 256-bit
   token, stores only its SHA-256 and parks the token on the pending entry,
   which the panel collects exactly once by polling its random 128-bit
   `pair_id`. Pending pairings live in memory (≤32, 10 min); the paired
   panels (`DashboardDisplay`, ≤20) are a JSON list in `instance_config`
   under `dashboard.displays`, written by `DashboardSettingsService` under
   the same lock as the epoch — so every epoch bump ("Sign out all
-  tablets", a new password) empties the list in the same write, and no
+  tablets", a new password, a reseed of a corrupt stored epoch — checked
+  before the list is first loaded) empties the list in the same write, and no
   in-flight write can bring a panel back. The session guard keeps the two
   credentials apart: under the prefix only the bearer token is read
   (cookies are ignored, so the same-origin `POST` check is skipped — no
