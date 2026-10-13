@@ -94,6 +94,7 @@ const _zone = (over: Partial<any> = {}) => ({
   longitude: 8.5417,
   radius_m: 150,
   color: '#3b82f6',
+  icon: null,
   created_by: 'u_admin',
   created_at: '2026-04-27T12:00:00Z',
   updated_at: '2026-04-27T12:00:00Z',
@@ -269,5 +270,82 @@ describe('SpaceZonesAdmin', () => {
     expect(sw.style.position).toBe('')
     expect(sw.style.backgroundImage).not.toContain('url')
     expect(sw.getAttribute('style') ?? '').not.toContain('evil')
+  })
+  it('lists zones alphabetically, ignoring case', async () => {
+    mockApi.get.mockResolvedValue({ zones: [
+      _zone({ id: 'a', name: 'work' }),
+      _zone({ id: 'b', name: 'Home' }),
+      _zone({ id: 'c', name: 'gym' }),
+    ] })
+    const { container, findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
+    await findByText('Home')
+    const names = [...container.querySelectorAll('.sh-zones-admin__meta strong')]
+      .map(el => el.textContent)
+    expect(names).toEqual(['gym', 'Home', 'work'])
+  })
+
+  it('shows the zone icon inside the list swatch', async () => {
+    mockApi.get.mockResolvedValue({ zones: [_zone({ icon: '🏢' })] })
+    const { container, findByText } = render(<SpaceZonesAdmin spaceId="sp_test" />)
+    await findByText('Office')
+    const sw = container.querySelector('.sh-zones-admin__swatch') as HTMLElement
+    expect(sw.textContent).toBe('🏢')
+    expect(sw.classList.contains('sh-zone-icon--has-icon')).toBe(true)
+  })
+
+  it('POSTs the icon picked in the create form', async () => {
+    mockApi.get.mockResolvedValueOnce({ zones: [] })
+    mockApi.post.mockResolvedValueOnce(_zone({ name: 'School', icon: '🏫' }))
+    mockApi.get.mockResolvedValue({ zones: [] })
+    const { findByText, getByText, getByLabelText, getByRole } = render(
+      <SpaceZonesAdmin spaceId="sp_test" />,
+    )
+    await findByText(/No zones yet/i)
+    fireEvent.click(getByText('+ Add zone'))
+    // A new zone starts without an icon.
+    expect(getByRole('button', { name: 'No icon' }).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.input(getByLabelText('Name'), { target: { value: 'School' } })
+    fireEvent.input(getByLabelText('Latitude'), { target: { value: '47.3769' } })
+    fireEvent.input(getByLabelText('Longitude'), { target: { value: '8.5417' } })
+    fireEvent.click(getByRole('button', { name: 'School' }))
+    expect(getByRole('button', { name: 'School' }).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(getByText('Create zone'))
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(1))
+    expect(mockApi.post).toHaveBeenCalledWith(
+      '/api/spaces/sp_test/zones',
+      expect.objectContaining({ name: 'School', icon: '🏫' }),
+    )
+  })
+
+  it('PATCHes icon: null when "No icon" clears an existing icon', async () => {
+    mockApi.get.mockResolvedValueOnce({ zones: [_zone({ icon: '🏢' })] })
+    mockApi.patch.mockResolvedValueOnce(_zone())
+    mockApi.get.mockResolvedValue({ zones: [_zone()] })
+    const { findByText, getAllByText, getByText, getByRole } = render(
+      <SpaceZonesAdmin spaceId="sp_test" />,
+    )
+    await findByText('Office')
+    fireEvent.click(getAllByText('Edit')[0])
+    // The stored icon is pre-selected.
+    expect(getByRole('button', { name: 'Work' }).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(getByRole('button', { name: 'No icon' }))
+    fireEvent.click(getByText('Save changes'))
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalledTimes(1))
+    expect(mockApi.patch.mock.calls[0][1]).toMatchObject({ icon: null })
+  })
+
+  it('keeps the stored icon on a PATCH that only renames', async () => {
+    mockApi.get.mockResolvedValueOnce({ zones: [_zone({ icon: '🦄' })] })
+    mockApi.patch.mockResolvedValueOnce(_zone())
+    mockApi.get.mockResolvedValue({ zones: [_zone()] })
+    const { findByText, getAllByText, getByText, getByLabelText } = render(
+      <SpaceZonesAdmin spaceId="sp_test" />,
+    )
+    await findByText('Office')
+    fireEvent.click(getAllByText('Edit')[0])
+    fireEvent.input(getByLabelText('Name'), { target: { value: 'HQ' } })
+    fireEvent.click(getByText('Save changes'))
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalledTimes(1))
+    expect(mockApi.patch.mock.calls[0][1]).toMatchObject({ name: 'HQ', icon: '🦄' })
   })
 })

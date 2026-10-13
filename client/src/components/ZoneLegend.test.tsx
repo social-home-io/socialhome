@@ -11,6 +11,7 @@ const zone = (over: Partial<SpaceZone> = {}): SpaceZone => ({
   longitude: 8.5417,
   radius_m: 150,
   color: '#2E7D32',
+  icon: null,
   created_by: 'uid-admin',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -84,5 +85,29 @@ describe('ZoneLegend', () => {
     expect(sw.style.backgroundImage).not.toContain('url')
     expect(sw.getAttribute('style') ?? '').not.toContain('evil')
     expect(sw.style.background).not.toBe('')
+  })
+  it('lists zones alphabetically, ignoring case', () => {
+    const { container } = render(
+      <ZoneLegend zones={[zone({ id: 'a', name: 'work' }), zone({ id: 'b', name: 'Home' }), zone({ id: 'c', name: 'gym' })]} />,
+    )
+    const names = [...container.querySelectorAll('.sh-zone-legend__name')].map(el => el.textContent)
+    expect(names).toEqual(['gym', 'Home', 'work'])
+  })
+
+  it('renders the zone icon inside a coloured round swatch', () => {
+    const { container } = render(
+      <ZoneLegend zones={[zone({ icon: '🏫', color: '#F57C00' })]} />,
+    )
+    const sw = container.querySelector('.sh-zone-legend__swatch') as HTMLElement
+    expect(sw.textContent).toBe('🏫')
+    expect(sw.classList.contains('sh-zone-icon--has-icon')).toBe(true)
+    expect(sw.style.background).toMatch(/rgb\(\s*245,\s*124,\s*0\s*\)/)
+  })
+
+  it('keeps the plain swatch when the zone has no icon', () => {
+    const { container } = render(<ZoneLegend zones={[zone({ icon: null })]} />)
+    const sw = container.querySelector('.sh-zone-legend__swatch') as HTMLElement
+    expect(sw.textContent).toBe('')
+    expect(sw.classList.contains('sh-zone-icon--has-icon')).toBe(false)
   })
 })

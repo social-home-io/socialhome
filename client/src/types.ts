@@ -513,6 +513,8 @@ export interface SpaceZone {
   longitude: number
   radius_m: number
   color: string | null
+  /** One emoji shown with the zone, or null for none. */
+  icon: string | null
   created_by: string
   created_at: string
   updated_at: string

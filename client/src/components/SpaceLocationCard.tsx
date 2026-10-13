@@ -343,10 +343,9 @@ export function SpaceLocationCard({
                   style={{ '--zone-colour': colour }}
                   title={t('location.card.zone_title', { zone: p.zone_name ?? t('location.card.unknown') })}
                 >
-                  <span
-                    class="sh-zone-only-list__swatch"
-                    aria-hidden="true"
-                  />
+                  {zone?.icon
+                    ? <span class="sh-zone-only-list__icon" aria-hidden="true">{zone.icon}</span>
+                    : <span class="sh-zone-only-list__swatch" aria-hidden="true" />}
                   {p.zone_name ?? t('location.card.unknown_zone')}
                 </span>
               </li>

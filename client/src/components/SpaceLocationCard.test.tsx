@@ -235,6 +235,38 @@ describe('SpaceLocationCard', () => {
     expect(chip.style.getPropertyValue('--zone-colour')).toMatch(/^#[0-9a-f]{6}$/i)
   })
 
+  it('shows the zone icon before the zone name in the zone-only chip', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'zone_only',
+          entries: [{
+            user_id: 'u_pascal', username: 'pascal', display_name: 'Pascal',
+            state: 'zone', zone_id: 'z_school', zone_name: 'School', picture_url: null,
+          }],
+        })
+      }
+      return Promise.resolve({
+        zones: [{
+          id: 'z_school', space_id: 'sp_test', name: 'School',
+          latitude: 47.3769, longitude: 8.5417, radius_m: 200,
+          color: '#3b82f6', icon: '🏫',
+          created_by: 'u_admin', created_at: '2026-04-28T00:00:00Z',
+          updated_at: '2026-04-28T00:00:00Z',
+        }],
+      })
+    })
+    const { container, findByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByText('Pascal')
+    const chip = container.querySelector('.sh-zone-only-list__chip') as HTMLElement
+    const icon = chip.querySelector('.sh-zone-only-list__icon') as HTMLElement
+    expect(icon.textContent).toBe('🏫')
+    expect(icon.getAttribute('aria-hidden')).toBe('true')
+    expect(chip.querySelector('.sh-zone-only-list__swatch')).toBeNull()
+    expect(chip.textContent).toBe('🏫School')
+  })
+
   it('hydrates the sharing chip from /members on cold load', async () => {
     // Regression for "I shared my location, came back, and the map
     // page rendered as if it was reset" — the chip's ``sharingMe``
