@@ -50,6 +50,11 @@ tile the wall can't serve from the shared cache is a fetch from the
 upstream tile server, whose policy we keep. A wall panel asking for a
 pairing code (anonymous) is held to :data:`PAIR_MAX` per
 :data:`PAIR_WINDOW_S` per client address (:meth:`DashboardAuth.begin_pair`).
+Wrong pairing codes an admin types (Admin › Dashboard) count against one
+global bucket of their own (:meth:`DashboardAuth.begin_pair_code`):
+:data:`PAIR_CODE_MAX_FAILURES` in :data:`PAIR_CODE_WINDOW_S`, fixed size,
+and fully separate from the login / PIN failure table — a flood of failed
+tablet logins can't hold pairing back, nor wrong codes hold back a login.
 """
 
 from __future__ import annotations
@@ -84,6 +89,8 @@ __all__ = [
     "TILE_WINDOW_S",
     "COOKIE_NAME",
     "GLOBAL_MAX_FAILURES",
+    "PAIR_CODE_MAX_FAILURES",
+    "PAIR_CODE_WINDOW_S",
     "PAIR_MAX",
     "PAIR_WINDOW_S",
     "KEEP_TTL_S",
@@ -136,6 +143,11 @@ TILE_WINDOW_S = 60
 #: real panels' codes out of the bounded pending list.
 PAIR_MAX = 10
 PAIR_WINDOW_S = 600
+
+#: Wrong wall-panel pairing codes (every admin together) per window
+#: (:meth:`DashboardAuth.begin_pair_code`).
+PAIR_CODE_MAX_FAILURES = 5
+PAIR_CODE_WINDOW_S = 15 * 60
 
 #: Revocation reasons (:meth:`DashboardAuth.revoke`). ``locked``: the
 #: cookie was replaced by a locked one (``POST /lock``) — it now counts
@@ -254,6 +266,7 @@ class DashboardAuth:
         "_tiles",
         "_pairs",
         "_pairs_pruned_at",
+        "_pair_codes",
         "last_seen_at",
     )
 
@@ -281,6 +294,8 @@ class DashboardAuth:
         self._tiles = RateLimiter(monotonic=clock)
         self._pairs = RateLimiter(monotonic=clock)
         self._pairs_pruned_at = clock()
+        # Wrong pairing codes: one global bucket, never the login table.
+        self._pair_codes: deque[float] = deque(maxlen=PAIR_CODE_MAX_FAILURES)
         #: When a signed-in tablet last made a request (unix seconds).
         self.last_seen_at: float | None = None
 
@@ -483,6 +498,36 @@ class DashboardAuth:
     def pair_key_count(self) -> int:
         """Client addresses the pair-start limiter currently remembers."""
         return self._pairs.key_count
+
+    def begin_pair_code(self) -> int:
+        """Start an admin's pairing-code check: ``0`` when it may go ahead
+        — it then counts as a wrong code until
+        :meth:`record_pair_code_success` — else the seconds to wait
+        (nothing is counted).
+
+        One global bucket for every admin, fixed in size
+        (:data:`PAIR_CODE_MAX_FAILURES`), and independent of the
+        password / PIN failure table and the global login brake: failed
+        tablet logins never hold pairing back, and wrong codes never
+        hold a login back. Callers serialise checks (the claim lock).
+        """
+        now = self._clock()
+        stamps = self._pair_codes
+        while stamps and now - stamps[0] >= PAIR_CODE_WINDOW_S:
+            stamps.popleft()
+        if len(stamps) >= PAIR_CODE_MAX_FAILURES:
+            return max(1, math.ceil(stamps[0] + PAIR_CODE_WINDOW_S - now))
+        stamps.append(now)
+        return 0
+
+    def record_pair_code_success(self) -> None:
+        """The code was right: forget the wrong ones."""
+        self._pair_codes.clear()
+
+    @property
+    def pair_code_failure_count(self) -> int:
+        """Wrong pairing codes currently counted (unpruned)."""
+        return len(self._pair_codes)
 
     # ── Throttle ────────────────────────────────────────────────────────
     #

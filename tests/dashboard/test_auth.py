@@ -13,6 +13,8 @@ from unittest.mock import patch
 import pytest
 
 from socialhome.dashboard.auth import (
+    PAIR_CODE_MAX_FAILURES,
+    PAIR_CODE_WINDOW_S,
     PAIR_MAX,
     PAIR_WINDOW_S,
     ACK_MAX,
@@ -795,3 +797,62 @@ def test_pair_limiter_forgets_quiet_addresses(auth, clock):
     clock.advance(PAIR_WINDOW_S + 1)
     auth.begin_pair("10.0.1.1")
     assert auth.pair_key_count == 1
+
+
+# ─── wrong pairing codes ─────────────────────────────────────────────────
+
+
+def _wrong_codes(auth, n: int) -> None:
+    for _ in range(n):
+        assert auth.begin_pair_code() == 0
+
+
+def test_pair_code_bucket_locks_after_five_and_ages_out(auth, clock):
+    _wrong_codes(auth, PAIR_CODE_MAX_FAILURES)
+    wait = auth.begin_pair_code()
+    assert 0 < wait <= PAIR_CODE_WINDOW_S
+    # A refused check counts nothing.
+    assert auth.pair_code_failure_count == PAIR_CODE_MAX_FAILURES
+    clock.advance(PAIR_CODE_WINDOW_S)
+    assert auth.begin_pair_code() == 0
+
+
+def test_pair_code_success_clears_the_bucket(auth):
+    _wrong_codes(auth, PAIR_CODE_MAX_FAILURES - 1)
+    auth.record_pair_code_success()
+    assert auth.pair_code_failure_count == 0
+    _wrong_codes(auth, PAIR_CODE_MAX_FAILURES)
+
+
+def test_pair_code_bucket_is_bounded(auth, clock):
+    """One fixed-size bucket: however many checks run, it never grows."""
+    for _ in range(1000):
+        auth.begin_pair_code()
+        clock.advance(PAIR_CODE_WINDOW_S / 4)
+    assert auth.pair_code_failure_count <= PAIR_CODE_MAX_FAILURES
+
+
+def test_login_failures_never_hold_pairing_back(settings_service, clock):
+    """An attacker filling the login table with locked-out clients — and
+    tripping the global brake — must not block an admin's code entry."""
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=3)
+    for n in range(3):
+        _fail(auth, f"10.0.0.{n}", THROTTLE_MAX_FAILURES)
+    for n in range(GLOBAL_MAX_FAILURES):
+        auth.begin_attempt(f"10.1.0.{n}")
+    assert auth.begin_attempt("newcomer") > 0  # login table full + brake on
+    assert auth.begin_pair_code() == 0
+    assert auth.pair_code_failure_count == 1
+
+
+def test_wrong_pairing_codes_never_hold_logins_back(settings_service, clock):
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=1)
+    _wrong_codes(auth, PAIR_CODE_MAX_FAILURES)
+    assert auth.begin_pair_code() > 0
+    # Nothing landed in the login table or the global brake…
+    assert auth.throttle_key_count == 0
+    assert auth.global_failure_count == 0
+    # …so the one free slot still takes a login.
+    assert auth.begin_attempt("10.0.0.1") == 0
+    auth.record_pair_code_success()
+    assert auth.failure_count("10.0.0.1") == 1

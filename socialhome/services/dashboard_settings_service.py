@@ -616,9 +616,17 @@ class DashboardSettingsService:
         except ValueError:
             # Never fall back to 0: cookies minted at small epochs would
             # validate again. Reseed far above any epoch reached by bumps.
+            # Like any epoch bump, it unpairs every wall panel in the same
+            # write: panel tokens die with the epoch.
             fresh = (1 << 61) | secrets.randbits(61)
-            log.warning("stored dashboard epoch is corrupt — reseeding")
-            await self._repo.set(KEY_EPOCH, str(fresh))
+            log.warning(
+                "stored dashboard epoch is corrupt — reseeding; every tablet "
+                "is signed out and every wall panel unpaired"
+            )
+            await self._repo.set_many(
+                {KEY_EPOCH: str(fresh), KEY_DISPLAYS: _NO_DISPLAYS}
+            )
+            self._displays = ()
             return fresh
 
     async def revoke_sessions(self, *, actor_is_admin: bool) -> None:
@@ -727,6 +735,10 @@ class DashboardSettingsService:
     # wipe can't be undone by a write that read the list before it.
 
     async def _displays_unlocked(self) -> tuple[DashboardDisplay, ...]:
+        if self._displays is None:
+            # Check the epoch first: a corrupt one reseeds and unpairs
+            # every panel, even when no tablet has read it yet.
+            await self._epoch_unlocked()
         if self._displays is None:
             self._displays = _displays_from_json(await self._repo.get(KEY_DISPLAYS))
         return self._displays

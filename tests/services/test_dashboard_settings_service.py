@@ -498,6 +498,36 @@ async def test_corrupt_epoch_is_reseeded_high(svc, repo):
     assert await svc.epoch() == first + 1
 
 
+async def test_corrupt_epoch_reseed_unpairs_every_display(svc, repo):
+    """A reseed is an epoch bump: panel tokens die with it, in the same
+    write as the new epoch (a crash can't keep panels paired)."""
+    await svc.add_display(_display(1))
+    repo.rows["dashboard.epoch"] = "x"
+    batches: list[dict[str, str]] = []
+    real = repo.set_many
+
+    async def spy(items):
+        batches.append(dict(items))
+        await real(items)
+
+    repo.set_many = spy
+    fresh = await svc.epoch()
+    assert batches == [{"dashboard.epoch": str(fresh), "dashboard.displays": "[]"}]
+    assert await svc.displays() == ()
+
+
+async def test_corrupt_epoch_unpairs_displays_on_their_first_read(repo):
+    """Panels authenticate without reading the epoch — a cold load of the
+    panel list must still notice a corrupt epoch and unpair them."""
+    first = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    await first.add_display(_display(1))
+    repo.rows["dashboard.epoch"] = "x"
+    svc = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert await svc.displays() == ()
+    assert repo.rows["dashboard.displays"] == "[]"
+    assert int(repo.rows["dashboard.epoch"]) > 1_000_000
+
+
 # ── cookie secret ────────────────────────────────────────────────────────
 
 

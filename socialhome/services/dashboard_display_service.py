@@ -16,9 +16,9 @@ other way round from a tablet:
 
 Pending pairings live in memory only (a restart drops them — the panel
 just asks for a new code), at most :data:`MAX_PENDING_PAIRINGS`, each for
-:data:`PAIRING_TTL_SECONDS`. Wrong codes are throttled globally (the
-:class:`~socialhome.dashboard.auth.DashboardAuth` failure table, one
-bucket for every admin, never the login brake). Tokens are never logged.
+:data:`PAIRING_TTL_SECONDS`. Wrong codes are throttled globally — one
+bucket for every admin (:meth:`DashboardAuth.begin_pair_code`), separate
+from the tablet login / PIN throttle and the login brake. Tokens are never logged.
 """
 
 from __future__ import annotations
@@ -62,8 +62,6 @@ __all__ = ["SEEN_INTERVAL_S", "DashboardDisplayService"]
 #: often (seconds) — a panel polls far more often than that.
 SEEN_INTERVAL_S = 60
 
-#: The one throttle bucket every wrong pairing code counts against.
-_CODE_THROTTLE_KEY = "display-pairing-code"
 _TOKEN_BYTES = 32
 _PAIR_ID_BYTES = 16
 _DISPLAY_ID_BYTES = 8
@@ -246,7 +244,7 @@ class DashboardDisplayService:
             raise DashboardPairingCodeInvalidError()
         await self._require_enabled()
         async with self._claim_lock:
-            wait = self._auth.begin_attempt(_CODE_THROTTLE_KEY, count_global=False)
+            wait = self._auth.begin_pair_code()
             if wait:
                 raise DashboardPairingThrottledError(wait)
             now = self._clock()
@@ -259,7 +257,7 @@ class DashboardDisplayService:
             if match is None:
                 log.info("household dashboard: wrong display pairing code")
                 raise DashboardPairingCodeInvalidError()
-            self._auth.record_success(_CODE_THROTTLE_KEY, count_global=False)
+            self._auth.record_pair_code_success()
             token = secrets.token_urlsafe(_TOKEN_BYTES)
             display = DashboardDisplay(
                 id=secrets.token_hex(_DISPLAY_ID_BYTES),

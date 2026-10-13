@@ -334,7 +334,9 @@ again with a new code to use it again). **Sign out all tablets** and a new
 dashboard password unpair every panel too.
 
 Five wrong codes in 15 minutes hold pairing back for a while — check the
-code on the panel. At most 20 panels can be paired.
+code on the panel. This limit is separate from tablet sign-in: failed
+password tries on the dashboard never hold pairing back, and wrong codes
+never hold a tablet's sign-in back. At most 20 panels can be paired.
 
 > **Firmware comes later.** This release adds pairing and device tokens
 > only; the panel firmware and the data the panels show arrive in a

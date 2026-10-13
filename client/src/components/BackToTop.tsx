@@ -17,6 +17,14 @@
  * button's resting spot, the button lifts above it (``--sh-back-to-top-lift``)
  * so it never covers a Save button. Re-measured (once per animation
  * frame) on scroll, resize, and when such a bar mounts or unmounts.
+ *
+ * Modal layers: the button sits on the toast layer, above modals, and
+ * the page behind an open dialog keeps its scroll position — so on a
+ * phone it used to float over a bottom sheet's inputs (the right end of
+ * a Name field). While any modal surface is open (``aria-modal="true"``:
+ * every ``Modal``, sheets, the lightbox, the mobile nav drawer — or a
+ * native ``<dialog open>``) the button is not rendered at all; it can't
+ * act on the dialog anyway, since it scrolls the page behind it.
  */
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -26,6 +34,9 @@ const SHOW_AFTER_PX = 600
 
 /** Bars that stick to the viewport bottom and hold controls. */
 export const STICKY_BAR_SELECTOR = '.sh-form-actions, .sh-timetable-brushbar'
+
+/** Open modal surfaces — the button hides while any is in the DOM. */
+export const MODAL_SELECTOR = '[aria-modal="true"], dialog[open]'
 
 /** Breathing room between a lifted button and the bar under it. */
 const LIFT_GAP_PX = 8
@@ -52,19 +63,37 @@ export function liftOverStickyBars(rest: Box, bars: Box[]): number {
 
 const visible = signal(false)
 const lift = signal(0)
+const modalOpen = signal(false)
 
-/** True when a mutation added or removed a sticky bar (or a subtree
- *  holding one) — the only DOM changes that can move the bar. */
-export function touchesStickyBar(records: MutationRecord[]): boolean {
+/** True when a mutation added or removed an element matching
+ *  ``selector`` (or a subtree holding one). */
+function touches(records: MutationRecord[], selector: string): boolean {
   for (const rec of records) {
     for (const list of [rec.addedNodes, rec.removedNodes]) {
       for (const node of list) {
         if (!(node instanceof Element)) continue
-        if (node.matches(STICKY_BAR_SELECTOR) || node.querySelector(STICKY_BAR_SELECTOR)) return true
+        if (node.matches(selector) || node.querySelector(selector)) return true
       }
     }
   }
   return false
+}
+
+/** True when a mutation added or removed a sticky bar (or a subtree
+ *  holding one) — the only DOM changes that can move the bar. */
+export function touchesStickyBar(records: MutationRecord[]): boolean {
+  return touches(records, STICKY_BAR_SELECTOR)
+}
+
+/** True when a mutation may have opened or closed a modal: one mounted
+ *  or unmounted, or an ``aria-modal`` / ``open`` attribute flipped. */
+export function touchesModal(records: MutationRecord[]): boolean {
+  return records.some(rec => rec.type === 'attributes') || touches(records, MODAL_SELECTOR)
+}
+
+function checkModal() {
+  const open = document.querySelector(MODAL_SELECTOR) !== null
+  if (open !== modalOpen.value) modalOpen.value = open
 }
 
 export function BackToTop() {
@@ -109,20 +138,36 @@ export function BackToTop() {
     }
   }, [])
 
-  // While shown: re-measure on first paint and whenever a sticky bar
-  // mounts or unmounts (a tab switch swaps a form in without scrolling).
-  // The observer only runs while the button is visible, and its filter
-  // is a cheap ``matches`` / ``querySelector`` on the changed nodes.
+  // While scrolled past the fold: re-measure on first paint and whenever
+  // a sticky bar mounts or unmounts (a tab switch swaps a form in without
+  // scrolling), and hide while a modal is open. The observer only runs
+  // past the fold, and its filters are a cheap ``matches`` /
+  // ``querySelector`` on the changed nodes.
   useLayoutEffect(() => {
     if (!visible.value) return
+    checkModal()
     measure()
     if (typeof MutationObserver === 'undefined') return
-    const mo = new MutationObserver(records => { if (touchesStickyBar(records)) measure() })
-    mo.observe(document.body, { childList: true, subtree: true })
+    const mo = new MutationObserver(records => {
+      if (touchesModal(records)) checkModal()
+      if (touchesStickyBar(records)) measure()
+    })
+    mo.observe(document.body, {
+      childList: true, subtree: true,
+      attributes: true, attributeFilter: ['aria-modal', 'open'],
+    })
     return () => mo.disconnect()
   }, [visible.value])
 
-  if (!visible.value) return null
+  // Coming back from under a dialog: the bars may have moved meanwhile.
+  const wasHidden = useRef(false)
+  useLayoutEffect(() => {
+    const reappeared = wasHidden.current && !modalOpen.value
+    wasHidden.current = modalOpen.value
+    if (reappeared && visible.value) measure()
+  }, [modalOpen.value])
+
+  if (!visible.value || modalOpen.value) return null
 
   const onClick = () => {
     const reduced = typeof window !== 'undefined'
