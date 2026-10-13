@@ -33,6 +33,12 @@ peer's hash only when it is exactly 16 lowercase hex characters (the shape
 `compute_picture_hash` produces — `socialhome/domain/picture_hash.py`) and
 stores `NULL` for anything else, because the hash is interpolated into
 `…/picture?v={hash}` URLs.
+An applied update is re-published on the local bus with
+`origin_instance_id` set to the sender, so local members' open clients get
+the `space.member.profile_updated` frame while
+`SpaceMemberProfileFederationOutbound` never re-sends it to the other
+member households (the §25.6 picture catch-up publishes the same way — see
+[`sync.md`](./sync.md)).
 
 From v_23, `SPACE_MEMBER_JOINED` / `SPACE_MEMBER_LEFT` are the
 **peer-replicated, space-authority-signed roster gossip** — the host emits

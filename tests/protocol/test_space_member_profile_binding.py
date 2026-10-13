@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import SpaceMemberProfileUpdated
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.space import (
     JoinMode,
@@ -87,8 +88,9 @@ async def stack(tmp_dir):
             user_pk=None,
             display_name=None,
         )
+    bus = EventBus()
     svc = FederationInboundService(
-        bus=EventBus(),
+        bus=bus,
         conversation_repo=AsyncMock(),
         space_post_repo=AsyncMock(),
         space_repo=spaces,
@@ -96,7 +98,7 @@ async def stack(tmp_dir):
         space_remote_member_repo=remote,
     )
     svc._federation_service = SimpleNamespace(own_instance_id=OWN)  # type: ignore[assignment]
-    yield SimpleNamespace(svc=svc, spaces=spaces, remote=remote)
+    yield SimpleNamespace(svc=svc, spaces=spaces, remote=remote, bus=bus)
     await db.shutdown()
 
 
@@ -152,3 +154,21 @@ async def test_unknown_user_is_a_noop(stack):
     )
     assert await stack.spaces.get_member(SPACE_ID, "u-nobody") is None
     assert await _name(stack, USER_B) == "original"
+
+
+async def test_an_applied_update_is_republished_with_its_origin(stack):
+    """Local clients hear about the change, but the event names the sending
+    household as its origin, so the federation outbound never echoes it
+    back out to every member household."""
+    seen: list[SpaceMemberProfileUpdated] = []
+
+    async def _capture(event: SpaceMemberProfileUpdated) -> None:
+        seen.append(event)
+
+    stack.bus.subscribe(SpaceMemberProfileUpdated, _capture)
+    await stack.svc._on_space_member_profile_updated(
+        _update(USER_B, sender=HOUSEHOLD_B)
+    )
+    assert len(seen) == 1
+    assert seen[0].user_id == USER_B
+    assert seen[0].origin_instance_id == HOUSEHOLD_B

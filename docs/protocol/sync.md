@@ -359,9 +359,23 @@ the member sets a new picture after that snapshot, and its live
 stale `null` drops the new picture. It heals at the next session: that
 `members` record carries the non-null hash (a no-op), and `member_pictures`
 ships the bytes again.
-Follow-up: an open SPA is not nudged when a sync changes a picture (it shows
-on the next load). Republishing `SpaceMemberProfileUpdated` would echo the
-change back out over federation, so any nudge must be WebSocket-only.
+
+**Local clients are told live; nothing is echoed.** When a catch-up changes
+a seat's picture — a `member_pictures` record re-pointing the seat at a new
+hash, or a `members` reset clearing it — the receiver publishes
+`SpaceMemberProfileUpdated` with `origin_instance_id` set to the provider,
+the event the live path publishes. The realtime service frames it as
+`space.member.profile_updated` to the space's local members (`picture_hash`
+/ `picture_url` `null` after a reset), so an open member list, feed or chat
+swaps the avatar without a reload. `SpaceMemberProfileFederationOutbound`
+skips any event with an origin, so a change applied from another household
+is never fanned back out (the live inbound `SPACE_MEMBER_PROFILE_UPDATED`
+handler sets the origin too — before, its republish was re-sent to every
+member household, where the seat binding dropped it). The nudge fires only
+when the seat's hash actually changed: a catch-up re-ships every picture,
+and an unchanged one (same bytes, same hash), a repeated record, or a member
+not seated here publishes nothing. The space map's member markers read their
+picture from the presence poll, so they follow on its next tick.
 
 (History: 0086 covered posts, comments, chat, gallery, calendar and the
 0085 tombstones; 0088 added task lists, tasks, pages, timetables and moved
