@@ -304,6 +304,7 @@ from .spaces import (
     SpaceUnbanView,
 )
 from .space_zones import SpaceZoneDetailView, SpaceZonesCollectionView
+from .household_zones import HouseholdZoneDetailView, HouseholdZonesCollectionView
 from .stickies import (
     SpaceStickyCollectionView,
     SpaceStickyDetailView,
@@ -1252,6 +1253,8 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
     # ── Household preferences ────────────────────────────────────────────
     app.router.add_view("/api/household/preferences", HouseholdPreferencesView)
     app.router.add_view("/api/household/chat", HouseholdChatView)
+    app.router.add_view("/api/household/zones", HouseholdZonesCollectionView)
+    app.router.add_view("/api/household/zones/{zone_id}", HouseholdZoneDetailView)
 
     # ── User preferences ─────────────────────────────────────────────────
     app.router.add_view("/api/me/preferences", MePreferencesView)
