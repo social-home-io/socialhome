@@ -434,6 +434,16 @@ class SpaceZoneDeleted(DomainEvent):
     origin_instance_id: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class HouseholdZonesChanged(DomainEvent):
+    """The household's zone list changed (created / edited / deleted /
+    re-synced). A content-free nudge: household zones are local-only and
+    never federated, so the only consumer is the WS
+    ``household_zones_changed`` frame that makes clients refetch."""
+
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Tasks ────────────────────────────────────────────────────────────────
 
 
