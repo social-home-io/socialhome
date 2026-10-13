@@ -173,5 +173,17 @@
   "dashboard.messages.empty": "Geen berichten van de afgelopen dag",
   "dashboard.messages.empty_hint": "Schrijf er een in de Social Home-app.",
   "dashboard.notes.empty": "Nog geen notities",
-  "dashboard.notes.empty_hint": "Voeg er een toe in de Social Home-app."
+  "dashboard.notes.empty_hint": "Voeg er een toe in de Social Home-app.",
+  "dashboard.rel.hours_ago": "{n} uur geleden",
+  "dashboard.tabs.map": "Kaart",
+  "dashboard.map.list": "Wie is waar",
+  "dashboard.map.updated": "bijgewerkt",
+  "dashboard.map.last_seen": "laatst gezien {rel}",
+  "dashboard.map.show_all": "Iedereen tonen",
+  "dashboard.map.label": "Kaart: {summary}",
+  "dashboard.map.at": "{names} bij {place}",
+  "dashboard.map.away": "{names} onderweg",
+  "dashboard.map.and": "{rest} en {last}",
+  "dashboard.map.more_places": "+{n} plekken",
+  "dashboard.map.more_places_one": "+1 plek"
 }

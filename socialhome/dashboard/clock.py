@@ -111,13 +111,18 @@ def relative_in(now: datetime, then: datetime, t: Callable[..., str]) -> str:
     return t("dashboard.rel.in_hours_minutes", h=h, m=m)
 
 
-def ago(now: datetime, then: datetime, t: Callable[..., str]) -> str:
+def ago(
+    now: datetime, then: datetime, t: Callable[..., str], *, hours: bool = False
+) -> str:
     """ "just now" / "4 min ago" — how long since ``then`` (whole minutes,
     rounded down; ``then`` under a minute ago, or ahead of ``now``, is
-    "just now")."""
+    "just now"). With ``hours``, an hour or more is said in whole hours
+    ("2 h ago", rounded down)."""
     minutes = math.floor((now - then).total_seconds() / 60)
     if minutes < 1:
         return t("dashboard.rel.just_now")
+    if hours and minutes >= 60:
+        return t("dashboard.rel.hours_ago", n=minutes // 60)
     return t("dashboard.rel.minutes_ago", n=minutes)
 
 

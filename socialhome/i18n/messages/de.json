@@ -173,5 +173,17 @@
   "dashboard.messages.empty": "Keine Nachrichten seit gestern",
   "dashboard.messages.empty_hint": "Schreib eine in der Social-Home-App.",
   "dashboard.notes.empty": "Noch keine Notizen",
-  "dashboard.notes.empty_hint": "Füge eine in der Social-Home-App hinzu."
+  "dashboard.notes.empty_hint": "Füge eine in der Social-Home-App hinzu.",
+  "dashboard.rel.hours_ago": "vor {n} Std.",
+  "dashboard.tabs.map": "Karte",
+  "dashboard.map.list": "Wer ist wo",
+  "dashboard.map.updated": "aktualisiert",
+  "dashboard.map.last_seen": "zuletzt gesehen {rel}",
+  "dashboard.map.show_all": "Alle zeigen",
+  "dashboard.map.label": "Karte: {summary}",
+  "dashboard.map.at": "{names}: {place}",
+  "dashboard.map.away": "{names} unterwegs",
+  "dashboard.map.and": "{rest} und {last}",
+  "dashboard.map.more_places": "+{n} Orte",
+  "dashboard.map.more_places_one": "+1 Ort"
 }

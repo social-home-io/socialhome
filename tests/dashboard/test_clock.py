@@ -144,7 +144,24 @@ def test_ago(delta, expected):
     assert ago(T0 + delta, T0, _t("en")) == expected
 
 
+@pytest.mark.parametrize(
+    ("delta", "expected"),
+    [
+        (timedelta(minutes=59, seconds=59), "59 min ago"),
+        (timedelta(minutes=60), "1 h ago"),
+        (timedelta(hours=2, minutes=59), "2 h ago"),
+        (timedelta(hours=23, minutes=10), "23 h ago"),
+    ],
+)
+def test_ago_in_hours(delta, expected):
+    """The Map tab's "last seen 2 h ago": whole hours from an hour on;
+    without ``hours`` minutes keep counting (the chat's phrase)."""
+    assert ago(T0 + delta, T0, _t("en"), hours=True) == expected
+    assert ago(T0 + timedelta(minutes=90), T0, _t("en")) == "90 min ago"
+
+
 def test_ago_is_localised():
+    assert ago(T0 + timedelta(hours=2), T0, _t("de"), hours=True) == "vor 2 Std."
     assert ago(T0 + timedelta(minutes=4), T0, _t("de")) == "vor 4 Min."
 
 
