@@ -3,9 +3,9 @@
  *
  * Two modes are exercised:
  *   * ``location_mode === 'gps'`` — markers handed to LocationMap.
- *   * ``location_mode === 'zone_only'`` — flat list of zone labels;
- *     LocationMap is not rendered (the originating instance has
- *     already matched GPS to zones server-side).
+ *   * ``location_mode === 'zone_only'`` — members drawn as bubbles at
+ *     their zone centres (no coordinates exist — the originating
+ *     instance already matched GPS to zones) plus the zone-label list.
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/preact'
@@ -32,11 +32,19 @@ beforeAll(() => {
   })
 })
 
+const EMPTY_ZONE_TEXT = 'No one in this space is in any zone right now.'
+/** HTML of every divIcon the map built (bubbles + zone markers). */
+const icons: string[] = []
+/** Every marker ``title`` (the accessible name / hover text). */
+const titles: string[] = []
 vi.mock('leaflet', () => {
   const noop = () => undefined
   const layer = new Proxy({} as any, {
     get(_t, prop) {
-      if (prop === 'addTo' || prop === 'bindTooltip') return () => layer
+      if (
+        prop === 'addTo' || prop === 'bindTooltip' || prop === 'bindPopup'
+        || prop === 'on'
+      ) return () => layer
       return noop
     },
   })
@@ -47,6 +55,9 @@ vi.mock('leaflet', () => {
         || prop === 'fitBounds' || prop === 'invalidateSize'
         || prop === 'remove' || prop === 'clearLayers'
       ) return () => map
+      if (prop === 'latLngToContainerPoint') {
+        return (ll: [number, number]) => ({ x: ll[1] * 1e5, y: -ll[0] * 1e5 })
+      }
       return noop
     },
   })
@@ -56,9 +67,12 @@ vi.mock('leaflet', () => {
       tileLayer: () => layer,
       layerGroup: () => layer,
       circle: () => layer,
-      marker: () => layer,
+      marker: (_ll: unknown, opts?: { title?: string }) => {
+        if (opts?.title) titles.push(opts.title)
+        return layer
+      },
       latLngBounds: () => ({ pad: () => ({}) }),
-      divIcon: () => ({}),
+      divIcon: (o: { html: string }) => { icons.push(o.html); return {} },
     },
   }
 })
@@ -97,6 +111,8 @@ const mockWs = wsModule as unknown as { on: ReturnType<typeof vi.fn> }
 
 describe('SpaceLocationCard', () => {
   beforeEach(() => {
+    icons.length = 0
+    titles.length = 0
     mockApi.get.mockReset()
     mockApi.patch.mockReset()
     mockWs.on.mockClear()
@@ -145,7 +161,7 @@ describe('SpaceLocationCard', () => {
     expect(container.querySelector('[data-testid="zone-only-list"]')).toBeNull()
   })
 
-  it('renders a zone-label list when location_mode === "zone_only"', async () => {
+  it('renders the map and a zone-label list when location_mode === "zone_only"', async () => {
     mockApi.get.mockImplementation((url: string) => {
       if (url.includes('/presence')) {
         return Promise.resolve({
@@ -190,18 +206,169 @@ describe('SpaceLocationCard', () => {
         ],
       })
     })
-    const { container, findByText } = render(
+    const { container, findByText, findAllByText } = render(
       <SpaceLocationCard spaceId="sp_test" />,
     )
-    await findByText('Office')
+    await findAllByText('Office')
     await findByText('The Workshop')
-    // The flat list is rendered, the Leaflet map is NOT.
+    // The flat list is still rendered, under the map.
     expect(
       container.querySelector('[data-testid="zone-only-list"]'),
     ).toBeTruthy()
-    expect(container.querySelector('.sh-location-map')).toBeNull()
+    expect(container.querySelector('.sh-location-map')).toBeTruthy()
     // Footer counts members in zones.
     await findByText(/2 of 2 in a zone/i)
+  })
+
+  const office = {
+    id: 'z_office', space_id: 'sp_test', name: 'Office',
+    latitude: 47.3769, longitude: 8.5417, radius_m: 200,
+    color: '#3b82f6', icon: '🏢',
+    created_by: 'u_admin',
+    created_at: '2026-04-28T00:00:00Z', updated_at: '2026-04-28T00:00:00Z',
+  }
+
+  it('draws zone-only members as one bubble at their zone centre', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'zone_only',
+          entries: ['Pascal', 'Anna'].map((n) => ({
+            user_id: `u_${n}`, username: n, display_name: n, state: 'zone',
+            zone_id: 'z_office', zone_name: 'Office', picture_url: null,
+          })),
+        })
+      }
+      return Promise.resolve({ zones: [office] })
+    })
+    render(<SpaceLocationCard spaceId="sp_test" />)
+    await waitFor(() => {
+      expect(icons.some((h) => h.includes('sh-map-bubble--zone'))).toBe(true)
+    })
+    const bubble = icons.filter((h) => h.includes('sh-map-bubble--zone')).at(-1)!
+    expect(bubble.split('class="sh-map-avatar ').length - 1).toBe(2)
+    expect(icons.some((h) => h.includes('sh-map-zone') && h.includes('🏢'))).toBe(true)
+  })
+
+  it('groups GPS members inside a zone into the zone bubble', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'gps',
+          entries: [
+            {
+              user_id: 'u_pascal', username: 'pascal', display_name: 'Pascal',
+              state: 'home', latitude: 47.3770, longitude: 8.5418,
+              gps_accuracy_m: 10, picture_url: 'api/users/u_pascal/picture?v=1',
+            },
+            {
+              user_id: 'u_anna', username: 'anna', display_name: 'Anna',
+              state: 'away', latitude: 46.0, longitude: 7.0,
+              gps_accuracy_m: 10, picture_url: null,
+            },
+          ],
+        })
+      }
+      return Promise.resolve({ zones: [office] })
+    })
+    render(<SpaceLocationCard spaceId="sp_test" />)
+    await waitFor(() => {
+      expect(icons.some((h) => h.includes('sh-map-bubble--zone'))).toBe(true)
+    })
+    const zoneBubble = icons.filter((h) => h.includes('sh-map-bubble--zone')).at(-1)!
+    expect(zoneBubble).toContain('api/users/u_pascal/picture?v=1')
+    expect(icons.some((h) => h.includes('sh-map-bubble--solo'))).toBe(true)
+  })
+
+  it('labels a member outside every zone by their state, in words', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'gps',
+          entries: [
+            {
+              user_id: 'u_local', username: 'anna', display_name: 'Anna',
+              state: 'not_home', latitude: 46.0, longitude: 7.0, picture_url: null,
+            },
+            {
+              // Another household's pin: the server can't know its state.
+              user_id: 'u_remote', username: null, display_name: 'Rita',
+              state: 'home', latitude: 45.0, longitude: 6.0, picture_url: null,
+              instance_id: 'peer-1',
+            },
+          ],
+        })
+      }
+      return Promise.resolve({ zones: [office] })
+    })
+    render(<SpaceLocationCard spaceId="sp_test" />)
+    await waitFor(() => { expect(titles).toContain('Anna · Not home') })
+    expect(titles).toContain('Rita')
+    expect(titles.some((t) => t.startsWith('Rita ·'))).toBe(false)
+  })
+
+  it('words local states in the zone-only list and leaves remote ones out', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'zone_only',
+          entries: [
+            {
+              user_id: 'u_local', username: 'anna', display_name: 'Anna', state: 'zone',
+              zone_id: 'z_office', zone_name: 'Office', picture_url: null,
+            },
+            {
+              user_id: 'u_remote', username: null, display_name: 'Rita', state: 'home',
+              zone_id: 'z_office', zone_name: 'Office', picture_url: null,
+              instance_id: 'peer-1',
+            },
+          ],
+        })
+      }
+      return Promise.resolve({ zones: [office] })
+    })
+    const { findByTestId } = render(<SpaceLocationCard spaceId="sp_test" />)
+    const list = await findByTestId('zone-only-list')
+    const rows = list.querySelectorAll('.sh-zone-only-list__meta')
+    expect(rows[0].textContent).toBe('AnnaIn zone')
+    expect(rows[1].textContent).toBe('Rita')
+  })
+
+  it('shows no "nobody in a zone" text when members exist but their zones are unknown', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true,
+          location_mode: 'zone_only',
+          entries: [{
+            user_id: 'u_local', username: 'anna', display_name: 'Anna', state: 'zone',
+            zone_id: 'z_gone', zone_name: 'Old office', picture_url: null,
+          }],
+        })
+      }
+      return Promise.reject(new Error('zones down'))
+    })
+    const { findByTestId, queryByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    await findByTestId('zone-only-list')
+    expect(queryByText(EMPTY_ZONE_TEXT)).toBeNull()
+  })
+
+  it('shows the empty text once when nobody is in a zone', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes('/presence')) {
+        return Promise.resolve({
+          feature_enabled: true, location_mode: 'zone_only', entries: [],
+        })
+      }
+      return Promise.resolve({ zones: [office] })
+    })
+    const { findAllByText } = render(<SpaceLocationCard spaceId="sp_test" />)
+    const hits = await findAllByText(EMPTY_ZONE_TEXT)
+    expect(hits).toHaveLength(1)
   })
 
   it('never lets a hostile zone colour inject extra CSS into the zone chip', async () => {

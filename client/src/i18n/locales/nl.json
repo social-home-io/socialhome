@@ -4220,6 +4220,7 @@
   "location.card.stopped_location": "Je deelt je locatie niet meer met deze ruimte",
   "location.zones_legend": "Legenda van zones",
   "location.map_empty": "Geen locaties om te tonen.",
+  "location.map.zone_marker": "Zone {name}",
   "space_profile.title": "Je profiel in deze ruimte",
   "space_profile.intro": "Kies een andere weergavenaam of foto voor deze ruimte. Laat een veld leeg om die van je huishouden te gebruiken.",
   "space_profile.upload_hint": "Klik om een nieuwe foto voor deze ruimte te uploaden",

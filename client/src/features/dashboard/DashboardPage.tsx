@@ -46,6 +46,7 @@ import { TodayScheduleCard } from '../welcome/TodayScheduleCard'
 import { activeTimetables, lessonCount } from '../welcome/schedule'
 import { addBase } from '@/baseUrl'
 import { safeIconSrc } from '@/utils/appIcon'
+import { presenceLabel } from '@/utils/presenceLabel'
 
 interface CornerPresence {
   user_id: string
@@ -252,13 +253,6 @@ function presenceDotClass(state: string): string {
   }
 }
 
-/** A presence state in the UI language; unknown states show as sent. */
-function presenceStateLabel(state: string): string {
-  const key = `presence.state.${state}`
-  const label = t(key)
-  return label === key ? state : label
-}
-
 /** "Who's home" — household member presence + the GPS map underneath
  *  for members who opt in.  Wraps in the same paper-card chrome the
  *  Welcome cards use so the corner reads as one stack. */
@@ -277,7 +271,7 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
             <span class={presenceDotClass(p.state)} />
             <Avatar name={p.display_name} src={p.picture_url} size={28} />
             <span>{p.display_name}</span>
-            <span class="sh-muted">{p.zone_name || presenceStateLabel(p.state)}</span>
+            <span class="sh-muted">{p.zone_name || presenceLabel(p.state)}</span>
           </div>
         ))}
       </div>
@@ -285,16 +279,20 @@ function PresenceCard({ presence }: { presence: CornerPresence[] }) {
         <LocationMap
           markers={withCoords.map((p) => ({
             id: p.user_id,
+            user_id: p.user_id,
             lat: p.latitude as number,
             lon: p.longitude as number,
             accuracy_m: p.gps_accuracy_m ?? null,
             label: p.display_name,
-            sub_label: p.zone_name,
+            sub_label: p.zone_name || presenceLabel(p.state),
             avatar_url: p.picture_url,
             state: p.state,
           }))}
           height={220}
           emptyLabel={t('dashboard.no_gps')}
+          // The whole card is one link to the presence page: the map is
+          // a picture here, not a control.
+          readOnly
         />
       )}
       <span class="sh-welcome-card__more">{t('dashboard.open_presence')}</span>

@@ -1138,26 +1138,7 @@ async def test_remote_member_display_name_prefers_fresh_users_table_row(client):
     assert remote["display_name"] == "Jacqueline Williams"
 
 
-async def test_remote_member_surfaces_picture_url_when_users_sync_delivered_bytes(
-    client,
-):
-    """``USERS_SYNC`` fans the remote user's WebP avatar bytes onto every
-    paired peer; they land in the shared ``user_profile_pictures`` table
-    keyed by ``user_id`` and the ``remote_users`` row picks up
-    ``picture_hash``. The space member list MUST surface the resulting
-    ``api/users/{user_id}/picture?v=<hash>`` URL so the SPA shows
-    cross-household members with their actual avatar instead of just
-    initials. Pascal's report was "all members have no profile
-    pictures" — root cause was the route hardcoding ``picture_url:
-    None`` on the remote row even when the bytes had arrived."""
-    app = client.app
-    db = app[_db_key]
-    r = await client.post(
-        "/api/spaces",
-        json={"name": "RemoteAvatar"},
-        headers=_auth(client._admin_token),
-    )
-    sid = (await r.json())["id"]
+async def _seed_remote_member_with_picture(db, sid: str, picture_hash: str) -> None:
     # Pair-instance + remote_user row carrying the synced picture hash.
     await db.enqueue(
         "INSERT INTO remote_instances"
@@ -1187,8 +1168,31 @@ async def test_remote_member_surfaces_picture_url_when_users_sync_delivered_byte
         "(user_id, instance_id, remote_username, display_name,"
         " picture_hash, synced_at, deprovisioned_at)"
         " VALUES(?,?,?,?,?, datetime('now'), NULL)",
-        ("uid-bob", "peer-instance-id", "bob", "Bob", "deadbeef"),
+        ("uid-bob", "peer-instance-id", "bob", "Bob", picture_hash),
     )
+
+
+async def test_remote_member_surfaces_picture_url_when_users_sync_delivered_bytes(
+    client,
+):
+    """``USERS_SYNC`` fans the remote user's WebP avatar bytes onto every
+    paired peer; they land in the shared ``user_profile_pictures`` table
+    keyed by ``user_id`` and the ``remote_users`` row picks up
+    ``picture_hash``. The space member list MUST surface the resulting
+    ``api/users/{user_id}/picture?v=<hash>`` URL so the SPA shows
+    cross-household members with their actual avatar instead of just
+    initials. Pascal's report was "all members have no profile
+    pictures" — root cause was the route hardcoding ``picture_url:
+    None`` on the remote row even when the bytes had arrived."""
+    app = client.app
+    db = app[_db_key]
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "RemoteAvatar"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    await _seed_remote_member_with_picture(db, sid, "deadbeef")
 
     resp = await client.get(
         f"/api/spaces/{sid}/members",
@@ -1200,6 +1204,26 @@ async def test_remote_member_surfaces_picture_url_when_users_sync_delivered_byte
     assert remote["picture_url"] is not None
     assert "api/users/uid-bob/picture" in remote["picture_url"]
     assert "v=deadbeef" in remote["picture_url"]
+
+
+async def test_remote_member_picture_hash_is_url_encoded(client):
+    """``picture_hash`` arrives over federation: a ``&`` in it must not
+    smuggle an extra query parameter into the member's picture URL."""
+    db = client.app[_db_key]
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "RemoteAvatarHash"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    await _seed_remote_member_with_picture(db, sid, "ab&sig=evil")
+    resp = await client.get(
+        f"/api/spaces/{sid}/members",
+        headers=_auth(client._admin_token),
+    )
+    remote = next(m for m in await resp.json() if m.get("instance_id"))
+    assert "v=ab%26sig%3Devil" in remote["picture_url"]
+    assert remote["picture_url"].count("sig=") == 1
 
 
 async def test_remote_member_surfaces_personal_alias(client):

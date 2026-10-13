@@ -10,10 +10,12 @@ import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
 import { LocationMap, type LocationMarker } from '@/components/LocationMap'
 import { currentUser } from '@/store/auth'
+import { presenceLabel } from '@/utils/presenceLabel'
 import type { UserStatus } from '@/types'
 
 interface PresenceEntry {
   username: string
+  user_id: string
   display_name: string
   picture_url: string | null
   state: string
@@ -21,6 +23,8 @@ interface PresenceEntry {
   latitude?: number | null
   longitude?: number | null
   gps_accuracy_m?: number | null
+  /** When the presence row last changed (UTC). */
+  updated_at?: string | null
   last_seen_at?: string | null
   is_online?: boolean
   is_idle?: boolean
@@ -60,15 +64,6 @@ function presenceDot(state: string): string {
     case 'away': return 'sh-dot sh-dot--away'
     case 'not_home': return 'sh-dot sh-dot--not-home'
     default: return 'sh-dot sh-dot--unknown'
-  }
-}
-
-function presenceLabel(state: string): string {
-  switch (state) {
-    case 'home': return t('presence.state.home')
-    case 'away': return t('presence.state.away')
-    case 'not_home': return t('presence.state.not_home')
-    default: return state
   }
 }
 
@@ -153,12 +148,13 @@ export default function PresencePage() {
               typeof p.latitude === 'number' && typeof p.longitude === 'number',
             )
             .map<LocationMarker>((p) => ({
-              id: p.username,
+              id: p.user_id,
+              user_id: p.user_id,
               lat: p.latitude as number,
               lon: p.longitude as number,
               accuracy_m: p.gps_accuracy_m ?? null,
               label: p.display_name,
-              sub_label: p.zone_name || presenceLabel(p.state),
+              sub_label: presenceLabel(p.state, p.zone_name),
               avatar_url: p.picture_url,
               state: p.state,
             }))}
@@ -203,7 +199,7 @@ export default function PresencePage() {
               <strong>{p.display_name}</strong>
               {p.dnd && <span class="sh-badge sh-badge--dnd">{t('presence.dnd_badge')}</span>}
               <span class={`sh-presence-state sh-presence-state--${p.state}`}>
-                {p.zone_name || presenceLabel(p.state)}
+                {presenceLabel(p.state, p.zone_name)}
               </span>
               <span class="sh-presence-online sh-muted">
                 {online === 'online' && `· ${t('dms.status.online')}`}

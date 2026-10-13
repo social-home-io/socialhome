@@ -13,6 +13,7 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
 import math
+from urllib.parse import quote
 
 from ..app_keys import (
     alias_resolver_key,
@@ -656,7 +657,9 @@ def _remote_member_to_dict(
         "personal_alias": personal_alias,
         "picture_hash": picture_hash,
         "picture_url": (
-            f"api/users/{rm.user_id}/picture?v={picture_hash}" if picture_hash else None
+            f"api/users/{rm.user_id}/picture?v={quote(picture_hash, safe='')}"
+            if picture_hash
+            else None
         ),
         "is_online": is_online,
         "is_idle": is_idle,
@@ -698,6 +701,15 @@ def _remote_member_to_dict_signed(
         mention=mention,
         household_name=household_name,
     )
+    signer = request.app.get(media_signer_key)
+    if signer is not None:
+        sign_media_urls_in(payload, signer)
+    return payload
+
+
+def _signed(request: web.Request, payload: dict) -> dict:
+    """Sign every ``picture_url`` in ``payload`` for direct ``<img src>``
+    use — the picture route answers 401 to an unsigned URL."""
     signer = request.app.get(media_signer_key)
     if signer is not None:
         sign_media_urls_in(payload, signer)
@@ -2181,7 +2193,9 @@ async def _remote_member_pin_entries(
     member_repo = request.app.get(space_remote_member_repo_key)
     if repo is None or member_repo is None:
         return []
-    signer = request.app.get(media_signer_key)
+    # ``picture_url`` stays unsigned here: the view signs the whole
+    # response once (``_signed``) — a second pass appends a second
+    # ``exp``/``sig`` pair.
     locs = await repo.list_for_space(space_id)
     if not locs:
         return []
@@ -2218,7 +2232,9 @@ async def _remote_member_pin_entries(
         # on another household").
         picture_hash = remote_user.picture_hash if remote_user is not None else None
         picture_url = (
-            f"api/users/{loc.user_id}/picture?v={picture_hash}"
+            # The hash comes over federation — encode it so it can't add
+            # query parameters of its own.
+            f"api/users/{loc.user_id}/picture?v={quote(picture_hash, safe='')}"
             if picture_hash
             else None
         )
@@ -2237,8 +2253,6 @@ async def _remote_member_pin_entries(
         else:  # zone_only
             entry["zone_id"] = loc.zone_id
             entry["zone_name"] = loc.zone_name
-        if signer is not None and entry.get("picture_url"):
-            sign_media_urls_in(entry, signer)
         out.append(entry)
     return out
 
@@ -2352,13 +2366,16 @@ class SpacePresenceView(BaseView):
                 )
             )
             return web.json_response(
-                {
-                    "feature_enabled": True,
-                    "location_mode": "zone_only",
-                    "entries": response_entries,
-                    "total_members": total_members,
-                    "sharing_count": sharing_count,
-                },
+                _signed(
+                    self.request,
+                    {
+                        "feature_enabled": True,
+                        "location_mode": "zone_only",
+                        "entries": response_entries,
+                        "total_members": total_members,
+                        "sharing_count": sharing_count,
+                    },
+                ),
             )
 
         # gps mode (default)
@@ -2377,13 +2394,16 @@ class SpacePresenceView(BaseView):
         ]
         remote_entries = await _remote_member_pin_entries(self.request, space_id)
         return web.json_response(
-            {
-                "feature_enabled": True,
-                "location_mode": "gps",
-                "entries": local_entries + remote_entries,
-                "total_members": total_members,
-                "sharing_count": sharing_count,
-            }
+            _signed(
+                self.request,
+                {
+                    "feature_enabled": True,
+                    "location_mode": "gps",
+                    "entries": local_entries + remote_entries,
+                    "total_members": total_members,
+                    "sharing_count": sharing_count,
+                },
+            )
         )
 
 

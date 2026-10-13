@@ -24,6 +24,7 @@ import { householdUsers } from '@/store/householdUsers'
 import { presence, type PresenceEntry } from '@/store/presence'
 import { Avatar } from './Avatar'
 import { t } from '@/i18n/i18n'
+import { presenceLabel } from '@/utils/presenceLabel'
 
 interface PresenceRow extends PresenceEntry {
   user_id: string
@@ -51,16 +52,8 @@ async function loadPresence(): Promise<void> {
 
 function statusLabel(row: PresenceRow): string {
   // ``zone`` state surfaces the human-readable zone name when the
-  // server has one — otherwise fall back to a generic verb so we
-  // never render an empty cell.
-  if (row.state === 'zone' && row.zone_name) return row.zone_name
-  switch (row.state) {
-    case 'home': return t('presence.state.home')
-    case 'away': return t('presence.state.away')
-    case 'not_home': return t('presence.state.not_home')
-    case 'zone': return t('presence.state.in_zone')
-    default: return row.state || t('presence.state.unknown')
-  }
+  // server has one — otherwise a generic verb, never an empty cell.
+  return presenceLabel(row.state, row.zone_name)
 }
 
 function statusModifier(state: string): string {

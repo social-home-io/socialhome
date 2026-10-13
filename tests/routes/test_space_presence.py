@@ -427,6 +427,9 @@ async def test_presence_includes_remote_member_picture_url(client):
     # The signer ran — the URL carries the cache-busting hash and
     # the signature query the SPA needs for <img> loads under ingress.
     assert "v=feedface" in jacqueline["picture_url"]
+    # Signed exactly once — a second pass appended a second exp/sig pair.
+    assert jacqueline["picture_url"].count("sig=") == 1
+    assert jacqueline["picture_url"].count("exp=") == 1
 
 
 async def test_presence_skips_remote_pin_without_member_row(client):
@@ -538,3 +541,68 @@ async def test_presence_total_members_excludes_share_state(client):
     body = await r.json()
     assert body["total_members"] == 2
     assert body["sharing_count"] == 1
+
+
+async def _seed_local_picture(client, picture_hash: str) -> None:
+    await client._db.enqueue(
+        "UPDATE users SET picture_hash=? WHERE username=?",
+        (picture_hash, "admin"),
+    )
+
+
+async def test_gps_entries_carry_a_signed_picture_url(client):
+    """The map pin loads ``picture_url`` straight into ``<img src>``; the
+    picture route answers 401 to an unsigned URL, so it must be signed."""
+    space_id = await _create_space(client)
+    await _enable_feature_location(client, space_id, enabled=True)
+    await _set_member_opt_in(client, space_id, client._uid, enabled=True)
+    await _seed_local_picture(client, "cafe01")
+    await _seed_presence(
+        client, username="admin", user_id=client._uid, lat=47.3769, lon=8.5417
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    [e] = (await r.json())["entries"]
+    assert e["picture_url"].startswith(f"api/users/{client._uid}/picture?v=cafe01")
+    assert "sig=" in e["picture_url"] and "exp=" in e["picture_url"]
+
+
+async def test_zone_only_entries_carry_a_signed_picture_url(client):
+    space_id = await _create_space(client)
+    await _enable_feature_location(client, space_id, enabled=True)
+    await _set_location_mode(client, space_id, "zone_only")
+    await _set_member_opt_in(client, space_id, client._uid, enabled=True)
+    await _seed_local_picture(client, "cafe02")
+    await _seed_zone(
+        client, space_id, zid="z_home", name="Home", lat=47.3769, lon=8.5417
+    )
+    await _seed_presence(
+        client, username="admin", user_id=client._uid, lat=47.3769, lon=8.5417
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    [e] = (await r.json())["entries"]
+    assert e["picture_url"].startswith(f"api/users/{client._uid}/picture?v=cafe02")
+    assert "sig=" in e["picture_url"]
+
+
+async def test_remote_pin_picture_hash_is_url_encoded(client):
+    """A remote ``picture_hash`` arrives over federation: a ``&`` in it
+    must not smuggle an extra query parameter into the picture URL."""
+    space_id = await _create_space(client)
+    await _enable_feature_location(client, space_id, enabled=True)
+    await _seed_remote_member(
+        client, space_id, instance_id="peer-x", user_id="uid-x", display_name="X"
+    )
+    await client._db.enqueue(
+        "INSERT INTO remote_users"
+        "(user_id, instance_id, remote_username, display_name,"
+        " picture_hash, synced_at, deprovisioned_at)"
+        " VALUES(?,?,?,?,?, datetime('now'), NULL)",
+        ("uid-x", "peer-x", "x", "X", "ab&sig=evil"),
+    )
+    await _seed_remote_pin(
+        client, space_id, instance_id="peer-x", user_id="uid-x", lat=48.1, lon=11.5
+    )
+    r = await client.get(f"/api/spaces/{space_id}/presence", headers=_auth(client._tok))
+    entry = next(e for e in (await r.json())["entries"] if e["user_id"] == "uid-x")
+    assert "v=ab%26sig%3Devil" in entry["picture_url"]
+    assert entry["picture_url"].count("sig=") == 1

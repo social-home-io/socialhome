@@ -4247,6 +4247,7 @@
   "location.card.stopped_location": "Ya no compartes tu ubicación con este espacio",
   "location.zones_legend": "Leyenda de zonas",
   "location.map_empty": "No hay ubicaciones que mostrar.",
+  "location.map.zone_marker": "Zona {name}",
   "space_profile.title": "Tu perfil en este espacio",
   "space_profile.intro": "Pon otro nombre visible u otra foto para este espacio. Deja un campo vacío para usar el de tu hogar.",
   "space_profile.upload_hint": "Haz clic para subir una foto nueva para este espacio",

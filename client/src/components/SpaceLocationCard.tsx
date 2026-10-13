@@ -7,9 +7,12 @@
  * The space-level switch is now a single boolean (`feature_enabled`).
  * When OFF the map tab is hidden — this component renders an
  * explanatory banner so admins know why. When ON, members who opted
- * in surface as GPS pins; the per-space zones are drawn as labelled
- * overlay circles. HA-defined zone names never reach this component
- * (the server strips them at the household boundary).
+ * in surface as person bubbles: everyone inside one of the per-space
+ * zones shares that zone's bubble, the rest sit at their GPS point. In
+ * zone-only mode there are no coordinates at all — members are drawn at
+ * their zone's centre (nothing beyond the zone already shared). HA-defined
+ * zone names never reach this component (the server strips them at the
+ * household boundary).
  *
  * The persistent **sharing chip** above the map shows the current
  * user's own opt-in state and exposes a one-tap toggle that calls
@@ -30,6 +33,8 @@ import { Modal } from './Modal'
 import { showToast } from './Toast'
 import { ZoneLegend } from './ZoneLegend'
 import { zoneColor } from '@/utils/zoneColor'
+import { matchZone } from '@/utils/mapMarkers'
+import { presenceLabel } from '@/utils/presenceLabel'
 import type { SpaceZone } from '@/types'
 import { isOne, t } from '@/i18n/i18n'
 
@@ -58,6 +63,15 @@ interface SpacePresenceEntry {
   zone_id?: string
   zone_name?: string
   picture_url: string | null
+  /** Set on another household's member. Their ``state`` is a server
+   *  placeholder (the pin carries no state), so it is never shown. */
+  instance_id?: string | null
+}
+
+/** What to say about a member's state — nothing for another
+ *  household's member, whose state the server can't know. */
+function _stateLabel(p: SpacePresenceEntry): string | null {
+  return p.instance_id ? null : presenceLabel(p.state)
 }
 
 interface SpacePresenceResponse {
@@ -108,6 +122,8 @@ export function SpaceLocationCard({
   const [zones, setZones] = useState<SpaceZone[]>([])
   const [sharingMe, setSharingMe] = useState<boolean>(false)
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false)
+  // Person id or ``zone:<id>``; highlights the marker for now.
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -261,18 +277,29 @@ export function SpaceLocationCard({
   const isZoneOnly = data.location_mode === 'zone_only'
 
   const markers: LocationMarker[] = isZoneOnly
-    ? []
+    ? data.entries
+        .filter((p) => p.zone_id != null)
+        .map((p) => ({
+          id: p.user_id,
+          user_id: p.user_id,
+          zone_id: p.zone_id,
+          label: p.display_name,
+          sub_label: p.zone_name ?? null,
+          avatar_url: p.picture_url,
+          state: p.state,
+        }))
     : data.entries
         .filter((p) => p.latitude != null && p.longitude != null)
         .map((p) => ({
           id: p.user_id,
+          user_id: p.user_id,
           lat: p.latitude as number,
           lon: p.longitude as number,
           accuracy_m: p.gps_accuracy_m ?? null,
           label: p.display_name,
           sub_label:
-            matchZoneName(zones, p.latitude as number, p.longitude as number)
-            || p.state,
+            matchZone(zones, p.latitude as number, p.longitude as number)?.name
+            ?? _stateLabel(p),
           avatar_url: p.picture_url,
           state: p.state,
         }))
@@ -318,13 +345,26 @@ export function SpaceLocationCard({
           </Button>
         </div>
       )}
-      {isZoneOnly ? (
+      <LocationMap
+        markers={markers}
+        zones={zones}
+        height={380}
+        selectedId={selectedId}
+        onSelect={setSelectedId}
+        emptyLabel={
+          isZoneOnly
+            // Members are in zones we can't place (zones failed to load,
+            // or a zone was deleted): the list below says who — the map
+            // stays quiet rather than claim nobody is anywhere.
+            ? (data.entries.length === 0 ? t('location.card.no_one_in_zone') : '')
+            : total === 0
+              ? t('location.card.no_gps_yet')
+              : t('location.card.no_gps_now')
+        }
+      />
+      {zones.length > 0 && <ZoneLegend zones={zones} />}
+      {isZoneOnly && data.entries.length > 0 && (
         <ul class="sh-zone-only-list" data-testid="zone-only-list">
-          {data.entries.length === 0 && (
-            <li class="sh-zone-only-list__empty sh-muted">
-              {t('location.card.no_one_in_zone')}
-            </li>
-          )}
           {data.entries.map((p) => {
             const zone = zones.find((z) => z.id === p.zone_id)
             const colour = zoneColor(zone)
@@ -332,11 +372,11 @@ export function SpaceLocationCard({
               <li key={p.user_id} class="sh-zone-only-list__row">
                 <span class="sh-zone-only-list__avatar">
                   <Avatar name={p.display_name} src={p.picture_url} size={32} />
-                  <span class={_stateDotClass(p.state)} />
+                  {!p.instance_id && <span class={_stateDotClass(p.state)} />}
                 </span>
                 <div class="sh-zone-only-list__meta">
                   <strong>{p.display_name}</strong>
-                  <span class="sh-muted">{p.state}</span>
+                  {_stateLabel(p) && <span class="sh-muted">{_stateLabel(p)}</span>}
                 </div>
                 <span
                   class="sh-zone-only-list__chip"
@@ -352,20 +392,6 @@ export function SpaceLocationCard({
             )
           })}
         </ul>
-      ) : (
-        <>
-          <LocationMap
-            markers={markers}
-            zones={zones}
-            height={380}
-            emptyLabel={
-              total === 0
-                ? t('location.card.no_gps_yet')
-                : t('location.card.no_gps_now')
-            }
-          />
-          {zones.length > 0 && <ZoneLegend zones={zones} />}
-        </>
       )}
       <div class="sh-location-map-footer sh-muted">
         <span>
@@ -413,36 +439,4 @@ export function SpaceLocationCard({
       </Modal>
     </div>
   )
-}
-
-/** Client-side match of a marker's GPS to the closest zone whose
- *  haversine distance is ≤ radius_m. Returns the zone name, or null
- *  when the pin is outside every zone. The server never sends
- *  preprocessed labels — see §23.8.7. */
-function matchZoneName(
-  zones: SpaceZone[],
-  lat: number,
-  lon: number,
-): string | null {
-  let best: { name: string; d: number } | null = null
-  for (const z of zones) {
-    const d = haversineMeters(lat, lon, z.latitude, z.longitude)
-    if (d <= z.radius_m && (best === null || d < best.d)) {
-      best = { name: z.name, d }
-    }
-  }
-  return best?.name ?? null
-}
-
-function haversineMeters(
-  lat1: number, lon1: number, lat2: number, lon2: number,
-): number {
-  const R = 6_371_000
-  const toRad = (deg: number) => (deg * Math.PI) / 180
-  const dLat = toRad(lat2 - lat1)
-  const dLon = toRad(lon2 - lon1)
-  const a =
-    Math.sin(dLat / 2) ** 2
-    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
-  return 2 * R * Math.asin(Math.sqrt(a))
 }
