@@ -3525,16 +3525,20 @@ async def test_gallery_item_deleted_cross_space_is_refused(gallery_handlers, cap
 class _FakeZoneRepo:
     def __init__(self) -> None:
         self.rows = _ScopedRows()
+        self.stored: dict = {}
         self.upserted: list = []
         self.deleted: list[str] = []
         self.deleted_by: list[str] = []
 
     async def get(self, zone_id):
+        if zone_id in self.stored and zone_id in self.rows.space_of:
+            return self.stored[zone_id]
         return self.rows.row(zone_id)
 
     async def upsert(self, zone, *, space_id):
         if not self.rows.claim(zone.id, space_id):
             return False
+        self.stored[zone.id] = zone
         self.upserted.append(zone)
         return True
 
@@ -3608,6 +3612,56 @@ async def test_zone_upserted_malformed_or_missing_drops(zone_handlers):
         _event(FederationEventType.SPACE_ZONE_DELETED, {}, space_id="sp-1")
     )
     assert zones.upserted == [] and zones.deleted == []
+
+
+async def _zone_up(handlers, **over):
+    await handlers._on_zone_upserted(
+        _event(
+            FederationEventType.SPACE_ZONE_UPSERTED,
+            dict(_ZONE, **over),
+            space_id="sp-1",
+            from_instance="peer-x",
+        )
+    )
+
+
+async def test_zone_upserted_applies_the_icon(zone_handlers):
+    handlers, zones = zone_handlers
+    await _zone_up(handlers, icon="🏫")
+    assert zones.upserted[-1].icon == "🏫"
+
+
+async def test_zone_upserted_without_icon_key_keeps_the_stored_icon(zone_handlers):
+    """An older admin household (pre-icon) editing a zone must not wipe
+    the icon a newer household set: an absent key means "keep"."""
+    handlers, zones = zone_handlers
+    await _zone_up(handlers, icon="🏫")
+    await _zone_up(handlers, radius_m=300)  # no "icon" key at all
+    assert zones.upserted[-1].radius_m == 300
+    assert zones.upserted[-1].icon == "🏫"
+
+
+async def test_zone_upserted_without_icon_key_new_zone_has_none(zone_handlers):
+    handlers, zones = zone_handlers
+    await _zone_up(handlers)
+    assert zones.upserted[-1].icon is None
+
+
+async def test_zone_upserted_explicit_null_icon_clears(zone_handlers):
+    handlers, zones = zone_handlers
+    await _zone_up(handlers, icon="🏫")
+    await _zone_up(handlers, icon=None)
+    assert zones.upserted[-1].icon is None
+
+
+@pytest.mark.parametrize("icon", ["school", "🏫🏠", "", "<b>", 5, "🏫" * 17])
+async def test_zone_upserted_invalid_icon_dropped(zone_handlers, caplog, icon):
+    handlers, zones = zone_handlers
+    with caplog.at_level("WARNING"):
+        await _zone_up(handlers, icon=icon)
+    assert zones.upserted == []
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "sp-1" in text and "peer-x" in text and "icon" in text
 
 
 @pytest.mark.parametrize(

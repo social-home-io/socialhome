@@ -10,8 +10,9 @@ Service responsibilities:
 * admin gate — only ``owner`` or ``admin`` members of the space may
   create / update / delete; any member may list. Mirrors the pattern in
   :mod:`space_service`.
-* validation — radius range (25 m – 50 km), color hex shape, name
-  uniqueness within a space, 50-zones-per-space cap.
+* validation — radius range (25 m – 50 km), color hex shape, icon
+  (exactly one emoji), name uniqueness within a space,
+  50-zones-per-space cap.
 * coordinates — finite, in range and truncated to 4 dp via
   :func:`~socialhome.domain.space.validate_zone_coord` (§25 / CLAUDE.md).
 * domain events — emit :class:`SpaceZoneUpserted` /
@@ -36,6 +37,7 @@ from ..domain.space import (
     SpaceZone,
     validate_zone_color,
     validate_zone_coord,
+    validate_zone_icon,
     validate_zone_name,
     validate_zone_radius,
 )
@@ -57,8 +59,8 @@ MAX_RADIUS_M = MAX_ZONE_RADIUS_M
 MAX_ZONES_PER_SPACE = 50
 
 #: Sentinel for "argument omitted" so PATCH callers can distinguish
-#: "don't change colour" (omit) from "clear the colour, fall back to
-#: palette default" (pass ``None`` explicitly).
+#: "don't change colour / icon" (omit) from "clear it" (pass ``None``
+#: explicitly).
 _UNSET: object = object()
 
 
@@ -125,6 +127,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         longitude: float,
         radius_m: int,
         color: str | None = None,
+        icon: str | None = None,
     ) -> SpaceZone:
         """Create a new zone. Admin/owner-only."""
         await self._require_admin(space_id, actor_username)
@@ -134,6 +137,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         clean_name = validate_zone_name(name)
         clean_radius = _validate_radius(radius_m)
         clean_color = validate_zone_color(color)
+        clean_icon = validate_zone_icon(icon)
         clean_lat = validate_zone_coord(latitude, name="latitude", limit=90)
         clean_lon = validate_zone_coord(longitude, name="longitude", limit=180)
         assert clean_lat is not None and clean_lon is not None  # noqa: S101
@@ -157,6 +161,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
             longitude=clean_lon,
             radius_m=clean_radius,
             color=clean_color,
+            icon=clean_icon,
             created_by=actor.user_id,
             created_at=now,
             updated_at=now,
@@ -176,13 +181,15 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
         longitude: float | None = None,
         radius_m: int | None = None,
         color: "str | None | object" = _UNSET,
+        icon: "str | None | object" = _UNSET,
     ) -> SpaceZone:
         """Partial update. Admin/owner-only.
 
         ``color`` accepts three states: omit (no change), explicit
         ``None`` (clear the colour, fall back to palette default), or
         a hex string. We use a sentinel so ``color=None`` actually
-        means "clear it" rather than "do nothing".
+        means "clear it" rather than "do nothing". ``icon`` (a single
+        emoji) follows the same three states.
         """
         await self._require_admin(space_id, actor_username)
         existing = await self._zones.get(zone_id)
@@ -194,6 +201,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
             existing.radius_m if radius_m is None else _validate_radius(radius_m)
         )
         new_color = existing.color if color is _UNSET else validate_zone_color(color)
+        new_icon = existing.icon if icon is _UNSET else validate_zone_icon(icon)
         new_lat = (
             existing.latitude
             if latitude is None
@@ -221,6 +229,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
             longitude=new_lon,
             radius_m=new_radius,
             color=new_color,
+            icon=new_icon,
             created_by=existing.created_by,
             created_at=existing.created_at,
             updated_at=_now_iso(),
@@ -288,6 +297,7 @@ class SpaceZoneService(BusPublisherMixin, SpaceMemberGuardMixin):
                 color=zone.color,
                 created_by=zone.created_by,
                 updated_at=zone.updated_at,
+                icon=zone.icon,
             ),
         )
 

@@ -7,7 +7,7 @@ exceptions are mapped centrally by :class:`BaseView._iter`:
 * :class:`SpaceZoneLimitError`              → 409 ``ZONE_LIMIT``
 * :class:`SpaceZoneNameConflictError`       → 409 ``ZONE_NAME_TAKEN``
 * :class:`SpacePermissionError`             → 403 ``FORBIDDEN``
-* ``ValueError`` (radius / colour / name)   → 422 ``UNPROCESSABLE``
+* ``ValueError`` (radius / colour / icon / name) → 422 ``UNPROCESSABLE``
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ def _zone_to_dict(z: SpaceZone) -> dict:
         "longitude": z.longitude,
         "radius_m": z.radius_m,
         "color": z.color,
+        "icon": z.icon,
         "created_by": z.created_by,
         "created_at": z.created_at,
         "updated_at": z.updated_at,
@@ -80,6 +81,7 @@ class SpaceZonesCollectionView(BaseView):
             longitude=body.get("longitude", 0.0),
             radius_m=body.get("radius_m", 0),
             color=body.get("color"),
+            icon=body.get("icon"),
         )
         return self._json(_zone_to_dict(zone), status=201)
 
@@ -89,8 +91,8 @@ class SpaceZoneDetailView(BaseView):
 
     Both are admin/owner-only. Partial updates: omit any of
     ``name``, ``latitude``, ``longitude``, ``radius_m`` to leave them
-    untouched. Send ``"color": null`` to clear the colour explicitly,
-    omit the field to leave it untouched.
+    untouched. Send ``"color": null`` / ``"icon": null`` to clear the
+    colour / icon explicitly, omit the field to leave it untouched.
     """
 
     async def patch(self) -> web.Response:
@@ -113,6 +115,8 @@ class SpaceZoneDetailView(BaseView):
             kwargs["radius_m"] = body["radius_m"]
         if "color" in body:  # explicit None means "clear"
             kwargs["color"] = body["color"]
+        if "icon" in body:  # explicit None means "clear"
+            kwargs["icon"] = body["icon"]
 
         zone = await svc.update_zone(
             space_id,

@@ -104,6 +104,7 @@ from ...domain.space import (
     SpaceZone,
     validate_zone_color,
     validate_zone_coord,
+    validate_zone_icon,
     validate_zone_name,
     validate_zone_radius,
 )
@@ -2283,8 +2284,8 @@ class SpaceContentInboundHandlers:
         if not zone_id or not p.get("name"):
             log.debug("SPACE_ZONE_UPSERTED missing required field")
             return
-        # Same display-data rules as the local API (§23.8.7): the name and
-        # colour reach every member's map. Never log the name itself.
+        # Same display-data rules as the local API (§23.8.7): the name,
+        # colour and icon reach every member's map. Never log the name itself.
         # Coordinates and radius pass the same rules too: finite, in
         # range, truncated to 4 dp (CLAUDE.md GPS rule), 25 m – 50 km.
         try:
@@ -2295,6 +2296,7 @@ class SpaceContentInboundHandlers:
                 p.get("longitude"), name="longitude", limit=180
             )
             radius_m = validate_zone_radius(p.get("radius_m"))
+            icon = validate_zone_icon(p.get("icon"))
         except ValueError as exc:
             log.warning(
                 "SPACE_ZONE_UPSERTED from %s: zone %s in space %s refused — %s",
@@ -2307,9 +2309,10 @@ class SpaceContentInboundHandlers:
         if not await self._zone_write_allowed(event, space_id, zone_id):
             return
         created_by = str(p.get("created_by") or "")
+        existing = await self._zone_repo.get(zone_id)
         if (
             created_by
-            and await self._zone_repo.get(zone_id) is None
+            and existing is None
             and not await self._authorship.may_author(event, space_id, created_by)
         ):
             await self._authorship.hold_or_refuse(
@@ -2320,6 +2323,15 @@ class SpaceContentInboundHandlers:
                 user_id=created_by,
             )
             return
+        if "icon" not in p:
+            # An older sender (pre-icon) knows nothing of the field: keep
+            # the stored icon rather than wiping it. An explicit ``null``
+            # clears it.
+            icon = (
+                existing.icon
+                if existing is not None and existing.space_id == space_id
+                else None
+            )
         zone = SpaceZone(
             id=zone_id,
             space_id=space_id,
@@ -2328,6 +2340,7 @@ class SpaceContentInboundHandlers:
             longitude=longitude,
             radius_m=radius_m,
             color=color,
+            icon=icon,
             created_by=created_by,
             created_at=str(
                 p.get("created_at") or p.get("updated_at") or "",

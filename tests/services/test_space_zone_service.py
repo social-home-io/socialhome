@@ -389,6 +389,77 @@ async def test_update_zone_clear_color(env):
     assert updated.color is None
 
 
+# ─── Icon ────────────────────────────────────────────────────────────────
+
+
+async def _iconed_zone(env, icon="🏫"):
+    return await env.svc.create_zone(
+        "sp_test",
+        "admin",
+        name="School",
+        latitude=47.0,
+        longitude=8.0,
+        radius_m=200,
+        icon=icon,
+    )
+
+
+async def test_create_zone_with_icon_persists_and_publishes(env):
+    zone = await _iconed_zone(env)
+    assert zone.icon == "🏫"
+    [persisted] = await env.svc.list_zones("sp_test", env.admin_uid)
+    assert persisted.icon == "🏫"
+    [event] = env.events
+    assert isinstance(event, SpaceZoneUpserted)
+    assert event.icon == "🏫"
+
+
+async def test_create_zone_without_icon_has_none(env):
+    zone = await _iconed_zone(env, icon=None)
+    assert zone.icon is None
+    assert env.events[-1].icon is None
+
+
+@pytest.mark.parametrize("bad", ["school", "🏫🏠", "", " 🏫", 7])
+async def test_create_zone_bad_icon_rejected(env, bad):
+    with pytest.raises(ValueError, match="icon"):
+        await _iconed_zone(env, icon=bad)
+    assert env.events == []
+
+
+async def test_update_zone_sets_icon(env):
+    z = await _iconed_zone(env, icon=None)
+    env.events.clear()
+    updated = await env.svc.update_zone("sp_test", z.id, "admin", icon="⚽")
+    assert updated.icon == "⚽"
+    [persisted] = await env.svc.list_zones("sp_test", env.admin_uid)
+    assert persisted.icon == "⚽"
+    assert env.events[-1].icon == "⚽"
+
+
+async def test_update_zone_omitted_icon_kept(env):
+    z = await _iconed_zone(env)
+    updated = await env.svc.update_zone("sp_test", z.id, "admin", radius_m=300)
+    assert updated.icon == "🏫"
+    assert env.events[-1].icon == "🏫"
+
+
+async def test_update_zone_none_clears_icon(env):
+    z = await _iconed_zone(env)
+    updated = await env.svc.update_zone("sp_test", z.id, "admin", icon=None)
+    assert updated.icon is None
+    [persisted] = await env.svc.list_zones("sp_test", env.admin_uid)
+    assert persisted.icon is None
+
+
+async def test_update_zone_bad_icon_rejected(env):
+    z = await _iconed_zone(env)
+    with pytest.raises(ValueError, match="icon"):
+        await env.svc.update_zone("sp_test", z.id, "admin", icon="school")
+    [persisted] = await env.svc.list_zones("sp_test", env.admin_uid)
+    assert persisted.icon == "🏫"
+
+
 async def test_update_zone_name_collision_rejected(env):
     await env.svc.create_zone(
         "sp_test",

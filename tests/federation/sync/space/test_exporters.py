@@ -564,6 +564,7 @@ async def test_zones_exporter_serialises_catalogue():
         created_by="u-1",
         created_at="2026-04-27T00:00:00+00:00",
         updated_at="2026-04-27T00:00:00+00:00",
+        icon="🏢",
     )
 
     class _Repo:
@@ -578,6 +579,9 @@ async def test_zones_exporter_serialises_catalogue():
     assert recs[0]["radius_m"] == 150
     # Match the on-the-wire shape the receiver expects.
     assert recs[0]["color"] == "#3b82f6"
+    # The icon key is always present (None when unset) so a receiver can
+    # tell "cleared" from "older provider without icons".
+    assert recs[0]["icon"] == "🏢"
 
 
 async def test_bazaar_exporter_serialises_listings():

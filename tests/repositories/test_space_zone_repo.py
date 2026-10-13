@@ -23,7 +23,9 @@ async def repo(db):
     return r
 
 
-def _zone(zone_id: str, space_id: str, *, name: str = "Home") -> SpaceZone:
+def _zone(
+    zone_id: str, space_id: str, *, name: str = "Home", icon: str | None = None
+) -> SpaceZone:
     return SpaceZone(
         id=zone_id,
         space_id=space_id,
@@ -35,6 +37,7 @@ def _zone(zone_id: str, space_id: str, *, name: str = "Home") -> SpaceZone:
         created_by="uid-alice",
         created_at="2026-01-01T00:00:00+00:00",
         updated_at="2026-01-01T00:00:00+00:00",
+        icon=icon,
     )
 
 
@@ -69,6 +72,22 @@ async def test_delete_is_scoped(repo):
     assert await repo.get("z-b") is not None
     assert await repo.delete("z-b", space_id="sp-b")
     assert await repo.get("z-b") is None
+
+
+async def test_upsert_round_trips_the_icon(repo):
+    assert (await repo.get("z-a")).icon is None
+    assert await repo.upsert(_zone("z-a", "sp-a", icon="🏫"), space_id="sp-a")
+    assert (await repo.get("z-a")).icon == "🏫"
+    assert [z.icon for z in await repo.list_for_space("sp-a")] == ["🏫"]
+    # An upsert carrying no icon clears it (the caller decides what to keep).
+    assert await repo.upsert(_zone("z-a", "sp-a"), space_id="sp-a")
+    assert (await repo.get("z-a")).icon is None
+
+
+async def test_a_zone_delete_drops_its_icon(repo):
+    assert await repo.upsert(_zone("z-a", "sp-a", icon="🏫"), space_id="sp-a")
+    assert await repo.delete("z-a", space_id="sp-a")
+    assert (await _row(repo, "z-a"))["icon"] is None
 
 
 # ─── Tombstones (migration 0085, §25.6 ``space_zones_deleted``) ──────

@@ -73,7 +73,8 @@ FULL_RESYNC_INTERVAL_S: float = 24 * 3600.0
 #:   gallery album takes the host's edits and recounts its items. Copies
 #:   the old shape left wrong heal on one full stream, not on the next row
 #:   change.
-SYNC_SHAPE_VERSION: int = 3
+#: * 4 — migration 0096: a ``space_zones`` record carries ``icon``.
+SYNC_SHAPE_VERSION: int = 4
 
 
 def session_shape(

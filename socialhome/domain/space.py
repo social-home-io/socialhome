@@ -28,6 +28,7 @@ from enum import StrEnum
 from typing import Literal, TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from .emoji import is_single_emoji
 from .errors import CodedError
 from .gfs_server import SignedGfsServerList
 from .presence import truncate_coord
@@ -1636,6 +1637,20 @@ def validate_zone_color(color: object) -> str | None:
     return color.lower()
 
 
+def validate_zone_icon(icon: object) -> str | None:
+    """Return the zone icon (``None`` passes through), or raise
+    :class:`ValueError` unless it is exactly one emoji.
+
+    Applied to the local API, ``SPACE_ZONE_UPSERTED`` and the
+    ``space_zones`` sync resource alike.
+    """
+    if icon is None:
+        return None
+    if not isinstance(icon, str) or not is_single_emoji(icon):
+        raise ValueError("icon must be a single emoji or None")
+    return icon
+
+
 #: §23.8.7: 25 m floor (just above the 4-dp ~11 m precision); 50 km
 #: ceiling (a "city-wide" zone is the largest meaningful display bucket
 #: on a per-space map).
@@ -1744,6 +1759,7 @@ class SpaceZone:
     * ``latitude``/``longitude`` — centre, 4dp-truncated.
     * ``radius_m`` — display radius (25 m – 50 km).
     * ``color`` — ``"#RRGGBB"`` or ``None`` (client picks from palette).
+    * ``icon`` — a single emoji shown on the map, or ``None``.
     * ``created_by`` — ``user_id`` of the admin who first saved the zone.
     """
 
@@ -1757,6 +1773,7 @@ class SpaceZone:
     created_at: str
     updated_at: str
     color: str | None = None
+    icon: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
