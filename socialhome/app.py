@@ -2891,7 +2891,9 @@ def create_app(config: Config | None = None) -> web.Application:
     household_zone_service = HouseholdZoneService(repos.household_zone, bus=bus)
 
     # ── Presence service (local + remote) ──────────────────────────────
-    presence_service = PresenceService(repos.presence, repos.user, bus)
+    presence_service = PresenceService(
+        repos.presence, repos.user, bus, zone_matcher=household_zone_service
+    )
 
     # ── Online status (session presence) ───────────────────────────────
     online_status_service = OnlineStatusService(

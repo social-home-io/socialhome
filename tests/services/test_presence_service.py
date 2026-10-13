@@ -7,9 +7,13 @@ from socialhome.crypto import (
     derive_user_id,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import PresenceUpdated
 from socialhome.domain.presence import LocationUpdate
+from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.household_zone_repo import SqliteHouseholdZoneRepo
 from socialhome.repositories.presence_repo import SqlitePresenceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.household_zone_service import HouseholdZoneService
 from socialhome.services.presence_service import (
     PresenceService,
     UserNotFoundError,
@@ -230,3 +234,94 @@ async def test_update_location_unknown_username_raises_user_not_found(env):
     # in the same writer tick wouldn't have seen a FK violation.
     row = await env.db.fetchone("SELECT 1 FROM presence WHERE username='nobody'")
     assert row is None
+
+
+# ─── Server-side GPS → household zone match ──────────────────────────────
+
+
+@pytest.fixture
+async def zoned(env):
+    """``env`` with household zones Home (radius 100 m) and School, and a
+    presence service that matches GPS against them."""
+    zones = HouseholdZoneService(SqliteHouseholdZoneRepo(env.db))
+    await zones.create_zone(
+        actor_is_admin=True,
+        name="Zuhause",
+        latitude=52.5200,
+        longitude=13.4050,
+        radius_m=100,
+        is_home=True,
+    )
+    await zones.create_zone(
+        actor_is_admin=True,
+        name="School",
+        latitude=52.5300,
+        longitude=13.4050,
+        radius_m=200,
+    )
+    bus = EventBus()
+    seen: list[PresenceUpdated] = []
+
+    async def _on(event):
+        seen.append(event)
+
+    bus.subscribe(PresenceUpdated, _on)
+    env.svc = PresenceService(
+        SqlitePresenceRepo(env.db), SqliteUserRepo(env.db), bus, zone_matcher=zones
+    )
+    env.events = seen
+    return env
+
+
+async def _post_gps(env, lat, lon, *, accuracy=10.0, zone_name=None, state=None):
+    await env.svc.update_location(
+        LocationUpdate(
+            username="anna",
+            state=state or ("away" if not zone_name else "zone"),
+            zone_name=zone_name,
+            latitude=lat,
+            longitude=lon,
+            gps_accuracy_m=accuracy,
+        )
+    )
+    return await env.svc.get_presence("anna")
+
+
+async def test_gps_inside_home_zone_is_home(zoned):
+    p = await _post_gps(zoned, 52.52005, 13.40502)
+    assert (p.state, p.zone_name) == ("home", "home")
+    assert (zoned.events[-1].state, zoned.events[-1].zone_name) == ("home", "home")
+
+
+async def test_gps_inside_named_zone_is_zone(zoned):
+    p = await _post_gps(zoned, 52.5301, 13.4050)
+    assert (p.state, p.zone_name) == ("zone", "School")
+    assert zoned.events[-1].zone_name == "School"
+
+
+async def test_gps_outside_every_zone_is_away(zoned):
+    p = await _post_gps(zoned, 48.1371, 11.5754)
+    assert (p.state, p.zone_name) == ("away", None)
+
+
+async def test_client_zone_name_is_kept(zoned):
+    """The HA integration sends HA's zone state — never overridden."""
+    p = await _post_gps(zoned, 52.5301, 13.4050, zone_name="Work", state="zone")
+    assert (p.state, p.zone_name) == ("zone", "Work")
+
+
+async def test_poor_accuracy_guesses_no_zone(zoned):
+    p = await _post_gps(zoned, 52.5200, 13.4050, accuracy=900.0)
+    assert (p.state, p.zone_name) == ("away", None)
+    assert p.latitude is None
+
+
+async def test_no_gps_guesses_no_zone(zoned):
+    p = await _post_gps(zoned, None, None)
+    assert (p.state, p.zone_name) == ("away", None)
+
+
+async def test_match_uses_the_truncated_point(zoned):
+    """The match runs on the stored 4-dp point, not raw device precision."""
+    p = await _post_gps(zoned, 52.520049999, 13.405049999)
+    assert p.latitude == 52.52 and p.zone_name == "home"

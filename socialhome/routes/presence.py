@@ -122,7 +122,9 @@ class PresenceLocationView(BaseView):
     and POSTs canonical ``{username, latitude, longitude, accuracy_m,
     zone_name}`` bodies here. The core derives :class:`PresenceState`
     from ``zone_name`` (``home`` / ``zone`` / ``away``) and returns
-    204 No Content.
+    204 No Content. A body without ``zone_name`` (standalone mode, other
+    clients) gets its zone from the server-side match against the
+    household zones in :meth:`PresenceService.update_location`.
     """
 
     async def post(self) -> web.Response:

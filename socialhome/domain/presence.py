@@ -57,11 +57,12 @@ class PersonPresence:
 
 @dataclass(slots=True, frozen=True)
 class LocationUpdate:
-    """Location push payload sent by the HA integration to
-    ``POST /api/presence/location``.
+    """Location push payload for ``POST /api/presence/location`` — from
+    the HA integration (with HA's ``zone_name``) or another client (GPS
+    only; the server then matches the household zones).
 
-    The integration is responsible for truncating coordinates to 4 dp and
-    dropping updates with ``gps_accuracy_m > 500``.
+    :class:`PresenceService` truncates coordinates to 4 dp and nulls them
+    when ``gps_accuracy_m > 500`` whatever the sender did.
     """
 
     username: str
