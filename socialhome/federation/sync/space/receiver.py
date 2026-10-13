@@ -465,6 +465,21 @@ def _parse_iso(value: Any) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _sync_event(space_id: str, resource: str, provider: str) -> FederationEvent:
+    """The stand-in envelope a §25.6 record is judged under: the live-event
+    authorship rules (``SpaceAuthorship``) read its ``from_instance`` — the
+    provider household the chunk came from — and its ``space_id``."""
+    return FederationEvent(
+        msg_id=f"sync:{space_id}:{resource}",
+        event_type=FederationEventType.SPACE_SYNC_CHUNK,
+        from_instance=provider,
+        to_instance="",
+        timestamp="",
+        payload={},
+        space_id=space_id,
+    )
+
+
 class SpaceSyncReceiver:
     """Persist inbound space-sync chunks."""
 
@@ -1042,15 +1057,7 @@ class SpaceSyncReceiver:
             if self._profile_picture_repo is not None
             else set()
         )
-        event = FederationEvent(
-            msg_id=f"sync:{space_id}:members",
-            event_type=FederationEventType.SPACE_SYNC_CHUNK,
-            from_instance=provider,
-            to_instance="",
-            timestamp="",
-            payload={},
-            space_id=space_id,
-        )
+        event = _sync_event(space_id, "members", provider)
         for uid in reset:
             if uid in ours:
                 continue
@@ -2399,15 +2406,7 @@ class SpaceSyncReceiver:
             return actor
         if self._authorship is None:
             return ""
-        event = FederationEvent(
-            msg_id=f"sync:{space_id}:actor",
-            event_type=FederationEventType.SPACE_SYNC_CHUNK,
-            from_instance=provider,
-            to_instance="",
-            timestamp="",
-            payload={},
-            space_id=space_id,
-        )
+        event = _sync_event(space_id, "actor", provider)
         if await self._authorship.acts_for(event, space_id, actor, any_role=True):
             return actor
         return ""
@@ -2444,15 +2443,7 @@ class SpaceSyncReceiver:
             highest[page_id] = max(seq, highest.get(page_id, 0))
         if not highest:
             return
-        event = FederationEvent(
-            msg_id=f"sync:{space_id}:pages",
-            event_type=FederationEventType.SPACE_SYNC_CHUNK,
-            from_instance=provider,
-            to_instance="",
-            timestamp="",
-            payload={},
-            space_id=space_id,
-        )
+        event = _sync_event(space_id, "pages", provider)
         if not await self._authorship.writes_here(event, space_id):
             return
         for page_id, seq in highest.items():
@@ -2586,15 +2577,7 @@ class SpaceSyncReceiver:
                 provider,
             )
             return []
-        event = FederationEvent(
-            msg_id=f"sync:{space_id}:{resource}",
-            event_type=FederationEventType.SPACE_SYNC_CHUNK,
-            from_instance=provider,
-            to_instance="",
-            timestamp="",
-            payload={},
-            space_id=space_id,
-        )
+        event = _sync_event(space_id, resource, provider)
         admitted: list[dict[str, Any]] = []
         refused = 0
         for r in records:

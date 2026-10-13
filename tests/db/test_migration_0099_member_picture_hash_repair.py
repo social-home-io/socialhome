@@ -57,7 +57,15 @@ def conn(tmp_path):
     c.close()
 
 
-def _seat(c: sqlite3.Connection, uid: str, seat_hash: str | None) -> None:
+def _seat(
+    c: sqlite3.Connection, uid: str, seat_hash: str | None, *, local: bool = True
+) -> None:
+    """Seat ``uid``; a LOCAL member is one of this household's ``users``."""
+    if local:
+        c.execute(
+            "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+            (f"n-{uid}", uid, uid),
+        )
     c.execute(
         "INSERT INTO space_members(space_id, user_id, picture_hash) VALUES(?,?,?)",
         ("sp", uid, seat_hash),
@@ -76,6 +84,18 @@ def _hashes(c: sqlite3.Connection) -> dict[str, str | None]:
     return {
         r[0]: r[1] for r in c.execute("SELECT user_id, picture_hash FROM space_members")
     }
+
+
+def test_a_remote_members_null_seat_is_left_to_sync(conn):
+    """Before this release the live ``SPACE_MEMBER_PROFILE_UPDATED`` reset
+    NULLed a REMOTE member's seat and kept the blob — the same shape as the
+    wipe damage. Re-pointing it would bring back a picture the member
+    removed (and a host would ship it to every joiner), so remote seats are
+    left alone: their own household's catch-up settles them."""
+    _seat(conn, "remote", None, local=False)
+    _blob(conn, "remote", _GOOD)
+    _apply_through(conn, _VERSION)
+    assert _hashes(conn)["remote"] is None
 
 
 def test_a_wiped_seat_points_at_its_blob_again(conn):

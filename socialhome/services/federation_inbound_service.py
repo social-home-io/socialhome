@@ -3254,11 +3254,18 @@ class FederationInboundService(ProtectionGateMixin):
                     space_id,
                     exc,
                 )
-        if picture_hash is None and self._profile_picture_repo is not None:
-            # A reset leaves no picture behind — like the local reset
+        if (
+            "picture_hash" in p
+            and p["picture_hash"] is None
+            and not bytes_b64
+            and self._profile_picture_repo is not None
+        ):
+            # An explicit reset (``picture_hash: null``, no bytes) leaves no
+            # picture behind — like the local reset
             # (``SpaceService.clear_member_picture``) — so "no hash" honestly
             # means "no picture": the v_58 §25.6 ``members`` record tells
-            # co-members exactly that, and they drop their copy.
+            # co-members exactly that, and they drop their copy. A
+            # display-name-only update or undecodable bytes is no reset.
             await self._profile_picture_repo.clear_member_picture(space_id, user_id)
         await self._space_repo.set_member_profile(
             space_id,

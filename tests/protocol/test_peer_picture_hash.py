@@ -291,6 +291,38 @@ async def test_member_profile_reset_also_drops_the_stored_blob(stack):
     assert await stack.pictures.get_member_picture(SPACE_ID, MEMBER) is None
 
 
+async def test_a_display_name_only_update_keeps_the_blob(stack):
+    """No ``picture_hash`` key: the update says nothing about the picture,
+    so the blob is no reset's to drop."""
+    await _held_picture(stack)
+    await stack.svc._on_space_member_profile_updated(
+        _event(
+            FederationEventType.SPACE_MEMBER_PROFILE_UPDATED,
+            {"user_id": MEMBER, "space_display_name": "B"},
+            space_id=SPACE_ID,
+        )
+    )
+    assert await stack.pictures.get_member_picture(SPACE_ID, MEMBER) is not None
+
+
+async def test_an_update_with_unreadable_bytes_keeps_the_blob(stack):
+    """Bytes that fail to decode are a failed change, not a reset."""
+    await _held_picture(stack)
+    await stack.svc._on_space_member_profile_updated(
+        _event(
+            FederationEventType.SPACE_MEMBER_PROFILE_UPDATED,
+            {
+                "user_id": MEMBER,
+                "space_display_name": "B",
+                "picture_hash": None,
+                "picture_webp_base64": base64.b64encode(b"not an image").decode(),
+            },
+            space_id=SPACE_ID,
+        )
+    )
+    assert await stack.pictures.get_member_picture(SPACE_ID, MEMBER) is not None
+
+
 async def test_member_profile_update_with_a_hash_keeps_the_blob(stack):
     held = await _held_picture(stack)
     await stack.svc._on_space_member_profile_updated(_member_update(held))

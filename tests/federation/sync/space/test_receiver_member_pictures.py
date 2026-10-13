@@ -351,6 +351,27 @@ async def test_a_member_households_roster_is_still_refused(stack):
     assert await stack.spaces.get_member(SPACE_ID, "u-stranger") is None
 
 
+async def test_another_co_member_household_does_not_reset_the_member(stack):
+    """Household K is a co-member (it seats its own person) but not the
+    member's home: its ``null`` for household L's member is no reset."""
+    hash_ = await _stale_picture(stack)
+    await stack.remote_members.add(
+        space_id=SPACE_ID,
+        instance_id="k-household",
+        user_id="u-k",
+        user_pk=None,
+        display_name=None,
+    )
+    await _members_from(stack, "k-household", [_members_record(picture_hash=None)])
+    await _still_stale(stack, hash_)
+
+
+async def test_a_provider_with_no_seat_at_all_does_not_reset(stack):
+    hash_ = await _stale_picture(stack)
+    await _members_from(stack, "stranger", [_members_record(picture_hash=None)])
+    await _still_stale(stack, hash_)
+
+
 async def test_the_owner_does_not_reset_another_households_member(stack):
     """The owner's knowledge of another household's member picture is
     second-hand (a missed fan-out leaves it NULL) — like the live

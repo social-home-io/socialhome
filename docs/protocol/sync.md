@@ -320,8 +320,10 @@ repaired — leaves the key out ("says nothing"), so a provider never claims a
 reset it did not see. Every reset path deletes the blob along with the hash
 (the member's own reset, the live inbound `SPACE_MEMBER_PROFILE_UPDATED`
 with no picture, and this sync reset), and migration `0099` re-pointed the
-seats that the pre-#910 roster-upsert wipe (or `0098`'s repair) had left NULL
-next to their blob. "No hash" therefore means "no picture".
+local members' seats that the pre-#910 roster-upsert wipe (or `0098`'s
+repair) had left NULL next to their blob. A remote member's NULL seat with a
+blob is ambiguous (before v_58 the live reset kept the blob), so it is left
+to the member's own household's catch-up. "No hash" therefore means "no picture".
 
 **Receiver side.** When the key is present and `null`, the receiver clears
 the seat's hash and deletes the held blob. This runs **before roster
@@ -350,6 +352,13 @@ only stores its own digest of bytes it re-encoded. A record without the key
 a non-null hash, so this step does nothing, and the `member_pictures` record
 that streams right after `members` in the same session replaces it. A member
 who left is not in the roster stream at all and is not touched by this.
+There is one known ordering race between the snapshot and a live event. A
+`members` chunk is the provider's snapshot from when the session started. If
+the member sets a new picture after that snapshot, and its live
+`SPACE_MEMBER_PROFILE_UPDATED` reaches us before the chunk does, the chunk's
+stale `null` drops the new picture. It heals at the next session: that
+`members` record carries the non-null hash (a no-op), and `member_pictures`
+ships the bytes again.
 Follow-up: an open SPA is not nudged when a sync changes a picture (it shows
 on the next load). Republishing `SpaceMemberProfileUpdated` would echo the
 change back out over federation, so any nudge must be WebSocket-only.
