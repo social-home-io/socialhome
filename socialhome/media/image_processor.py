@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import struct
 import uuid
+import zlib
 
 import pillow_heif
 from PIL import Image, ImageOps
@@ -55,6 +57,21 @@ LINK_PREVIEW_MAX_SOURCE_PIXELS: int = 16_000_000
 #: Formats a web page's preview image may be in. No HEIC / SVG / TIFF.
 LINK_PREVIEW_SOURCE_MIMES: frozenset[str] = frozenset(
     {"image/jpeg", "image/png", "image/gif", "image/webp"}
+)
+
+#: What Pillow raises for malformed image *input* once it decodes the
+#: pixels (truncated / corrupt data, a decompression bomb, a bad chunk
+#: table). Deliberately not ``Exception``: a ``TypeError`` / ``AttributeError``
+#: is a bug in our code and must surface as one.
+_PILLOW_DECODE_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    ValueError,
+    SyntaxError,
+    EOFError,
+    IndexError,
+    struct.error,
+    zlib.error,
+    Image.DecompressionBombError,
 )
 
 # MIME type → tuple of (offset, magic_bytes)
@@ -156,6 +173,8 @@ class ImageProcessor:
         self,
         data: bytes,
         size: int = THUMBNAIL_PX,
+        *,
+        max_source_pixels: int | None = None,
     ) -> bytes:
         """Return a square-bounded WebP thumbnail of *data*.
 
@@ -164,19 +183,42 @@ class ImageProcessor:
         render at ≤ 400 px, so the lower quality vs the main image is
         perceptually invisible and saves bytes.
 
+        *max_source_pixels* caps the source's declared ``width × height``;
+        it is checked on the header, before any pixel is decoded, so an
+        oversized (decompression-bomb) image costs a header parse.
+
         Raises
         ------
-        ValueError
-            If Pillow cannot open *data*.
+        ImageUnreadableError
+            If *data* does not decode as an image — unopenable, truncated
+            or corrupt (the pixel decode in resize / encode fails), or over
+            *max_source_pixels*.
         """
-        return await asyncio.to_thread(self._generate_thumbnail_sync, data, size)
+        return await asyncio.to_thread(
+            self._generate_thumbnail_sync, data, size, max_source_pixels
+        )
 
-    def _generate_thumbnail_sync(self, data: bytes, size: int) -> bytes:
+    def _generate_thumbnail_sync(
+        self,
+        data: bytes,
+        size: int,
+        max_source_pixels: int | None = None,
+    ) -> bytes:
         try:
             img = Image.open(io.BytesIO(data))
         except Exception as exc:
             log.info("image processor: cannot open image for thumbnail: %s", exc)
             raise ImageUnreadableError() from exc
+
+        w, h = img.size
+        if max_source_pixels is not None and w * h > max_source_pixels:
+            log.info(
+                "image processor: thumbnail source %dx%d over the %d px cap",
+                w,
+                h,
+                max_source_pixels,
+            )
+            raise ImageUnreadableError()
 
         try:
             # exif_transpose returns a new (possibly sRGB-reencoded) Image.
@@ -184,13 +226,19 @@ class ImageProcessor:
         except Exception:
             pass
 
-        img = self._resize(img, size)
-
-        if img.mode not in ("RGB", "RGBA"):
-            img = img.convert("RGBA" if "transparency" in img.info else "RGB")
-
-        out = io.BytesIO()
-        img.save(out, format="WEBP", quality=THUMBNAIL_WEBP_QUALITY)
+        # ``Image.open`` reads only the header: the pixels decode in resize /
+        # convert / save, so a truncated or corrupt body fails HERE — with
+        # whatever Pillow raises for malformed input. That is still "not an
+        # image we can read", never a 500 or an aborted sync chunk.
+        try:
+            img = self._resize(img, size)
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA" if "transparency" in img.info else "RGB")
+            out = io.BytesIO()
+            img.save(out, format="WEBP", quality=THUMBNAIL_WEBP_QUALITY)
+        except _PILLOW_DECODE_ERRORS as exc:
+            log.info("image processor: cannot decode image for thumbnail: %s", exc)
+            raise ImageUnreadableError() from exc
         return out.getvalue()
 
     async def is_valid_webp(self, data: bytes, *, max_dimension: int) -> bool:

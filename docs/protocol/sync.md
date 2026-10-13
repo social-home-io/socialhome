@@ -287,8 +287,12 @@ re-encodes them (`media/profile_picture.py:reencode_peer_picture` — decode,
 bound to 384 px, encode WebP, off the event loop) exactly like the live
 `USER_UPDATED` / `USERS_SYNC` / `SPACE_MEMBER_PROFILE_UPDATED` handlers, so a
 provider cannot plant arbitrary bytes (an SVG, HTML, a polyglot) in the
-blob table. Bytes that do not decode as an image drop the record (WARNING
-naming provider, space and member — never the bytes). The record's
+blob table. A source over 40 MP (`PROFILE_PICTURE_MAX_SOURCE_PIXELS`, read
+from the header before any pixel is decoded) is refused. Bytes that do not
+decode as an image — unopenable, truncated or corrupt, or over that cap —
+drop only that record (WARNING naming provider, space and member — never
+the bytes); the rest of the chunk still lands and the stream stays clean,
+so one bad picture cannot fail every catch-up. The record's
 `picture_hash` is ignored: the receiver stores its own `compute_picture_hash`
 of the re-encoded bytes, so a provider can never plant a hash of its choosing
 (it ends up in picture URLs), and points the seat's

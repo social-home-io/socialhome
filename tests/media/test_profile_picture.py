@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import base64
 import io
+import struct
+import zlib
 
 import pytest
 from PIL import Image
 
+from socialhome.domain.errors import ImageUnreadableError
 from socialhome.domain.picture_hash import compute_picture_hash
 from socialhome.media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
+    PROFILE_PICTURE_MAX_SOURCE_PIXELS,
     normalize_profile_picture,
     reencode_peer_picture,
 )
@@ -57,3 +61,31 @@ async def test_reencode_peer_picture_decodes_base64_first():
 async def test_reencode_peer_picture_refuses_unusable_wire_values(wire):
     with pytest.raises(ValueError):
         await reencode_peer_picture(wire)
+
+
+def _png_header_only(width: int, height: int) -> bytes:
+    """A tiny PNG whose IHDR declares ``width`` x ``height`` — a
+    decompression bomb in shape: a few bytes on the wire, gigabytes once
+    decoded."""
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    chunk = b"IHDR" + ihdr
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", len(ihdr))
+        + chunk
+        + struct.pack(">I", zlib.crc32(chunk) & 0xFFFFFFFF)
+    )
+
+
+async def test_normalize_refuses_a_source_over_the_pixel_cap():
+    side = int(PROFILE_PICTURE_MAX_SOURCE_PIXELS**0.5) + 1
+    raw = _png_header_only(side, side)
+    assert len(raw) < 64
+    with pytest.raises(ImageUnreadableError):
+        await normalize_profile_picture(raw)
+
+
+async def test_normalize_refuses_a_truncated_image():
+    raw = _png(500, 500)[:200]
+    with pytest.raises(ImageUnreadableError):
+        await normalize_profile_picture(raw)

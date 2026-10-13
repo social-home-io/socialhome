@@ -7,7 +7,10 @@ cross-test ordering required.
 
 from __future__ import annotations
 
+import io
 import json
+
+from PIL import Image
 
 from socialhome.auth import sha256_token_hash
 
@@ -1512,6 +1515,25 @@ async def test_me_picture_upload_non_image_bytes_422(client):
         },
     )
     # ImageProcessor raises ValueError which the handler maps to 422.
+    assert r.status == 422
+
+
+async def test_me_picture_upload_truncated_image_422(client):
+    """A truncated image opens (Pillow reads only the header) but fails to
+    decode later — still the clean ``ImageUnreadableError`` 422, never a
+    500."""
+    buf = io.BytesIO()
+    Image.new("RGB", (500, 500), color="red").save(buf, format="PNG")
+    truncated = buf.getvalue()[:200]
+    body = _make_multipart(truncated)
+    r = await client.post(
+        "/api/me/picture",
+        data=body,
+        headers={
+            **_auth(client._tok),
+            "Content-Type": "multipart/form-data; boundary=BOUND",
+        },
+    )
     assert r.status == 422
 
 

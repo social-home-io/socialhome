@@ -24,6 +24,12 @@ from .image_processor import ImageProcessor
 #: 2018-era target that was already getting upscaled in some surfaces.
 PROFILE_PICTURE_MAX_DIMENSION = 384
 
+#: Largest source picture (declared pixels) we decode into a profile
+#: picture. Checked on the header before any pixel is decoded, so a
+#: decompression bomb from a peer (or an upload) costs a header parse.
+#: 40 MP covers every phone camera (≈ 160 MB as RGBA at the worst).
+PROFILE_PICTURE_MAX_SOURCE_PIXELS = 40_000_000
+
 
 async def normalize_profile_picture(raw: bytes) -> tuple[bytes, str]:
     """Re-encode ``raw`` into the stored WebP and return ``(webp, hash)``.
@@ -34,11 +40,14 @@ async def normalize_profile_picture(raw: bytes) -> tuple[bytes, str]:
     Raises
     ------
     ImageUnreadableError
-        (a ``ValueError``) when ``raw`` does not decode as an image.
+        (a ``ValueError``) when ``raw`` does not decode as an image —
+        unopenable, truncated / corrupt, or over
+        :data:`PROFILE_PICTURE_MAX_SOURCE_PIXELS`.
     """
     webp = await ImageProcessor().generate_thumbnail(
         raw,
         size=PROFILE_PICTURE_MAX_DIMENSION,
+        max_source_pixels=PROFILE_PICTURE_MAX_SOURCE_PIXELS,
     )
     return webp, compute_picture_hash(webp)
 
@@ -46,8 +55,12 @@ async def normalize_profile_picture(raw: bytes) -> tuple[bytes, str]:
 async def reencode_peer_picture(picture_webp_base64: object) -> tuple[bytes, str]:
     """A peer's ``picture_webp_base64`` wire value, re-encoded for storage.
 
-    Raises ``ValueError`` for anything that is not base64 of a decodable
-    image — the caller drops the picture (and logs it, never the bytes).
+    Raises ``ValueError`` — :class:`ImageUnreadableError` (a ``ValueError``)
+    from :func:`normalize_profile_picture`, or a plain ``ValueError`` for a
+    non-string / malformed base64 value — for anything that is not base64
+    of a decodable image within the pixel cap, including a truncated or
+    corrupt one. The caller drops the picture (and logs it, never the
+    bytes).
     """
     if not isinstance(picture_webp_base64, str) or not picture_webp_base64:
         raise ValueError("picture is not a base64 string")

@@ -199,3 +199,36 @@ async def test_member_picture_of_our_own_person_is_never_taken(stack):
     member = await stack.spaces.get_member(SPACE_ID, LOCAL)
     assert member is not None
     assert member.picture_hash == "0123456789abcdef"
+
+
+async def test_a_truncated_picture_is_dropped_and_the_rest_of_the_chunk_lands(
+    stack, caplog
+):
+    """A corrupt record (here: a truncated PNG — Pillow opens the header,
+    the decode fails later with ``OSError``) is dropped with a WARNING; the
+    next record in the same chunk is still stored and the stream stays
+    clean — so the catch-up does not fail on it forever."""
+    other = "u-other"
+    await stack.spaces.save_member(
+        SpaceMember(
+            space_id=SPACE_ID,
+            user_id=other,
+            role=SpaceRole.MEMBER.value,
+            joined_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    truncated = _png()[:200]
+    clean = await stack.receiver._dispatch(
+        "member_pictures",
+        SPACE_ID,
+        [_picture_record(truncated), _picture_record(_png(color="blue"), other)],
+        provider=HOST,
+    )
+    assert clean is True
+    assert await stack.pictures.get_member_picture(SPACE_ID, MEMBER) is None
+    assert await stack.pictures.get_member_picture(SPACE_ID, other) is not None
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any(MEMBER in r.getMessage() for r in warnings)
+    b64 = _picture_record(truncated)["picture_webp_base64"]
+    for r in caplog.records:
+        assert b64[:40] not in r.getMessage()
