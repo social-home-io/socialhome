@@ -31,6 +31,38 @@ describe('HaUsersPanel', () => {
     expect(await findByText('Not added')).toBeTruthy()
   })
 
+  it('each person has a named switch that toggles from the switch or its status word', async () => {
+    const post = vi.fn(async () => ({ synced: true }))
+    const del = vi.fn(async () => ({}))
+    vi.doMock('@/api', () => ({
+      api: {
+        get: vi.fn(async () => ([
+          { username: 'alice', display_name: 'Alice', picture_url: null, is_admin: false, synced: true },
+          { username: 'kid', display_name: 'Kid', picture_url: null, is_admin: false, synced: false },
+        ])),
+        post,
+        delete: del,
+      },
+    }))
+    vi.doMock('@/store/instance', () => ({
+      instanceConfig: { value: { mode: 'haos', capabilities: ['ingress'], setup_required: false, instance_name: 'Home' } },
+    }))
+    const { HaUsersPanel } = await import('./HaUsersPanel')
+    const { findByRole } = render(<HaUsersPanel />)
+    const kid = await findByRole('switch', { name: 'Sync Kid' }) as HTMLInputElement
+    expect(kid.checked).toBe(false)
+    fireEvent.click(kid)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(kid.checked).toBe(true)
+    // Kid's own status word, now "Active", is part of the tap target.
+    const word = kid.parentElement!.querySelector('span')!
+    expect(word.textContent).toBe('Active')
+    fireEvent.click(word)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(del).toHaveBeenCalledTimes(1)
+  })
+
   it('flips the toggle and calls POST /provision for a new sync (haos)', async () => {
     const post = vi.fn(async () => ({ synced: true }))
     vi.doMock('@/api', () => ({

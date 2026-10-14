@@ -34,6 +34,21 @@ describe('ShareHomeToggle — card variant (Manage sheet)', () => {
   })
 })
 
+describe('ShareHomeToggle — card variant clicks', () => {
+  it('toggles from the switch itself and from the card text, once per click', async () => {
+    render(<ShareHomeToggle variant="card" instanceId="abc123" peerName="The Smiths" initialValue={false} />)
+    const sw = screen.getByRole('switch', { name: 'Share our home location' }) as HTMLInputElement
+    fireEvent.click(sw)
+    expect(mockPatch).toHaveBeenCalledTimes(1)
+    expect(mockPatch).toHaveBeenLastCalledWith('/api/pairing/connections/abc123', { share_home: true })
+    expect(sw.checked).toBe(true)
+    fireEvent.click(screen.getByText('Share our home location'))
+    expect(mockPatch).toHaveBeenCalledTimes(2)
+    expect(mockPatch).toHaveBeenLastCalledWith('/api/pairing/connections/abc123', { share_home: false })
+    expect(sw.checked).toBe(false)
+  })
+})
+
 describe('ShareHomeToggle — URL', () => {
   it('URL-encodes the instance id', () => {
     render(<ShareHomeToggle instanceId="a/b c" peerName="P" initialValue={true} />)

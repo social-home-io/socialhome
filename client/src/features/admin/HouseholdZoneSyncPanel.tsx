@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 
 import { api, ApiError } from '@/api'
 import { Button } from '@/components/Button'
+import { Switch } from '@/components/Switch'
 import { showToast } from '@/components/Toast'
 import { t, formatLocale } from '@/i18n/i18n'
 import { relativeDocsTime } from '@/utils/relativeTime'
@@ -122,22 +123,14 @@ export function HouseholdZoneSyncPanel({ onChanged }: HouseholdZoneSyncPanelProp
             </span>
           )}
         </span>
-        <span class="sh-switch">
-          <input
-            type="checkbox"
-            role="switch"
-            checked={status.enabled}
-            disabled={busy}
-            aria-labelledby="sh-zone-sync-label"
-            aria-describedby="sh-zone-sync-explain sh-zone-sync-state"
-            onChange={(e) => {
-              // Controlled: the server's answer flips it, not the click.
-              ;(e.currentTarget as HTMLInputElement).checked = status.enabled
-              onToggle()
-            }}
-          />
-          <span class="sh-switch-track" />
-        </span>
+        {/* Controlled: the server's answer flips it, not the click. */}
+        <Switch
+          checked={status.enabled}
+          disabled={busy}
+          aria-labelledby="sh-zone-sync-label"
+          aria-describedby="sh-zone-sync-explain sh-zone-sync-state"
+          onChange={() => onToggle()}
+        />
       </label>
       {confirmingOff && (
         <div

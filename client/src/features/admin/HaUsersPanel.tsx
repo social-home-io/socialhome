@@ -16,6 +16,7 @@ import { showToast } from '@/components/Toast'
 import { Spinner } from '@/components/Spinner'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
+import { Switch } from '@/components/Switch'
 import { Modal } from '@/components/Modal'
 import { requiresHaUserPassword } from '@/platform'
 import { t } from '@/i18n/i18n'
@@ -150,14 +151,12 @@ export function HaUsersPanel() {
                 <span class="sh-badge sh-badge--admin">{t('admin.members.admin')}</span>
               )}
             </div>
-            <label class="sh-switch">
-              <input
-                type="checkbox"
+            <label class="sh-ha-users__toggle">
+              <Switch
                 checked={u.synced}
                 aria-label={t('ha_users.sync_aria', { name: u.display_name })}
                 onChange={() => toggle(u)}
               />
-              <span class="sh-switch-track" />
               <span class="sh-muted">
                 {u.synced ? t('ha_users.active') : t('ha_users.not_added')}
               </span>

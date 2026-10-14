@@ -28,6 +28,7 @@ import { relativeDocsTime } from '@/utils/relativeTime'
 import { DashboardPasswordDialog, DashboardPinDialog } from './DashboardDialogs'
 import { DashboardPanelsCard } from './DashboardPanelsCard'
 import { SwitchRow } from './DashboardSwitchRow'
+import { Switch } from '@/components/Switch'
 import { TabletStep } from './DashboardTabletStep'
 import type { DashboardPerson, DashboardState, Patch, SaveFn, SaveOpts } from './dashboardTypes'
 
@@ -176,18 +177,13 @@ function HeaderSection({ state, save }: { state: DashboardState, save: SaveFn })
       <div class="sh-dashboard-admin__title-row">
         <h2 id="sh-dash-title">{t('admin.dashboard.title')}</h2>
         <label class={`sh-dashboard-admin__switch ${locked ? 'sh-dashboard-admin__switch--locked' : ''}`}>
-          <span class="sh-switch">
-            <input
-              type="checkbox"
-              role="switch"
-              checked={state.enabled}
-              disabled={locked || busy}
-              aria-label={t('admin.dashboard.enable_aria')}
-              aria-describedby="sh-dash-status sh-dash-enable-error"
-              onChange={() => void toggle()}
-            />
-            <span class="sh-switch-track" />
-          </span>
+          <Switch
+            checked={state.enabled}
+            disabled={locked || busy}
+            aria-label={t('admin.dashboard.enable_aria')}
+            aria-describedby="sh-dash-status sh-dash-enable-error"
+            onChange={() => void toggle()}
+          />
           <span aria-hidden="true">{state.enabled ? t('admin.dashboard.on') : t('admin.dashboard.off')}</span>
         </label>
       </div>
@@ -429,24 +425,18 @@ function PeopleSection({ state, save }: { state: DashboardState, save: SaveFn })
                   </div>
                   <div class="sh-dashboard-person__toggles">
                     <label class="sh-dashboard-person__toggle">
-                      <span class="sh-switch">
-                        <input type="checkbox" role="switch" checked={p.show}
-                          aria-label={t('admin.dashboard.people.show_aria', { name })}
-                          onChange={() => set(p, { show: !p.show })} />
-                        <span class="sh-switch-track" />
-                      </span>
+                      <Switch checked={p.show}
+                        aria-label={t('admin.dashboard.people.show_aria', { name })}
+                        onChange={(show) => set(p, { show })} />
                       <span aria-hidden="true">{t('admin.dashboard.people.show')}</span>
                     </label>
                     <div class="sh-dashboard-person__picture">
                       <label class="sh-dashboard-person__toggle">
-                        <span class="sh-switch">
-                          <input type="checkbox" role="switch" checked={p.picture_effective}
-                            disabled={!p.show}
-                            aria-label={t('admin.dashboard.people.picture_aria', { name })}
-                            aria-describedby="sh-dash-picture-hint"
-                            onChange={() => set(p, { picture: !p.picture_effective })} />
-                          <span class="sh-switch-track" />
-                        </span>
+                        <Switch checked={p.picture_effective}
+                          disabled={!p.show}
+                          aria-label={t('admin.dashboard.people.picture_aria', { name })}
+                          aria-describedby="sh-dash-picture-hint"
+                          onChange={(picture) => set(p, { picture })} />
                         <span aria-hidden="true">{t('admin.dashboard.people.picture')}</span>
                       </label>
                       {p.picture === null ? (

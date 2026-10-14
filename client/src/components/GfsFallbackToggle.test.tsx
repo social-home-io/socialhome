@@ -74,6 +74,20 @@ describe('GfsFallbackToggle — card variant (Manage sheet)', () => {
     expect(sw.disabled).toBe(true)
     expect(screen.queryByRole('note')).toBeNull()
   })
+
+  it('turns on from a click on the switch itself and from a click on its card text', async () => {
+    mockPatch.mockResolvedValue({ ...OFF, gfs_relay: true })
+    render(<GfsFallbackToggle variant="card" instanceId="peer-1" peerName="The Smiths" initial={OFF} />)
+    fireEvent.click(screen.getByRole('switch', { name: 'Use the GFS as a fallback' }))
+    expect(mockPatch).toHaveBeenCalledTimes(1)
+    expect(mockPatch).toHaveBeenLastCalledWith('/api/pairing/connections/peer-1', { gfs_relay: true })
+    await waitFor(() => expect((screen.getByRole('switch') as HTMLInputElement).checked).toBe(true))
+    mockPatch.mockResolvedValue({ ...OFF, gfs_relay: false })
+    fireEvent.click(screen.getByText('Use the GFS as a fallback'))
+    await waitFor(() => expect(mockPatch).toHaveBeenLastCalledWith(
+      '/api/pairing/connections/peer-1', { gfs_relay: false }))
+    expect(mockPatch).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('GfsFallbackToggle — URL', () => {
