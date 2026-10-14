@@ -23,8 +23,13 @@ task brings the responder to the last state asked for — so a later
 :meth:`~DisplayAdvertiser.withdraw` or port change can't be overtaken by an
 announce still in flight. While announced, it rescans the LAN addresses
 every :data:`RESCAN_INTERVAL_S` (DHCP renumbering, an interface coming
-up) and follows a change; a failed or address-less announcement is
-retried on the same beat.
+up) and follows a change in place — the record re-announced with the new
+addresses, the responder's sockets moved onto them — so a panel never
+sees the service vanish; a failed or address-less announcement is
+retried on the same beat. This is a request-driven reconciler rather than
+a periodic job, so it doesn't use the ``_stop: asyncio.Event`` scheduler
+shape: a stop is a request the task drains (goodbyes sent, sockets
+closed), never a bare ``cancel()``.
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ import logging
 from collections.abc import Iterable
 
 import ifaddr
-from zeroconf import ServiceInfo
+from zeroconf import IPVersion, ServiceInfo
 from zeroconf.asyncio import AsyncZeroconf
 
 log = logging.getLogger(__name__)
@@ -176,6 +181,8 @@ class DisplayAdvertiser:
         "_short_id",
         "_zc",
         "_addresses",
+        "_scanned",
+        "_name",
         "_info",
         "_warned",
         "_noted_loopback",
@@ -191,7 +198,12 @@ class DisplayAdvertiser:
         self._host = host
         self._short_id: str | None = None
         self._zc: AsyncZeroconf | None = None
+        # The addresses the responder serves, the scan they came from (a
+        # retry may serve fewer — see :meth:`_open`) and the instance name
+        # won by probing (kept across a restart of the responder).
         self._addresses: list[str] = []
+        self._scanned: list[str] = []
+        self._name: str | None = None
         self._info: ServiceInfo | None = None
         self._warned = False
         self._noted_loopback = False
@@ -264,8 +276,10 @@ class DisplayAdvertiser:
                     continue  # asked again meanwhile
                 if self._want is None and self._zc is None:
                     return
+                # A loopback bind has nothing to follow: wait for requests.
+                beat = None if _is_loopback_bind(self._host) else RESCAN_INTERVAL_S
                 try:
-                    async with asyncio.timeout(RESCAN_INTERVAL_S):
+                    async with asyncio.timeout(beat):
                         await self._wake.wait()
                 except TimeoutError:
                     rescan = True
@@ -296,7 +310,7 @@ class DisplayAdvertiser:
 
     async def _close(self) -> None:
         zc, self._zc, self._info = self._zc, None, None
-        self._addresses = []
+        self._addresses, self._scanned = [], []
         if zc is None:
             return
         try:
@@ -305,6 +319,8 @@ class DisplayAdvertiser:
             log.debug("dashboard mDNS: close failed: %r", exc)
 
     async def _scan(self) -> list[str]:
+        if _is_specific_ip(self._host):
+            return lan_addresses(self._host, ())  # the adapters don't matter
         adapters = await asyncio.to_thread(ifaddr.get_adapters)
         return lan_addresses(self._host, adapters)
 
@@ -314,7 +330,9 @@ class DisplayAdvertiser:
             return await self._start(port, short_id)
         if rescan:
             addresses = await self._scan()
-            if set(addresses) != set(self._addresses):
+            # Against the last *scan*: after a retry on fewer addresses
+            # (:meth:`_open`) the same scan is no change, not a flap.
+            if set(addresses) != set(self._scanned):
                 return await self._follow(port, short_id, addresses)
         if self._info.port != port:
             # Port change: re-publish the SRV under the registered name
@@ -327,28 +345,31 @@ class DisplayAdvertiser:
         return True
 
     async def _follow(self, port: int, short_id: str, addresses: list[str]) -> bool:
-        """The LAN addresses changed under a live announcement."""
+        """The LAN addresses changed under a live announcement: re-announce
+        the record with the new set (cache-flush, so panels drop the old
+        addresses) and move the responder's sockets onto it — no goodbye,
+        no new probe."""
         assert self._zc is not None and self._info is not None
-        name = self._info.name
-        if addresses and set(addresses) <= set(self._addresses):
-            # Only gone: the responder still has a socket on every one
-            # left, so the record is updated in place (no goodbye, no probe).
-            info = _service_info(port, short_id, addresses, name=name)
-            _reap(await self._zc.async_update_service(info))
-            self._info, self._addresses = info, addresses
-            log.info("dashboard announcement now on %s", ", ".join(addresses))
-            return True
-        # A new address needs sockets on it: a fresh responder, under the
-        # name already won (the old one says goodbye first, so the probe
-        # doesn't meet it).
-        await self._close()
-        return await self._start(port, short_id, name=name)
-
-    async def _start(
-        self, port: int, short_id: str, *, name: str | None = None
-    ) -> bool:
-        addresses = await self._scan()
         if not addresses:
+            await self._close()
+            self._warn(
+                "the host lost its LAN address — the dashboard announcement "
+                "is withdrawn until it is back"
+            )
+            return False
+        info = _service_info(port, short_id, addresses, name=self._name)
+        _reap(await self._zc.async_update_service(info))
+        self._info = info
+        await self._zc.async_update_interfaces(
+            interfaces=list(addresses), ip_version=_ip_version(addresses)
+        )
+        self._addresses, self._scanned = addresses, addresses
+        log.info("dashboard announcement now on %s", ", ".join(addresses))
+        return True
+
+    async def _start(self, port: int, short_id: str) -> bool:
+        scanned = await self._scan()
+        if not scanned:
             if _is_loopback_bind(self._host):
                 # Deliberate (e.g. behind a reverse proxy) — nothing to say.
                 if not self._noted_loopback:
@@ -360,11 +381,13 @@ class DisplayAdvertiser:
                     f"(listening on {self._host!r}) — panels need its address typed in"
                 )
             return False
-        zc, addresses = await self._open(addresses)
-        self._zc, self._addresses = zc, addresses
-        info = _service_info(port, short_id, addresses, name=name)
+        zc, addresses = await self._open(scanned)
+        self._zc, self._addresses, self._scanned = zc, addresses, scanned
+        # Under the name already won, if any: a responder restarted after a
+        # failure keeps a conflict-renamed name.
+        info = _service_info(port, short_id, addresses, name=self._name)
         _reap(await zc.async_register_service(info, allow_name_change=True))
-        self._info = info
+        self._info, self._name = info, info.name
         log.info("dashboard announced on the network as %r (port %d)", info.name, port)
         return True
 
@@ -381,7 +404,10 @@ class DisplayAdvertiser:
             retry = _fallback(addresses, await self._scan())
             if retry is None:
                 raise
-            log.info(
+            log.log(
+                # Once per failure streak: a retry that keeps failing logs
+                # its WARNING once, not this line every beat.
+                logging.DEBUG if self._warned else logging.INFO,
                 "dashboard mDNS: could not open %s (%r) — retrying on %s",
                 ", ".join(addresses),
                 exc,
@@ -405,6 +431,20 @@ def _fallback(failed: list[str], current: list[str]) -> list[str] | None:
     if v4 and set(v4) != set(failed):
         return v4
     return None
+
+
+def _ip_version(addresses: list[str]) -> IPVersion:
+    if any(ipaddress.ip_address(a).version == 6 for a in addresses):
+        return IPVersion.All
+    return IPVersion.V4Only
+
+
+def _is_specific_ip(host: str) -> bool:
+    """``host`` is one IP address (not a wildcard, not a host name)."""
+    try:
+        return not ipaddress.ip_address(host.strip().strip("[]")).is_unspecified
+    except ValueError:
+        return False
 
 
 def _is_loopback_bind(host: str) -> bool:

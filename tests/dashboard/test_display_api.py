@@ -808,7 +808,7 @@ async def test_theme_follows_household_and_locale(
     assert payload["locale"] == "de"
     assert payload["strings"]["tab_overview"] == "Übersicht"
     # The panel's own screens and PIN pad, placeholders intact.
-    assert payload["strings"]["pin_remaining"] == "Noch {n} Versuche"
+    assert payload["strings"]["pin_remaining"] == "Verbleibende Versuche: {n}"
     assert payload["strings"]["claim_unreachable"].count("{host}") == 1
 
 

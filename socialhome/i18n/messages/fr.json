@@ -52,7 +52,7 @@
   "dashboard.lock.delete": "Effacer le dernier chiffre",
   "dashboard.lock.wrong_pin": "Code PIN incorrect",
   "dashboard.lock.signed_out": "Déconnecté après trop de codes PIN incorrects — connectez-vous avec le mot de passe du tableau de bord.",
-  "dashboard.lock.tries_left": "Encore {n} essais",
+  "dashboard.lock.tries_left": "Essais restants : {n}",
   "dashboard.lock.wait": "Trop d'essais. Réessayez dans {n} s.",
   "dashboard.lock.offline": "Social Home est injoignable. Réessayez.",
   "dashboard.date.long": "{weekday} {day} {month}",

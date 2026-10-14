@@ -93,7 +93,7 @@
     "pair_unreachable": "Can't reach Social Home at this address.",
     "pin_button": "PIN",
     "pin_offline": "Can't reach Social Home. Try again.",
-    "pin_remaining": "{n} tries left",
+    "pin_remaining": "Tries left: {n}",
     "pin_wait": "Too many tries. Try again in {n} s.",
     "read_aloud": "Read aloud",
     "retry": "Try again",

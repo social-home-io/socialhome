@@ -52,7 +52,7 @@
   "dashboard.lock.delete": "Letzte Ziffer löschen",
   "dashboard.lock.wrong_pin": "Falsche PIN",
   "dashboard.lock.signed_out": "Nach zu vielen falschen PINs abgemeldet — melde dich mit dem Dashboard-Passwort an.",
-  "dashboard.lock.tries_left": "Noch {n} Versuche",
+  "dashboard.lock.tries_left": "Verbleibende Versuche: {n}",
   "dashboard.lock.wait": "Zu viele Versuche. Versuch es in {n} s noch einmal.",
   "dashboard.lock.offline": "Social Home ist nicht erreichbar. Versuch es noch einmal.",
   "dashboard.date.long": "{weekday}, {day}. {month}",

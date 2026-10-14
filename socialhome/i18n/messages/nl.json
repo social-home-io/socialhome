@@ -52,7 +52,7 @@
   "dashboard.lock.delete": "Laatste cijfer wissen",
   "dashboard.lock.wrong_pin": "Verkeerde pincode",
   "dashboard.lock.signed_out": "Afgemeld na te veel verkeerde pincodes — log in met het dashboardwachtwoord.",
-  "dashboard.lock.tries_left": "Nog {n} pogingen",
+  "dashboard.lock.tries_left": "Resterende pogingen: {n}",
   "dashboard.lock.wait": "Te veel pogingen. Probeer het over {n} s opnieuw.",
   "dashboard.lock.offline": "Social Home is niet bereikbaar. Probeer het opnieuw.",
   "dashboard.date.long": "{weekday} {day} {month}",

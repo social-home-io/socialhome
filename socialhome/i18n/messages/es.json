@@ -52,7 +52,7 @@
   "dashboard.lock.delete": "Borrar el último dígito",
   "dashboard.lock.wrong_pin": "PIN incorrecto",
   "dashboard.lock.signed_out": "Sesión cerrada tras demasiados PIN incorrectos — inicia sesión con la contraseña del panel.",
-  "dashboard.lock.tries_left": "Quedan {n} intentos",
+  "dashboard.lock.tries_left": "Intentos restantes: {n}",
   "dashboard.lock.wait": "Demasiados intentos. Vuelve a intentarlo en {n} s.",
   "dashboard.lock.offline": "No se puede conectar con Social Home. Inténtalo de nuevo.",
   "dashboard.date.long": "{weekday}, {day} de {month}",

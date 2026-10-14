@@ -470,7 +470,9 @@ def test_theme_carries_the_panel_strings_in_every_locale():
 
 def test_theme_panel_strings_are_the_firmware_english():
     strings = theme_payload(css=_css(), theme=None, locale="en", t=T)["strings"]
-    assert strings["pin_remaining"] == "{n} tries left"
+    # Worded without a plural (the panel fills one number into one
+    # string), unlike the firmware's built-in "{n} tries left".
+    assert strings["pin_remaining"] == "Tries left: {n}"
     assert strings["pin_wait"] == "Too many tries. Try again in {n} s."
     assert strings["pin_offline"] == "Can't reach Social Home. Try again."
     assert strings["claim_unreachable"] == "Can't reach Social Home at {host}."

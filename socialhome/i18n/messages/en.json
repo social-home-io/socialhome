@@ -62,7 +62,7 @@
   "dashboard.lock.delete": "Delete last digit",
   "dashboard.lock.wrong_pin": "Wrong PIN",
   "dashboard.lock.signed_out": "Signed out after too many wrong PINs — sign in with the dashboard password.",
-  "dashboard.lock.tries_left": "{n} tries left",
+  "dashboard.lock.tries_left": "Tries left: {n}",
   "dashboard.lock.wait": "Too many tries. Try again in {n} s.",
   "dashboard.lock.offline": "Can't reach Social Home. Try again.",
   "dashboard.date.long": "{weekday}, {month} {day}",
