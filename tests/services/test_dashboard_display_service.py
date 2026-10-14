@@ -556,21 +556,43 @@ async def test_wrong_pin_counts_and_says_how_many_are_left(svc, settings, pin):
     assert found is not None and found.locked
 
 
-async def test_sixth_wrong_try_unpairs_the_panel(svc, settings, auth, caplog):
+async def test_fifth_wrong_pin_unpairs_the_panel(svc, settings, auth, caplog):
     display, token = await _locked(svc, settings)
-    for left in range(THROTTLE_MAX_FAILURES - 1, -1, -1):
+    for left in range(THROTTLE_MAX_FAILURES - 1, 0, -1):
         with pytest.raises(DashboardDisplayPinWrongError) as exc:
             await svc.unlock(display, "0000")
         assert exc.value.params == {"remaining": left}
     caplog.set_level(logging.WARNING)
-    # Even the right PIN: the budget is spent, the panel is signed out.
+    # The wrong PIN that spends the last try: "remaining" never reads 0.
     with pytest.raises(DashboardDisplaySignedOutError) as signed_out:
-        await svc.unlock(display, PIN)
+        await svc.unlock(display, "0000")
     assert signed_out.value.status == 401
     assert await svc.authenticate(token) is None
     assert await settings.displays() == ()
     assert "too many wrong PINs" in caplog.text
     assert token not in caplog.text
+
+
+async def test_the_right_pin_on_the_last_try_unlocks(svc, settings):
+    display, token = await _locked(svc, settings)
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        with pytest.raises(DashboardDisplayPinWrongError):
+            await svc.unlock(display, "0000")
+    await svc.unlock(display, PIN)
+    found = await svc.authenticate(token)
+    assert found is not None and not found.locked
+
+
+async def test_a_try_past_the_spent_budget_unpairs_the_panel(svc, settings, auth):
+    """A try that finds the budget already spent (one racing the fifth
+    wrong PIN) unpairs the panel too — even with the right PIN."""
+    display, token = await _locked(svc, settings)
+    key = DashboardAuth.display_pin_throttle_key(display.id)
+    for _ in range(THROTTLE_MAX_FAILURES):
+        auth.begin_attempt(key, count_global=False)
+    with pytest.raises(DashboardDisplaySignedOutError):
+        await svc.unlock(display, PIN)
+    assert await svc.authenticate(token) is None
 
 
 async def test_a_login_flood_cannot_refill_a_panels_pin_budget(settings, clock):
@@ -580,22 +602,26 @@ async def test_a_login_flood_cannot_refill_a_panels_pin_budget(settings, clock):
     auth = DashboardAuth(settings, clock=clock, max_throttle_keys=2)
     svc = DashboardDisplayService(settings, auth, clock=clock)
     display, token = await _locked(svc, settings)
-    for n in range(THROTTLE_MAX_FAILURES):
+    for n in range(THROTTLE_MAX_FAILURES - 1):
         with pytest.raises(DashboardDisplayPinWrongError):
             await svc.unlock(display, "0000")
         for m in range(50):  # the flood between guesses
             auth.begin_attempt(f"2001:db8:{n}:{m}::/64", count_global=False)
+    # Still the fifth wrong PIN, not the first of a fresh budget.
     with pytest.raises(DashboardDisplaySignedOutError):
-        await svc.unlock(display, PIN)
+        await svc.unlock(display, "0000")
     assert await svc.authenticate(token) is None
 
 
 async def test_wrong_pins_age_out(svc, settings, clock):
     display, token = await _locked(svc, settings)
-    for _ in range(THROTTLE_MAX_FAILURES):
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
         with pytest.raises(DashboardDisplayPinWrongError):
             await svc.unlock(display, "0000")
     clock.now += 15 * 60
+    with pytest.raises(DashboardDisplayPinWrongError) as exc:
+        await svc.unlock(display, "0000")
+    assert exc.value.params == {"remaining": THROTTLE_MAX_FAILURES - 1}
     await svc.unlock(display, PIN)
     assert await svc.authenticate(token) is not None
 
@@ -677,7 +703,7 @@ async def test_update_renames_and_unlocks(svc, settings):
 
 async def test_admin_unlock_gives_the_panel_fresh_pin_tries(svc, settings, auth):
     display, token = await _locked(svc, settings)
-    for _ in range(THROTTLE_MAX_FAILURES):
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
         with pytest.raises(DashboardDisplayPinWrongError):
             await svc.unlock(display, "0000")
     await svc.update(
@@ -688,8 +714,9 @@ async def test_admin_unlock_gives_the_panel_fresh_pin_tries(svc, settings, auth)
     locked = await svc.authenticate(token)
     assert locked is not None
     await svc.lock(locked)
-    with pytest.raises(DashboardDisplayPinWrongError):
+    with pytest.raises(DashboardDisplayPinWrongError) as exc:
         await svc.unlock(locked, "0000")
+    assert exc.value.params == {"remaining": THROTTLE_MAX_FAILURES - 1}
 
 
 async def test_unlock_reads_the_stored_lock_not_the_request_snapshot(
@@ -1204,7 +1231,7 @@ async def test_a_pin_sign_out_also_drops_the_pending_reconnect(
     stolen = await hsvc.spend_claim(
         await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
     )
-    for _ in range(THROTTLE_MAX_FAILURES):
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
         with pytest.raises(DashboardDisplayPinWrongError):
             await hsvc.unlock(display, "0000")
     with pytest.raises(DashboardDisplaySignedOutError):

@@ -11,13 +11,17 @@
   },
   "dir": "ltr",
   "household": "Home",
+  "is_night": false,
   "locale": "en",
   "locked": true,
   "strings": {
     "delete": "Delete last digit",
     "enter_pin": "Enter PIN",
+    "forgot_pin": "Forgot the PIN? An admin can change it in Social Home under Admin › Dashboard.",
+    "last_try": "Last try — one more wrong PIN signs this screen out.",
     "locked": "Screen locked",
     "pin_button": "PIN",
+    "tries_left": "Tries left: {n}",
     "unlock": "Unlock",
     "wrong_pin": "Wrong PIN"
   }

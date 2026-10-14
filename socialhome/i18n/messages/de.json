@@ -55,6 +55,8 @@
   "dashboard.lock.tries_left": "Verbleibende Versuche: {n}",
   "dashboard.lock.wait": "Zu viele Versuche. Versuch es in {n} s noch einmal.",
   "dashboard.lock.offline": "Social Home ist nicht erreichbar. Versuch es noch einmal.",
+  "dashboard.lock.last_try": "Letzter Versuch — noch eine falsche PIN meldet diesen Bildschirm ab.",
+  "dashboard.lock.forgot": "PIN vergessen? Ein Admin kann sie in Social Home unter Admin › Dashboard ändern.",
   "dashboard.date.long": "{weekday}, {day}. {month}",
   "dashboard.date.short": "{day}. {month}",
   "dashboard.date.weekday.0": "Montag",

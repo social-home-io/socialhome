@@ -67,6 +67,7 @@ import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import NoReturn
 
 from ..dashboard.auth import THROTTLE_MAX_FAILURES, DashboardAuth
 from ..dashboard.claim_seal import InvalidPanelKey, seal_claim
@@ -601,9 +602,9 @@ class DashboardDisplayService:
     #
     # The tablet keeps its lock in its signed cookie; a panel's lives on
     # its stored record, so a reboot can't lift it. The PIN rules are the
-    # tablet's (``views.UnlockView``): five wrong PINs in the throttle
-    # window, then the next try — right or wrong — signs the panel out
-    # (here: unpairs it; only an admin pairing it again helps).
+    # tablet's (``views.UnlockView``): the fifth wrong PIN in the throttle
+    # window signs the panel out (here: unpairs it; only an admin pairing
+    # it again helps), and so does any try that finds them already spent.
 
     async def is_locked(self, display: DashboardDisplay) -> bool:
         """``display`` is privacy-locked: its flag is set *and* a PIN
@@ -628,9 +629,10 @@ class DashboardDisplayService:
         A panel that isn't locked is left alone — no PIN is checked, so
         there is nothing to guess against. Otherwise the guess is counted
         before the (slow, constant-time) scrypt check; a wrong one raises
-        :class:`DashboardDisplayPinWrongError` with the tries left. Once
-        the panel's wrong PINs are spent, the next try unpairs it and
-        raises :class:`DashboardDisplaySignedOutError`; any other
+        :class:`DashboardDisplayPinWrongError` with the tries left (never
+        ``0``). The wrong PIN that spends the panel's last try unpairs it
+        and raises :class:`DashboardDisplaySignedOutError` (so does a try
+        racing it); any other
         hold-back (a full throttle table) only asks it to wait
         (:class:`DashboardDisplayPinThrottledError`).
         """
@@ -647,30 +649,38 @@ class DashboardDisplayService:
         key = DashboardAuth.display_pin_throttle_key(display.id)
         wait = auth.begin_attempt(key, count_global=False)
         if wait and auth.failure_count(key) >= THROTTLE_MAX_FAILURES:
-            log.warning(
-                "household dashboard: too many wrong PINs on display %s — unpaired",
-                display.id,
-            )
-            try:
-                removed = await self._settings.remove_display(display.id)
-            except DashboardDisplayNotFoundError:
-                removed = (display.id,)
-            for display_id in removed:
-                self._forget(display_id)
-            raise DashboardDisplaySignedOutError()
+            await self._sign_out_after_wrong_pins(display)
         if wait:
             raise DashboardDisplayPinThrottledError(wait)
         if not isinstance(pin, str) or not await auth.check_pin(pin):
+            remaining = THROTTLE_MAX_FAILURES - auth.failure_count(key)
+            if remaining <= 0:
+                # That was the last try: ``remaining`` never reads 0 on a
+                # PIN pad whose next press could only unpair the panel.
+                await self._sign_out_after_wrong_pins(display)
             log.info("household dashboard: wrong PIN on display %s", display.id)
-            raise DashboardDisplayPinWrongError(
-                max(0, THROTTLE_MAX_FAILURES - auth.failure_count(key))
-            )
+            raise DashboardDisplayPinWrongError(remaining)
         auth.record_success(key, count_global=False)
         try:
             await self._settings.update_display(display.id, {"locked": False})
         except DashboardDisplayNotFoundError:
             raise DashboardDisplaySignedOutError() from None
         log.info("household dashboard: display %s unlocked", display.id)
+
+    async def _sign_out_after_wrong_pins(self, display: DashboardDisplay) -> NoReturn:
+        """Unpair ``display`` (its wrong PINs are spent) and raise
+        :class:`DashboardDisplaySignedOutError`."""
+        log.warning(
+            "household dashboard: too many wrong PINs on display %s — unpaired",
+            display.id,
+        )
+        try:
+            removed = await self._settings.remove_display(display.id)
+        except DashboardDisplayNotFoundError:
+            removed = (display.id,)
+        for display_id in removed:
+            self._forget(display_id)
+        raise DashboardDisplaySignedOutError()
 
     # ── Device auth ─────────────────────────────────────────────────────
 

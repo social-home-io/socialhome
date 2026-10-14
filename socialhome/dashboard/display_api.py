@@ -114,7 +114,7 @@ from .map_scene import (
 )
 from .presenter import home_colors, person_colors, view_key
 from .tabs import TAB_MAP, TAB_MESSAGES, TAB_NOTES, TAB_OVERVIEW
-from .views import ack_id
+from .views import ack_id, lock_is_night
 
 log = logging.getLogger(__name__)
 
@@ -254,16 +254,20 @@ async def guard_display_request(
 
 async def _locked(request: web.Request, *, status: int = 423) -> web.Response:
     """``423`` for a privacy-locked panel: what the tablet lock screen
-    shows (household name, clock, the PIN strings) — never a person.
+    shows (household name, clock and date, night or not, the PIN pad's
+    strings) — never a person.
     ``POST /lock`` answers the same body with ``200``."""
     app = request.app
-    locale = (await app[SETTINGS_KEY].get()).locale
+    settings = await app[SETTINGS_KEY].get()
+    locale = settings.locale
     zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
     t = app[RENDERER_KEY].translator(locale)
+    now = app[AUTH_KEY].now()
     payload = lock_payload(
         household=await app[HOUSEHOLD_NAME_KEY](),
         locale=locale,
-        clock=display_clock(app[AUTH_KEY].now(), zone, t),
+        clock=display_clock(now, zone, t),
+        is_night=lock_is_night(settings, now, zone),
         t=t,
     )
     return web.json_response(payload, status=status, dumps=_dumps)
@@ -412,8 +416,8 @@ class DisplayUnlockView(web.View):
     panel's lock (the one route a locked panel reaches besides the lock
     screen). ``200 {"locked": false}`` (also when it wasn't locked —
     nothing is checked then); ``403 DISPLAY_PIN_WRONG`` with
-    ``params.remaining``; once those are spent the next try unpairs the
-    panel: ``401 DISPLAY_SIGNED_OUT``
+    ``params.remaining`` (never ``0``); the wrong PIN that spends the
+    last try unpairs the panel: ``401 DISPLAY_SIGNED_OUT``
     (:meth:`DashboardDisplayService.unlock`)."""
 
     async def post(self) -> web.Response:

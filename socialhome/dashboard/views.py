@@ -23,7 +23,9 @@ import hashlib
 import logging
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, tzinfo
 from typing import cast
 from urllib.parse import quote, urlsplit
 
@@ -32,8 +34,10 @@ from aiohttp import web
 from ..domain.household_dashboard import (
     HERE_SHOWN,
     DashboardPerson,
+    DashboardSettings,
     HomeSnapshot,
     PersonSnapshot,
+    in_night_window,
 )
 from ..rate_limiter import client_bucket
 from ..services.dashboard_settings_service import DashboardSettingsService
@@ -120,6 +124,8 @@ __all__ = [
     "cookie_secure",
     "html_response",
     "image_type",
+    "lock_is_night",
+    "pin_tries_note",
     "redirect",
     "register_routes",
     "render_lock_screen",
@@ -227,6 +233,24 @@ async def clear_session_cookie(
     )
 
 
+def lock_is_night(settings: DashboardSettings, now: float, zone: tzinfo) -> bool:
+    """Whether a locked tablet or panel is in the household's night
+    window — the lock screen then draws with the dim night colours (and
+    a panel dims its backlight), like the night board. Night is a screen
+    state, not anyone's data, so the neutral lock screen may show it."""
+    local = datetime.fromtimestamp(now, zone).time()
+    return in_night_window(local, settings.night_start, settings.night_end)
+
+
+def pin_tries_note(t: Callable[..., str], remaining: int) -> str:
+    """The note under "Wrong PIN": "Tries left: n" — or, with one wrong
+    PIN left before the tablet (panel) is signed out, the warning that
+    the next one signs it out."""
+    if remaining <= 1:
+        return t("dashboard.lock.last_try")
+    return t("dashboard.lock.tries_left", n=remaining)
+
+
 async def render_lock_screen(request: web.Request) -> web.Response:
     """The privacy lock screen: household name, clock, date, PIN form.
 
@@ -237,42 +261,49 @@ async def render_lock_screen(request: web.Request) -> web.Response:
     ``Retry-After`` while this tablet must still wait.
 
     After a wrong PIN the page also says how many tries are left before
-    the tablet is signed out — the wall panel's ``params.remaining``. The
-    count is read from this tablet's own PIN bucket, never from the
-    address: the flag only asks for it, so it can't be spoofed, and a
-    stale flag with no wrong PIN counted shows no count.
+    the tablet is signed out (:func:`pin_tries_note`) — the wall panel's
+    ``params.remaining``. The count is read from this tablet's own PIN
+    bucket, never from the address: the flag only asks for it, so it
+    can't be spoofed, and a stale flag with no wrong PIN counted shows no
+    count. In the night window the screen uses the night colours
+    (:func:`lock_is_night`); the household theme colour is the accent,
+    as on the boards.
     """
     app = request.app
     auth = app[AUTH_KEY]
     renderer = app[RENDERER_KEY]
-    locale = (await app[SETTINGS_KEY].get()).locale
+    settings = await app[SETTINGS_KEY].get()
+    locale = settings.locale
     zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
     t = renderer.translator(locale)
-    status, headers, error, tries_left = 200, None, None, None
+    now = auth.now()
+    status, headers, error, tries_left = 200, {}, None, None
     flag = request.query.get("pin")
     key = DashboardAuth.pin_throttle_key(request[CLAIMS_KEY])
     if flag == PIN_WRONG:
         error = t("dashboard.lock.wrong_pin")
         failures = auth.failure_count(key)
         if failures:
-            tries_left = t(
-                "dashboard.lock.tries_left",
-                n=max(0, THROTTLE_MAX_FAILURES - failures),
-            )
+            tries_left = pin_tries_note(t, THROTTLE_MAX_FAILURES - failures)
     elif flag == PIN_WAIT:
         wait = auth.attempt_wait(key, count_global=False)
         if wait:
             status, headers = 429, {"Retry-After": str(wait)}
             error = t("dashboard.login.too_many_tries", minutes=math.ceil(wait / 60))
+    style = theme_css(await _theme_primary(app))
+    if style:
+        headers["Content-Security-Policy"] = build_dashboard_csp([style])
     text = renderer.render(
         "lock.html.j2",
         locale=locale,
         household=await app[HOUSEHOLD_NAME_KEY](),
-        clock=household_clock(auth.now(), zone, t),
+        clock=household_clock(now, zone, t),
+        night=lock_is_night(settings, now, zone),
+        style=style,
         error=error,
         tries_left=tries_left,
     )
-    return html_response(text, status=status, headers=headers)
+    return html_response(text, status=status, headers=headers or None)
 
 
 class _DashboardView(web.View):
@@ -933,10 +964,12 @@ class UnlockView(_GoHomeOnGet):
 
     Only a valid *and* locked session is checked against the PIN; an
     unlocked one just goes home. Guesses are throttled per tablet
-    (:meth:`DashboardAuth.pin_throttle_key`). When this tablet's own five
-    wrong PINs in 15 minutes are spent, the next try signs it out and
-    revokes the cookie — then only the household password helps. Any
-    other hold-back (a full throttle table) only asks it to wait.
+    (:meth:`DashboardAuth.pin_throttle_key`). The wrong PIN that spends
+    this tablet's own five in 15 minutes signs it out and revokes the
+    cookie — then only the household password helps (so the lock screen
+    never shows "0 tries left" over a live keypad; a try racing that one
+    is signed out too). Any other hold-back (a full throttle table) only
+    asks it to wait.
     Every outcome is a redirect (Post/Redirect/Get).
     """
 
@@ -961,6 +994,15 @@ class UnlockView(_GoHomeOnGet):
             return response
         pin = form.get("pin")
         if not isinstance(pin, str) or not await self.auth.check_pin(pin):
+            if self.auth.failure_count(key) >= THROTTLE_MAX_FAILURES:
+                # That was the last try: "Tries left" never reads 0 over
+                # a keypad whose next press could only sign out.
+                log.warning(
+                    "household dashboard: too many wrong PINs from %s — tablet signed out",
+                    self.client_key,
+                )
+                await self.auth.revoke(claims, REVOKED_SIGNED_OUT)
+                return await _signed_out_response(self.request)
             log.info("household dashboard: wrong PIN from %s", self.client_key)
             return redirect(f"/?pin={PIN_WRONG}")
         self.auth.record_success(key, count_global=False)

@@ -311,13 +311,14 @@ h1 {
   display: none;
 }
 
+/* One width for the alert, the keypad and the hint under it: wide keys,
+   a phone-style dial pad (the wall panel draws the same). */
 .dash-pin-form {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 16px;
-  inline-size: 100%;
-  max-inline-size: 20rem;
+  inline-size: min(20rem, 100%);
   margin-inline: auto;
   text-align: start;
 }
@@ -327,6 +328,16 @@ h1 {
   display: block;
   margin-block-start: 4px;
   font-weight: 600;
+}
+
+/* "Forgot the PIN?" under the pad: who can change it — quiet, muted. */
+.dash-lock-forgot {
+  max-inline-size: 20rem;
+  margin-block: 16px 0;
+  margin-inline: auto;
+  color: var(--dash-muted);
+  font-size: 1rem;
+  line-height: 1.4;
 }
 
 /* With lock.js the field + submit stay in the form (they carry the
@@ -444,6 +455,10 @@ h1 {
 
   .dash-pin-form {
     gap: 12px;
+  }
+
+  .dash-lock-forgot {
+    margin-block-start: 12px;
   }
 }
 

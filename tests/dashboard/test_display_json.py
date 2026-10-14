@@ -355,7 +355,7 @@ def test_german_wording():
 
 def test_lock_payload_is_minimal():
     clock = display_clock(at(9).timestamp(), ZoneInfo("Europe/Berlin"), T)
-    payload = lock_payload(household="H", locale="en", clock=clock, t=T)
+    payload = lock_payload(household="H", locale="en", clock=clock, is_night=False, t=T)
     assert set(payload) == {
         "api_version",
         "locked",
@@ -363,9 +363,30 @@ def test_lock_payload_is_minimal():
         "locale",
         "dir",
         "clock",
+        "is_night",
         "strings",
     }
-    assert payload["strings"]["unlock"] == "Unlock"
+    assert payload["is_night"] is False
+    assert payload["strings"] == {
+        "locked": "Screen locked",
+        "pin_button": "PIN",
+        "enter_pin": "Enter PIN",
+        "unlock": "Unlock",
+        "delete": "Delete last digit",
+        "wrong_pin": "Wrong PIN",
+        "tries_left": "Tries left: {n}",
+        "last_try": "Last try — one more wrong PIN signs this screen out.",
+        "forgot_pin": (
+            "Forgot the PIN? An admin can change it in Social Home under "
+            "Admin › Dashboard."
+        ),
+    }
+
+
+def test_lock_payload_at_night():
+    clock = display_clock(at(9).timestamp(), ZoneInfo("Europe/Berlin"), T)
+    payload = lock_payload(household="H", locale="en", clock=clock, is_night=True, t=T)
+    assert payload["is_night"] is True
 
 
 def _css() -> str:

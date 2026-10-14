@@ -278,6 +278,8 @@
         "pair_title",
         "pair_unreachable",
         "pin_button",
+        "pin_forgot",
+        "pin_last_try",
         "pin_offline",
         "pin_remaining",
         "pin_wait",

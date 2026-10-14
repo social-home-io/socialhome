@@ -1535,8 +1535,9 @@ drives it) and is then served by a **separate aiohttp application on its own por
   `UnlockView`: the guess is counted before the scrypt check in the shared
   failure table, keyed on the panel id
   (`DashboardAuth.display_pin_throttle_key`, never the global brake); once
-  five wrong PINs in 15 min are spent the next try unpairs the panel (the
-  tablet's sign-out), so a new bucket takes an admin pairing it again.
+  the fifth wrong PIN in 15 min unpairs the panel (the tablet's
+  sign-out; `params.remaining` never reads 0), so a new bucket takes an
+  admin pairing it again.
   `POST /api/display/v1/ack` calls the same
   `HouseholdDashboardService.acknowledge` as the tablet (every eligibility
   rule re-derived) under the same 30 / 5 min budget, per panel. Admins can
@@ -1643,8 +1644,8 @@ drives it) and is then served by a **separate aiohttp application on its own por
     id, so it doesn't reset the bucket either. A locked session can't
     mint a new id: `/lock` on it changes nothing (no cookie, no
     revocation) and `/unlock` needs the PIN. Never the global brake.
-    Once this lock's 5 wrong PINs / 15 min are spent the next try
-    **signs the tablet out** and revokes the session as *signed out*,
+    The wrong PIN that spends this lock's 5 / 15 min (or any try past
+    them) **signs the tablet out** and revokes the session as *signed out*,
     so neither a copied nor a renewed cookie of it can keep guessing;
     only the household password helps then. Any other hold-back (a
     full throttle table) only asks the tablet to wait. `/unlock`

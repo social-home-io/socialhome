@@ -98,6 +98,8 @@
     "pair_title": "Pair this panel",
     "pair_unreachable": "Can't reach Social Home at this address.",
     "pin_button": "PIN",
+    "pin_forgot": "Forgot the PIN? An admin can change it in Social Home under Admin › Dashboard.",
+    "pin_last_try": "Last try — one more wrong PIN signs this screen out.",
     "pin_offline": "Can't reach Social Home. Try again.",
     "pin_remaining": "Tries left: {n}",
     "pin_wait": "Too many tries. Try again in {n} s.",

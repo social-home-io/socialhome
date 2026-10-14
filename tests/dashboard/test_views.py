@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from dataclasses import replace
 from html import unescape
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import pytest
@@ -37,6 +38,8 @@ from socialhome.dashboard.views import (
     _hostname,
     cookie_secure,
     image_type,
+    lock_is_night,
+    pin_tries_note,
     safe_next,
 )
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
@@ -796,14 +799,14 @@ async def test_chaining_lock_cannot_reset_the_pin_budget(pin_client, auth):
     used to mint a fresh cookie — and a fresh PIN bucket — forever."""
     current = await _locked(auth)
     for guess in range(THROTTLE_MAX_FAILURES * 3):
-        if guess and guess % THROTTLE_MAX_FAILURES == 0:
+        if guess and guess % (THROTTLE_MAX_FAILURES - 1) == 0:
             lock = await _lock(pin_client, current)
             if COOKIE_NAME in lock.cookies:
                 current = _jar(lock)
         resp = await _unlock(pin_client, current, pin=f"{guess:06d}")
         if resp.status == 401 or "signed_out" in resp.headers.get("Location", ""):
             break
-    assert guess == THROTTLE_MAX_FAILURES  # the sixth try signs it out
+    assert guess == THROTTLE_MAX_FAILURES - 1  # the fifth wrong PIN signs it out
     assert auth.throttle_key_count == 1
 
 
@@ -832,12 +835,12 @@ async def test_renewed_lock_shares_its_pin_bucket_and_its_sign_out(
     first = await _locked(auth)
     clock.advance(RENEW_AFTER_S + 1)  # still inside the one-year cookie
     renewed = _jar(await pin_client.get("/", headers=first))
-    for _ in range(THROTTLE_MAX_FAILURES - 1):
+    for _ in range(THROTTLE_MAX_FAILURES - 2):
         await _unlock(pin_client, first, pin="000000")
     assert (await _unlock(pin_client, renewed, pin="000000")).headers[
         "Location"
     ] == WRONG
-    resp = await _unlock(pin_client, renewed)
+    resp = await _unlock(pin_client, renewed, pin="000000")
     assert resp.headers["Location"] == "/login?signed_out=1"
     for copy in (first, renewed):
         page = await pin_client.get("/", headers=copy, allow_redirects=False)
@@ -852,9 +855,9 @@ async def test_rotating_client_addresses_share_one_pin_bucket(pin_client, auth):
         "socialhome.dashboard.views.client_bucket",
         side_effect=lambda _remote: next(addresses),
     ):
-        for _ in range(THROTTLE_MAX_FAILURES):
+        for _ in range(THROTTLE_MAX_FAILURES - 1):
             await _unlock(pin_client, headers, pin="000000")
-        resp = await _unlock(pin_client, headers)
+        resp = await _unlock(pin_client, headers, pin="000000")
     assert resp.headers["Location"] == "/login?signed_out=1"
 
 
@@ -1250,14 +1253,98 @@ async def test_wrong_pin_redirects_to_the_lock_screen_with_a_flag(pin_client, au
 
 async def test_wrong_pin_says_how_many_tries_are_left(pin_client, auth):
     """Owner decision 2026-10-14: like the wall panel's
-    ``params.remaining``, counting down to the sign-out."""
+    ``params.remaining``, counting down to the sign-out — and the last
+    one warns that the next wrong PIN signs the tablet out."""
     headers = await _locked(auth)
-    for left in range(THROTTLE_MAX_FAILURES - 1, -1, -1):
+    for left in range(THROTTLE_MAX_FAILURES - 1, 1, -1):
         await _unlock(pin_client, headers, pin="000000")
         html = await (await pin_client.get(WRONG, headers=headers)).text()
         assert (
             f'Wrong PIN <span class="dash-pin-tries">Tries left: {left}</span>'
         ) in html
+        assert "Last try" not in html
+    await _unlock(pin_client, headers, pin="000000")
+    html = await (await pin_client.get(WRONG, headers=headers)).text()
+    assert (
+        'Wrong PIN <span class="dash-pin-tries">Last try — one more wrong PIN '
+        "signs this screen out.</span>"
+    ) in html
+    assert "Tries left" not in html
+
+
+async def test_the_lock_screen_never_says_no_tries_are_left(pin_client, auth):
+    """The wrong PIN that spends the last try signs out at once: no "0
+    tries left" over a keypad whose next press could only sign out."""
+    headers = await _locked(auth)
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        await _unlock(pin_client, headers, pin="000000")
+    resp = await _unlock(pin_client, headers, pin="000000")
+    assert resp.headers["Location"] == "/login?signed_out=1"
+    assert "Tries left: 0" not in await (await pin_client.get(WRONG)).text()
+
+
+async def test_the_right_pin_on_the_last_try_unlocks(pin_client, auth):
+    headers = await _locked(auth)
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        await _unlock(pin_client, headers, pin="000000")
+    resp = await _unlock(pin_client, headers)
+    assert resp.headers["Location"] == "/"
+    claims = await _claims(auth, resp)
+    assert claims is not None and claims.locked is False
+
+
+async def test_last_try_in_the_dashboard_language(pin_client, auth, settings_service):
+    await settings_service.update(actor_is_admin=True, patch={"locale": "de"})
+    headers = await _locked(auth)
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        await _unlock(pin_client, headers, pin="000000")
+    html = await (await pin_client.get(WRONG, headers=headers)).text()
+    assert (
+        "Letzter Versuch — noch eine falsche PIN meldet diesen Bildschirm ab." in html
+    )
+
+
+async def test_lock_page_says_who_can_change_a_forgotten_pin(pin_client, auth):
+    """Inside the PIN pad (shown once it opens), never on the plain lock
+    screen's first glance — guidance, not household data."""
+    html = await (await pin_client.get("/", headers=await _locked(auth))).text()
+    pad = html[html.index("<details") : html.index("</details>")]
+    assert (
+        '<p class="dash-lock-forgot">Forgot the PIN? An admin can change it in '
+        "Social Home under Admin › Dashboard.</p>"
+    ) in pad
+    _assert_nothing_personal(html)
+
+
+async def test_lock_page_uses_the_night_colours_in_the_night_window(
+    pin_client, auth, settings_service
+):
+    # Fixed clock: 09:00 in Berlin.
+    headers = await _locked(auth)
+    html = await (await pin_client.get("/", headers=headers)).text()
+    assert '<body class="dash-locked">' in html
+    await settings_service.update(
+        actor_is_admin=True, patch={"night_start": "08:30", "night_end": "09:30"}
+    )
+    html = await (await pin_client.get("/", headers=headers)).text()
+    assert '<body class="dash-locked dash-night">' in html
+    _assert_nothing_personal(html)
+
+
+async def test_lock_page_takes_the_household_theme_colour(pin_client, auth, household):
+    household["theme"] = "#2F6F5E"
+    resp = await pin_client.get("/", headers=await _locked(auth))
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    assert "--dash-accent:#2f6f5e" in _board_style(html)[0]
+
+
+async def test_lock_page_without_a_theme_keeps_the_strict_policy(
+    pin_client, auth, household
+):
+    household["theme"] = RuntimeError("theme db gone")
+    resp = await pin_client.get("/", headers=await _locked(auth))
+    _assert_strict_csp(resp, await resp.text())
 
 
 async def test_tries_left_is_the_servers_count_never_the_address(pin_client, auth):
@@ -1295,6 +1382,35 @@ async def test_tries_left_in_the_dashboard_language(pin_client, auth, settings_s
     assert f"Verbleibende Versuche: {THROTTLE_MAX_FAILURES - 1}" in html
 
 
+@pytest.mark.parametrize(
+    ("remaining", "note"),
+    [(4, "Tries left: 4"), (2, "Tries left: 2"), (1, "last"), (0, "last")],
+)
+def test_pin_tries_note(remaining, note):
+    text = pin_tries_note(RENDERER.translator("en"), remaining)
+    if note == "last":
+        assert text == "Last try — one more wrong PIN signs this screen out."
+    else:
+        assert text == note
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "night"),
+    [
+        ("08:30", "09:30", True),
+        ("22:00", "06:00", False),
+        ("23:00", "09:30", True),
+        ("09:00", "09:00", False),
+        ("09:01", "10:00", False),
+    ],
+)
+def test_lock_is_night_reads_the_household_clock(start, end, night):
+    settings = SimpleNamespace(night_start=start, night_end=end)
+    # 08:00 UTC is 09:00 in Berlin.
+    now = datetime(2027, 1, 15, 8, 0, tzinfo=UTC).timestamp()
+    assert lock_is_night(settings, now, ZoneInfo("Europe/Berlin")) is night
+
+
 async def test_lock_page_keypad_is_closed_until_asked(pin_client, auth):
     html = await (await pin_client.get("/", headers=await _locked(auth))).text()
     assert re.search(r"<details[^>]*\sopen", html) is None
@@ -1330,11 +1446,11 @@ async def test_malformed_pin_counts_as_wrong(pin_client, auth, data):
 
 async def test_five_wrong_pins_then_the_tablet_is_signed_out(pin_client, auth):
     headers = await _locked(auth)
-    for _ in range(THROTTLE_MAX_FAILURES):
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
         assert (await _unlock(pin_client, headers, pin="000000")).headers[
             "Location"
         ] == WRONG
-    resp = await _unlock(pin_client, headers)  # even the right PIN now
+    resp = await _unlock(pin_client, headers, pin="000000")  # the fifth
     assert resp.status == 303
     assert resp.headers["Location"] == "/login?signed_out=1"
     morsel = resp.cookies[COOKIE_NAME]
@@ -1343,6 +1459,20 @@ async def test_five_wrong_pins_then_the_tablet_is_signed_out(pin_client, auth):
     html = await login.text()
     assert "Signed out after too many wrong PINs" in html
     assert 'name="password"' in html
+    # The cookie is revoked: even the right PIN can't bring it back.
+    assert (await _unlock(pin_client, headers)).status == 401
+
+
+async def test_a_try_past_the_spent_budget_signs_out(pin_client, auth):
+    """A try that finds the budget already spent (one racing the fifth
+    wrong PIN) signs the tablet out too — even with the right PIN."""
+    headers = await _locked(auth)
+    claims = await auth.verify(headers["Cookie"].split("=", 1)[1])
+    key = DashboardAuth.pin_throttle_key(claims)
+    for _ in range(THROTTLE_MAX_FAILURES):
+        auth.begin_attempt(key, count_global=False)
+    resp = await _unlock(pin_client, headers)
+    assert resp.headers["Location"] == "/login?signed_out=1"
 
 
 async def test_signed_out_cookie_is_dead_even_when_replayed(pin_client, auth):
@@ -1443,9 +1573,13 @@ async def test_wait_flag_without_a_wait_is_the_plain_lock_screen(pin_client, aut
 
 async def test_pin_throttle_expires(pin_client, auth, clock):
     headers = await _locked(auth)
-    for _ in range(THROTTLE_MAX_FAILURES):
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
         await _unlock(pin_client, headers, pin="000000")
     clock.advance(THROTTLE_WINDOW_S)
+    # The old wrong PINs aged out: a full budget again, not a sign-out.
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        resp = await _unlock(pin_client, headers, pin="000000")
+        assert resp.headers["Location"] == WRONG
     assert (await _unlock(pin_client, headers)).headers["Location"] == "/"
 
 
@@ -1471,17 +1605,21 @@ async def test_pin_failures_do_not_trip_the_global_brake(pin_client, auth):
 
 async def test_parallel_pin_guesses_cannot_outrun_the_throttle(pin_client, auth):
     headers = await _locked(auth)
+    key = DashboardAuth.pin_throttle_key(
+        await auth.verify(headers["Cookie"].split("=", 1)[1])
+    )
     results = await asyncio.gather(
         *(_unlock(pin_client, headers, pin="000000") for _ in range(8))
     )
     wrong = [r for r in results if r.headers.get("Location") == WRONG]
     out = [r for r in results if r.headers.get("Location") == "/login?signed_out=1"]
-    # Past the limit: the first sign-out revokes the cookie, so guesses
-    # still in flight behind it find no session at all.
+    # The fifth wrong PIN signs out (guesses in flight count as spent);
+    # the sign-out revokes the cookie, so later ones find no session.
     dead = [r for r in results if r.status == 401]
-    assert len(wrong) == THROTTLE_MAX_FAILURES
+    assert len(wrong) <= THROTTLE_MAX_FAILURES - 1
     assert len(out) >= 1
     assert len(wrong) + len(out) + len(dead) == 8
+    assert auth.failure_count(key) == THROTTLE_MAX_FAILURES
 
 
 async def test_unlock_an_unlocked_session_redirects_home(pin_client, auth):
