@@ -39,11 +39,17 @@ short code and then authenticates every request with
   (``{message_id, person_id?}``) (bearer) — the privacy lock (stored on
   the panel's record, :meth:`DashboardDisplayService.lock` / ``unlock``:
   the tablet's PIN rules, the 6th wrong try unpairs the panel) and "Got
-  it" (the tablet's :meth:`acknowledge` rules and budget, per panel).
+  it" (the tablet's :meth:`acknowledge` rules and budget, per panel);
+* ``POST /api/display/v1/unlock/ha`` (bearer, no body) — Home Assistant
+  lifts the panel's lock without the PIN (the panel's "Privacy lock"
+  entity), only while an admin allows it (``403 DISPLAY_HA_UNLOCK_OFF``
+  otherwise); logged and audited
+  (:meth:`DashboardDisplayService.unlock_from_ha`), capped per panel
+  (:meth:`DashboardAuth.begin_display_ha_unlock`).
 
 A panel that is locked (its record's ``locked``, while a PIN is set) gets
 ``423`` with the lock payload (household name, clock, PIN strings — never
-a person) for everything but pairing and ``/unlock``. Requests are
+a person) for everything but pairing, ``/unlock`` and ``/unlock/ha``. Requests are
 budgeted per panel (:meth:`DashboardAuth.begin_display_read`, ``429`` +
 ``Retry-After``).
 
@@ -122,6 +128,7 @@ __all__ = [
     "DISPLAY_API_PREFIX",
     "CLAIM_PATH",
     "DISPLAY_CACHE",
+    "HA_UNLOCK_PATH",
     "IMAGE_PREFIXES",
     "LOCK_PATH",
     "MAP_PNG_PATH",
@@ -140,6 +147,8 @@ PAIR_PATH = "/api/display/v1/pair"
 CLAIM_PATH = "/api/display/v1/pair/claim"
 LOCK_PATH = "/api/display/v1/lock"
 UNLOCK_PATH = "/api/display/v1/unlock"
+#: Home Assistant lifts the lock without the PIN (when an admin allows it).
+HA_UNLOCK_PATH = "/api/display/v1/unlock/ha"
 #: Panels report themselves in these headers (untrusted, length-capped).
 FIRMWARE_HEADER = "X-Display-Firmware"
 MODEL_HEADER = "X-Display-Model"
@@ -163,8 +172,9 @@ IMAGE_PREFIXES = (
 #: Twemoji (no household data), so a locked panel — even one rebooted
 #: while locked, its image cache empty — may still fetch it.
 LOCK_EMOJI_PATH = DISPLAY_API_PREFIX + "emoji/1f512"
-#: What a locked panel reaches: the PIN (the one way out) and the 🔒.
-_LOCKED_PASS = frozenset({UNLOCK_PATH, LOCK_EMOJI_PATH})
+#: What a locked panel reaches: the ways out (the PIN, and Home
+#: Assistant when an admin allows it) and the 🔒.
+_LOCKED_PASS = frozenset({UNLOCK_PATH, HA_UNLOCK_PATH, LOCK_EMOJI_PATH})
 #: How long a panel waits before asking again for a map with no tiles.
 TILES_RETRY_S = 60
 _SAFE_TAG = re.compile(r"[A-Za-z0-9_.-]{1,128}")
@@ -209,6 +219,13 @@ def _coded(exc: CodedError) -> web.Response:
     return response
 
 
+def _rate_limited(wait: int, detail: str = "Too many requests.") -> web.Response:
+    """A ``429 RATE_LIMITED`` with ``Retry-After: wait``."""
+    response = error_response(429, "RATE_LIMITED", detail)
+    response.headers["Retry-After"] = str(wait)
+    return response
+
+
 async def _json_object(request: web.Request) -> dict[str, object] | None:
     """The request body as a JSON object (``{}`` when empty), else ``None``."""
     raw = await request.read()
@@ -250,10 +267,8 @@ async def guard_display_request(
         display.id, image=request.path.startswith(IMAGE_PREFIXES)
     )
     if wait:
-        response = error_response(429, "RATE_LIMITED", "Too many requests.")
-        response.headers["Retry-After"] = str(wait)
-        return response
-    # The PIN is the one way out of the lock, so ``/unlock`` passes — and
+        return _rate_limited(wait)
+    # The ways out of the lock (``/unlock``, ``/unlock/ha``) pass — and
     # the lock screen's own 🔒 picture.
     if request.path not in _LOCKED_PASS and await displays.is_locked(display):
         return await _locked(request)
@@ -276,6 +291,7 @@ async def _locked(request: web.Request, *, status: int = 423) -> web.Response:
         locale=locale,
         clock=display_clock(now, zone, t),
         is_night=lock_is_night(settings, now, zone),
+        ha_unlock=settings.panel_unlock_from_ha,
         t=t,
     )
     return web.json_response(payload, status=status, dumps=_dumps)
@@ -312,11 +328,7 @@ class DisplayPairView(web.View):
         # The socket peer only — never X-Forwarded-For, which anyone can set.
         wait = self.request.app[AUTH_KEY].begin_pair(client_bucket(self.request.remote))
         if wait:
-            response = error_response(
-                429, "RATE_LIMITED", "Too many pairing requests. Try again later."
-            )
-            response.headers["Retry-After"] = str(wait)
-            return response
+            return _rate_limited(wait, "Too many pairing requests. Try again later.")
         body = await _json_object(self.request)
         if body is None:
             return _bad_request()
@@ -359,11 +371,7 @@ class DisplayClaimView(web.View):
             client_bucket(self.request.remote), claim=True
         )
         if wait:
-            response = error_response(
-                429, "RATE_LIMITED", "Too many pairing requests. Try again later."
-            )
-            response.headers["Retry-After"] = str(wait)
-            return response
+            return _rate_limited(wait, "Too many pairing requests. Try again later.")
         body = await _json_object(self.request)
         if body is None:
             return _bad_request()
@@ -421,8 +429,8 @@ class DisplayLockView(web.View):
 
 class DisplayUnlockView(web.View):
     """``POST /api/display/v1/unlock`` ``{"pin": "1234"}`` — lift this
-    panel's lock (the one route a locked panel reaches besides the lock
-    screen). ``200 {"locked": false}`` (also when it wasn't locked —
+    panel's lock with the PIN (reachable while locked, like
+    ``/unlock/ha`` and the 🔒). ``200 {"locked": false}`` (also when it wasn't locked —
     nothing is checked then); ``403 DISPLAY_PIN_WRONG`` with
     ``params.remaining`` (never ``0``); the wrong PIN that spends the
     last try unpairs the panel: ``401 DISPLAY_SIGNED_OUT``
@@ -435,6 +443,31 @@ class DisplayUnlockView(web.View):
         try:
             await self.request.app[DISPLAYS_KEY].unlock(
                 self.request[DISPLAY_KEY], body.get("pin")
+            )
+        except CodedError as exc:
+            return _coded(exc)
+        return web.json_response({"api_version": API_VERSION, "locked": False})
+
+
+class DisplayHaUnlockView(web.View):
+    """``POST /api/display/v1/unlock/ha`` — Home Assistant (the panel's
+    "Privacy lock" entity) lifts this panel's lock without the PIN. No
+    body is needed (one sent is ignored). ``200 {"locked": false}`` — also
+    when it wasn't locked; ``403 DISPLAY_HA_UNLOCK_OFF`` unless an admin
+    allows it; ``429`` + ``Retry-After`` past
+    :data:`~.auth.HA_UNLOCK_MAX` calls in :data:`~.auth.HA_UNLOCK_WINDOW_S`
+    (counted before the setting is read). Reachable while locked
+    (:meth:`DashboardDisplayService.unlock_from_ha`)."""
+
+    async def post(self) -> web.Response:
+        app = self.request.app
+        display = self.request[DISPLAY_KEY]
+        wait = app[AUTH_KEY].begin_display_ha_unlock(display.id)
+        if wait:
+            return _rate_limited(wait)
+        try:
+            await app[DISPLAYS_KEY].unlock_from_ha(
+                display, ip_address=self.request.remote
             )
         except CodedError as exc:
             return _coded(exc)
@@ -458,9 +491,7 @@ class DisplayAckView(web.View):
         app = self.request.app
         wait = app[AUTH_KEY].begin_display_ack(self.request[DISPLAY_KEY].id)
         if wait:
-            response = error_response(429, "RATE_LIMITED", "Too many requests.")
-            response.headers["Retry-After"] = str(wait)
-            return response
+            return _rate_limited(wait)
         body = await _json_object(self.request)
         if body is None:
             return _bad_request()
@@ -675,9 +706,7 @@ class DisplayMapPictureView(_DisplayBoardView):
         if kept is None:
             wait = app[AUTH_KEY].begin_map_render(self.request[DISPLAY_KEY].id)
             if wait:
-                response = error_response(429, "RATE_LIMITED", "Too many map pictures.")
-                response.headers["Retry-After"] = str(wait)
-                return response
+                return _rate_limited(wait, "Too many map pictures.")
             try:
                 kept = await pictures.render(
                     scene,
@@ -831,6 +860,7 @@ def register_display_routes(app: web.Application) -> None:
     app.router.add_view(DISPLAY_API_PREFIX + "whoami", DisplayWhoamiView)
     app.router.add_view(LOCK_PATH, DisplayLockView)
     app.router.add_view(UNLOCK_PATH, DisplayUnlockView)
+    app.router.add_view(HA_UNLOCK_PATH, DisplayHaUnlockView)
     app.router.add_view(DISPLAY_API_PREFIX + "ack", DisplayAckView)
     app.router.add_view(DISPLAY_API_PREFIX + "home", DisplayHomeView)
     app.router.add_view(

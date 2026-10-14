@@ -23,6 +23,7 @@ from socialhome.domain.household_dashboard import (
     DashboardDisplayNotFoundError,
     DashboardPairingCodeInvalidError,
     DashboardPairingThrottledError,
+    DisplayHaUnlockOffError,
     DisplayPairingStatus,
     MENTION_HERE,
     MENTION_PERSON,
@@ -99,6 +100,8 @@ def test_settings_defaults():
     assert s.show_household_messages is False
     # Mentions play a tone by default (admin can turn it off).
     assert s.mention_sound is True
+    # Home Assistant may not lift a panel's lock unless an admin allows it.
+    assert s.panel_unlock_from_ha is False
     assert s.address is None
     assert s.people == ()
     assert s.password_set_at is None
@@ -142,6 +145,15 @@ def test_password_required_error():
     assert e.status == 422
     assert e.code == "DASHBOARD_PASSWORD_REQUIRED"
     assert e.detail == "Set a dashboard password before enabling the dashboard."
+
+
+def test_display_ha_unlock_off_error():
+    e = DisplayHaUnlockOffError()
+    assert isinstance(e, CodedError)
+    assert e.status == 403
+    assert e.code == "DISPLAY_HA_UNLOCK_OFF"
+    assert "Home Assistant" in e.detail
+    assert e.params == {}
 
 
 def test_port_fixed_error():

@@ -448,7 +448,8 @@ night colours, on panels and tablets alike. A locked panel shows
 the lock without the PIN (*headless:* `PATCH
 /api/admin/dashboard/displays/{id}` with `{"locked": false}`). **Remove
 PIN** unlocks every panel too; setting a new PIN afterwards doesn't lock
-them again.
+them again. Home Assistant can lock and unlock a panel too — see
+[below](#home-assistant-privacy-lock-entity).
 
 **Got it on a panel.** A panel that shows household-chat mentions can
 send "Got it" like the tablet — the same rules (only what the wall shows
@@ -459,6 +460,89 @@ right now, never at night or while locked) and the same limit of 30 per
 > only; the panel firmware and the data the panels show arrive in a
 > later release. The panel API is documented in
 > [api.md](../api.md#hfs--household-dashboard).
+
+### Home Assistant "Privacy lock" entity
+
+A panel adopted in Home Assistant has a **lock** entity named **Privacy
+lock** on its device (Settings › Devices & services › ESPHome › the
+panel). It shows whether the panel is locked and lets Home Assistant — a
+dashboard card, a voice command, an automation — lock or unlock it. It
+comes with the panel firmware from the `esphome-dashboard` release that
+pairs with this Social Home release; update the panel if the entity is
+missing.
+
+- **Locking from Home Assistant always works**, as long as a household
+  PIN is set (**Set PIN** under **Privacy lock** in **Admin ›
+  Dashboard**). Without a PIN the lock is refused — nothing could unlock
+  the panel — and the entity stays unlocked.
+- **Unlocking from Home Assistant is off by default.** It lifts the lock
+  without anyone typing the PIN, so an admin has to allow it: **Admin ›
+  Dashboard › Wall panels › Home Assistant may unlock wall panels**
+  (*headless:* `PUT /api/admin/dashboard` with
+  `{"panel_unlock_from_ha": true}`). While it's off, an unlock from Home
+  Assistant is refused: the entity stays locked and the panel logs a
+  warning. The PIN on the panel, or **Unlock** in **Admin › Dashboard ›
+  Wall panels**, works either way.
+- **Every Home Assistant unlock is recorded**: Social Home logs it and
+  writes it to the auth audit log (`GET /api/admin/auth-audit`, event
+  `display_ha_unlock`, with the panel's id and name and the address the
+  request came from). A refused unlock is logged too. An unlock from Home
+  Assistant does **not** give the panel fresh PIN tries: wrong PINs typed
+  before it still count until they age out (15 minutes), so it can't be
+  used to keep guessing the PIN.
+- **At most 6 unlock requests per 5 minutes per panel** — refused ones
+  count too. After that a looping automation is told to wait, and the
+  panel stays locked.
+
+The entity id depends on the panel's device name — for a panel named
+*Kitchen panel* it is `lock.kitchen_panel_privacy_lock`. Lock it every
+night at 22:00:
+
+```yaml
+automation:
+  - alias: "Lock the kitchen panel at night"
+    triggers:
+      - trigger: time
+        at: "22:00:00"
+    actions:
+      - action: lock.lock
+        target:
+          entity_id: lock.kitchen_panel_privacy_lock
+```
+
+Lock it when guests arrive and unlock it again when they've left (the
+unlock needs **Home Assistant may unlock wall panels** turned on):
+
+```yaml
+automation:
+  - alias: "Lock the kitchen panel for guests"
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.guests
+        to: "on"
+    actions:
+      - action: lock.lock
+        target:
+          entity_id: lock.kitchen_panel_privacy_lock
+  - alias: "Unlock the kitchen panel when guests leave"
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.guests
+        to: "off"
+    actions:
+      - action: lock.unlock
+        target:
+          entity_id: lock.kitchen_panel_privacy_lock
+```
+
+> **Who can unlock then.** Home Assistant has no per-entity permissions,
+> so once this is on, **every** Home Assistant user (not only admins), any
+> long-lived access token or integration, a voice assistant the lock
+> entity is exposed to, and anyone who can reach the panel's ESPHome API
+> can lift the privacy lock. Leave it off if Home Assistant users
+> shouldn't be able to see what the wall shows. Keep the panel's ESPHome
+> API encryption on (the panel firmware ships it on by default —
+> `api: encryption: {}`) and set an OTA password.
 
 ## Signing tablets out
 

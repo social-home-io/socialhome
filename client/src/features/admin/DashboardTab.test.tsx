@@ -58,6 +58,7 @@ function state(over: Partial<DashboardState> = {}): DashboardState {
     show_status_text: false,
     show_household_messages: false,
     mention_sound: true,
+    panel_unlock_from_ha: false,
     household_chat_enabled: true,
     last_seen_at: null,
     people: [
@@ -454,6 +455,16 @@ describe('DashboardTab — display settings', () => {
     await waitFor(() => expect(mPut).toHaveBeenLastCalledWith(
       '/api/admin/dashboard', { mention_sound: false }))
     await waitFor(() => expect(sw.checked).toBe(false))
+  })
+
+  it('saves the Home Assistant panel-unlock switch through the settings endpoint', async () => {
+    await mount(state())
+    const sw = screen.getByRole('switch', { name: 'Home Assistant may unlock wall panels' }) as HTMLInputElement
+    expect(sw.checked).toBe(false)
+    fireEvent.click(sw)
+    await waitFor(() => expect(mPut).toHaveBeenLastCalledWith(
+      '/api/admin/dashboard', { panel_unlock_from_ha: true }))
+    await waitFor(() => expect(sw.checked).toBe(true))
   })
 
   it('greys the mention sound switch while household messages are off', async () => {

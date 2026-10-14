@@ -160,6 +160,7 @@ async def test_update_partial_round_trip(svc):
             "show_status_text": True,
             "show_household_messages": True,
             "mention_sound": False,
+            "panel_unlock_from_ha": True,
         },
     )
     assert s.port == 9000
@@ -171,6 +172,7 @@ async def test_update_partial_round_trip(svc):
     assert s.show_status_text is True
     assert s.show_household_messages is True
     assert s.mention_sound is False
+    assert s.panel_unlock_from_ha is True
     # Partial: an untouched field keeps its value.
     s2 = await svc.update(actor_is_admin=True, patch={"locale": "fr"})
     assert s2.port == 9000
@@ -198,6 +200,9 @@ async def test_update_does_not_store_secrets_in_settings(svc, repo):
         ("show_household_messages", None),
         ("mention_sound", 1),
         ("mention_sound", None),
+        ("panel_unlock_from_ha", 1),
+        ("panel_unlock_from_ha", "true"),
+        ("panel_unlock_from_ha", None),
         ("port", "9000"),
         ("port", True),
         ("port", 1023),

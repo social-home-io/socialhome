@@ -287,6 +287,7 @@
     }
   },
   "settings": {
+    "ha_unlock": false,
     "idle_return_minutes": 3,
     "keep_screen_on": true,
     "mention_sound": true,

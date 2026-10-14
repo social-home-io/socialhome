@@ -13,6 +13,8 @@ from pathlib import Path
 from string import Formatter
 from zoneinfo import ZoneInfo
 
+import pytest
+
 import socialhome.i18n as i18n_pkg
 from socialhome.dashboard.boards import board_base, home_board, person_board
 from socialhome.dashboard.display_json import (
@@ -355,7 +357,9 @@ def test_german_wording():
 
 def test_lock_payload_is_minimal():
     clock = display_clock(at(9).timestamp(), ZoneInfo("Europe/Berlin"), T)
-    payload = lock_payload(household="H", locale="en", clock=clock, is_night=False, t=T)
+    payload = lock_payload(
+        household="H", locale="en", clock=clock, is_night=False, ha_unlock=False, t=T
+    )
     assert set(payload) == {
         "api_version",
         "locked",
@@ -364,9 +368,11 @@ def test_lock_payload_is_minimal():
         "dir",
         "clock",
         "is_night",
+        "ha_unlock",
         "strings",
     }
     assert payload["is_night"] is False
+    assert payload["ha_unlock"] is False
     assert payload["strings"] == {
         "locked": "Screen locked",
         "pin_button": "PIN",
@@ -385,8 +391,34 @@ def test_lock_payload_is_minimal():
 
 def test_lock_payload_at_night():
     clock = display_clock(at(9).timestamp(), ZoneInfo("Europe/Berlin"), T)
-    payload = lock_payload(household="H", locale="en", clock=clock, is_night=True, t=T)
+    payload = lock_payload(
+        household="H", locale="en", clock=clock, is_night=True, ha_unlock=False, t=T
+    )
     assert payload["is_night"] is True
+
+
+def test_lock_payload_says_whether_home_assistant_may_unlock():
+    clock = display_clock(at(9).timestamp(), ZoneInfo("Europe/Berlin"), T)
+    payload = lock_payload(
+        household="H", locale="en", clock=clock, is_night=False, ha_unlock=True, t=T
+    )
+    assert payload["ha_unlock"] is True
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_board_settings_say_whether_home_assistant_may_unlock(allowed):
+    snap = home()
+    base = board_base(snap, people=snap.people, colors=home_colors(snap), t=T)
+    header = board_header(
+        view="overview",
+        base=base,
+        sections=snap.sections,
+        settings=DashboardSettings(panel_unlock_from_ha=allowed),
+        household="H",
+        clock=display_clock(snap.now.timestamp(), snap.now.tzinfo, T),
+        view_key="k",
+    )
+    assert header["settings"]["ha_unlock"] is allowed
 
 
 def _css() -> str:

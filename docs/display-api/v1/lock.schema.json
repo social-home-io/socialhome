@@ -8,6 +8,7 @@
     "api_version",
     "clock",
     "dir",
+    "ha_unlock",
     "household",
     "is_night",
     "locale",
@@ -39,6 +40,10 @@
     "is_night": {
       "type": "boolean",
       "description": "The household's night window is on: draw the lock screen with the night palette and dim, as on the night board."
+    },
+    "ha_unlock": {
+      "type": "boolean",
+      "description": "An admin allows Home Assistant to unlock this panel without the PIN (POST /unlock/ha); false → that call answers 403 DISPLAY_HA_UNLOCK_OFF. Reflects the admin setting panel_unlock_from_ha."
     },
     "strings": {
       "type": "object",

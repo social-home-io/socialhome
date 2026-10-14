@@ -83,6 +83,7 @@ __all__ = [
     "DashboardAddressRequiredError",
     "DisplayDiscoveryFailedError",
     "DisplayDiscoveryUnavailableError",
+    "DisplayHaUnlockOffError",
     "DisplayPairing",
     "DisplayPairingStatus",
     "DisplayPanelNeedsUpdateError",
@@ -254,6 +255,12 @@ class DashboardSettings:
     #: Play a short on-device tone when a new @here / @name mention of
     #: the household chat appears (part of the messages opt-in above).
     mention_sound: bool = True
+    #: A Home Assistant automation / action may lift a wall panel's
+    #: privacy lock without the PIN (``POST /api/display/v1/unlock/ha``,
+    #: the panel's "Privacy lock" entity). Off by default: once on,
+    #: anyone who can run Home Assistant automations or actions can
+    #: unlock the wall panels. Every such unlock is logged and audited.
+    panel_unlock_from_ha: bool = False
     #: Admin-set base URL tablets use (``http(s)://host[:port]``), shown
     #: in the admin UI and setup links instead of a guessed address.
     address: str | None = None
@@ -446,6 +453,16 @@ class DashboardAddressRequiredError(CodedError):
 
     def __init__(self, reason: str) -> None:
         super().__init__(params={"reason": reason})
+
+
+class DisplayHaUnlockOffError(CodedError):
+    """Home Assistant asked to lift a panel's privacy lock, but no admin
+    turned on "Home Assistant may unlock wall panels"
+    (:attr:`DashboardSettings.panel_unlock_from_ha`)."""
+
+    status = 403
+    code = "DISPLAY_HA_UNLOCK_OFF"
+    detail = "An admin hasn't allowed Home Assistant to unlock wall panels."
 
 
 class DashboardDisplaySignedOutError(CodedError):

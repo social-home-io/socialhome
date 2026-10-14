@@ -3649,6 +3649,8 @@
   "admin.dashboard.panels.ha_status_ready": "Nog niet gekoppeld",
   "admin.dashboard.panels.ha_status_offline": "Offline in Home Assistant",
   "admin.dashboard.panels.ha_status_needs_update": "Werk de firmware van het scherm bij om het hiervandaan te verbinden",
+  "admin.dashboard.panels.ha_unlock": "Home Assistant mag wandschermen ontgrendelen",
+  "admin.dashboard.panels.ha_unlock_hint": "Laat een Home Assistant-automatisering een scherm ontgrendelen zonder pincode. Iedereen die je Home Assistant-automatiseringen of -acties kan uitvoeren, kan dan het privacyslot opheffen.",
   "admin.backup.downloaded": "Back-up gedownload",
   "admin.backup.restore_confirm": "Herstellen vanuit ‘{name}’?\n\nDit werkt alleen op een lege Social Home. Bestaande gegevens blokkeren het herstel, zodat je niets per ongeluk overschrijft. Download eerst een back-up als je de huidige stand wilt bewaren.",
   "admin.backup.restored": "Back-up hersteld",

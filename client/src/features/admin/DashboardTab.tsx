@@ -27,6 +27,7 @@ import localeMeta from '@/i18n/locales/_meta.json'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { DashboardPasswordDialog, DashboardPinDialog } from './DashboardDialogs'
 import { DashboardPanelsCard } from './DashboardPanelsCard'
+import { SwitchRow } from './DashboardSwitchRow'
 import { TabletStep } from './DashboardTabletStep'
 import type { DashboardPerson, DashboardState, Patch, SaveFn, SaveOpts } from './dashboardTypes'
 
@@ -141,7 +142,7 @@ export function DashboardTab() {
       <TabletStep state={state} save={save} reload={load} />
       <PinStep state={state} reload={load} />
       <DisplaySection state={state} save={save} />
-      <DashboardPanelsCard state={state} reload={load} />
+      <DashboardPanelsCard state={state} save={save} reload={load} />
       <PeopleSection state={state} save={save} />
     </div>
   )
@@ -293,27 +294,6 @@ function PinStep({ state, reload }: { state: DashboardState, reload: () => Promi
 }
 
 // ─── Display + sessions ────────────────────────────────────────────────────
-
-function SwitchRow({ id, label, hint, checked, disabled, onChange }: {
-  id: string, label: string, hint?: string, checked: boolean, disabled?: boolean,
-  onChange: (next: boolean) => void
-}) {
-  // The hint is a description, not part of the switch's name.
-  const hintId = hint ? `${id}-hint` : undefined
-  return (
-    <div class={`sh-dashboard-row${disabled ? ' sh-dashboard-row--disabled' : ''}`}>
-      <div class="sh-dashboard-row__label">
-        <label for={id}>{label}</label>
-        {hint && <span id={hintId} class="sh-form-hint">{hint}</span>}
-      </div>
-      <span class="sh-switch">
-        <input id={id} type="checkbox" role="switch" checked={checked} disabled={disabled}
-          aria-describedby={hintId} onChange={() => onChange(!checked)} />
-        <span class="sh-switch-track" />
-      </span>
-    </div>
-  )
-}
 
 function DisplaySection({ state, save }: { state: DashboardState, save: SaveFn }) {
   const [signingOut, setSigningOut] = useState(false)

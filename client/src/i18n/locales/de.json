@@ -3649,6 +3649,8 @@
   "admin.dashboard.panels.ha_status_ready": "Noch nicht gekoppelt",
   "admin.dashboard.panels.ha_status_offline": "In Home Assistant offline",
   "admin.dashboard.panels.ha_status_needs_update": "Aktualisiere die Firmware des Panels, um es von hier zu verbinden",
+  "admin.dashboard.panels.ha_unlock": "Home Assistant darf Wandpanels entsperren",
+  "admin.dashboard.panels.ha_unlock_hint": "Eine Home-Assistant-Automatisierung kann ein Panel ohne PIN entsperren. Wer deine Home-Assistant-Automatisierungen oder -Aktionen ausführen kann, kann dann die Privatsphäre-Sperre aufheben.",
   "admin.backup.downloaded": "Sicherung heruntergeladen",
   "admin.backup.restore_confirm": "Aus „{name}“ wiederherstellen?\n\nDas klappt nur bei einem leeren Social Home. Vorhandene Daten verhindern die Wiederherstellung, damit du nichts aus Versehen überschreibst. Lade vorher eine Sicherung herunter, wenn du den aktuellen Stand behalten willst.",
   "admin.backup.restored": "Sicherung wiederhergestellt",

@@ -139,8 +139,8 @@ Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
   has a PIN: else `409 DASHBOARD_PIN_REQUIRED`) and answers `200` with the
   lock screen (`lock.schema.json`). The lock is stored server-side: a
   reboot keeps it.
-- `POST /api/display/v1/unlock` `{"pin": "1234"}` — the only route a locked
-  panel reaches. `200` `unlock.schema.json` (also when it wasn't locked);
+- `POST /api/display/v1/unlock` `{"pin": "1234"}` — the PIN way out; a
+  locked panel reaches it (and `/unlock/ha` below). `200` `unlock.schema.json` (also when it wasn't locked);
   `403 DISPLAY_PIN_WRONG` with `params.remaining` (fixture
   `pin-wrong.json`) — show it as "Wrong PIN" with the lock body's
   `strings.tries_left` (`{n}` = `remaining`), or `strings.last_try` when
@@ -150,6 +150,20 @@ Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
   `strings.forgot_pin` under the PIN pad, draw the lock screen with the
   night palette (and dim) while `is_night` is true, and close a PIN pad
   left untouched for a minute.
+- `POST /api/display/v1/unlock/ha` (no body; one sent is ignored) — Home
+  Assistant lifts the lock without the PIN: the panel calls it when its
+  "Privacy lock" entity is unlocked from Home Assistant. Only while an
+  admin turned on "Home Assistant may unlock wall panels" (off by
+  default): the lock body's and every board's `settings.ha_unlock` say
+  whether it is on (`ha_unlock` reflects the admin setting
+  `panel_unlock_from_ha`) — else `403 DISPLAY_HA_UNLOCK_OFF` (the panel stays
+  locked; checked whether or not the panel is locked). `200`
+  `unlock.schema.json`, also when it wasn't locked (or no PIN is set —
+  nothing to lift). A locked panel reaches it (no `423`). A lifted lock
+  keeps the panel's wrong-PIN count (it does not refill the PIN budget —
+  earlier wrong PINs still count until they age out of the 15-minute
+  window); every one is logged and written to the auth audit log. 6 calls per 5 minutes per panel (refused ones count),
+  then `429` + `Retry-After`.
 - `POST /api/display/v1/ack` `{"message_id", "person_id"}` — send a
   mention's `ack` object as it came. `200` `ack.schema.json`;
   `404 NOT_FOUND` when the wall no longer shows that mention (refresh the
@@ -162,12 +176,13 @@ Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
 | `404 NOT_FOUND` from `/pair/claim` | Wrong, expired, spent or another panel's claim, or not the key it was sealed to | Show "press Connect in Social Home again", fall back to setup |
 | `401` | No / unknown token (also after "Sign out all tablets" or removal; `DISPLAY_SIGNED_OUT` after too many wrong PINs) | Forget the token, pair again |
 | `403 DISPLAY_PIN_WRONG` | `POST /unlock` with the wrong PIN (`params.remaining` tries left) | Say "Wrong PIN", stay locked |
+| `403 DISPLAY_HA_UNLOCK_OFF` | `POST /unlock/ha` while no admin allows Home Assistant to unlock wall panels | Stay locked; report the lock entity as still locked |
 | `409 DASHBOARD_PIN_REQUIRED` | `POST /lock` while the household has no PIN | Hide the lock button (`settings.pin_set`) |
 | `404 TAB_OFF` | The tab doesn't show (chat off, stickies off, nobody located) | Go to Overview |
 | `404 NOT_FOUND` | Unknown or hidden person | Go to Overview |
 | `409 NIGHT` | A tab other than Overview at night | Go to Overview |
 | `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`); `GET /emoji/1f512` (the PIN button's 🔒) still answers |
-| `429` | Over the request / ack budget, or the PIN can't be checked now | Wait `Retry-After` seconds |
+| `429` | Over the request / ack / Home Assistant unlock budget, or the PIN can't be checked now | Wait `Retry-After` seconds |
 | `503 TILES_UNAVAILABLE` | `map.png` without any map tile | Keep the old picture, retry after `Retry-After` |
 
 ## Versioning

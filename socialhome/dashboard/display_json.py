@@ -247,6 +247,9 @@ def board_header(
             "idle_return_minutes": settings.idle_return_minutes,
             "keep_screen_on": settings.keep_screen_on,
             "mention_sound": settings.mention_sound,
+            # Home Assistant may lift this panel's lock without the PIN
+            # (``POST /unlock/ha``) — what its "Privacy lock" entity offers.
+            "ha_unlock": settings.panel_unlock_from_ha,
             "night_start": settings.night_start,
             "night_end": settings.night_end,
             "pin_set": settings.pin_set,
@@ -1058,7 +1061,13 @@ def person_payload(
 
 
 def lock_payload(
-    *, household: str, locale: str, clock: Json, is_night: bool, t: T
+    *,
+    household: str,
+    locale: str,
+    clock: Json,
+    is_night: bool,
+    ha_unlock: bool,
+    t: T,
 ) -> Json:
     """What a privacy-locked panel gets (``423``): what the tablet lock
     screen shows — the household name, the clock and date, the PIN pad's
@@ -1067,7 +1076,9 @@ def lock_payload(
     uses the night colours and the panel dims, as on the night board.
     ``tries_left`` keeps ``{n}`` for the panel to fill with the
     ``DISPLAY_PIN_WRONG`` ``params.remaining``; with one left it shows
-    ``last_try`` instead (:func:`~.views.pin_tries_note`)."""
+    ``last_try`` instead (:func:`~.views.pin_tries_note`). ``ha_unlock``:
+    an admin allows Home Assistant to lift the lock without the PIN
+    (``POST /unlock/ha``) — a setting, never anyone's data."""
     return {
         "api_version": API_VERSION,
         "locked": True,
@@ -1076,6 +1087,7 @@ def lock_payload(
         "dir": text_direction(locale),
         "clock": clock,
         "is_night": is_night,
+        "ha_unlock": ha_unlock,
         "strings": {
             "locked": t("dashboard.lock.locked"),
             "pin_button": t("dashboard.lock.pin_button"),

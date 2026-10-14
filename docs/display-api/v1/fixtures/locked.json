@@ -10,6 +10,7 @@
     "utc_offset_minutes": 0
   },
   "dir": "ltr",
+  "ha_unlock": false,
   "household": "Home",
   "is_night": false,
   "locale": "en",

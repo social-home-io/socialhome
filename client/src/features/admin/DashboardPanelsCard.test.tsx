@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, waitFor, screen } from '@testing-library/preact'
-import type { DashboardDisplay, DashboardState, HaPanel } from './dashboardTypes'
+import type { DashboardDisplay, DashboardState, HaPanel, SaveFn } from './dashboardTypes'
 
 vi.mock('@/api', async (importOriginal) => {
   const real = await importOriginal<typeof import('@/api')>()
@@ -58,6 +58,7 @@ function state(over: Partial<DashboardState> = {}): DashboardState {
     show_status_text: false,
     show_household_messages: false,
     mention_sound: true,
+    panel_unlock_from_ha: false,
     household_chat_enabled: true,
     last_seen_at: null,
     people: [],
@@ -67,9 +68,10 @@ function state(over: Partial<DashboardState> = {}): DashboardState {
 }
 
 let reload: ReturnType<typeof vi.fn<() => Promise<void>>>
+let save: ReturnType<typeof vi.fn<SaveFn>>
 
 function mount(s: DashboardState) {
-  return render(<DashboardPanelsCard state={s} reload={reload} />)
+  return render(<DashboardPanelsCard state={s} save={save} reload={reload} />)
 }
 
 async function openAdd() {
@@ -79,6 +81,7 @@ async function openAdd() {
 
 beforeEach(() => {
   reload = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+  save = vi.fn<SaveFn>().mockResolvedValue(null)
   vi.stubGlobal('fetch', vi.fn())
 })
 
@@ -95,6 +98,34 @@ describe('formatPairingCode', () => {
     expect(formatPairingCode(' 7k2 m9q ')).toBe('7K2M9Q')
     expect(formatPairingCode('O0I1LUV')).toBe('')
     expect(formatPairingCode('ABCDEFGH')).toBe('ABCDEF')
+  })
+})
+
+describe('DashboardPanelsCard — Home Assistant unlock', () => {
+  const haSwitch = () => screen.getByRole('switch', {
+    name: 'Home Assistant may unlock wall panels',
+  }) as HTMLInputElement
+
+  it('is off by default and explains the trade-off, even with no panel paired', () => {
+    mount(state())
+    expect(screen.getByText('No wall panels paired yet.')).toBeTruthy()
+    const sw = haSwitch()
+    expect(sw.checked).toBe(false)
+    expect(sw.disabled).toBe(false)
+    expect(document.getElementById(sw.getAttribute('aria-describedby')!)?.textContent).toBe(
+      'Lets a Home Assistant automation unlock a panel without the PIN. Anyone who can run '
+      + 'your Home Assistant automations or actions can then lift the privacy lock.')
+  })
+
+  it('reflects the stored setting', () => {
+    mount(state({ panel_unlock_from_ha: true }))
+    expect(haSwitch().checked).toBe(true)
+  })
+
+  it('saves the switch', () => {
+    mount(state())
+    fireEvent.click(haSwitch())
+    expect(save).toHaveBeenCalledWith({ panel_unlock_from_ha: true })
   })
 })
 
