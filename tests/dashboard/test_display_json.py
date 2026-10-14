@@ -404,8 +404,14 @@ PANEL_STRINGS = {
     "wifi_title": set(),
     "wifi_text": set(),
     "wifi_waiting": set(),
+    "improv_title": set(),
+    "improv_allow": set(),
     "server_title": set(),
     "server_text": set(),
+    "server_text_found": set(),
+    "found_title": set(),
+    "found_looking": set(),
+    "found_none": set(),
     "server_placeholder": set(),
     "server_invalid": set(),
     "server_ha": set(),
@@ -417,6 +423,7 @@ PANEL_STRINGS = {
     "claim_disabled": set(),
     "claim_busy": set(),
     "claim_unreachable": {"host"},
+    "claim_sealed": set(),
     "ok": set(),
     "change_server": set(),
     "update_title": set(),
@@ -466,6 +473,10 @@ def test_theme_carries_the_panel_strings_in_every_locale():
         # "Social Home" is a name, never translated.
         assert strings["settings_server"] == "Social Home", locale
         assert "Social Home" in strings["pin_offline"], locale
+        # The Wi-Fi screen tells people to tap the Improv prompt's button
+        # by the name the panel draws on it.
+        assert strings["improv_allow"] in strings["wifi_text"], locale
+        assert "Home Assistant App" in strings["found_none"], locale
 
 
 def test_theme_panel_strings_are_the_firmware_english():
@@ -479,6 +490,21 @@ def test_theme_panel_strings_are_the_firmware_english():
     assert strings["wifi_waiting"] == "Waiting for Wi-Fi…"
     assert strings["map_none"] == (
         "No map picture on this Social Home — the list shows who's where."
+    )
+    assert strings["improv_title"] == "A phone wants to set up Wi-Fi"
+    assert strings["improv_allow"] == "Allow"
+    assert strings["server_text_found"] == (
+        "Tap your Social Home, or type its address. "
+        "The dashboard port 8100 is added for you."
+    )
+    assert strings["found_title"] == "Found on this network"
+    assert strings["found_looking"] == "Looking for Social Home on this network…"
+    assert strings["found_none"] == (
+        "None found yet. Using the Home Assistant App? Type its address below."
+    )
+    assert strings["claim_sealed"] == (
+        "This connect request can't be opened on this panel. "
+        "Press Connect in Social Home again."
     )
 
 

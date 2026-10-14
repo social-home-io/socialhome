@@ -195,7 +195,7 @@
   "dashboard.display.unpaired": "Dit paneel is niet meer gekoppeld. Koppel het opnieuw via Admin › Dashboard.",
   "dashboard.display.connecting": "Verbinden met Social Home…",
   "dashboard.display.wifi_title": "Het paneel met wifi verbinden",
-  "dashboard.display.wifi_text": "Geef het paneel je wifi met Improv: de webinstaller vraagt erom direct na het flashen, of een telefoon stuurt het via Bluetooth (Home Assistant vindt het paneel, of open improv-wifi.com). Tik op 'Allow' als het paneel erom vraagt.",
+  "dashboard.display.wifi_text": "Geef het paneel je wifi met Improv: de webinstaller vraagt erom direct na het flashen, of een telefoon stuurt het via Bluetooth (Home Assistant vindt het paneel, of open improv-wifi.com). Tik op 'Toestaan' als het paneel erom vraagt.",
   "dashboard.display.wifi_waiting": "Wachten op wifi…",
   "dashboard.display.server_title": "Social Home zoeken",
   "dashboard.display.server_text": "Typ het adres van je Social Home. De dashboardpoort 8100 wordt vanzelf toegevoegd.",
@@ -224,5 +224,12 @@
   "dashboard.display.forget_confirm": "Deze Social Home vergeten? Het paneel toont de installatie opnieuw en heeft een nieuwe koppelcode nodig.",
   "dashboard.display.cancel": "Annuleren",
   "dashboard.display.close": "Sluiten",
-  "dashboard.display.credits": "Emoji: Twemoji © Twitter, Inc en andere bijdragers, © jdecked en andere bijdragers, CC-BY 4.0. Lettertype: Roboto, Apache 2.0. Firmware: MPL-2.0, gebouwd op ESPHome (GPLv3) en LVGL (MIT)."
+  "dashboard.display.credits": "Emoji: Twemoji © Twitter, Inc en andere bijdragers, © jdecked en andere bijdragers, CC-BY 4.0. Lettertype: Roboto, Apache 2.0. Firmware: MPL-2.0, gebouwd op ESPHome (GPLv3) en LVGL (MIT).",
+  "dashboard.display.improv_title": "Een telefoon wil wifi instellen",
+  "dashboard.display.improv_allow": "Toestaan",
+  "dashboard.display.server_text_found": "Tik op je Social Home of typ het adres. De dashboardpoort 8100 wordt vanzelf toegevoegd.",
+  "dashboard.display.found_title": "Gevonden op dit netwerk",
+  "dashboard.display.found_looking": "Social Home zoeken op dit netwerk…",
+  "dashboard.display.found_none": "Nog niets gevonden. Gebruik je de Home Assistant App? Typ het adres hieronder.",
+  "dashboard.display.claim_sealed": "Dit verbindingsverzoek kan op dit paneel niet worden geopend. Druk in Social Home opnieuw op Verbinden."
 }

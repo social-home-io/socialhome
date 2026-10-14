@@ -841,6 +841,9 @@ async def test_theme_follows_household_and_locale(
     # The panel's own screens and PIN pad, placeholders intact.
     assert payload["strings"]["pin_remaining"] == "Verbleibende Versuche: {n}"
     assert payload["strings"]["claim_unreachable"].count("{host}") == 1
+    # The Improv prompt and the address screen's network list.
+    assert payload["strings"]["improv_allow"] == "Erlauben"
+    assert payload["strings"]["found_title"] == "In diesem Netzwerk gefunden"
 
 
 async def test_theme_read_failure_keeps_built_in_accent(client, displays, theme_box):
