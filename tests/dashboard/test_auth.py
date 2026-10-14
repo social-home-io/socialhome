@@ -916,7 +916,7 @@ def test_map_renders_are_budgeted_per_panel(auth, clock):
 # ─── PIN buckets can't be evicted (security) ─────────────────────────────
 
 
-def _pin_keys(auth) -> list[tuple[str, str]]:
+def _pin_keys() -> list[tuple[str, str]]:
     claims = SessionClaims(epoch=0, issued_at=0, keep=True, session_id="s" * 22)
     return [
         ("tablet", DashboardAuth.pin_throttle_key(claims)),
@@ -930,7 +930,7 @@ def test_a_login_flood_cannot_evict_a_pin_bucket(settings_service, clock, kind):
     the limit — a lock's 4 wrong PINs too — so flooding the table with
     fresh client addresses bought the PIN guesser a fresh budget."""
     auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=3)
-    key = dict(_pin_keys(auth))[kind]
+    key = dict(_pin_keys())[kind]
     for _ in range(THROTTLE_MAX_FAILURES - 1):
         assert auth.begin_attempt(key, count_global=False) == 0
     # The flood: many client addresses, one wrong try each (setup-link
@@ -963,7 +963,7 @@ def test_full_pin_table_refuses_newcomers_never_forgets_live_ones(
     settings_service, clock
 ):
     auth = DashboardAuth(settings_service, clock=clock, max_pin_keys=2)
-    _, tablet = _pin_keys(auth)[0]
+    _, tablet = _pin_keys()[0]
     panel = DashboardAuth.display_pin_throttle_key("d1")
     assert auth.begin_attempt(tablet, count_global=False) == 0  # 1 failure
     assert auth.begin_attempt(panel, count_global=False) == 0  # 1 failure

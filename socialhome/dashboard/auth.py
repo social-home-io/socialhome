@@ -114,6 +114,7 @@ __all__ = [
     "DISPLAY_WINDOW_S",
     "MAP_RENDER_MAX",
     "PAIR_WINDOW_S",
+    "PIN_THROTTLE_MAX_KEYS",
     "KEEP_TTL_S",
     "MAX_CLOCK_SKEW_S",
     "PRUNE_INTERVAL_S",
@@ -124,7 +125,6 @@ __all__ = [
     "SESSION_TTL_S",
     "THROTTLE_MAX_FAILURES",
     "THROTTLE_MAX_KEYS",
-    "PIN_THROTTLE_MAX_KEYS",
     "THROTTLE_WINDOW_S",
     "DashboardAuth",
     "SessionClaims",
@@ -339,7 +339,12 @@ class _FailureTable:
         return stamps
 
     def wait(self, now: float) -> int:
+        """Seconds a refused newcomer waits (at least one)."""
         return max(1, math.ceil(self._no_room_until - now))
+
+    def forget(self, key: str) -> None:
+        """Drop ``key``'s failures (a right password / PIN)."""
+        self.buckets.pop(key, None)
 
     def _room(self, now: float) -> bool:
         """Free one slot in the full table, or fail closed."""
@@ -783,7 +788,7 @@ class DashboardAuth:
 
         Pass the same ``count_global`` as the matching :meth:`begin_attempt`.
         """
-        self._table(key).buckets.pop(key, None)
+        self._table(key).forget(key)
         if count_global and self._global:
             self._global.pop()
 
