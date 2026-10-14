@@ -563,6 +563,32 @@ async def test_cookie_secret_survives_new_service(repo):
     assert await a.cookie_secret() == await b.cookie_secret()
 
 
+async def test_rotate_cookie_secret_replaces_it_durably(repo):
+    """A new KEK-wrapped key, seen by a fresh service too; the epoch and
+    the paired panels are untouched."""
+    km = _km()
+    svc = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    svc.attach_key_manager(km)
+    old = await svc.cookie_secret()
+    await svc.add_display(_display(1))
+    await svc.rotate_cookie_secret()
+    new = await svc.cookie_secret()
+    assert new != old and len(new) == 32
+    stored = repo.rows["dashboard.cookie_secret"]
+    assert km.decrypt(stored, associated_data=b"dashboard.cookie_secret") == new
+    fresh = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    fresh.attach_key_manager(km)
+    assert await fresh.cookie_secret() == new
+    assert await fresh.epoch() == 0
+    assert len(await fresh.displays()) == 1
+
+
+async def test_rotate_cookie_secret_requires_key_manager(svc, repo):
+    with pytest.raises(RuntimeError):
+        await svc.rotate_cookie_secret()
+    assert "dashboard.cookie_secret" not in repo.rows
+
+
 async def test_cookie_secret_other_kek_is_replaced(repo):
     a = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
     a.attach_key_manager(_km())
