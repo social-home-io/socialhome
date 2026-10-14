@@ -1646,6 +1646,32 @@ async def test_home_past_bars_fade_only_their_fill(client, auth):
         assert contrast_ratio(ink.group(1), bg.group(1)) >= 4.5
 
 
+async def test_person_past_rows_fade_only_their_strip(client, auth, snapshots):
+    """A row that is over carries ``dash-past`` (CSS: muted title, faded
+    colour strip and emoji — never the whole row, test_contrast) and its
+    colour class, whose --kp — the strip faded over the card — is in the
+    page's style; an upcoming row isn't marked."""
+    breakfast = event("e7", "Breakfast", at(7), at(8), "u-anna")
+    snapshots.pages["u-anna"] = person(today_items=(breakfast, WORK, DINNER))
+    resp = await _get(client, auth, "/p/u-anna")
+    html = await resp.text()
+    _assert_board_csp(resp, html)
+    rows = re.findall(
+        r'<li class="dash-row ([^"]*)">\s*<span class="dash-row-time">([^<]*)</span>',
+        html,
+    )
+    by_time = {when: cls.split() for cls, when in rows}
+    past = by_time["07:00–08:00"]
+    assert "dash-past" in past
+    assert all(
+        "dash-past" not in cls for when, cls in by_time.items() if when != "07:00–08:00"
+    )
+    k = next(c for c in past if re.fullmatch(r"k\d+", c))
+    assert re.search(
+        rf"\.{k}\{{--kc:#[0-9a-f]{{6}};[^}}]*--kp:#[0-9a-f]{{6}}", _board_style(html)[0]
+    )
+
+
 async def test_home_board(client, auth, snapshots):
     resp = await _get(client, auth, "/")
     assert resp.status == 200

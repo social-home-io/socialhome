@@ -695,10 +695,6 @@ h3.dash-sublabel {
   border-color: var(--dash-accent);
 }
 
-.dash-past {
-  opacity: 0.5;
-}
-
 /* ── Home: clock, next up, who's home ─────────────────────────────────── */
 
 .dash-top {
@@ -1383,7 +1379,6 @@ h3.dash-sublabel {
    strength — fading the whole bar left it at ~2:1 in dark mode — and the
    emoji fade as before. */
 .dash-block.dash-past {
-  opacity: 1;
   color: var(--kq, var(--dash-past-ink));
   background-color: var(--kp, var(--dash-past-fill));
 }
@@ -1535,6 +1530,23 @@ h3.dash-sublabel {
 .dash-row .dash-faces {
   align-self: center;
   margin-inline-start: auto;
+}
+
+/* A past row recedes into the card: no fill of its own, the colour
+   strip faded (--kp, the colour at 50 % over the card, as for past
+   timeline bars; a row with no colour keeps its plain border), the emoji
+   faded and the title in --dash-muted. The words never fade — opacity:
+   0.5 on the whole row left the title at ~3:1 and the time / room at
+   ~2:1; muted on the card keeps AA in light, dark and night
+   (test_contrast). */
+.dash-row.dash-past {
+  color: var(--dash-muted);
+  background: transparent;
+  border-inline-start-color: var(--kp, var(--dash-border));
+}
+
+.dash-row.dash-past .dash-row-title > [aria-hidden="true"] {
+  opacity: 0.5;
 }
 
 .dash-st-cancelled .dash-row-title {
@@ -1757,14 +1769,20 @@ h3.dash-sublabel {
 }
 
 /* Stale data: no "in 28 min" that is no longer true, and "now" / where
-   people are greyed out. */
+   people are greyed out — the colour drains and the pictures (faces,
+   emoji, the now line) fade, but the words keep their contrast: fading
+   the text too left it at ~2.3:1 at night. The offline note says why. */
 .dash-stale [data-rel] {
   visibility: hidden;
 }
 
 .dash-stale [data-live] {
-  opacity: 0.45;
   filter: grayscale(1);
+}
+
+.dash-stale [data-live][aria-hidden="true"],
+.dash-stale [data-live] [aria-hidden="true"] {
+  opacity: 0.45;
 }
 
 /* ── Night mode ───────────────────────────────────────────────────────── */
@@ -1773,14 +1791,15 @@ h3.dash-sublabel {
   --dash-bg: #000000;
   --dash-surface: #121110;
   --dash-text: #a8a298;
-  --dash-muted: #7d786f;
+  /* The dimmest ink that still reaches 4.5:1 on the night card. */
+  --dash-muted: #817c73;
   --dash-border: #2a2825;
   --dash-accent: #6cc3a8;
   --dash-accent-text: #0f1a16;
   --dash-error-bg: #3a1a16;
   --dash-error-text: #ffb4a9;
   --dash-focus: #8ab4ff;
-  --dash-past-fill: #484440;
+  --dash-past-fill: #4a4642;
   --dash-past-ink: #ffffff;
 
   color-scheme: dark;
