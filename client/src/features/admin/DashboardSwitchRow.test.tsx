@@ -14,21 +14,21 @@ function mount(checked = false, disabled = false) {
 }
 
 describe('SwitchRow', () => {
-  it('toggles when the visible track is clicked (the input itself is 0×0)', () => {
+  it('toggles when the switch graphic itself is clicked', () => {
     const { onChange, container } = mount()
-    fireEvent.click(container.querySelector('.sh-switch-track')!)
+    fireEvent.click(container.querySelector('input.sh-switch')!)
     expect(onChange).toHaveBeenCalledWith(true)
   })
 
-  it('toggles off from the track when on', () => {
+  it('toggles off from the graphic when on', () => {
     const { onChange, container } = mount(true)
-    fireEvent.click(container.querySelector('.sh-switch-track')!)
+    fireEvent.click(container.querySelector('input.sh-switch')!)
     expect(onChange).toHaveBeenCalledWith(false)
   })
 
-  it('does not toggle from the track while disabled', () => {
+  it('does not toggle from the graphic while disabled', () => {
     const { onChange, container } = mount(false, true)
-    fireEvent.click(container.querySelector('.sh-switch-track')!)
+    fireEvent.click(container.querySelector('input.sh-switch')!)
     expect(onChange).not.toHaveBeenCalled()
   })
 

@@ -14,6 +14,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api, ApiError } from '@/api'
 import { showToast } from './Toast'
+import { Switch } from './Switch'
 import { t, isOne } from '@/i18n/i18n'
 
 /** The four connection fields the switch reads (``GET /api/connections``). */
@@ -147,18 +148,13 @@ export function GfsFallbackToggle({ instanceId, peerName, initial, variant = 'ro
             {statusText(state, peerName)}
           </span>
         </span>
-        <span class="sh-switch">
-          <input
-            type="checkbox"
-            role="switch"
-            checked={state.gfs_relay}
-            disabled={locked || busy}
-            aria-labelledby={titleId}
-            aria-describedby={locked ? helpId : `${privacyId} ${helpId}`}
-            onChange={() => void toggle()}
-          />
-          <span class="sh-switch-track" />
-        </span>
+        <Switch
+          checked={state.gfs_relay}
+          disabled={locked || busy}
+          aria-labelledby={titleId}
+          aria-describedby={locked ? helpId : `${privacyId} ${helpId}`}
+          onChange={() => void toggle()}
+        />
       </label>
     )
   }

@@ -327,9 +327,10 @@ Dashboard**); a keypad left untouched for a minute closes again.
 ## Wall panels (ESPHome)
 
 Besides tablets, the dashboard can feed small always-on **wall panels** —
-for example an ESPHome display. A panel doesn't sign in with the
-password; it pairs once with a short code and then uses its own device
-token.
+for example an ESPHome display running the
+[Social Home panel firmware](#panel-firmware). A panel doesn't sign in
+with the password; it pairs once with a short code and then uses its own
+device token.
 
 1. Turn the dashboard on (a panel can only ask for a code while it runs).
 2. Start pairing on the panel: it shows a **6-character code**, valid for
@@ -456,10 +457,36 @@ send "Got it" like the tablet — the same rules (only what the wall shows
 right now, never at night or while locked) and the same limit of 30 per
 5 minutes, per panel.
 
-> **Firmware comes later.** This release adds pairing and device tokens
-> only; the panel firmware and the data the panels show arrive in a
-> later release. The panel API is documented in
-> [api.md](../api.md#hfs--household-dashboard).
+### Panel firmware
+
+The panel firmware lives in
+[social-home-io/esphome-dashboard](https://github.com/social-home-io/esphome-dashboard)
+(supported panels, building it yourself, release notes). Install it from
+the **[web installer](https://social-home-io.github.io/esphome-dashboard/)**
+in Chrome or Edge on a desktop computer: plug the panel in over USB-C,
+press **Install**, then give it your Wi-Fi when the installer asks
+(Improv; Improv over Bluetooth and a fallback access point work too). The
+installer always flashes the latest firmware release — the first one is
+still pending, so until it is published the installer has nothing to
+offer yet. The panel then updates itself over the air.
+
+Once on Wi-Fi the panel connects to Social Home in one of three ways:
+
+- **Found on this network** — it lists the Social Home dashboards it finds
+  over mDNS ([above](#how-a-panel-finds-social-home)); tap yours, then pair
+  with the **code** it shows (**Admin › Dashboard › Wall panels › Add a
+  panel**).
+- **Typed address** — not listed (the Home Assistant App doesn't announce
+  itself, some networks block mDNS)? Type the address shown in **Admin ›
+  Dashboard**; port `8100` is added for you. Then pair with the code.
+- **Connect from Home Assistant** — adopt the panel in Home Assistant and
+  press **Connect** in Social Home, no code needed
+  ([above](#connect-a-panel-from-home-assistant)).
+
+The firmware also adds the panel's **Privacy lock** entity in Home
+Assistant ([below](#home-assistant-privacy-lock-entity)). The panel API it
+talks to is documented in [api.md](../api.md#hfs--household-dashboard)
+and [display-api/](../display-api/README.md).
 
 ### Home Assistant "Privacy lock" entity
 
@@ -467,9 +494,8 @@ A panel adopted in Home Assistant has a **lock** entity named **Privacy
 lock** on its device (Settings › Devices & services › ESPHome › the
 panel). It shows whether the panel is locked and lets Home Assistant — a
 dashboard card, a voice command, an automation — lock or unlock it. It
-comes with the panel firmware from the `esphome-dashboard` release that
-pairs with this Social Home release; update the panel if the entity is
-missing.
+comes with the [panel firmware](#panel-firmware); update the panel if the
+entity is missing.
 
 - **Locking from Home Assistant always works**, as long as a household
   PIN is set (**Set PIN** under **Privacy lock** in **Admin ›

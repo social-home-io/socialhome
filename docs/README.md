@@ -37,7 +37,9 @@ Reference material for running and understanding Social Home.
   attribution.
 - **[operations/household-dashboard.md](./operations/household-dashboard.md)**
   — Enabling the wall-tablet household dashboard (own port `8100`), the
-  Home Assistant App port mapping, and keeping it on the home network.
+  Home Assistant App port mapping, keeping it on the home network, and
+  ESPHome wall panels (firmware, web installer, pairing, Home Assistant
+  privacy lock).
 
 ## Glossary
 

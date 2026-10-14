@@ -15440,40 +15440,39 @@ a.sh-link-preview-link:focus-visible {
   gap: var(--sh-space-sm);
 }
 
-/* Switch (on/off) */
-.sh-switch {
-  position: relative;
-  display: inline-block;
+/* Switch (on/off) — ``components/Switch.tsx``. The checkbox itself is the
+ * graphic (track = the box, thumb = a radial gradient), so a click or tap
+ * anywhere on it toggles without depending on a wrapping <label>. A 0×0
+ * input next to a painted span left the graphic dead wherever a caller
+ * forgot that label. ``input.`` outranks the global checkbox size rule. */
+input.sh-switch {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  box-sizing: border-box;
   width: 40px;
   height: 22px;
-}
-.sh-switch input { opacity: 0; width: 0; height: 0; }
-.sh-switch-track {
-  position: absolute;
+  margin: 0;
+  vertical-align: middle;
   cursor: pointer;
-  inset: 0;
-  background: var(--sh-border-strong);
+  border: 0;
   border-radius: var(--sh-radius-full);
-  transition: background var(--sh-transition-fast);
+  background-color: var(--sh-border-strong);
+  background-image: radial-gradient(circle closest-side, #fff 88%, rgba(0, 0, 0, 0.16) 94%, transparent 100%);
+  background-size: 20px 20px;
+  background-repeat: no-repeat;
+  background-position: 1px 50%;
+  transition: background-color var(--sh-transition-fast), background-position var(--sh-transition-fast);
 }
-.sh-switch-track::before {
-  content: '';
-  position: absolute;
-  width: 18px; height: 18px;
-  left: 2px; top: 2px;
-  background: #fff;
-  border-radius: var(--sh-radius-full);
-  box-shadow: var(--sh-shadow-sm);
-  transition: transform var(--sh-transition-fast);
+input.sh-switch:checked { background-color: var(--sh-primary); background-position: 19px 50%; }
+/* Mouse focus: no glow (the global ``input:focus`` one); keyboard focus
+ * keeps the ring from ``input[type="checkbox"]:focus-visible``. */
+input.sh-switch:focus { box-shadow: none; }
+input.sh-switch:disabled { opacity: 0.45; cursor: not-allowed; }
+@media (forced-colors: active) {
+  input.sh-switch { border: 1px solid ButtonText; }
+  input.sh-switch:checked { background-color: Highlight; }
 }
-.sh-switch input:checked + .sh-switch-track { background: var(--sh-primary); }
-.sh-switch input:checked + .sh-switch-track::before { transform: translateX(18px); }
-/* The hidden input keeps keyboard focus; draw the ring on the track. */
-.sh-switch input:focus-visible + .sh-switch-track {
-  outline: 2px solid var(--sh-primary);
-  outline-offset: 2px;
-}
-.sh-switch input:disabled + .sh-switch-track { opacity: 0.45; cursor: not-allowed; }
 
 /* Admin › Dashboard (household wall-tablet dashboard). Built from the
  * admin tape-cards; only the step numbers, URL row, QR block and the
@@ -15566,7 +15565,6 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-dashboard-row__control { width: auto; min-width: 9rem; flex: 0 0 auto; }
 .sh-dashboard-night__times { display: flex; align-items: center; gap: var(--sh-space-xs); flex: 0 0 auto; }
 .sh-dashboard-night__times input { width: 7.5rem; }
-.sh-dashboard-row > .sh-switch { flex: 0 0 auto; }
 .sh-dashboard-row--disabled > .sh-dashboard-row__label > label { color: var(--sh-text-muted); }
 .sh-dashboard-sessions {
   display: flex; align-items: center; justify-content: space-between;
@@ -15913,6 +15911,15 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-federation-list > p.sh-muted { margin: 0; padding: var(--sh-space-sm) var(--sh-space-md); }
 .sh-ha-user-info, .sh-federation-actions { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .sh-ha-user-name { font-weight: 600; }
+/* The HA users list is a <ul>: no browser indent, so rows and their
+ * dividers start at the box edge. */
+ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
+/* The provision switch + its "Active" / "Not added" word; the word is
+ * part of the tap target. */
+.sh-ha-users__toggle {
+  display: inline-flex; align-items: center; gap: var(--sh-space-sm);
+  min-height: 36px; cursor: pointer; font-size: var(--sh-font-size-sm);
+}
 .sh-federation-actions { display: flex; flex-direction: row; gap: var(--sh-space-xs); justify-content: flex-end; flex: 0 0 auto; }
 /* Public-link row — appears on a published GFS row so the admin can
  * grab the URL of the SSR /spaces/{id} page. Wraps under the
@@ -24233,7 +24240,6 @@ button.sh-page-editor-status {
 .sh-conn-setting__text b { font-weight: 600; font-size: var(--sh-font-size-sm); }
 .sh-conn-setting__text span { font-size: var(--sh-font-size-xs); color: var(--sh-text-muted); line-height: var(--sh-line-height-snug); }
 .sh-conn-setting__text span.sh-conn-setting__warn { color: color-mix(in srgb, var(--sh-warning) 30%, var(--sh-text)); font-weight: 600; }
-.sh-conn-setting .sh-switch { flex-shrink: 0; }
 .sh-conn-people { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-radius: var(--sh-radius-lg); border: 1px solid var(--sh-border); background: var(--sh-bg); }
 .sh-conn-people li { border-top: 1px solid var(--sh-border); }
 .sh-conn-people li:first-child { border-top: 0; }

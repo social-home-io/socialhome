@@ -8,6 +8,7 @@
 import { useState } from 'preact/hooks'
 import { api } from '@/api'
 import { showToast } from './Toast'
+import { Switch } from './Switch'
 import { t } from '@/i18n/i18n'
 
 export interface ShareHomeToggleProps {
@@ -54,17 +55,12 @@ export function ShareHomeToggle({
             {t(enabled ? 'connections.manage.share_home_on' : 'connections.manage.share_home_off', { peer: peerName })}
           </span>
         </span>
-        <span class="sh-switch">
-          <input
-            type="checkbox"
-            role="switch"
-            checked={enabled}
-            aria-labelledby={titleId}
-            aria-describedby={helpId}
-            onChange={() => void toggle()}
-          />
-          <span class="sh-switch-track" />
-        </span>
+        <Switch
+          checked={enabled}
+          aria-labelledby={titleId}
+          aria-describedby={helpId}
+          onChange={() => void toggle()}
+        />
       </label>
     )
   }
