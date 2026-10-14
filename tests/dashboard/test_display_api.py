@@ -19,6 +19,7 @@ from PIL import Image
 from referencing import Registry, Resource
 
 import socialhome.i18n as i18n_pkg
+from socialhome.crypto import b64url_encode, generate_x25519_keypair
 from socialhome.dashboard.app import build_dashboard_app
 from socialhome.dashboard.auth import (
     ACK_MAX,
@@ -27,6 +28,7 @@ from socialhome.dashboard.auth import (
     THROTTLE_MAX_FAILURES,
     DashboardAuth,
 )
+from socialhome.dashboard.claim_seal import open_sealed_claim
 from socialhome.dashboard.display_api import (
     DISPLAY_API_PREFIX,
     bearer_token,
@@ -91,8 +93,9 @@ def auth(settings_service, clock) -> DashboardAuth:
 
 
 class _Directory:
-    """A Home Assistant panel directory double: one kitchen panel; records
-    the connect requests (and so the claims) it is asked to deliver."""
+    """A Home Assistant panel directory double: a kitchen and a hall
+    panel; opens each connect request it is asked to deliver with the
+    panel's private key (as the firmware does) and records the claim."""
 
     def __init__(self) -> None:
         self.panels = [
@@ -101,12 +104,14 @@ class _Directory:
                 name="Kitchen panel",
                 mac=KITCHEN_MAC,
                 connect_action="kitchen_connect_social_home",
+                panel_key=KEYS[KITCHEN_MAC],
             ),
             ExternalDisplayPanel(
                 id="dev-hall",
                 name="Hall",
                 mac=HALL_MAC,
                 connect_action="hall_connect_social_home",
+                panel_key=KEYS[HALL_MAC],
             ),
         ]
         self.claims: dict[str, str] = {}
@@ -114,12 +119,19 @@ class _Directory:
     async def list_panels(self) -> list[ExternalDisplayPanel]:
         return list(self.panels)
 
-    async def connect(self, panel, *, url: str, claim: str) -> None:
-        self.claims[panel.id] = claim
+    async def connect(self, panel, *, sealed: str) -> None:
+        keypair = _KEYPAIRS[panel.mac]
+        opened = open_sealed_claim(
+            sealed, panel_private=keypair.private_key, panel_pub=keypair.public_key
+        )
+        self.claims[panel.id] = opened.claim
 
 
 KITCHEN_MAC = "a0:b7:65:12:34:56"
 HALL_MAC = "a0:b7:65:00:00:02"
+#: Each panel's X25519 keypair (its firmware's) and published key.
+_KEYPAIRS = {mac: generate_x25519_keypair() for mac in (KITCHEN_MAC, HALL_MAC)}
+KEYS = {mac: b64url_encode(kp.public_key) for mac, kp in _KEYPAIRS.items()}
 CLAIM = "/api/display/v1/pair/claim"
 
 
@@ -309,8 +321,10 @@ async def test_pair_poll_expired_is_404(client, clock):
 # ── Pairing a panel connected from Home Assistant (claims) ──────────────
 
 
-def _mac(mac: str) -> dict[str, str]:
-    return {"X-Display-Mac": mac}
+def _mac(mac: str, key: str | None = None) -> dict[str, str]:
+    """A panel's ``/pair/claim`` headers: its MAC and (by default) its own
+    public key."""
+    return {"X-Display-Mac": mac, "X-Display-Key": key or KEYS[mac.lower()]}
 
 
 async def test_claim_pairs_the_panel(client, displays, directory, settings_service):
@@ -385,6 +399,21 @@ async def test_claim_for_another_panel_is_404_and_burnt(client, displays, direct
     )
 
 
+async def test_claim_needs_the_key_it_was_sealed_to(client, displays, directory):
+    """The right claim and MAC with another panel's key — or none — is
+    the uniform 404, and burns the claim."""
+    for headers in (
+        _mac(KITCHEN_MAC, KEYS[HALL_MAC]),
+        {"X-Display-Mac": KITCHEN_MAC},
+        _mac(KITCHEN_MAC, "A" * 43),
+    ):
+        claim = await _claim_for(displays, directory)
+        await _refused(await client.post(CLAIM, json={"claim": claim}, headers=headers))
+        await _refused(
+            await client.post(CLAIM, json={"claim": claim}, headers=_mac(KITCHEN_MAC))
+        )
+
+
 @pytest.mark.parametrize(
     "body", [{}, {"claim": None}, {"claim": "A" * 43}, {"claim": "short"}]
 )
@@ -441,14 +470,16 @@ async def test_claim_refused_while_disabled(
 async def test_panels_report_their_mac(client, displays, settings_service, clock):
     """``X-Display-Mac`` on /pair is kept at pairing; on any later request
     it is recorded like the firmware / model headers."""
-    resp = await client.post(PAIR, headers=_mac("A0-B7-65-12-34-56"))
+    resp = await client.post(PAIR, headers={"X-Display-Mac": "A0-B7-65-12-34-56"})
     started = await resp.json()
     await displays.claim(actor_is_admin=True, code=started["code"], name="K")
     (display,) = await settings_service.displays()
     assert display.mac == KITCHEN_MAC
     _, token = await _paired(client, displays, name="Old firmware")
     clock.advance(SEEN_INTERVAL_S + 1)
-    await client.get(WHOAMI, headers={**_bearer(token), **_mac("a0b765000002")})
+    await client.get(
+        WHOAMI, headers={**_bearer(token), "X-Display-Mac": "a0b765000002"}
+    )
     assert [d.mac for d in await settings_service.displays()] == [
         KITCHEN_MAC,
         HALL_MAC,

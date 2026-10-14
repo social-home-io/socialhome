@@ -373,7 +373,7 @@ async def test_display_directory_protocol_is_runtime_checkable():
         async def list_panels(self):
             return []
 
-        async def connect(self, panel, *, url, claim):
+        async def connect(self, panel, *, sealed):
             return None
 
     assert isinstance(_Directory(), DisplayDirectory)

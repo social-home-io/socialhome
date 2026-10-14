@@ -190,12 +190,18 @@ def _ha_panel(
     """One panel found in Home Assistant as the admin UI sees it.
     ``status``: ``connected`` (paired here — ``display_id`` / ``display_name``),
     ``ready`` (Connect works), ``offline`` (HA lost it), ``needs_update``
-    (its firmware has no connect action). Never the action name or MAC."""
+    (its firmware has no connect action, or publishes no key to seal the
+    connect request to). Never the action name, key or MAC."""
+    connectable = (
+        panel.connect_action is not None
+        and panel.mac is not None
+        and panel.panel_key is not None
+    )
     if display is not None:
         status = "connected"
     elif not panel.online:
         status = "offline"
-    elif panel.connect_action is None or panel.mac is None:
+    elif not connectable:
         status = "needs_update"
     else:
         status = "ready"
@@ -206,9 +212,7 @@ def _ha_panel(
         "status": status,
         # A connected panel can be connected again (e.g. after a reset)
         # while Home Assistant can reach it.
-        "can_connect": panel.online
-        and panel.connect_action is not None
-        and panel.mac is not None,
+        "can_connect": panel.online and connectable,
         "display_id": display.id if display is not None else None,
         "display_name": display.name if display is not None else None,
     }

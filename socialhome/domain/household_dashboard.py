@@ -17,6 +17,9 @@ template's job — and every datetime is tz-aware in the household zone.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -86,6 +89,7 @@ __all__ = [
     "DisplayPanelNotFoundError",
     "DisplayPanelOfflineError",
     "ExternalDisplayPanel",
+    "parse_panel_key",
     "DashboardEvent",
     "DashboardLesson",
     "DashboardMention",
@@ -495,8 +499,12 @@ class ExternalDisplayPanel:
     paired :class:`DashboardDisplay`. ``connect_action`` is the
     platform's handle for sending it a connect request — ``None`` when it
     can't be connected from here (firmware too old, or the entity that
-    names the action is disabled). ``online`` is ``False`` while the
-    platform has lost the panel (HA shows its entities unavailable).
+    names the action is disabled). ``panel_key`` is the panel's X25519
+    public key (43-character base64url, :func:`parse_panel_key`) the
+    connect request is sealed to — ``None`` when the panel publishes none
+    (firmware too old), so it can't be connected either. ``online`` is
+    ``False`` while the platform has lost the panel (HA shows its
+    entities unavailable).
     """
 
     id: str
@@ -505,6 +513,28 @@ class ExternalDisplayPanel:
     sw_version: str | None = None
     connect_action: str | None = None
     online: bool = True
+    panel_key: str | None = None
+
+
+#: A 32-byte key as unpadded base64url.
+_PANEL_KEY = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
+def parse_panel_key(value: object) -> bytes | None:
+    """A wall panel's published public key (its ``Social Home key``
+    sensor) as its 32 raw bytes — ``None`` unless it is exactly 43
+    characters of canonical unpadded base64url (no padding, no stray low
+    bits in the last character). Format only: whether the point is
+    usable is the seal's call."""
+    if not isinstance(value, str) or _PANEL_KEY.fullmatch(value) is None:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(value + "=")
+    except binascii.Error, ValueError:
+        return None
+    if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != value:
+        return None
+    return raw
 
 
 def normalize_mac(value: object) -> str | None:

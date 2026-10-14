@@ -18,6 +18,7 @@ The HA client is replaced at the boundary by a recording double.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -28,6 +29,8 @@ from socialhome.domain.household_dashboard import (
 )
 from socialhome.platform.adapter import DisplayDirectory
 from socialhome.platform.ha.displays import (
+    KEY_SENSOR_NAME,
+    NODE_SENSOR_NAME,
     HaDisplayDirectory,
     connect_action_for,
     panels_from_registries,
@@ -123,10 +126,18 @@ OTHER_DEVICE = _device(
 )
 KITCHEN_NODE = "sensor.kitchen_social_home_node"
 HALL_NODE = "sensor.hall_panel_social_home_node"
+KITCHEN_KEY = "sensor.kitchen_social_home_key"
+HALL_KEY = "sensor.hall_panel_social_home_key"
+#: Two panels' X25519 public keys as their ``Social Home key`` sensors
+#: publish them (43-character base64url).
+KITCHEN_PUB = "UWBHFos4Xvjpuc3ZQbHdy6Qqt9vdxwxbykT_x9MjFH0"
+HALL_PUB = "KIqQOwZFquk4ySsZiWu5niDasjjTL_cmMR3osnf1rQk"
 ENTITIES = [
     _entity(KITCHEN, KITCHEN_NODE, "Social Home node"),
     _entity(KITCHEN, "sensor.kitchen_social_home_status", "Social Home status"),
+    _entity(KITCHEN, KITCHEN_KEY, "Social Home key"),
     _entity(HALL, HALL_NODE, "Social Home node"),
+    _entity(HALL, HALL_KEY, "Social Home key"),
 ]
 
 
@@ -141,7 +152,10 @@ class _Client:
         self.states: dict[str, dict] = {
             KITCHEN_NODE: _state(KITCHEN_NODE, "sh-dash-kitchen"),
             HALL_NODE: _state(HALL_NODE, "hall"),
+            KITCHEN_KEY: _state(KITCHEN_KEY, KITCHEN_PUB),
+            HALL_KEY: _state(HALL_KEY, HALL_PUB),
         }
+        self.state_reads: list[str] = []
         self.ws_calls: list[str] = []
         self.service_calls: list[tuple[str, str, dict]] = []
         self.service_reply: object = []
@@ -152,6 +166,7 @@ class _Client:
         return None if result is None else {"result": result}
 
     async def get_state(self, entity_id: str):
+        self.state_reads.append(entity_id)
         return self.states.get(entity_id)
 
     async def call_service(self, domain, service, data=None, *, return_response=False):
@@ -184,6 +199,13 @@ def test_satisfies_the_protocol(directory):
     assert isinstance(directory, DisplayDirectory)
 
 
+def test_sensor_names_match_the_firmware():
+    """The firmware's ``text_sensor`` names (``common/api.yaml``) — HA's
+    ``original_name`` for them, unprefixed."""
+    assert NODE_SENSOR_NAME == "Social Home node"
+    assert KEY_SENSOR_NAME == "Social Home key"
+
+
 @pytest.mark.parametrize(
     ("node", "action"),
     [
@@ -211,6 +233,7 @@ async def test_lists_only_social_home_panels(directory, client):
             mac="a0:b7:65:12:34:56",
             sw_version="2026.10.13 (ESPHome 2026.9.1)",
             connect_action="sh_dash_kitchen_connect_social_home",
+            panel_key=KITCHEN_PUB,
         ),
         ExternalDisplayPanel(
             id=HALL,
@@ -218,12 +241,62 @@ async def test_lists_only_social_home_panels(directory, client):
             mac="a0:b7:65:00:00:02",
             sw_version="2026.10.13 (ESPHome 2026.9.1)",
             connect_action="hall_connect_social_home",
+            panel_key=HALL_PUB,
         ),
     ]
     assert client.ws_calls == [
         "config/device_registry/list",
         "config/entity_registry/list",
     ]
+    # Each sensor read once.
+    assert sorted(client.state_reads) == sorted(
+        [KITCHEN_NODE, KITCHEN_KEY, HALL_NODE, HALL_KEY]
+    )
+
+
+async def test_panel_without_a_key_sensor_needs_an_update(directory, client):
+    """Firmware from before the sealed connect (no ``Social Home key``
+    sensor, or it is disabled): listed, online, but not connectable."""
+    for entities in (
+        [e for e in ENTITIES if e["entity_id"] != KITCHEN_KEY],
+        [
+            _entity(KITCHEN, KITCHEN_KEY, "Social Home key", disabled_by="user")
+            if e["entity_id"] == KITCHEN_KEY
+            else e
+            for e in ENTITIES
+        ],
+    ):
+        client.ws["config/entity_registry/list"] = entities
+        kitchen, hall = await directory.list_panels()
+        assert kitchen.online and kitchen.panel_key is None
+        assert kitchen.connect_action == "sh_dash_kitchen_connect_social_home"
+        assert hall.panel_key == HALL_PUB
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        KITCHEN_PUB[:42],
+        KITCHEN_PUB + "=",
+        KITCHEN_PUB[:42] + "B",  # non-canonical last character
+        "not a key at all, but 43 characters long!!",
+    ],
+)
+async def test_a_malformed_key_is_no_key(directory, client, value):
+    client.states[KITCHEN_KEY] = _state(KITCHEN_KEY, value)
+    kitchen = (await directory.list_panels())[0]
+    assert kitchen.online and kitchen.panel_key is None
+
+
+@pytest.mark.parametrize("gone", ["unavailable", "unknown", None])
+async def test_a_key_sensor_that_cant_be_read_is_offline(directory, client, gone):
+    if gone is None:
+        del client.states[KITCHEN_KEY]
+    else:
+        client.states[KITCHEN_KEY] = _state(KITCHEN_KEY, gone)
+    kitchen = (await directory.list_panels())[0]
+    assert kitchen.online is False and kitchen.panel_key is None
 
 
 async def test_no_panels_skips_the_entity_registry(directory, client):
@@ -301,9 +374,20 @@ def test_panels_from_registries_mac_and_name_fallbacks():
         _device(KITCHEN, connections=[["zigbee", "x"], ["mac", "A0B765123456"]]),
         _device(HALL, connections=[], name="  ", name_by_user=None),
     ]
-    (kitchen, k_sensor), (hall, h_sensor) = panels_from_registries(devices, [])
-    assert kitchen.mac == "a0:b7:65:12:34:56" and k_sensor is None
-    assert hall.mac is None and hall.name == "Wall panel" and h_sensor is None
+    (kitchen, k_node, k_key), (hall, h_node, h_key) = panels_from_registries(
+        devices, []
+    )
+    assert kitchen.mac == "a0:b7:65:12:34:56" and k_node is None and k_key is None
+    assert hall.mac is None and hall.name == "Wall panel"
+    assert h_node is None and h_key is None
+
+
+def test_panels_from_registries_pairs_each_device_with_its_sensors():
+    (kitchen, k_node, k_key), (hall, h_node, h_key) = panels_from_registries(
+        [KITCHEN_DEVICE, HALL_DEVICE, "not a row"], [*ENTITIES, "not a row"]
+    )
+    assert (kitchen.id, k_node, k_key) == (KITCHEN, KITCHEN_NODE, KITCHEN_KEY)
+    assert (hall.id, h_node, h_key) == (HALL, HALL_NODE, HALL_KEY)
 
 
 @pytest.mark.parametrize(
@@ -325,30 +409,32 @@ async def test_a_client_not_started_is_a_failure():
         await directory.list_panels()
 
 
+SEALED = json.dumps(
+    {"ct": "Y3Q", "epk": KITCHEN_PUB, "nonce": "AAAAAAAAAAAAAAAA", "suite": "s"}
+)
+
+
 async def test_connect_calls_the_panels_esphome_action(directory, client):
+    """One variable, ``sealed`` — never the claim or the address."""
     kitchen = (await directory.list_panels())[0]
-    await directory.connect(kitchen, url="http://192.168.1.20:8100", claim="c" * 43)
+    await directory.connect(kitchen, sealed=SEALED)
     assert client.service_calls == [
-        (
-            "esphome",
-            "sh_dash_kitchen_connect_social_home",
-            {"url": "http://192.168.1.20:8100", "claim": "c" * 43},
-        )
+        ("esphome", "sh_dash_kitchen_connect_social_home", {"sealed": SEALED})
     ]
 
 
-async def test_connect_failure_never_logs_the_claim(directory, client, caplog):
+async def test_connect_failure_never_logs_the_sealed_value(directory, client, caplog):
     kitchen = (await directory.list_panels())[0]
     client.service_reply = None
     with caplog.at_level(logging.DEBUG):
         with pytest.raises(DisplayDiscoveryFailedError):
-            await directory.connect(kitchen, url="http://h:8100", claim="s" * 43)
-    assert "s" * 43 not in caplog.text
+            await directory.connect(kitchen, sealed=SEALED)
+    assert SEALED not in caplog.text and "Y3Q" not in caplog.text
     assert "sh_dash_kitchen_connect_social_home" in caplog.text
 
 
 async def test_connect_without_an_action_is_a_failure(directory, client):
     panel = ExternalDisplayPanel(id=KITCHEN, name="K", mac=None)
     with pytest.raises(DisplayDiscoveryFailedError):
-        await directory.connect(panel, url="http://h:8100", claim="c" * 43)
+        await directory.connect(panel, sealed=SEALED)
     assert client.service_calls == []

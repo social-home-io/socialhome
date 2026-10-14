@@ -11,6 +11,7 @@ import pytest
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
     normalize_mac,
+    parse_panel_key,
     MAX_DISPLAYS,
     MAX_PENDING_PAIRINGS,
     PAIRING_CODE_ALPHABET,
@@ -580,3 +581,34 @@ def test_normalize_mac(raw, expected):
     """Home Assistant's device registry spells a MAC as ``format_mac`` does
     (``homeassistant/helpers/device_registry.py``): lower case, ``:``."""
     assert normalize_mac(raw) == expected
+
+
+_KEY = "UWBHFos4Xvjpuc3ZQbHdy6Qqt9vdxwxbykT_x9MjFH0"
+
+
+def test_parse_panel_key_valid():
+    raw = parse_panel_key(_KEY)
+    assert raw is not None and len(raw) == 32
+    assert parse_panel_key("A" * 42 + "A") == bytes(32)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        42,
+        b"bytes",
+        "",
+        _KEY[:42],
+        _KEY + "=",
+        _KEY + "A",
+        # Non-canonical: the last character's low bits must be zero.
+        _KEY[:42] + "B",
+        "+" + _KEY[1:],
+        "/" + _KEY[1:],
+        " " + _KEY[1:],
+        "unavailable",
+    ],
+)
+def test_parse_panel_key_invalid(value):
+    assert parse_panel_key(value) is None

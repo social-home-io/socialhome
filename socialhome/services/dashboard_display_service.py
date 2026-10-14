@@ -27,25 +27,31 @@ pair without a code:
 1. Admin › Dashboard lists them (:meth:`DashboardDisplayService.platform_panels`);
 2. *Connect* (:meth:`DashboardDisplayService.connect_platform_panel`)
    mints a **claim** — 256 random bits, only its SHA-256 kept in memory,
-   bound to that panel (its platform id and MAC), single-use, valid
-   :data:`CLAIM_TTL_SECONDS`, at most :data:`MAX_PENDING_CLAIMS` (one per
-   panel) — and asks the platform to hand it to the panel together with
-   the dashboard's address;
-3. the panel spends it at ``POST /api/display/v1/pair/claim``
+   bound to that panel (its platform id, MAC and published public key),
+   single-use, valid :data:`CLAIM_TTL_SECONDS`, at most
+   :data:`MAX_PENDING_CLAIMS` (one per panel) — seals it together with
+   the dashboard's address to the panel's public key
+   (:mod:`socialhome.dashboard.claim_seal`) and asks the platform to hand
+   the sealed value to the panel;
+3. the panel opens it and spends the claim at
+   ``POST /api/display/v1/pair/claim`` with its MAC and public key
    (:meth:`DashboardDisplayService.spend_claim`) and gets its token in
    the answer.
 
-The claim crosses Home Assistant, the token never does. Treat the claim
-as visible to everyone with admin-level access to Home Assistant: its
-recorder stores every action's data, and an admin token (or an App with
-Home Assistant API access) can watch ``call_service`` events live and
-spend the claim before the panel does. That is inside the trust Connect
-already puts in Home Assistant — the same people can reflash the panel
-(ESPHome) or retarget the action — so it is documented, not defended.
-What is bounded: a claim pairs one device once (spent by its first use,
-even a wrong-MAC one), lives :data:`CLAIM_TTL_SECONDS`, and dies with a
-"sign out all tablets" / password change (it is bound to the session
-epoch) or with the removal of the panel's display.
+Only ciphertext crosses Home Assistant (its recorder stores every
+action's data, an admin token can watch ``call_service`` live): the
+claim and the address are readable by the panel's private key alone,
+which never leaves the panel. The token never crosses Home Assistant at
+all. Home Assistant admins are still trusted with the panel itself —
+they can reflash it (ESPHome) or swap the key sensor it reports — so
+Connect means "the panel Home Assistant vouches for". What is bounded
+besides: a claim pairs one device once (spent by its first use, even a
+wrong-MAC or wrong-key one), lives :data:`CLAIM_TTL_SECONDS`, must come
+with the public key it was sealed to (a consistency check — that key is
+public in Home Assistant; the seal is what keeps the claim to the
+panel), and dies with a "sign out all tablets" /
+password change (it is bound to the session epoch) or with the removal
+of the panel's display.
 """
 
 from __future__ import annotations
@@ -63,6 +69,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..dashboard.auth import THROTTLE_MAX_FAILURES, DashboardAuth
+from ..dashboard.claim_seal import InvalidPanelKey, seal_claim
 from ..domain.household_dashboard import (
     CLAIM_TTL_SECONDS,
     MAX_DISPLAY_INFO_LENGTH,
@@ -91,6 +98,7 @@ from ..domain.household_dashboard import (
     DisplayPanelOfflineError,
     ExternalDisplayPanel,
     normalize_mac,
+    parse_panel_key,
 )
 from ..platform.adapter import DisplayDirectory
 from .dashboard_settings_service import DashboardSettingsService, require_admin
@@ -140,6 +148,9 @@ class _Claim:
 
     digest: bytes = field(repr=False)
     mac: str
+    #: The panel public key (raw 32 bytes) the claim was sealed to — the
+    #: panel must present it when it spends the claim.
+    panel_key: bytes
     name: str
     expires_at: float
     #: The session epoch it was minted under — a bump revokes it.
@@ -423,9 +434,18 @@ class DashboardDisplayService:
             raise DisplayPanelNotFoundError()
         if not panel.online:
             raise DisplayPanelOfflineError()
-        if panel.connect_action is None or panel.mac is None:
+        panel_key = parse_panel_key(panel.panel_key)
+        if panel.connect_action is None or panel.mac is None or panel_key is None:
             raise DisplayPanelNeedsUpdateError()
         claim = secrets.token_urlsafe(_TOKEN_BYTES)
+        try:
+            sealed = seal_claim(claim=claim, url=url, panel_pub=panel_key)
+        except InvalidPanelKey as exc:
+            # A key no firmware would publish (e.g. a small-order point).
+            log.warning(
+                "household dashboard: panel %s publishes an unusable key", panel.id
+            )
+            raise DisplayPanelNeedsUpdateError() from exc
         epoch = await self._settings.epoch()
         async with self._claim_lock:
             now = self._clock()
@@ -439,13 +459,14 @@ class DashboardDisplayService:
             entry = _Claim(
                 digest=_claim_digest(claim),
                 mac=panel.mac,
+                panel_key=panel_key,
                 name=_panel_display_name(panel.name),
                 expires_at=now + CLAIM_TTL_SECONDS,
                 epoch=epoch,
             )
             self._claims[panel.id] = entry
         try:
-            await directory.connect(panel, url=url, claim=claim)
+            await directory.connect(panel, sealed=sealed)
         except BaseException:
             # Undelivered: nobody should be able to spend it.
             if self._claims.get(panel.id) is entry:
@@ -459,13 +480,15 @@ class DashboardDisplayService:
         claim: object,
         *,
         mac: object,
+        panel_key: object,
         model: object = None,
         firmware: object = None,
     ) -> DisplayPairingStatus | None:
         """Pair the panel spending ``claim``: a new display (named as on
         the platform) and its token, handed out here and only here.
         ``None`` — uniformly — when the claim is malformed, unknown,
-        expired, already spent, or ``mac`` isn't the panel it was minted
+        expired, already spent, or ``mac`` / ``panel_key`` (the panel's
+        base64url public key) isn't the panel it was minted and sealed
         for. Every claim is compared in constant time; a matching one is
         spent by this call whatever its outcome. A display with the same
         MAC (the panel's old pairing) is replaced — not here, but on the
@@ -488,7 +511,10 @@ class DashboardDisplayService:
                 log.info("household dashboard: unknown connect claim")
                 return None
             spent = self._claims.pop(found)
-            if normalize_mac(mac) != spent.mac:
+            presented = parse_panel_key(panel_key)
+            if normalize_mac(mac) != spent.mac or not hmac.compare_digest(
+                presented or b"", spent.panel_key
+            ):
                 log.warning(
                     "household dashboard: connect claim for panel %s spent by"
                     " another device — refused",

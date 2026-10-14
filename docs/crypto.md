@@ -62,6 +62,7 @@ addresses. See the last section of this document.
 | Identity signatures | Ed25519 | 256-bit | Federation envelopes, user-identity assertions, space config, SDP | `socialhome/crypto.py` |
 | Identity signatures (PQ, optional) | ML-DSA-65 (FIPS 204) | 1952-byte pk / 4032-byte sk | Hybrid signature when suite is `ed25519+mldsa65` | `socialhome/federation/pq_signer.py` |
 | Key agreement | X25519 (ECDH) | 256-bit | Pairing-time session key derivation | `socialhome/federation/pairing_coordinator.py` |
+| Key agreement (ECIES) | X25519 + HKDF-SHA256 + AES-256-GCM | 256-bit | Sealed wall-panel connect claim (suite `x25519-hkdf-sha256-aes256gcm`) | `socialhome/dashboard/claim_seal.py` |
 | Symmetric AEAD | AES-256-GCM | 256-bit | Federation payloads, space content, KEK wrap | `cryptography.hazmat.primitives.ciphers.aead.AESGCM` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | Hash | SHA-256 | 256-bit | Instance/space/user ID derivation, token hashing, space-page version hashes (`sha256:` suite-prefixed over title + content + cover — they recognise versions, never order them; receivers reject any other prefix, v_48) | `hashlib.sha256`, `socialhome/domain/page_version.py` |
@@ -944,6 +945,68 @@ reopens a replay), and the signed recipient `to`: a frame for node A is
 refused by node B. `to` is left out only by older senders and by a HELLO to
 a configured URL whose node id the sender does not know yet — those can be
 replayed once to each other node inside their window.
+
+**Sealed wall-panel connect claim** (`dashboard/claim_seal.py`) —
+*Connect from Home Assistant* hands an ESPHome wall panel its single-use
+pairing claim through an ESPHome action called via Home Assistant, and
+HA's recorder stores every action's data. So the action carries only
+ciphertext, sealed to the panel (ECIES):
+
+- The panel generates an X25519 keypair once (NVS; new on "Forget
+  server" / factory reset) and publishes the public half in its
+  diagnostic text sensor *Social Home key* (32 bytes, unpadded base64url,
+  43 characters — refused unless canonical).
+- Social Home seals `{"claim", "url"}` (compact JSON) with a fresh
+  ephemeral X25519 key per Connect: `shared = X25519(e, panel_pub)`
+  (an all-zero / small-order result is refused);
+  `key = HKDF-SHA256(shared, salt = epk ‖ panel_pub, info =
+  "socialhome-panel-claim-v1", L = 32)`; AES-256-GCM with a random
+  12-byte nonce and `AAD = suite ‖ panel_pub`. The ephemeral key is new
+  every time, so a (key, nonce) pair never repeats.
+- Wire shape — the action's one variable, `sealed`, compact JSON:
+
+  ```json
+  {"ct": "<b64url ct‖tag>", "epk": "<b64url 32>", "nonce": "<b64url 12>",
+   "suite": "x25519-hkdf-sha256-aes256gcm"}
+  ```
+
+- Suite contract: `PANEL_CLAIM_SUITE_X25519_AESGCM`,
+  `SUPPORTED_PANEL_CLAIM_SUITES`, `UnsupportedPanelClaimSuite`. The
+  receiver (the firmware; `open_sealed_claim` is the reference) checks
+  the suite before any key work and refuses unknown or missing ones —
+  there is no default and no plaintext form (the firmware was never
+  released without it). Every other failure is one silent refusal.
+- The address goes inside the seal — for integrity, not secrecy. Sealed
+  in one AEAD with the claim, it can't be swapped: were it plaintext next
+  to a sealed claim, whoever can call the action could point the panel at
+  their own server, collect the claim it sends there and spend it at the
+  real dashboard (the MAC and public key are no secrets). Keep it inside.
+- Binding: the pending claim (only its SHA-256 in memory) remembers the
+  panel key it was sealed to; `POST /api/display/v1/pair/claim` must
+  present it in `X-Display-Key` (compared in constant time, alongside the
+  MAC); a mismatch burns the claim and answers the same uniform 404. This
+  is a consistency check, **not proof of possession**: the public key is
+  readable in HA (`GET /api/states`, the recorder), like the MAC. What
+  keeps the claim from anyone but the panel is the seal — only the
+  private key opens it.
+- The seal gives confidentiality, **not sender authentication**
+  (anonymous ECIES): anyone who can call the panel's ESPHome action
+  through HA and reads its public key can seal a request of their own —
+  a claim for another dashboard, which the panel then pairs with
+  (connecting a paired panel replaces its pairing). That is the same
+  trust Connect already puts in Home Assistant (whoever runs its actions
+  can also reflash the panel); it is not widened here.
+- What HA (and its recorder, history, logbook and API readers) sees: the
+  ciphertext and the panel's public key, never the claim or the address. Shared vectors (fixed keys and nonces, with intermediate
+  values and must-refuse cases):
+  `docs/display-api/v1/fixtures/sealed-claim-vectors.json`, opened by
+  both `tests/dashboard/test_claim_seal.py` and the firmware's host
+  tests.
+- PQ: the claim lives 10 minutes and pairs once, so harvest-now-decrypt-
+  later gains a dead claim (the dashboard address is the only lasting
+  content). Phase 2 is a sibling suite
+  (`x25519+mlkem768-hkdf-sha256-aes256gcm`: longer `epk` / panel key,
+  same shape).
 
 **Standalone auth** — `StandaloneAdapter` hashes passwords with scrypt
 and embeds parameters in the stored hash: `scrypt$16384$8$1$<salt

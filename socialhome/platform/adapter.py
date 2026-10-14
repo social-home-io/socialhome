@@ -343,15 +343,14 @@ class DisplayDirectory(Protocol):
         when the platform couldn't be read."""
         ...
 
-    async def connect(
-        self, panel: "ExternalDisplayPanel", *, url: str, claim: str
-    ) -> None:
-        """Ask ``panel`` to pair itself: it should spend ``claim`` at
-        ``url`` (the dashboard's address). Raises
+    async def connect(self, panel: "ExternalDisplayPanel", *, sealed: str) -> None:
+        """Ask ``panel`` to pair itself: deliver ``sealed`` — its claim
+        and the dashboard's address, sealed to ``panel.panel_key``
+        (:mod:`socialhome.dashboard.claim_seal`). Raises
         :class:`~socialhome.domain.household_dashboard.DisplayDiscoveryFailedError`
-        when the platform didn't deliver it. The claim may end up in the
-        platform's history (HA's recorder) — callers make it single-use
-        and short-lived."""
+        when the platform didn't deliver it. ``sealed`` may end up in the
+        platform's history (HA's recorder) — it is ciphertext only the
+        panel opens."""
         ...
 
 
