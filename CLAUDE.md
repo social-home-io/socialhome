@@ -272,6 +272,38 @@ is valid only if you actually looked. If the dev server is unreachable
 (sandbox/offline), say so in the PR rather than claiming verification — the
 missing screenshots are the signal for a reviewer to reproduce locally.
 
+### Wall dashboard ↔ ESPHome wall panel stay aligned
+
+The household wall dashboard (`socialhome/dashboard/`, browser tablets on
+the dashboard port) and the ESPHome wall-panel firmware
+([social-home-io/esphome-dashboard](https://github.com/social-home-io/esphome-dashboard),
+LVGL, fed by the display API `/api/display/v1/`) are **one product on two
+screens — they must look and behave the same.** The browser is the source of
+truth; the panel follows it.
+
+- **A change to what the wall shows needs a PR in both repos.** Layout, CSS,
+  colours / palettes, copy, a board's content, the lock screen / PIN pad,
+  night / offline / stale states, tab rules, a new or removed element — open
+  the Social Home PR and the matching esphome-dashboard PR together and link
+  them in both descriptions. A change only one screen can show (e.g.
+  read-aloud in the browser, setup / pairing screens on the panel) says so in
+  the PR instead.
+- **Data the panel needs goes through the display API.** Add it additively to
+  the v1 JSON (`dashboard/boards.py` is the one source for both renderers,
+  `dashboard/display_json.py` spells it), update the `docs/display-api/v1/`
+  schemas + fixtures, and keep user-readable strings server-formatted and
+  translated (the panel is locale-free). A breaking shape change needs v2
+  (`docs/display-api/README.md`).
+- **Order:** merge the Social Home PR first, then re-pin the firmware's
+  contract (`tests/fixtures/display-api/SOURCE`, then
+  `scripts/display_api_contract.py --update`) to that merge commit and merge
+  the firmware PR.
+- **Verify side by side:** the browser next to the firmware's host-SDL build
+  at 1280×800 (light / dark / night, en + one other locale) against the same
+  Social Home; put the comparison in both PRs. Any remaining difference is
+  fixed or listed explicitly (font and emoji artwork are the known, accepted
+  ones).
+
 ### Federation & Security
 
 - Every inbound federation event MUST pass the §24.11 pipeline: JSON parse →
