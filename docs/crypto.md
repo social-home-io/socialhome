@@ -976,18 +976,28 @@ ciphertext, sealed to the panel (ECIES):
   the suite before any key work and refuses unknown or missing ones —
   there is no default and no plaintext form (the firmware was never
   released without it). Every other failure is one silent refusal.
-- The address goes inside the seal too: low-sensitivity, but nothing
-  about the household's dashboard needs to sit readable in HA's history.
+- The address goes inside the seal — for integrity, not secrecy. Sealed
+  in one AEAD with the claim, it can't be swapped: were it plaintext next
+  to a sealed claim, whoever can call the action could point the panel at
+  their own server, collect the claim it sends there and spend it at the
+  real dashboard (the MAC and public key are no secrets). Keep it inside.
 - Binding: the pending claim (only its SHA-256 in memory) remembers the
   panel key it was sealed to; `POST /api/display/v1/pair/claim` must
   present it in `X-Display-Key` (compared in constant time, alongside the
-  MAC). A claim that reached someone without being opened — e.g. through
-  some other channel — is useless without that key; a mismatch burns the
-  claim and answers the same uniform 404.
+  MAC); a mismatch burns the claim and answers the same uniform 404. This
+  is a consistency check, **not proof of possession**: the public key is
+  readable in HA (`GET /api/states`, the recorder), like the MAC. What
+  keeps the claim from anyone but the panel is the seal — only the
+  private key opens it.
+- The seal gives confidentiality, **not sender authentication**
+  (anonymous ECIES): anyone who can call the panel's ESPHome action
+  through HA and reads its public key can seal a request of their own —
+  a claim for another dashboard, which the panel then pairs with
+  (connecting a paired panel replaces its pairing). That is the same
+  trust Connect already puts in Home Assistant (whoever runs its actions
+  can also reflash the panel); it is not widened here.
 - What HA (and its recorder, history, logbook and API readers) sees: the
-  ciphertext and the panel's public key. What it can still do: reflash
-  the panel or report another key — HA admins are trusted with the panel
-  itself. Shared vectors (fixed keys and nonces, with intermediate
+  ciphertext and the panel's public key, never the claim or the address. Shared vectors (fixed keys and nonces, with intermediate
   values and must-refuse cases):
   `docs/display-api/v1/fixtures/sealed-claim-vectors.json`, opened by
   both `tests/dashboard/test_claim_seal.py` and the firmware's host

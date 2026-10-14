@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+import socialhome.dashboard.claim_seal as claim_seal_module
 from socialhome.crypto import b64url_decode, b64url_encode, x25519_exchange
 from socialhome.dashboard.claim_seal import (
     PANEL_CLAIM_HKDF_INFO,
@@ -35,7 +36,7 @@ from socialhome.dashboard.claim_seal import (
     open_sealed_claim,
     parse_panel_key,
     seal_claim,
-    seal_claim_with,
+    _seal_claim_with,
 )
 
 VECTORS_PATH = (
@@ -98,13 +99,8 @@ def build_vectors() -> dict:
         nonce = _seed(f"nonce {name}")[:12]
         claim = b64url_encode(_seed(f"claim {name}"))
         shared = x25519_exchange(eph_priv, panel_pub)
-        sealed = seal_claim_with(
-            claim=claim,
-            url=url,
-            panel_pub=panel_pub,
-            eph_private=eph_priv,
-            eph_public=eph_pub,
-            nonce=nonce,
+        sealed = _seal_claim_with(
+            claim=claim, url=url, panel_pub=panel_pub, eph_private=eph_priv, nonce=nonce
         )
         valid.append(
             {
@@ -129,14 +125,31 @@ def build_vectors() -> dict:
     body = _sealed(base)
     _, other_pub = _keypair("another panel")
     eph_priv, eph_pub = _keypair("ephemeral lan-ip")
-    to_other = seal_claim_with(
+    to_other = _seal_claim_with(
         claim=valid[0]["claim"],
         url=valid[0]["url"],
         panel_pub=other_pub,
         eph_private=eph_priv,
-        eph_public=eph_pub,
         nonce=b64url_decode(valid[0]["nonce"]),
     )
+
+    def sealed_plaintext(plain: bytes) -> str:
+        """``plain`` correctly sealed to the panel (as case 0, but a
+        nonce of its own) — for the checks after the AEAD opens."""
+        nonce = _seed(f"nonce plaintext {plain!r}")[:12]
+        key = claim_key(x25519_exchange(eph_priv, panel_pub), eph_pub, panel_pub)
+        ct = AESGCM(key).encrypt(
+            nonce, plain, claim_aad(PANEL_CLAIM_SUITE_X25519_AESGCM, panel_pub)
+        )
+        return _reseal(base, ct=b64url_encode(ct), nonce=b64url_encode(nonce))
+
+    # The order-8 point of Curve25519 (RFC 7748 §6.1 lists the small-order
+    # u-coordinates): every clamped scalar maps it to the all-zero secret.
+    order_8 = bytes.fromhex(
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"
+    )
+    # Same bytes, but the last base64url character carries stray low bits.
+    stray = {"k": "l", "A": "B", "Q": "R", "g": "h", "w": "x"}
     invalid = [
         ("unknown suite", _reseal(base, suite="x25519-hkdf-sha256-chacha20"), True),
         ("missing suite", _reseal(base, suite=None), True),
@@ -158,7 +171,39 @@ def build_vectors() -> dict:
         ("epk too short", _reseal(base, epk=body["epk"][:42]), False),
         ("nonce too short", _reseal(base, nonce=body["nonce"][:15]), False),
         ("ct too short for a tag", _reseal(base, ct=body["ct"][:20]), False),
+        (
+            "ct length 1 mod 4",
+            _reseal(base, ct=body["ct"] + "A" * ((1 - len(body["ct"])) % 4)),
+            False,
+        ),
         ("ct not base64url", _reseal(base, ct=body["ct"][:-1] + "+"), False),
+        (
+            "epk with stray low bits (non-canonical)",
+            _reseal(base, epk=body["epk"][:-1] + stray[body["epk"][-1]]),
+            False,
+        ),
+        (
+            "epk order-8 point (small order)",
+            _reseal(base, epk=b64url_encode(order_8)),
+            False,
+        ),
+        (
+            "suite not a string",
+            _reseal(base, suite=["x25519-hkdf-sha256-aes256gcm"]),
+            True,
+        ),
+        ("plaintext not an object", sealed_plaintext(b"[]"), False),
+        (
+            "plaintext claim not a string",
+            sealed_plaintext(b'{"claim":1,"url":"http://h:8100"}'),
+            False,
+        ),
+        (
+            "plaintext without url",
+            sealed_plaintext(b'{"claim":"' + b"A" * 43 + b'"}'),
+            False,
+        ),
+        ("plaintext not json", sealed_plaintext(b"claim=x"), False),
         ("missing ct", _reseal(base, ct=None), False),
         ("not json", "suite=x25519-hkdf-sha256-aes256gcm", False),
         ("json array", "[]", False),
@@ -172,7 +217,8 @@ def build_vectors() -> dict:
             " and nonces. Bytes are unpadded base64url unless the key ends"
             " in _hex. Every 'invalid' vector is opened with the panel key"
             " below and must be rejected; 'unsupported_suite' ones before"
-            " any key work."
+            " any key work. panel_private is a published TEST key: never"
+            " ship it, or any fixed key, in firmware."
         ),
         "suite": PANEL_CLAIM_SUITE_X25519_AESGCM,
         "hkdf_info": PANEL_CLAIM_HKDF_INFO.decode("ascii"),
@@ -272,6 +318,11 @@ def test_invalid_vectors_are_rejected(case):
         )
 
 
+def test_ct_length_one_mod_four_is_the_uniform_refusal():
+    (case,) = [c for c in VECTORS["invalid"] if c["name"] == "ct length 1 mod 4"]
+    assert len(json.loads(case["sealed"])["ct"]) % 4 == 1
+
+
 def test_aad_binds_the_panel_key():
     """Opened with the right private key but told another public key, the
     AAD (and HKDF salt) differ — refused."""
@@ -308,16 +359,21 @@ def test_seal_refuses_small_order_and_short_keys():
 
 
 def test_seal_refuses_a_bad_nonce_length():
-    eph_priv, eph_pub = _keypair("ephemeral lan-ip")
-    with pytest.raises(InvalidPanelKey):
-        seal_claim_with(
+    eph_priv, _ = _keypair("ephemeral lan-ip")
+    with pytest.raises(ValueError) as err:
+        _seal_claim_with(
             claim="x",
             url="http://a",
             panel_pub=PANEL_PUBLIC,
             eph_private=eph_priv,
-            eph_public=eph_pub,
             nonce=bytes(11),
         )
+    assert not isinstance(err.value, InvalidPanelKey)
+
+
+def test_seal_claim_with_is_module_private():
+    assert "_seal_claim_with" not in claim_seal_module.__all__
+    assert not hasattr(claim_seal_module, "seal_claim_with")
 
 
 def test_opened_claim_repr_hides_the_claim():

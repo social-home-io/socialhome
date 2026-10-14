@@ -46,9 +46,10 @@ all. Home Assistant admins are still trusted with the panel itself —
 they can reflash it (ESPHome) or swap the key sensor it reports — so
 Connect means "the panel Home Assistant vouches for". What is bounded
 besides: a claim pairs one device once (spent by its first use, even a
-wrong-MAC or wrong-key one), lives :data:`CLAIM_TTL_SECONDS`, needs the
-public key it was sealed to (a claim learned elsewhere is useless
-without the matching key), and dies with a "sign out all tablets" /
+wrong-MAC or wrong-key one), lives :data:`CLAIM_TTL_SECONDS`, must come
+with the public key it was sealed to (a consistency check — that key is
+public in Home Assistant; the seal is what keeps the claim to the
+panel), and dies with a "sign out all tablets" /
 password change (it is bound to the session epoch) or with the removal
 of the panel's display.
 """

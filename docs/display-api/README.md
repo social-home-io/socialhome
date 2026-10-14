@@ -103,7 +103,8 @@ picture or a `304` is free).
 ### The sealed connect request
 
 `sealed` is compact JSON (bytes as unpadded base64url — reject padding,
-other alphabets and wrong lengths):
+other alphabets, wrong lengths and stray low bits in the last character:
+only the canonical encoding is valid):
 
 ```json
 {"ct": "…", "epk": "<32 bytes>", "nonce": "<12 bytes>", "suite": "x25519-hkdf-sha256-aes256gcm"}

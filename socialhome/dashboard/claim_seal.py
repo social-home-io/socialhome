@@ -37,7 +37,8 @@ import re
 from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
@@ -62,7 +63,6 @@ __all__ = [
     "open_sealed_claim",
     "parse_panel_key",
     "seal_claim",
-    "seal_claim_with",
 ]
 
 #: X25519 ECDH → HKDF-SHA256 → AES-256-GCM. Phase 2 of ``docs/crypto.md``
@@ -143,21 +143,28 @@ def _plaintext(claim: str, url: str) -> bytes:
     ).encode("utf-8")
 
 
-def seal_claim_with(
+def _seal_claim_with(
     *,
     claim: str,
     url: str,
     panel_pub: bytes,
     eph_private: bytes,
-    eph_public: bytes,
     nonce: bytes,
 ) -> str:
-    """The deterministic core of :func:`seal_claim`: seal with the given
-    ephemeral key and nonce (the shared test vectors pin these). Callers
-    other than :func:`seal_claim` and the vector tests must not pick
-    their own ephemeral key or nonce."""
-    if len(panel_pub) != _KEY_BYTES or len(nonce) != _NONCE_BYTES:
+    """The deterministic core of :func:`seal_claim`: seal under the given
+    ephemeral private key and nonce. Module-private — only
+    :func:`seal_claim` (fresh key and nonce every call) and the vector
+    tests (fixed ones) call it; a reused ephemeral key with a reused
+    nonce would repeat an AES-GCM (key, nonce) pair."""
+    if len(panel_pub) != _KEY_BYTES:
         raise InvalidPanelKey()
+    if len(nonce) != _NONCE_BYTES:
+        raise ValueError("a sealed claim's nonce is 12 bytes")
+    eph_public = (
+        X25519PrivateKey.from_private_bytes(eph_private)
+        .public_key()
+        .public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    )
     suite = PANEL_CLAIM_SUITE_X25519_AESGCM
     key = claim_key(_shared(eph_private, panel_pub), eph_public, panel_pub)
     ct = AESGCM(key).encrypt(nonce, _plaintext(claim, url), claim_aad(suite, panel_pub))
@@ -179,12 +186,11 @@ def seal_claim(*, claim: str, url: str, panel_pub: bytes) -> str:
     call, so no (key, nonce) pair ever repeats. Returns the ``sealed``
     action variable. :class:`InvalidPanelKey` for an unusable key."""
     eph = generate_x25519_keypair()
-    return seal_claim_with(
+    return _seal_claim_with(
         claim=claim,
         url=url,
         panel_pub=panel_pub,
         eph_private=eph.private_key,
-        eph_public=eph.public_key,
         nonce=os.urandom(_NONCE_BYTES),
     )
 
@@ -193,7 +199,10 @@ def _field(sealed: dict[str, object], name: str, pattern: re.Pattern[str]) -> by
     value = sealed.get(name)
     if not isinstance(value, str) or pattern.fullmatch(value) is None:
         raise SealedClaimInvalid()
-    raw = b64url_decode(value)
+    try:
+        raw = b64url_decode(value)
+    except ValueError as exc:  # binascii.Error: e.g. a length of 1 mod 4
+        raise SealedClaimInvalid() from exc
     if b64url_encode(raw) != value:
         raise SealedClaimInvalid()
     return raw
@@ -213,7 +222,7 @@ def open_sealed_claim(
     if not isinstance(parsed, dict):
         raise SealedClaimInvalid()
     suite = parsed.get("suite")
-    if suite not in SUPPORTED_PANEL_CLAIM_SUITES:
+    if not isinstance(suite, str) or suite not in SUPPORTED_PANEL_CLAIM_SUITES:
         raise UnsupportedPanelClaimSuite(
             f"sealed claim names unsupported suite {suite!r}; this build"
             f" supports {sorted(SUPPORTED_PANEL_CLAIM_SUITES)!r}"
