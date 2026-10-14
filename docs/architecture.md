@@ -1542,6 +1542,25 @@ drives it) and is then served by a **separate aiohttp application on its own por
   `HouseholdDashboardService.acknowledge` as the tablet (every eligibility
   rule re-derived) under the same 30 / 5 min budget, per panel. Admins can
   lift a panel's lock (`PATCH …/displays/{id}` `{"locked": false}`).
+- **Home Assistant "Privacy lock" entity.** The ESPHome panel firmware
+  exposes its lock to Home Assistant as a `lock` entity ("Privacy lock")
+  on the panel's device. Locking from HA is the panel's own
+  `POST /api/display/v1/lock` and always allowed (still needs a PIN).
+  Unlocking from HA is PIN-less, so it is gated by the admin setting
+  `DashboardSettings.panel_unlock_from_ha` (off by default):
+  `POST /api/display/v1/unlock/ha` → `DashboardDisplayService.unlock_from_ha`
+  answers 403 `DISPLAY_HA_UNLOCK_OFF` while it is off (the panel keeps the
+  entity locked); while it is on it clears the stored flag, resets the
+  panel's PIN tries, logs at INFO and writes a `display_ha_unlock` row to
+  `auth_audit_log` (a failed audit write only warns — the lock is already
+  lifted). The route passes the locked-panel guard like `/unlock` and is
+  budgeted 6 / 5 min per panel (`DashboardAuth.begin_display_ha_unlock`),
+  counted before the setting is read. The lock body and board `settings`
+  carry `ha_unlock`, so the firmware knows whether HA may unlock. **Trust
+  note:** with the setting on, anyone who can run HA automations / actions
+  — or command the panel over its ESPHome API — can lift the lock; the
+  server only sees the panel's bearer token, so it can't tell an
+  HA-driven unlock from any other call the panel makes.
 - **Wall-panel JSON (API v1).** A panel renders the same boards as the
   tablet, from JSON: `GET /api/display/v1/home` · `messages` · `notes` ·
   `map` · `person/{id}` · `theme`. There is one source for what a board
