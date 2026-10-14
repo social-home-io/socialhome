@@ -366,8 +366,9 @@ class DashboardPinRequiredError(CodedError):
 
 
 class DashboardDisplayPinWrongError(CodedError):
-    """A locked panel sent the wrong PIN; ``remaining`` more wrong ones
-    are allowed before the next try unpairs the panel."""
+    """A locked panel sent the wrong PIN; ``remaining`` (at least 1) more
+    tries are left — the wrong PIN that spends the last one unpairs the
+    panel."""
 
     status = 403
     code = "DISPLAY_PIN_WRONG"

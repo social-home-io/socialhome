@@ -114,7 +114,7 @@ from .map_scene import (
 )
 from .presenter import home_colors, person_colors, view_key
 from .tabs import TAB_MAP, TAB_MESSAGES, TAB_NOTES, TAB_OVERVIEW
-from .views import ack_id
+from .views import ack_id, lock_is_night
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +126,7 @@ __all__ = [
     "LOCK_PATH",
     "MAP_PNG_PATH",
     "PAIR_PATH",
+    "LOCK_EMOJI_PATH",
     "UNLOCK_PATH",
     "bearer_token",
     "guard_display_request",
@@ -158,6 +159,12 @@ IMAGE_PREFIXES = (
     DISPLAY_API_PREFIX + "emoji/",
     MAP_PNG_PATH,
 )
+#: The 🔒 the lock screen's PIN button shows, as on the tablet: a bundled
+#: Twemoji (no household data), so a locked panel — even one rebooted
+#: while locked, its image cache empty — may still fetch it.
+LOCK_EMOJI_PATH = DISPLAY_API_PREFIX + "emoji/1f512"
+#: What a locked panel reaches: the PIN (the one way out) and the 🔒.
+_LOCKED_PASS = frozenset({UNLOCK_PATH, LOCK_EMOJI_PATH})
 #: How long a panel waits before asking again for a map with no tiles.
 TILES_RETRY_S = 60
 _SAFE_TAG = re.compile(r"[A-Za-z0-9_.-]{1,128}")
@@ -246,24 +253,29 @@ async def guard_display_request(
         response = error_response(429, "RATE_LIMITED", "Too many requests.")
         response.headers["Retry-After"] = str(wait)
         return response
-    # The PIN is the one way out of the lock, so ``/unlock`` passes.
-    if request.path != UNLOCK_PATH and await displays.is_locked(display):
+    # The PIN is the one way out of the lock, so ``/unlock`` passes — and
+    # the lock screen's own 🔒 picture.
+    if request.path not in _LOCKED_PASS and await displays.is_locked(display):
         return await _locked(request)
     return await handler(request)
 
 
 async def _locked(request: web.Request, *, status: int = 423) -> web.Response:
     """``423`` for a privacy-locked panel: what the tablet lock screen
-    shows (household name, clock, the PIN strings) — never a person.
+    shows (household name, clock and date, night or not, the PIN pad's
+    strings) — never a person.
     ``POST /lock`` answers the same body with ``200``."""
     app = request.app
-    locale = (await app[SETTINGS_KEY].get()).locale
+    settings = await app[SETTINGS_KEY].get()
+    locale = settings.locale
     zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
     t = app[RENDERER_KEY].translator(locale)
+    now = app[AUTH_KEY].now()
     payload = lock_payload(
         household=await app[HOUSEHOLD_NAME_KEY](),
         locale=locale,
-        clock=display_clock(app[AUTH_KEY].now(), zone, t),
+        clock=display_clock(now, zone, t),
+        is_night=lock_is_night(settings, now, zone),
         t=t,
     )
     return web.json_response(payload, status=status, dumps=_dumps)
@@ -412,8 +424,8 @@ class DisplayUnlockView(web.View):
     panel's lock (the one route a locked panel reaches besides the lock
     screen). ``200 {"locked": false}`` (also when it wasn't locked —
     nothing is checked then); ``403 DISPLAY_PIN_WRONG`` with
-    ``params.remaining``; once those are spent the next try unpairs the
-    panel: ``401 DISPLAY_SIGNED_OUT``
+    ``params.remaining`` (never ``0``); the wrong PIN that spends the
+    last try unpairs the panel: ``401 DISPLAY_SIGNED_OUT``
     (:meth:`DashboardDisplayService.unlock`)."""
 
     async def post(self) -> web.Response:

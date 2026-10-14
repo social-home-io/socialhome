@@ -286,11 +286,13 @@ messages* (see above), and never a hidden person's messages. Use the privacy loc
 When someone who shouldn't see the household's people is around, tap
 the 🔒 button on the tablet. It switches to a neutral lock screen: the
 household name, the time and the date — no names, pictures, presence,
-events or chores. Reloading the page or restarting the browser keeps it
+events or chores. In the night window it dims to the night colours. Reloading the page or restarting the browser keeps it
 locked (the lock lives in that tablet's sign-in cookie, so it is per
 tablet: locking the hallway tablet doesn't lock the kitchen one).
 
-To unlock, tap **🔒 PIN** and type the PIN on the keypad.
+To unlock, tap **🔒 PIN** and type the PIN on the keypad. Under the
+keypad the tablet says where a forgotten PIN can be changed (**Admin ›
+Dashboard**); a keypad left untouched for a minute closes again.
 
 - **Set a PIN first.** The 🔒 button only appears once a household
   admin has set a PIN — **Set PIN** under **Privacy lock** in
@@ -299,11 +301,11 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
 - **The PIN is not the dashboard password.** It's a short code for the
   people who live there; the password stays with whoever sets tablets
   up. Setting or changing the PIN signs no tablet out.
-- **Five wrong PINs sign the tablet out.** After five wrong tries within
-  15 minutes the next one signs that tablet out, and it needs the
-  dashboard password (or a fresh setup link) again. After each wrong PIN
-  the keypad says how many tries are left ("Tries left: 3"), like a wall
-  panel does. This is counted per
+- **Five wrong PINs sign the tablet out.** The fifth wrong try within
+  15 minutes signs that tablet out, and it needs the dashboard password
+  (or a fresh setup link) again. After each wrong PIN the keypad says how
+  many tries are left ("Tries left: 3"), and on the last one it warns
+  that one more wrong PIN signs the screen out — like a wall panel. This is counted per
   lock on each tablet — tablets behind one reverse proxy don't use up
   each other's tries, and neither reloading, re-tapping 🔒 on a locked
   tablet, changing network address nor flooding the login page from
@@ -436,9 +438,12 @@ never hold a tablet's sign-in back. At most 20 panels can be paired.
 the tablets (it needs a PIN to be set) and then shows only the lock
 screen until someone types the PIN on it. Each panel locks on its own,
 and the lock is stored on the server, so restarting the panel — or Social
-Home — doesn't unlock it. **Five wrong PINs unpair the panel**: after five
-wrong tries within 15 minutes, the next try signs it out (like a tablet)
-and it has to be paired again with a new code. A locked panel shows
+Home — doesn't unlock it. **Five wrong PINs unpair the panel**: the fifth
+wrong try within 15 minutes signs it out (like a tablet) and it has to be
+paired again with a new code. The PIN pad counts down ("Tries left: n"),
+warns on the last try, and says that an admin can change a forgotten PIN
+in **Admin › Dashboard**. In the night window the lock screen dims to the
+night colours, on panels and tablets alike. A locked panel shows
 **Locked** in **Admin › Dashboard › Wall panels**; **Unlock** there lifts
 the lock without the PIN (*headless:* `PATCH
 /api/admin/dashboard/displays/{id}` with `{"locked": false}`). **Remove

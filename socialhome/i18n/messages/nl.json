@@ -55,6 +55,8 @@
   "dashboard.lock.tries_left": "Resterende pogingen: {n}",
   "dashboard.lock.wait": "Te veel pogingen. Probeer het over {n} s opnieuw.",
   "dashboard.lock.offline": "Social Home is niet bereikbaar. Probeer het opnieuw.",
+  "dashboard.lock.last_try": "Laatste poging — nog een verkeerde pincode meldt dit scherm af.",
+  "dashboard.lock.forgot": "Pincode vergeten? Een beheerder kan hem wijzigen in Social Home onder Admin › Dashboard.",
   "dashboard.date.long": "{weekday} {day} {month}",
   "dashboard.date.short": "{day} {month}",
   "dashboard.date.weekday.0": "maandag",

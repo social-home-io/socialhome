@@ -55,6 +55,8 @@
   "dashboard.lock.tries_left": "Essais restants : {n}",
   "dashboard.lock.wait": "Trop d'essais. Réessayez dans {n} s.",
   "dashboard.lock.offline": "Social Home est injoignable. Réessayez.",
+  "dashboard.lock.last_try": "Dernier essai — un autre code PIN incorrect déconnecte cet écran.",
+  "dashboard.lock.forgot": "Code PIN oublié ? Un administrateur peut le changer dans Social Home, sous Admin › Tableau.",
   "dashboard.date.long": "{weekday} {day} {month}",
   "dashboard.date.short": "{day} {month}",
   "dashboard.date.weekday.0": "lundi",

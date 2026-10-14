@@ -26,7 +26,9 @@ but draws it itself from JSON. It talks to the **dashboard port** (default
   address (with its "found on this network" list) / pairing / connect /
   update / settings screens). Placeholders stay in braces for the
   panel to fill: `{time}` in `offline`, `{host}` in `claim_unreachable`,
-  `{n}` in `pin_remaining` and `pin_wait`. The panel keeps English
+  `{n}` in `pin_remaining` and `pin_wait` (`pin_last_try` and
+  `pin_forgot` are the lock screen's last-try warning and forgotten-PIN
+  hint). The panel keeps English
   built-ins for the setup screens it shows before it has a server.
 - **People once, then ids.** Each board lists the shown `people` (name,
   initials, colour + ink, avatar path, where they are — never coordinates
@@ -140,9 +142,14 @@ Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
 - `POST /api/display/v1/unlock` `{"pin": "1234"}` — the only route a locked
   panel reaches. `200` `unlock.schema.json` (also when it wasn't locked);
   `403 DISPLAY_PIN_WRONG` with `params.remaining` (fixture
-  `pin-wrong.json`) — show it as "Wrong PIN"; after five wrong PINs in
-  15 minutes the next try unpairs the panel: `401 DISPLAY_SIGNED_OUT`
-  (forget the token, pair again). `429` + `Retry-After` only asks to wait.
+  `pin-wrong.json`) — show it as "Wrong PIN" with the lock body's
+  `strings.tries_left` (`{n}` = `remaining`), or `strings.last_try` when
+  `remaining` is `1` (it is never `0`); the fifth wrong PIN in 15 minutes
+  unpairs the panel: `401 DISPLAY_SIGNED_OUT` (forget the token, pair
+  again). `429` + `Retry-After` only asks to wait. Like the tablet, show
+  `strings.forgot_pin` under the PIN pad, draw the lock screen with the
+  night palette (and dim) while `is_night` is true, and close a PIN pad
+  left untouched for a minute.
 - `POST /api/display/v1/ack` `{"message_id", "person_id"}` — send a
   mention's `ack` object as it came. `200` `ack.schema.json`;
   `404 NOT_FOUND` when the wall no longer shows that mention (refresh the
@@ -159,7 +166,7 @@ Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
 | `404 TAB_OFF` | The tab doesn't show (chat off, stickies off, nobody located) | Go to Overview |
 | `404 NOT_FOUND` | Unknown or hidden person | Go to Overview |
 | `409 NIGHT` | A tab other than Overview at night | Go to Overview |
-| `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`) |
+| `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`); `GET /emoji/1f512` (the PIN button's 🔒) still answers |
 | `429` | Over the request / ack budget, or the PIN can't be checked now | Wait `Retry-After` seconds |
 | `503 TILES_UNAVAILABLE` | `map.png` without any map tile | Keep the old picture, retry after `Retry-After` |
 

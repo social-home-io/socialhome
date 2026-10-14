@@ -9,6 +9,7 @@
     "clock",
     "dir",
     "household",
+    "is_night",
     "locale",
     "locked",
     "strings"
@@ -35,14 +36,21 @@
     "clock": {
       "$ref": "common.schema.json#/$defs/clock"
     },
+    "is_night": {
+      "type": "boolean",
+      "description": "The household's night window is on: draw the lock screen with the night palette and dim, as on the night board."
+    },
     "strings": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "delete",
         "enter_pin",
+        "forgot_pin",
+        "last_try",
         "locked",
         "pin_button",
+        "tries_left",
         "unlock",
         "wrong_pin"
       ],
@@ -64,6 +72,18 @@
         },
         "wrong_pin": {
           "type": "string"
+        },
+        "tries_left": {
+          "type": "string",
+          "description": "Under \"Wrong PIN\" with 2+ tries left; {n} is the DISPLAY_PIN_WRONG params.remaining."
+        },
+        "last_try": {
+          "type": "string",
+          "description": "Under \"Wrong PIN\" instead of tries_left when params.remaining is 1: the next wrong PIN unpairs the panel."
+        },
+        "forgot_pin": {
+          "type": "string",
+          "description": "Under the PIN pad: who can change a forgotten PIN."
         }
       }
     }

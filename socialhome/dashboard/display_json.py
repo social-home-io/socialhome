@@ -1057,9 +1057,17 @@ def person_payload(
 # ─── Lock + theme ────────────────────────────────────────────────────────
 
 
-def lock_payload(*, household: str, locale: str, clock: Json, t: T) -> Json:
-    """What a privacy-locked panel gets (``423``): the household name, the
-    clock and the PIN strings — never a person (the lock screen's rule)."""
+def lock_payload(
+    *, household: str, locale: str, clock: Json, is_night: bool, t: T
+) -> Json:
+    """What a privacy-locked panel gets (``423``): what the tablet lock
+    screen shows — the household name, the clock and date, the PIN pad's
+    strings and how to get back in — never a person (the lock screen's
+    rule). ``is_night``: the night window is on — the lock screen then
+    uses the night colours and the panel dims, as on the night board.
+    ``tries_left`` keeps ``{n}`` for the panel to fill with the
+    ``DISPLAY_PIN_WRONG`` ``params.remaining``; with one left it shows
+    ``last_try`` instead (:func:`~.views.pin_tries_note`)."""
     return {
         "api_version": API_VERSION,
         "locked": True,
@@ -1067,6 +1075,7 @@ def lock_payload(*, household: str, locale: str, clock: Json, t: T) -> Json:
         "locale": locale,
         "dir": text_direction(locale),
         "clock": clock,
+        "is_night": is_night,
         "strings": {
             "locked": t("dashboard.lock.locked"),
             "pin_button": t("dashboard.lock.pin_button"),
@@ -1074,6 +1083,9 @@ def lock_payload(*, household: str, locale: str, clock: Json, t: T) -> Json:
             "unlock": t("dashboard.lock.unlock"),
             "delete": t("dashboard.lock.delete"),
             "wrong_pin": t("dashboard.lock.wrong_pin"),
+            "tries_left": t("dashboard.lock.tries_left", n="{n}"),
+            "last_try": t("dashboard.lock.last_try"),
+            "forgot_pin": t("dashboard.lock.forgot"),
         },
     }
 
@@ -1159,6 +1171,8 @@ STRING_KEYS: Final[Mapping[str, str]] = {
     "close": "dashboard.display.close",
     "credits": "dashboard.display.credits",
     "pin_remaining": "dashboard.lock.tries_left",
+    "pin_last_try": "dashboard.lock.last_try",
+    "pin_forgot": "dashboard.lock.forgot",
     "pin_wait": "dashboard.lock.wait",
     "pin_offline": "dashboard.lock.offline",
 }

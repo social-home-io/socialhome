@@ -1,12 +1,20 @@
 {#- The privacy lock screen. Shows ONLY the household name, clock and
-    date — never a person, picture, presence, event or chore. Works
-    without JS (plain form); lock.js adds the ticking clock + keypad. -#}
+    date — never a person, picture, presence, event or chore — plus how
+    to get back in (the PIN pad, tries left, who can change a forgotten
+    PIN). Night colours in the night window. Works without JS (plain
+    form); lock.js adds the ticking clock + keypad. The one inline
+    <style> is the household theme colour, admitted by its CSP hash. -#}
 {% extends "base.html.j2" %}
+{% block style %}
+{% if style %}
+<style>{{ style|safe }}</style>
+{% endif %}
+{% endblock %}
 {% block head %}
 <script src="/static/lock.js" defer></script>
 <noscript><meta http-equiv="refresh" content="60;url=/"></noscript>
 {% endblock %}
-{% block body_class %}dash-locked{% endblock %}
+{% block body_class %}dash-locked{% if night %} dash-night{% endif %}{% endblock %}
 {% block content %}
 <section class="dash-lock" data-lock>
   <h1 class="dash-visually-hidden">{{ t("dashboard.lock.locked") }}</h1>
@@ -25,6 +33,7 @@
       </label>
       <button type="submit" class="dash-button dash-pin-native">{{ t("dashboard.lock.unlock") }}</button>
     </form>
+    <p class="dash-lock-forgot">{{ t("dashboard.lock.forgot") }}</p>
   </details>
 </section>
 {% endblock %}

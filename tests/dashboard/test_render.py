@@ -134,6 +134,8 @@ def test_lock_screen(renderer):
         locale="en",
         household="<b>Casa</b>",
         clock=_clock(),
+        night=False,
+        style="",
         error=None,
     )
     assert "&lt;b&gt;Casa&lt;/b&gt;" in html
@@ -148,6 +150,26 @@ def test_lock_screen(renderer):
     assert "Screen locked" in html
     assert 'role="alert"' not in html
     assert '<noscript><meta http-equiv="refresh" content="60;url=/"></noscript>' in html
+    assert '<body class="dash-locked">' in html
+    assert "<style" not in html
+    assert (
+        '<p class="dash-lock-forgot">Forgot the PIN? An admin can change it in '
+        "Social Home under Admin › Dashboard.</p>\n  </details>"
+    ) in html
+
+
+def test_lock_screen_at_night_with_the_theme_colour(renderer):
+    html = renderer.render(
+        "lock.html.j2",
+        locale="en",
+        household="Casa",
+        clock=_clock(),
+        night=True,
+        style=":root{--dash-accent:#2f6f5e}",
+        error=None,
+    )
+    assert '<body class="dash-locked dash-night">' in html
+    assert "<style>:root{--dash-accent:#2f6f5e}</style>" in html
 
 
 def test_lock_screen_error_opens_the_keypad(renderer):
@@ -156,6 +178,8 @@ def test_lock_screen_error_opens_the_keypad(renderer):
         locale="fr",
         household="Casa",
         clock=_clock(),
+        night=False,
+        style="",
         error="Code PIN incorrect",
         tries_left=None,
     )
@@ -174,6 +198,8 @@ def test_lock_screen_says_how_many_tries_are_left(renderer):
         locale="en",
         household="Casa",
         clock=_clock(),
+        night=False,
+        style="",
         error="Wrong PIN",
         tries_left="Tries left: 3",
     )

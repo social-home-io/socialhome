@@ -2,8 +2,9 @@
  *
  * Progressive enhancement only: the server-rendered page already shows
  * the household time and a plain PIN form that works without this file.
- * Here we (1) keep the clock ticking in the household's time zone and
- * (2) replace the PIN field with a big on-screen keypad. Served from
+ * Here we (1) keep the clock ticking in the household's time zone,
+ * (2) reload after a quiet minute so the screen stays current and
+ * (3) replace the PIN field with a big on-screen keypad. Served from
  * /static/ (CSP script-src 'self'); no inline handlers anywhere.
  */
 (function () {
@@ -51,7 +52,7 @@
           parts[p.type] = p.value;
         });
         if (parts.year + "-" + parts.month + "-" + parts.day !== day) {
-          window.location.replace(window.location.pathname);
+          reloadIfReachable();
           return;
         }
         clock.textContent = parts.hour + ":" + parts.minute;
@@ -59,6 +60,47 @@
       window.setInterval(tick, 5000);
     }
   }
+
+  // ── Staying current ──────────────────────────────────────────────────
+  // A minute without a touch reloads the lock screen (the no-JS page
+  // refreshes the same way): it picks up an admin removing the PIN (the
+  // tablet unlocks), the night window's colours, a sign-out — and puts
+  // away a PIN pad left open with a half-typed PIN. Every touch or key
+  // starts the minute again; a PIN on its way to the server stops it.
+  // Only reloads while Social Home answers: a reload during a restart or
+  // a Wi-Fi drop would strand the tablet on the browser's error page.
+  var IDLE_MS = 60000;
+  var idleTimer = 0;
+  var reloading = true;
+  function reloadIfReachable() {
+    window
+      .fetch("/healthz", { cache: "no-store", credentials: "same-origin" })
+      .then(
+        function (response) {
+          if (reloading && response.ok) {
+            window.location.replace(window.location.pathname);
+          } else {
+            stayCurrent();
+          }
+        },
+        function () {
+          stayCurrent(); // offline: keep the lock screen, try again later
+        }
+      );
+  }
+  function stayCurrent() {
+    window.clearTimeout(idleTimer);
+    if (reloading) {
+      idleTimer = window.setTimeout(reloadIfReachable, IDLE_MS);
+    }
+  }
+  function stopReloading() {
+    reloading = false;
+    window.clearTimeout(idleTimer);
+  }
+  document.addEventListener("pointerdown", stayCurrent, true);
+  document.addEventListener("keydown", stayCurrent, true);
+  stayCurrent();
 
   // ── PIN keypad ───────────────────────────────────────────────────────
   var form = root.querySelector("[data-pin-form]");
@@ -121,6 +163,7 @@
     } else if (value === "ok") {
       if (input.value.length >= minLen) {
         sending = true;
+        stopReloading();
         render();
         form.submit();
         return;

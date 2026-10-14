@@ -767,6 +767,9 @@ async def test_locked_display_gets_423_lock_payload(
     payload = await resp.json()
     _validate("lock", payload)
     assert payload["household"] == "Home" and payload["locked"] is True
+    assert payload["is_night"] is False
+    assert payload["strings"]["tries_left"] == "Tries left: {n}"
+    assert payload["strings"]["forgot_pin"].startswith("Forgot the PIN?")
     text = json.dumps(payload)
     for leak in ("Anna", "u-anna", "Swimming", "Dinner"):
         assert leak not in text
@@ -775,6 +778,37 @@ async def test_locked_display_gets_423_lock_payload(
     assert snapshots.calls == []  # nothing about the household was read
     if path == "/api/display/v1/home":
         _fixture("locked", payload)
+
+
+async def test_locked_display_still_gets_the_lock_emoji(
+    client, displays, settings_service
+):
+    """The lock screen's 🔒 (a bundled Twemoji, nothing about the
+    household) — so a panel rebooted while locked can draw its PIN
+    button; every other picture stays behind the lock."""
+    _, token = await _locked(client, displays, settings_service)
+    resp = await _get(client, "/api/display/v1/emoji/1f512?size=48", token)
+    assert resp.status == 200
+    assert _png_size(await resp.read()) == (48, 48)
+    assert (await _get(client, "/api/display/v1/emoji/1f3ca", token)).status == 423
+    assert (await _get(client, "/api/display/v1/emoji/1f512x", token)).status == 423
+
+
+async def test_locked_display_in_the_night_window_is_told_so(
+    client, displays, settings_service
+):
+    """The lock screen dims at night (``is_night``) like the night board —
+    a screen state, never anyone's data."""
+    _, token = await _locked(client, displays, settings_service)
+    # Fixed clock: 08:00 UTC, the household zone here.
+    await settings_service.update(
+        actor_is_admin=True, patch={"night_start": "07:30", "night_end": "08:30"}
+    )
+    resp = await _get(client, "/api/display/v1/home", token)
+    assert resp.status == 423
+    payload = await resp.json()
+    _validate("lock", payload)
+    assert payload["is_night"] is True
 
 
 async def test_tab_off_is_404_and_night_tab_is_409(client, displays, snapshots):
@@ -1086,7 +1120,7 @@ async def test_wrong_pins_then_the_panel_is_signed_out(
     client, displays, settings_service
 ):
     display_id, token = await _locked(client, displays, settings_service)
-    for left in range(THROTTLE_MAX_FAILURES - 1, -1, -1):
+    for left in range(THROTTLE_MAX_FAILURES - 1, 0, -1):
         resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
         assert resp.status == 403
         body = await resp.json()
@@ -1095,8 +1129,8 @@ async def test_wrong_pins_then_the_panel_is_signed_out(
         assert body["error"]["params"] == {"remaining": left}
         if left == THROTTLE_MAX_FAILURES - 1:
             _fixture("pin-wrong", body)
-    # The sixth try — even the right PIN — unpairs the panel.
-    resp = await client.post(UNLOCK, json={"pin": PIN}, headers=_bearer(token))
+    # The fifth wrong PIN unpairs the panel: "remaining" never reads 0.
+    resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
     assert resp.status == 401
     assert resp.headers["WWW-Authenticate"] == "Bearer"
     body = await resp.json()
