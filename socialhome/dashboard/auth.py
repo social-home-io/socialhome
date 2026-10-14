@@ -132,6 +132,7 @@ __all__ = [
     "THROTTLE_WINDOW_S",
     "DashboardAuth",
     "SessionClaims",
+    "StaleSessionError",
 ]
 
 COOKIE_NAME = "sh_dash"
@@ -200,6 +201,13 @@ MAP_RENDER_MAX = 6
 REVOKED_LOCKED = "locked"
 REVOKED_SIGNED_OUT = "signed_out"
 _REVOCATION_REASONS = frozenset({REVOKED_LOCKED, REVOKED_SIGNED_OUT})
+
+
+class StaleSessionError(Exception):
+    """A session verified under a cookie key that has since been replaced
+    (:meth:`DashboardAuth.issue` with ``continuing``): it is signed out."""
+
+
 #: Most revoked sessions kept in memory. Full of unexpired entries, the
 #: next revocation replaces the cookie key (every tablet signs out).
 REVOCATION_MAX = 10_000
@@ -247,10 +255,12 @@ class SessionClaims:
     #: derived from its signature). Revocation and the per-lock PIN
     #: throttle key on it. Not part of equality or ``repr``.
     session_id: str = field(default="", compare=False, repr=False)
-    #: Which cookie key generation of :class:`DashboardAuth` verified it.
-    #: A key replacement (full revocation list) makes every claim of an
-    #: older generation count as signed out — so a request in flight
-    #: across it can't renew or re-issue a cookie under the new key.
+    #: The version of the cookie key that verified it
+    #: (:meth:`DashboardSettingsService.cookie_key`). A key replacement
+    #: (full revocation list) makes every claim of an older key count as
+    #: signed out, and :meth:`DashboardAuth.issue` refuses to continue
+    #: such a session under the new key — so a request in flight across
+    #: it can't renew, lock or unlock its way back in.
     generation: int = field(default=0, compare=False, repr=False)
 
 
@@ -398,7 +408,6 @@ class DashboardAuth:
         "_verify_slot",
         "_revoked",
         "_max_revoked",
-        "_key_generation",
         "_acks",
         "_tiles",
         "_pairs",
@@ -422,8 +431,6 @@ class DashboardAuth:
         # session id → (reason, expires_at, epoch of the revoked cookie).
         self._revoked: dict[str, tuple[str, float, int]] = {}
         self._max_revoked = max_revocations
-        # Bumped when the cookie key is replaced (full revocation list).
-        self._key_generation = 0
         # Password / setup-link failures per client, and PIN failures per
         # lock — apart, so neither can crowd out or evict the other.
         self._logins = _FailureTable(
@@ -446,23 +453,35 @@ class DashboardAuth:
     # ── Cookie ──────────────────────────────────────────────────────────
 
     async def issue(
-        self, keep: bool, *, locked: bool = False, session_id: str | None = None
+        self,
+        keep: bool,
+        *,
+        locked: bool = False,
+        session_id: str | None = None,
+        continuing: SessionClaims | None = None,
     ) -> str:
         """A fresh cookie value for the current epoch.
 
         ``session_id`` continues a session (renewal); ``None`` starts a
-        new one (sign-in, lock, unlock).
+        new one (sign-in, lock, unlock). ``continuing``: the verified
+        claims this cookie follows from (renewal, lock, unlock) — raises
+        :class:`StaleSessionError` when they were verified under a cookie
+        key that has since been replaced, instead of signing with the new
+        one.
         """
+        epoch = await self._settings.epoch()
+        version, secret = await self._settings.cookie_key()
+        if continuing is not None and continuing.generation != version:
+            raise StaleSessionError()
         payload = {
             "v": _PAYLOAD_VERSION,
-            "e": await self._settings.epoch(),
+            "e": epoch,
             "i": int(self._clock()),
             "k": bool(keep),
             "l": bool(locked),
             "n": session_id or _b64encode(secrets.token_bytes(_NONCE_BYTES)),
         }
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        secret = await self._settings.cookie_secret()
         sig = hmac.new(secret, body, hashlib.sha256).digest()
         return f"{_b64encode(body)}.{_b64encode(sig)}"
 
@@ -473,9 +492,6 @@ class DashboardAuth:
         """
         if not isinstance(raw, str) or not raw or len(raw) > _MAX_COOKIE_LEN:
             return None
-        # Read before the key: a replacement while this awaits leaves the
-        # claims a stale generation (signed out), never a fresh one.
-        generation = self._key_generation
         parts = raw.split(".")
         if len(parts) != 2:
             return None
@@ -483,7 +499,9 @@ class DashboardAuth:
         sig = _b64decode(parts[1])
         if body is None or sig is None:
             return None
-        secret = await self._settings.cookie_secret()
+        # The version comes with the key it names: claims verified by a
+        # key replaced while this awaits below count as signed out.
+        generation, secret = await self._settings.cookie_key()
         expected = hmac.new(secret, body, hashlib.sha256).digest()
         if not hmac.compare_digest(expected, sig):
             return None
@@ -536,30 +554,44 @@ class DashboardAuth:
     # correct password or PIN entries, so nobody without one can trigger
     # it.
 
-    async def revoke(self, claims: SessionClaims, reason: str) -> None:
+    async def revoke(self, claims: SessionClaims, reason: str) -> bool:
         """Revoke the session ``claims`` belongs to (by its session id).
 
         ``signed_out`` wins over ``locked`` and is never downgraded.
+        ``True`` when this call recorded the revocation; ``False`` when
+        the session already had it (or ``signed_out``), or its cookie key
+        is gone (replaced now or before — it verifies nowhere). While the
+        list has room the entry is recorded before any ``await``, so a
+        concurrent caller for the same session sees it.
         """
         if reason not in _REVOCATION_REASONS:
             raise ValueError(f"unknown revocation reason: {reason}")
-        if claims.generation != self._key_generation:
-            return  # Its key is already gone: the cookie verifies nowhere.
         sid = claims.session_id
-        current = self._revoked.get(sid)
-        if current is not None and current[0] == REVOKED_SIGNED_OUT:
-            return
-        if current is None and len(self._revoked) >= self._max_revoked:
-            if not await self._make_revocation_room():
-                return
+        if not self._may_record(claims, reason):
+            return False
+        if sid not in self._revoked and len(self._revoked) >= self._max_revoked:
+            if not await self._make_revocation_room(sid):
+                return False
+            # Re-checked: a concurrent call may have recorded it meanwhile.
+            if not self._may_record(claims, reason):
+                return False
         self._revoked[sid] = (reason, self._clock() + _ttl(claims), claims.epoch)
+        return True
+
+    def _may_record(self, claims: SessionClaims, reason: str) -> bool:
+        if claims.generation != self._settings.cookie_key_version:
+            return False
+        current = self._revoked.get(claims.session_id)
+        return current is None or (
+            current[0] != REVOKED_SIGNED_OUT and current[0] != reason
+        )
 
     def revocation(self, claims: SessionClaims) -> str | None:
         """Why the session behind ``claims`` was revoked, or ``None``.
 
         Claims verified under a replaced cookie key count as signed out.
         """
-        if claims.generation != self._key_generation:
+        if claims.generation != self._settings.cookie_key_version:
             return REVOKED_SIGNED_OUT
         entry = self._revoked.get(claims.session_id)
         if entry is None:
@@ -573,16 +605,18 @@ class DashboardAuth:
     def revoked_count(self) -> int:
         return len(self._revoked)
 
-    async def _make_revocation_room(self) -> bool:
+    async def _make_revocation_room(self, sid: str) -> bool:
         """Drop entries no cookie can match any more (expired, or of an
         older epoch). ``False`` when that wasn't enough and the cookie key
         was replaced instead — every revoked cookie is dead then."""
-        now = self._clock()
         epoch = await self._settings.epoch()
-        for sid in [
+        if sid in self._revoked:
+            return True  # A concurrent call recorded it meanwhile.
+        now = self._clock()
+        for stale in [
             s for s, (_, exp, e) in self._revoked.items() if now > exp or e != epoch
         ]:
-            del self._revoked[sid]
+            del self._revoked[stale]
         if len(self._revoked) < self._max_revoked:
             return True
         log.warning(
@@ -590,10 +624,10 @@ class DashboardAuth:
             "replacing the cookie key; every tablet is signed out "
             "(wall panels stay paired)"
         )
-        # Generation first: claims verified before now count as signed out
-        # while the new key is stored. The list is cleared only once it is,
-        # so a failed write leaves every revocation in force.
-        self._key_generation += 1
+        # The list is cleared only once the new key is stored and in use —
+        # in the same step as the swap (nothing runs in between), so no
+        # verify ever sees the old key with an empty list. A failed write
+        # leaves every revocation in force.
         await self._settings.rotate_cookie_secret()
         self._revoked.clear()
         return False

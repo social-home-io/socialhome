@@ -376,6 +376,7 @@ class DashboardSettingsService:
         "_lock",
         "_key_manager",
         "_cookie_secret",
+        "_cookie_key_version",
         "_cached",
         "_generation",
         "_displays",
@@ -402,6 +403,10 @@ class DashboardSettingsService:
         # the lock + a KEK decrypt each time. Only this service writes the
         # stored key, so the cache can't go stale behind its back.
         self._cookie_secret: bytes | None = None
+        # Bumped with every :meth:`rotate_cookie_secret`, in the same step
+        # that swaps the cached key — :meth:`cookie_key` hands both out
+        # together, so a caller always knows which key it signed with.
+        self._cookie_key_version = 0
         # The stored settings (+ password timestamp) after the first load:
         # the dashboard reads them on every request (locale, Host
         # allow-list). Every write path replaces or drops the cache and
@@ -722,7 +727,22 @@ class DashboardSettingsService:
                 KEY_COOKIE_SECRET,
                 km.encrypt(secret, associated_data=_COOKIE_SECRET_AAD),
             )
+            # One synchronous step: no reader sees the new key under the
+            # old version or the other way round.
             self._cookie_secret = secret
+            self._cookie_key_version += 1
+
+    @property
+    def cookie_key_version(self) -> int:
+        """Which key :meth:`cookie_secret` currently hands out (in this
+        process; bumped by :meth:`rotate_cookie_secret`)."""
+        return self._cookie_key_version
+
+    async def cookie_key(self) -> tuple[int, bytes]:
+        """``(version, secret)`` of the current tablet-cookie key, read
+        together — no other coroutine runs between the two."""
+        secret = await self.cookie_secret()
+        return self._cookie_key_version, secret
 
     # ── Setup token ─────────────────────────────────────────────────────
 

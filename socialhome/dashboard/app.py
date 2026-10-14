@@ -36,7 +36,13 @@ from aiohttp import web
 from ..hardening import build_body_size_middleware, install_security_headers
 from ..services.dashboard_display_service import DashboardDisplayService
 from ..services.dashboard_settings_service import DashboardSettingsService
-from .auth import COOKIE_NAME, REVOKED_LOCKED, REVOKED_SIGNED_OUT, DashboardAuth
+from .auth import (
+    COOKIE_NAME,
+    REVOKED_LOCKED,
+    REVOKED_SIGNED_OUT,
+    DashboardAuth,
+    StaleSessionError,
+)
 from .display_api import (
     guard_display_request,
     is_display_api,
@@ -296,17 +302,19 @@ async def _session_guard(request: web.Request, handler) -> web.StreamResponse:
         # may have revoked this cookie while the request was in flight.
         reason = auth.revocation(claims)
         if reason != REVOKED_SIGNED_OUT:
-            await set_session_cookie(
-                response,
-                request,
-                await auth.issue(
+            try:
+                renewed = await auth.issue(
                     claims.keep,
                     locked=claims.locked or reason == REVOKED_LOCKED,
                     # Same session: same revocation entry, same PIN bucket.
                     session_id=claims.session_id,
-                ),
-                keep=claims.keep,
-            )
+                    continuing=claims,
+                )
+            except StaleSessionError:
+                # The cookie key was replaced while this was in flight:
+                # the session is signed out — nothing to renew.
+                return response
+            await set_session_cookie(response, request, renewed, keep=claims.keep)
     return response
 
 

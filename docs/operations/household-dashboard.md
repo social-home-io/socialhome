@@ -309,7 +309,8 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
 - **That sign-out is remembered in memory only.** The signed-out cookie
   (and any copy of it) stays refused until Social Home restarts; after a
   restart it is a *locked* tablet again — still behind the PIN, with
-  five fresh tries. To be
+  five fresh tries. Likewise a copy of a tablet's cookie taken before it
+  was locked works unlocked again after a restart. To be
   sure a lost or copied tablet cookie is dead for good, use **Sign out
   all tablets** in **Admin › Dashboard** (*headless:*
   `DELETE /api/admin/dashboard/sessions`) — that one survives restarts.

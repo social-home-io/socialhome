@@ -1654,7 +1654,10 @@ drives it) and is then served by a **separate aiohttp application on its own por
     copy issued before it outlives it). Entries are added only by a
     `/lock` from an unlocked session (a password or PIN holder) or by a
     lock's own sign-out — one per session — so someone holding only a
-    locked cookie can't flood it. **An entry is never dropped while its
+    locked cookie can't flood it. `/lock` records its entry before its
+    first `await` and mints nothing if the session already has one, so
+    concurrent `/lock`s of one copied unlocked cookie yield one locked
+    session, not one PIN budget each. **An entry is never dropped while its
     cookie could still verify** — that would let a signed-out tablet
     back in. When full, entries past their cookie's lifetime or of an
     older epoch (dead since "Sign out all tablets") go first. Still
@@ -1665,11 +1668,15 @@ drives it) and is then served by a **separate aiohttp application on its own por
     epoch, not cookies) stay paired — an epoch bump would unpair them
     all. Refusing new revocations or sessions instead was rejected:
     entries live up to a year, so a full map would block locking and
-    the wrong-PIN sign-out that long. A key-generation counter makes
-    claims verified before the replacement count as signed out, so a
-    request in flight across it (a renewal, `/lock`, a right PIN on
-    `/unlock`) can't mint a cookie under the new key; if storing the new
-    key fails, the map is kept. A restart forgets the map: a signed-out
+    the wrong-PIN sign-out that long. `cookie_key()` hands out the key
+    with a per-process version, swapped together with the key after it
+    is stored, and the map is cleared in that same step — so a verify
+    never pairs the old key with an empty map. Claims carry the version
+    that verified them: an older one counts as signed out, and `issue(…,
+    continuing=claims)` (renewal, `/lock`, `/unlock`) raises
+    `StaleSessionError` rather than sign it under the new key. If storing
+    the new key fails, nothing changes and the map is kept (the request
+    errors; fail closed). A restart forgets the map: a signed-out
     lock is a plain locked cookie again (still behind the PIN, whose
     throttle also restarts), a pre-lock copy an unlocked one. Not
     persisted on purpose — a 10k-entry write per lock is a poor trade

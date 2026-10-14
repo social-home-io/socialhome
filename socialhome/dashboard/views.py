@@ -47,6 +47,7 @@ from .auth import (
     KEEP_TTL_S,
     REVOKED_LOCKED,
     REVOKED_SIGNED_OUT,
+    StaleSessionError,
     THROTTLE_MAX_FAILURES,
     DashboardAuth,
 )
@@ -889,17 +890,28 @@ class LockView(_GoHomeOnGet):
         response = redirect("/")
         if claims.locked:
             return response
-        if self.auth.revocation(claims) == REVOKED_SIGNED_OUT:
+        reason = self.auth.revocation(claims)
+        if reason == REVOKED_SIGNED_OUT:
             # Signed out while this request was in flight (the cookie key
             # was replaced): no fresh cookie under the new key.
             return await _signed_out_response(self.request)
-        await set_session_cookie(
-            response,
-            self.request,
-            await self.auth.issue(claims.keep, locked=True),
-            keep=claims.keep,
-        )
-        await self.auth.revoke(claims, REVOKED_LOCKED)
+        if reason is not None:
+            # A concurrent ``/lock`` of the same session got here first:
+            # one lock (one new session) per unlocked session, so a copied
+            # cookie can't fan out into many PIN budgets / revocations.
+            return response
+        # Revoked before the new cookie — ``revoke`` records the entry
+        # before its first await while the list has room, so a concurrent
+        # ``/lock`` of this session sees it above (or here: ``False``).
+        if not await self.auth.revoke(claims, REVOKED_LOCKED):
+            if self.auth.revocation(claims) == REVOKED_SIGNED_OUT:
+                return await _signed_out_response(self.request)
+            return response
+        try:
+            locked = await self.auth.issue(claims.keep, locked=True, continuing=claims)
+        except StaleSessionError:
+            return await _signed_out_response(self.request)
+        await set_session_cookie(response, self.request, locked, keep=claims.keep)
         return response
 
 
@@ -943,13 +955,14 @@ class UnlockView(_GoHomeOnGet):
             # Signed out while the PIN was being checked (the cookie key
             # was replaced): a right PIN doesn't bring the session back.
             return await _signed_out_response(self.request)
+        try:
+            unlocked = await self.auth.issue(
+                claims.keep, locked=False, continuing=claims
+            )
+        except StaleSessionError:
+            return await _signed_out_response(self.request)
         response = redirect("/")
-        await set_session_cookie(
-            response,
-            self.request,
-            await self.auth.issue(claims.keep, locked=False),
-            keep=claims.keep,
-        )
+        await set_session_cookie(response, self.request, unlocked, keep=claims.keep)
         return response
 
 

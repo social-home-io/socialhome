@@ -3860,3 +3860,16 @@ async def test_full_revocation_list_then_password_signs_back_in(pin_client, auth
     assert page.status == 302
     login = await _login(pin_client)
     assert (await pin_client.get("/", headers=_jar(login))).status == 200
+
+
+async def test_concurrent_locks_of_one_session_mint_one_locked_session(
+    pin_client, auth
+):
+    """Review: a copied unlocked cookie sent to ``/lock`` many times at
+    once yields one locked session (one PIN budget, one revocation)."""
+    headers = await _cookie(auth)
+    responses = await asyncio.gather(*(_lock(pin_client, headers) for _ in range(5)))
+    minted = [r for r in responses if COOKIE_NAME in r.cookies]
+    assert len(minted) == 1
+    assert all(r.status == 303 for r in responses)
+    assert auth.revoked_count == 1

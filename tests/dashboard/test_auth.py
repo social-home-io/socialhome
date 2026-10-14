@@ -36,6 +36,7 @@ from socialhome.dashboard.auth import (
     THROTTLE_WINDOW_S,
     DashboardAuth,
     SessionClaims,
+    StaleSessionError,
     _FailureTable,
 )
 from socialhome.domain.household_dashboard import DashboardDisplay
@@ -796,6 +797,84 @@ async def test_claims_from_before_a_key_replacement_count_as_signed_out(
     assert auth.revocation(claims) == REVOKED_SIGNED_OUT
     await auth.revoke(claims, REVOKED_LOCKED)  # its key is gone: no entry
     assert auth.revoked_count == 0
+
+
+async def test_no_revoked_cookie_slips_through_the_key_replacement_window(
+    settings_service, clock
+):
+    """Regression (review): a verify that starts while the new key is
+    being stored still holds the old key; it must not resume after the
+    list is cleared and count as unrevoked — nor be renewed under the new
+    key."""
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
+    gone = await auth.issue(True, locked=True)
+    await auth.revoke(await auth.verify(gone), REVOKED_SIGNED_OUT)
+    prelock = await auth.issue(True)
+    prelock_claims = await auth.verify(prelock)
+    await auth.revoke(prelock_claims, REVOKED_LOCKED)
+    repo = settings_service._repo
+    gate = asyncio.Event()
+    real_set = repo.set
+
+    async def slow_set(key, value):
+        await gate.wait()
+        await real_set(key, value)
+
+    repo.set = slow_set
+    rotation = asyncio.create_task(auth.revoke(_sess(clock, "c"), REVOKED_LOCKED))
+    await asyncio.sleep(0)
+    in_window = [asyncio.create_task(auth.verify(raw)) for raw in (gone, prelock)]
+    await asyncio.sleep(0)
+    gate.set()
+    await rotation
+    gone_claims, prelock_again = await asyncio.gather(*in_window)
+    assert auth.revoked_count == 0  # the key was replaced
+    assert gone_claims is None
+    if prelock_again is not None:  # verified under the old key, locked
+        assert prelock_again.locked is True
+        assert auth.revocation(prelock_again) == REVOKED_SIGNED_OUT
+        with pytest.raises(StaleSessionError):
+            await auth.issue(
+                True, session_id=prelock_again.session_id, continuing=prelock_again
+            )
+    assert await auth.verify(gone) is None
+    assert await auth.verify(prelock) is None
+
+
+async def test_issue_refuses_to_continue_a_session_of_a_replaced_key(
+    settings_service, clock
+):
+    auth = DashboardAuth(settings_service, clock=clock)
+    claims = await auth.verify(await auth.issue(True))
+    assert await auth.issue(True, continuing=claims)  # same key: fine
+    await settings_service.rotate_cookie_secret()
+    with pytest.raises(StaleSessionError):
+        await auth.issue(True, session_id=claims.session_id, continuing=claims)
+    assert await auth.issue(True)  # a fresh sign-in is fine
+
+
+async def test_revoke_reports_whether_it_recorded(auth):
+    claims = await auth.verify(await auth.issue(True))
+    assert await auth.revoke(claims, REVOKED_LOCKED) is True
+    assert await auth.revoke(claims, REVOKED_LOCKED) is False
+    assert await auth.revoke(claims, REVOKED_SIGNED_OUT) is True
+    assert await auth.revoke(claims, REVOKED_LOCKED) is False
+
+
+async def test_concurrent_revokes_of_one_session_record_it_once(
+    settings_service, clock
+):
+    """Even when the first must make room (an await), a concurrent call
+    for the same session doesn't record it a second time."""
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=1)
+    await auth.revoke(_sess(clock, "old", keep=False), REVOKED_LOCKED)
+    clock.advance(SESSION_TTL_S + 1)
+    claims = _sess(clock, "x")
+    results = await asyncio.gather(
+        auth.revoke(claims, REVOKED_LOCKED), auth.revoke(claims, REVOKED_LOCKED)
+    )
+    assert sorted(results) == [False, True]
+    assert auth.revoked_count == 1
 
 
 async def test_failed_key_replacement_keeps_every_revocation(settings_service, clock):
