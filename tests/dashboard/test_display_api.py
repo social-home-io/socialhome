@@ -337,6 +337,27 @@ async def test_claim_pairs_the_panel(client, displays, directory, settings_servi
     assert await who.json() == {"display_id": display.id, "name": "Kitchen panel"}
 
 
+async def test_reconnect_keeps_the_old_token_until_the_new_one_is_used(
+    client, displays, directory, settings_service
+):
+    """A6: a re-connect's old pairing dies on the new token's first use,
+    not when the claim is spent."""
+    tokens = []
+    for _ in range(2):
+        claim = await _claim_for(displays, directory)
+        resp = await client.post(
+            CLAIM, json={"claim": claim}, headers=_mac(KITCHEN_MAC)
+        )
+        assert resp.status == 200
+        tokens.append((await resp.json())["token"])
+    old, new = tokens
+    assert len(await settings_service.displays()) == 2
+    assert (await client.get(WHOAMI, headers=_bearer(old))).status == 200
+    assert (await client.get(WHOAMI, headers=_bearer(new))).status == 200
+    assert (await client.get(WHOAMI, headers=_bearer(old))).status == 401
+    assert len(await settings_service.displays()) == 1
+
+
 async def _refused(resp) -> None:
     assert resp.status == 404
     assert await resp.json() == {

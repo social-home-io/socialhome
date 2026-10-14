@@ -298,6 +298,7 @@ def _display_to_dict(d: DashboardDisplay) -> dict[str, object]:
         "model": d.model,
         "locked": d.locked,
         "mac": d.mac,
+        "replaces": list(d.replaces),
     }
 
 
@@ -313,6 +314,11 @@ def _display_from_dict(raw: object) -> DashboardDisplay | None:
     locked = raw.get("locked", False)
     if not isinstance(locked, bool):
         return None
+    replaces = raw.get("replaces") or []
+    if not isinstance(replaces, list) or not all(
+        isinstance(r, str) and r for r in replaces
+    ):
+        return None
     return DashboardDisplay(
         id=raw["id"],
         name=raw["name"],
@@ -323,6 +329,7 @@ def _display_from_dict(raw: object) -> DashboardDisplay | None:
         model=raw.get("model"),
         locked=locked,
         mac=normalize_mac(raw.get("mac")),
+        replaces=tuple(replaces),
     )
 
 
@@ -776,16 +783,20 @@ class DashboardSettingsService:
         self,
         display: DashboardDisplay,
         *,
-        replace_same_mac: bool = False,
+        supersede_same_mac: bool = False,
         expected_epoch: int | None = None,
     ) -> tuple[str, ...] | None:
         """Store a newly paired panel; :class:`DashboardDisplayLimitError`
-        at :data:`MAX_DISPLAYS`. With ``replace_same_mac`` every stored
-        panel with ``display.mac`` is dropped in the same write (a panel
-        re-connected from Home Assistant replaces its old record and
-        token); their ids are returned. With ``expected_epoch`` nothing is
-        stored — ``None`` returned — unless the session epoch still is that
-        (checked under the lock, so a sign-out can't slip in between)."""
+        at :data:`MAX_DISPLAYS`. With ``supersede_same_mac`` (a panel
+        re-connected from Home Assistant) the new display takes over every
+        stored panel with ``display.mac``: they stay — and their tokens
+        keep working — until the new token authenticates
+        (:meth:`take_over`); they don't count towards the cap meanwhile.
+        A same-MAC display still waiting for its own first use is dropped
+        here (its takeover passes to the new one); those ids are returned.
+        With ``expected_epoch`` nothing is stored — ``None`` returned —
+        unless the session epoch still is that (checked under the lock, so
+        a sign-out can't slip in between)."""
         async with self._lock:
             if (
                 expected_epoch is not None
@@ -794,13 +805,42 @@ class DashboardSettingsService:
                 return None
             current = await self._displays_unlocked()
             dropped: tuple[str, ...] = ()
-            if replace_same_mac and display.mac is not None:
-                dropped = tuple(d.id for d in current if d.mac == display.mac)
-                current = tuple(d for d in current if d.mac != display.mac)
-            if len(current) >= MAX_DISPLAYS:
+            replaces: tuple[str, ...] = ()
+            if supersede_same_mac and display.mac is not None:
+                same = [d for d in current if d.mac == display.mac]
+                dropped = tuple(d.id for d in same if d.replaces)
+                current = tuple(d for d in current if d.id not in dropped)
+                kept = {d.id for d in current}
+                # The working ones, plus whatever a dropped one was to take
+                # over (still stored), in stored order.
+                wanted = {r for d in same for r in (*d.replaces, d.id)}
+                replaces = tuple(d.id for d in current if d.id in wanted & kept)
+                display = replace(display, replaces=replaces)
+            if len(current) - len(replaces) >= MAX_DISPLAYS:
                 raise DashboardDisplayLimitError()
             await self._save_displays_unlocked((*current, display))
             return dropped
+
+    async def take_over(self, display_id: str) -> tuple[str, ...]:
+        """The first authenticated use of ``display_id``: remove the
+        displays it replaces and clear its ``replaces`` — one write.
+        Returns the removed ids (``()`` when there is nothing to take
+        over, e.g. a concurrent request already did)."""
+        async with self._lock:
+            current = await self._displays_unlocked()
+            display = next((d for d in current if d.id == display_id), None)
+            if display is None or not display.replaces:
+                return ()
+            gone = set(display.replaces) - {display_id}
+            removed = tuple(d.id for d in current if d.id in gone)
+            await self._save_displays_unlocked(
+                tuple(
+                    replace(d, replaces=()) if d.id == display_id else d
+                    for d in current
+                    if d.id not in gone
+                )
+            )
+            return removed
 
     async def _replace_display_unlocked(
         self, display_id: str, change: Mapping[str, object]
