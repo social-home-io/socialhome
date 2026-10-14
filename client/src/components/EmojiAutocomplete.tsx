@@ -18,23 +18,35 @@
  * for splicing the emoji into its own state.
  */
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
 import {
   type EmojiEntry,
   searchEmoji,
 } from '@/data/emojis'
+import {
+  clampHorizontally,
+  pinFixed,
+  placeVertically,
+  visibleArea,
+} from '@/utils/popoverPlacement'
 
 type SpliceCallback = (emoji: string, range: [number, number]) => void
 
 interface AutocompleteState {
-  /** Pixel position of the popover (anchored to the input's bounding box). */
+  /** Viewport (``position: fixed``) position of the popover, anchored
+   *  to the input's bounding box; ``top`` is its bottom edge when it
+   *  opens ``above``. */
   top: number
   left: number
+  /** Room between the input and the visible edge on the chosen side —
+   *  the list scrolls rather than running behind the keyboard. */
+  maxHeight: number
   /** ``'below'`` places the popover under the anchor (the default,
    *  for top-of-page inputs). ``'above'`` flips it above the anchor —
-   *  used when the input is near the viewport bottom (chat composer)
-   *  where a popover below would render off-screen. CSS handles the
-   *  ``translateY(-100%)`` to anchor the popover's bottom edge at the
+   *  used when the input is near the bottom of the *visible* area (a
+   *  chat composer, any field with the phone keyboard up) where a
+   *  popover below would render off-screen or behind the keyboard.
+   *  ``translateY(-100%)`` anchors the popover's bottom edge at the
    *  stored ``top`` in that case. */
   placement: 'below' | 'above'
   /** ``[startInclusive, endExclusive]`` byte range in the input that
@@ -56,11 +68,11 @@ const state = signal<AutocompleteState | null>(null)
 
 const MAX_RESULTS = 8
 
-/** Upper bound on the popover height (8 rows × ~40 px row height +
- *  borders). Used at trigger time to decide whether the popover fits
- *  below the input; if not, we flip it above. Generous so we never
- *  end up with a half-clipped popover even when results are dense. */
-const ESTIMATED_POPOVER_HEIGHT = 320
+/** The list's height cap (matches the CSS ``max-height``) and the room
+ *  it wants below the input before flipping above. */
+const MAX_LIST_HEIGHT = 280
+/** Narrowest the list renders (CSS ``min-width``) — for the clamp. */
+const MIN_WIDTH = 200
 
 /** Return true while the popover is open. Owners wire keyboard events
  *  through :func:`handleEmojiAutocompleteKey` only when this is true. */
@@ -106,17 +118,16 @@ export function checkForEmojiTrigger(
   }
   const rect = anchor.getBoundingClientRect()
   const start = cursorPos - token.length
-  // Flip the popover above the input when there isn't room below — the
-  // DM-thread composer is pinned to the visual viewport bottom, so the
-  // default "open downward" placement renders the popover off-screen.
-  const wouldOverflowBelow =
-    rect.bottom + ESTIMATED_POPOVER_HEIGHT + 8 > window.innerHeight
+  // Measured against the visual viewport: with the phone keyboard up
+  // the room below the field is often behind the keyboard, so the
+  // list flips above it (and is capped to the room it has there).
+  const area = visibleArea()
+  const v = placeVertically(rect, area, MAX_LIST_HEIGHT)
   state.value = {
-    top: wouldOverflowBelow
-      ? rect.top + window.scrollY - 4
-      : rect.bottom + window.scrollY + 4,
-    left: rect.left + window.scrollX,
-    placement: wouldOverflowBelow ? 'above' : 'below',
+    top: v.top,
+    left: clampHorizontally(rect.left, MIN_WIDTH, area),
+    maxHeight: Math.min(v.maxHeight, MAX_LIST_HEIGHT),
+    placement: v.placement,
     range: [start, cursorPos],
     matches,
     active: 0,
@@ -161,31 +172,52 @@ export function handleEmojiAutocompleteKey(e: KeyboardEvent): boolean {
  *  triggering input registered via :func:`checkForEmojiTrigger`. */
 export function EmojiAutocomplete() {
   const s = state.value
+  const ref = useRef<HTMLDivElement>(null)
+  // Cancel the offset of a transformed / filtered ancestor (the comment
+  // sheet) so ``position: fixed`` really means the viewport.
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || s === null) return
+    pinFixed(el, s.left, s.top, s.placement)
+  })
   // Close on outside click. Owners that mount this should still wire
   // ``handleEmojiAutocompleteKey`` for keyboard support.
+  const open = s !== null
   useEffect(() => {
-    if (s === null) return
+    if (!open) return
     const onDocMouseDown = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null
       if (t && t.closest('.sh-emoji-autocomplete')) return
       closeEmojiAutocomplete()
     }
+    // Fixed-position popover: a page / list scroll would strand it
+    // away from the input, so close (typing re-opens it in place).
+    const onScroll = (e: Event) => {
+      const t = e.target
+      if (t instanceof Element && (t.matches('input, textarea') || t.closest('.sh-emoji-autocomplete'))) return
+      closeEmojiAutocomplete()
+    }
     document.addEventListener('mousedown', onDocMouseDown)
-    return () => document.removeEventListener('mousedown', onDocMouseDown)
-  }, [s !== null])
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown)
+      window.removeEventListener('scroll', onScroll, true)
+    }
+  }, [open])
 
   if (s === null) return null
   return (
     <div
+      ref={ref}
       class="sh-emoji-autocomplete"
       role="listbox"
       style={{
         top: `${s.top}px`,
         left: `${s.left}px`,
+        maxHeight: `${s.maxHeight}px`,
         // ``placement: 'above'`` anchors the popover's *bottom* at
         // ``s.top`` instead of its top, so its bottom edge sits just
-        // above the input — preventing the chat-composer-pinned-to-
-        // viewport-bottom case from rendering the popover off-screen.
+        // above the input.
         transform: s.placement === 'above' ? 'translateY(-100%)' : 'none',
       }}
     >

@@ -593,6 +593,48 @@ a:focus:not(:focus-visible) { outline: none; }
  * dismiss (handled by MobileNav.tsx). */
 .sh-mobile-drawer { display: none; }
 .sh-mobile-drawer-scrim { display: none; }
+/* ───── On-screen keyboard (``useKeyboardOpen`` → ``html.sh-kbd-open``) ──
+ * Touch devices only — the class never appears on a desktop, so none of
+ * this can change a desktop layout. ``--sh-kbd-inset`` is the part of
+ * the layout viewport the keyboard covers: 0 where the keyboard resizes
+ * the page (Android WebView / HA companion app — ``100dvh`` already
+ * shrank), the keyboard's height where only the visual viewport shrinks
+ * (iOS Safari, Android Chrome). Chat columns and the comment sheet
+ * subtract it so they end right above the keyboard instead of behind
+ * it; a ``min-height`` would push the composer back under it. Phone
+ * overrides (no tab bar, tighter gaps) follow in the ≤ 768 px block. */
+html.sh-kbd-open .sh-feed-host--chat,
+html.sh-kbd-open .sh-space-feed--chat {
+  height: calc(
+    100dvh - var(--sh-kbd-inset, 0px) - var(--sh-topbar-height)
+    - 2 * var(--sh-space-lg)
+  );
+  min-height: 0;
+}
+html.sh-kbd-open body.sh-dm-thread-open .sh-thread {
+  height: calc(100dvh - var(--sh-kbd-inset, 0px) - var(--sh-topbar-height-mobile));
+}
+/* A swipe at the end of the message list must not drag the page
+ * under the keyboard (iOS lets the page scroll up by its height). */
+html.sh-kbd-open .sh-messages { overscroll-behavior: contain; }
+/* The comment sheet docks above the keyboard, not behind it. */
+html.sh-kbd-open .sh-comment-overlay-backdrop { bottom: var(--sh-kbd-inset, 0px); }
+html.sh-kbd-open .sh-comment-overlay {
+  max-height: calc(100% - var(--sh-space-sm));
+}
+/* Phones (portrait, or landscape — short): typing in a chat folds the
+ * rows above the messages (the DM thread's call / mute row; a chat
+ * tab's tab strip, Feed | Chat switch and audience line) so several
+ * messages stay in view. The page title bar stays — it names the
+ * conversation. Everything returns as soon as the keyboard closes. */
+@media (max-width: 768px), (max-height: 500px) {
+  html.sh-kbd-open .sh-thread:focus-within > .sh-thread-header,
+  html.sh-kbd-open .sh-feed-host--chat:has(> .sh-thread:focus-within) > :not(.sh-thread),
+  html.sh-kbd-open .sh-space-feed--chat:has(> .sh-thread:focus-within) > :not(.sh-thread) {
+    display: none;
+  }
+}
+
 @media (max-width: 768px) {
   .sh-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -664,11 +706,14 @@ a:focus:not(:focus-visible) { outline: none; }
   html.sh-kbd-open .sh-main { padding-bottom: var(--sh-space-md); }
   html.sh-kbd-open .sh-main:has(.sh-feed-host--chat),
   html.sh-kbd-open .sh-main:has(.sh-space-feed--chat) { padding-bottom: 0; }
+  /* Phones: no tab bar to clear, tighter gaps (see the keyboard
+   * rules above for ``--sh-kbd-inset``). */
   html.sh-kbd-open .sh-feed-host--chat,
   html.sh-kbd-open .sh-space-feed--chat {
     height: calc(
-      100dvh - var(--sh-topbar-height) - var(--sh-space-md)
-      - var(--sh-space-sm) - env(safe-area-inset-bottom, 0px)
+      100dvh - var(--sh-kbd-inset, 0px) - var(--sh-topbar-height)
+      - var(--sh-space-md) - var(--sh-space-sm)
+      - env(safe-area-inset-bottom, 0px)
     );
   }
   html.sh-kbd-open .sh-mobile-drawer .sh-sidenav {
@@ -4184,6 +4229,14 @@ body.sh-dm-thread-open .sh-thread {
   border: 0;
   border-radius: 0;
   box-shadow: none;
+}
+@media (max-width: 768px) and (pointer: coarse) {
+  /* A phone's topbar is taller than the desktop one (touch tap
+   * targets), so the full-bleed thread subtracts that — 56 px left the
+   * composer's bottom edge 4 px below the screen. */
+  body.sh-dm-thread-open .sh-thread {
+    height: calc(100dvh - var(--sh-topbar-height-mobile));
+  }
 }
 body.sh-dm-thread-open .sh-thread > .sh-composer {
   margin-bottom: 0;
@@ -14647,9 +14700,12 @@ a.sh-link-preview-link:focus-visible {
   cursor: crosshair;
 }
 
-/* Slack-style ``:shortcode`` autocomplete shown as the user types. */
+/* Slack-style ``:shortcode`` autocomplete shown as the user types.
+ * ``position: fixed`` in viewport coordinates like the @-mention picker
+ * below: it flips above the field and caps its height (inline
+ * ``max-height``) to the area the phone keyboard leaves visible. */
 .sh-emoji-autocomplete {
-  position: absolute;
+  position: fixed;
   background: var(--sh-bg);
   border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-md);
@@ -14658,7 +14714,7 @@ a.sh-link-preview-link:focus-visible {
   min-width: 200px;
   max-height: 280px;
   overflow-y: auto;
-  z-index: var(--sh-z-dropdown);
+  z-index: calc(var(--sh-z-modal) + 10);
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -14819,6 +14875,13 @@ a.sh-link-preview-link:focus-visible {
   right: 0;
   left: auto;
   top: auto;
+  /* Never wider than a phone screen; ``EmojiPickButton`` nudges it
+   * sideways (inline ``right``) to keep it inside the visible width. */
+  max-width: calc(100vw - 16px);
+}
+.sh-emoji-pick-wrap .sh-reaction-picker.sh-reaction-picker--below {
+  top: calc(100% + 6px);
+  bottom: auto;
 }
 
 /* Reaction picker */

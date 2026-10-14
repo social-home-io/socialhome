@@ -94,6 +94,9 @@ function setAtRuntime(): Set<string> {
     const code = readFileSync(file, 'utf8')
     for (const m of code.matchAll(/setProperty\(\s*['"`](--sh-[\w-]+)['"`]/g)) out.add(m[1])
     for (const m of code.matchAll(/['"](--sh-[\w-]+)['"]\s*:/g)) out.add(m[1])
+    // A property named once as a constant and set via that constant
+    // (``KBD_INSET_VAR`` in hooks/useKeyboardOpen.ts).
+    for (const m of code.matchAll(/const \w+ = ['"](--sh-[\w-]+)['"]/g)) out.add(m[1])
   }
   return out
 }

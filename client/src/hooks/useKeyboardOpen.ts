@@ -36,6 +36,29 @@
  * bar's reserved space (``.sh-main`` bottom padding, chat heights, the
  * back-to-top FAB) back to the content. The watcher is shared and
  * ref-counted: every ``useKeyboardOpen()`` consumer reads one signal.
+ *
+ * **Keyboard inset.** It also publishes ``--sh-kbd-inset`` on ``<html>``
+ * — how many px of the layout viewport's bottom the keyboard covers
+ * (``keyboardInset``). It is 0 where the keyboard resizes the layout
+ * viewport (Android WebView / HA companion app: ``100dvh`` already
+ * shrank) and the keyboard height where only the visual viewport
+ * shrinks (iOS Safari, Android Chrome's default ``resizes-visual``),
+ * so chat columns and bottom sheets subtract it to end right above the
+ * keyboard instead of behind it. In a same-origin ingress frame it's
+ * the part of the frame the top window's keyboard covers.
+ *
+ * **Pinned chats.** A chat thread (``.sh-thread``) is laid out to fill
+ * the screen and never scrolls the page; when its composer is focused
+ * and fits above the keyboard the page is held at ``scrollY = 0`` so
+ * the browser's own "reveal the field" pan (iOS scrolls the page up
+ * under the keyboard) doesn't push the thread's top off screen once the
+ * column has shrunk to fit.
+ *
+ * **Closing.** Focus leaving the field (tapping 😀 / 📎) closes the
+ * keyboard, but it takes a moment to animate away. The state stays
+ * open until the viewport has grown back (or ``CLOSE_GRACE_MS`` at the
+ * latest) so the bottom bar doesn't spring back over the composer —
+ * under the finger that is mid-tap — while the keyboard is still up.
  */
 import { useEffect } from 'preact/hooks'
 import { signal, type ReadonlySignal } from '@preact/signals'
@@ -47,6 +70,18 @@ export const KEYBOARD_SHRINK_PX = 150
 
 /** Class set on ``<html>`` while the keyboard is up. */
 export const KBD_OPEN_CLASS = 'sh-kbd-open'
+
+/** CSS custom property (on ``<html>``) with the px the keyboard covers
+ *  at the bottom of the layout viewport; removed while closed. */
+export const KBD_INSET_VAR = '--sh-kbd-inset'
+
+/** Focus inside one of these pins the page to the top while typing —
+ *  the surface sizes itself to the visible area and must not scroll. */
+export const PINNED_SURFACE_SELECTOR = '.sh-thread'
+
+/** Upper bound on how long the state outlives the focused field when
+ *  the viewport never reports the keyboard going away. */
+export const CLOSE_GRACE_MS = 800
 
 /** ``<input type>`` values that do NOT raise a text keyboard. */
 const NO_KEYBOARD_INPUT_TYPES = new Set([
@@ -101,6 +136,32 @@ export function coveredBottom(doc: Document, field: Element, visibleBottom: numb
   return Math.ceil(covered)
 }
 
+/** Geometry ``keyboardInset`` needs, all in CSS px. */
+export interface InsetGeometry {
+  /** Height of our own layout viewport (``window.innerHeight``). */
+  innerHeight: number
+  /** The measuring window's visual viewport (``offsetTop``, ``height``). */
+  vvTop: number
+  vvHeight: number
+  /** Our frame's top / bottom in the top window's layout viewport —
+   *  only for a same-origin frame (haos ingress); omitted at top level. */
+  frame?: { top: number, bottom: number }
+}
+
+/**
+ * Px of our layout viewport's bottom hidden behind the keyboard: the
+ * part below the visual viewport's bottom edge. 0 when the keyboard
+ * resized the layout viewport itself or the browser panned the visual
+ * viewport down instead (then nothing below it is hidden).
+ */
+export function keyboardInset(g: InsetGeometry): number {
+  const visibleBottom = g.vvTop + g.vvHeight
+  const covered = g.frame
+    ? g.frame.bottom - visibleBottom
+    : g.innerHeight - visibleBottom
+  return Math.round(Math.min(Math.max(covered, 0), g.innerHeight))
+}
+
 const _open = signal(false)
 /** Live keyboard state — read via ``useKeyboardOpen()`` in components. */
 export const keyboardOpen: ReadonlySignal<boolean> = _open
@@ -119,6 +180,8 @@ function install(win: Window): () => void {
   /** Tallest (scale-normalised) viewport height seen per width. */
   const baseline = new Map<number, number>()
   let pendingBlur: ReturnType<typeof setTimeout> | null = null
+  let closeGrace: ReturnType<typeof setTimeout> | null = null
+  const root = doc.documentElement
 
   const shrunk = (): boolean => {
     if (!measure || !vv) return true // no way to measure: focus decides
@@ -129,14 +192,76 @@ function install(win: Window): () => void {
     return tallest - height > KEYBOARD_SHRINK_PX
   }
 
+  const inset = (): number => {
+    if (!measure || !vv) return 0
+    let frame: InsetGeometry['frame']
+    if (measure !== win) {
+      const el = win.frameElement
+      if (!el) return 0
+      const r = el.getBoundingClientRect()
+      frame = { top: r.top, bottom: r.bottom }
+    }
+    return keyboardInset({
+      innerHeight: win.innerHeight, vvTop: vv.offsetTop, vvHeight: vv.height, frame,
+    })
+  }
+
+  const clearGrace = () => {
+    if (closeGrace !== null) { clearTimeout(closeGrace); closeGrace = null }
+  }
+
+  const setOpen = (next: boolean) => {
+    clearGrace()
+    if (next === _open.value) return
+    _open.value = next
+    root.classList.toggle(KBD_OPEN_CLASS, next)
+    if (!next) root.style.removeProperty(KBD_INSET_VAR)
+  }
+
   const compute = () => {
     // Always sample, so the baseline learns the keyboard-less height.
     const viewportShrunk = shrunk()
-    const next = isTouch(win) && opensKeyboard(doc.activeElement) && viewportShrunk
-    if (next === _open.value) return
-    _open.value = next
-    doc.documentElement.classList.toggle(KBD_OPEN_CLASS, next)
-    if (next) revealFocused()
+    const typing = opensKeyboard(doc.activeElement)
+    let next = isTouch(win) && typing && viewportShrunk
+    // Focus left the field but the keyboard is still on its way out:
+    // hold the open layout until the viewport grows back.
+    if (!next && _open.value && !typing && viewportShrunk && measure && vv) {
+      if (closeGrace === null) {
+        closeGrace = setTimeout(() => { closeGrace = null; setOpen(false) }, CLOSE_GRACE_MS)
+      }
+      next = true
+    } else {
+      clearGrace()
+    }
+    if (!next) {
+      setOpen(false)
+      return
+    }
+    const opening = !_open.value
+    root.style.setProperty(KBD_INSET_VAR, `${inset()}px`)
+    if (opening) {
+      _open.value = true
+      root.classList.add(KBD_OPEN_CLASS)
+    }
+    // After the class + inset are applied, so the thread is measured at
+    // its keyboard-up size.
+    if (typing) pinSurface()
+    if (opening) revealFocused()
+  }
+
+  // A chat thread fills the visible area once ``--sh-kbd-inset`` is
+  // applied; undo any page scroll the browser added to reveal its
+  // composer (iOS pans the page under the keyboard) — but only when the
+  // composer really sits above the keyboard at the top of the page, so
+  // a layout that doesn't fit falls back to the normal reveal.
+  const pinSurface = () => {
+    const el = doc.activeElement
+    if (measure !== win || !(el instanceof HTMLElement)) return
+    if (!el.closest(PINNED_SURFACE_SELECTOR) || win.scrollY === 0) return
+    const own = win.visualViewport
+    const visibleBottom = own ? own.offsetTop + own.height : win.innerHeight
+    if (el.getBoundingClientRect().bottom + win.scrollY > visibleBottom + 1) return
+    win.scrollTo(0, 0)
   }
 
   // The browser scrolls a focused field into the visible area on its
@@ -177,19 +302,23 @@ function install(win: Window): () => void {
   doc.addEventListener('focusin', onFocusIn)
   doc.addEventListener('focusout', onFocusOut)
   vv?.addEventListener('resize', compute)
+  vv?.addEventListener('scroll', compute)
   win.addEventListener('resize', compute)
   win.addEventListener('orientationchange', compute)
   compute()
 
   return () => {
     if (pendingBlur !== null) clearTimeout(pendingBlur)
+    clearGrace()
     doc.removeEventListener('focusin', onFocusIn)
     doc.removeEventListener('focusout', onFocusOut)
     vv?.removeEventListener('resize', compute)
+    vv?.removeEventListener('scroll', compute)
     win.removeEventListener('resize', compute)
     win.removeEventListener('orientationchange', compute)
     _open.value = false
-    doc.documentElement.classList.remove(KBD_OPEN_CLASS)
+    root.classList.remove(KBD_OPEN_CLASS)
+    root.style.removeProperty(KBD_INSET_VAR)
   }
 }
 

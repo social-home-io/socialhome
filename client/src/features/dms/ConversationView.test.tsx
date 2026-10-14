@@ -626,3 +626,43 @@ describe('markThreadRead — read receipts', () => {
     }
   })
 })
+
+describe('ConversationView — typing on a phone', () => {
+  it('composerHeightCap keeps most of a short visible area for the conversation', async () => {
+    const { composerHeightCap } = await import('./ConversationView')
+    // Roomy screens (desktop, phone without keyboard): the 160 px cap.
+    expect(composerHeightCap(720)).toBe(160)
+    expect(composerHeightCap(844)).toBe(160)
+    // 390×844 with the keyboard up (~508 px visible): 30 %.
+    expect(composerHeightCap(508)).toBe(152)
+    // 360×640 with the keyboard up (~304 px visible).
+    expect(composerHeightCap(304)).toBe(91)
+    // Never below ~3 lines.
+    expect(composerHeightCap(150)).toBe(72)
+  })
+
+  it('tapping Send keeps focus in the composer so the keyboard stays up', async () => {
+    const { render, waitFor, fireEvent, ConversationView } = await setup()
+    apiPost.mockResolvedValue({ id: 'srv-1' })
+    const { container } = render(<ConversationView conversationId="conv-a" />)
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('BOB-conv-a')
+    }, { timeout: RENDER_WAIT })
+    const ta = container.querySelector('textarea') as HTMLTextAreaElement
+    ta.focus()
+    ta.value = 'hello'
+    fireEvent.input(ta)
+    const send = await waitFor(() => {
+      const b = container.querySelector<HTMLButtonElement>('form.sh-composer button[type=submit]')
+      expect(b).not.toBeNull()
+      return b!
+    })
+    // The pointer-down default (moving focus to the button) is cancelled.
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    send.dispatchEvent(down)
+    expect(down.defaultPrevented).toBe(true)
+    fireEvent.click(send)
+    await waitFor(() => { expect(apiPost).toHaveBeenCalled() })
+    expect(document.activeElement).toBe(ta)
+  })
+})
