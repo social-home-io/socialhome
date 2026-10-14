@@ -12,10 +12,12 @@ short code and then authenticates every request with
   "pending"}``, or once ``{"status": "paired", "token", "display_id"}``;
   ``404`` when unknown or expired;
 * ``POST /api/display/v1/pair/claim`` (public) ``{claim, model?,
-  firmware?}`` + ``X-Display-Mac`` — a panel connected from Home
-  Assistant spends the claim it was sent: ``200 {"status": "paired",
-  "token", "display_id"}`` (the poll's shape); ``404 NOT_FOUND`` —
-  uniformly — for a wrong, expired, spent or other panel's claim;
+  firmware?}`` + ``X-Display-Mac`` + ``X-Display-Key`` — a panel
+  connected from Home Assistant spends the claim it opened (sealed to its
+  key, :mod:`.claim_seal`): ``200 {"status": "paired", "token",
+  "display_id"}`` (the poll's shape); ``404 NOT_FOUND`` — uniformly — for
+  a wrong, expired, spent or other panel's claim (another MAC, or not the
+  public key it was sealed to);
   throttled per client address like ``/pair`` (a bucket of its own);
 * ``GET /api/display/v1/whoami`` (bearer) — ``{display_id, name}``;
 * ``GET /api/display/v1/home`` · ``/messages`` · ``/notes`` · ``/map`` ·
@@ -142,6 +144,9 @@ FIRMWARE_HEADER = "X-Display-Firmware"
 MODEL_HEADER = "X-Display-Model"
 #: The panel's MAC — the key that ties it to the panel Home Assistant lists.
 MAC_HEADER = "X-Display-Mac"
+#: The panel's X25519 public key (43-character base64url) on
+#: ``/pair/claim`` — must be the key the claim was sealed to.
+KEY_HEADER = "X-Display-Key"
 
 #: Every answer is revalidated by ``ETag`` (a 30 s poll is a ``304`` while
 #: nothing changed); the panel keeps it, nobody in between does.
@@ -354,6 +359,7 @@ class DisplayClaimView(web.View):
             status = await self.request.app[DISPLAYS_KEY].spend_claim(
                 body.get("claim"),
                 mac=self.request.headers.get(MAC_HEADER),
+                panel_key=self.request.headers.get(KEY_HEADER),
                 model=body.get("model"),
                 firmware=body.get("firmware"),
             )

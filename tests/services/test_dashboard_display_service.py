@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from socialhome.crypto import b64url_encode, generate_x25519_keypair
 from socialhome.dashboard.auth import (
     PAIR_CODE_MAX_FAILURES,
     THROTTLE_MAX_FAILURES,
@@ -46,7 +48,9 @@ from socialhome.domain.household_dashboard import (
     DisplayPanelNotFoundError,
     DisplayPanelOfflineError,
     ExternalDisplayPanel,
+    parse_panel_key,
 )
+from socialhome.dashboard.claim_seal import SealedClaimInvalid, open_sealed_claim
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.dashboard_display_service import (
     SEEN_INTERVAL_S,
@@ -724,6 +728,16 @@ async def test_rename_and_unlock_is_one_write(svc, settings, repo):
 
 KITCHEN_MAC = "aa:bb:cc:dd:ee:01"
 HALL_MAC = "aa:bb:cc:dd:ee:02"
+#: Each panel's X25519 keypair, as its firmware would hold it: private
+#: half (raw) by public half (published base64url, ``Social Home key``).
+_KITCHEN_KP = generate_x25519_keypair()
+_HALL_KP = generate_x25519_keypair()
+KITCHEN_KEY = b64url_encode(_KITCHEN_KP.public_key)
+HALL_KEY = b64url_encode(_HALL_KP.public_key)
+_PANEL_PRIVATE = {
+    KITCHEN_KEY: _KITCHEN_KP.private_key,
+    HALL_KEY: _HALL_KP.private_key,
+}
 
 
 def _panel(
@@ -733,6 +747,7 @@ def _panel(
     mac: str | None = KITCHEN_MAC,
     action: str | None = "sh_dash_kitchen_connect_social_home",
     online: bool = True,
+    key: str | None = KITCHEN_KEY,
 ) -> ExternalDisplayPanel:
     return ExternalDisplayPanel(
         id=panel_id,
@@ -741,16 +756,19 @@ def _panel(
         sw_version="2026.10.13 (ESPHome 2026.9.1)",
         connect_action=action,
         online=online,
+        panel_key=key,
     )
 
 
 class _Directory:
-    """A :class:`DisplayDirectory` test double: lists ``panels`` and
-    records every connect request it is asked to deliver."""
+    """A :class:`DisplayDirectory` test double: lists ``panels`` and, for
+    every connect request it is asked to deliver, records the sealed value
+    and what the panel's private key opens it to."""
 
     def __init__(self, *panels: ExternalDisplayPanel) -> None:
         self.panels = list(panels)
         self.sent: list[tuple[str, str, str]] = []
+        self.sealed: list[str] = []
         self.fail_list = False
         self.fail_connect = False
 
@@ -759,10 +777,16 @@ class _Directory:
             raise DisplayDiscoveryFailedError()
         return list(self.panels)
 
-    async def connect(self, panel, *, url: str, claim: str) -> None:
+    async def connect(self, panel, *, sealed: str) -> None:
         if self.fail_connect:
             raise DisplayDiscoveryFailedError()
-        self.sent.append((panel.id, url, claim))
+        self.sealed.append(sealed)
+        opened = open_sealed_claim(
+            sealed,
+            panel_private=_PANEL_PRIVATE[panel.panel_key],
+            panel_pub=parse_panel_key(panel.panel_key),
+        )
+        self.sent.append((panel.id, opened.url, opened.claim))
 
 
 URL = "http://192.168.1.20:8100"
@@ -770,7 +794,9 @@ URL = "http://192.168.1.20:8100"
 
 @pytest.fixture
 def directory() -> _Directory:
-    return _Directory(_panel(), _panel("dev-hall", name="Hall", mac=HALL_MAC))
+    return _Directory(
+        _panel(), _panel("dev-hall", name="Hall", mac=HALL_MAC, key=HALL_KEY)
+    )
 
 
 @pytest.fixture
@@ -809,7 +835,9 @@ async def test_platform_panels_are_admin_only(hsvc):
 
 async def test_platform_panels_match_paired_displays_by_mac(hsvc, directory):
     claim = await _connect(hsvc, directory)
-    status = await hsvc.spend_claim(claim, mac=KITCHEN_MAC.upper())
+    status = await hsvc.spend_claim(
+        claim, mac=KITCHEN_MAC.upper(), panel_key=KITCHEN_KEY
+    )
     assert status is not None
     found = await hsvc.platform_panels(actor_is_admin=True)
     assert [(p.id, d.id if d else None) for p, d in found] == [
@@ -833,7 +861,11 @@ async def test_claim_pairs_the_panel_once(hsvc, directory, settings):
     # 256 random bits, url-safe — what the panel's NVS / HA action carry.
     assert re.fullmatch(r"[A-Za-z0-9_-]{43}", claim)
     status = await hsvc.spend_claim(
-        claim, mac=KITCHEN_MAC, model="guition-jc8012p4a1", firmware="2026.10.13"
+        claim,
+        mac=KITCHEN_MAC,
+        panel_key=KITCHEN_KEY,
+        model="guition-jc8012p4a1",
+        firmware="2026.10.13",
     )
     assert status is not None and status.paired and status.token
     (display,) = await settings.displays()
@@ -843,7 +875,7 @@ async def test_claim_pairs_the_panel_once(hsvc, directory, settings):
     assert (display.model, display.firmware) == ("guition-jc8012p4a1", "2026.10.13")
     assert await hsvc.authenticate(status.token) == display
     # Single use: the same claim again is unknown.
-    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC) is None
+    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY) is None
     assert hsvc.claim_count == 0
 
 
@@ -856,7 +888,7 @@ async def test_only_the_claims_hash_is_kept(hsvc, directory):
 async def test_claim_expires(hsvc, directory, clock):
     claim = await _connect(hsvc, directory)
     clock.now += CLAIM_TTL_SECONDS
-    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC) is None
+    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY) is None
     assert hsvc.claim_count == 0
 
 
@@ -864,17 +896,64 @@ async def test_claim_for_one_panel_is_refused_from_another_and_burnt(
     hsvc, directory, settings
 ):
     claim = await _connect(hsvc, directory)
-    assert await hsvc.spend_claim(claim, mac=HALL_MAC) is None
-    assert await hsvc.spend_claim(claim, mac=None) is None
+    assert await hsvc.spend_claim(claim, mac=HALL_MAC, panel_key=HALL_KEY) is None
+    assert await hsvc.spend_claim(claim, mac=None, panel_key=KITCHEN_KEY) is None
     # Spent by the wrong-MAC try: the right panel can't use it any more.
-    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC) is None
+    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY) is None
     assert await settings.displays() == ()
+
+
+async def test_claim_needs_the_key_it_was_sealed_to_and_is_burnt(
+    hsvc, directory, settings
+):
+    """Someone who learnt the claim elsewhere (not by opening the seal)
+    can't spend it with the right MAC alone: the panel public key it was
+    sealed to must come along — and a wrong one burns the claim."""
+    for wrong in (HALL_KEY, None, "", KITCHEN_KEY[:42], KITCHEN_KEY + "=", 7):
+        claim = await _connect(hsvc, directory)
+        assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC, panel_key=wrong) is None
+        assert hsvc.claim_count == 0
+        assert (
+            await hsvc.spend_claim(claim, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY)
+            is None
+        )
+    assert await settings.displays() == ()
+
+
+async def test_the_platform_only_ever_sees_ciphertext(hsvc, directory):
+    """What crosses Home Assistant (and lands in its recorder): the
+    sealed value — neither the claim nor the dashboard address."""
+    claim = await _connect(hsvc, directory)
+    (sealed,) = directory.sealed
+    assert claim not in sealed and URL not in sealed
+    assert "192.168" not in sealed
+    assert set(json.loads(sealed)) == {"ct", "epk", "nonce", "suite"}
+
+
+async def test_each_connect_seals_afresh(hsvc, directory):
+    await _connect(hsvc, directory)
+    await _connect(hsvc, directory)
+    first, second = (json.loads(s) for s in directory.sealed)
+    assert first["epk"] != second["epk"] and first["nonce"] != second["nonce"]
+
+
+async def test_a_panel_sealed_to_its_own_key(hsvc, directory):
+    """The hall's request opens with the hall's key, not the kitchen's."""
+    await _connect(hsvc, directory, "dev-hall")
+    with pytest.raises(SealedClaimInvalid):
+        open_sealed_claim(
+            directory.sealed[-1],
+            panel_private=_KITCHEN_KP.private_key,
+            panel_pub=_KITCHEN_KP.public_key,
+        )
 
 
 async def test_malformed_claims_are_unknown(hsvc, directory):
     await _connect(hsvc, directory)
     for bad in (None, 7, "", "short", "x" * 43 + "!", "é" * 43):
-        assert await hsvc.spend_claim(bad, mac=KITCHEN_MAC) is None
+        assert (
+            await hsvc.spend_claim(bad, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY) is None
+        )
     assert hsvc.claim_count == 1
 
 
@@ -891,7 +970,9 @@ async def test_claims_are_compared_in_constant_time(hsvc, directory, monkeypatch
     monkeypatch.setattr(
         "socialhome.services.dashboard_display_service.hmac.compare_digest", spy
     )
-    assert await hsvc.spend_claim("A" * 43, mac=KITCHEN_MAC) is None
+    assert (
+        await hsvc.spend_claim("A" * 43, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY) is None
+    )
     # Every pending claim compared, digest against digest — no early exit.
     assert len(calls) == 2
     assert all(len(a) == len(b) == 32 for a, b in calls)
@@ -901,8 +982,11 @@ async def test_a_new_connect_replaces_the_panels_old_claim(hsvc, directory):
     first = await _connect(hsvc, directory)
     second = await _connect(hsvc, directory)
     assert first != second and hsvc.claim_count == 1
-    assert await hsvc.spend_claim(first, mac=KITCHEN_MAC) is None
-    assert await hsvc.spend_claim(second, mac=KITCHEN_MAC) is not None
+    assert await hsvc.spend_claim(first, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY) is None
+    assert (
+        await hsvc.spend_claim(second, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY)
+        is not None
+    )
 
 
 async def test_pending_claims_are_bounded(hsvc, directory):
@@ -916,10 +1000,17 @@ async def test_pending_claims_are_bounded(hsvc, directory):
     ]
     assert hsvc.claim_count == MAX_PENDING_CLAIMS
     # The oldest went first.
-    assert await hsvc.spend_claim(claims[0], mac="aa:bb:cc:00:00:00") is None
+    assert (
+        await hsvc.spend_claim(
+            claims[0], mac="aa:bb:cc:00:00:00", panel_key=KITCHEN_KEY
+        )
+        is None
+    )
     last = MAX_PENDING_CLAIMS + 2
     assert (
-        await hsvc.spend_claim(claims[last], mac=f"aa:bb:cc:00:00:{last:02x}")
+        await hsvc.spend_claim(
+            claims[last], mac=f"aa:bb:cc:00:00:{last:02x}", panel_key=KITCHEN_KEY
+        )
         is not None
     )
 
@@ -938,12 +1029,19 @@ async def test_connect_refuses_unknown_offline_and_old_panels(hsvc, directory):
         _panel("dev-off", online=False),
         _panel("dev-old", action=None),
         _panel("dev-nomac", mac=None),
+        _panel("dev-nokey", key=None),
+        _panel("dev-badkey", key="not-a-key"),
+        # A well-formed but small-order point: no shared secret.
+        _panel("dev-zerokey", key=b64url_encode(bytes(32))),
     ]
     cases = {
         "dev-gone": DisplayPanelNotFoundError,
         "dev-off": DisplayPanelOfflineError,
         "dev-old": DisplayPanelNeedsUpdateError,
         "dev-nomac": DisplayPanelNeedsUpdateError,
+        "dev-nokey": DisplayPanelNeedsUpdateError,
+        "dev-badkey": DisplayPanelNeedsUpdateError,
+        "dev-zerokey": DisplayPanelNeedsUpdateError,
     }
     for panel_id, error in cases.items():
         with pytest.raises(error):
@@ -961,7 +1059,7 @@ async def test_connect_and_spend_need_the_dashboard_on(hsvc, directory, settings
             actor_is_admin=True, panel_id="dev-kitchen", url=URL
         )
     with pytest.raises(DashboardDisabledError):
-        await hsvc.spend_claim(claim, mac=KITCHEN_MAC)
+        await hsvc.spend_claim(claim, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY)
 
 
 async def test_reconnecting_replaces_the_old_pairing_once_the_new_token_is_used(
@@ -969,11 +1067,15 @@ async def test_reconnecting_replaces_the_old_pairing_once_the_new_token_is_used(
 ):
     """A6: the old record (and token) stays until the new display's token
     authenticates once; then it goes, in the same write."""
-    first = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    hall = await hsvc.spend_claim(
-        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC
+    first = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
     )
-    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    hall = await hsvc.spend_claim(
+        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC, panel_key=HALL_KEY
+    )
+    again = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     assert first and hall and again
     ids = [d.id for d in await settings.displays()]
     assert ids == [first.display_id, hall.display_id, again.display_id]
@@ -1000,14 +1102,20 @@ async def test_a_claim_spent_by_someone_else_cannot_evict_the_panel_unused(
     """Whoever spends a claim (a Home Assistant admin watching the action
     data, with the panel's MAC) gets a token, but the real panel's working
     pairing survives until that token is actually used."""
-    real = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    stolen = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    real = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
+    stolen = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     assert real and stolen
     for _ in range(3):
         assert (await hsvc.authenticate(real.token)).id == real.display_id
     # A later Connect (the admin trying again) drops the unused stolen
     # record at once — and still keeps the real pairing until its own use.
-    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    again = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     assert again is not None
     assert await hsvc.authenticate(stolen.token) is None
     assert (await hsvc.authenticate(real.token)).id == real.display_id
@@ -1020,8 +1128,12 @@ async def test_a_claim_spent_by_someone_else_cannot_evict_the_panel_unused(
 
 
 async def test_takeover_survives_a_restart(hsvc, directory, repo, clock):
-    first = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    first = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
+    again = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     # A restart: fresh services over the same storage.
     settings2 = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
     settings2.attach_key_manager(KeyManager(os.urandom(32)))
@@ -1034,8 +1146,12 @@ async def test_takeover_survives_a_restart(hsvc, directory, repo, clock):
 
 
 async def test_concurrent_first_uses_take_over_once(hsvc, directory, settings):
-    first = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    first = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
+    again = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     results = await asyncio.gather(*(hsvc.authenticate(again.token) for _ in range(5)))
     assert all(r is not None and r.id == again.display_id for r in results)
     assert [d.id for d in await settings.displays()] == [again.display_id]
@@ -1043,8 +1159,12 @@ async def test_concurrent_first_uses_take_over_once(hsvc, directory, settings):
 
 
 async def test_removing_the_new_display_keeps_the_old_one(hsvc, directory, settings):
-    first = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    first = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
+    again = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     await hsvc.remove(actor_is_admin=True, display_id=again.display_id)
     assert (await hsvc.authenticate(first.token)).id == first.display_id
     assert await hsvc.authenticate(again.token) is None
@@ -1055,10 +1175,14 @@ async def test_removing_the_panel_also_drops_its_pending_reconnect(
 ):
     """Review finding: unpairing the working display must not leave a
     stolen, still-unused re-connect behind that could step in later."""
-    real = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    stolen = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    real = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
+    stolen = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     hall = await hsvc.spend_claim(
-        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC
+        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC, panel_key=HALL_KEY
     )
     await hsvc.remove(actor_is_admin=True, display_id=real.display_id)
     assert await hsvc.authenticate(stolen.token) is None
@@ -1072,10 +1196,14 @@ async def test_a_pin_sign_out_also_drops_the_pending_reconnect(
     hsvc, directory, settings
 ):
     await settings.set_pin(actor_is_admin=True, pin=PIN)
-    real = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    real = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     display = await hsvc.authenticate(real.token)
     await hsvc.lock(display)
-    stolen = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    stolen = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     for _ in range(THROTTLE_MAX_FAILURES):
         with pytest.raises(DashboardDisplayPinWrongError):
             await hsvc.unlock(display, "0000")
@@ -1088,9 +1216,13 @@ async def test_a_pin_sign_out_also_drops_the_pending_reconnect(
 async def test_takeover_keeps_the_privacy_lock(hsvc, directory, settings):
     """A re-connect must not lift the panel's privacy lock."""
     await settings.set_pin(actor_is_admin=True, pin=PIN)
-    real = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    real = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     await hsvc.lock(await hsvc.authenticate(real.token))
-    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    again = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     taken = await hsvc.authenticate(again.token)
     assert taken is not None and taken.locked
     assert await hsvc.is_locked(taken)
@@ -1102,8 +1234,12 @@ async def test_a_display_removed_mid_takeover_is_not_authenticated(
     """Review finding: authenticate read the display, then it was dropped
     (another Connect, a removal, a sign-out) before the takeover — the
     request must not be served."""
-    await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
+    again = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     take_over = DashboardSettingsService.take_over
 
     async def removed_first(self, display_id):
@@ -1122,13 +1258,19 @@ async def test_a_display_removed_mid_takeover_is_not_authenticated(
 async def test_two_pending_reconnects_at_the_cap(hsvc, directory, settings):
     """Review finding: at the cap, a second panel's re-connect counted the
     first's pending record in full and was refused."""
-    await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    await hsvc.spend_claim(await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC)
+    await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
+    await hsvc.spend_claim(
+        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC, panel_key=HALL_KEY
+    )
     for i in range(MAX_DISPLAYS - 2):
         await _pair(hsvc, f"Panel {i}")
-    kitchen = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    kitchen = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     hall = await hsvc.spend_claim(
-        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC
+        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC, panel_key=HALL_KEY
     )
     assert kitchen and hall
     assert len(await settings.displays()) == MAX_DISPLAYS + 2
@@ -1138,19 +1280,27 @@ async def test_two_pending_reconnects_at_the_cap(hsvc, directory, settings):
 
 
 async def test_the_platform_list_shows_the_working_pairing(hsvc, directory):
-    real = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    real = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
+    await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     listed = {p.id: d for p, d in await hsvc.platform_panels(actor_is_admin=True)}
     assert listed["dev-kitchen"].id == real.display_id
     assert listed["dev-hall"] is None
 
 
 async def test_reconnecting_at_the_limit_still_works(hsvc, directory, settings):
-    await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     for i in range(MAX_DISPLAYS - 1):
         await _pair(hsvc, f"Panel {i}")
     assert len(await settings.displays()) == MAX_DISPLAYS
-    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    again = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     assert again is not None
     # Over the cap by the one record it takes over — until its first use.
     assert len(await settings.displays()) == MAX_DISPLAYS + 1
@@ -1158,7 +1308,9 @@ async def test_reconnecting_at_the_limit_still_works(hsvc, directory, settings):
     assert len(await settings.displays()) == MAX_DISPLAYS
     with pytest.raises(DashboardDisplayLimitError):
         await hsvc.spend_claim(
-            await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC
+            await _connect(hsvc, directory, "dev-hall"),
+            mac=HALL_MAC,
+            panel_key=HALL_KEY,
         )
 
 
@@ -1174,7 +1326,9 @@ async def test_the_display_is_named_after_the_panel(
     hsvc, directory, settings, ha_name, expected
 ):
     directory.panels = [_panel(name=ha_name)]
-    await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     (display,) = await settings.displays()
     assert display.name == expected
 
@@ -1188,23 +1342,29 @@ async def test_sign_out_revokes_pending_claims(hsvc, directory, settings, revoke
         await settings.revoke_sessions(actor_is_admin=True)
     else:
         await settings.set_password(actor_is_admin=True, password="new horse battery")
-    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC) is None
+    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY) is None
     assert await settings.displays() == ()
     # A fresh Connect after the sign-out works.
     assert (
-        await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+        await hsvc.spend_claim(
+            await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+        )
         is not None
     )
 
 
 async def test_removing_a_display_drops_its_pending_claim(hsvc, directory, settings):
-    first = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    first = await hsvc.spend_claim(
+        await _connect(hsvc, directory), mac=KITCHEN_MAC, panel_key=KITCHEN_KEY
+    )
     hall_claim = await _connect(hsvc, directory, "dev-hall")
     again = await _connect(hsvc, directory)
     await hsvc.remove(actor_is_admin=True, display_id=first.display_id)
-    assert await hsvc.spend_claim(again, mac=KITCHEN_MAC) is None
+    assert await hsvc.spend_claim(again, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY) is None
     # Another panel's claim is untouched.
-    assert await hsvc.spend_claim(hall_claim, mac=HALL_MAC) is not None
+    assert (
+        await hsvc.spend_claim(hall_claim, mac=HALL_MAC, panel_key=HALL_KEY) is not None
+    )
 
 
 async def test_code_pairing_keeps_the_panels_mac(hsvc, settings):
@@ -1230,9 +1390,9 @@ async def test_seen_records_a_reported_mac_once(hsvc, settings, clock):
 async def test_claim_logs_never_carry_the_claim_or_token(hsvc, directory, caplog):
     caplog.set_level(logging.DEBUG)
     claim = await _connect(hsvc, directory)
-    await hsvc.spend_claim(claim, mac=HALL_MAC)
+    await hsvc.spend_claim(claim, mac=HALL_MAC, panel_key=HALL_KEY)
     claim2 = await _connect(hsvc, directory)
-    status = await hsvc.spend_claim(claim2, mac=KITCHEN_MAC)
+    status = await hsvc.spend_claim(claim2, mac=KITCHEN_MAC, panel_key=KITCHEN_KEY)
     assert status is not None and status.token is not None
-    for secret in (claim, claim2, status.token):
+    for secret in (claim, claim2, status.token, *directory.sealed):
         assert secret not in caplog.text

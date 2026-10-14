@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/sealed-claim.schema.json",
+  "title": "The connect_social_home action's `sealed` variable (a JSON string): the claim and the dashboard address sealed to the panel's X25519 key",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ct",
+    "epk",
+    "nonce",
+    "suite"
+  ],
+  "properties": {
+    "suite": {
+      "type": "string",
+      "description": "The sealing suite. Receivers refuse every value they don't implement (no default): today only x25519-hkdf-sha256-aes256gcm.",
+      "examples": [
+        "x25519-hkdf-sha256-aes256gcm"
+      ]
+    },
+    "epk": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "description": "The sender's ephemeral X25519 public key, unpadded base64url (32 bytes)."
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{16}$",
+      "description": "The AES-256-GCM nonce, unpadded base64url (12 bytes)."
+    },
+    "ct": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{23,2731}$",
+      "description": "AES-256-GCM ciphertext followed by its 16-byte tag, unpadded base64url (17 to 2048 bytes). Opens to {\"claim\", \"url\"}."
+    }
+  }
+}

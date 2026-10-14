@@ -377,7 +377,8 @@ Assistant App), you don't type a code at all:
    ESPHome — the panel shows up as discovered once it's on your Wi-Fi.
 2. In **Admin › Dashboard › Wall panels › Found in Home Assistant**, press
    **Connect** next to it. Social Home asks Home Assistant to pass the
-   panel the dashboard's address and a one-time claim; the panel pairs
+   panel the dashboard's address and a one-time claim, sealed so only
+   that panel can read them; the panel pairs
    itself within seconds and shows up in the list above, named as in Home
    Assistant.
 
@@ -389,8 +390,8 @@ Assistant App), you don't type a code at all:
   Network).
 - **Offline in Home Assistant**: Home Assistant can't reach the panel —
   check it's on. **Update the panel's firmware**: its firmware is too old
-  for Connect (or its *Social Home node* entity is disabled in Home
-  Assistant — enable it); pair it with a code meanwhile.
+  for Connect (or its *Social Home node* or *Social Home key* entity is
+  disabled in Home Assistant — enable it); pair it with a code meanwhile.
 - **Connect again** on a connected panel replaces its pairing (e.g. after
   a factory reset). The old pairing keeps working until the panel uses
   its new one for the first time — usually seconds later — and is then
@@ -398,22 +399,28 @@ Assistant App), you don't type a code at all:
   entry "never seen"). A privacy lock on the panel stays on. **Remove**
   unpairs the panel together with a re-connect still waiting, and stops
   it being listed as connected.
-- **What Home Assistant sees.** The claim passes through Home Assistant,
-  whose recorder keeps every action's data — so treat it as visible to
-  anyone with admin access to Home Assistant (they can reflash the panel
-  anyway). It works once, for that panel only, for 10 minutes, and **Sign
-  out all tablets** cancels it. The panel's long-lived token never passes
-  through Home Assistant.
-- **What someone who grabs a claim can do.** Spending a claim before the
-  panel does (it also needs the panel's MAC, which Home Assistant shows)
-  gives them a token for a new display named after the panel. That alone
-  doesn't break the panel: its current pairing keeps working, and the
-  next **Connect** drops the unused new display. Only when they *use*
-  that token does it take the panel's place — the panel's own token then
-  stops working and it shows "not paired". That is the trust Connect
-  puts in Home Assistant admins (who could reflash the panel anyway); if
-  a panel unexpectedly says "not paired", remove the unknown display and
-  Connect again.
+- **What Home Assistant sees.** Home Assistant's recorder keeps every
+  action's data, so Social Home never sends it anything readable: the
+  claim and the dashboard address are sealed to the panel's own key (the
+  *Social Home key* entity — its public half; the private half never
+  leaves the panel). Home Assistant, its recorder and its history only
+  ever hold that ciphertext and the panel's public key. The claim works
+  once, for that panel (its MAC and key) only, for 10 minutes, and
+  **Sign out all tablets** cancels it. The panel's long-lived token never
+  passes through Home Assistant. The seal hides the request; it doesn't
+  prove who sent it: whoever can run the panel's actions in Home
+  Assistant can also send it a connect request of their own (or reflash
+  it), so Connect trusts the panel Home Assistant shows you — as before.
+- **If a claim got out anyway** (it can't be read from Home Assistant,
+  but say the panel itself was compromised): spending it before the
+  panel does also needs the panel's MAC and public key (both visible in
+  Home Assistant) and gives a token for a new display named after the
+  panel. That alone doesn't break the panel: its current pairing keeps
+  working, and the next **Connect** drops the unused new display. Only
+  when that token is *used* does it take the panel's place — the panel's
+  own token then stops working and it shows "not paired". If a panel
+  unexpectedly says "not paired", remove the unknown display and Connect
+  again.
 
 Five wrong codes in 15 minutes hold pairing back for a while — check the
 code on the panel. This limit is separate from tablet sign-in: failed

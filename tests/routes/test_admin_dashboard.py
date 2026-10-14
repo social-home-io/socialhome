@@ -7,6 +7,7 @@ these tests bind ephemeral ports and the app's cleanup stops it.
 
 from __future__ import annotations
 
+import json
 import socket
 from urllib.parse import parse_qs, urlsplit
 
@@ -20,13 +21,16 @@ from socialhome.app_keys import (
     dashboard_settings_service_key,
     platform_adapter_key,
 )
+from socialhome.crypto import b64url_encode, generate_x25519_keypair
 from socialhome.dashboard.auth import COOKIE_NAME
+from socialhome.dashboard.claim_seal import open_sealed_claim
 from socialhome.domain.household_dashboard import (
     DashboardAddressRequiredError,
     DisplayDiscoveryFailedError,
     ExternalDisplayPanel,
 )
 from socialhome.platform.adapter import DashboardHostPort
+from socialhome.platform.ha.displays import HaDisplayDirectory
 from socialhome.routes.admin_dashboard import dashboard_base_url, panel_url
 
 from .conftest import _auth
@@ -993,6 +997,10 @@ async def test_admin_unlock_unknown_display(client):
 
 HA_PANELS = "/api/admin/dashboard/displays/ha"
 KITCHEN_MAC = "a0:b7:65:12:34:56"
+#: The kitchen panel's X25519 keypair — its firmware's — and the public
+#: key it publishes in its ``Social Home key`` sensor.
+KITCHEN_KP = generate_x25519_keypair()
+KITCHEN_KEY = b64url_encode(KITCHEN_KP.public_key)
 
 
 @pytest.mark.parametrize(
@@ -1056,9 +1064,17 @@ class _HaDirectory:
                 mac=KITCHEN_MAC,
                 sw_version="2026.10.13 (ESPHome 2026.9.1)",
                 connect_action="kitchen_connect_social_home",
+                panel_key=KITCHEN_KEY,
             ),
             ExternalDisplayPanel(
                 id="dev-old", name="Old", mac="a0:b7:65:00:00:09", connect_action=None
+            ),
+            # Firmware with the connect action but no key to seal it to.
+            ExternalDisplayPanel(
+                id="dev-nokey",
+                name="No key",
+                mac="a0:b7:65:00:00:0b",
+                connect_action="nokey_connect_social_home",
             ),
             ExternalDisplayPanel(
                 id="dev-off",
@@ -1076,10 +1092,15 @@ class _HaDirectory:
             raise DisplayDiscoveryFailedError()
         return list(self.panels)
 
-    async def connect(self, panel, *, url, claim):
+    async def connect(self, panel, *, sealed):
         if self.fail:
             raise DisplayDiscoveryFailedError()
-        self.sent.append((panel.id, url, claim))
+        opened = open_sealed_claim(
+            sealed,
+            panel_private=KITCHEN_KP.private_key,
+            panel_pub=KITCHEN_KP.public_key,
+        )
+        self.sent.append((panel.id, opened.url, opened.claim))
 
 
 @pytest.fixture
@@ -1129,6 +1150,15 @@ async def test_list_ha_panels(client, ha):
                 "display_name": None,
             },
             {
+                "id": "dev-nokey",
+                "name": "No key",
+                "sw_version": None,
+                "status": "needs_update",
+                "can_connect": False,
+                "display_id": None,
+                "display_name": None,
+            },
+            {
                 "id": "dev-off",
                 "name": "Off",
                 "sw_version": None,
@@ -1139,8 +1169,9 @@ async def test_list_ha_panels(client, ha):
             },
         ]
     }
-    # Neither the MAC nor the HA action name leaves.
+    # Neither the MAC, the key nor the HA action name leaves.
     assert KITCHEN_MAC not in str(body) and "connect_social_home" not in str(body)
+    assert KITCHEN_KEY not in str(body)
 
 
 async def test_ha_unreachable_is_502(client, ha):
@@ -1151,9 +1182,10 @@ async def test_ha_unreachable_is_502(client, ha):
 
 
 async def test_connect_a_ha_panel_end_to_end(client, ha):
-    """Connect → HA gets {url, claim} for the panel → the panel spends the
-    claim on the dashboard port → it's paired and listed as connected; a
-    replayed claim is refused; removing it lists it as not connected."""
+    """Connect → HA gets ``{sealed}`` for the panel (opened with its key)
+    → the panel spends the claim on the dashboard port → it's paired and
+    listed as connected; a replayed claim is refused; removing it lists it
+    as not connected."""
     origin = await _running(client)
     assert (await _put(client, {"address": origin})).status == 200
     resp = await client.post(
@@ -1168,14 +1200,17 @@ async def test_connect_a_ha_panel_end_to_end(client, ha):
         async with panel.post(
             f"{url}/api/display/v1/pair/claim",
             json={"claim": claim, "firmware": "2026.10.13"},
-            headers={"X-Display-Mac": KITCHEN_MAC.upper()},
+            headers={
+                "X-Display-Mac": KITCHEN_MAC.upper(),
+                "X-Display-Key": KITCHEN_KEY,
+            },
         ) as r:
             assert r.status == 200
             paired = await r.json()
         async with panel.post(
             f"{url}/api/display/v1/pair/claim",
             json={"claim": claim},
-            headers={"X-Display-Mac": KITCHEN_MAC},
+            headers={"X-Display-Mac": KITCHEN_MAC, "X-Display-Key": KITCHEN_KEY},
         ) as r:
             assert r.status == 404
     status, who = await _panel_get(origin, "/api/display/v1/whoami", paired["token"])
@@ -1233,6 +1268,7 @@ async def test_connect_refusals(client, ha):
     cases = {
         "dev-gone": (404, "DISPLAY_PANEL_NOT_FOUND"),
         "dev-old": (409, "DISPLAY_PANEL_NEEDS_UPDATE"),
+        "dev-nokey": (409, "DISPLAY_PANEL_NEEDS_UPDATE"),
         "dev-off": (409, "DISPLAY_PANEL_OFFLINE"),
     }
     for panel_id, (status, code) in cases.items():
@@ -1248,3 +1284,172 @@ async def test_connect_refusals(client, ha):
     assert resp.status == 502
     assert ha.sent == []
     assert client.app[dashboard_display_service_key].claim_count == 0
+
+
+# ── Connect through Home Assistant, end to end (HA mocked at its API) ──
+
+
+class _HaApi:
+    """Home Assistant Core's API as :class:`HaClient` answers it — the
+    registries, the sensors' states, and ``call_service`` — recording
+    every action's data the way HA's recorder would keep it."""
+
+    DEVICE = "4f1c0e8a9b2d4c6e8f0a1b2c3d4e5f60"
+
+    def __init__(self, *, key_sensor: bool = True) -> None:
+        self.key_sensor = key_sensor
+        self.recorded: list[tuple[str, str, dict]] = []
+        self.states = {
+            "sensor.kitchen_social_home_node": "sh-dash-kitchen",
+            "sensor.kitchen_social_home_key": KITCHEN_KEY,
+        }
+
+    async def ws_command(self, type_: str, **_fields):
+        if type_ == "config/device_registry/list":
+            return {
+                "result": [
+                    {
+                        "id": self.DEVICE,
+                        "name": "Social Home Dashboard",
+                        "name_by_user": "Kitchen panel",
+                        "manufacturer": "social-home-io",
+                        "model": "esphome-dashboard",
+                        "sw_version": "2026.10.14 (ESPHome 2026.9.1)",
+                        "connections": [["mac", KITCHEN_MAC.upper()]],
+                        "disabled_by": None,
+                        "via_device_id": None,
+                    }
+                ]
+            }
+        if type_ == "config/entity_registry/list":
+            return {
+                "result": [
+                    {
+                        "device_id": self.DEVICE,
+                        "entity_id": entity_id,
+                        "platform": "esphome",
+                        "original_name": name,
+                        "disabled_by": None,
+                    }
+                    for entity_id, name in (
+                        ("sensor.kitchen_social_home_node", "Social Home node"),
+                        ("sensor.kitchen_social_home_key", "Social Home key"),
+                        ("sensor.kitchen_social_home_status", "Social Home status"),
+                    )
+                    if self.key_sensor or name != "Social Home key"
+                ]
+            }
+        return None
+
+    async def get_state(self, entity_id: str):
+        state = self.states.get(entity_id)
+        return None if state is None else {"entity_id": entity_id, "state": state}
+
+    async def call_service(self, domain, service, data=None, *, return_response=False):
+        self.recorded.append((domain, service, data))
+        return []
+
+
+class _HaAdapter:
+    def __init__(self, api: _HaApi) -> None:
+        self._client = api
+
+
+async def test_connect_through_home_assistant_end_to_end(client, monkeypatch):
+    """The real :class:`HaDisplayDirectory` over a mocked HA API: Connect
+    seals the claim and the address to the panel's published key; all HA
+    sees (and its recorder stores) is ciphertext; the panel opens it with
+    its private key, spends the claim with its MAC and key, and is paired."""
+    api = _HaApi()
+    monkeypatch.setattr(
+        client.app[dashboard_display_service_key],
+        "_directory",
+        HaDisplayDirectory(_HaAdapter(api)),
+    )
+    origin = await _running(client)
+    assert (await _put(client, {"address": origin})).status == 200
+    listed = (await (await client.get(HA_PANELS, headers=_auth(client._tok))).json())[
+        "panels"
+    ]
+    assert [(p["status"], p["can_connect"]) for p in listed] == [("ready", True)]
+    resp = await client.post(
+        f"{HA_PANELS}/{_HaApi.DEVICE}/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 202, await resp.text()
+
+    ((domain, action, data),) = api.recorded
+    assert (domain, action) == ("esphome", "sh_dash_kitchen_connect_social_home")
+    # One variable; HA's recorder holds ciphertext and the public key only.
+    assert set(data) == {"sealed"}
+    sealed = data["sealed"]
+    assert set(json.loads(sealed)) == {"ct", "epk", "nonce", "suite"}
+    assert json.loads(sealed)["suite"] == "x25519-hkdf-sha256-aes256gcm"
+    assert origin not in sealed and urlsplit(origin).hostname not in sealed
+
+    # The panel's side.
+    opened = open_sealed_claim(
+        sealed, panel_private=KITCHEN_KP.private_key, panel_pub=KITCHEN_KP.public_key
+    )
+    assert opened.url == origin
+    assert opened.claim not in sealed
+    async with aiohttp.ClientSession() as panel:
+        # The claim without the key it was sealed to: refused (and burnt).
+        async with panel.post(
+            f"{opened.url}/api/display/v1/pair/claim",
+            json={"claim": opened.claim},
+            headers={"X-Display-Mac": KITCHEN_MAC},
+        ) as r:
+            assert r.status == 404
+    resp = await client.post(
+        f"{HA_PANELS}/{_HaApi.DEVICE}/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 202
+    opened = open_sealed_claim(
+        api.recorded[-1][2]["sealed"],
+        panel_private=KITCHEN_KP.private_key,
+        panel_pub=KITCHEN_KP.public_key,
+    )
+    async with aiohttp.ClientSession() as panel:
+        async with panel.post(
+            f"{opened.url}/api/display/v1/pair/claim",
+            json={"claim": opened.claim, "firmware": "2026.10.14"},
+            headers={"X-Display-Mac": KITCHEN_MAC, "X-Display-Key": KITCHEN_KEY},
+        ) as r:
+            assert r.status == 200, await r.text()
+            paired = await r.json()
+    status, who = await _panel_get(origin, "/api/display/v1/whoami", paired["token"])
+    assert (status, who) == (
+        200,
+        {"display_id": paired["display_id"], "name": "Kitchen panel"},
+    )
+    listed = (await (await client.get(HA_PANELS, headers=_auth(client._tok))).json())[
+        "panels"
+    ]
+    assert listed[0]["status"] == "connected"
+
+
+async def test_a_panel_without_a_key_sensor_needs_an_update_end_to_end(
+    client, monkeypatch
+):
+    """Firmware without the ``Social Home key`` sensor: listed as needing
+    an update, Connect refused, nothing sent through Home Assistant."""
+    api = _HaApi(key_sensor=False)
+    monkeypatch.setattr(
+        client.app[dashboard_display_service_key],
+        "_directory",
+        HaDisplayDirectory(_HaAdapter(api)),
+    )
+    origin = await _running(client)
+    await _put(client, {"address": origin})
+    listed = (await (await client.get(HA_PANELS, headers=_auth(client._tok))).json())[
+        "panels"
+    ]
+    assert [(p["status"], p["can_connect"]) for p in listed] == [
+        ("needs_update", False)
+    ]
+    resp = await client.post(
+        f"{HA_PANELS}/{_HaApi.DEVICE}/connect", headers=_auth(client._tok)
+    )
+    assert resp.status == 409
+    assert (await resp.json())["error"]["code"] == "DISPLAY_PANEL_NEEDS_UPDATE"
+    assert api.recorded == []

@@ -39,6 +39,9 @@ HA contract — verified against home-assistant/core 2026.10.1, not inferred:
   reads its state with REST
   ``GET /api/states/{entity_id}`` (developers.home-assistant.io/docs/api/rest).
   ``unavailable`` / ``unknown`` mean HA has lost the panel.
+* **The panel's key.** The firmware publishes its X25519 public key in a
+  second diagnostic text sensor, :data:`KEY_SENSOR_NAME`, found and read
+  the same way. A panel without it (older firmware) can't be connected.
 * **Calling it.** REST ``POST /api/services/esphome/<action>`` with the
   variables as the JSON body (``homeassistant/components/api/__init__.py``
   ``APIDomainServicesView``: ``400`` for an unknown action, ``500`` when
@@ -46,7 +49,10 @@ HA contract — verified against home-assistant/core 2026.10.1, not inferred:
   ``http://supervisor/core/api/…`` (developers.home-assistant.io/docs/apps/communication).
   HA fires ``call_service`` with the full service data and the recorder
   stores it (``homeassistant/core.py``, ``recorder/core.py``) — so the
-  claim sent here is single-use and short-lived, and never logged.
+  one variable sent here, ``sealed``, is the claim and the dashboard
+  address sealed to the panel's key
+  (:mod:`socialhome.dashboard.claim_seal`): HA only ever holds
+  ciphertext. It is still never logged.
 
 Every failed HA call is logged at WARNING by the client; this module maps
 "HA didn't answer" to :class:`DisplayDiscoveryFailedError`, never to an
@@ -65,11 +71,13 @@ from ...domain.household_dashboard import (
     DisplayDiscoveryFailedError,
     ExternalDisplayPanel,
     normalize_mac,
+    parse_panel_key,
 )
 
 __all__ = [
     "CONNECT_ACTION",
     "ESPHOME_DOMAIN",
+    "KEY_SENSOR_NAME",
     "NODE_SENSOR_NAME",
     "PANEL_MANUFACTURER",
     "PANEL_MODEL",
@@ -85,10 +93,14 @@ PANEL_MANUFACTURER = "social-home-io"
 PANEL_MODEL = "esphome-dashboard"
 #: HA's integration domain for ESPHome devices and their actions.
 ESPHOME_DOMAIN = "esphome"
-#: The firmware's ``api: actions:`` name (variables ``url``, ``claim``).
+#: The firmware's ``api: actions:`` name (one variable, ``sealed``).
 CONNECT_ACTION = "connect_social_home"
 #: The firmware's diagnostic text sensor whose state is its node name.
 NODE_SENSOR_NAME = "Social Home node"
+#: The firmware's diagnostic text sensor whose state is its X25519 public
+#: key (43-character base64url) — what the connect request is sealed to.
+KEY_SENSOR_NAME = "Social Home key"
+_SENSOR_NAMES = (NODE_SENSOR_NAME, KEY_SENSOR_NAME)
 #: States HA gives an entity it can't read.
 _GONE_STATES = frozenset({"unavailable", "unknown"})
 #: An ESPHome node name (``esphome: name:`` — lower-case letters, digits,
@@ -147,27 +159,28 @@ def _text(value: object) -> str | None:
 
 def panels_from_registries(
     devices: list[Any], entities: list[Any]
-) -> list[tuple[ExternalDisplayPanel, str | None]]:
+) -> list[tuple[ExternalDisplayPanel, str | None, str | None]]:
     """The Social Home panels in HA's device registry, each with the
-    ``entity_id`` of its :data:`NODE_SENSOR_NAME` sensor (``None`` when it
-    has none, or it's disabled). Rows that aren't registry objects are
-    ignored."""
-    node_sensors: dict[str, str] = {}
+    ``entity_id`` of its :data:`NODE_SENSOR_NAME` and its
+    :data:`KEY_SENSOR_NAME` sensor (``None`` when it has none, or it's
+    disabled). Rows that aren't registry objects are ignored."""
+    sensors: dict[tuple[str, str], str] = {}
     for entity in entities:
         if not isinstance(entity, dict):
             continue
         device_id = entity.get("device_id")
         entity_id = entity.get("entity_id")
+        name = entity.get("original_name")
         if (
             entity.get("platform") == ESPHOME_DOMAIN
-            and entity.get("original_name") == NODE_SENSOR_NAME
+            and name in _SENSOR_NAMES
             and entity.get("disabled_by") is None
             and isinstance(device_id, str)
             and isinstance(entity_id, str)
             and entity_id.startswith("sensor.")
         ):
-            node_sensors[device_id] = entity_id
-    panels: list[tuple[ExternalDisplayPanel, str | None]] = []
+            sensors[(device_id, name)] = entity_id
+    panels: list[tuple[ExternalDisplayPanel, str | None, str | None]] = []
     for device in devices:
         if not isinstance(device, dict) or not _is_panel(device):
             continue
@@ -177,8 +190,23 @@ def panels_from_registries(
             mac=_mac(device),
             sw_version=_text(device.get("sw_version")),
         )
-        panels.append((panel, node_sensors.get(device["id"])))
+        panels.append(
+            (
+                panel,
+                sensors.get((device["id"], NODE_SENSOR_NAME)),
+                sensors.get((device["id"], KEY_SENSOR_NAME)),
+            )
+        )
     return panels
+
+
+def _state_value(state: object) -> str | None:
+    """A sensor's state — ``None`` for no state, a failed read (the
+    client logged it) or one HA can't read (unavailable / unknown)."""
+    value = state.get("state") if isinstance(state, dict) else None
+    if not isinstance(value, str) or value in _GONE_STATES:
+        return None
+    return value
 
 
 class HaDisplayDirectory:
@@ -219,40 +247,53 @@ class HaDisplayDirectory:
             return []
         entities = await self._registry("config/entity_registry/list")
         client = self._client()
-        pairs = panels_from_registries(found, entities)
-        states = iter(
-            await asyncio.gather(
-                *(client.get_state(s) for _, s in pairs if s is not None)
-            )
+        found_sensors = panels_from_registries(found, entities)
+        wanted = sorted(
+            {
+                sensor
+                for _, node_sensor, key_sensor in found_sensors
+                for sensor in (node_sensor, key_sensor)
+                if sensor is not None
+            }
+        )
+        states = dict(
+            zip(wanted, await asyncio.gather(*(client.get_state(s) for s in wanted)))
         )
         panels: list[ExternalDisplayPanel] = []
-        for panel, sensor in pairs:
-            if sensor is None:
+        for panel, node_sensor, key_sensor in found_sensors:
+            if node_sensor is None:
                 panels.append(panel)
                 continue
-            state = next(states)
-            value = state.get("state") if isinstance(state, dict) else None
-            if value is None or value in _GONE_STATES:
-                # Unavailable — or no state / a failed read (the client
-                # logged it): HA can't reach the panel now. Never "old
-                # firmware", which would send the admin the wrong way.
+            node = _state_value(states[node_sensor])
+            key = _state_value(states[key_sensor]) if key_sensor else ""
+            if node is None or key is None:
+                # Unavailable — or no state / a failed read: HA can't
+                # reach the panel now. Never "old firmware", which would
+                # send the admin the wrong way.
                 panels.append(replace(panel, online=False))
                 continue
-            panels.append(replace(panel, connect_action=connect_action_for(value)))
+            panels.append(
+                replace(
+                    panel,
+                    connect_action=connect_action_for(node),
+                    # No (usable) key → older firmware: it can't be
+                    # connected, the admin list says "needs update".
+                    panel_key=key if parse_panel_key(key) is not None else None,
+                )
+            )
         return panels
 
-    async def connect(
-        self, panel: ExternalDisplayPanel, *, url: str, claim: str
-    ) -> None:
-        """Call the panel's ``connect_social_home`` action with ``url`` and
-        ``claim``. Raises :class:`DisplayDiscoveryFailedError` when HA
-        refused or didn't answer (the client logs the HTTP status at
-        WARNING — never the data, which carries the claim)."""
+    async def connect(self, panel: ExternalDisplayPanel, *, sealed: str) -> None:
+        """Call the panel's ``connect_social_home`` action with its one
+        variable, ``sealed`` (the claim and address sealed to the panel's
+        key). Raises :class:`DisplayDiscoveryFailedError` when HA refused
+        or didn't answer (the client logs the HTTP status at WARNING —
+        never the data)."""
         action = panel.connect_action
         if action is None:
             raise DisplayDiscoveryFailedError()
         result = await self._client().call_service(
-            ESPHOME_DOMAIN, action, {"url": url, "claim": claim}
+            ESPHOME_DOMAIN, action, {"sealed": sealed}
         )
         if result is None:
             log.warning(

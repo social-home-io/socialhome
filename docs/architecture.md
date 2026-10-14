@@ -104,11 +104,13 @@ Dashboard › Wall panels. `platform/ha/displays.py:HaDisplayDirectory`
 `config/device_registry/list` for ESPHome devices whose `esphome.project`
 is `social-home-io.esphome-dashboard` (HA splits it into manufacturer
 `social-home-io` / model `esphome-dashboard`; sub-devices skipped), finds
-each one's diagnostic *Social Home node* sensor in
-`config/entity_registry/list` and reads its state (`GET /api/states/…`) —
-the ESPHome node name, which HA's device registry doesn't carry but the
-action name needs: `connect()` calls `esphome.<node, "-" → "_">_connect_social_home`
-with `{url, claim}` (REST `POST /api/services/…`). A failed read is
+each one's diagnostic *Social Home node* and *Social Home key* sensors in
+`config/entity_registry/list` and reads their states (`GET /api/states/…`)
+— the ESPHome node name, which HA's device registry doesn't carry but the
+action name needs, and the panel's X25519 public key: `connect()` calls
+`esphome.<node, "-" → "_">_connect_social_home` with `{sealed}` (REST
+`POST /api/services/…`), the claim and address sealed to that key
+(`dashboard/claim_seal.py`; no key → *needs update*). A failed read is
 `DisplayDiscoveryFailedError` (502), never an empty list; every HA call
 failure is logged at WARNING. This is also how the Home Assistant App —
 whose mDNS can't reach the LAN — gets panels connected without a typed
@@ -1495,13 +1497,16 @@ drives it) and is then served by a **separate aiohttp application on its own por
   a second way to pair: the admin presses Connect on a panel found in HA;
   `DashboardDisplayService.connect_platform_panel` mints a single-use
   **claim** (256 bits, SHA-256 in memory, ≤20 — one per panel — 10 min,
-  bound to the panel's HA id, its MAC and the session epoch) and has HA
-  call the panel's `connect_social_home` ESPHome action with `{url, claim}`;
-  the panel spends it at `POST /api/display/v1/pair/claim` (header
-  `X-Display-Mac`, compared against the MAC in HA's device registry) and
-  gets its token in that answer. HA's recorder stores the claim, so it is
-  treated as visible to HA admins (who can reflash the panel anyway); the
-  long-lived token never crosses HA. A display records the panel's
+  bound to the panel's HA id, its MAC, its published public key and the
+  session epoch), seals it with the dashboard address to the panel's
+  X25519 key (ECIES, suite `x25519-hkdf-sha256-aes256gcm`, see
+  `docs/crypto.md`) and has HA call the panel's `connect_social_home`
+  ESPHome action with `{sealed}`; the panel opens it and spends the claim
+  at `POST /api/display/v1/pair/claim` (headers `X-Display-Mac`, compared
+  against the MAC in HA's device registry, and `X-Display-Key`, compared
+  in constant time against the key it was sealed to) and gets its token in
+  that answer. HA's recorder only stores ciphertext and the panel's public
+  key; the long-lived token never crosses HA. A display records the panel's
   self-reported MAC (write-once) so the HA list can show it as connected;
   a claim spend stores a new display that *takes over* the older ones
   with the same MAC (`DashboardDisplay.replaces`): they keep working until

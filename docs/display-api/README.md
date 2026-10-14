@@ -78,18 +78,53 @@ picture or a `304` is free).
   `GET /api/display/v1/pair/{pair_id}` until `{"status": "paired",
   "token", "display_id"}` (once).
 - **Connected from Home Assistant:** Home Assistant calls the firmware's
-  `connect_social_home` ESPHome action with `{url, claim}`. Spend the claim
-  right away at `{url}/api/display/v1/pair/claim` with `{"claim", "model",
-  "firmware"}` and the header `X-Display-Mac` — the MAC exactly as ESPHome
-  reports it to Home Assistant. `200` is the poll's paired shape
+  `connect_social_home` ESPHome action with one variable, `sealed`: the
+  claim and the dashboard address sealed to the panel's own X25519 key
+  (Home Assistant's recorder keeps action data, so it only ever holds
+  ciphertext). Open it (below), then spend the claim right away at
+  `{url}/api/display/v1/pair/claim` with `{"claim", "model", "firmware"}`
+  and the headers `X-Display-Mac` — the MAC exactly as ESPHome reports it
+  to Home Assistant — and `X-Display-Key` — the panel's public key, the
+  one it was sealed to. `200` is the poll's paired shape
   (`pair-claim.schema.json`, fixture `pair-claim.json`); `404 NOT_FOUND`
-  means the claim is wrong, expired, spent or for another panel — ask the
-  admin to press Connect again. Never log the claim or the token: ESPHome
-  device logs stream to Home Assistant.
-- The firmware publishes a diagnostic text sensor named exactly
-  **`Social Home node`** whose state is its node name (`App.get_name()`):
-  Home Assistant's device registry has only the friendly name, and Social
-  Home needs the node name to build the action name.
+  means the claim is wrong, expired, spent, for another panel or came
+  with another key — ask the admin to press Connect again. Never log the
+  sealed value, the claim, the private key or the token: ESPHome device
+  logs stream to Home Assistant.
+- The firmware publishes two diagnostic text sensors, named exactly:
+  - **`Social Home node`** — its node name (`App.get_name()`): Home
+    Assistant's device registry has only the friendly name, and Social
+    Home needs the node name to build the action name;
+  - **`Social Home key`** — its X25519 public key, 32 bytes as unpadded
+    base64url (43 characters). Generate the keypair once and keep it in
+    flash (NVS); make a new one on "Forget server" and factory reset.
+    Without this sensor Social Home lists the panel as *needs update*.
+
+### The sealed connect request
+
+`sealed` is compact JSON (bytes as unpadded base64url — reject padding,
+other alphabets and wrong lengths):
+
+```json
+{"ct": "…", "epk": "<32 bytes>", "nonce": "<12 bytes>", "suite": "x25519-hkdf-sha256-aes256gcm"}
+```
+
+1. Check `suite` first: anything but `x25519-hkdf-sha256-aes256gcm`
+   (missing included) is refused — no default, no fallback.
+2. `shared = X25519(panel_private, epk)`; refuse an all-zero result.
+3. `key = HKDF-SHA256(ikm = shared, salt = epk ‖ panel_pub, info =
+   "socialhome-panel-claim-v1", L = 32)`.
+4. `plaintext = AES-256-GCM-open(key, nonce, ct, aad = suite ‖ panel_pub)`
+   (`ct` is ciphertext ‖ 16-byte tag, at most 2048 bytes; `suite` as
+   ASCII, `panel_pub` the 32 raw bytes).
+5. `plaintext` is `{"claim": "<43 chars>", "url": "<dashboard address>"}`
+   — both strings, else refuse.
+
+Every failure is one silent refusal (log no detail). The shared vectors
+in `v1/fixtures/sealed-claim-vectors.json` — valid cases with their
+intermediate values, invalid ones that must be refused, and key strings
+to accept or refuse — are what the firmware's host tests open; Social
+Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
 - Send `X-Display-Mac` (plus `X-Display-Firmware` / `X-Display-Model`) on
   every request: an already-paired panel's display learns its MAC once
   that way, so Admin › Dashboard can show it as connected.
@@ -115,7 +150,7 @@ picture or a `304` is free).
 
 | Status | Meaning | What the panel does |
 |---|---|---|
-| `404 NOT_FOUND` from `/pair/claim` | Wrong, expired, spent or another panel's claim | Show "press Connect in Social Home again", fall back to setup |
+| `404 NOT_FOUND` from `/pair/claim` | Wrong, expired, spent or another panel's claim, or not the key it was sealed to | Show "press Connect in Social Home again", fall back to setup |
 | `401` | No / unknown token (also after "Sign out all tablets" or removal; `DISPLAY_SIGNED_OUT` after too many wrong PINs) | Forget the token, pair again |
 | `403 DISPLAY_PIN_WRONG` | `POST /unlock` with the wrong PIN (`params.remaining` tries left) | Say "Wrong PIN", stay locked |
 | `409 DASHBOARD_PIN_REQUIRED` | `POST /lock` while the household has no PIN | Hide the lock button (`settings.pin_set`) |
@@ -144,7 +179,9 @@ picture or a `304` is free).
 - [`v1/*.schema.json`](./v1/) — JSON Schema (draft 2020-12), one per
   endpoint plus `common.schema.json` (shared definitions) and
   `error.schema.json` / `lock.schema.json` / `unlock.schema.json` /
-  `ack.schema.json` / `pair-claim.schema.json`.
+  `ack.schema.json` / `pair-claim.schema.json`, and
+  `sealed-claim.schema.json` — the `connect_social_home` action's
+  `sealed` variable (not an endpoint).
 - [`v1/fixtures/`](./v1/fixtures/) — real answers for a seeded household
   (four people, a school day, the chat on, mentions, people on the map).
   `tests/dashboard/test_display_api.py` validates every endpoint's real
@@ -152,6 +189,9 @@ picture or a `304` is free).
   regenerate them after an intended change with
   `SH_UPDATE_DISPLAY_FIXTURES=1 pytest tests/dashboard/test_display_api.py`.
   The firmware repository pins the same fixtures for its screenshot tests.
+  `v1/fixtures/sealed-claim-vectors.json` is no answer but the sealed
+  connect request's test vectors (see above), built by
+  `tests/dashboard/test_claim_seal.py` (same regeneration switch).
 
 ## Map attribution and font
 
