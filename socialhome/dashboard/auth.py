@@ -57,7 +57,10 @@ and fully separate from the login / PIN failure table — a flood of failed
 tablet logins can't hold pairing back, nor wrong codes hold back a login.
 A paired panel's reads are budgeted per panel
 (:meth:`DashboardAuth.begin_display_read`): :data:`DISPLAY_READ_MAX` JSON
-reads and :data:`DISPLAY_IMAGE_MAX` images per :data:`DISPLAY_WINDOW_S`.
+reads and :data:`DISPLAY_IMAGE_MAX` images per :data:`DISPLAY_WINDOW_S`,
+and of those images at most :data:`MAP_RENDER_MAX` freshly painted map
+pictures (:meth:`DashboardAuth.begin_map_render` — painting is the
+expensive part; a kept picture or a ``304`` is not counted).
 A panel's PIN guesses use the tablet PIN limit, keyed on the panel id
 (:meth:`DashboardAuth.display_pin_throttle_key`), and its "Got it" taps
 the tablet's ack budget (:meth:`DashboardAuth.begin_display_ack`).
@@ -101,6 +104,7 @@ __all__ = [
     "DISPLAY_IMAGE_MAX",
     "DISPLAY_READ_MAX",
     "DISPLAY_WINDOW_S",
+    "MAP_RENDER_MAX",
     "PAIR_WINDOW_S",
     "KEEP_TTL_S",
     "MAX_CLOCK_SKEW_S",
@@ -163,6 +167,10 @@ PAIR_CODE_WINDOW_S = 15 * 60
 DISPLAY_READ_MAX = 120
 DISPLAY_IMAGE_MAX = 600
 DISPLAY_WINDOW_S = 60
+#: Map pictures one panel may have painted per :data:`DISPLAY_WINDOW_S`
+#: (:meth:`DashboardAuth.begin_map_render`): a new size or scheme, or what
+#: the map shows changing. A 30 s poll of an unchanged map paints nothing.
+MAP_RENDER_MAX = 6
 
 #: Revocation reasons (:meth:`DashboardAuth.revoke`). ``locked``: the
 #: cookie was replaced by a locked one (``POST /lock``) — it now counts
@@ -522,6 +530,16 @@ class DashboardAuth:
         )
         key = f"display-{kind}:{display_id}"
         if self._display_reads.is_allowed(key, limit=limit, window_s=DISPLAY_WINDOW_S):
+            return 0
+        return self._display_reads.retry_after_s(key, window_s=DISPLAY_WINDOW_S)
+
+    def begin_map_render(self, display_id: str) -> int:
+        """Count one map picture painted for a panel: ``0`` when it may be
+        painted, else the seconds to wait (nothing is counted then)."""
+        key = f"display-map:{display_id}"
+        if self._display_reads.is_allowed(
+            key, limit=MAP_RENDER_MAX, window_s=DISPLAY_WINDOW_S
+        ):
             return 0
         return self._display_reads.retry_after_s(key, window_s=DISPLAY_WINDOW_S)
 

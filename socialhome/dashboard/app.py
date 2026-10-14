@@ -44,6 +44,7 @@ from .display_api import (
 )
 from .avatars import AvatarImages
 from .emoji import EmojiImages
+from .map_png import MapPictures
 from .keys import (
     AUTH_KEY,
     AVATARS_KEY,
@@ -56,6 +57,7 @@ from .keys import (
     RENDERER_KEY,
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
+    MAP_PICTURES_KEY,
     TILES_KEY,
     DashboardSnapshots,
     DashboardTiles,
@@ -402,6 +404,12 @@ def build_dashboard_app(
     app[EMOJI_KEY] = EmojiImages()
     if tiles is not None:
         app[TILES_KEY] = tiles
+        app[MAP_PICTURES_KEY] = MapPictures(
+            tiles=tiles,
+            emoji=app[EMOJI_KEY],
+            avatars=app[AVATARS_KEY],
+            pictures=snapshots.avatar,
+        )
     install_security_headers(app)
     # After the shared hook (which only ``setdefault``s), so these win.
     app.on_response_prepare.append(_dashboard_headers)

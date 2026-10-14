@@ -1508,6 +1508,21 @@ drives it) and is then served by a **separate aiohttp application on its own por
   record is `locked` gets `423` with only the lock-screen data. The contract
   is the JSON Schemas in `docs/display-api/v1/`; see
   [display-api/README.md](./display-api/README.md) for versioning.
+- **Wall-panel map picture.** A panel can't run `map.js`, so
+  `GET /api/display/v1/map.png` paints the Map tab server-side: the same
+  view model (`map_view.py` → `dashboard/map_scene.py`), the same framing
+  (`dashboard/map_frame.py` is a line-by-line port of `map.js`'s geometry,
+  held to it by shared test vectors that both pytest and Vitest check),
+  tiles from the shared `MapTileService` (no new upstream), Pillow in
+  `asyncio.to_thread` (`dashboard/map_render.py`, Roboto bundled under
+  SIL OFL — the firmware's font). `dashboard/map_png.py` bounds tile
+  fetches (4 at once, 10 s per picture), paints one picture at a time and
+  keeps the last eight. The `ETag` hashes everything that decides the
+  pixels (scene, both schemes' colours, the tile source tag, a render
+  version) plus size and scheme, so a panel's 30 s poll is a 304 that
+  paints nothing; `/map` announces the default picture's. Missing tiles
+  or photos leave the board colour / initials and a separate ETag
+  (redrawn after a minute); a per-panel budget caps fresh paintings.
 - **Discovery over mDNS.** `DisplayAdvertiser` (`dashboard/advertiser.py`,
   python-zeroconf) announces the dashboard as `_socialhome-dash._tcp`
   so panels find it without a typed address. `DashboardServer` drives it:

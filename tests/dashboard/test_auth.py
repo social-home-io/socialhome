@@ -18,6 +18,7 @@ from socialhome.dashboard.auth import (
     DISPLAY_IMAGE_MAX,
     DISPLAY_READ_MAX,
     DISPLAY_WINDOW_S,
+    MAP_RENDER_MAX,
     PAIR_MAX,
     PAIR_WINDOW_S,
     ACK_MAX,
@@ -897,3 +898,15 @@ def test_display_pin_bucket_is_per_panel_and_apart_from_tablets():
     assert key != DashboardAuth.display_pin_throttle_key("d2")
     claims = SessionClaims(epoch=0, issued_at=0, keep=True, session_id="d1")
     assert key != DashboardAuth.pin_throttle_key(claims)
+
+
+def test_map_renders_are_budgeted_per_panel(auth, clock):
+    for _ in range(MAP_RENDER_MAX):
+        assert auth.begin_map_render("d1") == 0
+    wait = auth.begin_map_render("d1")
+    assert 0 < wait <= DISPLAY_WINDOW_S
+    # Another panel, and the panel's other budgets, are untouched.
+    assert auth.begin_map_render("d2") == 0
+    assert auth.begin_display_read("d1", image=True) == 0
+    clock.advance(DISPLAY_WINDOW_S + 1)
+    assert auth.begin_map_render("d1") == 0

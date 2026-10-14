@@ -21,7 +21,11 @@ short code and then authenticates every request with
   Overview, like the tablet's ``303``);
 * ``GET /api/display/v1/avatar/{user_id}?size=N`` and
   ``/emoji/{code}?size=N`` (bearer) — PNGs (:mod:`.avatars`,
-  :mod:`.emoji`).
+  :mod:`.emoji`);
+* ``GET /api/display/v1/map.png?w=&h=&scheme=`` (bearer) — the Map tab as
+  one picture (:mod:`.map_png`), under the same rules as ``/map``; a poll
+  of an unchanged map is a ``304`` that paints nothing (``/map``'s
+  ``image.etag`` is the default picture's ``ETag``).
 
 * ``POST /api/display/v1/lock`` · ``/unlock`` (``{pin}``) · ``/ack``
   (``{message_id, person_id?}``) (bearer) — the privacy lock (stored on
@@ -61,10 +65,11 @@ from ..rate_limiter import client_bucket
 from ..security import error_response
 from ..services.map_tile_service import MAP_ATTRIBUTION_TEXT
 from .avatars import AVATAR_SIZES, DEFAULT_AVATAR_SIZE
-from .boards import BoardBase, board_base, home_board, person_board
+from .boards import BoardBase, HomeBoard, board_base, home_board, person_board
 from .clock import resolve_zone
 from .display_json import (
     API_VERSION,
+    board_colors,
     board_header,
     display_clock,
     home_payload,
@@ -85,9 +90,19 @@ from .keys import (
     HOUSEHOLD_NAME_KEY,
     HOUSEHOLD_THEME_KEY,
     HOUSEHOLD_TZ_KEY,
+    MAP_PICTURES_KEY,
     RENDERER_KEY,
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
+)
+from .map_png import DEFAULT_SIZE, SCHEMES, MapTilesUnavailable, clamp_size
+from .map_scene import (
+    MapPalette,
+    MapScene,
+    map_palettes,
+    map_scene,
+    scene_etag,
+    scene_key,
 )
 from .presenter import home_colors, person_colors, view_key
 from .tabs import TAB_MAP, TAB_MESSAGES, TAB_NOTES, TAB_OVERVIEW
@@ -100,6 +115,7 @@ __all__ = [
     "DISPLAY_CACHE",
     "IMAGE_PREFIXES",
     "LOCK_PATH",
+    "MAP_PNG_PATH",
     "PAIR_PATH",
     "UNLOCK_PATH",
     "bearer_token",
@@ -120,8 +136,15 @@ MODEL_HEADER = "X-Display-Model"
 #: Every answer is revalidated by ``ETag`` (a 30 s poll is a ``304`` while
 #: nothing changed); the panel keeps it, nobody in between does.
 DISPLAY_CACHE = "private, no-cache"
+MAP_PNG_PATH = DISPLAY_API_PREFIX + "map.png"
 #: Image routes — their own, larger read budget.
-IMAGE_PREFIXES = (DISPLAY_API_PREFIX + "avatar/", DISPLAY_API_PREFIX + "emoji/")
+IMAGE_PREFIXES = (
+    DISPLAY_API_PREFIX + "avatar/",
+    DISPLAY_API_PREFIX + "emoji/",
+    MAP_PNG_PATH,
+)
+#: How long a panel waits before asking again for a map with no tiles.
+TILES_RETRY_S = 60
 _SAFE_TAG = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -448,7 +471,10 @@ class _DisplayBoardView(web.View):
         )
         return header, clock
 
-    async def _home(self, tab: str) -> web.Response:
+    async def _board(
+        self, tab: str
+    ) -> tuple[DashboardSettings, BoardBase, HomeBoard] | web.Response:
+        """Home on ``tab`` — or the ``409 NIGHT`` / ``404 TAB_OFF`` answer."""
         settings, t = await self._setup()
         snap = await self.request.app[SNAPSHOTS_KEY].home()
         base = board_base(snap, people=snap.people, colors=home_colors(snap), t=t)
@@ -459,6 +485,32 @@ class _DisplayBoardView(web.View):
         board = home_board(snap, base.fmt, tab)
         if board is None:
             return error_response(404, "TAB_OFF", "This tab isn't shown.")
+        return settings, base, board
+
+    async def _map_picture(
+        self, board: HomeBoard, base: BoardBase
+    ) -> tuple[MapScene, dict[str, MapPalette], str] | None:
+        """The Map tab's picture scene, both schemes' colours and its key —
+        ``None`` when no tile source is wired (no picture then)."""
+        app = self.request.app
+        pictures = app.get(MAP_PICTURES_KEY)
+        if pictures is None or board.map is None:
+            return None
+        scene = map_scene(board.map, t=base.fmt.t, attribution=MAP_ATTRIBUTION_TEXT)
+        css = app[RENDERER_KEY].static_asset("dashboard.css")
+        colors = board_colors(
+            "" if css is None else css.body.decode("utf-8"), await _theme(app)
+        )
+        palettes = map_palettes(colors)
+        key = scene_key(scene, palettes=palettes, tiles=pictures.source_tag)
+        return scene, palettes, key
+
+    async def _home(self, tab: str) -> web.Response:
+        found = await self._board(tab)
+        if isinstance(found, web.Response):
+            return found
+        settings, base, board = found
+        snap = board.snap
         header, clock = await self._header(
             view=tab, base=base, sections=snap.sections, settings=settings, tab=tab
         )
@@ -467,7 +519,20 @@ class _DisplayBoardView(web.View):
         elif tab == TAB_NOTES:
             payload = notes_payload(header, board, base, clock)
         elif tab == TAB_MAP:
-            payload = map_payload(header, board, base, clock, MAP_ATTRIBUTION_TEXT)
+            picture = await self._map_picture(board, base)
+            image = (
+                None
+                if picture is None
+                else {
+                    "url": MAP_PNG_PATH,
+                    "width": DEFAULT_SIZE[0],
+                    "height": DEFAULT_SIZE[1],
+                    "etag": scene_etag(picture[2], *DEFAULT_SIZE, "light"),
+                }
+            )
+            payload = map_payload(
+                header, board, base, clock, MAP_ATTRIBUTION_TEXT, image
+            )
         else:
             payload = home_payload(header, board, base, clock)
         return json_answer(self.request, payload)
@@ -485,6 +550,86 @@ class DisplayTabView(_DisplayBoardView):
 
     async def get(self) -> web.Response:
         return await self._home(self.request.match_info["tab"])
+
+
+def _dimension(request: web.Request, name: str) -> int | None:
+    """``?name=`` as an int, ``None`` when absent; ``ValueError`` when it
+    is not a plain number of at most five digits."""
+    raw = request.query.get(name)
+    if raw is None:
+        return None
+    if not raw.isascii() or not raw.isdigit() or len(raw) > 5:
+        raise ValueError(name)
+    return int(raw)
+
+
+class DisplayMapPictureView(_DisplayBoardView):
+    """``GET /api/display/v1/map.png?w=&h=&scheme=`` — Home's Map tab as
+    one PNG (:mod:`.map_png`): ``w`` × ``h`` held to 200–1920 × 200–1200
+    (default: the firmware's map area), ``scheme`` ``light`` / ``dark``.
+
+    The same rules as ``/map``: ``409 NIGHT``, ``404 TAB_OFF`` (nobody
+    located, presence off), ``423`` when locked (the guard); hidden people
+    are never in the read model. ``ETag`` → ``304`` without painting; a
+    picture is painted only when nothing kept matches, at most
+    :data:`~.auth.MAP_RENDER_MAX` a minute per panel (``429``). ``503``
+    when no tile at all can be had."""
+
+    async def get(self) -> web.Response:
+        try:
+            width, height = clamp_size(
+                _dimension(self.request, "w"), _dimension(self.request, "h")
+            )
+        except ValueError:
+            return error_response(400, "BAD_SIZE", "w and h must be whole numbers.")
+        scheme = self.request.query.get("scheme", "light")
+        if scheme not in SCHEMES:
+            return error_response(
+                400,
+                "BAD_SCHEME",
+                "Unsupported scheme.",
+                extra={"params": {"allowed": sorted(SCHEMES)}},
+            )
+        found = await self._board(TAB_MAP)
+        if isinstance(found, web.Response):
+            return found
+        _, base, board = found
+        app = self.request.app
+        picture = await self._map_picture(board, base)
+        if picture is None:
+            return _no_tiles()
+        scene, palettes, key = picture
+        etag = scene_etag(key, width, height, scheme)
+        if _etag_matches(self.request, etag):
+            return _png(self.request, b"", etag)
+        pictures = app[MAP_PICTURES_KEY]
+        kept = pictures.cached(key, width, height, scheme)
+        if kept is None:
+            wait = app[AUTH_KEY].begin_map_render(self.request[DISPLAY_KEY].id)
+            if wait:
+                response = error_response(429, "RATE_LIMITED", "Too many map pictures.")
+                response.headers["Retry-After"] = str(wait)
+                return response
+            try:
+                kept = await pictures.render(
+                    scene,
+                    key,
+                    w=width,
+                    h=height,
+                    scheme=scheme,
+                    palette=palettes[scheme],
+                )
+            except MapTilesUnavailable:
+                return _no_tiles()
+        return _png(self.request, kept.png, kept.etag)
+
+
+def _no_tiles() -> web.Response:
+    response = error_response(
+        503, "TILES_UNAVAILABLE", "The map tiles can't be loaded right now."
+    )
+    response.headers["Retry-After"] = str(TILES_RETRY_S)
+    return response
 
 
 class DisplayPersonView(_DisplayBoardView):
@@ -622,6 +767,7 @@ def register_display_routes(app: web.Application) -> None:
         DISPLAY_API_PREFIX + f"{{tab:{TAB_MESSAGES}|{TAB_NOTES}|{TAB_MAP}}}",
         DisplayTabView,
     )
+    app.router.add_view(MAP_PNG_PATH, DisplayMapPictureView)
     app.router.add_view(DISPLAY_API_PREFIX + "person/{user_id}", DisplayPersonView)
     app.router.add_view(DISPLAY_API_PREFIX + "theme", DisplayThemeView)
     app.router.add_view(DISPLAY_API_PREFIX + "avatar/{user_id}", DisplayAvatarView)

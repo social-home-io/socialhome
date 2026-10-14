@@ -78,6 +78,7 @@ __all__ = [
     "EMPTY_DAY_ICON",
     "STRING_KEYS",
     "board_header",
+    "board_colors",
     "css_palettes",
     "display_clock",
     "emoji",
@@ -731,9 +732,16 @@ def notes_payload(header: Json, board: HomeBoard, base: BoardBase, clock: Json) 
 
 
 def map_payload(
-    header: Json, board: HomeBoard, base: BoardBase, clock: Json, attribution: str
+    header: Json,
+    board: HomeBoard,
+    base: BoardBase,
+    clock: Json,
+    attribution: str,
+    image: Json | None = None,
 ) -> Json:
-    """``GET /api/display/v1/map`` — who's where (no image yet)."""
+    """``GET /api/display/v1/map`` — who's where, and ``image``: where the
+    map picture is (``GET …/map.png``), its default size and the ``ETag``
+    it has now (``None`` without a tile source)."""
     t = base.fmt.t
     payload = _home_common(header, board, base, clock)
     view: MapView | None = board.map
@@ -742,6 +750,7 @@ def map_payload(
         "title": t("dashboard.map.list"),
         "label": view.label,
         "attribution": attribution,
+        "image": image,
         "spots": [
             {
                 "person": s.person.user_id,
@@ -1157,18 +1166,10 @@ def css_palettes(css: str) -> dict[str, dict[str, str]]:
     return {"light": light, "dark": dark, "night": night}
 
 
-def theme_payload(
-    *,
-    css: str,
-    theme: HouseholdTheme | None,
-    locale: str,
-    t: T,
-) -> Json:
-    """``GET /api/display/v1/theme`` — colours, font, locale and strings.
-
-    The household theme colour becomes the accent per scheme exactly as
-    on the wall (:func:`~.presenter.theme_css`): only where it reads as
-    text on that scheme's surfaces."""
+def board_colors(css: str, theme: HouseholdTheme | None) -> dict[str, dict[str, str]]:
+    """:func:`css_palettes` with the household theme colour as the accent
+    per scheme exactly as on the wall (:func:`~.presenter.theme_css`):
+    only where it reads as text on that scheme's surfaces."""
     palettes = css_palettes(css)
     primary = hex_color(theme.primary_color) if theme is not None else None
     if primary is not None:
@@ -1176,6 +1177,20 @@ def theme_payload(
             if readable_on(primary, surfaces):
                 palettes[name]["accent"] = primary
                 palettes[name]["accent_text"] = ink_on(primary)
+    return palettes
+
+
+def theme_payload(
+    *,
+    css: str,
+    theme: HouseholdTheme | None,
+    locale: str,
+    t: T,
+) -> Json:
+    """``GET /api/display/v1/theme`` — colours (:func:`board_colors`),
+    font, locale and strings."""
+    palettes = board_colors(css, theme)
+    primary = hex_color(theme.primary_color) if theme is not None else None
     strings = {
         name: t(key, **_PLACEHOLDERS.get(key, {})) for name, key in STRING_KEYS.items()
     }

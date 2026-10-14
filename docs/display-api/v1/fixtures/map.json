@@ -82,6 +82,12 @@
         "zone": null
       }
     ],
+    "image": {
+      "etag": "\"054b8fa50fdea399bc76398c501de86d\"",
+      "height": 560,
+      "url": "/api/display/v1/map.png",
+      "width": 748
+    },
     "label": "Map: Mia and Pascal at Home, Leo at School, Anna away",
     "pins": [
       {

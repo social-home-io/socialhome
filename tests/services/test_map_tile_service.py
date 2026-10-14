@@ -596,3 +596,11 @@ async def test_fetch_sends_a_bounded_timeout():
     timeout = kwargs["timeout"]
     assert isinstance(timeout, aiohttp.ClientTimeout)
     assert timeout.total == 15
+
+
+def test_source_tag_names_the_template_without_revealing_it():
+    keyed = "https://tiles.example/{z}/{x}/{y}.png?key=SECRET"
+    tag = MapTileService(keyed, user_agent=UA).source_tag
+    assert len(tag) == 16 and "SECRET" not in tag
+    assert tag == MapTileService(keyed, user_agent=UA).source_tag
+    assert tag != MapTileService(TEMPLATE, user_agent=UA).source_tag

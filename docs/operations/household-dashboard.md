@@ -165,7 +165,10 @@ dashboard **address** — it always wins over the guess.
   Assistant reports as unavailable is left off the map rather than
   shown as away. Map tiles are fetched by Social
   Home (the tablet never contacts a map server); the map credits
-  OpenStreetMap.
+  OpenStreetMap. Wall panels get the same map as one picture, drawn by
+  Social Home from the same tiles — a few hundred kilobytes, fetched
+  again only when someone moves (or a minute after the tile server was
+  unreachable, when the missing squares show plain).
 - **A person** (tap their face in the rail): what they're doing now and
   next, their school day with rooms and teachers (a cancelled lesson is
   struck through *and* says "Cancelled"), today's and tomorrow's plans

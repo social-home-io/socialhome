@@ -24,6 +24,7 @@ only ``scheme://host/path`` is ever emitted.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections import OrderedDict
@@ -126,6 +127,13 @@ class MapTileService:
         # cannot see these buffers — the bound has to live here.
         self._fetch_semaphore = asyncio.Semaphore(max_concurrent_fetches)
         self._upstream_failed_at: float | None = None
+
+    @property
+    def source_tag(self) -> str:
+        """A short digest of the upstream template — names the source for
+        a cache key (the household dashboard's map picture) without ever
+        exposing the template, which may carry an API key."""
+        return hashlib.sha256(self._template.encode()).hexdigest()[:16]
 
     def attach_session(self, session: aiohttp.ClientSession) -> None:
         """Provide the shared aiohttp session after construction."""

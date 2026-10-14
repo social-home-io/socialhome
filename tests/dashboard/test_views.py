@@ -97,6 +97,8 @@ def household():
 class FakeTiles:
     """Stands in for :class:`MapTileService` (the main app's tile proxy)."""
 
+    source_tag = "fake-tiles"
+
     def __init__(self) -> None:
         self.calls: list[tuple[int, int, int]] = []
         self.fail: Exception | None = None
