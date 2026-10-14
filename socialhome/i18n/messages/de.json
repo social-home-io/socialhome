@@ -195,7 +195,7 @@
   "dashboard.display.unpaired": "Dieses Panel ist nicht mehr gekoppelt. Kopple es erneut unter Admin › Dashboard.",
   "dashboard.display.connecting": "Verbinde mit Social Home…",
   "dashboard.display.wifi_title": "Panel mit dem WLAN verbinden",
-  "dashboard.display.wifi_text": "Gib dem Panel dein WLAN mit Improv: Der Web-Installer fragt direkt nach dem Flashen danach, oder ein Handy schickt es per Bluetooth (Home Assistant findet das Panel, oder öffne improv-wifi.com). Tippe auf „Allow“, wenn das Panel fragt.",
+  "dashboard.display.wifi_text": "Gib dem Panel dein WLAN mit Improv: Der Web-Installer fragt direkt nach dem Flashen danach, oder ein Handy schickt es per Bluetooth (Home Assistant findet das Panel, oder öffne improv-wifi.com). Tippe auf „Erlauben“, wenn das Panel fragt.",
   "dashboard.display.wifi_waiting": "Warte auf WLAN…",
   "dashboard.display.server_title": "Social Home finden",
   "dashboard.display.server_text": "Gib die Adresse deines Social Home ein. Der Dashboard-Port 8100 wird automatisch ergänzt.",
@@ -224,5 +224,12 @@
   "dashboard.display.forget_confirm": "Dieses Social Home vergessen? Das Panel zeigt wieder die Einrichtung und braucht einen neuen Kopplungscode.",
   "dashboard.display.cancel": "Abbrechen",
   "dashboard.display.close": "Schließen",
-  "dashboard.display.credits": "Emoji: Twemoji © Twitter, Inc und weitere Mitwirkende, © jdecked und weitere Mitwirkende, CC-BY 4.0. Schrift: Roboto, Apache 2.0. Firmware: MPL-2.0, basiert auf ESPHome (GPLv3) und LVGL (MIT)."
+  "dashboard.display.credits": "Emoji: Twemoji © Twitter, Inc und weitere Mitwirkende, © jdecked und weitere Mitwirkende, CC-BY 4.0. Schrift: Roboto, Apache 2.0. Firmware: MPL-2.0, basiert auf ESPHome (GPLv3) und LVGL (MIT).",
+  "dashboard.display.improv_title": "Ein Handy möchte das WLAN einrichten",
+  "dashboard.display.improv_allow": "Erlauben",
+  "dashboard.display.server_text_found": "Tippe auf dein Social Home oder gib seine Adresse ein. Der Dashboard-Port 8100 wird automatisch ergänzt.",
+  "dashboard.display.found_title": "In diesem Netzwerk gefunden",
+  "dashboard.display.found_looking": "Suche Social Home in diesem Netzwerk…",
+  "dashboard.display.found_none": "Noch keins gefunden. Nutzt du die Home Assistant App? Gib ihre Adresse unten ein.",
+  "dashboard.display.claim_sealed": "Diese Verbindungsanfrage lässt sich auf diesem Panel nicht öffnen. Tippe in Social Home erneut auf Verbinden."
 }

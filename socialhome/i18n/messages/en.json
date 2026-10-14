@@ -234,5 +234,12 @@
   "dashboard.display.forget_confirm": "Forget this Social Home? The panel shows the setup again and needs a new pairing code.",
   "dashboard.display.cancel": "Cancel",
   "dashboard.display.close": "Close",
-  "dashboard.display.credits": "Emoji: Twemoji © Twitter, Inc and other contributors, © jdecked and other contributors, CC-BY 4.0. Font: Roboto, Apache 2.0. Firmware: MPL-2.0, built on ESPHome (GPLv3) and LVGL (MIT)."
+  "dashboard.display.credits": "Emoji: Twemoji © Twitter, Inc and other contributors, © jdecked and other contributors, CC-BY 4.0. Font: Roboto, Apache 2.0. Firmware: MPL-2.0, built on ESPHome (GPLv3) and LVGL (MIT).",
+  "dashboard.display.improv_title": "A phone wants to set up Wi-Fi",
+  "dashboard.display.improv_allow": "Allow",
+  "dashboard.display.server_text_found": "Tap your Social Home, or type its address. The dashboard port 8100 is added for you.",
+  "dashboard.display.found_title": "Found on this network",
+  "dashboard.display.found_looking": "Looking for Social Home on this network…",
+  "dashboard.display.found_none": "None found yet. Using the Home Assistant App? Type its address below.",
+  "dashboard.display.claim_sealed": "This connect request can't be opened on this panel. Press Connect in Social Home again."
 }
