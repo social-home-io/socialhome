@@ -479,6 +479,61 @@ def test_theme_carries_the_panel_strings_in_every_locale():
         assert "Home Assistant App" in strings["found_none"], locale
 
 
+#: The SPA's own catalogs — the pair hint names the admin's labels.
+SPA_LOCALES_DIR = Path(__file__).parents[2] / "client" / "src" / "i18n" / "locales"
+
+
+def test_credits_name_roboto_under_the_sil_ofl_in_every_locale():
+    """Roboto (bundled under ``dashboard/fonts/`` with ``OFL.txt``, and
+    embedded in the panel firmware) is SIL OFL 1.1 — not Apache 2.0."""
+    for locale in SUPPORTED_DASHBOARD_LOCALES:
+        t = RENDERER.translator(locale)
+        credits = theme_payload(css=_css(), theme=None, locale=locale, t=t)["strings"][
+            "credits"
+        ]
+        assert "Roboto, SIL OFL 1.1" in credits, (locale, credits)
+        assert "Apache" not in credits, (locale, credits)
+        for part in ("Twemoji", "CC-BY 4.0", "MPL-2.0", "GPLv3", "LVGL (MIT)"):
+            assert part in credits, (locale, part, credits)
+
+
+def test_credits_english_matches_the_firmware_built_in():
+    strings = theme_payload(css=_css(), theme=None, locale="en", t=T)["strings"]
+    assert strings["credits"] == (
+        "Emoji: Twemoji © Twitter, Inc and other contributors, "
+        "© jdecked and other contributors, CC-BY 4.0. Font: Roboto, SIL OFL 1.1. "
+        "Firmware: MPL-2.0, built on ESPHome (GPLv3) and LVGL (MIT)."
+    )
+
+
+def test_bundled_roboto_ships_its_ofl_licence():
+    fonts = STATIC_DIR.parent / "fonts"
+    assert "SIL Open Font License, Version 1.1" in (fonts / "OFL.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_pair_hint_walks_to_the_add_panel_button_in_every_locale():
+    """The hint names the exact Admin › Dashboard › Wall panels › Add
+    labels the SPA shows in the admin's language."""
+    for locale in SUPPORTED_DASHBOARD_LOCALES:
+        spa = json.loads(
+            (SPA_LOCALES_DIR / f"{locale}.json").read_text(encoding="utf-8")
+        )
+        t = RENDERER.translator(locale)
+        hint = theme_payload(css=_css(), theme=None, locale=locale, t=t)["strings"][
+            "pair_hint"
+        ]
+        path = " › ".join(
+            (
+                spa["admin.tab.dashboard"],
+                spa["admin.dashboard.panels.heading"],
+                spa["admin.dashboard.panels.add"],
+            )
+        )
+        assert path in hint, (locale, hint, path)
+
+
 def test_theme_panel_strings_are_the_firmware_english():
     strings = theme_payload(css=_css(), theme=None, locale="en", t=T)["strings"]
     # Worded without a plural (the panel fills one number into one
