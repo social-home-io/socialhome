@@ -59,6 +59,9 @@ export interface DashboardState {
   /** A short on-device tone for a new @here / @name mention (default on;
    *  only matters while ``show_household_messages`` is). */
   mention_sound: boolean
+  /** A Home Assistant automation may lift a wall panel's privacy lock
+   *  without the PIN (admin opt-in, default off). */
+  panel_unlock_from_ha: boolean
   /** ``feat_household_chat`` is on — the messages switch needs it. */
   household_chat_enabled: boolean
   last_seen_at: string | null

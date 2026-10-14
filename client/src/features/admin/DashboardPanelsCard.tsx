@@ -10,6 +10,9 @@
  * A panel privacy-locked with the household PIN shows "Locked"; Unlock
  * (``PATCH … {"locked": false}``) lifts it from here — no confirm, the
  * panel can lock itself again.
+ * "Home Assistant may unlock wall panels" (``panel_unlock_from_ha``,
+ * saved through the settings ``PUT``) lets an automation lift that lock
+ * without the PIN — shown with no panel paired too, so it can be set first.
  * "Sign out all tablets" unpairs every panel too.
  *
  * On ha / the Home Assistant App (``state.ha_display_discovery``) a
@@ -28,7 +31,8 @@ import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
 import { t } from '@/i18n/i18n'
 import { relativeDocsTime } from '@/utils/relativeTime'
-import type { DashboardDisplay, DashboardState, HaPanel } from './dashboardTypes'
+import { SwitchRow } from './DashboardSwitchRow'
+import type { DashboardDisplay, DashboardState, HaPanel, SaveFn } from './dashboardTypes'
 
 const ENDPOINT = '/api/admin/dashboard/displays'
 const HA_ENDPOINT = '/api/admin/dashboard/displays/ha'
@@ -52,11 +56,13 @@ export function formatPairingCode(raw: string): string {
     .slice(0, PAIRING_CODE_LENGTH)
 }
 
-export function DashboardPanelsCard({ state, reload }: {
+export function DashboardPanelsCard({ state, save, reload }: {
   state: DashboardState
+  save: SaveFn
   reload: () => Promise<void>
 }) {
   const [adding, setAdding] = useState(false)
+  const [savingHaUnlock, setSavingHaUnlock] = useState(false)
   const [renaming, setRenaming] = useState<DashboardDisplay | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const displays = state.displays
@@ -95,6 +101,15 @@ export function DashboardPanelsCard({ state, reload }: {
     } finally {
       setBusyId(null)
       await reload()
+    }
+  }
+
+  const setHaUnlock = async (on: boolean) => {
+    setSavingHaUnlock(true)
+    try {
+      await save({ panel_unlock_from_ha: on })
+    } finally {
+      setSavingHaUnlock(false)
     }
   }
 
@@ -155,6 +170,10 @@ export function DashboardPanelsCard({ state, reload }: {
           {t('admin.dashboard.panels.add')}
         </Button>
       </div>
+      <SwitchRow id="sh-dash-panels-ha-unlock" label={t('admin.dashboard.panels.ha_unlock')}
+        hint={t('admin.dashboard.panels.ha_unlock_hint')} checked={state.panel_unlock_from_ha}
+        disabled={savingHaUnlock}
+        onChange={(v) => void setHaUnlock(v)} />
       {state.ha_display_discovery && <HaPanelsSection state={state} reload={reload} />}
       <AddPanelDialog open={adding} onClose={() => setAdding(false)}
         onPaired={(name) => {

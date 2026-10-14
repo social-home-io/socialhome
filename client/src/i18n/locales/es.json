@@ -3676,6 +3676,8 @@
   "admin.dashboard.panels.ha_status_ready": "Aún sin vincular",
   "admin.dashboard.panels.ha_status_offline": "Sin conexión en Home Assistant",
   "admin.dashboard.panels.ha_status_needs_update": "Actualiza el firmware de la pantalla para conectarla desde aquí",
+  "admin.dashboard.panels.ha_unlock": "Home Assistant puede desbloquear las pantallas de pared",
+  "admin.dashboard.panels.ha_unlock_hint": "Permite que una automatización de Home Assistant desbloquee una pantalla sin el PIN. Cualquiera que pueda ejecutar tus automatizaciones o acciones de Home Assistant podrá entonces quitar el bloqueo de privacidad.",
   "admin.backup.downloaded": "Copia de seguridad descargada",
   "admin.backup.restore_confirm": "¿Restaurar desde «{name}»?\n\nSolo funciona en un Social Home vacío. Si ya hay datos, la restauración se bloquea para que no los sobrescribas sin querer. Descarga antes una copia si quieres conservar lo que hay.",
   "admin.backup.restored": "Copia de seguridad restaurada",

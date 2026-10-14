@@ -3649,6 +3649,8 @@
   "admin.dashboard.panels.ha_status_ready": "Pas encore associé",
   "admin.dashboard.panels.ha_status_offline": "Hors ligne dans Home Assistant",
   "admin.dashboard.panels.ha_status_needs_update": "Mettez à jour le firmware de l’écran pour le connecter d’ici",
+  "admin.dashboard.panels.ha_unlock": "Home Assistant peut déverrouiller les écrans muraux",
+  "admin.dashboard.panels.ha_unlock_hint": "Permet à une automatisation Home Assistant de déverrouiller un écran sans le code PIN. Toute personne pouvant exécuter vos automatisations ou actions Home Assistant pourra alors lever le verrouillage de confidentialité.",
   "admin.backup.downloaded": "Sauvegarde téléchargée",
   "admin.backup.restore_confirm": "Restaurer depuis « {name} » ?\n\nCela ne fonctionne que sur un Social Home vide. Les données existantes bloquent la restauration pour éviter de les écraser par erreur. Téléchargez d'abord une sauvegarde si vous voulez garder l'état actuel.",
   "admin.backup.restored": "Sauvegarde restaurée",

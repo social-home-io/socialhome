@@ -3685,6 +3685,8 @@
   "admin.dashboard.panels.ha_status_ready": "Not paired yet",
   "admin.dashboard.panels.ha_status_offline": "Offline in Home Assistant",
   "admin.dashboard.panels.ha_status_needs_update": "Update the panel's firmware to connect it from here",
+  "admin.dashboard.panels.ha_unlock": "Home Assistant may unlock wall panels",
+  "admin.dashboard.panels.ha_unlock_hint": "Lets a Home Assistant automation unlock a panel without the PIN. Anyone who can run your Home Assistant automations or actions can then lift the privacy lock.",
   "admin.backup.downloaded": "Backup downloaded",
   "admin.backup.restore_confirm": "Restore from \"{name}\"?\n\nThis only works on an empty Social Home. Existing data blocks the restore so you don't overwrite it by accident. Download a backup first if you want to keep what's there now.",
   "admin.backup.restored": "Backup restored",
