@@ -645,7 +645,47 @@ a:focus:not(:focus-visible) { outline: none; }
     overflow: hidden;
     overscroll-behavior: contain;
   }
+
+  /* On-screen keyboard up (``useKeyboardOpen`` → ``html.sh-kbd-open``,
+   * touch devices only): the tab bar slides off the bottom edge so the
+   * field being typed into keeps the room, and every surface that
+   * reserved space for the bar hands it back. The visibility flip is
+   * delayed until the slide ends on the way out and immediate on the
+   * way back. ``inert`` (MobileNav.tsx) keeps it out of focus order. */
+  .sh-mobile-nav {
+    transition: transform 160ms var(--sh-ease-out), visibility 0s linear 0s;
+  }
+  .sh-mobile-nav.sh-mobile-nav--kbd {
+    transform: translateY(100%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform 160ms var(--sh-ease-out), visibility 0s linear 160ms;
+  }
+  html.sh-kbd-open .sh-main { padding-bottom: var(--sh-space-md); }
+  html.sh-kbd-open .sh-main:has(.sh-feed-host--chat),
+  html.sh-kbd-open .sh-main:has(.sh-space-feed--chat) { padding-bottom: 0; }
+  html.sh-kbd-open .sh-feed-host--chat,
+  html.sh-kbd-open .sh-space-feed--chat {
+    height: calc(
+      100dvh - var(--sh-topbar-height) - var(--sh-space-md)
+      - var(--sh-space-sm) - env(safe-area-inset-bottom, 0px)
+    );
+  }
+  html.sh-kbd-open .sh-mobile-drawer .sh-sidenav {
+    padding-bottom: calc(var(--sh-space-md) + env(safe-area-inset-bottom, 0px));
+  }
+  html.sh-kbd-open .sh-timetable-brushbar {
+    bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html.sh-kbd-open .sh-conn { padding-bottom: var(--sh-space-xl); }
 }
+@media (max-width: 768px) and (prefers-reduced-motion: reduce) {
+  .sh-mobile-nav,
+  .sh-mobile-nav.sh-mobile-nav--kbd { transition: none; }
+}
+/* The back-to-top FAB floats over the bottom-right corner — exactly
+ * where a focused field sits once the keyboard pushes it down. */
+html.sh-kbd-open .sh-back-to-top { display: none; }
 
 /* ───── 3. Primitives ────────────────────────────────────────────────── */
 
