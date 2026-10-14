@@ -148,7 +148,7 @@ describe('MobileNav — steps aside while the on-screen keyboard is up', () => {
     })
   }
 
-  it('hides the tab bar (inert + aria-hidden) and restores it on blur', async () => {
+  it('hides the tab bar (inert + aria-hidden) and restores it once the keyboard is gone', async () => {
     const { container } = render(wrap(<><MobileNav /><input id="f" /></>))
     const nav = container.querySelector('.sh-mobile-nav') as HTMLElement
     expect(nav.classList.contains('sh-mobile-nav--kbd')).toBe(false)
@@ -166,6 +166,13 @@ describe('MobileNav — steps aside while the on-screen keyboard is up', () => {
     await act(async () => {
       input.blur()
       await new Promise((r) => setTimeout(r, 0))
+    })
+    // Still hidden while the keyboard animates away — it must not pop
+    // up over the composer under a finger that's mid-tap.
+    expect(nav.classList.contains('sh-mobile-nav--kbd')).toBe(true)
+    act(() => {
+      vv.height = 844
+      vv.dispatchEvent(new Event('resize'))
     })
     expect(nav.classList.contains('sh-mobile-nav--kbd')).toBe(false)
     expect(nav.hasAttribute('inert')).toBe(false)

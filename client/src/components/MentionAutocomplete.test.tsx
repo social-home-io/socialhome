@@ -282,6 +282,27 @@ describe('MentionAutocomplete — right-to-left', () => {
     }
   })
 
+  it('flips above the field and fits the room the phone keyboard leaves', async () => {
+    const { ta } = await composer()
+    // 360×640 phone, keyboard up: only the top 300 px are visible.
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true, value: { offsetTop: 0, height: 300, width: 360 },
+    })
+    ta.getBoundingClientRect = () => ({
+      left: 16, right: 344, top: 220, bottom: 260, width: 328, height: 40,
+      x: 16, y: 220, toJSON: () => ({}),
+    }) as DOMRect
+    try {
+      type(ta, '@an')
+      await waitFor(() => expect(listbox()).toBeTruthy())
+      expect(listbox()!.style.transform).toBe('translateY(-100%)')
+      // 220 px above the field, minus the 4 px gap and 8 px edge.
+      expect(listbox()!.style.maxHeight).toBe('208px')
+    } finally {
+      Object.defineProperty(window, 'visualViewport', { configurable: true, value: undefined })
+    }
+  })
+
   it('keeps a token readable ("@anna", not "anna@") in an RTL page', async () => {
     const { ta } = await composer()
     type(ta, '@an')

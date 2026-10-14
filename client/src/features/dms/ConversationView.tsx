@@ -55,6 +55,8 @@ import { useTitle, useTitleAvatar, type PageAvatar } from '@/store/pageTitle'
 import { normaliseTimestamp } from '@/utils/relativeTime'
 import { addBase } from '@/baseUrl'
 import { safeHref } from '@/utils/safeHref'
+import { visibleArea } from '@/utils/popoverPlacement'
+import { useKeyboardOpen } from '@/hooks/useKeyboardOpen'
 
 /** Page size for the lazy-load older-history fetch. The initial
  *  load uses a wider window (see ``ConversationView`` body); each
@@ -68,6 +70,22 @@ const PAGE_SIZE = 50
  *  WhatsApp's ceiling so a very long draft doesn't eat half the chat
  *  while the user is still typing. */
 const MAX_COMPOSER_HEIGHT_PX = 160
+/** Share of the visible height a growing draft may take. With a phone
+ *  keyboard up only ~300–500 px are visible; a full 160 px composer
+ *  would leave a strip of the conversation — keep most of it in view. */
+const COMPOSER_VISIBLE_SHARE = 0.3
+/** …but never cap it below ~3 lines. */
+const MIN_COMPOSER_CAP_PX = 72
+
+/** Height cap for the composer textarea given the visible area's
+ *  height: ``MAX_COMPOSER_HEIGHT_PX`` on a roomy screen, a share of it
+ *  when the keyboard leaves little room. */
+export function composerHeightCap(visibleHeight: number): number {
+  return Math.min(
+    MAX_COMPOSER_HEIGHT_PX,
+    Math.max(MIN_COMPOSER_CAP_PX, Math.floor(visibleHeight * COMPOSER_VISIBLE_SHARE)),
+  )
+}
 
 /** Pixel slack at the visual bottom that still counts as "looking at
  *  the live edge". Picked at 80 px so a single line of swipe inertia
@@ -798,6 +816,14 @@ export function ConversationView({
   // sending. Uncontrolled input + ref keeps the existing FormData send
   // path untouched.
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
+  // The draft's height cap follows the visible area: re-fit a long
+  // draft when the phone keyboard opens or closes.
+  const keyboardUp = useKeyboardOpen()
+  useEffect(() => {
+    const ta = composerInputRef.current
+    if (ta && ta.value) autoResize(ta)
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- ``autoResize`` only reads the element it is given
+  }, [keyboardUp])
   /** Hidden ``<input type="file">`` driven by the paperclip button.
    *  Ref-managed so the on-click handler can call ``click()`` and
    *  open the system file picker without rendering the ugly default
@@ -1391,10 +1417,9 @@ export function ConversationView({
     // point. Add the border delta so a 1-row composer stays
     // scrollbar-free; the cap still applies past the limit.
     const borderDelta = el.offsetHeight - el.clientHeight
-    const target = Math.min(
-      el.scrollHeight + borderDelta,
-      MAX_COMPOSER_HEIGHT_PX,
-    )
+    const area = visibleArea()
+    const cap = composerHeightCap(area.bottom - area.top)
+    const target = Math.min(el.scrollHeight + borderDelta, cap)
     el.style.height = `${target}px`
     // Toggle the vertical scrollbar: visible only when the user has
     // typed past the height cap. On Linux Chrome (classic
@@ -1404,7 +1429,7 @@ export function ConversationView({
     // the cap reclaims that gutter for the text; only the rare
     // "drafting a screenplay in the chat bar" case still gets a
     // scrollbar.
-    el.style.overflowY = target >= MAX_COMPOSER_HEIGHT_PX ? 'auto' : 'hidden'
+    el.style.overflowY = target >= cap ? 'auto' : 'hidden'
   }
 
   /** Drive a file picker → ``/api/media/upload`` → composer chip.
@@ -2972,6 +2997,10 @@ export function ConversationView({
         {composerHasContent.value || !allowAttachments ? (
           <Button
             type="submit"
+            // Keep focus (and the phone keyboard) in the textarea: a tap
+            // on Send would otherwise move focus to the button and close
+            // the keyboard after every message.
+            onMouseDown={(e) => e.preventDefault()}
             // Block sends while an upload is in flight — otherwise a
             // user mid-upload who hit Send would ship the text only
             // and silently drop the attachment.

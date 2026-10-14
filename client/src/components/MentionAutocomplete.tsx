@@ -36,6 +36,13 @@ import {
   type MentionCandidate,
 } from '@/utils/mentions'
 import { t } from '@/i18n/i18n'
+import {
+  POPOVER_EDGE,
+  clampHorizontally,
+  pinFixed,
+  placeVertically,
+  visibleArea,
+} from '@/utils/popoverPlacement'
 
 type SpliceCallback = (text: string, range: [number, number]) => void
 
@@ -63,6 +70,8 @@ interface MentionState {
   top: number
   left: number
   width: number
+  /** Room between the input and the visible edge on the chosen side. */
+  maxHeight: number
   placement: 'below' | 'above'
   anchor: HTMLInputElement | HTMLTextAreaElement
   splice: SpliceCallback
@@ -73,10 +82,10 @@ const state = signal<MentionState | null>(null)
 export const MENTION_LISTBOX_ID = 'sh-mention-listbox'
 const optionId = (idx: number) => `sh-mention-opt-${idx}`
 
-/** Popover height budget used to decide whether it fits below the input. */
-const ESTIMATED_POPOVER_HEIGHT = 300
 const MAX_WIDTH = 320
-const EDGE = 8
+/** The list's own cap (≈ 6 rows) and the room it wants below the
+ *  input before flipping above; a short visible area lowers the cap. */
+const MAX_LIST_HEIGHT = 280
 
 function matchesFor(s: MentionState): MentionCandidate[] | null {
   const { kind, id } = s.scope
@@ -118,21 +127,15 @@ export function checkForMentionTrigger(
   if (resolved.kind === 'space') void loadSpaceMembers(resolved.id)
   else void loadConversationMembers(resolved.id)
   const rect = anchor.getBoundingClientRect()
-  const vv = window.visualViewport
   // The on-screen area is the visual viewport — on a phone with the
   // keyboard up it ends well above ``innerHeight``. Flip above the input
   // when the list wouldn't fit between the input and the keyboard.
-  const visibleTop = vv ? vv.offsetTop : 0
-  const visibleBottom = vv ? vv.offsetTop + vv.height : window.innerHeight
-  const visibleWidth = vv ? vv.width : window.innerWidth
-  const spaceBelow = visibleBottom - rect.bottom
-  const spaceAbove = rect.top - visibleTop
-  const above = spaceBelow < ESTIMATED_POPOVER_HEIGHT + EDGE && spaceAbove > spaceBelow
-  const width = Math.min(MAX_WIDTH, visibleWidth - 2 * EDGE)
+  const area = visibleArea()
+  const v = placeVertically(rect, area, MAX_LIST_HEIGHT)
+  const width = Math.min(MAX_WIDTH, area.width - 2 * POPOVER_EDGE)
   // Anchor on the input's inline-start edge: its right edge in RTL.
   const rtl = getComputedStyle(anchor).direction === 'rtl'
-  const start = rtl ? rect.right - width : rect.left
-  const left = Math.max(EDGE, Math.min(start, visibleWidth - width - EDGE))
+  const left = clampHorizontally(rtl ? rect.right - width : rect.left, width, area)
   const prev = state.value
   const sameToken = prev !== null && prev.anchor === anchor
     && prev.range[0] === trigger.start
@@ -141,10 +144,11 @@ export function checkForMentionTrigger(
     query: trigger.query,
     range: [trigger.start, cursorPos],
     active: sameToken && prev.query === trigger.query ? prev.active : 0,
-    top: above ? rect.top - 4 : rect.bottom + 4,
+    top: v.top,
     left,
     width,
-    placement: above ? 'above' : 'below',
+    maxHeight: v.maxHeight,
+    placement: v.placement,
     anchor,
     splice,
   }
@@ -221,13 +225,7 @@ export function MentionAutocomplete() {
   useLayoutEffect(() => {
     const el = ref.current
     if (!el || s === null) return
-    el.style.left = `${s.left}px`
-    el.style.top = `${s.top}px`
-    const r = el.getBoundingClientRect()
-    const dx = r.left - s.left
-    const dy = (s.placement === 'above' ? r.bottom : r.top) - s.top
-    if (dx) el.style.left = `${s.left - dx}px`
-    if (dy) el.style.top = `${s.top - dy}px`
+    pinFixed(el, s.left, s.top, s.placement)
   })
   const open = s !== null
   useEffect(() => {
@@ -260,6 +258,7 @@ export function MentionAutocomplete() {
     top: `${s.top}px`,
     left: `${s.left}px`,
     width: `${s.width}px`,
+    maxHeight: `${Math.min(s.maxHeight, MAX_LIST_HEIGHT)}px`,
     transform: s.placement === 'above' ? 'translateY(-100%)' : 'none',
   }
   if (matches === null) {
