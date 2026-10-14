@@ -131,7 +131,7 @@
                   too narrow for a word (always below 10 % of the day, and
                   by its real width via a container query). -#}
               <span class="dash-block-icon" aria-hidden="true">{{ b.icon }}</span>
-              <span class="dash-block-title" aria-hidden="true">{% if b.kind == "school" %}🎒 {% endif %}{{ b.title }}</span>
+              <span class="dash-block-title" aria-hidden="true">{% if b.kind == "school" %}<span class="dash-block-emoji">🎒</span> {% endif %}{{ b.title }}</span>
               {% if b.more %}<span class="dash-block-more" aria-hidden="true">+{{ b.more }}</span>{% endif %}
             </li>
             {% endfor %}

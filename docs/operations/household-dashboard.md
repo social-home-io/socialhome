@@ -301,7 +301,9 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
   up. Setting or changing the PIN signs no tablet out.
 - **Five wrong PINs sign the tablet out.** After five wrong tries within
   15 minutes the next one signs that tablet out, and it needs the
-  dashboard password (or a fresh setup link) again. This is counted per
+  dashboard password (or a fresh setup link) again. After each wrong PIN
+  the keypad says how many tries are left ("Tries left: 3"), like a wall
+  panel does. This is counted per
   lock on each tablet — tablets behind one reverse proxy don't use up
   each other's tries, and neither reloading, re-tapping 🔒 on a locked
   tablet, changing network address nor flooding the login page from

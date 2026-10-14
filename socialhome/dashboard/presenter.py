@@ -51,6 +51,7 @@ from .contrast import (
     hex_color,
     ink_on,
     note_colors,
+    past_colors,
     readable_on,
 )
 from .icons import title_icon
@@ -118,8 +119,11 @@ class ColorBook:
     softened toward the page, mixed here in Oklab) with ``--kn`` (an ink
     picked against that fill, :func:`~.contrast.note_colors`), and for
     Map markers ``--kf`` (a frame that reaches 3:1 on the marker bubble,
-    :func:`~.contrast.frame_color`) — the dark fill, ink and frame again
-    under ``prefers-color-scheme: dark`` and at night.
+    :func:`~.contrast.frame_color`) and for past timeline bars ``--kp``
+    (the colour faded over the card) with ``--kq`` (an ink picked against
+    that fill, :func:`~.contrast.past_colors`) — the dark fills, inks and
+    frame again under ``prefers-color-scheme: dark`` and at night (the
+    past fill once more, over the darker night card).
     Register every colour *before* rendering
     (:meth:`add`); the template asks :meth:`cls`. Anything that isn't a
     plain hex colour gets no class — the element keeps its neutral look.
@@ -146,29 +150,38 @@ class ColorBook:
         return next((c for c, name in self._classes.items() if name == cls), None)
 
     def css(self) -> str:
+        if not self._classes:
+            return ""
         notes = {color: note_colors(color) for color in self._classes}
+        past = {color: past_colors(color) for color in self._classes}
         light = "".join(
             f".{name}{{--kc:{color};--kt:{ink_on(color)};"
             f"--kn:{notes[color].light_ink};--kb:{notes[color].light_bg};"
-            f"--kf:{frame_color(color, BUBBLE_LIGHT, BLACK)}}}"
+            f"--kf:{frame_color(color, BUBBLE_LIGHT, BLACK)};"
+            f"--kp:{past[color].light_bg};--kq:{past[color].light_ink}}}"
             for color, name in self._classes.items()
         )
-        dark = [
-            (
-                name,
+
+        def dark(color: str, past_bg: str, past_ink: str) -> str:
+            return (
                 f"{{--kn:{notes[color].dark_ink};--kb:{notes[color].dark_bg};"
-                f"--kf:{frame_color(color, BUBBLE_DARK, WHITE)}}}",
+                f"--kf:{frame_color(color, BUBBLE_DARK, WHITE)};"
+                f"--kp:{past_bg};--kq:{past_ink}}}"
             )
-            for color, name in self._classes.items()
-        ]
-        if not dark:
-            return light
+
         return (
             light
             + "@media (prefers-color-scheme:dark){"
-            + "".join(f".{name}{rule}" for name, rule in dark)
+            + "".join(
+                f".{name}" + dark(color, past[color].dark_bg, past[color].dark_ink)
+                for color, name in self._classes.items()
+            )
             + "}"
-            + "".join(f".dash-night .{name}{rule}" for name, rule in dark)
+            + "".join(
+                f".dash-night .{name}"
+                + dark(color, past[color].night_bg, past[color].night_ink)
+                for color, name in self._classes.items()
+            )
         )
 
 

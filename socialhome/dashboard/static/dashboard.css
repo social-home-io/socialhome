@@ -2,7 +2,8 @@
    System fonts only: the dashboard never fetches from a third-party host.
    No inline style attributes anywhere (the CSP forbids them): per-person /
    per-item colours arrive as classes (.kN sets --kc / --kt, --kb / --kn
-   for note cards and --kf for map markers) in the page's
+   for note cards, --kp / --kq for past timeline bars and --kf for map
+   markers) in the page's
    one hash-admitted <style>; timeline geometry uses the .x-N / .w-N steps
    at the end of this file. Logical properties throughout, so RTL flips. */
 
@@ -19,6 +20,11 @@
   --dash-error-text: #8a1c12;
   --dash-focus: #1d5fd1;
   --dash-radius: 16px;
+  /* A past timeline bar with no colour of its own: --dash-muted at 50 %
+     over --dash-surface, and the ink that reads on it (contrast.py
+     past_colors — test_contrast checks these stay in step). */
+  --dash-past-fill: #afaca8;
+  --dash-past-ink: #000000;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -33,6 +39,8 @@
     --dash-error-bg: #3a1a16;
     --dash-error-text: #ffb4a9;
     --dash-focus: #8ab4ff;
+    --dash-past-fill: #6a6660;
+    --dash-past-ink: #ffffff;
   }
 }
 
@@ -312,6 +320,13 @@ h1 {
   max-inline-size: 20rem;
   margin-inline: auto;
   text-align: start;
+}
+
+/* "Tries left: n" under "Wrong PIN" (the panel's remaining count). */
+.dash-pin-tries {
+  display: block;
+  margin-block-start: 4px;
+  font-weight: 600;
 }
 
 /* With lock.js the field + submit stay in the form (they carry the
@@ -1362,6 +1377,31 @@ h3.dash-sublabel {
   );
 }
 
+/* A past bar fades only its fill: --kp is the colour composited at 50 %
+   over the card on the server, --kq the black or white ink picked
+   against that (contrast.py past_colors). The label stays at full
+   strength — fading the whole bar left it at ~2:1 in dark mode — and the
+   emoji fade as before. */
+.dash-block.dash-past {
+  opacity: 1;
+  color: var(--kq, var(--dash-past-ink));
+  background-color: var(--kp, var(--dash-past-fill));
+}
+
+.dash-block.dash-past .dash-block-icon,
+.dash-block.dash-past .dash-block-emoji {
+  opacity: 0.5;
+}
+
+/* Half-strength stripes too, as when the whole bar faded. */
+.dash-block-school.dash-past {
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgb(255 255 255 / 0.08) 0 8px,
+    transparent 8px 16px
+  );
+}
+
 .dash-r-0 {
   inset-block-start: 0;
 }
@@ -1740,6 +1780,8 @@ h3.dash-sublabel {
   --dash-error-bg: #3a1a16;
   --dash-error-text: #ffb4a9;
   --dash-focus: #8ab4ff;
+  --dash-past-fill: #484440;
+  --dash-past-ink: #ffffff;
 
   color-scheme: dark;
 }

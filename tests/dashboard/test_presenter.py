@@ -18,6 +18,7 @@ from socialhome.dashboard.contrast import (
     contrast_ratio,
     frame_color,
     note_colors,
+    past_colors,
 )
 from socialhome.dashboard.presenter import (
     MAX_LANE_ROWS,
@@ -115,17 +116,25 @@ def test_color_book_classes_and_css():
         frame_color("#112233", BUBBLE_LIGHT, BLACK),
         frame_color("#112233", BUBBLE_DARK, WHITE),
     )
+    # Past timeline bars: the faded fill (--kp) and its ink (--kq) per
+    # card surface — night has its own, darker card.
+    yp, dp = past_colors("#ffee88"), past_colors("#112233")
     assert book.css() == (
         f".k0{{--kc:#ffee88;--kt:#000000;--kn:{y.light_ink};--kb:{y.light_bg};"
-        f"--kf:{yf[0]}}}"
+        f"--kf:{yf[0]};--kp:{yp.light_bg};--kq:{yp.light_ink}}}"
         f".k1{{--kc:#112233;--kt:#ffffff;--kn:{d.light_ink};--kb:{d.light_bg};"
-        f"--kf:{df[0]}}}"
+        f"--kf:{df[0]};--kp:{dp.light_bg};--kq:{dp.light_ink}}}"
         "@media (prefers-color-scheme:dark){"
-        f".k0{{--kn:{y.dark_ink};--kb:{y.dark_bg};--kf:{yf[1]}}}"
-        f".k1{{--kn:{d.dark_ink};--kb:{d.dark_bg};--kf:{df[1]}}}}}"
-        f".dash-night .k0{{--kn:{y.dark_ink};--kb:{y.dark_bg};--kf:{yf[1]}}}"
-        f".dash-night .k1{{--kn:{d.dark_ink};--kb:{d.dark_bg};--kf:{df[1]}}}"
+        f".k0{{--kn:{y.dark_ink};--kb:{y.dark_bg};--kf:{yf[1]};"
+        f"--kp:{yp.dark_bg};--kq:{yp.dark_ink}}}"
+        f".k1{{--kn:{d.dark_ink};--kb:{d.dark_bg};--kf:{df[1]};"
+        f"--kp:{dp.dark_bg};--kq:{dp.dark_ink}}}}}"
+        f".dash-night .k0{{--kn:{y.dark_ink};--kb:{y.dark_bg};--kf:{yf[1]};"
+        f"--kp:{yp.night_bg};--kq:{yp.night_ink}}}"
+        f".dash-night .k1{{--kn:{d.dark_ink};--kb:{d.dark_bg};--kf:{df[1]};"
+        f"--kp:{dp.night_bg};--kq:{dp.night_ink}}}"
     )
+    assert ColorBook().css() == ""
     assert yf == ("#998f52", "#ffee88")  # pale yellow darkens on white
 
 
@@ -140,6 +149,19 @@ def test_color_book_note_inks_read_on_the_drawn_fill():
     for part in (light, dark):
         for ink, bg in re.findall(r"--kn:(#[0-9a-f]{6});--kb:(#[0-9a-f]{6})", part):
             assert contrast_ratio(ink, bg) >= 4.5, (ink, bg)
+
+
+def test_color_book_past_inks_read_on_the_drawn_fill():
+    """Review (dark mode): a past bar's label used to fade with its fill
+    (~2:1); now its ink is picked against the faded fill per scheme."""
+    book = ColorBook()
+    for color in ("#ffee88", "#8855ee", "#5588bb", "#112233"):
+        book.add(color)
+    css = book.css()
+    pairs = re.findall(r"--kp:(#[0-9a-f]{6});--kq:(#[0-9a-f]{6})", css)
+    assert len(pairs) == 12  # four colours × light, dark, night
+    for bg, ink in pairs:
+        assert contrast_ratio(ink, bg) >= 4.5, (ink, bg)
 
 
 def test_overview_shows_three_notes():

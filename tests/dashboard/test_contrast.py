@@ -18,6 +18,10 @@ from socialhome.dashboard.contrast import (
     NOTE_LIGHT_BG,
     NOTE_MIX_DARK,
     NOTE_MIX_LIGHT,
+    PAST_FADE,
+    SURFACE_DARK,
+    SURFACE_LIGHT,
+    SURFACE_NIGHT,
     WARM_INK,
     mix_oklab,
     note_colors,
@@ -25,6 +29,7 @@ from socialhome.dashboard.contrast import (
     hex_color,
     ink_on,
     note_ink,
+    past_colors,
     readable_on,
     relative_luminance,
 )
@@ -229,3 +234,97 @@ def test_mix_srgb():
     assert mix_srgb("#000000", "#ffffff", 0.5) == "#808080"
     assert mix_srgb("#123456", "#000000", 0.0) == "#123456"
     assert mix_srgb("#123456", "#ffffff", 1.0) == "#ffffff"
+
+
+# ─── Past timeline bars (--kp / --kq) ────────────────────────────────────
+
+
+def _palette(css: str, start: str) -> dict[str, str]:
+    at = css.index(start)
+    block = css[at : css.index("}", at)]
+    return dict(re.findall(r"(--dash-[a-z-]+):\s*(#[0-9a-f]{6});", block))
+
+
+def _palettes() -> dict[str, dict[str, str]]:
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    light = _palette(css, ":root {")
+    dark = {**light, **_palette(css, "@media (prefers-color-scheme: dark)")}
+    night = {**dark, **_palette(css, ".dash-night {")}
+    return {"light": light, "dark": dark, "night": night}
+
+
+def test_past_surfaces_are_the_card_surfaces():
+    palettes = _palettes()
+    assert palettes["light"]["--dash-surface"] == SURFACE_LIGHT
+    assert palettes["dark"]["--dash-surface"] == SURFACE_DARK
+    assert palettes["night"]["--dash-surface"] == SURFACE_NIGHT
+
+
+def test_past_colors_fade_only_the_fill():
+    """The fill is what ``opacity: 0.5`` drew over the card; the ink is
+    picked against it (the panel firmware's rule)."""
+    past = past_colors("#ffee88")
+    assert PAST_FADE == 0.5
+    assert past.light_bg == mix_srgb("#ffee88", SURFACE_LIGHT, 0.5) == "#fff6c4"
+    assert past.dark_bg == mix_srgb("#ffee88", SURFACE_DARK, 0.5)
+    assert past.night_bg == mix_srgb("#ffee88", SURFACE_NIGHT, 0.5)
+    for bg, ink in (
+        (past.light_bg, past.light_ink),
+        (past.dark_bg, past.dark_ink),
+        (past.night_bg, past.night_ink),
+    ):
+        assert ink == ink_on(bg)
+
+
+def test_dark_past_bar_label_was_unreadable_and_now_reads():
+    """Regression: a red bar's black label at 50 % opacity on the dark
+    card was ~2.2:1; the full-strength ink on the faded fill clears AA."""
+    color = "#e53935"
+    faded_ink = mix_srgb(ink_on(color), SURFACE_DARK, 0.5)
+    faded_fill = mix_srgb(color, SURFACE_DARK, 0.5)
+    assert contrast_ratio(faded_ink, faded_fill) < 2.5
+    past = past_colors(color)
+    assert contrast_ratio(past.dark_ink, past.dark_bg) >= AA_TEXT
+
+
+@pytest.mark.parametrize(
+    "color",
+    ["#ffee88", "#112233", "#8855ee", "#5588bb", "#e53935", "#43a047", "#808080"],
+)
+def test_past_bar_ink_is_the_better_of_black_and_white(color):
+    past = past_colors(color)
+    for bg, ink in (
+        (past.light_bg, past.light_ink),
+        (past.dark_bg, past.dark_ink),
+        (past.night_bg, past.night_ink),
+    ):
+        ratio = contrast_ratio(ink, bg)
+        assert ratio >= max(contrast_ratio(BLACK, bg), contrast_ratio(WHITE, bg))
+        assert ratio >= AA_TEXT, (color, bg, ink)
+
+
+def test_past_fallback_matches_past_colors_of_muted():
+    """A bar with no colour of its own fades --dash-muted: the CSS
+    fallback (--dash-past-fill / --dash-past-ink) per scheme is what
+    :func:`past_colors` gives for it on that scheme's card."""
+    for name, palette in _palettes().items():
+        past = past_colors(palette["--dash-muted"])
+        bg, ink = {
+            "light": (past.light_bg, past.light_ink),
+            "dark": (past.dark_bg, past.dark_ink),
+            "night": (past.night_bg, past.night_ink),
+        }[name]
+        assert palette["--dash-past-fill"] == bg, name
+        assert palette["--dash-past-ink"] == ink, name
+        assert contrast_ratio(ink, bg) >= AA_TEXT, name
+
+
+def test_past_bars_no_longer_fade_their_label():
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    rule = css[css.index(".dash-block.dash-past {") :]
+    rule = rule[: rule.index("}")]
+    assert "opacity: 1;" in rule
+    assert "color: var(--kq, var(--dash-past-ink));" in rule
+    assert "background-color: var(--kp, var(--dash-past-fill));" in rule
+    emoji = css[css.index(".dash-block.dash-past .dash-block-icon,") :]
+    assert emoji[: emoji.index("}")].endswith("opacity: 0.5;\n")
