@@ -583,6 +583,38 @@ async def test_the_right_pin_on_the_last_try_unlocks(svc, settings):
     assert found is not None and not found.locked
 
 
+async def test_a_later_try_in_flight_never_makes_a_wrong_pin_the_last(
+    svc, settings, auth
+):
+    """Review regression: the count is read when the try starts, not after
+    the slow check — a right PIN arriving while the fourth wrong one is
+    checked must not turn that one into the unpairing fifth."""
+    display, token = await _locked(svc, settings)
+    for _ in range(THROTTLE_MAX_FAILURES - 2):
+        with pytest.raises(DashboardDisplayPinWrongError):
+            await svc.unlock(display, "0000")
+    release = asyncio.Event()
+    real_check = DashboardAuth.check_pin
+
+    async def slow_check(self: DashboardAuth, pin: str) -> bool:
+        if pin == "0000":
+            await release.wait()
+        return await real_check(self, pin)
+
+    with patch.object(DashboardAuth, "check_pin", slow_check):
+        wrong = asyncio.create_task(svc.unlock(display, "0000"))
+        await asyncio.sleep(0)  # the wrong try is counted and waiting
+        right = asyncio.create_task(svc.unlock(display, PIN))
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(DashboardDisplayPinWrongError) as exc:
+            await wrong
+        await right
+    assert exc.value.params == {"remaining": 1}
+    found = await svc.authenticate(token)
+    assert found is not None and not found.locked
+
+
 async def test_a_try_past_the_spent_budget_unpairs_the_panel(svc, settings, auth):
     """A try that finds the budget already spent (one racing the fifth
     wrong PIN) unpairs the panel too — even with the right PIN."""

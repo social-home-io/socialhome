@@ -648,12 +648,16 @@ class DashboardDisplayService:
         auth = self._auth
         key = DashboardAuth.display_pin_throttle_key(display.id)
         wait = auth.begin_attempt(key, count_global=False)
-        if wait and auth.failure_count(key) >= THROTTLE_MAX_FAILURES:
+        # This try's place in the budget, read in the same step (no
+        # ``await`` in between): tries that start while this PIN is being
+        # checked must not make it the one that unpairs the panel.
+        ordinal = auth.failure_count(key)
+        if wait and ordinal >= THROTTLE_MAX_FAILURES:
             await self._sign_out_after_wrong_pins(display)
         if wait:
             raise DashboardDisplayPinThrottledError(wait)
         if not isinstance(pin, str) or not await auth.check_pin(pin):
-            remaining = THROTTLE_MAX_FAILURES - auth.failure_count(key)
+            remaining = THROTTLE_MAX_FAILURES - ordinal
             if remaining <= 0:
                 # That was the last try: ``remaining`` never reads 0 on a
                 # PIN pad whose next press could only unpair the panel.

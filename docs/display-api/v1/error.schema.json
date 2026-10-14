@@ -27,7 +27,7 @@
           "properties": {
             "remaining": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 1
             },
             "retry_after": {
               "type": "integer",

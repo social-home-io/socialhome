@@ -52,7 +52,7 @@
           parts[p.type] = p.value;
         });
         if (parts.year + "-" + parts.month + "-" + parts.day !== day) {
-          window.location.replace(window.location.pathname);
+          reloadIfReachable();
           return;
         }
         clock.textContent = parts.hour + ":" + parts.minute;
@@ -67,15 +67,31 @@
   // tablet unlocks), the night window's colours, a sign-out — and puts
   // away a PIN pad left open with a half-typed PIN. Every touch or key
   // starts the minute again; a PIN on its way to the server stops it.
+  // Only reloads while Social Home answers: a reload during a restart or
+  // a Wi-Fi drop would strand the tablet on the browser's error page.
   var IDLE_MS = 60000;
   var idleTimer = 0;
   var reloading = true;
+  function reloadIfReachable() {
+    window
+      .fetch("/healthz", { cache: "no-store", credentials: "same-origin" })
+      .then(
+        function (response) {
+          if (reloading && response.ok) {
+            window.location.replace(window.location.pathname);
+          } else {
+            stayCurrent();
+          }
+        },
+        function () {
+          stayCurrent(); // offline: keep the lock screen, try again later
+        }
+      );
+  }
   function stayCurrent() {
     window.clearTimeout(idleTimer);
     if (reloading) {
-      idleTimer = window.setTimeout(function () {
-        window.location.replace(window.location.pathname);
-      }, IDLE_MS);
+      idleTimer = window.setTimeout(reloadIfReachable, IDLE_MS);
     }
   }
   function stopReloading() {

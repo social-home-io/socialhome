@@ -1463,6 +1463,37 @@ async def test_five_wrong_pins_then_the_tablet_is_signed_out(pin_client, auth):
     assert (await _unlock(pin_client, headers)).status == 401
 
 
+async def test_a_later_try_in_flight_never_makes_a_wrong_pin_the_last(pin_client, auth):
+    """Review regression: a right PIN arriving while the fourth wrong one
+    is checked must not turn that one into the signing-out fifth."""
+    headers = await _locked(auth)
+    key = DashboardAuth.pin_throttle_key(
+        await auth.verify(headers["Cookie"].split("=", 1)[1])
+    )
+    for _ in range(THROTTLE_MAX_FAILURES - 2):
+        await _unlock(pin_client, headers, pin="000000")
+    gates = {"000000": asyncio.Event(), PIN: asyncio.Event()}
+    real_check = DashboardAuth.check_pin
+
+    async def slow_check(self: DashboardAuth, pin: str) -> bool:
+        await gates[pin].wait()
+        return await real_check(self, pin)
+
+    async def counted(n: int) -> None:
+        while auth.failure_count(key) < n:
+            await asyncio.sleep(0.01)
+
+    with patch.object(DashboardAuth, "check_pin", slow_check):
+        wrong = asyncio.create_task(_unlock(pin_client, headers, pin="000000"))
+        await counted(THROTTLE_MAX_FAILURES - 1)
+        right = asyncio.create_task(_unlock(pin_client, headers))
+        await counted(THROTTLE_MAX_FAILURES)  # both tries in flight
+        gates["000000"].set()  # the wrong one is checked first
+        assert (await wrong).headers["Location"] == WRONG
+        gates[PIN].set()
+        assert (await right).headers["Location"] == "/"
+
+
 async def test_a_try_past_the_spent_budget_signs_out(pin_client, auth):
     """A try that finds the budget already spent (one racing the fifth
     wrong PIN) signs the tablet out too — even with the right PIN."""

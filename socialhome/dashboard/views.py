@@ -981,7 +981,11 @@ class UnlockView(_GoHomeOnGet):
         key = DashboardAuth.pin_throttle_key(claims)
         # Counted before the slow scrypt check — see ``begin_attempt``.
         wait = self.auth.begin_attempt(key, count_global=False)
-        if wait and self.auth.failure_count(key) >= THROTTLE_MAX_FAILURES:
+        # This try's place in the budget, read in the same step (no
+        # ``await`` in between): tries that start while this PIN is being
+        # checked must not make it the one that signs out.
+        ordinal = self.auth.failure_count(key)
+        if wait and ordinal >= THROTTLE_MAX_FAILURES:
             log.warning(
                 "household dashboard: too many wrong PINs from %s — tablet signed out",
                 self.client_key,
@@ -994,7 +998,7 @@ class UnlockView(_GoHomeOnGet):
             return response
         pin = form.get("pin")
         if not isinstance(pin, str) or not await self.auth.check_pin(pin):
-            if self.auth.failure_count(key) >= THROTTLE_MAX_FAILURES:
+            if ordinal >= THROTTLE_MAX_FAILURES:
                 # That was the last try: "Tries left" never reads 0 over
                 # a keypad whose next press could only sign out.
                 log.warning(
