@@ -166,7 +166,7 @@ Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
 | `404 TAB_OFF` | The tab doesn't show (chat off, stickies off, nobody located) | Go to Overview |
 | `404 NOT_FOUND` | Unknown or hidden person | Go to Overview |
 | `409 NIGHT` | A tab other than Overview at night | Go to Overview |
-| `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`) |
+| `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`); `GET /emoji/1f512` (the PIN button's 🔒) still answers |
 | `429` | Over the request / ack budget, or the PIN can't be checked now | Wait `Retry-After` seconds |
 | `503 TILES_UNAVAILABLE` | `map.png` without any map tile | Keep the old picture, retry after `Retry-After` |
 

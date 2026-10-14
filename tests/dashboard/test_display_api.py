@@ -780,6 +780,20 @@ async def test_locked_display_gets_423_lock_payload(
         _fixture("locked", payload)
 
 
+async def test_locked_display_still_gets_the_lock_emoji(
+    client, displays, settings_service
+):
+    """The lock screen's 🔒 (a bundled Twemoji, nothing about the
+    household) — so a panel rebooted while locked can draw its PIN
+    button; every other picture stays behind the lock."""
+    _, token = await _locked(client, displays, settings_service)
+    resp = await _get(client, "/api/display/v1/emoji/1f512?size=48", token)
+    assert resp.status == 200
+    assert _png_size(await resp.read()) == (48, 48)
+    assert (await _get(client, "/api/display/v1/emoji/1f3ca", token)).status == 423
+    assert (await _get(client, "/api/display/v1/emoji/1f512x", token)).status == 423
+
+
 async def test_locked_display_in_the_night_window_is_told_so(
     client, displays, settings_service
 ):

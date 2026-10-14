@@ -126,6 +126,7 @@ __all__ = [
     "LOCK_PATH",
     "MAP_PNG_PATH",
     "PAIR_PATH",
+    "LOCK_EMOJI_PATH",
     "UNLOCK_PATH",
     "bearer_token",
     "guard_display_request",
@@ -158,6 +159,12 @@ IMAGE_PREFIXES = (
     DISPLAY_API_PREFIX + "emoji/",
     MAP_PNG_PATH,
 )
+#: The 🔒 the lock screen's PIN button shows, as on the tablet: a bundled
+#: Twemoji (no household data), so a locked panel — even one rebooted
+#: while locked, its image cache empty — may still fetch it.
+LOCK_EMOJI_PATH = DISPLAY_API_PREFIX + "emoji/1f512"
+#: What a locked panel reaches: the PIN (the one way out) and the 🔒.
+_LOCKED_PASS = frozenset({UNLOCK_PATH, LOCK_EMOJI_PATH})
 #: How long a panel waits before asking again for a map with no tiles.
 TILES_RETRY_S = 60
 _SAFE_TAG = re.compile(r"[A-Za-z0-9_.-]{1,128}")
@@ -246,8 +253,9 @@ async def guard_display_request(
         response = error_response(429, "RATE_LIMITED", "Too many requests.")
         response.headers["Retry-After"] = str(wait)
         return response
-    # The PIN is the one way out of the lock, so ``/unlock`` passes.
-    if request.path != UNLOCK_PATH and await displays.is_locked(display):
+    # The PIN is the one way out of the lock, so ``/unlock`` passes — and
+    # the lock screen's own 🔒 picture.
+    if request.path not in _LOCKED_PASS and await displays.is_locked(display):
         return await _locked(request)
     return await handler(request)
 

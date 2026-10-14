@@ -1233,7 +1233,8 @@ PIN is set) gets **423** with `{api_version, locked: true, household,
 locale, dir, clock, is_night, strings}` (nothing about any person; the
 strings include the PIN pad's tries-left / last-try / forgotten-PIN
 lines) on every bearer
-endpoint but `POST /unlock`; reads are budgeted per panel (429 +
+endpoint but `POST /unlock` and the lock screen's own 🔒 picture
+(`GET /emoji/1f512`, a bundled Twemoji); reads are budgeted per panel (429 +
 `Retry-After`, see Rate limits). A panel's lock is stored on its record
 (`dashboard.displays`), so a panel reboot or a server restart keeps it.
 
