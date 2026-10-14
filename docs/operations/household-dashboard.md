@@ -304,7 +304,8 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
   dashboard password (or a fresh setup link) again. This is counted per
   lock on each tablet — tablets behind one reverse proxy don't use up
   each other's tries, and neither reloading, re-tapping 🔒 on a locked
-  tablet nor changing network address starts the count over.
+  tablet, changing network address nor flooding the login page from
+  other addresses starts the count over.
 - **That sign-out is remembered in memory only.** The signed-out cookie
   (and any copy of it) stays refused until Social Home restarts. To be
   sure a lost or copied tablet cookie is dead for good, use **Sign out

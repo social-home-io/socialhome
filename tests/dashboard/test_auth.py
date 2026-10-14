@@ -37,6 +37,7 @@ from socialhome.dashboard.auth import (
     THROTTLE_WINDOW_S,
     DashboardAuth,
     SessionClaims,
+    _FailureTable,
 )
 
 
@@ -449,10 +450,10 @@ def test_throttle_full_table_rescans_at_most_once_per_interval(settings_service,
     _fail(auth, "a", 5)
     _fail(auth, "b", 5)
     with patch.object(
-        DashboardAuth,
+        _FailureTable,
         "_make_room",
         autospec=True,
-        side_effect=DashboardAuth._make_room,
+        side_effect=_FailureTable._make_room,
     ) as make_room:
         for _ in range(50):
             assert auth.begin_attempt("newcomer") > 0
@@ -910,3 +911,93 @@ def test_map_renders_are_budgeted_per_panel(auth, clock):
     assert auth.begin_display_read("d1", image=True) == 0
     clock.advance(DISPLAY_WINDOW_S + 1)
     assert auth.begin_map_render("d1") == 0
+
+
+# ─── PIN buckets can't be evicted (security) ─────────────────────────────
+
+
+def _pin_keys(auth) -> list[tuple[str, str]]:
+    claims = SessionClaims(epoch=0, issued_at=0, keep=True, session_id="s" * 22)
+    return [
+        ("tablet", DashboardAuth.pin_throttle_key(claims)),
+        ("panel", DashboardAuth.display_pin_throttle_key("d1")),
+    ]
+
+
+@pytest.mark.parametrize("kind", ["tablet", "panel"])
+def test_a_login_flood_cannot_evict_a_pin_bucket(settings_service, clock, kind):
+    """Regression: a full throttle table used to evict any bucket under
+    the limit — a lock's 4 wrong PINs too — so flooding the table with
+    fresh client addresses bought the PIN guesser a fresh budget."""
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=3)
+    key = dict(_pin_keys(auth))[kind]
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        assert auth.begin_attempt(key, count_global=False) == 0
+    # The flood: many client addresses, one wrong try each (setup-link
+    # guesses skip the global brake, so nothing stops them early).
+    for n in range(100):
+        auth.begin_attempt(f"2001:db8:{n:x}::/64", count_global=False)
+    assert auth.failure_count(key) == THROTTLE_MAX_FAILURES - 1
+    # The fifth wrong PIN is the last: the guesser gets no sixth.
+    assert auth.begin_attempt(key, count_global=False) == 0
+    assert auth.begin_attempt(key, count_global=False) > 0
+    assert auth.failure_count(key) == THROTTLE_MAX_FAILURES
+
+
+def test_total_pin_guesses_stay_bounded_under_any_flood(settings_service, clock):
+    """Interleave guesses with floods: one lock never gets more than
+    THROTTLE_MAX_FAILURES wrong PINs inside a window."""
+    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=2)
+    key = DashboardAuth.display_pin_throttle_key("d1")
+    allowed = 0
+    for round_ in range(20):
+        if auth.begin_attempt(key, count_global=False) == 0:
+            allowed += 1
+        for n in range(10):
+            auth.begin_attempt(f"10.{round_}.{n}.1", count_global=False)
+            auth.begin_attempt(f"pin:other-{round_}-{n}", count_global=False)
+    assert allowed == THROTTLE_MAX_FAILURES
+
+
+def test_full_pin_table_refuses_newcomers_never_forgets_live_ones(
+    settings_service, clock
+):
+    auth = DashboardAuth(settings_service, clock=clock, max_pin_keys=2)
+    _, tablet = _pin_keys(auth)[0]
+    panel = DashboardAuth.display_pin_throttle_key("d1")
+    assert auth.begin_attempt(tablet, count_global=False) == 0  # 1 failure
+    assert auth.begin_attempt(panel, count_global=False) == 0  # 1 failure
+    newcomer = DashboardAuth.display_pin_throttle_key("d2")
+    wait = auth.begin_attempt(newcomer, count_global=False)
+    assert wait > 0  # refused, not admitted by forgetting someone
+    assert auth.failure_count(newcomer) == 0
+    assert auth.failure_count(tablet) == 1 and auth.failure_count(panel) == 1
+    assert auth.attempt_wait(newcomer, count_global=False) > 0
+    # A lock already in the table keeps guessing within its own budget.
+    assert auth.begin_attempt(panel, count_global=False) == 0
+    # Once the live failures age out, the room is free again.
+    clock.advance(THROTTLE_WINDOW_S)
+    assert auth.begin_attempt(newcomer, count_global=False) == 0
+    assert auth.failure_count(newcomer) == 1
+
+
+def test_a_pin_flood_cannot_crowd_out_logins(settings_service, clock):
+    """The two tables are apart: PIN buckets never take login room, and
+    logins never take PIN room."""
+    auth = DashboardAuth(
+        settings_service, clock=clock, max_throttle_keys=1, max_pin_keys=1
+    )
+    assert auth.begin_attempt("pin:a", count_global=False) == 0
+    assert auth.begin_attempt("10.0.0.1") == 0
+    assert auth.begin_attempt("pin:b", count_global=False) > 0
+    assert auth.failure_count("10.0.0.1") == 1
+    assert auth.failure_count("pin:a") == 1
+    assert auth.throttle_key_count == 2
+
+
+def test_record_success_frees_a_pin_slot(settings_service, clock):
+    auth = DashboardAuth(settings_service, clock=clock, max_pin_keys=1)
+    assert auth.begin_attempt("pin:a", count_global=False) == 0
+    assert auth.begin_attempt("pin:b", count_global=False) > 0
+    auth.record_success("pin:a", count_global=False)
+    assert auth.begin_attempt("pin:b", count_global=False) == 0

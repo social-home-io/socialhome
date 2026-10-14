@@ -567,6 +567,23 @@ async def test_sixth_wrong_try_unpairs_the_panel(svc, settings, auth, caplog):
     assert token not in caplog.text
 
 
+async def test_a_login_flood_cannot_refill_a_panels_pin_budget(settings, clock):
+    """Security regression: filling the throttle table with client
+    addresses used to evict the panel's PIN bucket (under 5 failures),
+    so a guesser got five fresh tries after every flood."""
+    auth = DashboardAuth(settings, clock=clock, max_throttle_keys=2)
+    svc = DashboardDisplayService(settings, auth, clock=clock)
+    display, token = await _locked(svc, settings)
+    for n in range(THROTTLE_MAX_FAILURES):
+        with pytest.raises(DashboardDisplayPinWrongError):
+            await svc.unlock(display, "0000")
+        for m in range(50):  # the flood between guesses
+            auth.begin_attempt(f"2001:db8:{n}:{m}::/64", count_global=False)
+    with pytest.raises(DashboardDisplaySignedOutError):
+        await svc.unlock(display, PIN)
+    assert await svc.authenticate(token) is None
+
+
 async def test_wrong_pins_age_out(svc, settings, clock):
     display, token = await _locked(svc, settings)
     for _ in range(THROTTLE_MAX_FAILURES):
@@ -578,9 +595,9 @@ async def test_wrong_pins_age_out(svc, settings, clock):
 
 
 async def test_full_throttle_table_only_asks_to_wait(settings, clock):
-    auth = DashboardAuth(settings, clock=clock, max_throttle_keys=1)
+    auth = DashboardAuth(settings, clock=clock, max_pin_keys=1)
     svc = DashboardDisplayService(settings, auth, clock=clock)
-    # Someone else's locked-out bucket fills the only slot.
+    # Someone else's locked-out PIN bucket fills the only slot.
     for _ in range(THROTTLE_MAX_FAILURES):
         auth.begin_attempt("pin:other", count_global=False)
     display, token = await _locked(svc, settings)

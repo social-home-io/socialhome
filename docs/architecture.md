@@ -1463,7 +1463,11 @@ drives it) and is then served by a **separate aiohttp application on its own por
   client back (logged once). The 256-bit setup token on `/enter` uses only
   the per-client limit. scrypt checks run one at a time (a semaphore) in a
   worker thread. The throttle table is bounded; a full table of locked-out
-  clients fails closed.
+  clients fails closed. Privacy-lock PIN guesses (per locked tablet
+  session, per paired panel) live in a bounded table of their own that
+  never evicts a bucket with a live failure — a full one asks new locks
+  to wait — so flooding the login table from many addresses can't hand a
+  PIN guesser a fresh budget.
 - **Wall panels (displays) + device tokens.** Small always-on screens
   (an ESPHome panel) aren't browsers, so they don't use the cookie: they
   pair with a code and then send `Authorization: Bearer <token>` to a JSON
