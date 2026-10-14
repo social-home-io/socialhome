@@ -1142,17 +1142,54 @@ async def test_display_mac_round_trips_and_old_records_load(repo):
     ]
 
 
-async def test_add_display_can_replace_the_same_mac(svc):
+async def test_add_display_can_supersede_the_same_mac(svc):
     mac = "aa:bb:cc:dd:ee:01"
     await svc.add_display(_display(1, mac=mac))
     await svc.add_display(_display(2, mac="aa:bb:cc:dd:ee:02"))
-    # Code pairing keeps both; a reconnect replaces the old record.
+    # Code pairing keeps both; a reconnect takes the old records over —
+    # they stay until its first use.
     assert await svc.add_display(_display(3, mac=mac)) == ()
-    dropped = await svc.add_display(_display(4, mac=mac), replace_same_mac=True)
-    assert dropped == ("d1", "d3")
-    assert [d.id for d in await svc.displays()] == ["d2", "d4"]
+    assert await svc.add_display(_display(4, mac=mac), supersede_same_mac=True) == ()
+    stored = {d.id: d for d in await svc.displays()}
+    assert list(stored) == ["d1", "d2", "d3", "d4"]
+    assert stored["d4"].replaces == ("d1", "d3")
+    # Another reconnect before d4 was used drops d4 and inherits its takeover.
+    dropped = await svc.add_display(_display(5, mac=mac), supersede_same_mac=True)
+    assert dropped == ("d4",)
+    stored = {d.id: d for d in await svc.displays()}
+    assert list(stored) == ["d1", "d2", "d3", "d5"]
+    assert stored["d5"].replaces == ("d1", "d3")
+    # First use: the old ones go in one write.
+    assert await svc.take_over("d5") == ("d1", "d3")
+    assert [(d.id, d.replaces) for d in await svc.displays()] == [
+        ("d2", ()),
+        ("d5", ()),
+    ]
+    assert await svc.take_over("d5") == ()
+    assert await svc.take_over("missing") is None
     # No MAC → nothing to match.
-    assert await svc.add_display(_display(5), replace_same_mac=True) == ()
+    assert await svc.add_display(_display(6), supersede_same_mac=True) == ()
+
+
+async def test_replaces_round_trips_and_bad_values_skip_the_entry(repo):
+    first = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    mac = "aa:bb:cc:dd:ee:01"
+    await first.add_display(_display(1, mac=mac))
+    await first.add_display(_display(2, mac=mac), supersede_same_mac=True)
+    stored = json.loads(repo.rows["dashboard.displays"])
+    assert stored[1]["replaces"] == ["d1"]
+    second = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert [d.replaces for d in await second.displays()] == [(), ("d1",)]
+    # Records from before ``replaces`` load with none; garbled ones are skipped.
+    del stored[0]["replaces"]
+    stored.append({**stored[0], "id": "d3", "replaces": "d1"})
+    stored.append({**stored[0], "id": "d4", "replaces": [""]})
+    repo.rows["dashboard.displays"] = json.dumps(stored)
+    third = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert [(d.id, d.replaces) for d in await third.displays()] == [
+        ("d1", ()),
+        ("d2", ("d1",)),
+    ]
 
 
 async def test_add_display_refuses_a_stale_epoch(svc):
@@ -1170,8 +1207,16 @@ async def test_replacing_makes_room_at_the_limit(svc):
     await svc.add_display(_display(0, mac=mac))
     for i in range(1, MAX_DISPLAYS):
         await svc.add_display(_display(i))
-    await svc.add_display(_display(99, mac=mac), replace_same_mac=True)
+    await svc.add_display(_display(99, mac=mac), supersede_same_mac=True)
+    # Over by the record it takes over — until its first use.
+    assert len(await svc.displays()) == MAX_DISPLAYS + 1
+    await svc.take_over("d99")
     assert len(await svc.displays()) == MAX_DISPLAYS
+    # Without anything to take over, the cap holds.
+    with pytest.raises(DashboardDisplayLimitError):
+        await svc.add_display(
+            _display(98, mac="aa:bb:cc:dd:ee:02"), supersede_same_mac=True
+        )
 
 
 async def test_record_display_seen_keeps_a_reported_mac(svc):
@@ -1373,3 +1418,14 @@ async def test_update_display_only_changes_name_and_lock(svc, change):
     with pytest.raises(ValueError):
         await svc.update_display("d1", change)
     assert (await svc.displays())[0] == _display(1)
+
+
+async def test_remove_display_takes_its_pending_takeover_along(svc):
+    mac = "aa:bb:cc:dd:ee:01"
+    await svc.add_display(_display(1, mac=mac))
+    await svc.add_display(_display(2, mac="aa:bb:cc:dd:ee:02"))
+    await svc.add_display(_display(3, mac=mac), supersede_same_mac=True)
+    assert await svc.remove_display("d1") == ("d1", "d3")
+    assert [d.id for d in await svc.displays()] == ["d2"]
+    with pytest.raises(DashboardDisplayNotFoundError):
+        await svc.remove_display("d1")

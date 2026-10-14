@@ -394,7 +394,15 @@ class DashboardDisplayService:
         answer."""
         require_admin(actor_is_admin)
         panels = await self._require_directory().list_panels()
-        by_mac = {d.mac: d for d in await self._settings.displays() if d.mac}
+        # A display still waiting to take over (``replaces``) loses to the
+        # pairing that works today.
+        by_mac = {
+            d.mac: d
+            for d in sorted(
+                await self._settings.displays(), key=lambda d: not d.replaces
+            )
+            if d.mac
+        }
         return [(p, by_mac.get(p.mac) if p.mac else None) for p in panels]
 
     async def connect_platform_panel(
@@ -460,8 +468,11 @@ class DashboardDisplayService:
         expired, already spent, or ``mac`` isn't the panel it was minted
         for. Every claim is compared in constant time; a matching one is
         spent by this call whatever its outcome. A display with the same
-        MAC (the panel's old pairing) is replaced. The caller throttles
-        per client address."""
+        MAC (the panel's old pairing) is replaced — not here, but on the
+        new token's first authenticated use (:meth:`authenticate`), so
+        whoever spends a claim the panel never sees can't break the
+        panel's working pairing without using what they got. The caller
+        throttles per client address."""
         await self._require_enabled()
         if not isinstance(claim, str) or _TOKEN.fullmatch(claim) is None:
             return None
@@ -495,7 +506,7 @@ class DashboardDisplayService:
                 mac=spent.mac,
             )
             dropped = await self._settings.add_display(
-                display, replace_same_mac=True, expected_epoch=spent.epoch
+                display, supersede_same_mac=True, expected_epoch=spent.epoch
             )
             if dropped is None:
                 # Minted before "sign out all tablets" / a password change.
@@ -514,14 +525,14 @@ class DashboardDisplayService:
 
     async def remove(self, *, actor_is_admin: bool, display_id: str) -> None:
         """Unpair a panel — its token stops working at once, and a connect
-        claim still pending for it (same MAC) is dropped."""
+        claim or a re-connect still pending for it (same MAC) is dropped."""
         require_admin(actor_is_admin)
         mac = next(
             (d.mac for d in await self._settings.displays() if d.id == display_id),
             None,
         )
-        await self._settings.remove_display(display_id)
-        self._forget(display_id)
+        for removed in await self._settings.remove_display(display_id):
+            self._forget(removed)
         if mac is not None:
             for key in [k for k, c in self._claims.items() if c.mac == mac]:
                 del self._claims[key]
@@ -615,10 +626,11 @@ class DashboardDisplayService:
                 display.id,
             )
             try:
-                await self._settings.remove_display(display.id)
+                removed = await self._settings.remove_display(display.id)
             except DashboardDisplayNotFoundError:
-                pass
-            self._forget(display.id)
+                removed = (display.id,)
+            for display_id in removed:
+                self._forget(display_id)
             raise DashboardDisplaySignedOutError()
         if wait:
             raise DashboardDisplayPinThrottledError(wait)
@@ -646,6 +658,22 @@ class DashboardDisplayService:
         for display in await self._settings.displays():
             if hmac.compare_digest(display.token_hash.encode("utf-8"), digest):
                 found = display
+        if found is not None and found.replaces:
+            # A re-connected panel's first use: its old pairing goes now.
+            taken = await self._settings.take_over(found.id)
+            if taken is None:
+                return None  # removed since we read it
+            for display_id in taken:
+                self._forget(display_id)
+                log.info(
+                    "household dashboard: display %s took over from %s",
+                    found.id,
+                    display_id,
+                )
+            found = next(
+                (d for d in await self._settings.displays() if d.id == found.id),
+                None,
+            )
         return found
 
     async def seen(

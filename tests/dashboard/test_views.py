@@ -1336,10 +1336,10 @@ async def test_one_tablets_wrong_pins_spare_another_on_the_same_address(
 
 @pytest.fixture
 async def tiny_client(aiohttp_client, settings_service, clock):
-    """A dashboard whose throttle table holds one client."""
+    """A dashboard whose PIN throttle table holds one lock."""
     await settings_service.set_password(actor_is_admin=True, password=PASSWORD)
     await settings_service.set_pin(actor_is_admin=True, pin=PIN)
-    auth = DashboardAuth(settings_service, clock=clock, max_throttle_keys=1)
+    auth = DashboardAuth(settings_service, clock=clock, max_pin_keys=1)
 
     async def name() -> str:
         return "Home"
@@ -1364,8 +1364,10 @@ async def tiny_client(aiohttp_client, settings_service, clock):
 async def test_full_throttle_table_holds_back_but_never_signs_out(tiny_client, clock):
     """F2: only this tablet's own wrong PINs sign it out."""
     client, auth = tiny_client
+    # Another tablet's lock holds the only PIN slot (with live failures,
+    # so it can't be evicted for this one).
     for _ in range(THROTTLE_MAX_FAILURES):
-        auth.begin_attempt("someone-else", count_global=False)
+        auth.begin_attempt("pin:someone-else", count_global=False)
     headers = await _locked(auth)
     resp = await _unlock(client, headers)
     assert resp.status == 303

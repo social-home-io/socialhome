@@ -304,7 +304,8 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
   dashboard password (or a fresh setup link) again. This is counted per
   lock on each tablet — tablets behind one reverse proxy don't use up
   each other's tries, and neither reloading, re-tapping 🔒 on a locked
-  tablet nor changing network address starts the count over.
+  tablet, changing network address nor flooding the login page from
+  other addresses starts the count over.
 - **That sign-out is remembered in memory only.** The signed-out cookie
   (and any copy of it) stays refused until Social Home restarts. To be
   sure a lost or copied tablet cookie is dead for good, use **Sign out
@@ -390,13 +391,28 @@ Assistant App), you don't type a code at all:
   for Connect (or its *Social Home node* entity is disabled in Home
   Assistant — enable it); pair it with a code meanwhile.
 - **Connect again** on a connected panel replaces its pairing (e.g. after
-  a factory reset). **Remove** stops it being listed as connected.
+  a factory reset). The old pairing keeps working until the panel uses
+  its new one for the first time — usually seconds later — and is then
+  removed; until then Admin › Dashboard lists the panel twice (the new
+  entry "never seen"). A privacy lock on the panel stays on. **Remove**
+  unpairs the panel together with a re-connect still waiting, and stops
+  it being listed as connected.
 - **What Home Assistant sees.** The claim passes through Home Assistant,
   whose recorder keeps every action's data — so treat it as visible to
   anyone with admin access to Home Assistant (they can reflash the panel
   anyway). It works once, for that panel only, for 10 minutes, and **Sign
   out all tablets** cancels it. The panel's long-lived token never passes
   through Home Assistant.
+- **What someone who grabs a claim can do.** Spending a claim before the
+  panel does (it also needs the panel's MAC, which Home Assistant shows)
+  gives them a token for a new display named after the panel. That alone
+  doesn't break the panel: its current pairing keeps working, and the
+  next **Connect** drops the unused new display. Only when they *use*
+  that token does it take the panel's place — the panel's own token then
+  stops working and it shows "not paired". That is the trust Connect
+  puts in Home Assistant admins (who could reflash the panel anyway); if
+  a panel unexpectedly says "not paired", remove the unknown display and
+  Connect again.
 
 Five wrong codes in 15 minutes hold pairing back for a while — check the
 code on the panel. This limit is separate from tablet sign-in: failed

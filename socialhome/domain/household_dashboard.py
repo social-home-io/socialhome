@@ -477,6 +477,11 @@ class DashboardDisplay:
     #: lists (Home Assistant's device registry carries the same MAC).
     #: Self-reported, so only a matching hint, never an authorisation.
     mac: str | None = None
+    #: Ids of older displays of the same panel (same MAC) this one takes
+    #: over: they keep working until this display's token authenticates
+    #: for the first time, and are removed in that same write (a panel
+    #: re-connected from Home Assistant). Empty once taken over.
+    replaces: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)

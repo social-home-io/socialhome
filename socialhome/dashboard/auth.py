@@ -39,6 +39,14 @@ lock — the locked session's id (:meth:`DashboardAuth.pin_throttle_key`),
 never the client address — and never the global brake; the PIN check
 shares the scrypt slot.
 
+PIN buckets live in a table of their own (:data:`PIN_THROTTLE_MAX_KEYS`)
+that never forgets a bucket with a live failure: when it is full a new
+lock is asked to wait instead (fail closed). The login table makes room
+by evicting clients under the limit — fine for a password guesser, who
+gains nothing a fresh client address wouldn't give — but a PIN bucket
+is the lock's whole budget, so evicting one would hand its guesser five
+fresh tries (a flood of client addresses could force that).
+
 "Got it" taps on a mention (the dashboard's one data write) have their
 own small budget per session (:meth:`DashboardAuth.begin_ack`):
 :data:`ACK_MAX` in :data:`ACK_WINDOW_S` — far above any real household,
@@ -106,6 +114,7 @@ __all__ = [
     "DISPLAY_WINDOW_S",
     "MAP_RENDER_MAX",
     "PAIR_WINDOW_S",
+    "PIN_THROTTLE_MAX_KEYS",
     "KEEP_TTL_S",
     "MAX_CLOCK_SKEW_S",
     "PRUNE_INTERVAL_S",
@@ -135,6 +144,14 @@ MAX_CLOCK_SKEW_S = 300
 THROTTLE_MAX_FAILURES = 5
 THROTTLE_WINDOW_S = 15 * 60
 THROTTLE_MAX_KEYS = 10_000
+#: PIN buckets (one per locked tablet session / paired panel) kept at
+#: once — a table apart from the login one, which never evicts a bucket
+#: with a live failure (:class:`_FailureTable`).
+PIN_THROTTLE_MAX_KEYS = 10_000
+#: Throttle keys with these prefixes are PIN buckets
+#: (:meth:`DashboardAuth.pin_throttle_key`,
+#: :meth:`DashboardAuth.display_pin_throttle_key`).
+_PIN_KEY_PREFIXES = ("pin:", "pin-display:")
 #: Failures across all clients per window before everyone is held back.
 GLOBAL_MAX_FAILURES = 30
 #: With the client table full of locked-out clients, newcomers are
@@ -271,17 +288,103 @@ def _parse_payload(body: bytes) -> SessionClaims | None:
     )
 
 
+class _FailureTable:
+    """Failure timestamps per throttle key, bounded at ``max_keys``.
+
+    ``evict_unlocked``: whether making room may drop a key that still
+    has live failures under the limit (the login table: a password
+    guesser gets nothing from it a fresh client address wouldn't give).
+    Without it (the PIN table) only keys whose failures all aged out go;
+    a full table of live keys refuses newcomers instead.
+    """
+
+    __slots__ = ("buckets", "_max_keys", "_evict_unlocked", "_no_room_until", "_what")
+
+    def __init__(self, max_keys: int, *, evict_unlocked: bool, what: str) -> None:
+        # Insertion-ordered: eviction walks it from the front.
+        self.buckets: dict[str, deque[float]] = {}
+        self._max_keys = max_keys
+        self._evict_unlocked = evict_unlocked
+        self._no_room_until = 0.0
+        self._what = what
+
+    def live(self, key: str, now: float) -> deque[float] | None:
+        """``key``'s failures still inside the window (pruned in place)."""
+        stamps = self.buckets.get(key)
+        if stamps is None:
+            return None
+        while stamps and now - stamps[0] >= THROTTLE_WINDOW_S:
+            stamps.popleft()
+        if not stamps:
+            del self.buckets[key]
+            return None
+        return stamps
+
+    def refusing(self, key: str, now: float) -> int:
+        """Seconds a newcomer ``key`` would wait for room (``0``: none)."""
+        if key in self.buckets or len(self.buckets) < self._max_keys:
+            return 0
+        return max(0, math.ceil(self._no_room_until - now))
+
+    def admit(self, key: str, now: float) -> deque[float] | None:
+        """``key``'s bucket, made if need be; ``None`` when the table is
+        full and no room can be made (fail closed)."""
+        stamps = self.live(key, now)
+        if stamps is not None:
+            return stamps
+        if len(self.buckets) >= self._max_keys and not self._room(now):
+            return None
+        stamps = deque(maxlen=THROTTLE_MAX_FAILURES)
+        self.buckets[key] = stamps
+        return stamps
+
+    def wait(self, now: float) -> int:
+        """Seconds a refused newcomer waits (at least one)."""
+        return max(1, math.ceil(self._no_room_until - now))
+
+    def forget(self, key: str) -> None:
+        """Drop ``key``'s failures (a right password / PIN)."""
+        self.buckets.pop(key, None)
+
+    def _room(self, now: float) -> bool:
+        """Free one slot in the full table, or fail closed."""
+        if now < self._no_room_until:
+            return False
+        if self._make_room(now):
+            return True
+        self._no_room_until = now + PRUNE_INTERVAL_S
+        log.warning(
+            "household dashboard: %s throttle full — refusing new ones", self._what
+        )
+        return False
+
+    def _make_room(self, now: float) -> bool:
+        """Drop the first stale key — or, with ``evict_unlocked``, the
+        first not-locked-out one — walking from the oldest. Kept keys
+        rotate to the back so the next walk doesn't step over them again."""
+        for _ in range(len(self.buckets)):
+            key = next(iter(self.buckets))
+            stamps = self.live(key, now)
+            if stamps is None:
+                return True
+            if self._evict_unlocked and len(stamps) < THROTTLE_MAX_FAILURES:
+                del self.buckets[key]
+                log.debug("household dashboard: %s throttle evicted a key", self._what)
+                return True
+            self.buckets[key] = self.buckets.pop(key)
+        return False
+
+
 class DashboardAuth:
     """Issues and verifies dashboard session cookies; throttles logins."""
 
     __slots__ = (
         "_settings",
         "_clock",
-        "_max_keys",
-        "_failures",
+        "_logins",
+        "_pins",
         "_global",
         "_global_tripped",
-        "_no_room_until",
         "_verify_slot",
         "_revoked",
         "_max_revoked",
@@ -300,19 +403,22 @@ class DashboardAuth:
         *,
         clock: Callable[[], float] = time.time,
         max_throttle_keys: int = THROTTLE_MAX_KEYS,
+        max_pin_keys: int = PIN_THROTTLE_MAX_KEYS,
         max_revocations: int = REVOCATION_MAX,
     ) -> None:
         self._settings = settings_service
         self._clock = clock
-        self._max_keys = max_throttle_keys
         # session id → (reason, expires_at). Insertion-ordered (oldest first).
         self._revoked: dict[str, tuple[str, float]] = {}
         self._max_revoked = max_revocations
-        # Insertion-ordered: eviction walks it from the front.
-        self._failures: dict[str, deque[float]] = {}
+        # Password / setup-link failures per client, and PIN failures per
+        # lock — apart, so neither can crowd out or evict the other.
+        self._logins = _FailureTable(
+            max_throttle_keys, evict_unlocked=True, what="login"
+        )
+        self._pins = _FailureTable(max_pin_keys, evict_unlocked=False, what="PIN")
         self._global: deque[float] = deque(maxlen=GLOBAL_MAX_FAILURES + 1)
         self._global_tripped = False
-        self._no_room_until = 0.0
         self._verify_slot = asyncio.Semaphore(1)
         self._acks = RateLimiter(monotonic=clock)
         self._tiles = RateLimiter(monotonic=clock)
@@ -482,7 +588,7 @@ class DashboardAuth:
         a valid cookie, so it mustn't feed the global brake that holds
         back every login).
         """
-        return f"pin:{claims.session_id}"
+        return f"{_PIN_KEY_PREFIXES[0]}{claims.session_id}"
 
     @staticmethod
     def display_pin_throttle_key(display_id: str) -> str:
@@ -491,7 +597,7 @@ class DashboardAuth:
         to rotate, and a fresh id (a fresh bucket) takes an admin pairing
         it again. Same limit and ``count_global=False`` as
         :meth:`pin_throttle_key`."""
-        return f"pin-display:{display_id}"
+        return f"{_PIN_KEY_PREFIXES[1]}{display_id}"
 
     def begin_display_ack(self, display_id: str) -> int:
         """Count one "Got it" write by a wall panel — the same budget as a
@@ -603,17 +709,13 @@ class DashboardAuth:
     # (:meth:`record_success`): concurrent guesses can't slip past the
     # limit while earlier ones are still being checked.
 
+    def _table(self, key: str) -> _FailureTable:
+        """PIN buckets (by key prefix) or the login table."""
+        return self._pins if key.startswith(_PIN_KEY_PREFIXES) else self._logins
+
     def _live(self, key: str, now: float) -> deque[float] | None:
         """``key``'s failures still inside the window (pruned in place)."""
-        stamps = self._failures.get(key)
-        if stamps is None:
-            return None
-        while stamps and now - stamps[0] >= THROTTLE_WINDOW_S:
-            stamps.popleft()
-        if not stamps:
-            del self._failures[key]
-            return None
-        return stamps
+        return self._table(key).live(key, now)
 
     def _global_remaining(self, now: float) -> int:
         stamps = self._global
@@ -654,9 +756,7 @@ class DashboardAuth:
         nothing."""
         now = self._clock()
         wait = self._remaining(key, now, count_global=count_global)
-        if wait or key in self._failures or len(self._failures) < self._max_keys:
-            return wait
-        return max(0, math.ceil(self._no_room_until - now))
+        return wait or self._table(key).refusing(key, now)
 
     def begin_attempt(self, key: str, *, count_global: bool = True) -> int:
         """Start a sign-in attempt for ``key``.
@@ -674,12 +774,10 @@ class DashboardAuth:
         wait = self._remaining(key, now, count_global=count_global)
         if wait:
             return wait
-        stamps = self._live(key, now)
+        table = self._table(key)
+        stamps = table.admit(key, now)
         if stamps is None:
-            if len(self._failures) >= self._max_keys and not self._room(now):
-                return max(1, math.ceil(self._no_room_until - now))
-            stamps = deque(maxlen=THROTTLE_MAX_FAILURES)
-            self._failures[key] = stamps
+            return table.wait(now)
         stamps.append(now)
         if count_global:
             self._global.append(now)
@@ -690,44 +788,16 @@ class DashboardAuth:
 
         Pass the same ``count_global`` as the matching :meth:`begin_attempt`.
         """
-        self._failures.pop(key, None)
+        self._table(key).forget(key)
         if count_global and self._global:
             self._global.pop()
 
     @property
     def throttle_key_count(self) -> int:
-        return len(self._failures)
+        """Keys in the login and PIN tables together."""
+        return len(self._logins.buckets) + len(self._pins.buckets)
 
     @property
     def global_failure_count(self) -> int:
         """Failures currently feeding the global brake (unpruned)."""
         return len(self._global)
-
-    def _room(self, now: float) -> bool:
-        """Free one slot in the full client table, or fail closed."""
-        if now < self._no_room_until:
-            return False
-        if self._make_room(now):
-            return True
-        self._no_room_until = now + PRUNE_INTERVAL_S
-        log.warning(
-            "household dashboard: login throttle full of locked-out clients — "
-            "refusing new ones"
-        )
-        return False
-
-    def _make_room(self, now: float) -> bool:
-        """Drop the first stale or not-locked client, walking from the
-        oldest. Locked-out clients are never evicted — they rotate to the
-        back so the next walk doesn't step over them again."""
-        for _ in range(len(self._failures)):
-            key = next(iter(self._failures))
-            stamps = self._live(key, now)
-            if stamps is None:
-                return True
-            if len(stamps) < THROTTLE_MAX_FAILURES:
-                del self._failures[key]
-                log.debug("household dashboard: login throttle evicted a client")
-                return True
-            self._failures[key] = self._failures.pop(key)
-        return False
