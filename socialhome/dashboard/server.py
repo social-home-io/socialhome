@@ -28,7 +28,10 @@ class PortAdvertiser(Protocol):
     (:class:`~socialhome.dashboard.advertiser.DisplayAdvertiser`).
 
     Both methods are fail-soft: they never raise, so a broken multicast
-    setup can't take the dashboard down with it.
+    setup can't take the dashboard down with it. ``advertise`` returns at
+    once (the announcement runs in the background, so the listener lock
+    never waits for a name probe); ``withdraw`` returns once announcing
+    has stopped, after anything still in flight.
     """
 
     async def advertise(self, port: int) -> None: ...

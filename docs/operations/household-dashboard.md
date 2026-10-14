@@ -345,7 +345,8 @@ it by itself — you don't type an address. The announcement says only
 "a Social Home dashboard is here": a short random-looking id, the port
 and the API version. It never carries your household's name, anyone's
 name or what the dashboard shows. It stops as soon as you switch the
-dashboard off.
+dashboard off, and follows the host's address within a minute when it
+changes (e.g. a new DHCP lease).
 
 - **Firewall:** the host must allow multicast DNS — UDP port `5353` to and
   from `224.0.0.251` (and `ff02::fb` for IPv6) — on the home network. If

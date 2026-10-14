@@ -1589,9 +1589,24 @@ drives it) and is then served by a **separate aiohttp application on its own por
   bridge network never reaches the LAN; panels there use a typed address
   or Home Assistant). Fail-soft: any error (no multicast, socket refused,
   a 10 s probe timeout) logs one WARNING until the next success and never
-  touches the listener. The address set is scanned when the responder
-  starts (each enable / restart); a DHCP change while it runs isn't
-  followed yet.
+  touches the listener. The announcement runs in a task of its own:
+  `advertise` only records the wanted port and returns, so the listener
+  lock (`DashboardServer.apply`, e.g. enabling from the admin API) never
+  waits for the ~1.2 s name probe; the task always converges on the last
+  request, and `withdraw` waits for it (goodbye sent, sockets closed), so
+  a stop or rebind straight after an enable can't be overtaken by the
+  probe. Every 60 s (`RESCAN_INTERVAL_S`; not for a loopback bind) it
+  rescans the LAN addresses and follows a change (DHCP renumbering, an
+  interface coming up or going away) in place: the record is re-announced
+  with the new set (`async_update_service`, cache-flush records so panels
+  drop the old addresses) and the responder's sockets move onto it
+  (`async_update_interfaces`) — no goodbye, no new probe. Losing every
+  address withdraws until one is back, under the name already won. A
+  failed or address-less announcement is retried on the same beat. If an
+  address vanishes between the scan and the responder start (an expiring
+  IPv6 privacy address on a `::` bind), the start is retried once on a
+  fresh scan, or its IPv4 part; later rescans compare against the scan,
+  so a persistent IPv4-only fallback doesn't flap.
 - **Privacy lock.** When a guest is around, someone taps 🔒 and the
   tablet shows a neutral lock screen (household name, clock and date in
   the household time zone — no person, picture, presence, event or

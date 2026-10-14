@@ -6,9 +6,11 @@ wording is the tablet's own).
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC
 from pathlib import Path
+from string import Formatter
 from zoneinfo import ZoneInfo
 
 import socialhome.i18n as i18n_pkg
@@ -32,6 +34,7 @@ from socialhome.dashboard.presenter import home_colors, person_colors
 from socialhome.dashboard.render import STATIC_DIR, DashboardRenderer
 from socialhome.dashboard.tabs import TAB_MAP, TAB_MESSAGES, TAB_NOTES
 from socialhome.domain.household_dashboard import (
+    SUPPORTED_DASHBOARD_LOCALES,
     DashboardSettings,
     DashboardShoppingItem,
     DashboardTask,
@@ -55,9 +58,8 @@ from .factories import (
     person,
 )
 
-RENDERER = DashboardRenderer(
-    Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
-)
+MESSAGES_DIR = Path(i18n_pkg.__file__).parent / "messages"
+RENDERER = DashboardRenderer(Catalog.from_directory(MESSAGES_DIR))
 T = RENDERER.translator("en")
 SETTINGS = DashboardSettings()
 
@@ -394,6 +396,90 @@ def test_theme_payload():
     # Pale khaki reads on dark surfaces only.
     assert light["colors"]["dark"]["accent"] == "#f0e68c"
     assert light["colors"]["light"]["accent"] == "#2f6f5e"
+
+
+#: The firmware's setup / settings / PIN-pad strings (its English
+#: built-ins until the server's arrive) and the placeholders each keeps.
+PANEL_STRINGS = {
+    "wifi_title": set(),
+    "wifi_text": set(),
+    "wifi_waiting": set(),
+    "server_title": set(),
+    "server_text": set(),
+    "server_placeholder": set(),
+    "server_invalid": set(),
+    "server_ha": set(),
+    "connect": set(),
+    "pair_unreachable": set(),
+    "pair_busy": set(),
+    "claim_title": set(),
+    "claim_expired": set(),
+    "claim_disabled": set(),
+    "claim_busy": set(),
+    "claim_unreachable": {"host"},
+    "ok": set(),
+    "change_server": set(),
+    "update_title": set(),
+    "update_text": set(),
+    "map_placeholder": set(),
+    "map_none": set(),
+    "settings_title": set(),
+    "settings_server": set(),
+    "settings_panel": set(),
+    "settings_firmware": set(),
+    "forget": set(),
+    "forget_confirm": set(),
+    "cancel": set(),
+    "close": set(),
+    "credits": set(),
+    "pin_remaining": {"n"},
+    "pin_wait": {"n"},
+    "pin_offline": set(),
+}
+
+
+def _fields(text: str) -> set[str]:
+    return {f for _, f, _, _ in Formatter().parse(text) if f}
+
+
+def test_every_string_key_is_in_every_catalog():
+    """No theme string falls back to English (or to the raw key)."""
+    for locale in SUPPORTED_DASHBOARD_LOCALES:
+        path = MESSAGES_DIR / f"{locale}.json"
+        messages = json.loads(path.read_text(encoding="utf-8"))
+        for name, key in STRING_KEYS.items():
+            assert messages.get(key, "").strip(), (locale, name, key)
+
+
+def test_theme_carries_the_panel_strings_in_every_locale():
+    assert set(PANEL_STRINGS) <= set(STRING_KEYS)
+    for locale in SUPPORTED_DASHBOARD_LOCALES:
+        t = RENDERER.translator(locale)
+        strings = theme_payload(css=_css(), theme=None, locale=locale, t=t)["strings"]
+        for name, fields in PANEL_STRINGS.items():
+            text = strings[name]
+            assert text.strip() and text != STRING_KEYS[name], (locale, name)
+            # The placeholders reach the panel literally, once each.
+            assert _fields(text) == fields, (locale, name, text)
+            for field in fields:
+                assert text.count("{" + field + "}") == 1, (locale, name, text)
+        # "Social Home" is a name, never translated.
+        assert strings["settings_server"] == "Social Home", locale
+        assert "Social Home" in strings["pin_offline"], locale
+
+
+def test_theme_panel_strings_are_the_firmware_english():
+    strings = theme_payload(css=_css(), theme=None, locale="en", t=T)["strings"]
+    # Worded without a plural (the panel fills one number into one
+    # string), unlike the firmware's built-in "{n} tries left".
+    assert strings["pin_remaining"] == "Tries left: {n}"
+    assert strings["pin_wait"] == "Too many tries. Try again in {n} s."
+    assert strings["pin_offline"] == "Can't reach Social Home. Try again."
+    assert strings["claim_unreachable"] == "Can't reach Social Home at {host}."
+    assert strings["wifi_waiting"] == "Waiting for Wi-Fi…"
+    assert strings["map_none"] == (
+        "No map picture on this Social Home — the list shows who's where."
+    )
 
 
 def test_picture_page_shows_no_status_text():

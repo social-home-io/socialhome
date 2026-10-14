@@ -13,15 +13,19 @@ from unittest.mock import patch
 
 import ifaddr
 import pytest
-from zeroconf import service_type_name
+from aiohttp import web
+from zeroconf import IPVersion, service_type_name
 
 from socialhome.dashboard import advertiser as adv_mod
 from socialhome.dashboard.advertiser import (
+    RESCAN_INTERVAL_S,
     SERVICE_TYPE,
     DisplayAdvertiser,
     display_short_id,
     lan_addresses,
 )
+from socialhome.dashboard.server import DashboardServer
+from socialhome.domain.household_dashboard import DashboardSettings
 
 SEED = bytes(range(32))
 
@@ -30,6 +34,7 @@ class FakeZeroconf:
     """Stand-in for :class:`zeroconf.asyncio.AsyncZeroconf`."""
 
     instances: list[FakeZeroconf] = []
+    scan = None  # the patched ``ifaddr.get_adapters`` (set per test)
     fail_init: Exception | None = None
     fail_register: Exception | None = None
     fail_update: Exception | None = None
@@ -41,6 +46,7 @@ class FakeZeroconf:
         self.registered: list = []
         self.updated: list = []
         self.unregistered: list = []
+        self.interface_updates: list = []
         self.closed = False
         FakeZeroconf.instances.append(self)
 
@@ -53,6 +59,9 @@ class FakeZeroconf:
         if FakeZeroconf.fail_update is not None:
             raise FakeZeroconf.fail_update
         self.updated.append(info)
+
+    async def async_update_interfaces(self, interfaces=None, ip_version=None):
+        self.interface_updates.append((interfaces, ip_version))
 
     async def async_unregister_service(self, info):
         self.unregistered.append(info)
@@ -75,22 +84,31 @@ ADAPTERS = [
 ]
 
 
+_CREATED: list[DisplayAdvertiser] = []
+
+
 @pytest.fixture(autouse=True)
-def fake_zeroconf():
+async def fake_zeroconf():
     FakeZeroconf.instances = []
     FakeZeroconf.fail_init = None
     FakeZeroconf.fail_register = None
     FakeZeroconf.fail_update = None
+    _CREATED.clear()
     with (
         patch.object(adv_mod, "AsyncZeroconf", FakeZeroconf),
-        patch.object(adv_mod.ifaddr, "get_adapters", return_value=ADAPTERS),
+        patch.object(adv_mod.ifaddr, "get_adapters", return_value=ADAPTERS) as scan,
     ):
+        FakeZeroconf.scan = scan
         yield FakeZeroconf
+        # No announcement task outlives its test.
+        for a in _CREATED:
+            await a.withdraw()
 
 
 def _advertiser(host: str = "0.0.0.0") -> DisplayAdvertiser:
     a = DisplayAdvertiser(host=host)
     a.attach_identity(SEED)
+    _CREATED.append(a)
     return a
 
 
@@ -143,6 +161,7 @@ def test_service_type_passes_zeroconf_validation():
 async def test_advertise_registers_service_with_minimal_txt(fake_zeroconf):
     a = _advertiser()
     await a.advertise(8100)
+    await a.settled()
 
     [zc] = fake_zeroconf.instances
     assert zc.interfaces == ["192.168.1.20", "10.0.0.5"]
@@ -165,7 +184,9 @@ async def test_advertise_registers_service_with_minimal_txt(fake_zeroconf):
 async def test_advertise_same_port_is_a_noop(fake_zeroconf):
     a = _advertiser()
     await a.advertise(8100)
+    await a.settled()
     await a.advertise(8100)
+    await a.settled()
     [zc] = fake_zeroconf.instances
     assert len(zc.registered) == 1
 
@@ -173,11 +194,14 @@ async def test_advertise_same_port_is_a_noop(fake_zeroconf):
 async def test_port_change_updates_the_registered_service(fake_zeroconf):
     a = _advertiser()
     await a.advertise(8100)
+    await a.settled()
     [zc] = fake_zeroconf.instances
     [(first, _)] = zc.registered
     first.name = f"Social Home {display_short_id(SEED)} (2).{SERVICE_TYPE}"
 
     await a.advertise(8200)
+
+    await a.settled()
 
     assert len(fake_zeroconf.instances) == 1
     assert len(zc.registered) == 1  # no second probe
@@ -192,9 +216,11 @@ async def test_port_change_updates_the_registered_service(fake_zeroconf):
 async def test_failed_port_change_withdraws(fake_zeroconf, caplog):
     a = _advertiser()
     await a.advertise(8100)
+    await a.settled()
     fake_zeroconf.fail_update = OSError("socket gone")
     with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
         await a.advertise(8200)
+        await a.settled()
     [zc] = fake_zeroconf.instances
     assert zc.closed
     assert a.advertising_port is None
@@ -215,6 +241,7 @@ async def test_register_timeout_is_fail_soft(fake_zeroconf, caplog):
         caplog.at_level(logging.WARNING, logger=adv_mod.__name__),
     ):
         await a.advertise(8100)
+        await a.settled()
     assert started.is_set()
     [zc] = fake_zeroconf.instances
     assert zc.closed
@@ -225,6 +252,7 @@ async def test_register_timeout_is_fail_soft(fake_zeroconf, caplog):
 async def test_withdraw_closes_responder(fake_zeroconf):
     a = _advertiser()
     await a.advertise(8100)
+    await a.settled()
     await a.withdraw()
 
     [zc] = fake_zeroconf.instances
@@ -232,6 +260,7 @@ async def test_withdraw_closes_responder(fake_zeroconf):
     assert a.advertising_port is None
     # A later advertise starts a fresh responder.
     await a.advertise(8100)
+    await a.settled()
     assert len(fake_zeroconf.instances) == 2
 
 
@@ -242,6 +271,7 @@ async def test_withdraw_when_idle_is_safe():
 async def test_no_identity_yet_skips(fake_zeroconf):
     a = DisplayAdvertiser(host="0.0.0.0")
     await a.advertise(8100)
+    await a.settled()
     assert fake_zeroconf.instances == []
     assert a.advertising_port is None
 
@@ -251,6 +281,7 @@ async def test_loopback_listener_skips_without_warning(fake_zeroconf, caplog, ho
     a = _advertiser(host=host)
     with caplog.at_level(logging.INFO, logger=adv_mod.__name__):
         await a.advertise(8100)
+        await a.settled()
     assert fake_zeroconf.instances == []
     assert [r.levelno for r in caplog.records] == [logging.INFO]
 
@@ -260,7 +291,9 @@ async def test_no_lan_address_warns_once(fake_zeroconf, caplog):
     with patch.object(adv_mod.ifaddr, "get_adapters", return_value=[ADAPTERS[0]]):
         with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
             await a.advertise(8100)
+            await a.settled()
             await a.advertise(8200)
+            await a.settled()
     assert fake_zeroconf.instances == []
     assert len(caplog.records) == 1
 
@@ -270,7 +303,9 @@ async def test_multicast_failure_is_fail_soft_and_warns_once(fake_zeroconf, capl
     a = _advertiser()
     with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
         await a.advertise(8100)
+        await a.settled()
         await a.advertise(8200)
+        await a.settled()
     assert a.advertising_port is None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
@@ -282,6 +317,7 @@ async def test_register_failure_closes_responder(fake_zeroconf, caplog):
     a = _advertiser()
     with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
         await a.advertise(8100)
+        await a.settled()
     [zc] = fake_zeroconf.instances
     assert zc.closed
     assert a.advertising_port is None
@@ -289,11 +325,13 @@ async def test_register_failure_closes_responder(fake_zeroconf, caplog):
     # Recovery: the next attempt succeeds and warns again on a later failure.
     fake_zeroconf.fail_register = None
     await a.advertise(8100)
+    await a.settled()
     assert a.advertising_port == 8100
     await a.withdraw()
     fake_zeroconf.fail_register = RuntimeError("again")
     with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
         await a.advertise(8100)
+        await a.settled()
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
 
@@ -303,11 +341,14 @@ async def test_warning_rearms_after_success(fake_zeroconf, caplog):
     fake_zeroconf.fail_init = OSError("first")
     with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
         await a.advertise(8100)
+        await a.settled()
         fake_zeroconf.fail_init = None
         await a.advertise(8100)
+        await a.settled()
         await a.withdraw()
         fake_zeroconf.fail_init = OSError("second")
         await a.advertise(8100)
+        await a.settled()
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(messages) == 2
 
@@ -323,6 +364,7 @@ async def test_broadcast_future_outcome_is_retrieved(fake_zeroconf):
     a = _advertiser()
     with patch.object(FakeZeroconf, "async_register_service", register):
         await a.advertise(8100)
+        await a.settled()
     broadcast.set_exception(RuntimeError("closed mid-broadcast"))
     await asyncio.sleep(0)
     assert broadcast._log_traceback is False  # retrieved by the callback
@@ -331,6 +373,7 @@ async def test_broadcast_future_outcome_is_retrieved(fake_zeroconf):
 async def test_withdraw_failure_is_fail_soft(fake_zeroconf):
     a = _advertiser()
     await a.advertise(8100)
+    await a.settled()
     [zc] = fake_zeroconf.instances
 
     async def boom() -> None:
@@ -346,5 +389,295 @@ async def test_hostname_bind_without_lan_address_warns(fake_zeroconf, caplog):
     with patch.object(adv_mod.ifaddr, "get_adapters", return_value=[ADAPTERS[0]]):
         with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
             await a.advertise(8100)
+            await a.settled()
     assert fake_zeroconf.instances == []
     assert "myhost.lan" in caplog.text
+
+
+# ── the announcement task: non-blocking, ordered, following the LAN ────
+
+
+class _Gate:
+    """A register that waits until released (``register`` is patched
+    onto :class:`FakeZeroconf`, so it gets the responder as ``zc``)."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        gate = self
+
+        async def register(zc, info, **kw):
+            gate.started.set()
+            await gate.release.wait()
+            zc.registered.append((info, kw))
+
+        self.register = register
+
+
+async def _eventually(check, *, timeout: float = 2.0) -> None:
+    async with asyncio.timeout(timeout):
+        while not check():
+            await asyncio.sleep(0.005)
+
+
+async def test_advertise_returns_before_the_probe_finishes(fake_zeroconf):
+    gate = _Gate()
+    a = _advertiser()
+    with patch.object(FakeZeroconf, "async_register_service", gate.register):
+        await a.advertise(8100)  # returns at once
+        assert a.advertising_port is None
+        await gate.started.wait()
+        gate.release.set()
+        await a.settled()
+    assert a.advertising_port == 8100
+
+
+async def test_withdraw_waits_for_an_announce_in_flight(fake_zeroconf):
+    """A stop right after an enable must not be overtaken by the probe:
+    once ``withdraw`` returns, nothing is announced and no socket is open."""
+    gate = _Gate()
+    a = _advertiser()
+    with patch.object(FakeZeroconf, "async_register_service", gate.register):
+        await a.advertise(8100)
+        await gate.started.wait()
+        withdraw = asyncio.create_task(a.withdraw())
+        await asyncio.sleep(0.01)
+        assert not withdraw.done()
+        gate.release.set()
+        await withdraw
+    [zc] = fake_zeroconf.instances
+    assert zc.closed
+    assert a.advertising_port is None
+    await asyncio.sleep(0.01)
+    assert len(fake_zeroconf.instances) == 1  # nothing re-announced
+
+
+async def test_requests_in_flight_end_on_the_last_one(fake_zeroconf):
+    gate = _Gate()
+    a = _advertiser()
+    with patch.object(FakeZeroconf, "async_register_service", gate.register):
+        await a.advertise(8100)
+        await gate.started.wait()
+        await a.advertise(8200)  # a rebind while the first probe runs
+        gate.release.set()
+        await a.settled()
+    assert a.advertising_port == 8200
+    [zc] = fake_zeroconf.instances
+    assert [i.port for i in zc.updated] == [8200]
+
+
+async def test_server_apply_is_not_held_by_the_probe(fake_zeroconf, unused_tcp_port):
+    """Enabling from the admin API returns while the name is still being
+    probed; a stop straight after leaves nothing announced."""
+    gate = _Gate()
+    a = _advertiser(host="0.0.0.0")
+    server = DashboardServer(web.Application, "127.0.0.1", advertiser=a)
+    settings = DashboardSettings(enabled=True, port=unused_tcp_port)
+    with patch.object(FakeZeroconf, "async_register_service", gate.register):
+        async with asyncio.timeout(1):
+            await server.apply(settings)  # gate still closed
+        assert server.running_port == unused_tcp_port
+        await gate.started.wait()
+        stop = asyncio.create_task(server.apply(DashboardSettings(enabled=False)))
+        await asyncio.sleep(0.01)
+        gate.release.set()
+        await stop
+    assert server.running_port is None
+    assert a.advertising_port is None
+    assert all(zc.closed for zc in fake_zeroconf.instances)
+
+
+async def test_rescan_updates_the_record_in_place_when_an_address_goes(
+    fake_zeroconf,
+):
+    a = _advertiser()
+    with patch.object(adv_mod, "RESCAN_INTERVAL_S", 0.01):
+        await a.advertise(8100)
+        await a.settled()
+        [zc] = fake_zeroconf.instances
+        fake_zeroconf.scan.return_value = [_adapter("eth0", "192.168.1.20")]
+        await _eventually(lambda: zc.interface_updates)
+    [moved] = zc.updated
+    assert moved.parsed_addresses() == ["192.168.1.20"]
+    assert moved.port == 8100
+    assert zc.interface_updates == [(["192.168.1.20"], IPVersion.V4Only)]
+    assert len(fake_zeroconf.instances) == 1 and not zc.closed
+    assert zc.unregistered == []
+
+
+async def test_rescan_follows_a_new_address_in_place(fake_zeroconf):
+    """DHCP hands out a new address: the record is re-announced with it
+    and the responder's sockets move onto it — same responder, same
+    (conflict-renamed) name, no goodbye, no new probe."""
+    a = _advertiser(host="::")
+    with patch.object(adv_mod, "RESCAN_INTERVAL_S", 0.01):
+        await a.advertise(8100)
+        await a.settled()
+        [zc] = fake_zeroconf.instances
+        [(first, _)] = zc.registered
+        renamed = f"Social Home {display_short_id(SEED)} (2).{SERVICE_TYPE}"
+        first.name = renamed
+        a._name = renamed  # as zeroconf's allow_name_change leaves it
+        fake_zeroconf.scan.return_value = [
+            _adapter("eth0", "192.168.1.77", ("fd00::77", 0, 2))
+        ]
+        await _eventually(lambda: zc.interface_updates)
+    assert len(fake_zeroconf.instances) == 1 and not zc.closed
+    assert len(zc.registered) == 1  # no second probe
+    [moved] = zc.updated
+    assert moved.name == renamed
+    assert moved.parsed_addresses() == ["192.168.1.77", "fd00::77"]
+    assert zc.interface_updates == [(["192.168.1.77", "fd00::77"], IPVersion.All)]
+    assert a.advertising_port == 8100
+
+
+async def test_losing_every_address_withdraws_then_returns_under_the_won_name(
+    fake_zeroconf, caplog
+):
+    a = _advertiser()
+    with (
+        patch.object(adv_mod, "RESCAN_INTERVAL_S", 0.01),
+        caplog.at_level(logging.WARNING, logger=adv_mod.__name__),
+    ):
+        await a.advertise(8100)
+        await a.settled()
+        [old] = fake_zeroconf.instances
+        renamed = f"Social Home {display_short_id(SEED)} (2).{SERVICE_TYPE}"
+        a._name = renamed
+        fake_zeroconf.scan.return_value = [ADAPTERS[0]]  # cable pulled
+        await _eventually(lambda: old.closed)
+        assert a.advertising_port is None
+        fake_zeroconf.scan.return_value = ADAPTERS
+        await _eventually(lambda: a.advertising_port == 8100)
+    new = fake_zeroconf.instances[-1]
+    [(info, _)] = new.registered
+    assert info.name == renamed
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+async def test_rescan_with_nothing_changed_does_nothing(fake_zeroconf):
+    a = _advertiser()
+    with patch.object(adv_mod, "RESCAN_INTERVAL_S", 0.01):
+        await a.advertise(8100)
+        await a.settled()
+        calls = fake_zeroconf.scan.call_count
+        await _eventually(lambda: fake_zeroconf.scan.call_count >= calls + 3)
+    [zc] = fake_zeroconf.instances
+    assert zc.updated == [] and not zc.closed
+
+
+async def test_no_lan_address_is_retried_on_the_rescan(fake_zeroconf, caplog):
+    fake_zeroconf.scan.return_value = [ADAPTERS[0]]
+    a = _advertiser()
+    with (
+        patch.object(adv_mod, "RESCAN_INTERVAL_S", 0.01),
+        caplog.at_level(logging.WARNING, logger=adv_mod.__name__),
+    ):
+        await a.advertise(8100)
+        await a.settled()
+        assert a.advertising_port is None
+        fake_zeroconf.scan.return_value = ADAPTERS  # the network came up
+        await _eventually(lambda: a.advertising_port == 8100)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+
+
+async def test_loopback_bind_notes_it_once_and_never_rescans(fake_zeroconf, caplog):
+    a = _advertiser(host="127.0.0.1")
+    with (
+        patch.object(adv_mod, "RESCAN_INTERVAL_S", 0.01),
+        caplog.at_level(logging.INFO, logger=adv_mod.__name__),
+    ):
+        await a.advertise(8100)
+        await a.settled()
+        await asyncio.sleep(0.05)
+        await a.advertise(8200)
+        await a.settled()
+    assert len(caplog.records) == 1
+    assert fake_zeroconf.scan.call_count == 0  # a fixed bind reads no adapters
+
+
+def _vanishing(gone: str):
+    """An ``AsyncZeroconf`` that fails like zeroconf does when an IPv6
+    address has no adapter any more."""
+
+    def build(interfaces=None, **kw):
+        if gone in interfaces:
+            raise RuntimeError(f"No adapter found for IP address {gone}")
+        return FakeZeroconf(interfaces=interfaces, **kw)
+
+    return build
+
+
+async def test_dual_stack_retries_on_the_current_set(fake_zeroconf):
+    """``::`` bind: fd00::20 vanished between the scan and the socket
+    setup — one retry on a fresh scan announces the rest."""
+    after = [_adapter("eth0", "192.168.1.20", ("fd00::21", 0, 2))]
+    fake_zeroconf.scan.side_effect = [ADAPTERS, after, after]
+    a = _advertiser(host="::")
+    with patch.object(adv_mod, "AsyncZeroconf", _vanishing("fd00::20")):
+        await a.advertise(8100)
+        await a.settled()
+    [zc] = fake_zeroconf.instances
+    assert zc.interfaces == ["192.168.1.20", "fd00::21"]
+    [(info, _)] = zc.registered
+    assert info.parsed_addresses() == ["192.168.1.20", "fd00::21"]
+    assert a.advertising_port == 8100
+
+
+async def test_dual_stack_falls_back_to_ipv4(fake_zeroconf):
+    """The fresh scan still lists the bad address: retry on IPv4 only."""
+    a = _advertiser(host="::")
+    with patch.object(adv_mod, "AsyncZeroconf", _vanishing("fd00::20")):
+        await a.advertise(8100)
+        await a.settled()
+    [zc] = fake_zeroconf.instances
+    assert zc.interfaces == ["192.168.1.20", "10.0.0.5"]
+    assert a.advertising_port == 8100
+
+
+async def test_an_ipv4_fallback_does_not_flap_on_the_rescan(fake_zeroconf, caplog):
+    """Review finding: the scan still lists the address that can't be
+    opened, so every rescan saw a change and rebuilt the responder."""
+    a = _advertiser(host="::")
+    with (
+        patch.object(adv_mod, "AsyncZeroconf", _vanishing("fd00::20")),
+        patch.object(adv_mod, "RESCAN_INTERVAL_S", 0.01),
+        caplog.at_level(logging.INFO, logger=adv_mod.__name__),
+    ):
+        await a.advertise(8100)
+        await a.settled()
+        calls = fake_zeroconf.scan.call_count
+        await _eventually(lambda: fake_zeroconf.scan.call_count >= calls + 5)
+    [zc] = fake_zeroconf.instances
+    assert not zc.closed and zc.updated == [] and zc.interface_updates == []
+    assert len(zc.registered) == 1
+
+
+async def test_a_failing_retry_logs_its_warning_once(fake_zeroconf, caplog):
+    fake_zeroconf.fail_init = OSError("multicast unavailable")
+    a = _advertiser(host="::")
+    with (
+        patch.object(adv_mod, "RESCAN_INTERVAL_S", 0.01),
+        caplog.at_level(logging.INFO, logger=adv_mod.__name__),
+    ):
+        await a.advertise(8100)
+        await a.settled()
+        calls = fake_zeroconf.scan.call_count
+        await _eventually(lambda: fake_zeroconf.scan.call_count >= calls + 6)
+    assert a.advertising_port is None
+    assert len([r for r in caplog.records if r.levelno >= logging.INFO]) <= 2
+
+
+async def test_the_retry_is_only_once(fake_zeroconf, caplog):
+    fake_zeroconf.fail_init = OSError("multicast unavailable")
+    a = _advertiser(host="::")
+    with caplog.at_level(logging.WARNING, logger=adv_mod.__name__):
+        await a.advertise(8100)
+        await a.settled()
+    assert a.advertising_port is None
+    assert "multicast unavailable" in caplog.text
+
+
+def test_rescan_interval_is_a_minute():
+    assert RESCAN_INTERVAL_S == 60.0
