@@ -1155,6 +1155,16 @@ async def test_add_display_can_replace_the_same_mac(svc):
     assert await svc.add_display(_display(5), replace_same_mac=True) == ()
 
 
+async def test_add_display_refuses_a_stale_epoch(svc):
+    """A claim minted before a sign-out must not store a display after it —
+    checked under the same lock as the epoch bump."""
+    epoch = await svc.epoch()
+    assert await svc.add_display(_display(1), expected_epoch=epoch) == ()
+    await svc.revoke_sessions(actor_is_admin=True)
+    assert await svc.add_display(_display(2), expected_epoch=epoch) is None
+    assert await svc.displays() == ()
+
+
 async def test_replacing_makes_room_at_the_limit(svc):
     mac = "aa:bb:cc:dd:ee:01"
     await svc.add_display(_display(0, mac=mac))

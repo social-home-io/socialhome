@@ -3147,7 +3147,7 @@
   "error.display_panel_offline": "L’écran est hors ligne dans Home Assistant. Allumez-le et réessayez.",
   "error.display_panel_needs_update": "Mettez à jour le firmware de l’écran, puis réessayez.",
   "error.dashboard_address_required": "Définissez d’abord l’adresse du tableau de bord, pour que l’écran puisse l’atteindre.",
-  "error.dashboard_address_port": "Activez d’abord le port du tableau de bord dans les paramètres réseau de l’app Home Assistant.",
+  "error.dashboard_address_port": "Activez d’abord le port du tableau de bord dans les paramètres réseau de la Home Assistant App.",
   "error.zone_limit": "Vous avez atteint la limite de {max} zones. Supprimez-en une pour en ajouter une autre.",
   "error.zone_name_taken": "Une zone porte déjà ce nom.",
   "error.zone_read_only": "Cette zone vient de Home Assistant. Modifiez-la dans Home Assistant.",

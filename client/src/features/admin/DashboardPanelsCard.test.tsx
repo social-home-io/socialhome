@@ -359,6 +359,46 @@ describe('DashboardPanelsCard — found in Home Assistant', () => {
     }
   })
 
+  it('"Connect again" waits for a new pairing, not the old one', async () => {
+    const HALL: HaPanel = { ...READY, status: 'connected', display_id: 'd1', display_name: 'Hall' }
+    mGet.mockResolvedValue({ panels: [HALL] })
+    mPost.mockResolvedValue({ expires_in: 600 })
+    mount(state({ ha_display_discovery: true }))
+    const btn = await screen.findByRole('button', { name: 'Connect Kitchen panel again' })
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(btn)
+      await vi.waitFor(() => expect(screen.getByText('Waiting for the panel to pair…')).toBeTruthy())
+      // Still the old display: keep waiting, no "connected" toast.
+      await vi.advanceTimersByTimeAsync(HA_POLL_MS)
+      expect(reload).not.toHaveBeenCalled()
+      expect(screen.getByText('Waiting for the panel to pair…')).toBeTruthy()
+      mGet.mockResolvedValue({ panels: [{ ...HALL, display_id: 'd2' }] })
+      await vi.advanceTimersByTimeAsync(HA_POLL_MS)
+      await vi.waitFor(() => expect(reload).toHaveBeenCalled())
+      expect(showToast).toHaveBeenCalledWith('Hall is connected', 'success')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('names the panel in the timeout even when Home Assistant stops listing it', async () => {
+    mGet.mockResolvedValue({ panels: [READY] })
+    mPost.mockResolvedValue({ expires_in: 600 })
+    mount(state({ ha_display_discovery: true }))
+    const btn = await screen.findByRole('button', { name: 'Connect Kitchen panel' })
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(btn)
+      await vi.waitFor(() => expect(screen.getByText('Waiting for the panel to pair…')).toBeTruthy())
+      mGet.mockRejectedValue(new ApiError(502, '/x', { code: 'DISPLAY_DISCOVERY_FAILED', detail: 'x' }))
+      await vi.advanceTimersByTimeAsync(HA_WAIT_MS + HA_POLL_MS)
+      await vi.waitFor(() => expect(screen.getByText(/^Kitchen panel didn't pair\./)).toBeTruthy())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('gives up waiting after a minute and says so', async () => {
     mGet.mockResolvedValue({ panels: [READY] })
     mPost.mockResolvedValue({ expires_in: 600 })

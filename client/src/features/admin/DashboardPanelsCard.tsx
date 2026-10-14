@@ -168,6 +168,12 @@ export function DashboardPanelsCard({ state, reload }: {
   )
 }
 
+interface Waiting {
+  until: number
+  prior: string | null
+  name: string
+}
+
 function HaPanelsSection({ state, reload }: {
   state: DashboardState
   reload: () => Promise<void>
@@ -176,14 +182,18 @@ function HaPanelsSection({ state, reload }: {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
-  /** Panels sent a connect request: id → when we stop waiting (ms). */
-  const [waiting, setWaiting] = useState<Record<string, number>>({})
+  /** Panels sent a connect request, by id: when we stop waiting (ms), the
+   *  display it was paired as before (a "Connect again" only counts once
+   *  that changes) and its name (for the timeout line). */
+  const [waiting, setWaiting] = useState<Record<string, Waiting>>({})
   const [errors, setErrors] = useState<Record<string, string>>({})
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
 
-  const load = useCallback(async (): Promise<HaPanel[] | null> => {
-    setLoading(true)
+  /** Re-read Home Assistant's list. ``background`` (the wait poll) leaves
+   *  the Refresh button alone, so it doesn't flicker or drop focus. */
+  const load = useCallback(async (background = false): Promise<HaPanel[] | null> => {
+    if (!background) setLoading(true)
     try {
       const body = await api.get<{ panels: HaPanel[] }>(HA_ENDPOINT)
       if (!alive.current) return null
@@ -194,40 +204,47 @@ function HaPanelsSection({ state, reload }: {
       if (alive.current) setLoadError((e as Error).message)
       return null
     } finally {
-      if (alive.current) setLoading(false)
+      if (alive.current && !background) setLoading(false)
     }
   }, [])
 
   useEffect(() => { void load() }, [load])
 
-  // While a panel pairs itself, re-read the list until it shows as
-  // connected (then refresh the paired list above) or the wait runs out.
+  // While a panel pairs itself, re-read the list until it shows as paired
+  // under a new display (then refresh the paired list above) or the wait
+  // runs out.
   useEffect(() => {
-    const waitingIds = Object.keys(waiting)
-    if (waitingIds.length === 0) return
+    const entries = Object.entries(waiting)
+    if (entries.length === 0) return
     const timer = setTimeout(async () => {
-      const fresh = await load()
+      const fresh = await load(true)
       if (!alive.current) return
       const now = Date.now()
-      const next: Record<string, number> = {}
+      const settled: string[] = []
       let paired = false
-      for (const id of waitingIds) {
+      for (const [id, w] of entries) {
         const panel = fresh?.find((p) => p.id === id)
-        if (panel?.status === 'connected') {
+        if (panel?.status === 'connected' && panel.display_id !== w.prior) {
           paired = true
+          settled.push(id)
           showToast(t('admin.dashboard.panels.ha_connected', {
             name: panel.display_name ?? panel.name,
           }), 'success')
-        } else if (now >= waiting[id]) {
+        } else if (now >= w.until) {
+          settled.push(id)
           setErrors((prev) => ({
             ...prev,
-            [id]: t('admin.dashboard.panels.ha_timeout', { name: panel?.name ?? '' }),
+            [id]: t('admin.dashboard.panels.ha_timeout', { name: w.name }),
           }))
-        } else {
-          next[id] = waiting[id]
         }
       }
-      setWaiting(next)
+      // Only drop what this poll settled — a Connect pressed meanwhile stays.
+      setWaiting((prev) => {
+        const next = { ...prev }
+        for (const id of settled) delete next[id]
+        // Nothing settled: a fresh object still re-arms this effect's poll.
+        return settled.length ? next : { ...prev }
+      })
       if (paired) await reload()
     }, HA_POLL_MS)
     return () => clearTimeout(timer)
@@ -243,7 +260,10 @@ function HaPanelsSection({ state, reload }: {
     try {
       await api.post(`${HA_ENDPOINT}/${encodeURIComponent(panel.id)}/connect`, {})
       showToast(t('admin.dashboard.panels.ha_sent', { name: panel.name }), 'success')
-      setWaiting((prev) => ({ ...prev, [panel.id]: Date.now() + HA_WAIT_MS }))
+      setWaiting((prev) => ({
+        ...prev,
+        [panel.id]: { until: Date.now() + HA_WAIT_MS, prior: panel.display_id, name: panel.name },
+      }))
     } catch (e: unknown) {
       setErrors((prev) => ({ ...prev, [panel.id]: (e as Error).message }))
       // Gone / offline / updated meanwhile: show what Home Assistant has now.

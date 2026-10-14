@@ -773,14 +773,25 @@ class DashboardSettingsService:
             return await self._displays_unlocked()
 
     async def add_display(
-        self, display: DashboardDisplay, *, replace_same_mac: bool = False
-    ) -> tuple[str, ...]:
+        self,
+        display: DashboardDisplay,
+        *,
+        replace_same_mac: bool = False,
+        expected_epoch: int | None = None,
+    ) -> tuple[str, ...] | None:
         """Store a newly paired panel; :class:`DashboardDisplayLimitError`
         at :data:`MAX_DISPLAYS`. With ``replace_same_mac`` every stored
         panel with ``display.mac`` is dropped in the same write (a panel
         re-connected from Home Assistant replaces its old record and
-        token); their ids are returned."""
+        token); their ids are returned. With ``expected_epoch`` nothing is
+        stored — ``None`` returned — unless the session epoch still is that
+        (checked under the lock, so a sign-out can't slip in between)."""
         async with self._lock:
+            if (
+                expected_epoch is not None
+                and await self._epoch_unlocked() != expected_epoch
+            ):
+                return None
             current = await self._displays_unlocked()
             dropped: tuple[str, ...] = ()
             if replace_same_mac and display.mac is not None:

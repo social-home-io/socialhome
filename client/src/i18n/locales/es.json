@@ -3174,7 +3174,7 @@
   "error.display_panel_offline": "La pantalla está sin conexión en Home Assistant. Enciéndela y vuelve a intentarlo.",
   "error.display_panel_needs_update": "Actualiza el firmware de la pantalla y vuelve a intentarlo.",
   "error.dashboard_address_required": "Primero define la dirección del panel, para que la pantalla pueda llegar a él.",
-  "error.dashboard_address_port": "Primero activa el puerto del panel en los ajustes de red de la app de Home Assistant.",
+  "error.dashboard_address_port": "Primero activa el puerto del panel en los ajustes de red de la Home Assistant App.",
   "error.zone_limit": "Has alcanzado el límite de {max} zonas. Elimina una para añadir otra.",
   "error.zone_name_taken": "Ya existe una zona con este nombre.",
   "error.zone_read_only": "Esta zona viene de Home Assistant. Cámbiala en Home Assistant.",

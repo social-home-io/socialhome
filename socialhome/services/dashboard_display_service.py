@@ -477,10 +477,6 @@ class DashboardDisplayService:
                 log.info("household dashboard: unknown connect claim")
                 return None
             spent = self._claims.pop(found)
-            if await self._settings.epoch() != spent.epoch:
-                # Minted before "sign out all tablets" / a password change.
-                log.info("household dashboard: connect claim revoked by sign-out")
-                return None
             if normalize_mac(mac) != spent.mac:
                 log.warning(
                     "household dashboard: connect claim for panel %s spent by"
@@ -498,7 +494,13 @@ class DashboardDisplayService:
                 firmware=clean_info(firmware),
                 mac=spent.mac,
             )
-            dropped = await self._settings.add_display(display, replace_same_mac=True)
+            dropped = await self._settings.add_display(
+                display, replace_same_mac=True, expected_epoch=spent.epoch
+            )
+            if dropped is None:
+                # Minted before "sign out all tablets" / a password change.
+                log.info("household dashboard: connect claim revoked by sign-out")
+                return None
             for display_id in dropped:
                 self._forget(display_id)
         log.info(
