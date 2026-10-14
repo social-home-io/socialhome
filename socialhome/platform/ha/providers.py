@@ -392,8 +392,8 @@ class HaPushProvider:
                 body["data"] = data
         result = await self._adapter._client.call_service(domain, service, body)
         if result is None:
-            # call_service swallows non-2xx at debug; surface push failures
-            # at WARNING so a wrong service name is diagnosable instead of
+            # call_service logs the HTTP failure; say here what it means
+            # for push, so a wrong service name is diagnosable instead of
             # silently dropping every notification.
             log.warning(
                 "HA push to %s via %s.%s failed — check the notify service "

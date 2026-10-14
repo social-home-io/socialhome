@@ -95,6 +95,25 @@ no auto-derived default — an unset value skips HA-app push for that user,
 and a configured-but-wrong service is logged at WARNING (not silently
 dropped).
 
+Wall panels adopted in Home Assistant are found through the optional
+`DisplayDirectory` Provider (`adapter.displays`; `None` on standalone).
+Adapters that wire one advertise `Capability.HA_DISPLAY_DISCOVERY`
+(`ha_display_discovery`), which shows "Found in Home Assistant" in Admin ›
+Dashboard › Wall panels. `platform/ha/displays.py:HaDisplayDirectory`
+(shared by `HaAdapter` and `HaosAdapter`) reads HA's WS
+`config/device_registry/list` for ESPHome devices whose `esphome.project`
+is `social-home-io.esphome-dashboard` (HA splits it into manufacturer
+`social-home-io` / model `esphome-dashboard`; sub-devices skipped), finds
+each one's diagnostic *Social Home node* sensor in
+`config/entity_registry/list` and reads its state (`GET /api/states/…`) —
+the ESPHome node name, which HA's device registry doesn't carry but the
+action name needs: `connect()` calls `esphome.<node, "-" → "_">_connect_social_home`
+with `{url, claim}` (REST `POST /api/services/…`). A failed read is
+`DisplayDiscoveryFailedError` (502), never an empty list; every HA call
+failure is logged at WARNING. This is also how the Home Assistant App —
+whose mDNS can't reach the LAN — gets panels connected without a typed
+address.
+
 Household zones (§23.8) can follow the platform's own places through
 the optional `ZoneSource` Provider (`adapter.zones`; `None` on
 standalone). Adapters that wire one also advertise `Capability.ZONE_SYNC`
@@ -1467,7 +1486,21 @@ drives it) and is then served by a **separate aiohttp application on its own por
   the same lock as the epoch — so every epoch bump ("Sign out all
   tablets", a new password, a reseed of a corrupt stored epoch — checked
   before the list is first loaded) empties the list in the same write, and no
-  in-flight write can bring a panel back. The session guard keeps the two
+  in-flight write can bring a panel back.
+  **Connect from Home Assistant** (ha / haos, `DisplayDirectory` above) is
+  a second way to pair: the admin presses Connect on a panel found in HA;
+  `DashboardDisplayService.connect_platform_panel` mints a single-use
+  **claim** (256 bits, SHA-256 in memory, ≤20 — one per panel — 10 min,
+  bound to the panel's HA id, its MAC and the session epoch) and has HA
+  call the panel's `connect_social_home` ESPHome action with `{url, claim}`;
+  the panel spends it at `POST /api/display/v1/pair/claim` (header
+  `X-Display-Mac`, compared against the MAC in HA's device registry) and
+  gets its token in that answer. HA's recorder stores the claim, so it is
+  treated as visible to HA admins (who can reflash the panel anyway); the
+  long-lived token never crosses HA. A display records the panel's
+  self-reported MAC (write-once) so the HA list can show it as connected;
+  a claim spend replaces an older display with the same MAC.
+  The session guard keeps the two
   credentials apart: under the prefix only the bearer token is read
   (cookies are ignored, so the same-origin `POST` check is skipped — no
   ambient credential), everywhere else only the cookie. A panel's

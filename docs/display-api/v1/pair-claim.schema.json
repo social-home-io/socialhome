@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/pair-claim.schema.json",
+  "title": "200 — POST /pair/claim: the panel connected from Home Assistant is paired (same shape as a paired GET /pair/{pair_id})",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "token",
+    "display_id"
+  ],
+  "properties": {
+    "status": {
+      "const": "paired"
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "description": "The panel's bearer token — handed out once, here; store it and send it as Authorization: Bearer."
+    },
+    "display_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    }
+  }
+}

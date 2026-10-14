@@ -543,18 +543,20 @@ class DashboardAuth:
             return 0
         return self._display_reads.retry_after_s(key, window_s=DISPLAY_WINDOW_S)
 
-    def begin_pair(self, client_key: str) -> int:
+    def begin_pair(self, client_key: str, *, claim: bool = False) -> int:
         """Count one anonymous pairing start from ``client_key`` (a
         :func:`~socialhome.rate_limiter.client_bucket`): ``0`` when it may
         go ahead, else the seconds to wait (nothing is counted then).
         Separate from the password / PIN failure table and never part of
-        the global login brake."""
+        the global login brake. ``claim``: a connect-claim spend
+        (``/pair/claim``) — its own bucket, so code-pairing tries can't
+        use up the budget a panel needs to spend its claim in time."""
         now = self._clock()
         if now - self._pairs_pruned_at > PAIR_WINDOW_S:
             # Keyed on client addresses, which may never come back.
             self._pairs.prune(window_s=PAIR_WINDOW_S)
             self._pairs_pruned_at = now
-        key = f"pair:{client_key}"
+        key = f"{'claim' if claim else 'pair'}:{client_key}"
         if self._pairs.is_allowed(key, limit=PAIR_MAX, window_s=PAIR_WINDOW_S):
             return 0
         return self._pairs.retry_after_s(key, window_s=PAIR_WINDOW_S)

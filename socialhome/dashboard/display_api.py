@@ -11,6 +11,12 @@ short code and then authenticates every request with
 * ``GET /api/display/v1/pair/{pair_id}`` (public) — ``{"status":
   "pending"}``, or once ``{"status": "paired", "token", "display_id"}``;
   ``404`` when unknown or expired;
+* ``POST /api/display/v1/pair/claim`` (public) ``{claim, model?,
+  firmware?}`` + ``X-Display-Mac`` — a panel connected from Home
+  Assistant spends the claim it was sent: ``200 {"status": "paired",
+  "token", "display_id"}`` (the poll's shape); ``404 NOT_FOUND`` —
+  uniformly — for a wrong, expired, spent or other panel's claim;
+  throttled per client address like ``/pair`` (a bucket of its own);
 * ``GET /api/display/v1/whoami`` (bearer) — ``{display_id, name}``;
 * ``GET /api/display/v1/home`` · ``/messages`` · ``/notes`` · ``/map`` ·
   ``/person/{user_id}`` · ``/theme`` (bearer) — the boards as JSON
@@ -59,7 +65,7 @@ import orjson
 from aiohttp import web
 
 from ..domain.errors import CodedError
-from ..domain.household_dashboard import DashboardSettings
+from ..domain.household_dashboard import DashboardSettings, DisplayPairingStatus
 from ..domain.theme import HouseholdTheme
 from ..rate_limiter import client_bucket
 from ..security import error_response
@@ -112,6 +118,7 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "DISPLAY_API_PREFIX",
+    "CLAIM_PATH",
     "DISPLAY_CACHE",
     "IMAGE_PREFIXES",
     "LOCK_PATH",
@@ -127,11 +134,14 @@ __all__ = [
 
 DISPLAY_API_PREFIX = "/api/display/v1/"
 PAIR_PATH = "/api/display/v1/pair"
+CLAIM_PATH = "/api/display/v1/pair/claim"
 LOCK_PATH = "/api/display/v1/lock"
 UNLOCK_PATH = "/api/display/v1/unlock"
 #: Panels report themselves in these headers (untrusted, length-capped).
 FIRMWARE_HEADER = "X-Display-Firmware"
 MODEL_HEADER = "X-Display-Model"
+#: The panel's MAC — the key that ties it to the panel Home Assistant lists.
+MAC_HEADER = "X-Display-Mac"
 
 #: Every answer is revalidated by ``ETag`` (a 30 s poll is a ``304`` while
 #: nothing changed); the panel keeps it, nobody in between does.
@@ -221,6 +231,7 @@ async def guard_display_request(
         display,
         firmware=request.headers.get(FIRMWARE_HEADER),
         model=request.headers.get(MODEL_HEADER),
+        mac=request.headers.get(MAC_HEADER),
     )
     # Budgeted first, so a locked panel's 423s are capped too.
     wait = request.app[AUTH_KEY].begin_display_read(
@@ -294,7 +305,9 @@ class DisplayPairView(web.View):
             return _bad_request()
         try:
             pairing = await self.request.app[DISPLAYS_KEY].start_pairing(
-                model=body.get("model"), firmware=body.get("firmware")
+                model=body.get("model"),
+                firmware=body.get("firmware"),
+                mac=self.request.headers.get(MAC_HEADER),
             )
         except CodedError as exc:
             return _coded(exc)
@@ -308,6 +321,49 @@ class DisplayPairView(web.View):
         )
 
 
+def _paired(status: DisplayPairingStatus) -> web.Response:
+    return web.json_response(
+        {
+            "status": "paired",
+            "token": status.token,
+            "display_id": status.display_id,
+        }
+    )
+
+
+class DisplayClaimView(web.View):
+    """``POST /api/display/v1/pair/claim`` — a panel connected from Home
+    Assistant spends its claim (sent with the ``connect_social_home``
+    action) and gets its token, in the answer, once."""
+
+    async def post(self) -> web.Response:
+        # /pair's per-client limit in a bucket of its own — socket peer only.
+        wait = self.request.app[AUTH_KEY].begin_pair(
+            client_bucket(self.request.remote), claim=True
+        )
+        if wait:
+            response = error_response(
+                429, "RATE_LIMITED", "Too many pairing requests. Try again later."
+            )
+            response.headers["Retry-After"] = str(wait)
+            return response
+        body = await _json_object(self.request)
+        if body is None:
+            return _bad_request()
+        try:
+            status = await self.request.app[DISPLAYS_KEY].spend_claim(
+                body.get("claim"),
+                mac=self.request.headers.get(MAC_HEADER),
+                model=body.get("model"),
+                firmware=body.get("firmware"),
+            )
+        except CodedError as exc:
+            return _coded(exc)
+        if status is None:
+            return error_response(404, "NOT_FOUND", "No such pairing.")
+        return _paired(status)
+
+
 class DisplayPairStatusView(web.View):
     """``GET /api/display/v1/pair/{pair_id}`` — the panel polls for its token."""
 
@@ -319,13 +375,7 @@ class DisplayPairStatusView(web.View):
             return error_response(404, "NOT_FOUND", "No such pairing.")
         if not status.paired:
             return web.json_response({"status": "pending"})
-        return web.json_response(
-            {
-                "status": "paired",
-                "token": status.token,
-                "display_id": status.display_id,
-            }
-        )
+        return _paired(status)
 
 
 class DisplayWhoamiView(web.View):
@@ -755,6 +805,8 @@ class DisplayEmojiView(web.View):
 
 def register_display_routes(app: web.Application) -> None:
     app.router.add_view(PAIR_PATH, DisplayPairView)
+    # Before ``pair/{pair_id}``, which would otherwise match ``claim``.
+    app.router.add_view(CLAIM_PATH, DisplayClaimView)
     app.router.add_view(
         PAIR_PATH + "/{pair_id:[A-Za-z0-9_-]{1,64}}", DisplayPairStatusView
     )

@@ -11,6 +11,12 @@
   /api/admin/dashboard/displays/{display_id}`` — wall panels: list, pair
   one by the code it shows, rename, unpair. A panel's token (and its
   hash) never appears here — the panel collects the token itself.
+* ``GET /api/admin/dashboard/displays/ha`` and ``POST
+  /api/admin/dashboard/displays/ha/{panel_id}/connect`` — wall panels
+  adopted in Home Assistant (only with ``Capability.HA_DISPLAY_DISCOVERY``,
+  else ``404 DISPLAY_DISCOVERY_UNAVAILABLE``): list them, and send one a
+  connect request (a single-use claim + the dashboard address it should
+  spend it at) — the panel pairs itself.
 
 Admin-only: every call goes through a
 :class:`~socialhome.services.dashboard_settings_service.DashboardSettingsService`
@@ -23,6 +29,7 @@ import ipaddress
 import time
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -39,8 +46,12 @@ from ..dashboard.auth import DashboardAuth
 from ..dashboard.controller import DashboardController
 from ..domain.household_dashboard import (
     SETUP_TOKEN_TTL_SECONDS,
+    DashboardAddressRequiredError,
+    DashboardDisabledError,
     DashboardDisplay,
     DashboardSettings,
+    DisplayDiscoveryUnavailableError,
+    ExternalDisplayPanel,
     picture_effective,
 )
 from ..domain.user import User, _picture_url
@@ -53,6 +64,8 @@ from .base import BaseView
 
 __all__ = [
     "AdminDashboardDisplayView",
+    "AdminDashboardHaPanelConnectView",
+    "AdminDashboardHaPanelsView",
     "AdminDashboardDisplaysView",
     "AdminDashboardPasswordView",
     "AdminDashboardPinView",
@@ -61,6 +74,7 @@ __all__ = [
     "AdminDashboardView",
     "admin_request_host",
     "dashboard_base_url",
+    "panel_url",
 ]
 
 
@@ -93,6 +107,43 @@ def dashboard_base_url(address: str | None, request_host: str | None, port: int)
     if address:
         return address
     return f"http://{_request_hostname(request_host)}:{port}"
+
+
+#: Host names a wall panel can never reach the dashboard under.
+_LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost"})
+
+
+def _unusable_guess(host: str | None) -> bool:
+    """A guessed host no panel should be sent to: a loopback name, or a
+    public IP literal (the admin reached Social Home over the internet —
+    the claim and the panel's token would cross it in plain ``http``)."""
+    name = (host or "").strip("[]").rstrip(".").lower()
+    if not name or name in _LOOPBACK_NAMES or name.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_global
+
+
+def panel_url(
+    address: str | None, guessed: str, host_port: DashboardHostPort | None
+) -> str:
+    """The dashboard address a wall panel connected from Home Assistant
+    should use: the admin-set ``address``, else the ``guessed`` tablet URL
+    (:func:`dashboard_base_url`) — unless the Home Assistant App's
+    dashboard port isn't published on the host
+    (:class:`DashboardAddressRequiredError` ``port_not_published``) or the
+    guess is a loopback name no panel can reach, or a public IP the claim
+    shouldn't travel to in plain ``http`` (``no_address``)."""
+    if address:
+        return address
+    if host_port is not None and host_port.declared and not host_port.mapped:
+        raise DashboardAddressRequiredError("port_not_published")
+    if _unusable_guess(urlsplit(guessed).hostname):
+        raise DashboardAddressRequiredError("no_address")
+    return guessed
 
 
 def _iso(ts: float | None) -> str | None:
@@ -133,6 +184,36 @@ def _display(display: DashboardDisplay) -> dict[str, Any]:
     }
 
 
+def _ha_panel(
+    panel: ExternalDisplayPanel, display: DashboardDisplay | None
+) -> dict[str, Any]:
+    """One panel found in Home Assistant as the admin UI sees it.
+    ``status``: ``connected`` (paired here — ``display_id`` / ``display_name``),
+    ``ready`` (Connect works), ``offline`` (HA lost it), ``needs_update``
+    (its firmware has no connect action). Never the action name or MAC."""
+    if display is not None:
+        status = "connected"
+    elif not panel.online:
+        status = "offline"
+    elif panel.connect_action is None or panel.mac is None:
+        status = "needs_update"
+    else:
+        status = "ready"
+    return {
+        "id": panel.id,
+        "name": panel.name,
+        "sw_version": panel.sw_version,
+        "status": status,
+        # A connected panel can be connected again (e.g. after a reset)
+        # while Home Assistant can reach it.
+        "can_connect": panel.online
+        and panel.connect_action is not None
+        and panel.mac is not None,
+        "display_id": display.id if display is not None else None,
+        "display_name": display.name if display is not None else None,
+    }
+
+
 def admin_request_host(request: web.BaseRequest) -> str:
     """The host the admin's browser used to reach Social Home.
 
@@ -146,8 +227,10 @@ def admin_request_host(request: web.BaseRequest) -> str:
     ``Host`` / ``X-Forwarded-Host`` through untouched, only appends to
     ``X-Forwarded-For``), so ``X-Forwarded-Host`` is the name the browser
     typed, e.g. ``homeassistant.local:8123``. Trusting the header is safe
-    here: the endpoint is admin-only and the value only shapes a URL shown
-    back to that admin.
+    here: the endpoint is admin-only, and the value shapes a URL shown back
+    to that admin — or, for Connect from Home Assistant, sent to a wall
+    panel, where :func:`panel_url` refuses loopback and public-IP guesses
+    (no cross-site page can set this header on the admin's request).
     """
     forwarded = request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
     return forwarded or request.host
@@ -244,6 +327,9 @@ class _DashboardAdminView(BaseView):
                 "last_seen_at": _iso(auth.last_seen_at),
                 "people": people,
                 "displays": [_display(d) for d in displays],
+                # Wall panels adopted in Home Assistant can be listed and
+                # connected (``GET …/displays/ha``) — ha / haos only.
+                "ha_display_discovery": self.displays.can_discover,
             }
         )
 
@@ -370,3 +456,42 @@ class AdminDashboardDisplayView(_DashboardAdminView):
             display_id=self.request.match_info["display_id"],
         )
         return web.Response(status=204)
+
+
+class AdminDashboardHaPanelsView(_DashboardAdminView):
+    """``GET /api/admin/dashboard/displays/ha`` — wall panels adopted in
+    Home Assistant, each with whether it is paired here. ``404
+    DISPLAY_DISCOVERY_UNAVAILABLE`` without the capability; ``502
+    DISPLAY_DISCOVERY_FAILED`` when Home Assistant didn't answer."""
+
+    async def get(self) -> web.Response:
+        found = await self.displays.platform_panels(actor_is_admin=self.is_admin)
+        return self._json({"panels": [_ha_panel(p, d) for p, d in found]})
+
+
+class AdminDashboardHaPanelConnectView(_DashboardAdminView):
+    """``POST /api/admin/dashboard/displays/ha/{panel_id}/connect`` — send
+    the panel a connect request through Home Assistant: ``202
+    {expires_in}``; the panel then pairs itself (it shows up under the
+    paired panels). ``409 DASHBOARD_ADDRESS_REQUIRED`` when there is no
+    dashboard address a panel could use."""
+
+    async def post(self) -> web.Response:
+        if not self.is_admin:
+            raise PermissionError("Only household admins may manage the dashboard")
+        if not self.displays.can_discover:
+            raise DisplayDiscoveryUnavailableError()
+        if self.controller.running_port is None:
+            raise DashboardDisabledError()
+        settings = await self.settings.get()
+        host_port = await self.host_port()
+        url = panel_url(settings.address, self.base_url(settings, host_port), host_port)
+        if not await self.controller.url_host_allowed(url):
+            # The dashboard would refuse the panel's Host (421).
+            raise DashboardAddressRequiredError("no_address")
+        expires_in = await self.displays.connect_platform_panel(
+            actor_is_admin=self.is_admin,
+            panel_id=self.request.match_info["panel_id"],
+            url=url,
+        )
+        return self._json({"expires_in": expires_in}, status=202)

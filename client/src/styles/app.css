@@ -15521,6 +15521,11 @@ fieldset.sh-dashboard-row > legend { float: left; padding: 0; }
 .sh-dashboard-panel__title { display: flex; align-items: center; gap: var(--sh-space-xs); min-width: 0; }
 .sh-dashboard-panel__info { font-size: var(--sh-font-size-sm); }
 .sh-dashboard-panel__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); flex: 0 1 auto; }
+/* Admin › Dashboard › Wall panels › Found in Home Assistant. */
+.sh-dashboard-ha { margin-top: var(--sh-space-lg); padding-top: var(--sh-space-md); border-top: 1px solid var(--sh-border); }
+.sh-dashboard-ha__head { display: flex; align-items: center; justify-content: space-between; gap: var(--sh-space-sm); flex-wrap: wrap; }
+.sh-dashboard-ha__head h4 { margin: 0; }
+.sh-dashboard-ha .sh-form-error { margin: 0; }
 @media (max-width: 480px) {
   /* Selects and the night-mode times drop under their label; switches
    * stay beside theirs. */

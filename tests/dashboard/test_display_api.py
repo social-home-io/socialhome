@@ -41,7 +41,11 @@ from socialhome.dashboard.auth import (
 from socialhome.dashboard.display_json import STRING_KEYS
 from socialhome.dashboard.render import DashboardRenderer
 from socialhome.domain.theme import HouseholdTheme
-from socialhome.domain.household_dashboard import PAIRING_TTL_SECONDS
+from socialhome.domain.household_dashboard import (
+    CLAIM_TTL_SECONDS,
+    PAIRING_TTL_SECONDS,
+    ExternalDisplayPanel,
+)
 from socialhome.i18n import Catalog
 from socialhome.services.dashboard_display_service import (
     SEEN_INTERVAL_S,
@@ -86,9 +90,56 @@ def auth(settings_service, clock) -> DashboardAuth:
     return DashboardAuth(settings_service, clock=clock)
 
 
+class _Directory:
+    """A Home Assistant panel directory double: one kitchen panel; records
+    the connect requests (and so the claims) it is asked to deliver."""
+
+    def __init__(self) -> None:
+        self.panels = [
+            ExternalDisplayPanel(
+                id="dev-kitchen",
+                name="Kitchen panel",
+                mac=KITCHEN_MAC,
+                connect_action="kitchen_connect_social_home",
+            ),
+            ExternalDisplayPanel(
+                id="dev-hall",
+                name="Hall",
+                mac=HALL_MAC,
+                connect_action="hall_connect_social_home",
+            ),
+        ]
+        self.claims: dict[str, str] = {}
+
+    async def list_panels(self) -> list[ExternalDisplayPanel]:
+        return list(self.panels)
+
+    async def connect(self, panel, *, url: str, claim: str) -> None:
+        self.claims[panel.id] = claim
+
+
+KITCHEN_MAC = "a0:b7:65:12:34:56"
+HALL_MAC = "a0:b7:65:00:00:02"
+CLAIM = "/api/display/v1/pair/claim"
+
+
 @pytest.fixture
-def displays(settings_service, auth, clock) -> DashboardDisplayService:
-    return DashboardDisplayService(settings_service, auth, clock=clock)
+def directory() -> _Directory:
+    return _Directory()
+
+
+@pytest.fixture
+def displays(settings_service, auth, clock, directory) -> DashboardDisplayService:
+    return DashboardDisplayService(
+        settings_service, auth, directory=directory, clock=clock
+    )
+
+
+async def _claim_for(displays, directory, panel_id: str = "dev-kitchen") -> str:
+    await displays.connect_platform_panel(
+        actor_is_admin=True, panel_id=panel_id, url="http://127.0.0.2:8100"
+    )
+    return directory.claims[panel_id]
 
 
 @pytest.fixture
@@ -253,6 +304,134 @@ async def test_pair_poll_expired_is_404(client, clock):
     started = await (await client.post(PAIR)).json()
     clock.advance(PAIRING_TTL_SECONDS + 1)
     assert (await client.get(f"{PAIR}/{started['pair_id']}")).status == 404
+
+
+# ── Pairing a panel connected from Home Assistant (claims) ──────────────
+
+
+def _mac(mac: str) -> dict[str, str]:
+    return {"X-Display-Mac": mac}
+
+
+async def test_claim_pairs_the_panel(client, displays, directory, settings_service):
+    claim = await _claim_for(displays, directory)
+    resp = await client.post(
+        CLAIM,
+        json={"claim": claim, "model": "guition-jc8012p4a1", "firmware": "2026.10.13"},
+        headers=_mac(KITCHEN_MAC.upper()),
+    )
+    assert resp.status == 200, await resp.text()
+    assert resp.headers["Cache-Control"] == "no-store"
+    body = await resp.json()
+    _validate("pair-claim", body)
+    _validate("pair-claim", json.loads((FIXTURE_DIR / "pair-claim.json").read_text()))
+    (display,) = await settings_service.displays()
+    assert body["display_id"] == display.id
+    assert (display.name, display.mac, display.model) == (
+        "Kitchen panel",
+        KITCHEN_MAC,
+        "guition-jc8012p4a1",
+    )
+    # The token works on the API at once.
+    who = await client.get(WHOAMI, headers=_bearer(body["token"]))
+    assert await who.json() == {"display_id": display.id, "name": "Kitchen panel"}
+
+
+async def _refused(resp) -> None:
+    assert resp.status == 404
+    assert await resp.json() == {
+        "error": {"code": "NOT_FOUND", "detail": "No such pairing."}
+    }
+
+
+async def test_claim_replay_is_404(client, displays, directory):
+    claim = await _claim_for(displays, directory)
+    ok = await client.post(CLAIM, json={"claim": claim}, headers=_mac(KITCHEN_MAC))
+    assert ok.status == 200
+    await _refused(
+        await client.post(CLAIM, json={"claim": claim}, headers=_mac(KITCHEN_MAC))
+    )
+
+
+async def test_claim_for_another_panel_is_404_and_burnt(client, displays, directory):
+    claim = await _claim_for(displays, directory)
+    await _refused(
+        await client.post(CLAIM, json={"claim": claim}, headers=_mac(HALL_MAC))
+    )
+    # The panel it was minted for can't use it after that.
+    await _refused(
+        await client.post(CLAIM, json={"claim": claim}, headers=_mac(KITCHEN_MAC))
+    )
+
+
+@pytest.mark.parametrize(
+    "body", [{}, {"claim": None}, {"claim": "A" * 43}, {"claim": "short"}]
+)
+async def test_wrong_claims_are_a_uniform_404(client, displays, directory, body):
+    await _claim_for(displays, directory)
+    await _refused(await client.post(CLAIM, json=body, headers=_mac(KITCHEN_MAC)))
+
+
+async def test_expired_claim_is_404(client, displays, directory, clock):
+    claim = await _claim_for(displays, directory)
+    clock.advance(CLAIM_TTL_SECONDS + 1)
+    await _refused(
+        await client.post(CLAIM, json={"claim": claim}, headers=_mac(KITCHEN_MAC))
+    )
+
+
+async def test_claim_needs_no_token_and_is_not_the_poll_route(client):
+    # Public (one segment below /pair) and routed to the claim view: a GET
+    # is 405, not the pair-status 404.
+    assert is_public_display_path(CLAIM)
+    assert (await client.get(CLAIM)).status == 405
+
+
+@pytest.mark.parametrize("body", [b"{nope", b"[1]"])
+async def test_claim_bad_json_is_400(client, body):
+    resp = await client.post(
+        CLAIM, data=body, headers={"Content-Type": "application/json"}
+    )
+    assert resp.status == 400
+
+
+async def test_claim_is_throttled_in_its_own_bucket(client):
+    """Same per-client limit as /pair, counted apart: code-pairing tries
+    can't use up what a panel needs to spend its claim in time."""
+    for _ in range(PAIR_MAX):
+        assert (await client.post(PAIR)).status == 201
+    assert (await client.post(PAIR)).status == 429
+    for _ in range(PAIR_MAX):
+        assert (await client.post(CLAIM, json={"claim": "A" * 43})).status == 404
+    resp = await client.post(CLAIM, json={"claim": "A" * 43})
+    assert resp.status == 429 and int(resp.headers["Retry-After"]) > 0
+
+
+async def test_claim_refused_while_disabled(
+    client, displays, directory, settings_service
+):
+    claim = await _claim_for(displays, directory)
+    await settings_service.update(actor_is_admin=True, patch={"enabled": False})
+    resp = await client.post(CLAIM, json={"claim": claim}, headers=_mac(KITCHEN_MAC))
+    assert resp.status == 409
+    assert (await resp.json())["error"]["code"] == "DASHBOARD_DISABLED"
+
+
+async def test_panels_report_their_mac(client, displays, settings_service, clock):
+    """``X-Display-Mac`` on /pair is kept at pairing; on any later request
+    it is recorded like the firmware / model headers."""
+    resp = await client.post(PAIR, headers=_mac("A0-B7-65-12-34-56"))
+    started = await resp.json()
+    await displays.claim(actor_is_admin=True, code=started["code"], name="K")
+    (display,) = await settings_service.displays()
+    assert display.mac == KITCHEN_MAC
+    _, token = await _paired(client, displays, name="Old firmware")
+    clock.advance(SEEN_INTERVAL_S + 1)
+    await client.get(WHOAMI, headers={**_bearer(token), **_mac("a0b765000002")})
+    assert [d.mac for d in await settings_service.displays()] == [
+        KITCHEN_MAC,
+        HALL_MAC,
+    ]
 
 
 # ── Bearer auth ──────────────────────────────────────────────────────────

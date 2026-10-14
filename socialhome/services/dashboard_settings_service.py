@@ -64,6 +64,7 @@ from ..domain.household_dashboard import (
     DashboardPortFixedError,
     DashboardSettings,
     DashboardSettingsInvalidError,
+    normalize_mac,
 )
 from ..infrastructure.key_manager import KeyManager, KeyManagerError
 from ..platform.local_credentials import hash_password, verify_password
@@ -281,7 +282,7 @@ def _settings_from_json(raw: str | None) -> DashboardSettings:
 
 
 _DISPLAY_STR_FIELDS = ("id", "name", "token_hash", "created_at")
-_DISPLAY_OPT_FIELDS = ("last_seen_at", "firmware", "model")
+_DISPLAY_OPT_FIELDS = ("last_seen_at", "firmware", "model", "mac")
 #: What :meth:`DashboardSettingsService.update_display` may change.
 _DISPLAY_EDITABLE = frozenset({"name", "locked"})
 
@@ -296,6 +297,7 @@ def _display_to_dict(d: DashboardDisplay) -> dict[str, object]:
         "firmware": d.firmware,
         "model": d.model,
         "locked": d.locked,
+        "mac": d.mac,
     }
 
 
@@ -320,6 +322,7 @@ def _display_from_dict(raw: object) -> DashboardDisplay | None:
         firmware=raw.get("firmware"),
         model=raw.get("model"),
         locked=locked,
+        mac=normalize_mac(raw.get("mac")),
     )
 
 
@@ -769,14 +772,35 @@ class DashboardSettingsService:
         async with self._lock:
             return await self._displays_unlocked()
 
-    async def add_display(self, display: DashboardDisplay) -> None:
+    async def add_display(
+        self,
+        display: DashboardDisplay,
+        *,
+        replace_same_mac: bool = False,
+        expected_epoch: int | None = None,
+    ) -> tuple[str, ...] | None:
         """Store a newly paired panel; :class:`DashboardDisplayLimitError`
-        at :data:`MAX_DISPLAYS`."""
+        at :data:`MAX_DISPLAYS`. With ``replace_same_mac`` every stored
+        panel with ``display.mac`` is dropped in the same write (a panel
+        re-connected from Home Assistant replaces its old record and
+        token); their ids are returned. With ``expected_epoch`` nothing is
+        stored — ``None`` returned — unless the session epoch still is that
+        (checked under the lock, so a sign-out can't slip in between)."""
         async with self._lock:
+            if (
+                expected_epoch is not None
+                and await self._epoch_unlocked() != expected_epoch
+            ):
+                return None
             current = await self._displays_unlocked()
+            dropped: tuple[str, ...] = ()
+            if replace_same_mac and display.mac is not None:
+                dropped = tuple(d.id for d in current if d.mac == display.mac)
+                current = tuple(d for d in current if d.mac != display.mac)
             if len(current) >= MAX_DISPLAYS:
                 raise DashboardDisplayLimitError()
             await self._save_displays_unlocked((*current, display))
+            return dropped
 
     async def _replace_display_unlocked(
         self, display_id: str, change: Mapping[str, object]
@@ -827,13 +851,20 @@ class DashboardSettingsService:
         at: str,
         firmware: str | None,
         model: str | None,
+        mac: str | None = None,
     ) -> None:
         """Note a panel's request: ``last_seen_at`` and, when the panel
-        sent them, its firmware / model. A removed panel is ignored."""
+        sent them, its firmware / model / MAC. A removed panel is ignored."""
         change: dict[str, object] = {"last_seen_at": at}
         if firmware is not None:
             change["firmware"] = firmware
         if model is not None:
             change["model"] = model
         async with self._lock:
+            if mac is not None and any(
+                d.id == display_id and d.mac is None
+                for d in await self._displays_unlocked()
+            ):
+                # Write-once: never moves a MAC the record already has.
+                change["mac"] = mac
             await self._replace_display_unlocked(display_id, change)

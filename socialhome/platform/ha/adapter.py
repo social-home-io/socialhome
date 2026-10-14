@@ -42,6 +42,7 @@ from .providers import (
     HaSTTProvider,
     HaUserDirectory,
 )
+from .displays import HaDisplayDirectory
 from .zones import HaZoneSource
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ class HaAdapter(PlatformAdapter):
         "ai",
         "events",
         "zones",
+        "displays",
     )
 
     def __init__(
@@ -118,6 +120,8 @@ class HaAdapter(PlatformAdapter):
         self.events = HaEventSink(self)
         # HA ``zone.*`` entities → the household-zone sync.
         self.zones = HaZoneSource(self)
+        # ESPHome wall panels in HA's device registry → Admin › Dashboard.
+        self.displays = HaDisplayDirectory(self)
 
     @property
     def capabilities(self) -> frozenset[Capability]:
@@ -126,6 +130,7 @@ class HaAdapter(PlatformAdapter):
             Capability.AI,
             Capability.HA_PERSON_DIRECTORY,
             Capability.ZONE_SYNC,  # ``self.zones`` reads HA's zones
+            Capability.HA_DISPLAY_DISCOVERY,  # ``self.displays`` lists HA's panels
             # Local password auth — the wizard sets a password for the
             # picked HA owner so the user can log in via /api/auth/token
             # in addition to X-Remote-User-Name and HA bearer tokens.
