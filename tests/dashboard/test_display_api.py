@@ -807,6 +807,9 @@ async def test_theme_follows_household_and_locale(
     payload = await (await _get(client, "/api/display/v1/theme", token)).json()
     assert payload["locale"] == "de"
     assert payload["strings"]["tab_overview"] == "Übersicht"
+    # The panel's own screens and PIN pad, placeholders intact.
+    assert payload["strings"]["pin_remaining"] == "Noch {n} Versuche"
+    assert payload["strings"]["claim_unreachable"].count("{host}") == 1
 
 
 async def test_theme_read_failure_keeps_built_in_accent(client, displays, theme_box):

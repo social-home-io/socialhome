@@ -21,9 +21,12 @@ but draws it itself from JSON. It talks to the **dashboard port** (default
   comes from the server: times in the household time zone, relative
   phrases ("in 20 min", "4 min ago"), labels from the dashboard catalog in
   the dashboard locale. The firmware is locale-free and only lays things
-  out. `GET /theme` carries the few static UI strings (tabs, PIN screen,
-  "Got it", night, offline, pairing) — `{time}` in `offline` is the one
-  placeholder the panel fills.
+  out. `GET /theme` carries the static UI strings (tabs, PIN screen,
+  "Got it", night, offline, and the panel's own Wi-Fi / address / pairing /
+  connect / update / settings screens). Placeholders stay in braces for the
+  panel to fill: `{time}` in `offline`, `{host}` in `claim_unreachable`,
+  `{n}` in `pin_remaining` and `pin_wait`. The panel keeps English
+  built-ins for the setup screens it shows before it has a server.
 - **People once, then ids.** Each board lists the shown `people` (name,
   initials, colour + ink, avatar path, where they are — never coordinates
   — and a mention badge); items reference them by id.

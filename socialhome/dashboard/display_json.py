@@ -1079,8 +1079,8 @@ def lock_payload(*, household: str, locale: str, clock: Json, t: T) -> Json:
 
 
 #: The static UI strings a panel needs, by the name the firmware uses →
-#: the dashboard catalog key. Placeholders stay in braces (``{time}``) for
-#: the panel to fill.
+#: the dashboard catalog key. Placeholders stay in braces (``{time}``,
+#: ``{host}``, ``{n}``) for the panel to fill.
 STRING_KEYS: Final[Mapping[str, str]] = {
     "tab_overview": "dashboard.tabs.overview",
     "tab_messages": "dashboard.tabs.messages",
@@ -1119,9 +1119,49 @@ STRING_KEYS: Final[Mapping[str, str]] = {
     "pair_expired": "dashboard.display.pair_expired",
     "unpaired": "dashboard.display.unpaired",
     "connecting": "dashboard.display.connecting",
+    # The panel's setup, pairing, settings and PIN-pad strings.
+    "wifi_title": "dashboard.display.wifi_title",
+    "wifi_text": "dashboard.display.wifi_text",
+    "wifi_waiting": "dashboard.display.wifi_waiting",
+    "server_title": "dashboard.display.server_title",
+    "server_text": "dashboard.display.server_text",
+    "server_placeholder": "dashboard.display.server_placeholder",
+    "server_invalid": "dashboard.display.server_invalid",
+    "server_ha": "dashboard.display.server_ha",
+    "connect": "dashboard.display.connect",
+    "pair_unreachable": "dashboard.display.pair_unreachable",
+    "pair_busy": "dashboard.display.pair_busy",
+    "claim_title": "dashboard.display.claim_title",
+    "claim_expired": "dashboard.display.claim_expired",
+    "claim_disabled": "dashboard.display.claim_disabled",
+    "claim_busy": "dashboard.display.claim_busy",
+    "claim_unreachable": "dashboard.display.claim_unreachable",
+    "ok": "dashboard.display.ok",
+    "change_server": "dashboard.display.change_server",
+    "update_title": "dashboard.display.update_title",
+    "update_text": "dashboard.display.update_text",
+    "map_placeholder": "dashboard.display.map_placeholder",
+    "map_none": "dashboard.display.map_none",
+    "settings_title": "dashboard.display.settings_title",
+    "settings_server": "dashboard.display.settings_server",
+    "settings_panel": "dashboard.display.settings_panel",
+    "settings_firmware": "dashboard.display.settings_firmware",
+    "forget": "dashboard.display.forget",
+    "forget_confirm": "dashboard.display.forget_confirm",
+    "cancel": "dashboard.display.cancel",
+    "close": "dashboard.display.close",
+    "credits": "dashboard.display.credits",
+    "pin_remaining": "dashboard.lock.tries_left",
+    "pin_wait": "dashboard.lock.wait",
+    "pin_offline": "dashboard.lock.offline",
 }
 #: Placeholders a string keeps for the panel to fill.
-_PLACEHOLDERS: Final = {"dashboard.offline": {"time": "{time}"}}
+_PLACEHOLDERS: Final = {
+    "dashboard.offline": {"time": "{time}"},
+    "dashboard.display.claim_unreachable": {"host": "{host}"},
+    "dashboard.lock.tries_left": {"n": "{n}"},
+    "dashboard.lock.wait": {"n": "{n}"},
+}
 
 #: The ``--dash-*`` colour tokens a panel needs.
 _TOKENS: Final = (
