@@ -92,6 +92,7 @@ from ..domain.household_dashboard import (
     DashboardPinRequiredError,
     DashboardSettingsInvalidError,
     DisplayDiscoveryUnavailableError,
+    DisplayHaUnlockOffError,
     DisplayPairing,
     DisplayPairingStatus,
     DisplayPanelNeedsUpdateError,
@@ -102,6 +103,7 @@ from ..domain.household_dashboard import (
     parse_panel_key,
 )
 from ..platform.adapter import DisplayDirectory
+from ..repositories.auth_audit_log_repo import AbstractAuthAuditLogRepo
 from .dashboard_settings_service import DashboardSettingsService, require_admin
 
 log = logging.getLogger(__name__)
@@ -219,6 +221,7 @@ class DashboardDisplayService:
         "_auth",
         "_clock",
         "_directory",
+        "_audit",
         "_pending",
         "_claims",
         "_claim_lock",
@@ -231,6 +234,7 @@ class DashboardDisplayService:
         auth: DashboardAuth,
         *,
         directory: DisplayDirectory | None = None,
+        audit: AbstractAuthAuditLogRepo | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._settings = settings
@@ -238,6 +242,8 @@ class DashboardDisplayService:
         self._clock = clock
         # The platform's panels (Home Assistant); ``None`` on standalone.
         self._directory = directory
+        # The auth audit log: Home Assistant unlocks are recorded there.
+        self._audit = audit
         # platform panel id → its pending connect claim; oldest first.
         self._claims: dict[str, _Claim] = {}
         # pair_id → pending entry; insertion-ordered (oldest first).
@@ -605,6 +611,8 @@ class DashboardDisplayService:
     # tablet's (``views.UnlockView``): the fifth wrong PIN in the throttle
     # window signs the panel out (here: unpairs it; only an admin pairing
     # it again helps), and so does any try that finds them already spent.
+    # Home Assistant may lift the lock without the PIN only while an admin
+    # allows it (``unlock_from_ha``); each such unlock is audited.
 
     async def is_locked(self, display: DashboardDisplay) -> bool:
         """``display`` is privacy-locked: its flag is set *and* a PIN
@@ -670,6 +678,55 @@ class DashboardDisplayService:
         except DashboardDisplayNotFoundError:
             raise DashboardDisplaySignedOutError() from None
         log.info("household dashboard: display %s unlocked", display.id)
+
+    async def unlock_from_ha(self, display: DashboardDisplay) -> bool:
+        """Lift the panel's lock without the PIN, asked by Home Assistant
+        (the panel's "Privacy lock" entity) — only while an admin allows
+        it (:attr:`DashboardSettings.panel_unlock_from_ha`, else
+        :class:`DisplayHaUnlockOffError`, checked first so the panel learns
+        the setting is off whether or not it is locked). ``True`` when a
+        lock was lifted; a panel that isn't locked (also: no PIN set) is
+        left alone. A lifted lock gets fresh PIN tries (as an admin's
+        unlock does) and is logged and written to the auth audit log."""
+        # The stored record, not the request's snapshot (as in ``unlock``).
+        stored = next(
+            (d for d in await self._settings.displays() if d.id == display.id), None
+        )
+        if stored is None:
+            raise DashboardDisplaySignedOutError()
+        if not (await self._settings.get()).panel_unlock_from_ha:
+            raise DisplayHaUnlockOffError()
+        if not await self.is_locked(stored):
+            return False
+        try:
+            await self._settings.update_display(display.id, {"locked": False})
+        except DashboardDisplayNotFoundError:
+            raise DashboardDisplaySignedOutError() from None
+        self._auth.record_success(
+            DashboardAuth.display_pin_throttle_key(display.id), count_global=False
+        )
+        log.info(
+            "household dashboard: Home Assistant unlocked display %s (%s)",
+            display.id,
+            stored.name,
+        )
+        if self._audit is not None:
+            # The lock is already lifted (and logged above): a failed
+            # audit write must not turn that into an error the panel
+            # would retry, nor roll it back — warn, and report the unlock.
+            try:
+                await self._audit.record(
+                    "display_ha_unlock",
+                    metadata={"display_id": display.id, "display_name": stored.name},
+                )
+            except Exception:
+                log.warning(
+                    "household dashboard: audit record of the Home Assistant "
+                    "unlock of display %s failed",
+                    display.id,
+                    exc_info=True,
+                )
+        return True
 
     async def _sign_out_after_wrong_pins(self, display: DashboardDisplay) -> NoReturn:
         """Unpair ``display`` (its wrong PINs are spent) and raise

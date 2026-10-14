@@ -325,6 +325,9 @@ class _DashboardAdminView(BaseView):
                 "show_status_text": settings.show_status_text,
                 "show_household_messages": settings.show_household_messages,
                 "mention_sound": settings.mention_sound,
+                # Home Assistant may lift a wall panel's privacy lock
+                # without the PIN (off by default).
+                "panel_unlock_from_ha": settings.panel_unlock_from_ha,
                 # The messages come from the household chat: the admin UI
                 # greys the switch while the chat itself is off.
                 "household_chat_enabled": prefs.is_enabled(HOUSEHOLD_CHAT_SECTION),

@@ -159,6 +159,7 @@ async def test_get_defaults(client):
     assert body["show_status_text"] is False
     assert body["show_household_messages"] is False
     assert body["mention_sound"] is True
+    assert body["panel_unlock_from_ha"] is False
     assert body["household_chat_enabled"] is True
     assert body["url_host_allowed"] is True
     assert body["host_port_mapped"] is None
@@ -382,6 +383,23 @@ async def test_mention_sound_toggle_must_be_a_bool(client):
     assert resp.status == 422
     body = await resp.json()
     assert body["error"]["params"] == {"field": "mention_sound"}
+
+
+async def test_panel_unlock_from_ha_toggle_round_trips(client):
+    resp = await _put(client, {"panel_unlock_from_ha": True})
+    assert resp.status == 200
+    assert (await resp.json())["panel_unlock_from_ha"] is True
+    resp = await client.get("/api/admin/dashboard", headers=_auth(client._tok))
+    assert (await resp.json())["panel_unlock_from_ha"] is True
+    resp = await _put(client, {"panel_unlock_from_ha": False})
+    assert (await resp.json())["panel_unlock_from_ha"] is False
+
+
+async def test_panel_unlock_from_ha_toggle_must_be_a_bool(client):
+    resp = await _put(client, {"panel_unlock_from_ha": "yes"})
+    assert resp.status == 422
+    body = await resp.json()
+    assert body["error"]["params"] == {"field": "panel_unlock_from_ha"}
 
 
 async def test_household_messages_toggle_must_be_a_bool(client):

@@ -18,6 +18,9 @@ Event types currently in use:
 * ``reset_redeem_success`` — a reset token was consumed and the
   password rotated.
 * ``reset_redeem_failure`` — token unknown / expired / already used.
+* ``display_ha_unlock`` — Home Assistant lifted a wall panel's privacy
+  lock without the PIN (``metadata``: ``display_id``, ``display_name``;
+  never a token or hash).
 """
 
 from __future__ import annotations

@@ -101,6 +101,7 @@ _BOOL_FIELDS = frozenset(
         "show_status_text",
         "show_household_messages",
         "mention_sound",
+        "panel_unlock_from_ha",
     }
 )
 _PERSON_KEYS = frozenset({"show", "picture"})
@@ -203,6 +204,7 @@ _SCALAR_FIELDS = (
     "show_status_text",
     "show_household_messages",
     "mention_sound",
+    "panel_unlock_from_ha",
     "address",
 )
 

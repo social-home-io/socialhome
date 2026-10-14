@@ -44,6 +44,7 @@ from socialhome.domain.household_dashboard import (
     DashboardSettingsInvalidError,
     DisplayDiscoveryFailedError,
     DisplayDiscoveryUnavailableError,
+    DisplayHaUnlockOffError,
     DisplayPanelNeedsUpdateError,
     DisplayPanelNotFoundError,
     DisplayPanelOfflineError,
@@ -762,6 +763,169 @@ async def test_unlock_reads_the_stored_lock_not_the_request_snapshot(
         await svc.unlock(display, "0000")
     found = await svc.authenticate(token)
     assert found is not None and found.locked
+
+
+# ── unlock from Home Assistant ─────────────────────────────────────────
+
+
+class _Audit:
+    """An auth-audit-log double: records every row it is given."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.rows: list[tuple[str, dict]] = []
+        self.fail = fail
+
+    async def record(
+        self, event_type, *, username=None, ip_address=None, metadata=None
+    ) -> None:
+        if self.fail:
+            raise RuntimeError("disk full")
+        self.rows.append((event_type, dict(metadata or {})))
+
+    async def list_recent(self, limit: int = 100) -> list[dict]:
+        return []
+
+    async def prune_older_than(self, *, days: int = 90) -> int:
+        return 0
+
+
+async def _allow_ha(settings, allowed: bool = True) -> None:
+    await settings.update(actor_is_admin=True, patch={"panel_unlock_from_ha": allowed})
+
+
+async def test_ha_unlock_is_refused_while_the_setting_is_off(settings, auth, clock):
+    audit = _Audit()
+    svc = DashboardDisplayService(settings, auth, clock=clock, audit=audit)
+    display, token = await _locked(svc, settings)
+    with pytest.raises(DisplayHaUnlockOffError) as exc:
+        await svc.unlock_from_ha(display)
+    assert exc.value.status == 403
+    found = await svc.authenticate(token)
+    assert found is not None and found.locked
+    assert audit.rows == []
+
+
+async def test_ha_unlock_off_is_said_even_when_not_locked(svc, settings):
+    """The setting is checked first, so the panel learns it is off."""
+    display, _ = await _pair(svc)
+    with pytest.raises(DisplayHaUnlockOffError):
+        await svc.unlock_from_ha(display)
+
+
+async def test_ha_unlock_lifts_the_lock_and_is_audited(settings, auth, clock, caplog):
+    audit = _Audit()
+    svc = DashboardDisplayService(settings, auth, clock=clock, audit=audit)
+    display, token = await _locked(svc, settings)
+    await _allow_ha(settings)
+    caplog.set_level(logging.INFO, "socialhome.services.dashboard_display_service")
+    assert await svc.unlock_from_ha(display) is True
+    found = await svc.authenticate(token)
+    assert found is not None and not found.locked
+    assert audit.rows == [
+        ("display_ha_unlock", {"display_id": display.id, "display_name": "Kitchen"})
+    ]
+    lines = [
+        r for r in caplog.records if "Home Assistant unlocked display" in r.getMessage()
+    ]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    assert display.id in lines[0].getMessage() and "Kitchen" in lines[0].getMessage()
+    assert token not in caplog.text and display.token_hash not in caplog.text
+    assert token not in json.dumps(audit.rows)
+    assert display.token_hash not in json.dumps(audit.rows)
+
+
+async def test_ha_unlock_without_an_audit_log_still_unlocks(svc, settings):
+    display, token = await _locked(svc, settings)
+    await _allow_ha(settings)
+    assert await svc.unlock_from_ha(display) is True
+    found = await svc.authenticate(token)
+    assert found is not None and not found.locked
+
+
+async def test_ha_unlock_survives_a_failing_audit_write(settings, auth, clock, caplog):
+    svc = DashboardDisplayService(settings, auth, clock=clock, audit=_Audit(fail=True))
+    display, token = await _locked(svc, settings)
+    await _allow_ha(settings)
+    caplog.set_level(logging.WARNING, "socialhome.services.dashboard_display_service")
+    assert await svc.unlock_from_ha(display) is True
+    found = await svc.authenticate(token)
+    assert found is not None and not found.locked
+    assert any(
+        r.levelno == logging.WARNING and "audit" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+async def test_ha_unlock_gives_the_panel_fresh_pin_tries(svc, settings, auth):
+    display, token = await _locked(svc, settings)
+    await _allow_ha(settings)
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        with pytest.raises(DashboardDisplayPinWrongError):
+            await svc.unlock(display, "0000")
+    assert await svc.unlock_from_ha(display) is True
+    assert auth.failure_count(DashboardAuth.display_pin_throttle_key(display.id)) == 0
+    locked = await svc.authenticate(token)
+    assert locked is not None
+    await svc.lock(locked)
+    with pytest.raises(DashboardDisplayPinWrongError) as exc:
+        await svc.unlock(locked, "0000")
+    assert exc.value.params == {"remaining": THROTTLE_MAX_FAILURES - 1}
+
+
+async def test_ha_unlock_of_an_unlocked_panel_is_a_no_op(settings, auth, clock, caplog):
+    audit = _Audit()
+    svc = DashboardDisplayService(settings, auth, clock=clock, audit=audit)
+    await settings.set_pin(actor_is_admin=True, pin=PIN)
+    display, _ = await _pair(svc)
+    await _allow_ha(settings)
+    caplog.set_level(logging.INFO, "socialhome.services.dashboard_display_service")
+    assert await svc.unlock_from_ha(display) is False
+    assert audit.rows == []
+    assert "Home Assistant unlocked" not in caplog.text
+
+
+async def test_ha_unlock_with_no_pin_is_a_no_op(settings, auth, clock):
+    """A stale lock flag with no PIN counts as unlocked — nothing to lift."""
+    audit = _Audit()
+    svc = DashboardDisplayService(settings, auth, clock=clock, audit=audit)
+    display, _ = await _pair(svc)
+    await settings.update_display(display.id, {"locked": True})
+    await _allow_ha(settings)
+    assert await svc.unlock_from_ha(display) is False
+    assert audit.rows == []
+
+
+async def test_ha_unlock_reads_the_stored_lock_not_the_request_snapshot(svc, settings):
+    await settings.set_pin(actor_is_admin=True, pin=PIN)
+    display, token = await _pair(svc)
+    await _allow_ha(settings)
+    # Authenticated unlocked, then a /lock landed: still lifted.
+    await svc.lock(display)
+    assert await svc.unlock_from_ha(display) is True
+    found = await svc.authenticate(token)
+    assert found is not None and not found.locked
+
+
+async def test_ha_unlock_of_a_removed_panel_is_signed_out(svc, settings):
+    display, _ = await _locked(svc, settings)
+    await _allow_ha(settings)
+    await svc.remove(actor_is_admin=True, display_id=display.id)
+    with pytest.raises(DashboardDisplaySignedOutError):
+        await svc.unlock_from_ha(display)
+
+
+async def test_ha_unlock_racing_a_removal_is_signed_out(svc, settings):
+    display, _ = await _locked(svc, settings)
+    await _allow_ha(settings)
+    # Removed between the read and the write (the service is slotted:
+    # patch its class).
+    with patch.object(
+        DashboardSettingsService,
+        "update_display",
+        side_effect=DashboardDisplayNotFoundError(),
+    ):
+        with pytest.raises(DashboardDisplaySignedOutError):
+            await svc.unlock_from_ha(display)
 
 
 async def test_rename_and_unlock_is_one_write(svc, settings, repo):

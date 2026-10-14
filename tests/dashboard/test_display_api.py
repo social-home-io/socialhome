@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -24,6 +25,8 @@ from socialhome.dashboard.app import build_dashboard_app
 from socialhome.dashboard.auth import (
     ACK_MAX,
     COOKIE_NAME,
+    HA_UNLOCK_MAX,
+    HA_UNLOCK_WINDOW_S,
     PAIR_MAX,
     THROTTLE_MAX_FAILURES,
     DashboardAuth,
@@ -75,6 +78,7 @@ PAIR = "/api/display/v1/pair"
 WHOAMI = "/api/display/v1/whoami"
 LOCK = "/api/display/v1/lock"
 UNLOCK = "/api/display/v1/unlock"
+HA_UNLOCK = "/api/display/v1/unlock/ha"
 ACK = "/api/display/v1/ack"
 PIN = "2468"
 
@@ -140,10 +144,35 @@ def directory() -> _Directory:
     return _Directory()
 
 
+class _Audit:
+    """The auth audit log, in memory: every row it is given."""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, dict]] = []
+
+    async def record(
+        self, event_type, *, username=None, ip_address=None, metadata=None
+    ) -> None:
+        self.rows.append((event_type, dict(metadata or {})))
+
+    async def list_recent(self, limit: int = 100) -> list[dict]:
+        return []
+
+    async def prune_older_than(self, *, days: int = 90) -> int:
+        return 0
+
+
 @pytest.fixture
-def displays(settings_service, auth, clock, directory) -> DashboardDisplayService:
+def audit() -> _Audit:
+    return _Audit()
+
+
+@pytest.fixture
+def displays(
+    settings_service, auth, clock, directory, audit
+) -> DashboardDisplayService:
     return DashboardDisplayService(
-        settings_service, auth, directory=directory, clock=clock
+        settings_service, auth, directory=directory, clock=clock, audit=audit
     )
 
 
@@ -1073,7 +1102,7 @@ async def test_lock_answers_the_lock_screen_and_locks_every_read(
 
 
 async def test_lock_and_unlock_need_a_token(client):
-    for path in (LOCK, UNLOCK, ACK):
+    for path in (LOCK, UNLOCK, HA_UNLOCK, ACK):
         resp = await client.post(path, json={"pin": PIN})
         assert resp.status == 401
         assert resp.headers["WWW-Authenticate"] == "Bearer"
@@ -1081,7 +1110,7 @@ async def test_lock_and_unlock_need_a_token(client):
 
 async def test_tablet_cookie_cannot_lock_or_unlock_a_panel(client, auth):
     cookie = {"Cookie": f"{COOKIE_NAME}={await auth.issue(True)}"}
-    for path in (LOCK, UNLOCK, ACK):
+    for path in (LOCK, UNLOCK, HA_UNLOCK, ACK):
         assert (await client.post(path, headers=cookie)).status == 401
 
 
@@ -1181,6 +1210,178 @@ async def test_removing_the_pin_lifts_every_panel_lock(
     # A new PIN doesn't lock it again.
     await settings_service.set_pin(actor_is_admin=True, pin=PIN)
     assert (await client.get(WHOAMI, headers=_bearer(token))).status == 200
+
+
+# ── Unlock from Home Assistant ───────────────────────────────────────────
+
+
+async def _allow_ha(settings_service, allowed: bool = True) -> None:
+    await settings_service.update(
+        actor_is_admin=True, patch={"panel_unlock_from_ha": allowed}
+    )
+
+
+async def test_ha_unlock_is_refused_while_the_setting_is_off(
+    client, displays, settings_service, audit
+):
+    _, token = await _locked(client, displays, settings_service)
+    # A locked panel reaches it (no 423) — and learns the setting is off.
+    resp = await client.post(HA_UNLOCK, headers=_bearer(token))
+    assert resp.status == 403
+    body = await resp.json()
+    _validate("error", body)
+    assert body["error"]["code"] == "DISPLAY_HA_UNLOCK_OFF"
+    assert (await _get(client, "/api/display/v1/home", token)).status == 423
+    assert audit.rows == []
+
+
+async def test_ha_unlock_lifts_the_lock(
+    client, displays, settings_service, auth, audit, caplog
+):
+    display_id, token = await _locked(client, displays, settings_service)
+    await _allow_ha(settings_service)
+    # Some wrong PINs first: Home Assistant's unlock gives fresh tries.
+    for _ in range(THROTTLE_MAX_FAILURES - 2):
+        resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
+        assert resp.status == 403
+    caplog.set_level(logging.INFO, "socialhome.services.dashboard_display_service")
+    resp = await client.post(HA_UNLOCK, headers=_bearer(token))
+    assert resp.status == 200
+    body = await resp.json()
+    _validate("unlock", body)
+    assert body == {"api_version": 1, "locked": False}
+    assert (await _get(client, "/api/display/v1/whoami", token)).status == 200
+    key = DashboardAuth.display_pin_throttle_key(display_id)
+    assert auth.failure_count(key) == 0
+    # Recorded: a log line naming the panel, and an audit row.
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "Home Assistant unlocked display" in r.getMessage()
+    ]
+    assert lines == [
+        f"household dashboard: Home Assistant unlocked display {display_id} (Kitchen)"
+    ]
+    assert audit.rows == [
+        ("display_ha_unlock", {"display_id": display_id, "display_name": "Kitchen"})
+    ]
+    assert token not in caplog.text and token not in json.dumps(audit.rows)
+    # Locked again: the full PIN budget is back.
+    assert (await client.post(LOCK, headers=_bearer(token))).status == 200
+    resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
+    assert (await resp.json())["error"]["params"] == {
+        "remaining": THROTTLE_MAX_FAILURES - 1
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (b"", None),
+        (b"{}", "application/json"),
+        (b'{"pin": "0000"}', "application/json"),
+        (b"{not json", "application/json"),
+        (b"\x00\xff", "application/octet-stream"),
+    ],
+)
+async def test_ha_unlock_needs_no_body_and_ignores_one(
+    client, displays, settings_service, body, content_type
+):
+    _, token = await _locked(client, displays, settings_service)
+    await _allow_ha(settings_service)
+    headers = _bearer(token)
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    resp = await client.post(HA_UNLOCK, data=body, headers=headers)
+    assert resp.status == 200, await resp.text()
+    assert (await resp.json())["locked"] is False
+
+
+async def test_ha_unlock_of_an_unlocked_panel_is_a_no_op(
+    client, displays, settings_service, audit, caplog
+):
+    await settings_service.set_pin(actor_is_admin=True, pin=PIN)
+    _, token = await _paired(client, displays)
+    await _allow_ha(settings_service)
+    caplog.set_level(logging.INFO, "socialhome.services.dashboard_display_service")
+    resp = await client.post(HA_UNLOCK, headers=_bearer(token))
+    assert resp.status == 200
+    assert await resp.json() == {"api_version": 1, "locked": False}
+    assert audit.rows == []
+    assert "Home Assistant unlocked" not in caplog.text
+
+
+async def test_ha_unlock_with_no_pin_is_a_no_op(
+    client, displays, settings_service, audit
+):
+    display_id, token = await _paired(client, displays)
+    # A lock flag with no PIN counts as unlocked.
+    await settings_service.update_display(display_id, {"locked": True})
+    await _allow_ha(settings_service)
+    resp = await client.post(HA_UNLOCK, headers=_bearer(token))
+    assert resp.status == 200
+    assert (await resp.json())["locked"] is False
+    assert audit.rows == []
+
+
+async def test_ha_unlock_by_a_removed_panel_is_401(client, displays, settings_service):
+    display_id, token = await _locked(client, displays, settings_service)
+    await _allow_ha(settings_service)
+    await displays.remove(actor_is_admin=True, display_id=display_id)
+    resp = await client.post(HA_UNLOCK, headers=_bearer(token))
+    assert resp.status == 401
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+
+async def test_ha_unlock_is_capped_per_display(client, displays, settings_service):
+    _, token = await _locked(client, displays, settings_service)
+    await _allow_ha(settings_service)
+    for _ in range(HA_UNLOCK_MAX):
+        assert (await client.post(HA_UNLOCK, headers=_bearer(token))).status == 200
+    resp = await client.post(HA_UNLOCK, headers=_bearer(token))
+    assert resp.status == 429
+    assert 0 < int(resp.headers["Retry-After"]) <= HA_UNLOCK_WINDOW_S
+    body = await resp.json()
+    _validate("error", body)
+    assert body["error"]["code"] == "RATE_LIMITED"
+    # Another panel has its own budget.
+    _, other = await _paired(client, displays, name="Hall")
+    assert (await client.post(HA_UNLOCK, headers=_bearer(other))).status == 200
+
+
+async def test_ha_unlock_off_is_capped_too(client, displays, settings_service):
+    """The budget is spent before the setting is read: a refused call
+    counts."""
+    _, token = await _paired(client, displays)
+    for _ in range(HA_UNLOCK_MAX):
+        assert (await client.post(HA_UNLOCK, headers=_bearer(token))).status == 403
+    assert (await client.post(HA_UNLOCK, headers=_bearer(token))).status == 429
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_lock_payload_says_whether_home_assistant_may_unlock(
+    client, displays, settings_service, allowed
+):
+    _, token = await _locked(client, displays, settings_service)
+    await _allow_ha(settings_service, allowed)
+    resp = await _get(client, "/api/display/v1/home", token)
+    assert resp.status == 423
+    payload = await resp.json()
+    _validate("lock", payload)
+    assert payload["ha_unlock"] is allowed
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+async def test_board_settings_say_whether_home_assistant_may_unlock(
+    client, displays, settings_service, allowed
+):
+    _, token = await _paired(client, displays)
+    await _allow_ha(settings_service, allowed)
+    resp = await _get(client, "/api/display/v1/home", token)
+    assert resp.status == 200
+    payload = await resp.json()
+    _validate("home", payload)
+    assert payload["settings"]["ha_unlock"] is allowed
 
 
 async def test_ack(client, displays, snapshots):

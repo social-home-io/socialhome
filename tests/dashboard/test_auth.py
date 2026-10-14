@@ -17,6 +17,8 @@ from socialhome.dashboard.auth import (
     DISPLAY_IMAGE_MAX,
     DISPLAY_READ_MAX,
     DISPLAY_WINDOW_S,
+    HA_UNLOCK_MAX,
+    HA_UNLOCK_WINDOW_S,
     MAP_RENDER_MAX,
     PAIR_MAX,
     PAIR_WINDOW_S,
@@ -1085,6 +1087,22 @@ def test_map_renders_are_budgeted_per_panel(auth, clock):
     assert auth.begin_display_read("d1", image=True) == 0
     clock.advance(DISPLAY_WINDOW_S + 1)
     assert auth.begin_map_render("d1") == 0
+
+
+def test_ha_unlocks_are_budgeted_per_panel(auth, clock):
+    for _ in range(HA_UNLOCK_MAX):
+        assert auth.begin_display_ha_unlock("d1") == 0
+    wait = auth.begin_display_ha_unlock("d1")
+    assert 0 < wait <= HA_UNLOCK_WINDOW_S
+    # A refused call is not counted: the wait doesn't grow.
+    assert auth.begin_display_ha_unlock("d1") == wait
+    # Another panel, and the panel's other budgets, are untouched.
+    assert auth.begin_display_ha_unlock("d2") == 0
+    assert auth.begin_display_read("d1") == 0
+    assert auth.begin_display_ack("d1") == 0
+    assert auth.throttle_key_count == 0
+    clock.advance(HA_UNLOCK_WINDOW_S + 1)
+    assert auth.begin_display_ha_unlock("d1") == 0
 
 
 # ─── PIN buckets can't be evicted (security) ─────────────────────────────

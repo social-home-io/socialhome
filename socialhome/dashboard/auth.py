@@ -76,6 +76,10 @@ expensive part; a kept picture or a ``304`` is not counted).
 A panel's PIN guesses use the tablet PIN limit, keyed on the panel id
 (:meth:`DashboardAuth.display_pin_throttle_key`), and its "Got it" taps
 the tablet's ack budget (:meth:`DashboardAuth.begin_display_ack`).
+Home Assistant lifting a panel's lock without the PIN
+(``POST /api/display/v1/unlock/ha``) is held to :data:`HA_UNLOCK_MAX` per
+:data:`HA_UNLOCK_WINDOW_S` per panel
+(:meth:`DashboardAuth.begin_display_ha_unlock`).
 """
 
 from __future__ import annotations
@@ -116,6 +120,8 @@ __all__ = [
     "DISPLAY_IMAGE_MAX",
     "DISPLAY_READ_MAX",
     "DISPLAY_WINDOW_S",
+    "HA_UNLOCK_MAX",
+    "HA_UNLOCK_WINDOW_S",
     "MAP_RENDER_MAX",
     "PAIR_WINDOW_S",
     "PIN_THROTTLE_MAX_KEYS",
@@ -193,6 +199,13 @@ DISPLAY_WINDOW_S = 60
 #: (:meth:`DashboardAuth.begin_map_render`): a new size or scheme, or what
 #: the map shows changing. A 30 s poll of an unchanged map paints nothing.
 MAP_RENDER_MAX = 6
+#: Home Assistant unlocks of one panel per window
+#: (:meth:`DashboardAuth.begin_display_ha_unlock`). An automation lifts a
+#: lock rarely (someone came home, a button was pressed); a handful in
+#: five minutes covers a retry or two, while a looping automation — or
+#: anyone scripting Home Assistant's actions — can't hammer the panel.
+HA_UNLOCK_MAX = 6
+HA_UNLOCK_WINDOW_S = 300
 
 #: Revocation reasons (:meth:`DashboardAuth.revoke`). ``locked``: the
 #: cookie was replaced by a locked one (``POST /lock``) — it now counts
@@ -733,6 +746,19 @@ class DashboardAuth:
         ):
             return 0
         return self._display_reads.retry_after_s(key, window_s=DISPLAY_WINDOW_S)
+
+    def begin_display_ha_unlock(self, display_id: str) -> int:
+        """Count one Home Assistant unlock of a panel: ``0`` when it may go
+        ahead, else the seconds to wait (nothing is counted then). Keyed
+        on the panel id (at most
+        :data:`~socialhome.domain.household_dashboard.MAX_DISPLAYS` keys),
+        apart from the panel's reads and its PIN tries."""
+        key = f"ha-unlock-display:{display_id}"
+        if self._display_reads.is_allowed(
+            key, limit=HA_UNLOCK_MAX, window_s=HA_UNLOCK_WINDOW_S
+        ):
+            return 0
+        return self._display_reads.retry_after_s(key, window_s=HA_UNLOCK_WINDOW_S)
 
     def begin_pair(self, client_key: str, *, claim: bool = False) -> int:
         """Count one anonymous pairing start from ``client_key`` (a
