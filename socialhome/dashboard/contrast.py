@@ -11,7 +11,9 @@ Contrast follows WCAG 2.x: relative luminance from sRGB, ratio
 ``(L1 + 0.05) / (L2 + 0.05)``. :data:`AA_TEXT` (4.5:1) is the bar for
 text; :func:`ink_on` picks black or white text for a coloured fill —
 one of the two always clears it; :func:`note_ink` softens black to the
-board's warm text colour for note cards where that still reads.
+board's warm text colour for note cards where that still reads;
+:func:`past_colors` fades a timeline bar that is over and picks its ink
+against the faded fill.
 """
 
 from __future__ import annotations
@@ -32,7 +34,12 @@ __all__ = [
     "NOTE_MIX_LIGHT",
     "WARM_INK",
     "WHITE",
+    "PAST_FADE",
+    "SURFACE_DARK",
+    "SURFACE_LIGHT",
+    "SURFACE_NIGHT",
     "NoteColors",
+    "PastColors",
     "contrast_ratio",
     "frame_color",
     "hex_color",
@@ -41,6 +48,7 @@ __all__ = [
     "mix_srgb",
     "note_colors",
     "note_ink",
+    "past_colors",
     "readable_on",
     "relative_luminance",
 ]
@@ -218,3 +226,40 @@ def frame_color(color: str, surface: str, toward: str) -> str:
         if contrast_ratio(frame, surface) >= NON_TEXT:
             return frame
     return toward
+
+
+#: The card surface (``--dash-surface``) a timeline bar sits on: light,
+#: dark and night.
+SURFACE_LIGHT = "#ffffff"
+SURFACE_DARK = "#22201d"
+SURFACE_NIGHT = "#121110"
+#: How much of its colour a past timeline bar keeps: its fill is drawn at
+#: this opacity over the card (what ``opacity: 0.5`` on the whole bar
+#: used to do — label included, ~2:1 in dark mode).
+PAST_FADE = 0.5
+
+
+@dataclass(slots=True, frozen=True)
+class PastColors:
+    """A past timeline bar's faded fill and its ink, light / dark / night."""
+
+    light_bg: str
+    light_ink: str
+    dark_bg: str
+    dark_ink: str
+    night_bg: str
+    night_ink: str
+
+
+def past_colors(color: str) -> PastColors:
+    """The past timeline bar for ``color`` (``#rrggbb``): only the fill
+    fades — composited at :data:`PAST_FADE` over each card surface, in
+    sRGB like the browser's own alpha blending — and the label keeps full
+    strength in :func:`ink_on`'s black or white picked against that
+    fill (the wall panel firmware draws past bars the same way)."""
+    fills = (
+        mix_srgb(color, surface, 1 - PAST_FADE)
+        for surface in (SURFACE_LIGHT, SURFACE_DARK, SURFACE_NIGHT)
+    )
+    light, dark, night = fills
+    return PastColors(light, ink_on(light), dark, ink_on(dark), night, ink_on(night))

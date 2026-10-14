@@ -157,11 +157,30 @@ def test_lock_screen_error_opens_the_keypad(renderer):
         household="Casa",
         clock=_clock(),
         error="Code PIN incorrect",
+        tries_left=None,
     )
     assert '<details class="dash-lock-pin" open>' in html
     assert '<p class="dash-error" role="alert">Code PIN incorrect</p>' in html
     assert "dash-lock-error" in html
     assert "autofocus" in html
+    assert "dash-pin-tries" not in html
+
+
+def test_lock_screen_says_how_many_tries_are_left(renderer):
+    """Like the wall panel: "Tries left: n" in the same alert as "Wrong
+    PIN", so a screen reader announces both."""
+    html = renderer.render(
+        "lock.html.j2",
+        locale="en",
+        household="Casa",
+        clock=_clock(),
+        error="Wrong PIN",
+        tries_left="Tries left: 3",
+    )
+    assert (
+        '<p class="dash-error" role="alert">Wrong PIN '
+        '<span class="dash-pin-tries">Tries left: 3</span></p>'
+    ) in html
 
 
 def test_strict_undefined(renderer):

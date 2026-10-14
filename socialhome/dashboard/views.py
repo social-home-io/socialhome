@@ -235,6 +235,12 @@ async def render_lock_screen(request: web.Request) -> web.Response:
     Get, so a reload never re-sends a PIN): ``?pin=wrong`` shows "Wrong
     PIN"; ``?pin=wait`` shows "Too many tries" with ``429`` and
     ``Retry-After`` while this tablet must still wait.
+
+    After a wrong PIN the page also says how many tries are left before
+    the tablet is signed out — the wall panel's ``params.remaining``. The
+    count is read from this tablet's own PIN bucket, never from the
+    address: the flag only asks for it, so it can't be spoofed, and a
+    stale flag with no wrong PIN counted shows no count.
     """
     app = request.app
     auth = app[AUTH_KEY]
@@ -242,12 +248,18 @@ async def render_lock_screen(request: web.Request) -> web.Response:
     locale = (await app[SETTINGS_KEY].get()).locale
     zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
     t = renderer.translator(locale)
-    status, headers, error = 200, None, None
+    status, headers, error, tries_left = 200, None, None, None
     flag = request.query.get("pin")
+    key = DashboardAuth.pin_throttle_key(request[CLAIMS_KEY])
     if flag == PIN_WRONG:
         error = t("dashboard.lock.wrong_pin")
+        failures = auth.failure_count(key)
+        if failures:
+            tries_left = t(
+                "dashboard.lock.tries_left",
+                n=max(0, THROTTLE_MAX_FAILURES - failures),
+            )
     elif flag == PIN_WAIT:
-        key = DashboardAuth.pin_throttle_key(request[CLAIMS_KEY])
         wait = auth.attempt_wait(key, count_global=False)
         if wait:
             status, headers = 429, {"Retry-After": str(wait)}
@@ -258,6 +270,7 @@ async def render_lock_screen(request: web.Request) -> web.Response:
         household=await app[HOUSEHOLD_NAME_KEY](),
         clock=household_clock(auth.now(), zone, t),
         error=error,
+        tries_left=tries_left,
     )
     return html_response(text, status=status, headers=headers)
 

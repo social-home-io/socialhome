@@ -17,7 +17,7 @@
     <summary class="dash-lock-summary"><span aria-hidden="true">🔒</span> {{ t("dashboard.lock.pin_button") }}</summary>
     <form class="dash-pin-form{% if error %} dash-lock-error{% endif %}" method="post" action="/unlock" data-pin-form data-label-delete="{{ t("dashboard.lock.delete") }}" data-label-submit="{{ t("dashboard.lock.unlock") }}">
       {% if error %}
-      <p class="dash-error" role="alert">{{ error }}</p>
+      <p class="dash-error" role="alert">{{ error }}{% if tries_left %} <span class="dash-pin-tries">{{ tries_left }}</span>{% endif %}</p>
       {% endif %}
       <label class="dash-field dash-pin-native">
         <span>{{ t("dashboard.lock.enter_pin") }}</span>

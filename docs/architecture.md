@@ -1648,7 +1648,9 @@ drives it) and is then served by a **separate aiohttp application on its own por
     so neither a copied nor a renewed cookie of it can keep guessing;
     only the household password helps then. Any other hold-back (a
     full throttle table) only asks the tablet to wait. `/unlock`
-    answers with redirects only (Post/Redirect/Get).
+    answers with redirects only (Post/Redirect/Get); the `?pin=wrong`
+    lock screen shows the tries left from the lock's bucket (the flag
+    carries no number, so it can't be spoofed).
   - **Revocation is in memory.** A bounded map of session ids (10k;
     an entry lasts a full cookie lifetime from the revocation, so no
     copy issued before it outlives it). Entries are added only by a
@@ -1900,7 +1902,11 @@ otherwise the built-in high-contrast accent stays. Timeline positions are
 whole-percent classes (`.x-N` / `.w-N`) in the static stylesheet; a bar
 too narrow for its title shows an icon (`dashboard/icons.py`: its leading
 emoji or a keyword guess, else 🔹; forced below 10 % of the day, else
-by a container query on its real width). Home also renders the day as a
+by a container query on its real width). A bar that is over fades only
+its fill — the colour composited at 50 % over the card for each scheme
+on the server (`--kp`), with black or white ink picked against that fill
+(`--kq`, `contrast.past_colors`), the same rule as the wall panel — so
+its label stays readable in dark mode. Home also renders the day as a
 chronological list, which a media query swaps in for the lanes under
 600 px (the server can't know the width). On a person page events are
 painted in that person's colour, not the colour of whichever calendar copy

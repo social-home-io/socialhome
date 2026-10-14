@@ -30,6 +30,7 @@ from socialhome.dashboard.auth import (
     DashboardAuth,
     SessionClaims,
 )
+from socialhome.dashboard.contrast import contrast_ratio
 from socialhome.dashboard.keys import AUTH_KEY, CLAIMS_KEY
 from socialhome.dashboard.render import DashboardRenderer
 from socialhome.dashboard.views import (
@@ -1247,6 +1248,53 @@ async def test_wrong_pin_redirects_to_the_lock_screen_with_a_flag(pin_client, au
     _assert_strict_csp(page, html)
 
 
+async def test_wrong_pin_says_how_many_tries_are_left(pin_client, auth):
+    """Owner decision 2026-10-14: like the wall panel's
+    ``params.remaining``, counting down to the sign-out."""
+    headers = await _locked(auth)
+    for left in range(THROTTLE_MAX_FAILURES - 1, -1, -1):
+        await _unlock(pin_client, headers, pin="000000")
+        html = await (await pin_client.get(WRONG, headers=headers)).text()
+        assert (
+            f'Wrong PIN <span class="dash-pin-tries">Tries left: {left}</span>'
+        ) in html
+
+
+async def test_tries_left_is_the_servers_count_never_the_address(pin_client, auth):
+    """The flag only asks for the count: nothing in the address sets it,
+    and with no wrong PIN counted (a stale or hand-typed flag) there is
+    no count at all."""
+    headers = await _locked(auth)
+    html = await (
+        await pin_client.get(WRONG + "&remaining=99&n=99", headers=headers)
+    ).text()
+    assert "Wrong PIN" in html and "Tries left" not in html
+    await _unlock(pin_client, headers, pin="000000")
+    html = await (
+        await pin_client.get(WRONG + "&remaining=99&n=99", headers=headers)
+    ).text()
+    assert f"Tries left: {THROTTLE_MAX_FAILURES - 1}<" in html
+    assert "Tries left: 99" not in html
+
+
+async def test_tries_left_is_per_tablet(pin_client, auth):
+    """Another tablet's wrong PINs don't count down this one."""
+    tablet_a, tablet_b = await _locked(auth), await _locked(auth)
+    for _ in range(3):
+        await _unlock(pin_client, tablet_a, pin="000000")
+    await _unlock(pin_client, tablet_b, pin="000000")
+    html = await (await pin_client.get(WRONG, headers=tablet_b)).text()
+    assert f"Tries left: {THROTTLE_MAX_FAILURES - 1}<" in html
+
+
+async def test_tries_left_in_the_dashboard_language(pin_client, auth, settings_service):
+    await settings_service.update(actor_is_admin=True, patch={"locale": "de"})
+    headers = await _locked(auth)
+    await _unlock(pin_client, headers, pin="000000")
+    html = await (await pin_client.get(WRONG, headers=headers)).text()
+    assert f"Verbleibende Versuche: {THROTTLE_MAX_FAILURES - 1}" in html
+
+
 async def test_lock_page_keypad_is_closed_until_asked(pin_client, auth):
     html = await (await pin_client.get("/", headers=await _locked(auth))).text()
     assert re.search(r"<details[^>]*\sopen", html) is None
@@ -1574,6 +1622,28 @@ def _attr(html: str, name: str) -> str:
 
 async def _get(client, auth, path: str, **kw):
     return await client.get(path, headers=await _cookie(auth), **kw)
+
+
+async def test_home_past_bars_fade_only_their_fill(client, auth):
+    """Dark-mode contrast fix: a bar that is over keeps its label at full
+    strength in an ink picked against its faded fill (--kp / --kq in the
+    page's style); only the emoji are marked to fade with it."""
+    resp = await _get(client, auth, "/")
+    html = await resp.text()
+    style = _board_style(html)[0]
+    past = re.findall(r'<li class="dash-block [^"]*\bdash-past\b[^"]*">', html)
+    assert past, "the dentist bar is over at 14:32"
+    # The school bag fades with a past school bar; the title doesn't.
+    assert '<span class="dash-block-emoji">🎒</span> ' in html
+    cls = re.search(r"\b(k\d+)\b", past[0])
+    assert cls is not None
+    for scheme in style.split("@media (prefers-color-scheme:dark){", 1):
+        rule = re.search(rf"\.{cls.group(1)}\{{([^}}]*)\}}", scheme)
+        assert rule is not None
+        bg = re.search(r"--kp:(#[0-9a-f]{6})", rule.group(1))
+        ink = re.search(r"--kq:(#[0-9a-f]{6})", rule.group(1))
+        assert bg and ink
+        assert contrast_ratio(ink.group(1), bg.group(1)) >= 4.5
 
 
 async def test_home_board(client, auth, snapshots):
