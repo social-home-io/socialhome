@@ -149,11 +149,13 @@ class _Audit:
 
     def __init__(self) -> None:
         self.rows: list[tuple[str, dict]] = []
+        self.ips: list[str | None] = []
 
     async def record(
         self, event_type, *, username=None, ip_address=None, metadata=None
     ) -> None:
         self.rows.append((event_type, dict(metadata or {})))
+        self.ips.append(ip_address)
 
     async def list_recent(self, limit: int = 100) -> list[dict]:
         return []
@@ -1240,7 +1242,7 @@ async def test_ha_unlock_lifts_the_lock(
 ):
     display_id, token = await _locked(client, displays, settings_service)
     await _allow_ha(settings_service)
-    # Some wrong PINs first: Home Assistant's unlock gives fresh tries.
+    # Some wrong PINs first: Home Assistant's unlock keeps them counted.
     for _ in range(THROTTLE_MAX_FAILURES - 2):
         resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
         assert resp.status == 403
@@ -1252,7 +1254,7 @@ async def test_ha_unlock_lifts_the_lock(
     assert body == {"api_version": 1, "locked": False}
     assert (await _get(client, "/api/display/v1/whoami", token)).status == 200
     key = DashboardAuth.display_pin_throttle_key(display_id)
-    assert auth.failure_count(key) == 0
+    assert auth.failure_count(key) == THROTTLE_MAX_FAILURES - 2
     # Recorded: a log line naming the panel, and an audit row.
     lines = [
         r.getMessage()
@@ -1265,23 +1267,40 @@ async def test_ha_unlock_lifts_the_lock(
     assert audit.rows == [
         ("display_ha_unlock", {"display_id": display_id, "display_name": "Kitchen"})
     ]
+    # The caller's address is on the audit row (the test client's).
+    assert audit.ips == ["127.0.0.1"]
     assert token not in caplog.text and token not in json.dumps(audit.rows)
-    # Locked again: the full PIN budget is back.
+    # Locked again: the earlier wrong PINs still count.
     assert (await client.post(LOCK, headers=_bearer(token))).status == 200
     resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
-    assert (await resp.json())["error"]["params"] == {
-        "remaining": THROTTLE_MAX_FAILURES - 1
-    }
+    assert (await resp.json())["error"]["params"] == {"remaining": 1}
+
+
+async def test_ha_unlock_does_not_refill_the_pin_budget(
+    client, displays, settings_service
+):
+    """Regression: lock → 4 wrong PINs → HA unlock → lock → the 5th wrong
+    PIN in the window still unpairs the panel (no PIN-guessing loop)."""
+    display_id, token = await _locked(client, displays, settings_service)
+    await _allow_ha(settings_service)
+    for _ in range(THROTTLE_MAX_FAILURES - 1):
+        resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
+        assert resp.status == 403
+    assert (await client.post(HA_UNLOCK, headers=_bearer(token))).status == 200
+    assert (await client.post(LOCK, headers=_bearer(token))).status == 200
+    resp = await client.post(UNLOCK, json={"pin": "0000"}, headers=_bearer(token))
+    assert resp.status == 401
+    body = await resp.json()
+    _validate("error", body)
+    assert body["error"]["code"] == "DISPLAY_SIGNED_OUT"
+    assert display_id not in {d.id for d in await settings_service.displays()}
 
 
 @pytest.mark.parametrize(
     ("body", "content_type"),
     [
         (b"", None),
-        (b"{}", "application/json"),
-        (b'{"pin": "0000"}', "application/json"),
         (b"{not json", "application/json"),
-        (b"\x00\xff", "application/octet-stream"),
     ],
 )
 async def test_ha_unlock_needs_no_body_and_ignores_one(

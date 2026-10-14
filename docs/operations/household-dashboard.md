@@ -485,8 +485,11 @@ missing.
   Wall panels**, works either way.
 - **Every Home Assistant unlock is recorded**: Social Home logs it and
   writes it to the auth audit log (`GET /api/admin/auth-audit`, event
-  `display_ha_unlock`, with the panel's id and name). An unlock also gives
-  the panel fresh PIN tries.
+  `display_ha_unlock`, with the panel's id and name and the address the
+  request came from). A refused unlock is logged too. An unlock from Home
+  Assistant does **not** give the panel fresh PIN tries: wrong PINs typed
+  before it still count until they age out (15 minutes), so it can't be
+  used to keep guessing the PIN.
 - **At most 6 unlock requests per 5 minutes per panel** — refused ones
   count too. After that a looping automation is told to wait, and the
   panel stays locked.
@@ -532,10 +535,14 @@ automation:
           entity_id: lock.kitchen_panel_privacy_lock
 ```
 
-> **Who can unlock then.** Anyone who can run your Home Assistant
-> automations or actions — or reach the panel's ESPHome API — can then
-> lift the privacy lock. Leave it off if Home Assistant users shouldn't be
-> able to see what the wall shows.
+> **Who can unlock then.** Home Assistant has no per-entity permissions,
+> so once this is on, **every** Home Assistant user (not only admins), any
+> long-lived access token or integration, a voice assistant the lock
+> entity is exposed to, and anyone who can reach the panel's ESPHome API
+> can lift the privacy lock. Leave it off if Home Assistant users
+> shouldn't be able to see what the wall shows. Keep the panel's ESPHome
+> API encryption on (the panel firmware ships it on by default —
+> `api: encryption: {}`) and set an OTA password.
 
 ## Signing tablets out
 

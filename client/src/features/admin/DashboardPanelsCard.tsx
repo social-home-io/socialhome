@@ -62,7 +62,6 @@ export function DashboardPanelsCard({ state, save, reload }: {
   reload: () => Promise<void>
 }) {
   const [adding, setAdding] = useState(false)
-  const [savingHaUnlock, setSavingHaUnlock] = useState(false)
   const [renaming, setRenaming] = useState<DashboardDisplay | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const displays = state.displays
@@ -101,15 +100,6 @@ export function DashboardPanelsCard({ state, save, reload }: {
     } finally {
       setBusyId(null)
       await reload()
-    }
-  }
-
-  const setHaUnlock = async (on: boolean) => {
-    setSavingHaUnlock(true)
-    try {
-      await save({ panel_unlock_from_ha: on })
-    } finally {
-      setSavingHaUnlock(false)
     }
   }
 
@@ -172,8 +162,7 @@ export function DashboardPanelsCard({ state, save, reload }: {
       </div>
       <SwitchRow id="sh-dash-panels-ha-unlock" label={t('admin.dashboard.panels.ha_unlock')}
         hint={t('admin.dashboard.panels.ha_unlock_hint')} checked={state.panel_unlock_from_ha}
-        disabled={savingHaUnlock}
-        onChange={(v) => void setHaUnlock(v)} />
+        onChange={(v) => void save({ panel_unlock_from_ha: v })} />
       {state.ha_display_discovery && <HaPanelsSection state={state} reload={reload} />}
       <AddPanelDialog open={adding} onClose={() => setAdding(false)}
         onPaired={(name) => {

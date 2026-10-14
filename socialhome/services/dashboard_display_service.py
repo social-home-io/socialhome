@@ -560,10 +560,8 @@ class DashboardDisplayService:
         """Unpair a panel — its token stops working at once, and a connect
         claim or a re-connect still pending for it (same MAC) is dropped."""
         require_admin(actor_is_admin)
-        mac = next(
-            (d.mac for d in await self._settings.displays() if d.id == display_id),
-            None,
-        )
+        stored = await self._stored(display_id)
+        mac = stored.mac if stored is not None else None
         for removed in await self._settings.remove_display(display_id):
             self._forget(removed)
         if mac is not None:
@@ -596,6 +594,12 @@ class DashboardDisplayService:
             )
             log.info("household dashboard: admin unlocked display %s", display_id)
         return display
+
+    async def _stored(self, display_id: str) -> DashboardDisplay | None:
+        """The stored record of panel ``display_id``, else ``None``."""
+        return next(
+            (d for d in await self._settings.displays() if d.id == display_id), None
+        )
 
     def _forget(self, display_id: str) -> None:
         self._seen.pop(display_id, None)
@@ -646,9 +650,7 @@ class DashboardDisplayService:
         """
         # The stored record, not the request's snapshot: a /lock that
         # landed after this request authenticated still needs the PIN.
-        stored = next(
-            (d for d in await self._settings.displays() if d.id == display.id), None
-        )
+        stored = await self._stored(display.id)
         if stored is None:
             raise DashboardDisplaySignedOutError()
         if not await self.is_locked(stored):
@@ -679,22 +681,28 @@ class DashboardDisplayService:
             raise DashboardDisplaySignedOutError() from None
         log.info("household dashboard: display %s unlocked", display.id)
 
-    async def unlock_from_ha(self, display: DashboardDisplay) -> bool:
+    async def unlock_from_ha(
+        self, display: DashboardDisplay, *, ip_address: str | None = None
+    ) -> bool:
         """Lift the panel's lock without the PIN, asked by Home Assistant
         (the panel's "Privacy lock" entity) — only while an admin allows
         it (:attr:`DashboardSettings.panel_unlock_from_ha`, else
-        :class:`DisplayHaUnlockOffError`, checked first so the panel learns
-        the setting is off whether or not it is locked). ``True`` when a
-        lock was lifted; a panel that isn't locked (also: no PIN set) is
-        left alone. A lifted lock gets fresh PIN tries (as an admin's
-        unlock does) and is logged and written to the auth audit log."""
+        :class:`DisplayHaUnlockOffError`, logged at INFO and checked first
+        so the panel learns the setting is off whether or not it is
+        locked). ``True`` when a lock was lifted; a panel that isn't locked
+        (also: no PIN set) is left alone. A lifted lock keeps the panel's
+        wrong-PIN count (unlike an admin's rescue) and is logged and
+        written to the auth audit log with the caller's ``ip_address``."""
         # The stored record, not the request's snapshot (as in ``unlock``).
-        stored = next(
-            (d for d in await self._settings.displays() if d.id == display.id), None
-        )
+        stored = await self._stored(display.id)
         if stored is None:
             raise DashboardDisplaySignedOutError()
         if not (await self._settings.get()).panel_unlock_from_ha:
+            log.info(
+                "household dashboard: Home Assistant unlock of display %s "
+                "refused — not allowed in Admin › Dashboard",
+                display.id,
+            )
             raise DisplayHaUnlockOffError()
         if not await self.is_locked(stored):
             return False
@@ -702,9 +710,12 @@ class DashboardDisplayService:
             await self._settings.update_display(display.id, {"locked": False})
         except DashboardDisplayNotFoundError:
             raise DashboardDisplaySignedOutError() from None
-        self._auth.record_success(
-            DashboardAuth.display_pin_throttle_key(display.id), count_global=False
-        )
+        # The panel's wrong-PIN failures are NOT reset here: the household
+        # PIN also unlocks every tablet, so resetting them on each HA unlock
+        # would let a token holder loop lock → 4 wrong PINs → /unlock/ha →
+        # lock… and guess the PIN ~18x faster than the throttle allows,
+        # never unpaired. They age out of the throttle window on their own;
+        # only the admin rescue (``update``) and a correct PIN reset them.
         log.info(
             "household dashboard: Home Assistant unlocked display %s (%s)",
             display.id,
@@ -717,6 +728,7 @@ class DashboardDisplayService:
             try:
                 await self._audit.record(
                     "display_ha_unlock",
+                    ip_address=ip_address,
                     metadata={"display_id": display.id, "display_name": stored.name},
                 )
             except Exception:
@@ -767,10 +779,7 @@ class DashboardDisplayService:
                     found.id,
                     display_id,
                 )
-            found = next(
-                (d for d in await self._settings.displays() if d.id == found.id),
-                None,
-            )
+            found = await self._stored(found.id)
         return found
 
     async def seen(

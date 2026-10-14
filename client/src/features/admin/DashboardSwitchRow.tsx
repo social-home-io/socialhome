@@ -16,11 +16,14 @@ export function SwitchRow({ id, label, hint, checked, disabled, onChange }: {
         <label for={id}>{label}</label>
         {hint && <span id={hintId} class="sh-form-hint">{hint}</span>}
       </div>
-      <span class="sh-switch">
+      {/* A label (no text of its own, so the name stays the text label
+          above) so a click or tap on the visible track toggles the 0×0
+          input. */}
+      <label class="sh-switch" for={id}>
         <input id={id} type="checkbox" role="switch" checked={checked} disabled={disabled}
           aria-describedby={hintId} onChange={() => onChange(!checked)} />
         <span class="sh-switch-track" />
-      </span>
+      </label>
     </div>
   )
 }

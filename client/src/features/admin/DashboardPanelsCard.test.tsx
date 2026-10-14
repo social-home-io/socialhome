@@ -122,15 +122,10 @@ describe('DashboardPanelsCard — Home Assistant unlock', () => {
     expect(haSwitch().checked).toBe(true)
   })
 
-  it('saves the switch and greys it while the save is in flight', async () => {
-    let finish: (v: Error | null) => void = () => {}
-    save.mockReturnValueOnce(new Promise((resolve) => { finish = resolve }))
+  it('saves the switch', () => {
     mount(state())
     fireEvent.click(haSwitch())
     expect(save).toHaveBeenCalledWith({ panel_unlock_from_ha: true })
-    await waitFor(() => expect(haSwitch().disabled).toBe(true))
-    finish(null)
-    await waitFor(() => expect(haSwitch().disabled).toBe(false))
   })
 })
 

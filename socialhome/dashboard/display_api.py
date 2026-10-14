@@ -219,6 +219,13 @@ def _coded(exc: CodedError) -> web.Response:
     return response
 
 
+def _rate_limited(wait: int, detail: str = "Too many requests.") -> web.Response:
+    """A ``429 RATE_LIMITED`` with ``Retry-After: wait``."""
+    response = error_response(429, "RATE_LIMITED", detail)
+    response.headers["Retry-After"] = str(wait)
+    return response
+
+
 async def _json_object(request: web.Request) -> dict[str, object] | None:
     """The request body as a JSON object (``{}`` when empty), else ``None``."""
     raw = await request.read()
@@ -260,9 +267,7 @@ async def guard_display_request(
         display.id, image=request.path.startswith(IMAGE_PREFIXES)
     )
     if wait:
-        response = error_response(429, "RATE_LIMITED", "Too many requests.")
-        response.headers["Retry-After"] = str(wait)
-        return response
+        return _rate_limited(wait)
     # The ways out of the lock (``/unlock``, ``/unlock/ha``) pass — and
     # the lock screen's own 🔒 picture.
     if request.path not in _LOCKED_PASS and await displays.is_locked(display):
@@ -323,11 +328,7 @@ class DisplayPairView(web.View):
         # The socket peer only — never X-Forwarded-For, which anyone can set.
         wait = self.request.app[AUTH_KEY].begin_pair(client_bucket(self.request.remote))
         if wait:
-            response = error_response(
-                429, "RATE_LIMITED", "Too many pairing requests. Try again later."
-            )
-            response.headers["Retry-After"] = str(wait)
-            return response
+            return _rate_limited(wait, "Too many pairing requests. Try again later.")
         body = await _json_object(self.request)
         if body is None:
             return _bad_request()
@@ -370,11 +371,7 @@ class DisplayClaimView(web.View):
             client_bucket(self.request.remote), claim=True
         )
         if wait:
-            response = error_response(
-                429, "RATE_LIMITED", "Too many pairing requests. Try again later."
-            )
-            response.headers["Retry-After"] = str(wait)
-            return response
+            return _rate_limited(wait, "Too many pairing requests. Try again later.")
         body = await _json_object(self.request)
         if body is None:
             return _bad_request()
@@ -467,11 +464,11 @@ class DisplayHaUnlockView(web.View):
         display = self.request[DISPLAY_KEY]
         wait = app[AUTH_KEY].begin_display_ha_unlock(display.id)
         if wait:
-            response = error_response(429, "RATE_LIMITED", "Too many requests.")
-            response.headers["Retry-After"] = str(wait)
-            return response
+            return _rate_limited(wait)
         try:
-            await app[DISPLAYS_KEY].unlock_from_ha(display)
+            await app[DISPLAYS_KEY].unlock_from_ha(
+                display, ip_address=self.request.remote
+            )
         except CodedError as exc:
             return _coded(exc)
         return web.json_response({"api_version": API_VERSION, "locked": False})
@@ -494,9 +491,7 @@ class DisplayAckView(web.View):
         app = self.request.app
         wait = app[AUTH_KEY].begin_display_ack(self.request[DISPLAY_KEY].id)
         if wait:
-            response = error_response(429, "RATE_LIMITED", "Too many requests.")
-            response.headers["Retry-After"] = str(wait)
-            return response
+            return _rate_limited(wait)
         body = await _json_object(self.request)
         if body is None:
             return _bad_request()
@@ -711,9 +706,7 @@ class DisplayMapPictureView(_DisplayBoardView):
         if kept is None:
             wait = app[AUTH_KEY].begin_map_render(self.request[DISPLAY_KEY].id)
             if wait:
-                response = error_response(429, "RATE_LIMITED", "Too many map pictures.")
-                response.headers["Retry-After"] = str(wait)
-                return response
+                return _rate_limited(wait, "Too many map pictures.")
             try:
                 kept = await pictures.render(
                     scene,

@@ -155,12 +155,14 @@ Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
   "Privacy lock" entity is unlocked from Home Assistant. Only while an
   admin turned on "Home Assistant may unlock wall panels" (off by
   default): the lock body's and every board's `settings.ha_unlock` say
-  whether it is on — else `403 DISPLAY_HA_UNLOCK_OFF` (the panel stays
+  whether it is on (`ha_unlock` reflects the admin setting
+  `panel_unlock_from_ha`) — else `403 DISPLAY_HA_UNLOCK_OFF` (the panel stays
   locked; checked whether or not the panel is locked). `200`
   `unlock.schema.json`, also when it wasn't locked (or no PIN is set —
   nothing to lift). A locked panel reaches it (no `423`). A lifted lock
-  gives the panel fresh PIN tries; every one is logged and written to the
-  auth audit log. 6 calls per 5 minutes per panel (refused ones count),
+  keeps the panel's wrong-PIN count (it does not refill the PIN budget —
+  earlier wrong PINs still count until they age out of the 15-minute
+  window); every one is logged and written to the auth audit log. 6 calls per 5 minutes per panel (refused ones count),
   then `429` + `Retry-After`.
 - `POST /api/display/v1/ack` `{"message_id", "person_id"}` — send a
   mention's `ack` object as it came. `200` `ack.schema.json`;

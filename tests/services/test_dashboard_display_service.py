@@ -773,6 +773,7 @@ class _Audit:
 
     def __init__(self, *, fail: bool = False) -> None:
         self.rows: list[tuple[str, dict]] = []
+        self.ips: list[str | None] = []
         self.fail = fail
 
     async def record(
@@ -781,6 +782,7 @@ class _Audit:
         if self.fail:
             raise RuntimeError("disk full")
         self.rows.append((event_type, dict(metadata or {})))
+        self.ips.append(ip_address)
 
     async def list_recent(self, limit: int = 100) -> list[dict]:
         return []
@@ -805,6 +807,21 @@ async def test_ha_unlock_is_refused_while_the_setting_is_off(settings, auth, clo
     assert audit.rows == []
 
 
+async def test_ha_unlock_refusal_is_logged(svc, settings, caplog):
+    """A refused Home Assistant unlock is visible in the log (no audit row)."""
+    display, token = await _locked(svc, settings)
+    caplog.set_level(logging.INFO, "socialhome.services.dashboard_display_service")
+    with pytest.raises(DisplayHaUnlockOffError):
+        await svc.unlock_from_ha(display)
+    lines = [r for r in caplog.records if "refused" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    assert lines[0].getMessage() == (
+        f"household dashboard: Home Assistant unlock of display {display.id} "
+        "refused — not allowed in Admin › Dashboard"
+    )
+    assert token not in caplog.text
+
+
 async def test_ha_unlock_off_is_said_even_when_not_locked(svc, settings):
     """The setting is checked first, so the panel learns it is off."""
     display, _ = await _pair(svc)
@@ -818,12 +835,13 @@ async def test_ha_unlock_lifts_the_lock_and_is_audited(settings, auth, clock, ca
     display, token = await _locked(svc, settings)
     await _allow_ha(settings)
     caplog.set_level(logging.INFO, "socialhome.services.dashboard_display_service")
-    assert await svc.unlock_from_ha(display) is True
+    assert await svc.unlock_from_ha(display, ip_address="192.0.2.7") is True
     found = await svc.authenticate(token)
     assert found is not None and not found.locked
     assert audit.rows == [
         ("display_ha_unlock", {"display_id": display.id, "display_name": "Kitchen"})
     ]
+    assert audit.ips == ["192.0.2.7"]
     lines = [
         r for r in caplog.records if "Home Assistant unlocked display" in r.getMessage()
     ]
@@ -856,20 +874,25 @@ async def test_ha_unlock_survives_a_failing_audit_write(settings, auth, clock, c
     )
 
 
-async def test_ha_unlock_gives_the_panel_fresh_pin_tries(svc, settings, auth):
+async def test_ha_unlock_keeps_the_panels_wrong_pins(svc, settings, auth):
+    """An HA unlock must not reset the PIN throttle: the household PIN
+    unlocks every tablet, so lock → wrong PINs → HA unlock → lock… would
+    otherwise guess it far faster than the throttle allows."""
     display, token = await _locked(svc, settings)
     await _allow_ha(settings)
     for _ in range(THROTTLE_MAX_FAILURES - 1):
         with pytest.raises(DashboardDisplayPinWrongError):
             await svc.unlock(display, "0000")
+    key = DashboardAuth.display_pin_throttle_key(display.id)
     assert await svc.unlock_from_ha(display) is True
-    assert auth.failure_count(DashboardAuth.display_pin_throttle_key(display.id)) == 0
+    assert auth.failure_count(key) == THROTTLE_MAX_FAILURES - 1
     locked = await svc.authenticate(token)
     assert locked is not None
     await svc.lock(locked)
-    with pytest.raises(DashboardDisplayPinWrongError) as exc:
+    # The next wrong PIN is the last within the window: the panel goes.
+    with pytest.raises(DashboardDisplaySignedOutError):
         await svc.unlock(locked, "0000")
-    assert exc.value.params == {"remaining": THROTTLE_MAX_FAILURES - 1}
+    assert await svc.authenticate(token) is None
 
 
 async def test_ha_unlock_of_an_unlocked_panel_is_a_no_op(settings, auth, clock, caplog):
