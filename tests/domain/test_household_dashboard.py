@@ -10,7 +10,7 @@ import pytest
 
 from socialhome.domain.errors import CodedError
 from socialhome.domain.household_dashboard import (
-    normalise_mac,
+    normalize_mac,
     MAX_DISPLAYS,
     MAX_PENDING_PAIRINGS,
     PAIRING_CODE_ALPHABET,
@@ -576,7 +576,7 @@ def test_pairing_status_repr_hides_the_token():
         (0xAABBCCDDEEFF, None),
     ],
 )
-def test_normalise_mac(raw, expected):
+def test_normalize_mac(raw, expected):
     """Home Assistant's device registry spells a MAC as ``format_mac`` does
     (``homeassistant/helpers/device_registry.py``): lower case, ``:``."""
-    assert normalise_mac(raw) == expected
+    assert normalize_mac(raw) == expected

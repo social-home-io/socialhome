@@ -65,9 +65,30 @@ export interface DashboardState {
   people: DashboardPerson[]
   /** Paired wall panels, oldest first. */
   displays: DashboardDisplay[]
+  /** Wall panels adopted in Home Assistant can be listed and connected
+   *  (``Capability.HA_DISPLAY_DISCOVERY`` — ha / Home Assistant App). */
+  ha_display_discovery?: boolean
 }
 
-export type Patch = Partial<Omit<DashboardState, 'people' | 'displays'>> & {
+/** A wall panel found in Home Assistant
+ *  (``GET /api/admin/dashboard/displays/ha``). */
+export interface HaPanel {
+  /** Home Assistant's device id. */
+  id: string
+  /** Its name in Home Assistant. */
+  name: string
+  /** ``"<firmware> (ESPHome <version>)"``. */
+  sw_version: string | null
+  /** ``connected`` — paired here; ``ready`` — Connect works;
+   *  ``offline`` — Home Assistant lost it; ``needs_update`` — its
+   *  firmware can't be connected from here. */
+  status: 'connected' | 'ready' | 'offline' | 'needs_update'
+  can_connect: boolean
+  display_id: string | null
+  display_name: string | null
+}
+
+export type Patch = Partial<Omit<DashboardState, 'people' | 'displays' | 'ha_display_discovery'>> & {
   people?: Record<string, { show: boolean, picture: boolean | null }>
 }
 

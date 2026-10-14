@@ -10,11 +10,11 @@ from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRep
 from socialhome.platform.adapter import (
     DashboardHostPort,
     Capability,
+    DisplayDirectory,
     ExternalUser,
     InstanceConfig,
     PlatformAdapter,
     ZoneSource,
-    DisplayDirectory,
     _extract_bearer,
 )
 

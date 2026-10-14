@@ -470,6 +470,21 @@ async def test_call_service_transport_error_is_a_warning(session, caplog):
     assert "secret-claim" not in caplog.text
 
 
+async def test_get_state_is_none_on_a_body_that_isnt_json(
+    session, aiohttp_server, caplog
+):
+    async def bad(_):
+        return web.Response(text="<html>", content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/api/states/{eid}", bad)
+    server = await aiohttp_server(app)
+    c = HaClient(session, str(server.make_url("")).rstrip("/"), "tok")
+    with caplog.at_level(logging.WARNING, logger="socialhome.platform.ha.client"):
+        assert await c.get_state("sensor.x") is None
+    assert "get_state('sensor.x') failed" in caplog.text
+
+
 async def test_ws_command_takes_a_registry_bigger_than_aiohttps_default(
     client, ha_server
 ):

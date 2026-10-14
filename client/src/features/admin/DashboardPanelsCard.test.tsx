@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, waitFor, screen } from '@testing-library/preact'
-import type { DashboardDisplay, DashboardState } from './dashboardTypes'
+import type { DashboardDisplay, DashboardState, HaPanel } from './dashboardTypes'
 
 vi.mock('@/api', async (importOriginal) => {
   const real = await importOriginal<typeof import('@/api')>()
@@ -21,7 +21,7 @@ vi.mock('@/components/confirm', () => ({ confirmDialog: vi.fn().mockResolvedValu
 import { api, ApiError } from '@/api'
 import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
-import { DashboardPanelsCard, formatPairingCode } from './DashboardPanelsCard'
+import { DashboardPanelsCard, HA_POLL_MS, HA_WAIT_MS, formatPairingCode } from './DashboardPanelsCard'
 
 const mPost = vi.mocked(api.post)
 const mPatch = vi.mocked(api.patch)
@@ -267,5 +267,134 @@ describe('DashboardPanelsCard — unlock', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Unlock Hallway' }))
     await waitFor(() => expect(reload).toHaveBeenCalled())
     expect(showToast).toHaveBeenCalledWith('Server is down', 'error')
+  })
+})
+
+describe('DashboardPanelsCard — found in Home Assistant', () => {
+  const mGet = vi.mocked(api.get)
+  const READY: HaPanel = {
+    id: 'dev-kitchen', name: 'Kitchen panel', sw_version: '2026.10.13 (ESPHome 2026.9.1)',
+    status: 'ready', can_connect: true, display_id: null, display_name: null,
+  }
+
+  it('is hidden without the Home Assistant capability', () => {
+    mount(state())
+    expect(screen.queryByText('Found in Home Assistant')).toBeNull()
+    expect(mGet).not.toHaveBeenCalled()
+  })
+
+  it('lists the panels with their state, and only offers Connect where it works', async () => {
+    mGet.mockResolvedValue({
+      panels: [
+        READY,
+        { ...READY, id: 'dev-hall', name: 'Hall', status: 'connected', display_id: 'd1',
+          display_name: 'Hallway' },
+        { ...READY, id: 'dev-off', name: 'Garage', status: 'offline', can_connect: false },
+        { ...READY, id: 'dev-old', name: 'Attic', status: 'needs_update', can_connect: false },
+      ],
+    })
+    mount(state({ ha_display_discovery: true }))
+    expect(screen.getByText('Asking Home Assistant…')).toBeTruthy()
+    await screen.findByText('Kitchen panel')
+    expect(mGet).toHaveBeenCalledWith('/api/admin/dashboard/displays/ha')
+    expect(screen.getByText('Not paired yet')).toBeTruthy()
+    expect(screen.getByText('Paired here as Hallway')).toBeTruthy()
+    expect(screen.getByText('Offline in Home Assistant')).toBeTruthy()
+    expect(screen.getByText("Update the panel's firmware to connect it from here")).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Connect Kitchen panel' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Connect Hall again' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Connect Garage' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Connect Attic' })).toBeNull()
+  })
+
+  it('says how to adopt a panel when Home Assistant has none', async () => {
+    mGet.mockResolvedValue({ panels: [] })
+    mount(state({ ha_display_discovery: true }))
+    expect(await screen.findByText(/No wall panels in Home Assistant yet/)).toBeTruthy()
+  })
+
+  it('shows a failed read and retries on Refresh', async () => {
+    mGet.mockRejectedValueOnce(new ApiError(502, '/api/admin/dashboard/displays/ha', {
+      code: 'DISPLAY_DISCOVERY_FAILED', detail: 'x',
+    }))
+    mount(state({ ha_display_discovery: true }))
+    expect((await screen.findByRole('alert')).textContent)
+      .toBe("Home Assistant didn't answer. Try again in a moment.")
+    mGet.mockResolvedValue({ panels: [READY] })
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await screen.findByText('Kitchen panel')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('greys Connect while the dashboard is off', async () => {
+    mGet.mockResolvedValue({ panels: [READY] })
+    mount(state({ ha_display_discovery: true, enabled: false, running: false, running_port: null }))
+    const btn = await screen.findByRole('button', { name: 'Connect Kitchen panel' }) as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+  })
+
+  it('connects, waits for the panel to pair itself, then refreshes the paired list', async () => {
+    mGet.mockResolvedValue({ panels: [READY] })
+    mPost.mockResolvedValue({ expires_in: 600 })
+    mount(state({ ha_display_discovery: true }))
+    const btn = await screen.findByRole('button', { name: 'Connect Kitchen panel' })
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(btn)
+      await vi.waitFor(() => expect(mPost).toHaveBeenCalledWith(
+        '/api/admin/dashboard/displays/ha/dev-kitchen/connect', {},
+      ))
+      await vi.waitFor(() => expect(screen.getByText('Waiting for the panel to pair…')).toBeTruthy())
+      expect(showToast).toHaveBeenCalledWith(
+        'Sent to Kitchen panel — it pairs itself in a few seconds.', 'success',
+      )
+      mGet.mockResolvedValue({ panels: [{ ...READY, status: 'connected', display_id: 'd9',
+        display_name: 'Kitchen panel' }] })
+      await vi.advanceTimersByTimeAsync(HA_POLL_MS)
+      await vi.waitFor(() => expect(reload).toHaveBeenCalled())
+      expect(showToast).toHaveBeenCalledWith('Kitchen panel is connected', 'success')
+      expect(screen.getByText('Paired here as Kitchen panel')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('gives up waiting after a minute and says so', async () => {
+    mGet.mockResolvedValue({ panels: [READY] })
+    mPost.mockResolvedValue({ expires_in: 600 })
+    mount(state({ ha_display_discovery: true }))
+    const btn = await screen.findByRole('button', { name: 'Connect Kitchen panel' })
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(btn)
+      await vi.waitFor(() => expect(screen.getByText('Waiting for the panel to pair…')).toBeTruthy())
+      await vi.advanceTimersByTimeAsync(HA_WAIT_MS + HA_POLL_MS)
+      await vi.waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(
+        /^Kitchen panel didn't pair\./,
+      ))
+      expect(reload).not.toHaveBeenCalled()
+      expect((screen.getByRole('button', { name: 'Connect Kitchen panel' }) as HTMLButtonElement)
+        .disabled).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows why a connect was refused next to the panel', async () => {
+    mGet.mockResolvedValue({ panels: [READY] })
+    mPost.mockRejectedValue(new ApiError(409, '/x', {
+      code: 'DASHBOARD_ADDRESS_REQUIRED', detail: 'x', params: { reason: 'no_address' },
+    }))
+    mount(state({ ha_display_discovery: true }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Connect Kitchen panel' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toBe(
+      'Set the dashboard address first, so the panel can reach the dashboard.',
+    )
+    const btn = screen.getByRole('button', { name: 'Connect Kitchen panel' })
+    expect(btn.getAttribute('aria-describedby')).toBe(alert.id)
+    // Refresh starts over: the old reason goes once the admin re-reads.
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
   })
 })

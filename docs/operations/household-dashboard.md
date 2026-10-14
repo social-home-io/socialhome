@@ -357,13 +357,46 @@ dashboard off.
   the dashboard itself keeps working, and panels need the address typed in.
 - **Home Assistant App:** the App doesn't announce itself — it runs on
   Home Assistant's internal network, where multicast doesn't reach your
-  home network. Enter the address shown in **Admin › Dashboard** on the
-  panel (for example `homeassistant.local:8100`).
+  home network. Connect the panel from Home Assistant (below), or enter
+  the address shown in **Admin › Dashboard** on the panel (for example
+  `homeassistant.local:8100`).
 - **Bound to one address:** if `listen_host` is a specific address only
   that address is announced; `127.0.0.1` announces nothing.
 - **Changed IP address:** the addresses are read when the dashboard
   starts. If the host gets a new address while running, switch the
   dashboard off and on (or restart Social Home).
+
+### Connect a panel from Home Assistant
+
+With Social Home running alongside Home Assistant (`ha` mode or the Home
+Assistant App), you don't type a code at all:
+
+1. **Adopt the panel in Home Assistant**: Settings › Devices & services ›
+   ESPHome — the panel shows up as discovered once it's on your Wi-Fi.
+2. In **Admin › Dashboard › Wall panels › Found in Home Assistant**, press
+   **Connect** next to it. Social Home asks Home Assistant to pass the
+   panel the dashboard's address and a one-time claim; the panel pairs
+   itself within seconds and shows up in the list above, named as in Home
+   Assistant.
+
+- **Set the dashboard address** (Admin › Dashboard) if Connect says so:
+  Social Home sends the panel the address you set, or else the one it
+  guesses from how you reached Social Home — a guess that is `localhost`
+  or a public internet address is refused. On the Home Assistant App, the
+  dashboard port must be turned on (Settings › Apps › Social Home ›
+  Network).
+- **Offline in Home Assistant**: Home Assistant can't reach the panel —
+  check it's on. **Update the panel's firmware**: its firmware is too old
+  for Connect (or its *Social Home node* entity is disabled in Home
+  Assistant — enable it); pair it with a code meanwhile.
+- **Connect again** on a connected panel replaces its pairing (e.g. after
+  a factory reset). **Remove** stops it being listed as connected.
+- **What Home Assistant sees.** The claim passes through Home Assistant,
+  whose recorder keeps every action's data — so treat it as visible to
+  anyone with admin access to Home Assistant (they can reflash the panel
+  anyway). It works once, for that panel only, for 10 minutes, and **Sign
+  out all tablets** cancels it. The panel's long-lived token never passes
+  through Home Assistant.
 
 Five wrong codes in 15 minutes hold pairing back for a while — check the
 code on the panel. This limit is separate from tablet sign-in: failed

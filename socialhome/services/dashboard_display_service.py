@@ -35,10 +35,17 @@ pair without a code:
    (:meth:`DashboardDisplayService.spend_claim`) and gets its token in
    the answer.
 
-The claim crosses Home Assistant (its recorder stores every action's
-data), the token never does. A claim is spent by its first use — even a
-wrong-MAC one — so a copy read from HA's history is worth one race at
-most, inside ten minutes.
+The claim crosses Home Assistant, the token never does. Treat the claim
+as visible to everyone with admin-level access to Home Assistant: its
+recorder stores every action's data, and an admin token (or an App with
+Home Assistant API access) can watch ``call_service`` events live and
+spend the claim before the panel does. That is inside the trust Connect
+already puts in Home Assistant — the same people can reflash the panel
+(ESPHome) or retarget the action — so it is documented, not defended.
+What is bounded: a claim pairs one device once (spent by its first use,
+even a wrong-MAC one), lives :data:`CLAIM_TTL_SECONDS`, and dies with a
+"sign out all tablets" / password change (it is bound to the session
+epoch) or with the removal of the panel's display.
 """
 
 from __future__ import annotations
@@ -83,7 +90,7 @@ from ..domain.household_dashboard import (
     DisplayPanelNotFoundError,
     DisplayPanelOfflineError,
     ExternalDisplayPanel,
-    normalise_mac,
+    normalize_mac,
 )
 from ..platform.adapter import DisplayDirectory
 from .dashboard_settings_service import DashboardSettingsService, require_admin
@@ -135,6 +142,8 @@ class _Claim:
     mac: str
     name: str
     expires_at: float
+    #: The session epoch it was minted under — a bump revokes it.
+    epoch: int
 
 
 #: A platform panel's name when its own isn't usable as a display name.
@@ -143,6 +152,10 @@ _FALLBACK_PANEL_NAME = "Wall panel"
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+def _claim_digest(claim: str) -> bytes:
+    return hashlib.sha256(claim.encode("ascii")).digest()
 
 
 def clean_info(value: object) -> str | None:
@@ -284,7 +297,7 @@ class DashboardDisplayService:
             expires_at=now + PAIRING_TTL_SECONDS,
             model=clean_info(model),
             firmware=clean_info(firmware),
-            mac=normalise_mac(mac),
+            mac=normalize_mac(mac),
         )
         return DisplayPairing(
             pair_id=pair_id, code=code, expires_in=PAIRING_TTL_SECONDS
@@ -405,6 +418,7 @@ class DashboardDisplayService:
         if panel.connect_action is None or panel.mac is None:
             raise DisplayPanelNeedsUpdateError()
         claim = secrets.token_urlsafe(_TOKEN_BYTES)
+        epoch = await self._settings.epoch()
         async with self._claim_lock:
             now = self._clock()
             self._prune_claims(now)
@@ -415,10 +429,11 @@ class DashboardDisplayService:
                     "household dashboard: connect claims full — dropped the oldest"
                 )
             entry = _Claim(
-                digest=hashlib.sha256(claim.encode("ascii")).digest(),
+                digest=_claim_digest(claim),
                 mac=panel.mac,
                 name=_panel_display_name(panel.name),
                 expires_at=now + CLAIM_TTL_SECONDS,
+                epoch=epoch,
             )
             self._claims[panel.id] = entry
         try:
@@ -450,7 +465,7 @@ class DashboardDisplayService:
         await self._require_enabled()
         if not isinstance(claim, str) or _TOKEN.fullmatch(claim) is None:
             return None
-        digest = hashlib.sha256(claim.encode("ascii")).digest()
+        digest = _claim_digest(claim)
         async with self._claim_lock:
             now = self._clock()
             self._prune_claims(now)
@@ -462,7 +477,11 @@ class DashboardDisplayService:
                 log.info("household dashboard: unknown connect claim")
                 return None
             spent = self._claims.pop(found)
-            if normalise_mac(mac) != spent.mac:
+            if await self._settings.epoch() != spent.epoch:
+                # Minted before "sign out all tablets" / a password change.
+                log.info("household dashboard: connect claim revoked by sign-out")
+                return None
+            if normalize_mac(mac) != spent.mac:
                 log.warning(
                     "household dashboard: connect claim for panel %s spent by"
                     " another device — refused",
@@ -492,10 +511,18 @@ class DashboardDisplayService:
         return await self._settings.displays()
 
     async def remove(self, *, actor_is_admin: bool, display_id: str) -> None:
-        """Unpair a panel — its token stops working at once."""
+        """Unpair a panel — its token stops working at once, and a connect
+        claim still pending for it (same MAC) is dropped."""
         require_admin(actor_is_admin)
+        mac = next(
+            (d.mac for d in await self._settings.displays() if d.id == display_id),
+            None,
+        )
         await self._settings.remove_display(display_id)
         self._forget(display_id)
+        if mac is not None:
+            for key in [k for k, c in self._claims.items() if c.mac == mac]:
+                del self._claims[key]
         log.info("household dashboard: removed display %s", display_id)
 
     async def update(
@@ -644,5 +671,8 @@ class DashboardDisplayService:
             at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
             firmware=clean_info(firmware),
             model=clean_info(model),
-            mac=normalise_mac(mac),
+            # Write-once: a self-reported MAC fills a gap (a panel paired
+            # before it sent one) but never moves a known one — else any
+            # paired panel could pose as another in the Home Assistant list.
+            mac=normalize_mac(mac) if display.mac is None else None,
         )

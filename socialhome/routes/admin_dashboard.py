@@ -113,14 +113,18 @@ def dashboard_base_url(address: str | None, request_host: str | None, port: int)
 _LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost"})
 
 
-def _is_loopback(host: str | None) -> bool:
+def _unusable_guess(host: str | None) -> bool:
+    """A guessed host no panel should be sent to: a loopback name, or a
+    public IP literal (the admin reached Social Home over the internet —
+    the claim and the panel's token would cross it in plain ``http``)."""
     name = (host or "").strip("[]").rstrip(".").lower()
     if not name or name in _LOOPBACK_NAMES or name.endswith(".localhost"):
         return True
     try:
-        return ipaddress.ip_address(name).is_loopback
+        ip = ipaddress.ip_address(name)
     except ValueError:
         return False
+    return ip.is_loopback or ip.is_global
 
 
 def panel_url(
@@ -131,12 +135,13 @@ def panel_url(
     (:func:`dashboard_base_url`) — unless the Home Assistant App's
     dashboard port isn't published on the host
     (:class:`DashboardAddressRequiredError` ``port_not_published``) or the
-    guess is a loopback name, which no panel can reach (``no_address``)."""
+    guess is a loopback name no panel can reach, or a public IP the claim
+    shouldn't travel to in plain ``http`` (``no_address``)."""
     if address:
         return address
     if host_port is not None and host_port.declared and not host_port.mapped:
         raise DashboardAddressRequiredError("port_not_published")
-    if _is_loopback(urlsplit(guessed).hostname):
+    if _unusable_guess(urlsplit(guessed).hostname):
         raise DashboardAddressRequiredError("no_address")
     return guessed
 
@@ -222,8 +227,10 @@ def admin_request_host(request: web.BaseRequest) -> str:
     ``Host`` / ``X-Forwarded-Host`` through untouched, only appends to
     ``X-Forwarded-For``), so ``X-Forwarded-Host`` is the name the browser
     typed, e.g. ``homeassistant.local:8123``. Trusting the header is safe
-    here: the endpoint is admin-only and the value only shapes a URL shown
-    back to that admin.
+    here: the endpoint is admin-only, and the value shapes a URL shown back
+    to that admin — or, for Connect from Home Assistant, sent to a wall
+    panel, where :func:`panel_url` refuses loopback and public-IP guesses
+    (no cross-site page can set this header on the admin's request).
     """
     forwarded = request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
     return forwarded or request.host
@@ -483,7 +490,7 @@ class AdminDashboardHaPanelConnectView(_DashboardAdminView):
             # The dashboard would refuse the panel's Host (421).
             raise DashboardAddressRequiredError("no_address")
         expires_in = await self.displays.connect_platform_panel(
-            actor_is_admin=True,
+            actor_is_admin=self.is_admin,
             panel_id=self.request.match_info["panel_id"],
             url=url,
         )

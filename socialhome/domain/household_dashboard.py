@@ -119,7 +119,7 @@ __all__ = [
     "lesson_color_token",
     "mentioned_ids",
     "mentions_for",
-    "normalise_mac",
+    "normalize_mac",
     "normalize_token_key",
     "picture_effective",
     "subject_color_tokens",
@@ -486,7 +486,7 @@ class ExternalDisplayPanel:
 
     ``id`` is the platform's id for it (HA's device id); ``name`` its
     name there (the user's rename first); ``sw_version`` the firmware it
-    reports. ``mac`` (normalised, see :func:`normalise_mac`) ties it to a
+    reports. ``mac`` (normalised, see :func:`normalize_mac`) ties it to a
     paired :class:`DashboardDisplay`. ``connect_action`` is the
     platform's handle for sending it a connect request — ``None`` when it
     can't be connected from here (firmware too old, or the entity that
@@ -502,7 +502,7 @@ class ExternalDisplayPanel:
     online: bool = True
 
 
-def normalise_mac(value: object) -> str | None:
+def normalize_mac(value: object) -> str | None:
     """A MAC as ``aa:bb:cc:dd:ee:ff`` (lower case); ``None`` unless it is
     12 hex digits, optionally grouped in pairs by ``:`` or ``-``."""
     if not isinstance(value, str):

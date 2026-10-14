@@ -142,6 +142,26 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("The Home zone can't be removed. Mark another zone as Home first.")
   })
 
+  it('translates the Home Assistant wall-panel codes', () => {
+    const at = '/api/admin/dashboard/displays/ha/dev/connect'
+    expect(apiErrorMessage(409, at, {
+      code: 'DASHBOARD_ADDRESS_REQUIRED', detail: 'x', params: { reason: 'port_not_published' },
+    })).toBe("Turn on the dashboard port in the Home Assistant App's Network settings first.")
+    expect(apiErrorMessage(409, at, {
+      code: 'DASHBOARD_ADDRESS_REQUIRED', detail: 'x', params: { reason: 'no_address' },
+    })).toBe('Set the dashboard address first, so the panel can reach the dashboard.')
+    expect(apiErrorMessage(502, at, { code: 'DISPLAY_DISCOVERY_FAILED', detail: 'x' }))
+      .toBe("Home Assistant didn't answer. Try again in a moment.")
+    expect(apiErrorMessage(409, at, { code: 'DISPLAY_PANEL_OFFLINE', detail: 'x' }))
+      .toBe('The panel is offline in Home Assistant. Turn it on and try again.')
+    expect(apiErrorMessage(409, at, { code: 'DISPLAY_PANEL_NEEDS_UPDATE', detail: 'x' }))
+      .toBe("Update the panel's firmware, then try again.")
+    expect(apiErrorMessage(404, at, { code: 'DISPLAY_PANEL_NOT_FOUND', detail: 'x' }))
+      .toBe("That panel isn't in Home Assistant any more.")
+    expect(apiErrorMessage(404, at, { code: 'DISPLAY_DISCOVERY_UNAVAILABLE', detail: 'x' }))
+      .toBe("This installation can't find wall panels in Home Assistant.")
+  })
+
   it('translates the wall-panel pairing codes, with their params', () => {
     expect(apiErrorMessage(409, '/api/admin/dashboard/displays', {
       code: 'DASHBOARD_DISABLED', detail: 'x',

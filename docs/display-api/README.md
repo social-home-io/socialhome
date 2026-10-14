@@ -69,6 +69,28 @@ it" per 5 minutes (`429` + `Retry-After`); of the images, at most 6
 freshly painted map pictures a minute (a new size, scheme or map — a kept
 picture or a `304` is free).
 
+## Pairing
+
+- **With a code:** `POST /api/display/v1/pair` → show `code`, poll
+  `GET /api/display/v1/pair/{pair_id}` until `{"status": "paired",
+  "token", "display_id"}` (once).
+- **Connected from Home Assistant:** Home Assistant calls the firmware's
+  `connect_social_home` ESPHome action with `{url, claim}`. Spend the claim
+  right away at `{url}/api/display/v1/pair/claim` with `{"claim", "model",
+  "firmware"}` and the header `X-Display-Mac` — the MAC exactly as ESPHome
+  reports it to Home Assistant. `200` is the poll's paired shape
+  (`pair-claim.schema.json`, fixture `pair-claim.json`); `404 NOT_FOUND`
+  means the claim is wrong, expired, spent or for another panel — ask the
+  admin to press Connect again. Never log the claim or the token: ESPHome
+  device logs stream to Home Assistant.
+- The firmware publishes a diagnostic text sensor named exactly
+  **`Social Home node`** whose state is its node name (`App.get_name()`):
+  Home Assistant's device registry has only the friendly name, and Social
+  Home needs the node name to build the action name.
+- Send `X-Display-Mac` (plus `X-Display-Firmware` / `X-Display-Model`) on
+  every request: an already-paired panel's display learns its MAC once
+  that way, so Admin › Dashboard can show it as connected.
+
 ## Lock, unlock and "Got it"
 
 - `POST /api/display/v1/lock` — locks the panel (only while the household
@@ -90,6 +112,7 @@ picture or a `304` is free).
 
 | Status | Meaning | What the panel does |
 |---|---|---|
+| `404 NOT_FOUND` from `/pair/claim` | Wrong, expired, spent or another panel's claim | Show "press Connect in Social Home again", fall back to setup |
 | `401` | No / unknown token (also after "Sign out all tablets" or removal; `DISPLAY_SIGNED_OUT` after too many wrong PINs) | Forget the token, pair again |
 | `403 DISPLAY_PIN_WRONG` | `POST /unlock` with the wrong PIN (`params.remaining` tries left) | Say "Wrong PIN", stay locked |
 | `409 DASHBOARD_PIN_REQUIRED` | `POST /lock` while the household has no PIN | Hide the lock button (`settings.pin_set`) |
@@ -118,7 +141,7 @@ picture or a `304` is free).
 - [`v1/*.schema.json`](./v1/) — JSON Schema (draft 2020-12), one per
   endpoint plus `common.schema.json` (shared definitions) and
   `error.schema.json` / `lock.schema.json` / `unlock.schema.json` /
-  `ack.schema.json`.
+  `ack.schema.json` / `pair-claim.schema.json`.
 - [`v1/fixtures/`](./v1/fixtures/) — real answers for a seeded household
   (four people, a school day, the chat on, mentions, people on the map).
   `tests/dashboard/test_display_api.py` validates every endpoint's real

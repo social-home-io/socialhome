@@ -990,6 +990,34 @@ async def test_the_display_is_named_after_the_panel(
     assert display.name == expected
 
 
+@pytest.mark.parametrize("revoke", ["sessions", "password"])
+async def test_sign_out_revokes_pending_claims(hsvc, directory, settings, revoke):
+    """A claim minted before "sign out all tablets" (or a password change)
+    can't pair anything after it — it is bound to the session epoch."""
+    claim = await _connect(hsvc, directory)
+    if revoke == "sessions":
+        await settings.revoke_sessions(actor_is_admin=True)
+    else:
+        await settings.set_password(actor_is_admin=True, password="new horse battery")
+    assert await hsvc.spend_claim(claim, mac=KITCHEN_MAC) is None
+    assert await settings.displays() == ()
+    # A fresh Connect after the sign-out works.
+    assert (
+        await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+        is not None
+    )
+
+
+async def test_removing_a_display_drops_its_pending_claim(hsvc, directory, settings):
+    first = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    hall_claim = await _connect(hsvc, directory, "dev-hall")
+    again = await _connect(hsvc, directory)
+    await hsvc.remove(actor_is_admin=True, display_id=first.display_id)
+    assert await hsvc.spend_claim(again, mac=KITCHEN_MAC) is None
+    # Another panel's claim is untouched.
+    assert await hsvc.spend_claim(hall_claim, mac=HALL_MAC) is not None
+
+
 async def test_code_pairing_keeps_the_panels_mac(hsvc, settings):
     pairing = await hsvc.start_pairing(mac="AA-BB-CC-DD-EE-01")
     await hsvc.claim(actor_is_admin=True, code=pairing.code, name="Kitchen")
@@ -997,10 +1025,15 @@ async def test_code_pairing_keeps_the_panels_mac(hsvc, settings):
     assert display.mac == KITCHEN_MAC
 
 
-async def test_seen_records_a_reported_mac(hsvc, settings):
+async def test_seen_records_a_reported_mac_once(hsvc, settings, clock):
     display, _ = await _pair(hsvc)
     assert display.mac is None
     await hsvc.seen(display, firmware=None, model=None, mac="aabbccddee01")
+    (stored,) = await settings.displays()
+    assert stored.mac == KITCHEN_MAC
+    # Write-once: a paired panel can't later pose as another one.
+    clock.now += SEEN_INTERVAL_S
+    await hsvc.seen(stored, firmware=None, model=None, mac=HALL_MAC)
     (stored,) = await settings.displays()
     assert stored.mac == KITCHEN_MAC
 

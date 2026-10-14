@@ -22,6 +22,7 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.platform.adapter import Capability
 from socialhome.platform.ha.adapter import HomeAssistantAdapter
+from socialhome.platform.ha.displays import HaDisplayDirectory
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
 
@@ -261,9 +262,6 @@ async def test_zone_source_wired_with_zone_sync_capability():
 
 async def test_display_directory_wired_with_its_capability():
     """HA's device registry lists the ESPHome wall panels."""
-    from socialhome.platform.adapter import Capability
-    from socialhome.platform.ha.displays import HaDisplayDirectory
-
     adapter = _build_adapter(client=_FakeHaClient())
     assert isinstance(adapter.displays, HaDisplayDirectory)
     assert Capability.HA_DISPLAY_DISCOVERY in adapter.capabilities

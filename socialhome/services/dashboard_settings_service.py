@@ -64,7 +64,7 @@ from ..domain.household_dashboard import (
     DashboardPortFixedError,
     DashboardSettings,
     DashboardSettingsInvalidError,
-    normalise_mac,
+    normalize_mac,
 )
 from ..infrastructure.key_manager import KeyManager, KeyManagerError
 from ..platform.local_credentials import hash_password, verify_password
@@ -322,7 +322,7 @@ def _display_from_dict(raw: object) -> DashboardDisplay | None:
         firmware=raw.get("firmware"),
         model=raw.get("model"),
         locked=locked,
-        mac=normalise_mac(raw.get("mac")),
+        mac=normalize_mac(raw.get("mac")),
     )
 
 
@@ -849,7 +849,11 @@ class DashboardSettingsService:
             change["firmware"] = firmware
         if model is not None:
             change["model"] = model
-        if mac is not None:
-            change["mac"] = mac
         async with self._lock:
+            if mac is not None and any(
+                d.id == display_id and d.mac is None
+                for d in await self._displays_unlocked()
+            ):
+                # Write-once: never moves a MAC the record already has.
+                change["mac"] = mac
             await self._replace_display_unlocked(display_id, change)

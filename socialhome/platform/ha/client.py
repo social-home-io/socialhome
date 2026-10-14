@@ -45,6 +45,9 @@ _AUTH_LIST_TTL_SECONDS = 30
 #: ``homeassistant/components/config/entity_registry.py``
 #: ``websocket_list_entities``), so a busy home would fail the read.
 _WS_MAX_MSG_SIZE = 64 * 1024 * 1024
+#: One entity state is small and local — a hung Home Assistant must not
+#: hold an admin request for aiohttp's 5-minute default.
+_STATE_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
 class HaClient:
@@ -136,17 +139,20 @@ class HaClient:
         return data
 
     async def get_state(self, entity_id: str) -> dict | None:
-        """``GET /api/states/{entity_id}`` — ``None`` on 404 or error."""
+        """``GET /api/states/{entity_id}`` — ``None`` on 404 or error
+        (transport, timeout — :data:`_STATE_TIMEOUT` — or a non-JSON body;
+        logged at WARNING)."""
         try:
             async with self._session.get(
                 f"{self._base_url}/api/states/{entity_id}",
                 headers=self._headers(),
+                timeout=_STATE_TIMEOUT,
             ) as resp:
                 if resp.status == 404:
                     return None
                 resp.raise_for_status()
                 return await resp.json(content_type=None)
-        except aiohttp.ClientError as exc:
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
             log.warning("ha_client: get_state(%r) failed: %s", entity_id, exc)
             return None
 
@@ -240,7 +246,9 @@ class HaClient:
                 # — wrap into a dict for the typed signature, callers
                 # that expect a list reach in via ``["result"]``.
                 return {"result": reply.get("result")}
-        except (aiohttp.ClientError, TimeoutError) as exc:
+        except (aiohttp.ClientError, TimeoutError, TypeError, ValueError) as exc:
+            # TypeError / ValueError: a frame that isn't JSON text (an
+            # over-size frame arrives as an aiohttp ERROR message).
             log.warning("ha_client: ws_command(%r) failed: %s", type_, exc)
             return None
 

@@ -242,6 +242,30 @@ async def test_disabled_and_malformed_devices_are_skipped(directory, client):
     assert [p.id for p in await directory.list_panels()] == [HALL]
 
 
+async def test_a_state_that_cant_be_read_is_offline_not_old_firmware(directory, client):
+    """No state (404) or a failed read (``get_state`` → ``None``): Home
+    Assistant can't reach the panel now — saying "update the firmware"
+    would send the admin the wrong way."""
+    del client.states[KITCHEN_NODE]
+    kitchen, hall = await directory.list_panels()
+    assert kitchen.online is False and kitchen.connect_action is None
+    assert hall.connect_action == "hall_connect_social_home"
+
+
+async def test_esphome_sub_devices_are_not_panels(directory, client):
+    """``manager.py`` gives sub-devices the main device's manufacturer /
+    model, identifiers instead of a MAC, and ``via_device_id``."""
+    sub = _device(
+        "5" * 32,
+        connections=[],
+        identifiers=[["esphome", "a0b765123456_1"]],
+        via_device_id=KITCHEN,
+        name="Kitchen relay",
+    )
+    client.ws["config/device_registry/list"] = [KITCHEN_DEVICE, sub]
+    assert [p.id for p in await directory.list_panels()] == [KITCHEN]
+
+
 async def test_offline_panel(directory, client):
     for gone in ("unavailable", "unknown"):
         client.states[KITCHEN_NODE] = _state(KITCHEN_NODE, gone)
@@ -268,8 +292,6 @@ async def test_panel_without_a_usable_node_sensor_cannot_connect(directory, clie
         kitchen = (await directory.list_panels())[0]
         assert kitchen.connect_action is None and kitchen.online
     client.ws["config/entity_registry/list"] = ENTITIES
-    del client.states[KITCHEN_NODE]
-    assert (await directory.list_panels())[0].connect_action is None
     client.states[KITCHEN_NODE] = _state(KITCHEN_NODE, "Kitchen; drop")
     assert (await directory.list_panels())[0].connect_action is None
 

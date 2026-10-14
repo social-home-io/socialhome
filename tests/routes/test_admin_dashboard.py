@@ -1029,6 +1029,11 @@ KITCHEN_MAC = "a0:b7:65:12:34:56"
         (None, "http://127.0.0.1:8100", None, "no_address"),
         (None, "http://[::1]:8100", None, "no_address"),
         (None, "http://box.localhost:8100", None, "no_address"),
+        # A public IP: the claim would cross the internet in plain http.
+        (None, "http://203.0.113.7:8100", None, "http://203.0.113.7:8100"),
+        (None, "http://8.8.8.8:8100", None, "no_address"),
+        (None, "http://[2a00:1450::1]:8100", None, "no_address"),
+        (None, "http://10.0.0.5:8100", None, "http://10.0.0.5:8100"),
     ],
 )
 def test_panel_url(address, guessed, host_port, expected):

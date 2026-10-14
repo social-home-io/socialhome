@@ -395,12 +395,16 @@ async def test_claim_bad_json_is_400(client, body):
     assert resp.status == 400
 
 
-async def test_claim_shares_the_pair_throttle(client):
+async def test_claim_is_throttled_in_its_own_bucket(client):
+    """Same per-client limit as /pair, counted apart: code-pairing tries
+    can't use up what a panel needs to spend its claim in time."""
     for _ in range(PAIR_MAX):
-        await client.post(CLAIM, json={"claim": "A" * 43})
+        assert (await client.post(PAIR)).status == 201
+    assert (await client.post(PAIR)).status == 429
+    for _ in range(PAIR_MAX):
+        assert (await client.post(CLAIM, json={"claim": "A" * 43})).status == 404
     resp = await client.post(CLAIM, json={"claim": "A" * 43})
     assert resp.status == 429 and int(resp.headers["Retry-After"]) > 0
-    assert (await client.post(PAIR)).status == 429
 
 
 async def test_claim_refused_while_disabled(

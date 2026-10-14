@@ -55,6 +55,7 @@ empty list.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import replace
@@ -63,7 +64,7 @@ from typing import Any
 from ...domain.household_dashboard import (
     DisplayDiscoveryFailedError,
     ExternalDisplayPanel,
-    normalise_mac,
+    normalize_mac,
 )
 
 __all__ = [
@@ -110,6 +111,10 @@ def _is_panel(device: dict[str, Any]) -> bool:
         device.get("manufacturer") == PANEL_MANUFACTURER
         and device.get("model") == PANEL_MODEL
         and device.get("disabled_by") is None
+        # ESPHome sub-devices (``devices:`` in the firmware) carry the same
+        # manufacturer / model but hang off the main device (``manager.py``
+        # ``_async_setup_device_registry``) — they aren't panels.
+        and device.get("via_device_id") is None
         and isinstance(device.get("id"), str)
         and bool(device["id"])
     )
@@ -122,7 +127,7 @@ def _mac(device: dict[str, Any]) -> str | None:
             and len(connection) == 2
             and connection[0] == "mac"
         ):
-            mac = normalise_mac(connection[1])
+            mac = normalize_mac(connection[1])
             if mac is not None:
                 return mac
     return None
@@ -214,15 +219,23 @@ class HaDisplayDirectory:
             return []
         entities = await self._registry("config/entity_registry/list")
         client = self._client()
+        pairs = panels_from_registries(found, entities)
+        states = iter(
+            await asyncio.gather(
+                *(client.get_state(s) for _, s in pairs if s is not None)
+            )
+        )
         panels: list[ExternalDisplayPanel] = []
-        for panel, sensor in panels_from_registries(found, entities):
+        for panel, sensor in pairs:
             if sensor is None:
                 panels.append(panel)
                 continue
-            # ``None``: no state (404) or a failed call (logged by the client).
-            state = await client.get_state(sensor)
+            state = next(states)
             value = state.get("state") if isinstance(state, dict) else None
-            if value in _GONE_STATES:
+            if value is None or value in _GONE_STATES:
+                # Unavailable — or no state / a failed read (the client
+                # logged it): HA can't reach the panel now. Never "old
+                # firmware", which would send the admin the wrong way.
                 panels.append(replace(panel, online=False))
                 continue
             panels.append(replace(panel, connect_action=connect_action_for(value)))

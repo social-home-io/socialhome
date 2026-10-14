@@ -1171,6 +1171,12 @@ async def test_record_display_seen_keeps_a_reported_mac(svc):
     )
     await svc.record_display_seen("d1", at="y", firmware=None, model=None)
     assert (await svc.displays())[0].mac == "aa:bb:cc:dd:ee:01"
+    # Write-once: a known MAC is never moved.
+    await svc.record_display_seen(
+        "d1", at="z", firmware=None, model=None, mac="aa:bb:cc:dd:ee:02"
+    )
+    d = (await svc.displays())[0]
+    assert (d.mac, d.last_seen_at) == ("aa:bb:cc:dd:ee:01", "z")
 
 
 async def test_rename_display(svc):

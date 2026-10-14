@@ -168,6 +168,15 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   DASHBOARD_DISPLAY_LIMIT: (_b, p) => t('error.dashboard_display_limit', {
     max: str(p, 'max') || '20',
   }),
+  // Wall panels found in Home Assistant.
+  DISPLAY_DISCOVERY_UNAVAILABLE: () => t('error.display_discovery_unavailable'),
+  DISPLAY_DISCOVERY_FAILED: () => t('error.display_discovery_failed'),
+  DISPLAY_PANEL_NOT_FOUND: () => t('error.display_panel_not_found'),
+  DISPLAY_PANEL_OFFLINE: () => t('error.display_panel_offline'),
+  DISPLAY_PANEL_NEEDS_UPDATE: () => t('error.display_panel_needs_update'),
+  DASHBOARD_ADDRESS_REQUIRED: (_b, p) => p.reason === 'port_not_published'
+    ? t('error.dashboard_address_port')
+    : t('error.dashboard_address_required'),
   AI_AGENT_UNAVAILABLE: () => t('error.ai_unavailable'),
   // Zones (space and household). A space's ZONE_LIMIT carries no
   // params; both caps are 50.

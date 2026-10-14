@@ -16,7 +16,7 @@ short code and then authenticates every request with
   Assistant spends the claim it was sent: ``200 {"status": "paired",
   "token", "display_id"}`` (the poll's shape); ``404 NOT_FOUND`` —
   uniformly — for a wrong, expired, spent or other panel's claim;
-  throttled per client address like ``/pair``;
+  throttled per client address like ``/pair`` (a bucket of its own);
 * ``GET /api/display/v1/whoami`` (bearer) — ``{display_id, name}``;
 * ``GET /api/display/v1/home`` · ``/messages`` · ``/notes`` · ``/map`` ·
   ``/person/{user_id}`` · ``/theme`` (bearer) — the boards as JSON
@@ -337,8 +337,10 @@ class DisplayClaimView(web.View):
     action) and gets its token, in the answer, once."""
 
     async def post(self) -> web.Response:
-        # Same per-client budget as /pair — the socket peer only.
-        wait = self.request.app[AUTH_KEY].begin_pair(client_bucket(self.request.remote))
+        # /pair's per-client limit in a bucket of its own — socket peer only.
+        wait = self.request.app[AUTH_KEY].begin_pair(
+            client_bucket(self.request.remote), claim=True
+        )
         if wait:
             response = error_response(
                 429, "RATE_LIMITED", "Too many pairing requests. Try again later."
