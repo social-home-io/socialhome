@@ -7,7 +7,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +38,8 @@ from socialhome.dashboard.auth import (
     SessionClaims,
     _FailureTable,
 )
+from socialhome.domain.household_dashboard import DashboardDisplay
+from socialhome.services.dashboard_settings_service import DashboardSettingsService
 
 
 def _b64(data: bytes) -> str:
@@ -607,7 +608,7 @@ async def test_revocation_covers_every_cookie_of_the_session(auth):
     first = await auth.issue(True, locked=True)
     claims = await auth.verify(first)
     sibling = await auth.issue(True, locked=True, session_id=claims.session_id)
-    auth.revoke(claims, REVOKED_SIGNED_OUT)
+    await auth.revoke(claims, REVOKED_SIGNED_OUT)
     assert await auth.verify(first) is None
     assert await auth.verify(sibling) is None
 
@@ -617,7 +618,7 @@ async def test_revocation_entry_outlives_every_older_sibling(auth, clock):
     raw = await auth.issue(False)
     claims = await auth.verify(raw)
     clock.advance(SESSION_TTL_S - 10)
-    auth.revoke(claims, REVOKED_SIGNED_OUT)
+    await auth.revoke(claims, REVOKED_SIGNED_OUT)
     sibling = await auth.issue(False, session_id=claims.session_id)
     clock.advance(SESSION_TTL_S - 1)
     assert await auth.verify(sibling) is None
@@ -627,7 +628,7 @@ async def test_revoked_locked_cookie_verifies_locked(auth):
     raw = await auth.issue(True)
     claims = await auth.verify(raw)
     assert auth.revocation(claims) is None
-    auth.revoke(claims, REVOKED_LOCKED)
+    await auth.revoke(claims, REVOKED_LOCKED)
     assert auth.revocation(claims) == REVOKED_LOCKED
     again = await auth.verify(raw)
     assert again is not None and again.locked is True and again.keep is True
@@ -638,15 +639,15 @@ async def test_revoked_locked_cookie_verifies_locked(auth):
 
 async def test_revoked_signed_out_cookie_no_longer_verifies(auth):
     raw = await auth.issue(True, locked=True)
-    auth.revoke(await auth.verify(raw), REVOKED_SIGNED_OUT)
+    await auth.revoke(await auth.verify(raw), REVOKED_SIGNED_OUT)
     assert await auth.verify(raw) is None
 
 
 async def test_signed_out_is_never_downgraded_to_locked(auth):
     raw = await auth.issue(True)
     claims = await auth.verify(raw)
-    auth.revoke(claims, REVOKED_SIGNED_OUT)
-    auth.revoke(claims, REVOKED_LOCKED)
+    await auth.revoke(claims, REVOKED_SIGNED_OUT)
+    await auth.revoke(claims, REVOKED_LOCKED)
     assert await auth.verify(raw) is None
     assert auth.revoked_count == 1
 
@@ -654,21 +655,21 @@ async def test_signed_out_is_never_downgraded_to_locked(auth):
 async def test_locked_can_be_upgraded_to_signed_out(auth):
     raw = await auth.issue(True)
     claims = await auth.verify(raw)
-    auth.revoke(claims, REVOKED_LOCKED)
-    auth.revoke(claims, REVOKED_SIGNED_OUT)
+    await auth.revoke(claims, REVOKED_LOCKED)
+    await auth.revoke(claims, REVOKED_SIGNED_OUT)
     assert await auth.verify(raw) is None
 
 
-def test_revoke_rejects_an_unknown_reason(auth):
+async def test_revoke_rejects_an_unknown_reason(auth):
     claims = SessionClaims(epoch=0, issued_at=0, keep=True, session_id="x")
     with pytest.raises(ValueError):
-        auth.revoke(claims, "whatever")
+        await auth.revoke(claims, "whatever")
 
 
 @pytest.mark.parametrize(("keep", "ttl"), [(True, KEEP_TTL_S), (False, SESSION_TTL_S)])
 async def test_revocation_expires_with_the_cookie(auth, clock, keep, ttl):
     claims = await auth.verify(await auth.issue(keep))
-    auth.revoke(claims, REVOKED_LOCKED)
+    await auth.revoke(claims, REVOKED_LOCKED)
     clock.advance(ttl)
     assert auth.revocation(claims) == REVOKED_LOCKED
     clock.advance(1)
@@ -676,63 +677,157 @@ async def test_revocation_expires_with_the_cookie(auth, clock, keep, ttl):
     assert auth.revoked_count == 0
 
 
-async def test_revocation_set_is_bounded(settings_service, clock):
-    auth = DashboardAuth(settings_service, clock=clock, max_revocations=3)
-    cookies = []
-    for _ in range(4):
-        claims = SessionClaims(
-            epoch=0,
-            issued_at=int(clock.now),
-            keep=True,
-            session_id=os.urandom(16).hex(),
-        )
-        cookies.append(claims)
-        auth.revoke(claims, REVOKED_LOCKED)
-    assert auth.revoked_count == 3
-    # The oldest made room.
-    assert auth.revocation(cookies[0]) is None
-    assert all(auth.revocation(c) == REVOKED_LOCKED for c in cookies[1:])
+def _sess(clock, sid: str, *, keep: bool = True, epoch: int = 0) -> SessionClaims:
+    return SessionClaims(
+        epoch=epoch, issued_at=int(clock.now), keep=keep, session_id=sid
+    )
 
 
 async def test_full_revocation_set_drops_expired_entries_first(settings_service, clock):
     auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
-    old = SessionClaims(epoch=0, issued_at=int(clock.now), keep=False, session_id="o")
-    auth.revoke(old, REVOKED_LOCKED)
-    keep = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="k")
-    auth.revoke(keep, REVOKED_LOCKED)
+    old = _sess(clock, "o", keep=False)
+    await auth.revoke(old, REVOKED_LOCKED)
+    keep = _sess(clock, "k")
+    await auth.revoke(keep, REVOKED_LOCKED)
+    secret = await settings_service.cookie_secret()
     clock.advance(SESSION_TTL_S + 1)
-    new = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="n")
-    auth.revoke(new, REVOKED_LOCKED)
+    new = _sess(clock, "n")
+    await auth.revoke(new, REVOKED_LOCKED)
     assert auth.revocation(keep) == REVOKED_LOCKED
     assert auth.revocation(new) == REVOKED_LOCKED
     assert auth.revoked_count == 2
+    # Pruning was enough: nobody was signed out.
+    assert await settings_service.cookie_secret() == secret
 
 
-async def test_revocation_eviction_prefers_locked_over_signed_out(
+async def test_full_revocation_set_drops_entries_of_an_older_epoch(
     settings_service, clock
 ):
+    """After "Sign out all tablets" an old epoch's entries are dead
+    weight — no cookie of that epoch verifies — so they make room."""
     auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
-    gone = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="g")
-    auth.revoke(gone, REVOKED_SIGNED_OUT)
-    lock1 = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="1")
-    auth.revoke(lock1, REVOKED_LOCKED)
-    lock2 = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="2")
-    auth.revoke(lock2, REVOKED_LOCKED)
-    assert auth.revocation(gone) == REVOKED_SIGNED_OUT
-    assert auth.revocation(lock1) is None
-    assert auth.revocation(lock2) == REVOKED_LOCKED
+    await auth.revoke(_sess(clock, "a"), REVOKED_SIGNED_OUT)
+    await auth.revoke(_sess(clock, "b"), REVOKED_SIGNED_OUT)
+    await settings_service.revoke_sessions(actor_is_admin=True)
+    secret = await settings_service.cookie_secret()
+    new = _sess(clock, "n", epoch=1)
+    await auth.revoke(new, REVOKED_SIGNED_OUT)
+    assert auth.revoked_count == 1
+    assert auth.revocation(new) == REVOKED_SIGNED_OUT
+    assert await settings_service.cookie_secret() == secret
 
 
-async def test_full_revocation_set_of_signed_out_drops_the_oldest(
+@pytest.mark.parametrize("old_reason", [REVOKED_SIGNED_OUT, REVOKED_LOCKED])
+async def test_full_revocation_set_never_resurrects_a_revoked_cookie(
+    settings_service, clock, old_reason
+):
+    """Regression: a full list used to drop its oldest entry, so a
+    signed-out cookie verified again (and a locked one's pre-lock copy
+    came back unlocked). Now every revoked cookie stays dead."""
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
+    raws = [await auth.issue(True, locked=True) for _ in range(3)]
+    for raw in raws[:2]:
+        await auth.revoke(await auth.verify(raw), old_reason)
+    await auth.revoke(await auth.verify(raws[2]), REVOKED_SIGNED_OUT)
+    for raw in raws:
+        assert await auth.verify(raw) is None
+
+
+async def test_full_revocation_set_signs_every_tablet_out(settings_service, clock):
+    """Still full of live entries: the cookie key is replaced — every
+    tablet cookie stops verifying, the list is moot and cleared, and a
+    fresh sign-in works."""
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=2)
+    bystander = await auth.issue(True)
+    for sid in ("a", "b"):
+        await auth.revoke(_sess(clock, sid), REVOKED_SIGNED_OUT)
+    old_secret = await settings_service.cookie_secret()
+    await auth.revoke(_sess(clock, "c"), REVOKED_SIGNED_OUT)
+    assert await settings_service.cookie_secret() != old_secret
+    assert auth.revoked_count == 0
+    assert await auth.verify(bystander) is None
+    fresh = await auth.verify(await auth.issue(True))
+    assert fresh is not None and fresh.locked is False
+
+
+async def test_full_revocation_set_keeps_wall_panels_and_epoch(settings_service, clock):
+    """The fallback signs out tablets only: no epoch bump, so paired
+    wall panels (whose tokens die with the epoch) stay paired."""
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=1)
+    panel = DashboardDisplay(
+        id="d1",
+        name="Hall",
+        token_hash="0" * 64,
+        created_at="2026-10-13T08:00:00+00:00",
+    )
+    await settings_service.add_display(panel)
+    await auth.revoke(_sess(clock, "a"), REVOKED_LOCKED)
+    await auth.revoke(_sess(clock, "b"), REVOKED_LOCKED)
+    assert auth.revoked_count == 0  # the key was replaced
+    assert await settings_service.epoch() == 0
+    assert [d.id for d in await settings_service.displays()] == [panel.id]
+
+
+async def test_key_replacement_survives_a_restart(settings_service, clock):
+    """The fallback is durable: a fresh ``DashboardAuth`` (a restart)
+    over the same stored settings still refuses the old cookies."""
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=1)
+    raw = await auth.issue(True, locked=True)
+    await auth.revoke(await auth.verify(raw), REVOKED_SIGNED_OUT)
+    await auth.revoke(_sess(clock, "b"), REVOKED_SIGNED_OUT)
+    reloaded = DashboardSettingsService(
+        settings_service._repo, fixed_port=None, main_port=8080
+    )
+    reloaded.attach_key_manager(settings_service._key_manager)
+    restarted = DashboardAuth(reloaded, clock=clock)
+    assert await restarted.verify(raw) is None
+
+
+async def test_claims_from_before_a_key_replacement_count_as_signed_out(
     settings_service, clock
 ):
+    """A request in flight across the replacement can't renew or revoke
+    its way back in: its claims count as signed out."""
     auth = DashboardAuth(settings_service, clock=clock, max_revocations=1)
-    a = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="a")
-    b = SessionClaims(epoch=0, issued_at=int(clock.now), keep=True, session_id="b")
-    auth.revoke(a, REVOKED_SIGNED_OUT)
-    auth.revoke(b, REVOKED_SIGNED_OUT)
-    assert auth.revocation(a) is None
-    assert auth.revocation(b) == REVOKED_SIGNED_OUT
+    claims = await auth.verify(await auth.issue(True))
+    assert auth.revocation(claims) is None
+    await auth.revoke(_sess(clock, "a"), REVOKED_LOCKED)
+    await auth.revoke(_sess(clock, "b"), REVOKED_LOCKED)
+    assert auth.revocation(claims) == REVOKED_SIGNED_OUT
+    await auth.revoke(claims, REVOKED_LOCKED)  # its key is gone: no entry
+    assert auth.revoked_count == 0
+
+
+async def test_failed_key_replacement_keeps_every_revocation(settings_service, clock):
+    """If the new key can't be stored, nothing is forgotten."""
+    auth = DashboardAuth(settings_service, clock=clock, max_revocations=1)
+    raw = await auth.issue(True, locked=True)
+    await auth.revoke(await auth.verify(raw), REVOKED_SIGNED_OUT)
+    with (
+        patch.object(
+            DashboardSettingsService,
+            "rotate_cookie_secret",
+            side_effect=OSError("disk"),
+        ),
+        pytest.raises(OSError),
+    ):
+        await auth.revoke(_sess(clock, "b"), REVOKED_SIGNED_OUT)
+    assert auth.revoked_count == 1
+    assert await auth.verify(raw) is None
+
+
+async def test_restart_forgets_in_memory_revocations(settings_service, clock):
+    """Documented: revocations are memory-only. After a restart a
+    signed-out lock is a plain *locked* cookie again — still behind the
+    PIN — and only "Sign out all tablets" (the epoch) is durable."""
+    auth = DashboardAuth(settings_service, clock=clock)
+    raw = await auth.issue(True, locked=True)
+    await auth.revoke(await auth.verify(raw), REVOKED_SIGNED_OUT)
+    restarted = DashboardAuth(settings_service, clock=clock)
+    again = await restarted.verify(raw)
+    assert again is not None and again.locked is True
+    await settings_service.revoke_sessions(actor_is_admin=True)
+    assert await restarted.verify(raw) is None
 
 
 def test_now_is_the_auth_clock(auth, clock):

@@ -23,6 +23,10 @@ The key is the KEK-wrapped dashboard cookie secret
 epoch signs every tablet out — durably. On top, single sessions can be
 revoked in memory by session (:meth:`DashboardAuth.revoke`: replaced by a locked
 one, or signed out after too many wrong PINs); a restart forgets that.
+That list is bounded and never forgets an entry whose cookie could still
+verify: expired entries and those of an older epoch make room, and if it
+is still full the cookie key is replaced — every tablet signs out, the
+wall panels stay paired (see the comment above :meth:`DashboardAuth.revoke`).
 To add a claim later, add it to :data:`_PAYLOAD_TYPES`, :data:`_SHAPES`
 and :class:`SessionClaims` (and bump ``v`` if old cookies must not
 verify).
@@ -196,7 +200,8 @@ MAP_RENDER_MAX = 6
 REVOKED_LOCKED = "locked"
 REVOKED_SIGNED_OUT = "signed_out"
 _REVOCATION_REASONS = frozenset({REVOKED_LOCKED, REVOKED_SIGNED_OUT})
-#: Most revoked cookie signatures kept in memory.
+#: Most revoked sessions kept in memory. Full of unexpired entries, the
+#: next revocation replaces the cookie key (every tablet signs out).
 REVOCATION_MAX = 10_000
 
 _PAYLOAD_VERSION = 1
@@ -242,6 +247,11 @@ class SessionClaims:
     #: derived from its signature). Revocation and the per-lock PIN
     #: throttle key on it. Not part of equality or ``repr``.
     session_id: str = field(default="", compare=False, repr=False)
+    #: Which cookie key generation of :class:`DashboardAuth` verified it.
+    #: A key replacement (full revocation list) makes every claim of an
+    #: older generation count as signed out — so a request in flight
+    #: across it can't renew or re-issue a cookie under the new key.
+    generation: int = field(default=0, compare=False, repr=False)
 
 
 def _ttl(claims: SessionClaims) -> int:
@@ -388,6 +398,7 @@ class DashboardAuth:
         "_verify_slot",
         "_revoked",
         "_max_revoked",
+        "_key_generation",
         "_acks",
         "_tiles",
         "_pairs",
@@ -408,9 +419,11 @@ class DashboardAuth:
     ) -> None:
         self._settings = settings_service
         self._clock = clock
-        # session id → (reason, expires_at). Insertion-ordered (oldest first).
-        self._revoked: dict[str, tuple[str, float]] = {}
+        # session id → (reason, expires_at, epoch of the revoked cookie).
+        self._revoked: dict[str, tuple[str, float, int]] = {}
         self._max_revoked = max_revocations
+        # Bumped when the cookie key is replaced (full revocation list).
+        self._key_generation = 0
         # Password / setup-link failures per client, and PIN failures per
         # lock — apart, so neither can crowd out or evict the other.
         self._logins = _FailureTable(
@@ -460,6 +473,9 @@ class DashboardAuth:
         """
         if not isinstance(raw, str) or not raw or len(raw) > _MAX_COOKIE_LEN:
             return None
+        # Read before the key: a replacement while this awaits leaves the
+        # claims a stale generation (signed out), never a fresh one.
+        generation = self._key_generation
         parts = raw.split(".")
         if len(parts) != 2:
             return None
@@ -486,6 +502,7 @@ class DashboardAuth:
             # renewal then carries this id on as ``n``.
             derived = hashlib.sha256(sig).hexdigest()[:_DERIVED_ID_LEN]
             claims = replace(claims, session_id=derived)
+        claims = replace(claims, generation=generation)
         reason = self.revocation(claims)
         if reason == REVOKED_SIGNED_OUT:
             return None
@@ -501,25 +518,49 @@ class DashboardAuth:
     # cookie lifetime from the revocation, so no copy issued before it can
     # outlive it (and a ``signed_out`` session can't be renewed at all).
     # Only an unlocked session (``/lock``) or a lock's own sign-out adds an
-    # entry — one per session — so a locked session can't grow the map.
+    # entry — one per session — so a locked session can't grow the map:
+    # every two entries cost a fresh unlocked session, i.e. the household
+    # password or the PIN.
+    #
+    # Bounded, but an entry is never dropped while its cookie could still
+    # verify — that would let a signed-out tablet back in. When full,
+    # entries past their cookie's lifetime or of an older epoch (dead
+    # since "Sign out all tablets") go first. Still full, the cookie key
+    # is replaced (:meth:`DashboardSettingsService.rotate_cookie_secret`):
+    # every tablet cookie stops verifying, durably, so the whole list is
+    # moot and is cleared. Every tablet then needs the household password
+    # again; the wall panels (bearer tokens, not cookies) stay paired and
+    # the epoch is untouched. Not refusing new sessions instead: entries
+    # live up to a year, so a full list would lock the household out of
+    # every lock / sign-out that long. Reaching the cap takes ~10k
+    # correct password or PIN entries, so nobody without one can trigger
+    # it.
 
-    def revoke(self, claims: SessionClaims, reason: str) -> None:
+    async def revoke(self, claims: SessionClaims, reason: str) -> None:
         """Revoke the session ``claims`` belongs to (by its session id).
 
         ``signed_out`` wins over ``locked`` and is never downgraded.
         """
         if reason not in _REVOCATION_REASONS:
             raise ValueError(f"unknown revocation reason: {reason}")
+        if claims.generation != self._key_generation:
+            return  # Its key is already gone: the cookie verifies nowhere.
         sid = claims.session_id
         current = self._revoked.get(sid)
         if current is not None and current[0] == REVOKED_SIGNED_OUT:
             return
         if current is None and len(self._revoked) >= self._max_revoked:
-            self._make_revocation_room()
-        self._revoked[sid] = (reason, self._clock() + _ttl(claims))
+            if not await self._make_revocation_room():
+                return
+        self._revoked[sid] = (reason, self._clock() + _ttl(claims), claims.epoch)
 
     def revocation(self, claims: SessionClaims) -> str | None:
-        """Why the session behind ``claims`` was revoked, or ``None``."""
+        """Why the session behind ``claims`` was revoked, or ``None``.
+
+        Claims verified under a replaced cookie key count as signed out.
+        """
+        if claims.generation != self._key_generation:
+            return REVOKED_SIGNED_OUT
         entry = self._revoked.get(claims.session_id)
         if entry is None:
             return None
@@ -532,20 +573,30 @@ class DashboardAuth:
     def revoked_count(self) -> int:
         return len(self._revoked)
 
-    def _make_revocation_room(self) -> None:
-        """Drop expired entries; else the oldest ``locked`` one (losing it
-        only re-opens a lock race), else the oldest of all."""
+    async def _make_revocation_room(self) -> bool:
+        """Drop entries no cookie can match any more (expired, or of an
+        older epoch). ``False`` when that wasn't enough and the cookie key
+        was replaced instead — every revoked cookie is dead then."""
         now = self._clock()
-        for sid in [s for s, (_, exp) in self._revoked.items() if now > exp]:
+        epoch = await self._settings.epoch()
+        for sid in [
+            s for s, (_, exp, e) in self._revoked.items() if now > exp or e != epoch
+        ]:
             del self._revoked[sid]
         if len(self._revoked) < self._max_revoked:
-            return
-        log.warning("household dashboard: revocation list full — dropping oldest")
-        victim = next(
-            (s for s, (why, _) in self._revoked.items() if why == REVOKED_LOCKED),
-            next(iter(self._revoked)),
+            return True
+        log.warning(
+            "household dashboard: revocation list full of live sessions — "
+            "replacing the cookie key; every tablet is signed out "
+            "(wall panels stay paired)"
         )
-        del self._revoked[victim]
+        # Generation first: claims verified before now count as signed out
+        # while the new key is stored. The list is cleared only once it is,
+        # so a failed write leaves every revocation in force.
+        self._key_generation += 1
+        await self._settings.rotate_cookie_secret()
+        self._revoked.clear()
+        return False
 
     def needs_renewal(self, claims: SessionClaims) -> bool:
         """``True`` when ``claims`` is old enough to be re-issued."""

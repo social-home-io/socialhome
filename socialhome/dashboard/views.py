@@ -854,6 +854,13 @@ class AvatarView(_DashboardView):
         return web.Response(body=body, content_type=image_type(body), headers=headers)
 
 
+async def _signed_out_response(request: web.Request) -> web.Response:
+    """Off to the login form with the "signed out" note, cookie cleared."""
+    response = redirect(SIGNED_OUT_PATH)
+    await clear_session_cookie(response, request)
+    return response
+
+
 class _GoHomeOnGet(_DashboardView):
     """``GET`` (a reload, a typed URL) of a form target just goes home —
     nothing is ever re-POSTed."""
@@ -882,13 +889,17 @@ class LockView(_GoHomeOnGet):
         response = redirect("/")
         if claims.locked:
             return response
+        if self.auth.revocation(claims) == REVOKED_SIGNED_OUT:
+            # Signed out while this request was in flight (the cookie key
+            # was replaced): no fresh cookie under the new key.
+            return await _signed_out_response(self.request)
         await set_session_cookie(
             response,
             self.request,
             await self.auth.issue(claims.keep, locked=True),
             keep=claims.keep,
         )
-        self.auth.revoke(claims, REVOKED_LOCKED)
+        await self.auth.revoke(claims, REVOKED_LOCKED)
         return response
 
 
@@ -917,10 +928,8 @@ class UnlockView(_GoHomeOnGet):
                 "household dashboard: too many wrong PINs from %s — tablet signed out",
                 self.client_key,
             )
-            self.auth.revoke(claims, REVOKED_SIGNED_OUT)
-            response = redirect(SIGNED_OUT_PATH)
-            await clear_session_cookie(response, self.request)
-            return response
+            await self.auth.revoke(claims, REVOKED_SIGNED_OUT)
+            return await _signed_out_response(self.request)
         if wait:
             response = redirect(f"/?pin={PIN_WAIT}")
             response.headers["Retry-After"] = str(wait)
@@ -930,6 +939,10 @@ class UnlockView(_GoHomeOnGet):
             log.info("household dashboard: wrong PIN from %s", self.client_key)
             return redirect(f"/?pin={PIN_WRONG}")
         self.auth.record_success(key, count_global=False)
+        if self.auth.revocation(claims) == REVOKED_SIGNED_OUT:
+            # Signed out while the PIN was being checked (the cookie key
+            # was replaced): a right PIN doesn't bring the session back.
+            return await _signed_out_response(self.request)
         response = redirect("/")
         await set_session_cookie(
             response,

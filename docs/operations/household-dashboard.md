@@ -307,7 +307,9 @@ To unlock, tap **🔒 PIN** and type the PIN on the keypad.
   tablet, changing network address nor flooding the login page from
   other addresses starts the count over.
 - **That sign-out is remembered in memory only.** The signed-out cookie
-  (and any copy of it) stays refused until Social Home restarts. To be
+  (and any copy of it) stays refused until Social Home restarts; after a
+  restart it is a *locked* tablet again — still behind the PIN, with
+  five fresh tries. To be
   sure a lost or copied tablet cookie is dead for good, use **Sign out
   all tablets** in **Admin › Dashboard** (*headless:*
   `DELETE /api/admin/dashboard/sessions`) — that one survives restarts.
@@ -459,3 +461,11 @@ right now, never at night or while locked) and the same limit of 30 per
 - Both also unpair every wall panel — pair them again with a new code.
 - A lost or stolen tablet: do either of the above, then sign the
   remaining tablets in again (password or a fresh setup link).
+- **Social Home can sign every tablet out by itself.** It remembers
+  locked and signed-out tablet sessions in a list of up to 10,000 until
+  each one's cookie would have expired anyway. Should that list ever
+  fill up with sessions that could still come back — only possible
+  with thousands of correct password or PIN entries — it changes the
+  tablets' cookie key instead of forgetting one: every tablet then
+  needs the dashboard password again, wall panels stay paired, and the
+  log says `revocation list full of live sessions`.

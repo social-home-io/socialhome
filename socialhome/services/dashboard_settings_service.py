@@ -8,6 +8,8 @@ Everything lives in the ``instance_config`` key/value table under the
   scrypt hash of the household dashboard password and when it was set;
 * ``dashboard.cookie_secret`` — the 32-byte tablet-cookie key, wrapped
   under the instance KEK (:class:`KeyManager`, attached after startup);
+  replacing it (:meth:`DashboardSettingsService.rotate_cookie_secret`)
+  signs out every tablet but leaves the wall panels paired;
 * ``dashboard.epoch`` — session epoch; bumping it signs out every tablet;
 * ``dashboard.pin_hash`` / ``dashboard.pin_set_at`` — the scrypt hash of
   the tablets' privacy-lock PIN and when it was set (the timestamp alone
@@ -699,6 +701,28 @@ class DashboardSettingsService:
             )
             self._cookie_secret = secret
             return secret
+
+    async def rotate_cookie_secret(self) -> None:
+        """Replace the tablet-cookie key: every tablet cookie stops
+        verifying — durably, across restarts — while wall panels (bearer
+        tokens, not cookies) and the session epoch are untouched.
+
+        The dashboard's fallback when its in-memory revocation list is
+        full of unexpired entries (:meth:`DashboardAuth.revoke`): signing
+        every tablet out is the one way to drop a revocation that can't
+        let its cookie back in. Raises :class:`RuntimeError` before
+        :meth:`attach_key_manager`, like :meth:`cookie_secret`.
+        """
+        km = self._key_manager
+        if km is None:
+            raise RuntimeError("dashboard cookie secret needs the instance KEK")
+        secret = secrets.token_bytes(_COOKIE_SECRET_BYTES)
+        async with self._lock:
+            await self._repo.set(
+                KEY_COOKIE_SECRET,
+                km.encrypt(secret, associated_data=_COOKIE_SECRET_AAD),
+            )
+            self._cookie_secret = secret
 
     # ── Setup token ─────────────────────────────────────────────────────
 

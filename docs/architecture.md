@@ -1651,14 +1651,31 @@ drives it) and is then served by a **separate aiohttp application on its own por
     answers with redirects only (Post/Redirect/Get).
   - **Revocation is in memory.** A bounded map of session ids (10k;
     an entry lasts a full cookie lifetime from the revocation, so no
-    copy issued before it outlives it; when full, expired entries go
-    first, then the oldest *locked* one). Entries are added only by a
-    `/lock` from an unlocked session (a password holder) or by a
+    copy issued before it outlives it). Entries are added only by a
+    `/lock` from an unlocked session (a password or PIN holder) or by a
     lock's own sign-out — one per session — so someone holding only a
-    locked cookie can't flood it and evict other sign-outs. A restart
-    forgets it: a revoked cookie then counts as what its claims say
-    again. The durable revocation is the session epoch — "Sign out
-    all tablets" or a new password.
+    locked cookie can't flood it. **An entry is never dropped while its
+    cookie could still verify** — that would let a signed-out tablet
+    back in. When full, entries past their cookie's lifetime or of an
+    older epoch (dead since "Sign out all tablets") go first. Still
+    full, the tablet-cookie key is replaced
+    (`DashboardSettingsService.rotate_cookie_secret`, stored KEK-wrapped
+    in `instance_config`): every tablet cookie stops verifying, durably,
+    and the map is cleared. Wall panels (bearer tokens bound to the
+    epoch, not cookies) stay paired — an epoch bump would unpair them
+    all. Refusing new revocations or sessions instead was rejected:
+    entries live up to a year, so a full map would block locking and
+    the wrong-PIN sign-out that long. A key-generation counter makes
+    claims verified before the replacement count as signed out, so a
+    request in flight across it (a renewal, `/lock`, a right PIN on
+    `/unlock`) can't mint a cookie under the new key; if storing the new
+    key fails, the map is kept. A restart forgets the map: a signed-out
+    lock is a plain locked cookie again (still behind the PIN, whose
+    throttle also restarts), a pre-lock copy an unlocked one. Not
+    persisted on purpose — a 10k-entry write per lock is a poor trade
+    for a lock-race and five more PIN guesses per restart; the durable
+    revocation is the session epoch — "Sign out all tablets" or a new
+    password.
 - **Host allow-list (DNS rebinding).** The first middleware answers 421 to
   any `Host` that is not an IP literal, `localhost`, `homeassistant`, the
   machine's own host names, a home-network suffix (`.local`, `.lan`,

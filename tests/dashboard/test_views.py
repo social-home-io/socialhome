@@ -28,6 +28,7 @@ from socialhome.dashboard.auth import (
     THROTTLE_MAX_FAILURES,
     THROTTLE_WINDOW_S,
     DashboardAuth,
+    SessionClaims,
 )
 from socialhome.dashboard.keys import AUTH_KEY, CLAIMS_KEY
 from socialhome.dashboard.render import DashboardRenderer
@@ -931,7 +932,7 @@ async def race_client(aiohttp_client, settings_service, auth):
 
         async def home(self, *, now=None):
             request = self.request
-            request.app[AUTH_KEY].revoke(request[CLAIMS_KEY], self.why)
+            await request.app[AUTH_KEY].revoke(request[CLAIMS_KEY], self.why)
             return await super().home(now=now)
 
     snaps = RacingSnapshots()
@@ -3791,3 +3792,71 @@ async def test_only_the_map_page_loads_map_js(client, auth, snapshots):
     assert resp.headers["Content-Type"].startswith(
         ("text/javascript", "application/javascript")
     )
+
+
+# ─── A full revocation list replaces the cookie key ──────────────────────
+
+
+def _replace_key_after_verify():
+    """Patch ``verify`` so the cookie key is replaced (a full revocation
+    list) right after the request's cookie was verified — a request in
+    flight across the replacement."""
+    original = DashboardAuth.verify
+    fired = False
+
+    async def verify_then_replace(self, raw):
+        nonlocal fired
+        claims = await original(self, raw)
+        if claims is not None and not fired:
+            fired = True
+            self._max_revoked = 0
+            filler = SessionClaims(
+                epoch=claims.epoch,
+                issued_at=claims.issued_at,
+                keep=True,
+                session_id="f" * 22,
+            )
+            await self.revoke(filler, REVOKED_LOCKED)
+        return claims
+
+    return patch.object(DashboardAuth, "verify", verify_then_replace)
+
+
+async def test_lock_in_flight_across_a_key_replacement_signs_out(pin_client, auth):
+    headers = await _cookie(auth)
+    with _replace_key_after_verify():
+        resp = await _lock(pin_client, headers)
+    assert resp.headers["Location"] == "/login?signed_out=1"
+    assert resp.cookies[COOKIE_NAME].value == ""
+    assert await auth.verify(headers["Cookie"].split("=", 1)[1]) is None
+
+
+async def test_unlock_in_flight_across_a_key_replacement_signs_out(pin_client, auth):
+    """Even the right PIN can't mint a cookie under the new key."""
+    headers = await _locked(auth)
+    with _replace_key_after_verify():
+        resp = await _unlock(pin_client, headers)
+    assert resp.headers["Location"] == "/login?signed_out=1"
+    assert resp.cookies[COOKIE_NAME].value == ""
+
+
+async def test_renewal_in_flight_across_a_key_replacement_issues_nothing(
+    pin_client, auth, clock
+):
+    headers = await _cookie(auth)
+    clock.advance(RENEW_AFTER_S + 1)
+    with _replace_key_after_verify():
+        resp = await pin_client.get("/", headers=headers, allow_redirects=False)
+    assert COOKIE_NAME not in resp.cookies
+
+
+async def test_full_revocation_list_then_password_signs_back_in(pin_client, auth):
+    """After the key replacement every old cookie is dead, and the
+    household password signs a tablet straight back in."""
+    old = await _cookie(auth)
+    auth._max_revoked = 0
+    await auth.revoke(await auth.verify(old["Cookie"].split("=", 1)[1]), REVOKED_LOCKED)
+    page = await pin_client.get("/", headers=old, allow_redirects=False)
+    assert page.status == 302
+    login = await _login(pin_client)
+    assert (await pin_client.get("/", headers=_jar(login))).status == 200
