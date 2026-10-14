@@ -323,8 +323,107 @@ def test_past_bars_no_longer_fade_their_label():
     css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
     rule = css[css.index(".dash-block.dash-past {") :]
     rule = rule[: rule.index("}")]
-    assert "opacity: 1;" in rule
+    assert "opacity" not in rule
     assert "color: var(--kq, var(--dash-past-ink));" in rule
     assert "background-color: var(--kp, var(--dash-past-fill));" in rule
     emoji = css[css.index(".dash-block.dash-past .dash-block-icon,") :]
     assert emoji[: emoji.index("}")].endswith("opacity: 0.5;\n")
+
+
+# ─── Past agenda rows and other faded text ───────────────────────────────
+
+
+def _rule(css: str, selector: str) -> str:
+    at = css.index(selector + " {")
+    return css[at : css.index("}", at)]
+
+
+def _rules_with_opacity(css: str) -> set[str]:
+    """Every selector (one per comma-separated part) whose rule sets an
+    ``opacity`` below 1."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    found: set[str] = set()
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        match = re.search(r"(?<![-\w])opacity:\s*([0-9.]+)", body)
+        if match and float(match.group(1)) < 1:
+            found |= {" ".join(s.split()) for s in selectors.split(",")}
+    return found
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark", "night"])
+def test_past_row_text_reads_in_every_palette(scheme):
+    """A past day-list row has no fill of its own: its title, time and
+    room are --dash-muted on the card (--dash-surface) — AA in every
+    palette, night included (#7d786f was 4.3:1 on the night card)."""
+    palette = _palettes()[scheme]
+    for ground in (palette["--dash-surface"], palette["--dash-bg"]):
+        assert contrast_ratio(palette["--dash-muted"], ground) >= AA_TEXT
+    # The NOW tag never sits on a past row; a cancelled tag keeps its own
+    # colours, which read on its own fill.
+    assert (
+        contrast_ratio(palette["--dash-error-text"], palette["--dash-error-bg"])
+        >= AA_TEXT
+    )
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark", "night"])
+def test_past_row_faded_whole_was_unreadable(scheme):
+    """Regression: ``opacity: 0.5`` on the whole row (over the card)
+    left the time / room under 3.1:1 and the title under AA in light and
+    night."""
+    palette = _palettes()[scheme]
+    surface = palette["--dash-surface"]
+    row_bg = mix_srgb(palette["--dash-bg"], surface, 0.5)
+    time_ink = mix_srgb(palette["--dash-muted"], surface, 0.5)
+    assert contrast_ratio(time_ink, row_bg) < 3.1
+    if scheme != "dark":
+        title_ink = mix_srgb(palette["--dash-text"], surface, 0.5)
+        assert contrast_ratio(title_ink, row_bg) < AA_TEXT
+
+
+def test_past_rows_fade_only_their_decoration():
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    assert "\n.dash-past {" not in css  # the old whole-element fade
+    rule = _rule(css, ".dash-row.dash-past")
+    assert "opacity" not in rule
+    assert "color: var(--dash-muted);" in rule
+    assert "background: transparent;" in rule
+    assert "border-inline-start-color: var(--kp, var(--dash-border));" in rule
+    emoji = _rule(css, '.dash-row.dash-past .dash-row-title > [aria-hidden="true"]')
+    assert emoji.endswith("opacity: 0.5;\n")
+
+
+def test_stale_live_data_keeps_its_words():
+    """Offline, live data drains to grey and its pictures fade; the words
+    keep their contrast (``opacity: 0.45`` took them to ~2.3:1 at night)."""
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    rule = _rule(css, ".dash-stale [data-live]")
+    assert "opacity" not in rule
+    assert "filter: grayscale(1);" in rule
+
+
+def test_only_pictures_and_disabled_controls_fade():
+    """Guard: nothing that carries words is drawn translucent. Every
+    ``opacity`` < 1 in the stylesheet sits on emoji / faces / map
+    markers / the now line (no text), or on a disabled control (exempt
+    from WCAG 1.4.3). A new one needs a contrast check, then a line
+    here."""
+    css = (STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    assert _rules_with_opacity(css) == {
+        ".dash-key:disabled",
+        ".dash-msg-speaker",
+        ".dash-ack:disabled",
+        ".dash-block.dash-past .dash-block-icon",
+        ".dash-block.dash-past .dash-block-emoji",
+        '.dash-row.dash-past .dash-row-title > [aria-hidden="true"]',
+        '.dash-stale [data-live][aria-hidden="true"]',
+        '.dash-stale [data-live] [aria-hidden="true"]',
+        ".dash-pv-wedge",
+        ".dash-pv-part-past .dash-pv-part-icon",
+        ".dash-pv-past .dash-pv-emoji",
+        ".dash-pv-cancelled .dash-pv-emoji",
+        ".dash-pv-night-next",
+        ".dash-pv-night .dash-night-hint",
+        ".dash-mp-av.dash-mp-stale",
+        ".dash-mp-dot.dash-mp-stale",
+    }

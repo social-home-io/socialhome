@@ -1906,7 +1906,13 @@ by a container query on its real width). A bar that is over fades only
 its fill — the colour composited at 50 % over the card for each scheme
 on the server (`--kp`), with black or white ink picked against that fill
 (`--kq`, `contrast.past_colors`), the same rule as the wall panel — so
-its label stays readable in dark mode. Home also renders the day as a
+its label stays readable in dark mode. A past row in a day list (Home's
+narrow list, a person's school and today lists) likewise fades only its
+decoration — no fill of its own, the colour strip at `--kp`, the emoji at
+half strength — and draws its words in `--dash-muted`, never at reduced
+opacity; offline, live data (`[data-live]`) turns grey and fades only its
+pictures. `test_contrast` keeps every translucent rule in the stylesheet
+on a picture or a disabled control. Home also renders the day as a
 chronological list, which a media query swaps in for the lanes under
 600 px (the server can't know the width). On a person page events are
 painted in that person's colour, not the colour of whichever calendar copy
