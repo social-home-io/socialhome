@@ -429,8 +429,8 @@ class DisplayLockView(web.View):
 
 class DisplayUnlockView(web.View):
     """``POST /api/display/v1/unlock`` ``{"pin": "1234"}`` — lift this
-    panel's lock (the one route a locked panel reaches besides the lock
-    screen). ``200 {"locked": false}`` (also when it wasn't locked —
+    panel's lock with the PIN (reachable while locked, like
+    ``/unlock/ha`` and the 🔒). ``200 {"locked": false}`` (also when it wasn't locked —
     nothing is checked then); ``403 DISPLAY_PIN_WRONG`` with
     ``params.remaining`` (never ``0``); the wrong PIN that spends the
     last try unpairs the panel: ``401 DISPLAY_SIGNED_OUT``
