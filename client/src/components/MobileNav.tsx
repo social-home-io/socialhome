@@ -18,6 +18,12 @@
  * tech) and the ``sh-active`` class (visual). Without the active state
  * the bar gives no orientation cue, so a mobile user couldn't tell at
  * a glance which tab they were on.
+ *
+ * While the on-screen keyboard is up (``useKeyboardOpen``) the bar
+ * slides away so the field being typed into keeps the room; it is
+ * ``inert`` + ``aria-hidden`` meanwhile so neither focus nor a screen
+ * reader lands on controls nobody can see, and it returns as soon as
+ * the keyboard closes (blur, rotation, keyboard dismissed).
  */
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
@@ -26,6 +32,7 @@ import { SideNav } from '@/components/SideNav'
 import { dmUnreadTotal } from '@/store/dms'
 import { shortcutsHelpOpen } from '@/lib/shortcuts'
 import { addBase } from '@/baseUrl'
+import { useKeyboardOpen } from '@/hooks/useKeyboardOpen'
 import { t } from '@/i18n/i18n'
 
 interface Tab {
@@ -64,6 +71,7 @@ export const mobileSidebarOpen = signal(false)
 export function MobileNav() {
   const loc = useLocation()
   const path = loc.path
+  const keyboardUp = useKeyboardOpen()
 
   // Auto-close the drawer on route change so tapping a sidebar link
   // dismisses the overlay without a second tap on the scrim. Esc also
@@ -128,9 +136,11 @@ export function MobileNav() {
         <SideNav />
       </div>
       <nav
-        class="sh-mobile-nav"
+        class={keyboardUp ? 'sh-mobile-nav sh-mobile-nav--kbd' : 'sh-mobile-nav'}
         role="navigation"
         aria-label={t('nav.mobile')}
+        inert={keyboardUp}
+        aria-hidden={keyboardUp ? 'true' : undefined}
       >
         {TABS.map((tab) => {
           const active = tab.matches ? tab.matches(path) : path === tab.href
