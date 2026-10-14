@@ -394,7 +394,9 @@ Assistant App), you don't type a code at all:
   a factory reset). The old pairing keeps working until the panel uses
   its new one for the first time — usually seconds later — and is then
   removed; until then Admin › Dashboard lists the panel twice (the new
-  entry "never seen"). **Remove** stops it being listed as connected.
+  entry "never seen"). A privacy lock on the panel stays on. **Remove**
+  unpairs the panel together with a re-connect still waiting, and stops
+  it being listed as connected.
 - **What Home Assistant sees.** The claim passes through Home Assistant,
   whose recorder keeps every action's data — so treat it as visible to
   anyone with admin access to Home Assistant (they can reflash the panel

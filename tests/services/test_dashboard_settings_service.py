@@ -1166,7 +1166,7 @@ async def test_add_display_can_supersede_the_same_mac(svc):
         ("d5", ()),
     ]
     assert await svc.take_over("d5") == ()
-    assert await svc.take_over("missing") == ()
+    assert await svc.take_over("missing") is None
     # No MAC → nothing to match.
     assert await svc.add_display(_display(6), supersede_same_mac=True) == ()
 
@@ -1418,3 +1418,14 @@ async def test_update_display_only_changes_name_and_lock(svc, change):
     with pytest.raises(ValueError):
         await svc.update_display("d1", change)
     assert (await svc.displays())[0] == _display(1)
+
+
+async def test_remove_display_takes_its_pending_takeover_along(svc):
+    mac = "aa:bb:cc:dd:ee:01"
+    await svc.add_display(_display(1, mac=mac))
+    await svc.add_display(_display(2, mac="aa:bb:cc:dd:ee:02"))
+    await svc.add_display(_display(3, mac=mac), supersede_same_mac=True)
+    assert await svc.remove_display("d1") == ("d1", "d3")
+    assert [d.id for d in await svc.displays()] == ["d2"]
+    with pytest.raises(DashboardDisplayNotFoundError):
+        await svc.remove_display("d1")

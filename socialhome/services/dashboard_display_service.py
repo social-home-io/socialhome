@@ -59,7 +59,7 @@ import secrets
 import time
 import unicodedata
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..dashboard.auth import THROTTLE_MAX_FAILURES, DashboardAuth
@@ -525,14 +525,14 @@ class DashboardDisplayService:
 
     async def remove(self, *, actor_is_admin: bool, display_id: str) -> None:
         """Unpair a panel — its token stops working at once, and a connect
-        claim still pending for it (same MAC) is dropped."""
+        claim or a re-connect still pending for it (same MAC) is dropped."""
         require_admin(actor_is_admin)
         mac = next(
             (d.mac for d in await self._settings.displays() if d.id == display_id),
             None,
         )
-        await self._settings.remove_display(display_id)
-        self._forget(display_id)
+        for removed in await self._settings.remove_display(display_id):
+            self._forget(removed)
         if mac is not None:
             for key in [k for k, c in self._claims.items() if c.mac == mac]:
                 del self._claims[key]
@@ -626,10 +626,11 @@ class DashboardDisplayService:
                 display.id,
             )
             try:
-                await self._settings.remove_display(display.id)
+                removed = await self._settings.remove_display(display.id)
             except DashboardDisplayNotFoundError:
-                pass
-            self._forget(display.id)
+                removed = (display.id,)
+            for display_id in removed:
+                self._forget(display_id)
             raise DashboardDisplaySignedOutError()
         if wait:
             raise DashboardDisplayPinThrottledError(wait)
@@ -659,14 +660,20 @@ class DashboardDisplayService:
                 found = display
         if found is not None and found.replaces:
             # A re-connected panel's first use: its old pairing goes now.
-            for display_id in await self._settings.take_over(found.id):
+            taken = await self._settings.take_over(found.id)
+            if taken is None:
+                return None  # removed since we read it
+            for display_id in taken:
                 self._forget(display_id)
                 log.info(
                     "household dashboard: display %s took over from %s",
                     found.id,
                     display_id,
                 )
-            found = replace(found, replaces=())
+            found = next(
+                (d for d in await self._settings.displays() if d.id == found.id),
+                None,
+            )
         return found
 
     async def seen(

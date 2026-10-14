@@ -1508,7 +1508,10 @@ drives it) and is then served by a **separate aiohttp application on its own por
   the new token's first authenticated request, which removes them in the
   same write (`DashboardSettingsService.take_over`) — so a claim spent by
   someone else in HA can't break the panel's working pairing unless that
-  token is actually used. A later Connect drops a still-unused one.
+  token is actually used. A later Connect drops a still-unused one, and
+  so does removing (or a PIN sign-out of) the display it would take over;
+  a taken-over privacy lock carries over. The 20-panel cap counts what
+  stays once every pending takeover is done.
   The session guard keeps the two
   credentials apart: under the prefix only the bearer token is read
   (cookies are ignored, so the same-origin `POST` check is skipped — no

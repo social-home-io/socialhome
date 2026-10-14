@@ -13,6 +13,8 @@ import os
 import re
 from dataclasses import replace
 
+from unittest.mock import patch
+
 import pytest
 
 from socialhome.dashboard.auth import (
@@ -1048,13 +1050,91 @@ async def test_removing_the_new_display_keeps_the_old_one(hsvc, directory, setti
     assert await hsvc.authenticate(again.token) is None
 
 
-async def test_removing_the_old_display_first_is_harmless(hsvc, directory, settings):
-    first = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+async def test_removing_the_panel_also_drops_its_pending_reconnect(
+    hsvc, directory, settings
+):
+    """Review finding: unpairing the working display must not leave a
+    stolen, still-unused re-connect behind that could step in later."""
+    real = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    stolen = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    hall = await hsvc.spend_claim(
+        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC
+    )
+    await hsvc.remove(actor_is_admin=True, display_id=real.display_id)
+    assert await hsvc.authenticate(stolen.token) is None
+    assert await hsvc.authenticate(real.token) is None
+    assert [d.id for d in await settings.displays()] == [hall.display_id]
+    listed = {p.id: d for p, d in await hsvc.platform_panels(actor_is_admin=True)}
+    assert listed["dev-kitchen"] is None
+
+
+async def test_a_pin_sign_out_also_drops_the_pending_reconnect(
+    hsvc, directory, settings
+):
+    await settings.set_pin(actor_is_admin=True, pin=PIN)
+    real = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    display = await hsvc.authenticate(real.token)
+    await hsvc.lock(display)
+    stolen = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    for _ in range(THROTTLE_MAX_FAILURES):
+        with pytest.raises(DashboardDisplayPinWrongError):
+            await hsvc.unlock(display, "0000")
+    with pytest.raises(DashboardDisplaySignedOutError):
+        await hsvc.unlock(display, "0000")
+    assert await settings.displays() == ()
+    assert await hsvc.authenticate(stolen.token) is None
+
+
+async def test_takeover_keeps_the_privacy_lock(hsvc, directory, settings):
+    """A re-connect must not lift the panel's privacy lock."""
+    await settings.set_pin(actor_is_admin=True, pin=PIN)
+    real = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    await hsvc.lock(await hsvc.authenticate(real.token))
     again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
-    await hsvc.remove(actor_is_admin=True, display_id=first.display_id)
     taken = await hsvc.authenticate(again.token)
-    assert taken is not None and taken.replaces == ()
-    assert [d.id for d in await settings.displays()] == [again.display_id]
+    assert taken is not None and taken.locked
+    assert await hsvc.is_locked(taken)
+
+
+async def test_a_display_removed_mid_takeover_is_not_authenticated(
+    hsvc, directory, settings
+):
+    """Review finding: authenticate read the display, then it was dropped
+    (another Connect, a removal, a sign-out) before the takeover — the
+    request must not be served."""
+    await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    again = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    take_over = DashboardSettingsService.take_over
+
+    async def removed_first(self, display_id):
+        await self.remove_display(display_id)
+        return await take_over(self, display_id)
+
+    with patch.object(
+        DashboardSettingsService,
+        "take_over",
+        autospec=True,
+        side_effect=removed_first,
+    ):
+        assert await hsvc.authenticate(again.token) is None
+
+
+async def test_two_pending_reconnects_at_the_cap(hsvc, directory, settings):
+    """Review finding: at the cap, a second panel's re-connect counted the
+    first's pending record in full and was refused."""
+    await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    await hsvc.spend_claim(await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC)
+    for i in range(MAX_DISPLAYS - 2):
+        await _pair(hsvc, f"Panel {i}")
+    kitchen = await hsvc.spend_claim(await _connect(hsvc, directory), mac=KITCHEN_MAC)
+    hall = await hsvc.spend_claim(
+        await _connect(hsvc, directory, "dev-hall"), mac=HALL_MAC
+    )
+    assert kitchen and hall
+    assert len(await settings.displays()) == MAX_DISPLAYS + 2
+    await hsvc.authenticate(kitchen.token)
+    await hsvc.authenticate(hall.token)
+    assert len(await settings.displays()) == MAX_DISPLAYS
 
 
 async def test_the_platform_list_shows_the_working_pairing(hsvc, directory):
