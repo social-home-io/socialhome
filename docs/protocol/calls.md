@@ -128,8 +128,10 @@ record, and inbound events move it through the same states as local ones:
   only accepted for a call the household would accept from its own
   members: a known `call_type`, a caller hosted by the sending household
   (`remote_users`), a callee this household hosts, both in the named
-  conversation, no guardian block (§CP.F2) between caller and callee, and
-  at most `MAX_CALLS_PER_USER` ringing calls per callee.
+  conversation, no guardian block (§CP.F2) between caller and callee, no
+  personal block of the caller by the callee in a 1:1 (the block never
+  leaves the callee's household, so it is checked here), and at most
+  `MAX_CALLS_PER_USER` ringing calls per callee.
   Anything else is dropped with a WARNING and never rings. Locally a
   guardian block refuses a 1:1 call either way (403 — the blocked caller
   sees a personal block's `Recipient has you blocked.`) and the protected
@@ -137,7 +139,10 @@ record, and inbound events move it through the same states as local ones:
   the blocked person isn't rung by the other, and no mesh leg (offer or
   answer) ever opens between the two. A repeat
   `call_id` (a second local callee of a group call, or a `late_join`) is
-  merged into the existing call — it can never reset one.
+  merged into the existing call — it can never reset one. A personal block
+  refuses a 1:1 call either way too (403 `Recipient has you blocked.` /
+  `You have blocked this user…`); group calls ignore personal blocks, as
+  group DMs do.
 - `CALL_ANSWER` moves the caller-side row to `active` (otherwise the sweep
   would mark the live call missed after 90 s).
 - `CALL_HANGUP` / `CALL_END` close the row as `ended` (with a duration);

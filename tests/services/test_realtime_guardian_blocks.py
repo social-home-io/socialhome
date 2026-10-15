@@ -55,6 +55,9 @@ class _FakeUserRepo:
     async def get_by_user_id(self, user_id):
         return next((u for u in _USERS if u.user_id == user_id), None)
 
+    async def list_blockers(self, blocked_user_id):
+        return frozenset()
+
 
 class _FakeSpaceRepo:
     async def list_local_member_user_ids(self, space_id):

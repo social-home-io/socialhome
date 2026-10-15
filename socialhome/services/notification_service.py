@@ -452,6 +452,23 @@ class NotificationService(ProtectionGateMixin):
             self.on_app_challenge_received,
         )
 
+    # ── Blocks ─────────────────────────────────────────────────────────
+
+    async def _withheld_from(self, actor_user_id: str) -> frozenset[str]:
+        """Who never hears about *actor_user_id*'s activity: everyone who
+        blocked them (§Privacy — a personal block stays the blocker's own)
+        and everyone a guardian block (§CP.F2) separates them from."""
+        return await self._guardian_block_counterparts(
+            actor_user_id
+        ) | await self._users.list_blockers(actor_user_id)
+
+    async def _hidden_from(self, recipient_user_id: str, actor_user_id: str) -> bool:
+        """Whether *recipient_user_id* never hears about *actor_user_id* —
+        the one-pair form of :meth:`_withheld_from`."""
+        return await self._guardian_blocked(
+            recipient_user_id, actor_user_id
+        ) or await self._users.is_blocked(recipient_user_id, actor_user_id)
+
     # ── Handlers ───────────────────────────────────────────────────────
 
     async def on_post_created(self, event: PostCreated) -> None:
@@ -460,7 +477,7 @@ class NotificationService(ProtectionGateMixin):
         users = await self._users.list_active()
         author = await self._users.get_by_user_id(author_id)
         name = author.display_name if author else "Someone"
-        blocked = await self._guardian_block_counterparts(author_id)
+        blocked = await self._withheld_from(author_id)
         for user in users:
             if user.user_id == author_id or user.user_id in blocked:
                 continue
@@ -502,7 +519,7 @@ class NotificationService(ProtectionGateMixin):
         commenter = await self._users.get_by_user_id(commenter_id)
         name = commenter.display_name if commenter else "Someone"
         users = await self._users.list_active()
-        blocked = await self._guardian_block_counterparts(commenter_id)
+        blocked = await self._withheld_from(commenter_id)
         for user in users:
             if user.user_id == commenter_id or user.user_id in blocked:
                 continue
@@ -657,7 +674,7 @@ class NotificationService(ProtectionGateMixin):
         mentioned = (
             {m.user_id for m in event.mentions if m.user_id} if prefs.group else set()
         )
-        blocked = await self._guardian_block_counterparts(event.sender_user_id)
+        blocked = await self._withheld_from(event.sender_user_id)
         for recipient_id in event.recipient_user_ids:
             if recipient_id in blocked:
                 continue
@@ -762,7 +779,7 @@ class NotificationService(ProtectionGateMixin):
             event.conversation_id, prefs.system_scope, prefs.space_id
         )
         allowed = set(event.recipient_user_ids)
-        blocked = await self._guardian_block_counterparts(event.sender_user_id)
+        blocked = await self._withheld_from(event.sender_user_id)
         name = event.sender_display_name or await self._display_name(
             event.sender_user_id
         )
@@ -878,9 +895,7 @@ class NotificationService(ProtectionGateMixin):
 
     async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
         """A user wants to start a DM — notify the recipient + push."""
-        if await self._guardian_blocked(
-            event.recipient_user_id, event.requester_user_id
-        ):
+        if await self._hidden_from(event.recipient_user_id, event.requester_user_id):
             return
         recipient = await self._users.get_by_user_id(event.recipient_user_id)
         title = self._t(
@@ -1124,7 +1139,7 @@ class NotificationService(ProtectionGateMixin):
             self._take_here_slot(space_id, author_id)
         )
         members = await self._spaces.list_members(space_id)
-        blocked = await self._guardian_block_counterparts(author_id)
+        blocked = await self._withheld_from(author_id)
         for member in members:
             if member.user_id == author_id or member.user_id in blocked:
                 continue
@@ -1878,7 +1893,7 @@ class NotificationService(ProtectionGateMixin):
             return
         if event.reactor_user_id == event.author_user_id:
             return
-        if await self._guardian_blocked(event.author_user_id, event.reactor_user_id):
+        if await self._hidden_from(event.author_user_id, event.reactor_user_id):
             return
         author = await self._users.get_by_user_id(event.author_user_id)
         if author is None:
@@ -1907,9 +1922,7 @@ class NotificationService(ProtectionGateMixin):
             return
         if event.parent_author_user_id == event.author_user_id:
             return  # author replied to their own thread
-        if await self._guardian_blocked(
-            event.parent_author_user_id, event.author_user_id
-        ):
+        if await self._hidden_from(event.parent_author_user_id, event.author_user_id):
             return
         recipient = await self._users.get_by_user_id(event.parent_author_user_id)
         if recipient is None:
@@ -1929,7 +1942,7 @@ class NotificationService(ProtectionGateMixin):
         """Notify the followed user when someone starts following them."""
         if event.follower_user_id == event.followed_user_id:
             return
-        if await self._guardian_blocked(event.followed_user_id, event.follower_user_id):
+        if await self._hidden_from(event.followed_user_id, event.follower_user_id):
             return
         recipient = await self._users.get_by_user_id(event.followed_user_id)
         if recipient is None:

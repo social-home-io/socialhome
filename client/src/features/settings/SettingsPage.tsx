@@ -510,6 +510,7 @@ function BlockedAccountsPanel() {
   return (
     <div class="sh-blocked-accounts sh-settings-subcard">
       <h3 class="sh-settings-panel-heading">{t('settings.blocked.title')}</h3>
+      <p class="sh-muted sh-settings-panel-blurb">{t('settings.blocked.blurb')}</p>
       {rows.length === 0 && (
         <p class="sh-muted sh-settings-panel-blurb">
           {t('settings.blocked.empty')}

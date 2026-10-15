@@ -689,3 +689,13 @@ describe('SettingsPage — Privacy people lists name everyone (B1)', () => {
     expect(result.getByRole('button', { name: 'Unblock Unknown person' })).toBeTruthy()
   })
 })
+
+describe('BlockedAccountsPanel', () => {
+  it('says what a block does — and that it does not hide what you share', async () => {
+    const { findByText } = await renderPrivacyTab()
+    // Shown with or without blocks: a block is the blocker's own, so the
+    // blocked person still sees the blocker's posts and presence.
+    expect(await findByText(/they can still see your posts and presence/)).toBeTruthy()
+    expect(await findByText(/stops you messaging, calling or playing apps/)).toBeTruthy()
+  })
+})

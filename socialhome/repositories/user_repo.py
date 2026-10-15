@@ -121,6 +121,7 @@ class AbstractUserRepo(Protocol):
         self,
         blocker_user_id: str,
     ) -> list[tuple[str, str]]: ...
+    async def list_blockers(self, blocked_user_id: str) -> frozenset[str]: ...
 
     # Follows -------------------------------------------------------------
     async def follow(self, follower_user_id: str, followed_user_id: str) -> None: ...
@@ -979,6 +980,15 @@ class SqliteUserRepo:
             (blocker_user_id,),
         )
         return [(r["blocked_user_id"], r["blocked_at"]) for r in rows]
+
+    async def list_blockers(self, blocked_user_id: str) -> frozenset[str]:
+        """Everyone who blocked *blocked_user_id* — the people a frame or a
+        notification about that person's activity must not reach."""
+        rows = await self._db.fetchall(
+            "SELECT blocker_user_id FROM user_blocks WHERE blocked_user_id=?",
+            (blocked_user_id,),
+        )
+        return frozenset(r["blocker_user_id"] for r in rows)
 
     # ── Follows (§Momentum) ────────────────────────────────────────────
 

@@ -1990,3 +1990,29 @@ async def test_open_dedup_is_per_sending_household():
         "other-inst",
         "peer-inst-id",
     ]
+
+
+@pytest.mark.asyncio
+async def test_open_session_refuses_a_local_target_who_blocked_the_actor():
+    """§Privacy — the blocked person can't challenge the blocker either, as a
+    remote recipient's household already drops a blocked initiator's frames.
+    Same answer as a non-contact, so the block isn't revealed."""
+    app = _make_installed_app("chess")
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=[_make_user("u-bob", "bob", "Bob"), _make_user("u-ann", "ann", "Ann")],
+        block_pairs={("u-ann", "u-bob")},
+    )
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(
+            app_id="chess", target=_local_target("u-ann"), actor_user_id="u-bob"
+        )
+    with pytest.raises(AppContactNotFoundError):
+        await svc.send_message(
+            app_id="chess",
+            session_id="s1",
+            target=_local_target("u-ann"),
+            payload={"move": "e4"},
+            actor_user_id="u-bob",
+        )
+    assert ws.user_calls == []

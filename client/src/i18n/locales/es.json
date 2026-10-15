@@ -2532,6 +2532,7 @@
   "settings.blocked.unblocked": "Desbloqueado",
   "settings.blocked.unblock_failed": "No se pudo desbloquear: {error}",
   "settings.blocked.title": "Cuentas bloqueadas",
+  "settings.blocked.blurb": "Al bloquear a alguien dejas de ver sus publicaciones, destacados, momentos, ubicación y notificaciones, y ya no podéis escribiros, llamaros ni jugar juntos a apps. Lo que tú compartes no se oculta: esa persona sigue viendo tus publicaciones y tu presencia.",
   "settings.blocked.empty": "No has bloqueado a nadie. Abre un destacado o un perfil y toca el menú ⋯ para bloquear a alguien.",
   "settings.person.unknown": "Persona desconocida",
   "settings.person.no_longer_connected": "Hogar ya no conectado",

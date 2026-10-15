@@ -1016,3 +1016,15 @@ async def test_list_remote_by_ids_reads_a_roster_in_one_go(env):
     got = await env.user_repo.list_remote_by_ids({"u-a", "u-b", "u-nobody"})
     assert sorted(r.user_id for r in got) == ["u-a", "u-b"]
     assert await env.user_repo.list_remote_by_ids(set()) == []
+
+
+async def test_list_blockers_names_everyone_who_blocked_a_person(env):
+    a = await env.user_svc.provision(username="alice", display_name="Alice")
+    b = await env.user_svc.provision(username="bob", display_name="Bob")
+    c = await env.user_svc.provision(username="carol", display_name="Carol")
+    assert await env.user_repo.list_blockers(b.user_id) == frozenset()
+    await env.user_repo.block(a.user_id, b.user_id)
+    await env.user_repo.block(c.user_id, b.user_id)
+    await env.user_repo.block(b.user_id, a.user_id)
+    assert await env.user_repo.list_blockers(b.user_id) == {a.user_id, c.user_id}
+    assert await env.user_repo.list_blockers(a.user_id) == {b.user_id}

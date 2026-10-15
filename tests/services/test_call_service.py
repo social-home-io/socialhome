@@ -131,6 +131,12 @@ class _FakeUserRepo:
     async def list_remote_for_instance(self, instance_id):
         return self._remotes.get(instance_id, [])
 
+    #: ``(blocker, blocked)`` personal blocks (§Privacy).
+    blocks: frozenset[tuple[str, str]] = frozenset()
+
+    async def is_blocked(self, blocker_user_id, blocked_user_id):
+        return (blocker_user_id, blocked_user_id) in self.blocks
+
 
 class _FakeConversationRepo:
     """Minimal conversation repo — members + messages."""

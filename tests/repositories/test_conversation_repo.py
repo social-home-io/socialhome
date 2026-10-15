@@ -1254,3 +1254,46 @@ async def test_list_recent_messages_reads_nothing_for_empty_filters(
         limit=limit,
     )
     assert rows == []
+
+
+@pytest.mark.parametrize("seat_user_id", [True, False])
+async def test_list_for_user_drops_dm_with_blocked_remote_peer(env, seat_user_id):
+    """A 1:1 with someone on another household drops out of the blocker's
+    list too — whether the remote seat names its ``user_id`` or only
+    ``(instance, username)`` resolved through ``remote_users``."""
+    await env.db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            "peer-rex",
+            "Rex",
+            "00" * 32,
+            "k1",
+            "k2",
+            "https://rex/wh",
+            "wh-rex",
+            "confirmed",
+            "manual",
+        ),
+    )
+    await env.db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        ("ru-rex", "peer-rex", "rex", "Rex"),
+    )
+    conv = _conv("conv-dm-remote")
+    await env.repo.create(conv)
+    await env.repo.add_member(_member("conv-dm-remote", "alice"))
+    await env.db.enqueue(
+        "INSERT INTO conversation_remote_members(conversation_id, instance_id,"
+        " remote_username, user_id) VALUES(?,?,?,?)",
+        ("conv-dm-remote", "peer-rex", "rex", "ru-rex" if seat_user_id else None),
+    )
+    assert any(c.id == "conv-dm-remote" for c in await env.repo.list_for_user("alice"))
+    await env.db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        ("uid-alice", "ru-rex"),
+    )
+    result = await env.repo.list_for_user("alice")
+    assert not any(c.id == "conv-dm-remote" for c in result)

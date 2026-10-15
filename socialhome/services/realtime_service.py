@@ -534,7 +534,10 @@ class RealtimeService:
             {
                 "type": "post.created",
                 "post": post,
-            }
+            },
+            # §Privacy: not to anyone who blocked the author — their feed
+            # (``GET /api/feed``) leaves the post out too.
+            withheld=await self._user_repo.list_blockers(event.post.author),
         )
 
     async def _on_post_edited(self, event: PostEdited) -> None:
@@ -1451,7 +1454,7 @@ class RealtimeService:
                 "user_id": event.user_id,
                 "status": _safe(event.status) if event.status else None,
             },
-            withheld=await self._guardian_block_counterparts(event.user_id),
+            withheld=await self._blocked_or_counterparts(event.user_id),
         )
 
     # ─── Household feature toggles (§18 / §23.13) ────────────────────────
@@ -1830,6 +1833,18 @@ class RealtimeService:
             payload,
         )
 
+    async def _blocked_or_counterparts(self, user_id: str) -> frozenset[str]:
+        """Everyone who blocked *user_id* (§Privacy — ``GET /api/presence``
+        and the feed hide that person from them) plus the guardian-block
+        counterparts (§CP.F2): a frame about *user_id*'s activity reaches
+        none of them, so a WebSocket can't put back what the REST view
+        leaves out."""
+        if not user_id:
+            return frozenset()
+        return await self._user_repo.list_blockers(
+            user_id
+        ) | await self._guardian_block_counterparts(user_id)
+
     async def _guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
         """Everyone a guardian block (§CP.F2) separates from *user_id*,
         either way — a frame about one of them never reaches the other."""
@@ -1982,10 +1997,11 @@ class RealtimeService:
     # ─── Presence (§22) ──────────────────────────────────────────────────
 
     async def _on_presence_updated(self, event: PresenceUpdated) -> None:
-        # §CP.F2: no one a guardian block separates from this member gets
-        # their whereabouts (``GET /api/presence`` leaves them out too).
+        # §Privacy / §CP.F2: no one who blocked this member, and no one a
+        # guardian block separates them from, gets their whereabouts
+        # (``GET /api/presence`` leaves them out too).
         user_id = event.user_id
-        if user_id is None and self._cp_repo is not None:
+        if user_id is None:
             user = await self._user_repo.get(event.username)
             user_id = user.user_id if user is not None else ""
         await self._broadcast_household(
@@ -1997,7 +2013,7 @@ class RealtimeService:
                 "latitude": event.latitude,
                 "longitude": event.longitude,
             },
-            withheld=await self._guardian_block_counterparts(user_id or ""),
+            withheld=await self._blocked_or_counterparts(user_id or ""),
         )
 
     # ─── Online status (session presence) ─────────────────────────────────
@@ -2050,7 +2066,7 @@ class RealtimeService:
             "last_seen_at": last_seen_at,
         }
         # §CP.F2: not to anyone a guardian block separates from the subject.
-        withheld = await self._guardian_block_counterparts(user_id)
+        withheld = await self._blocked_or_counterparts(user_id)
         users = await self._user_repo.list_active()
         recipients = [
             u.user_id

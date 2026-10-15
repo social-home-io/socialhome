@@ -179,7 +179,11 @@ Viewer-private renames of other users (local or remote). Aliases never federate 
 
 ### Personal user blocks (§Privacy)
 
-Voluntary adult-to-adult block list — the viewer hides another user's highlights, household-feed posts, presence, notifications, friends-list entry and DMs. Distinct from the parent-driven CP block (`/api/cp/minors/{minor_id}/blocks`). The block stays local to the viewer's instance — the inbound DM gate runs on the receive side, so a remote sender is also rejected without exporting the block list.
+Voluntary adult-to-adult block list. Distinct from the parent-driven CP block (`/api/cp/minors/{minor_id}/blocks`). The block stays local to the viewer's household — it is never sent anywhere, so every rule below is enforced here, on receipt for a remote person.
+
+- **Hidden from the blocker:** the blocked person's household-feed posts (`GET /api/feed` and the live `post.created` frame), highlights, moments, presence / status / online state (`GET /api/presence`, the `/api/me/corner` presence slice and the live `presence.updated` / `user.status_changed` / `user.online|idle|offline` frames), their friends-list entry and person sheet, and every notification about them (posts, comments, @mentions, DMs, contact requests, follows, moment replies and reactions).
+- **Both ways, local or remote:** neither can open or continue a 1:1 DM (an inbound `DM_MESSAGE` from a remote person the local party blocked is refused, nothing stored), call the other 1:1 (an inbound 1:1 `CALL_OFFER` is refused too), or open / play an app session with the other. A 1:1 with them drops out of the blocker's conversation list.
+- **Not hidden:** a block doesn't hide what the blocker shares — the blocked person still sees the blocker's posts, highlights, moments and presence (their own household can't know about the block). Group DMs, spaces (posts, comments, chat) and household-feed comments ignore personal blocks.
 
 | Method | Path | Purpose |
 |---|---|---|
