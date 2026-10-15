@@ -208,6 +208,25 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _status_from_wire(p: dict) -> UserStatus | None:
+    """Parse a federated ``{emoji, text, expires_at}`` status.
+
+    Same caps the local ``PATCH /api/me`` applies — a peer can't push a
+    multi-line essay into our status surfaces; raises ``ValueError`` when
+    they are broken. ``None`` when neither emoji nor text is set. Shared by
+    ``USER_STATUS_UPDATED`` and the ``status`` of a ``USERS_SYNC`` entry.
+    """
+    emoji = clean_status_emoji(p.get("emoji"))
+    text = clean_status_text(p.get("text"))
+    if emoji is None and text is None:
+        return None
+    return UserStatus(
+        emoji=emoji,
+        text=text,
+        expires_at=str(p["expires_at"]) if p.get("expires_at") else None,
+    )
+
+
 def _coerce_sequence(meta: dict, payload: dict) -> int | None:
     """Pull ``config_sequence`` out of a SPACE_CONFIG_CHANGED payload.
 
@@ -3299,7 +3318,12 @@ class FederationInboundService(ProtectionGateMixin):
             return
         for u in users:
             try:
-                await self._upsert_remote_user(event.from_instance, u)
+                accepted = await self._upsert_remote_user(event.from_instance, u)
+                # ``status`` rides the snapshot so a peer's current status
+                # shows right after pairing. Absent key (older sender) =
+                # leave the cached status as is; ``null`` = clear.
+                if accepted and "status" in u:
+                    await self._apply_synced_status(str(u["user_id"]), u["status"])
             except Exception as exc:
                 log.warning(
                     "USERS_SYNC: skipping user %r from %s: %s",
@@ -3422,24 +3446,44 @@ class FederationInboundService(ProtectionGateMixin):
         if p.get("status_cleared"):
             status = None
         else:
-            # Same caps the local ``PATCH /api/me`` applies — a peer
-            # can't push a multi-line essay into our status surfaces.
             try:
-                emoji = clean_status_emoji(p.get("emoji"))
-                text = clean_status_text(p.get("text"))
+                status = _status_from_wire(p)
             except ValueError as exc:
                 refuse(event, f"invalid status: {exc}", user=user_id)
                 return
-            if emoji is None and text is None:
-                status = None
-            else:
-                status = UserStatus(
-                    emoji=emoji,
-                    text=text,
-                    expires_at=str(p["expires_at"]) if p.get("expires_at") else None,
-                )
         # Cache it on the ``remote_users`` row so ``GET /api/friends`` can
         # show it after a reload, not just on the live WS frame.
+        await self._user_repo.set_remote_status(
+            user_id, status.to_json() if status is not None else None
+        )
+        await self._bus.publish(UserStatusChanged(user_id=user_id, status=status))
+
+    async def _apply_synced_status(self, user_id: str, raw: object) -> None:
+        """Land the ``status`` of a ``USERS_SYNC`` entry whose user the
+        upsert just accepted (so it is homed on the sender).
+
+        ``None`` clears the cached status; an object is checked with the same
+        caps as ``USER_STATUS_UPDATED``. A malformed or over-cap status is
+        refused (WARNING) and leaves the cached one as is — the rest of the
+        entry already landed. One already past its deadline is stored as a
+        clear, never resurrected.
+        """
+        status: UserStatus | None
+        if raw is None:
+            status = None
+        elif isinstance(raw, dict):
+            try:
+                status = _status_from_wire(raw)
+            except ValueError as exc:
+                log.warning(
+                    "USERS_SYNC: invalid status for %s refused: %s", user_id, exc
+                )
+                return
+            if status is not None and status.is_expired(datetime.now(timezone.utc)):
+                status = None
+        else:
+            log.warning("USERS_SYNC: non-object status for %s refused", user_id)
+            return
         await self._user_repo.set_remote_status(
             user_id, status.to_json() if status is not None else None
         )
@@ -4333,11 +4377,12 @@ class FederationInboundService(ProtectionGateMixin):
 
     # ── Helpers ────────────────────────────────────────────────────────
 
-    async def _upsert_remote_user(self, instance_id: str, payload: dict) -> None:
+    async def _upsert_remote_user(self, instance_id: str, payload: dict) -> bool:
+        """Upsert one published user; ``True`` when it was accepted."""
         user_id = str(payload.get("user_id") or "")
         username = str(payload.get("username") or payload.get("remote_username") or "")
         if not user_id or not username:
-            return
+            return False
         # Binding check BEFORE any write — the picture table is shared with
         # local users, so a refused entry must not touch it either. A user
         # already known here (local or remote) is only ever published by
@@ -4349,11 +4394,11 @@ class FederationInboundService(ProtectionGateMixin):
                 instance_id,
                 user_id,
             )
-            return
+            return False
         if home is None and not await self._derives_from_sender(
             instance_id, user_id, username, payload
         ):
-            return
+            return False
         # The peer's own hash survives only in our 16-hex format — it is
         # interpolated into ``…/picture?v=`` URLs (see ``clean_picture_hash``).
         picture_hash = clean_picture_hash(payload.get("picture_hash"))
@@ -4409,6 +4454,7 @@ class FederationInboundService(ProtectionGateMixin):
         # re-verified outside the original §24.11 envelope (Phase 3/4), so we
         # check the instance signature here too — not just the user self-sig.
         await self._store_user_identity_binding(instance_id, user_id, payload)
+        return True
 
     async def _release_held_dms(self, instance_id: str, user_id: str) -> None:
         """Replay DMs held for ``user_id`` now that their user row exists.

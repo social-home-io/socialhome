@@ -15,8 +15,9 @@ application registry and SQLite:
 from __future__ import annotations
 
 import base64
+import json
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
 import pytest
@@ -303,3 +304,105 @@ async def test_a_first_seen_id_is_never_claimed_by_another_household(
         )
         rows = {r[0]: r for r in (await _state(db))["remote_users"]}
         assert rows[user_id][1] == PEER
+
+
+# ─── status carried on the USERS_SYNC roster snapshot ───────────────────
+
+
+async def _status_json(db, user_id: str) -> str | None:
+    row = await db.fetchone(
+        "SELECT status_json FROM remote_users WHERE user_id=?", (user_id,)
+    )
+    return row["status_json"] if row is not None else None
+
+
+@pytest.mark.parametrize(("user_id", "username"), _FOREIGN_USERS)
+async def test_synced_status_for_a_foreign_user_changes_and_announces_nothing(
+    env, user_id, username
+):
+    """A ``status`` on a refused USERS_SYNC entry is refused with it."""
+    app, db, published = env
+    before = await _status_json(db, "u-dora")
+    await _send(
+        app,
+        FET.USERS_SYNC,
+        {
+            "users": [
+                _profile(user_id, username, status={"emoji": "🌴", "text": "away"})
+            ]
+        },
+    )
+    assert await _status_json(db, "u-dora") == before
+    assert published == []
+
+
+async def test_synced_status_of_the_home_household_lands_and_clears(env):
+    """The home household's snapshot stores a status, ``null`` clears it, and
+    an entry without the key (an older sender) leaves it as is."""
+    app, db, published = env
+    later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    status = {"emoji": "🌴", "text": "On holiday", "expires_at": later}
+    bob = {"user_id": "u-bob", "username": "bob"}
+    await _send(app, FET.USERS_SYNC, {"users": [{**bob, "status": status}]})
+    assert json.loads(await _status_json(db, "u-bob")) == status
+    assert [type(e) for e in published] == [UserStatusChanged]
+
+    await _send(app, FET.USERS_SYNC, {"users": [bob]})
+    assert json.loads(await _status_json(db, "u-bob")) == status
+    assert len(published) == 1
+
+    await _send(app, FET.USERS_SYNC, {"users": [{**bob, "status": None}]})
+    assert await _status_json(db, "u-bob") is None
+    assert published[-1].status is None
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        pytest.param({"emoji": "🌴", "text": "line\nbreak"}, id="multi-line text"),
+        pytest.param({"text": "x" * 81}, id="over-long text"),
+        pytest.param("away", id="not an object"),
+    ],
+)
+async def test_synced_status_breaking_the_caps_is_refused(env, status):
+    """The same caps as USER_STATUS_UPDATED: an over-cap status is refused
+    (cached status untouched) while the rest of the entry still lands."""
+    app, db, published = env
+    await _send(
+        app,
+        FET.USERS_SYNC,
+        {"users": [{"user_id": "u-bob", "username": "bob", "status": {"text": "ok"}}]},
+    )
+    before = await _status_json(db, "u-bob")
+    await _send(
+        app,
+        FET.USERS_SYNC,
+        {
+            "users": [
+                {
+                    "user_id": "u-bob",
+                    "username": "bob",
+                    "display_name": "Bobby",
+                    "status": status,
+                }
+            ]
+        },
+    )
+    assert await _status_json(db, "u-bob") == before
+    rows = {r[0]: r for r in (await _state(db))["remote_users"]}
+    assert rows["u-bob"][3] == "Bobby"
+    assert len(published) == 1
+
+
+async def test_synced_status_already_past_its_deadline_is_stored_as_clear(env):
+    app, db, _ = env
+    earlier = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    bob = {"user_id": "u-bob", "username": "bob"}
+    await _send(app, FET.USER_STATUS_UPDATED, {"user_id": "u-bob", "text": "hi"})
+    assert await _status_json(db, "u-bob") is not None
+    await _send(
+        app,
+        FET.USERS_SYNC,
+        {"users": [{**bob, "status": {"text": "old", "expires_at": earlier}}]},
+    )
+    assert await _status_json(db, "u-bob") is None
