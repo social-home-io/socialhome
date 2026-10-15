@@ -45,6 +45,7 @@ def _peer(
     status: PairingStatus = PairingStatus.CONFIRMED,
     home_lat: float | None = None,
     home_lon: float | None = None,
+    unreachable_since: str | None = None,
 ) -> RemoteInstance:
     return RemoteInstance(
         id=iid,
@@ -58,6 +59,7 @@ def _peer(
         source=InstanceSource.MANUAL,
         home_lat=home_lat,
         home_lon=home_lon,
+        unreachable_since=unreachable_since,
     )
 
 
@@ -191,6 +193,21 @@ async def test_friends_carries_presence_triple_for_remote_members(client):
     assert m["is_idle"] is False
     assert "last_seen_at" in m
     assert m["last_seen_at"] is None
+
+
+async def test_friends_household_carries_unreachable_since(client):
+    """The Friends card says "Unreachable since Wed" — it needs the time."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-up"))
+    await fed_repo.save_instance(
+        _peer("peer-down", unreachable_since="2026-10-14 08:30:00")
+    )
+    body = await _friends(client)
+    by_id = {h["instance_id"]: h for h in body["households"]}
+    assert by_id["peer-up"]["reachable"] is True
+    assert by_id["peer-up"]["unreachable_since"] is None
+    assert by_id["peer-down"]["reachable"] is False
+    assert by_id["peer-down"]["unreachable_since"] == "2026-10-14 08:30:00"
 
 
 async def test_friends_omits_pending_pair(client):

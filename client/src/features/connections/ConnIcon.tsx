@@ -13,7 +13,7 @@ export type ConnIconName =
   | 'bolt' | 'globe' | 'cloud' | 'chev' | 'more' | 'check' | 'up' | 'bang'
   | 'dots' | 'off' | 'list' | 'map' | 'plus' | 'addr' | 'relay' | 'download'
   | 'info' | 'alert' | 'copy' | 'users' | 'qr' | 'spaces' | 'pencil' | 'clock' | 'x'
-  | 'message' | 'phone' | 'home' | 'tag'
+  | 'message' | 'phone' | 'home' | 'tag' | 'search'
 
 const PATHS: Record<ConnIconName, JSX.Element> = {
   bolt: <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z" />,
@@ -98,6 +98,12 @@ const PATHS: Record<ConnIconName, JSX.Element> = {
       <path d="M3 11 12 4l9 7" />
       <path d="M5 10v10h14V10" />
       <path d="M10 20v-5h4v5" />
+    </>
+  ),
+  search: (
+    <>
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-3.5-3.5" />
     </>
   ),
   tag: (

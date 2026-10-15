@@ -309,6 +309,10 @@ def _instance_safe_dict(inst, *, members: list[dict]) -> dict:
         "home_lon": getattr(inst, "home_lon", None),
         "status": status,
         "reachable": reachable,
+        # When the household stopped answering (UTC, naive SQLite shape)
+        # — the Friends card reads "Unreachable since Wed". ``None``
+        # while reachable.
+        "unreachable_since": getattr(inst, "unreachable_since", None),
         "paired_at": getattr(inst, "paired_at", None),
         "source": (inst.source.value if hasattr(inst.source, "value") else inst.source),
         # Whether this household's people can be put into a group chat

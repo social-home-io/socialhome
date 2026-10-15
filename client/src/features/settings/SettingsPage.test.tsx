@@ -113,6 +113,19 @@ describe('SettingsPage', () => {
     expect(getByRole('tab', { name: 'Security' }).getAttribute('aria-selected')).toBe('true')
     fireEvent.click(getByRole('tab', { name: 'Profile' }))
   })
+
+  it('opens on the Privacy tab for #privacy (Friends › blocked › Manage)', async () => {
+    const { default: SettingsPage } = await import('./SettingsPage')
+    window.location.hash = '#privacy'
+    try {
+      const { getByRole } = render(<SettingsPage />)
+      await waitFor(() =>
+        expect(getByRole('tab', { name: 'Privacy' }).getAttribute('aria-selected')).toBe('true'))
+      fireEvent.click(getByRole('tab', { name: 'Profile' }))
+    } finally {
+      window.location.hash = ''
+    }
+  })
 })
 
 async function renderPrivacyTab() {
