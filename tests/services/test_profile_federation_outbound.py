@@ -10,6 +10,8 @@ shape.
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from socialhome.crypto import (
@@ -25,6 +27,7 @@ from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import User, UserIdentityAssertion
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.profile_federation_outbound import (
+    _BLANK_PICTURE_WEBP,
     ProfileFederationOutbound,
 )
 
@@ -41,6 +44,9 @@ class _FakeFederationService:
         self._own_identity_seed = instance_seed or b"\x01" * 32
         self._supports_v25 = supports_v25
         self.sent: list[tuple[str, FederationEventType, dict]] = []
+        #: ``instance_id`` → how many queued envelopes ``drop_queued`` drops.
+        self.queued: dict[str, int] = {}
+        self.dropped: list[tuple[str, frozenset]] = []
 
     @property
     def own_instance_id(self) -> str:
@@ -64,6 +70,10 @@ class _FakeFederationService:
     async def send_event(self, *, to_instance_id, event_type, payload):
         self.sent.append((to_instance_id, event_type, payload))
         return None
+
+    async def drop_queued(self, instance_id, event_types) -> int:
+        self.dropped.append((instance_id, frozenset(event_types)))
+        return self.queued.pop(instance_id, 0)
 
 
 class _FakeUserRepo:
@@ -525,7 +535,15 @@ async def test_block_hooks_send_name_only_to_blocked_households_only(hook):
         await out.on_guardian_block("u1", "u-blocked")
     else:
         await out.on_account_protected("u1")
-    assert fed.sent == [("peer-2", FederationEventType.USER_UPDATED, _NAME_ONLY)]
+    # One grey placeholder first (it overwrites the bytes an older
+    # receiver keeps after a null hash), then the name only.
+    assert [(i, t) for i, t, _p in fed.sent] == [
+        ("peer-2", FederationEventType.USER_UPDATED)
+    ] * 2
+    blank, name_only = fed.sent[0][2], fed.sent[1][2]
+    assert name_only == _NAME_ONLY
+    assert base64.b64decode(blank.pop("picture_webp_base64")) == _BLANK_PICTURE_WEBP
+    assert blank == _NAME_ONLY
 
 
 async def test_block_hooks_skip_a_household_the_user_is_hidden_from():
@@ -557,3 +575,51 @@ async def test_block_lifted_sends_full_profile_to_lifted_households_only():
     assert fed.sent == [
         ("peer-1", FederationEventType.USER_UPDATED, _FULL_WITH_BYTES),
     ]
+
+
+async def test_block_drops_stale_queued_envelopes_before_the_name_only_update():
+    """§CP.F2: profile / status envelopes queued for the household before
+    the block were sealed with the full profile. They are dropped first, a
+    fresh snapshot replaces them, then the placeholder and the name only —
+    so a late delivery can't put the picture back, and the new sends are
+    never the ones dropped."""
+    _bus, fed, out, _cp = _gated(peers=("peer-1", "peer-2"))
+    fed.queued = {"peer-2": 3, "peer-1": 9}
+    snapshots: list[str] = []
+
+    async def _snapshot(peer: str) -> None:
+        snapshots.append(peer)
+        fed.sent.append((peer, FederationEventType.USERS_SYNC, {}))
+
+    out.attach_snapshot_sender(_snapshot)
+    await out.on_guardian_block("u1", "u-blocked")
+    assert fed.dropped == [
+        (
+            "peer-2",
+            frozenset(
+                {
+                    FederationEventType.USER_UPDATED,
+                    FederationEventType.USERS_SYNC,
+                    FederationEventType.USER_STATUS_UPDATED,
+                }
+            ),
+        )
+    ]
+    assert snapshots == ["peer-2"]
+    assert [(i, t) for i, t, _p in fed.sent] == [
+        ("peer-2", FederationEventType.USERS_SYNC),
+        ("peer-2", FederationEventType.USER_UPDATED),
+        ("peer-2", FederationEventType.USER_UPDATED),
+    ]
+
+
+async def test_block_with_nothing_queued_sends_no_snapshot():
+    _bus, fed, out, _cp = _gated()
+    snapshots: list[str] = []
+
+    async def _snapshot(peer: str) -> None:
+        snapshots.append(peer)
+
+    out.attach_snapshot_sender(_snapshot)
+    await out.on_guardian_block("u1", "u-blocked")
+    assert snapshots == []

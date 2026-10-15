@@ -1278,3 +1278,32 @@ async def test_disable_protection_without_blocks_lifts_nothing(env):
     gate = await _lift_env(env)
     await svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
     assert gate.lifted == []
+
+
+# ─── A blocked remote person placed later (§CP.F2) ─────────────────────
+
+
+async def test_remote_user_placed_runs_the_block_hooks_for_each_blocking_minor(env):
+    """A block on someone with no ``remote_users`` row yet (or again after a
+    re-pair) covers their household only once the row lands — the hooks run
+    then, as if the block was just added."""
+    svc, _db = env
+    gate = await _lift_env(env, "u-x")
+    await svc.on_remote_user_placed("u-x")
+    assert gate.blocks == [("lila-id", "u-x")]
+
+
+async def test_remote_user_placed_ignores_someone_nobody_blocked(env):
+    svc, _db = env
+    gate = await _lift_env(env, "u-x")
+    await svc.on_remote_user_placed("u-y")
+    await svc.on_remote_user_placed("")
+    assert gate.blocks == []
+
+
+async def test_remote_user_placed_ignores_a_block_while_not_protected(env):
+    svc, _db = env
+    gate = await _lift_env(env, "u-x")
+    await svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
+    await svc.on_remote_user_placed("u-x")
+    assert gate.blocks == []

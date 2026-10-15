@@ -4454,6 +4454,14 @@ class FederationInboundService(ProtectionGateMixin):
             synced_at=_now_iso(),
         )
         await self._user_repo.upsert_remote(remote)
+        if home is None and self._child_protection is not None:
+            # §CP.F2: a guardian block on this user now places them — the
+            # blocks start covering their household here. Never at the cost
+            # of the rest of the upsert (held DMs, the identity binding).
+            try:
+                await self._child_protection.on_remote_user_placed(user_id)
+            except Exception as exc:
+                log.warning("§CP.F2 placement of %s failed: %s", user_id, exc)
         await self._release_held_dms(instance_id, user_id)
 
         # Per-user identity binding (independent user identity, proto v_25).

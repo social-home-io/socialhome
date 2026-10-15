@@ -23,7 +23,9 @@ as "none" (the upsert overwrites both columns, and a current receiver also
 drops the cached picture bytes), so whatever it held before the block is
 cleared. The block never leaves this household, so the sender is the only
 place it can hold. On block-add (and protection turned back on over kept
-blocks) that household gets one name-only update at once; when the block
+blocks) that household gets one name-only update at once — preceded by
+one plain grey placeholder picture, so a receiver that keeps cached bytes
+after a ``null`` hash (an older build) overwrites the child's; when the block
 no longer covers it (block removed, protection off) it gets the full
 profile again, picture bytes included.
 """
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ..domain.events import UserProfileUpdated
@@ -54,6 +57,23 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Queued envelopes a guardian block supersedes on a household (§CP.F2).
+_SUPERSEDED: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.USER_UPDATED,
+        FederationEventType.USERS_SYNC,
+        FederationEventType.USER_STATUS_UPDATED,
+    }
+)
+
+#: A plain grey 8x8 WebP. On block-add it goes out once, just before the
+#: name-only update, so a receiver that keeps cached picture bytes after a
+#: ``picture_hash: null`` (any build before this rule) overwrites the
+#: child's picture with it instead of keeping it (§CP.F2).
+_BLANK_PICTURE_WEBP = base64.b64decode(
+    "UklGRh4AAABXRUJQVlA4TBEAAAAvB8ABAAdQ5jKXuf+BiOh/AAA="
+)
+
 
 class ProfileFederationOutbound(
     VisibilityMixin,
@@ -73,6 +93,7 @@ class ProfileFederationOutbound(
         "_federation",
         "_federation_repo",
         "_picture_repo",
+        "_snapshot_sender",
         "_user_repo",
     )
 
@@ -101,6 +122,12 @@ class ProfileFederationOutbound(
         # Optional — the picture bytes a lifted guardian block sends again.
         self._picture_repo = profile_picture_repo
         self._child_protection = None
+        self._snapshot_sender: Callable[[str], Awaitable[None]] | None = None
+
+    def attach_snapshot_sender(self, send: Callable[[str], Awaitable[None]]) -> None:
+        """Wire ``UsersSyncOutbound.send_snapshot`` — on a guardian block it
+        replaces the profile / status envelopes dropped from the outbox."""
+        self._snapshot_sender = send
 
     def wire(self) -> None:
         self._bus.subscribe(UserProfileUpdated, self._on_updated)
@@ -176,11 +203,13 @@ class ProfileFederationOutbound(
         picture_hash: str | None,
         handle: str | None,
         picture_webp: bytes | None,
+        blank: bool = False,
     ) -> None:
         # §CP.F2: a guardian blocked someone homed there — the name only.
         # ``null`` bio / picture_hash (and no bytes) read as "none" on every
         # receiver, so nothing set before the block stays there either.
-        if await self._guardian_blocks_household(user_id, instance_id):
+        # ``blank`` is the one overwrite of cached bytes (never the child's).
+        if not blank and await self._guardian_blocks_household(user_id, instance_id):
             bio, picture_hash, picture_webp = None, None, None
         payload: dict = {
             "user_id": user_id,
@@ -196,7 +225,7 @@ class ProfileFederationOutbound(
             ).decode("ascii")
         # Per-user identity binding (proto v_25). Computed per-peer because
         # the v_25 gate is per-peer; a v_24 peer keeps the legacy payload
-        # untouched. It signs the picture hash actually sent.
+        # untouched. (The picture hash is not among the signed fields.)
         binding = await user_identity_binding_fields(
             federation_service=self._federation,
             user_repo=self._user_repo,
@@ -247,7 +276,42 @@ class ProfileFederationOutbound(
             if user_id in await self.hidden_for_peer(instance_id):
                 continue
             if await self._guardian_blocks_household(user_id, instance_id):
+                await self._supersede_queued(instance_id)
+                # Overwrite the cached bytes first (an older receiver keeps
+                # them on a null hash), then the name only.
+                await self._send(
+                    instance_id,
+                    user_id=user.user_id,
+                    username=user.username,
+                    display_name=user.display_name,
+                    bio=None,
+                    picture_hash=None,
+                    handle=user.handle,
+                    picture_webp=_BLANK_PICTURE_WEBP,
+                    blank=True,
+                )
                 await self.send_profile(instance_id, user)
+
+    async def _supersede_queued(self, instance_id: str) -> None:
+        """Envelopes still queued for the household (it was unreachable)
+        were sealed before the block — delivered late, they would put the
+        picture, bio or status back. Drop them, and send one snapshot of
+        the current state in their place (it also carries what they said
+        about everyone else). Runs before the placeholder and the name-only
+        update so those are never the ones dropped. A status clear
+        :class:`UserStatusOutbound` queued for the same block may be dropped
+        here too (gate order) — the snapshot carries ``status: null`` for
+        the account, which says the same."""
+        dropped = await self._federation.drop_queued(instance_id, _SUPERSEDED)
+        if not dropped:
+            return
+        log.info(
+            "§CP.F2: dropped %d queued profile/status envelope(s) for %s",
+            dropped,
+            instance_id,
+        )
+        if self._snapshot_sender is not None:
+            await self._snapshot_sender(instance_id)
 
     async def _local_user(self, user_id: str) -> "User | None":
         if self._user_repo is None:

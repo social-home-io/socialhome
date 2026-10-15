@@ -31,6 +31,11 @@ class _FakeUserRepo:
 
     def __init__(self) -> None:
         self.last_seen_calls: list[tuple[str, str]] = []
+        #: Local users ``list_active`` returns (``user_id`` only is read).
+        self.active: list[str] = []
+
+    async def list_active(self):
+        return [type("U", (), {"user_id": uid})() for uid in self.active]
 
     async def set_last_seen(self, user_id: str, at: str) -> None:
         self.last_seen_calls.append((user_id, at))
@@ -212,9 +217,16 @@ async def test_start_stop_idempotent():
 class _FakeFederationService:
     def __init__(self) -> None:
         self.sent: list[tuple[str, object, dict]] = []
+        #: ``instance_id`` → how many queued envelopes ``drop_queued`` drops.
+        self.queued: dict[str, int] = {}
+        self.dropped: list[tuple[str, frozenset]] = []
 
     async def send_event(self, *, to_instance_id, event_type, payload, **_):
         self.sent.append((to_instance_id, event_type, dict(payload)))
+
+    async def drop_queued(self, instance_id, event_types) -> int:
+        self.dropped.append((instance_id, frozenset(event_types)))
+        return self.queued.pop(instance_id, 0)
 
 
 class _FakeFederationRepo:
@@ -561,6 +573,39 @@ async def test_block_sends_nothing_for_an_offline_account():
     svc, fed = _gated()
     await svc.on_guardian_block("kid", "u-blocked")
     assert fed.sent == []
+
+
+async def test_block_drops_queued_online_transitions_and_resends_the_rest():
+    """A queued ``USER_ONLINE`` sealed before the block would undo the
+    offline; it goes, and everyone else's current state is sent again."""
+    from socialhome.domain.federation import FederationEventType
+
+    svc, fed = _gated()
+    svc._user_repo.active = ["adult", "away", "kid"]
+    await svc.user_session_opened("kid", ws_id=1)
+    await svc.user_session_opened("adult", ws_id=2)
+    fed.sent.clear()
+    fed.queued["inst-B"] = 2
+    await svc.on_guardian_block("kid", "u-blocked")
+    assert fed.dropped == [
+        (
+            "inst-B",
+            frozenset(
+                {
+                    FederationEventType.USER_ONLINE,
+                    FederationEventType.USER_IDLE,
+                    FederationEventType.USER_OFFLINE,
+                }
+            ),
+        )
+    ]
+    # Everyone's current state again (``away`` is offline), then the kid's
+    # one offline.
+    assert [(tid, t, p["user_id"]) for tid, t, p in fed.sent] == [
+        ("inst-B", FederationEventType.USER_ONLINE, "adult"),
+        ("inst-B", FederationEventType.USER_OFFLINE, "away"),
+        ("inst-B", FederationEventType.USER_OFFLINE, "kid"),
+    ]
 
 
 async def test_block_hook_without_federation_is_a_noop():

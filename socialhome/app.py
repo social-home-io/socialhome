@@ -1851,9 +1851,14 @@ def _wire_federation_stack(
         profile_picture_repo=profile_picture_repo,
         visibility_repo=peer_user_visibility_repo,
     )
-    # §CP.F2: no protected account's status to a blocked person's household.
+    # §CP.F2: a protected account's name only (no picture, bio or status) to
+    # a blocked person's household.
     users_sync_outbound.attach_child_protection(app[K.child_protection_service_key])
     users_sync_outbound.wire()
+    # §CP.F2: what a block drops from the outbox is replaced by one snapshot.
+    profile_federation_outbound.attach_snapshot_sender(
+        users_sync_outbound.send_snapshot
+    )
 
     # §Highlights — fan HighlightFrameAdded / HighlightRemoved / HighlightFrameRemoved
     # to peer instances based on the highlight's audience. The subscriber

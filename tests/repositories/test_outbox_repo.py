@@ -804,3 +804,53 @@ async def test_purge_orphaned_drops_rows_of_households_that_are_gone(env):
     rows = await env.db.fetchall("SELECT id FROM federation_outbox ORDER BY id")
     assert sorted(r["id"] for r in rows) == sorted([unpair, kept])
     assert await env.outbox_repo.purge_orphaned() == 0
+
+
+async def test_delete_pending_of_types_drops_only_those_pending_rows(env):
+    """§CP.F2: a guardian block supersedes queued profile / status envelopes
+    for one household — other types, other peers and failed rows stay."""
+    repo = env.outbox_repo
+    stale = await repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.USER_UPDATED,
+        payload_json="{}",
+    )
+    other_type = await repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.SPACE_POST_CREATED,
+        payload_json="{}",
+    )
+    failed = await repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.USER_STATUS_UPDATED,
+        payload_json="{}",
+    )
+    await repo.mark_failed(failed)
+    other_peer = await repo.enqueue(
+        instance_id="kept",
+        event_type=FederationEventType.USER_UPDATED,
+        payload_json="{}",
+    )
+    dropped = await repo.delete_pending_of_types(
+        "gone",
+        frozenset(
+            {
+                FederationEventType.USER_UPDATED,
+                FederationEventType.USER_STATUS_UPDATED,
+            }
+        ),
+    )
+    assert dropped == 1
+    rows = await env.db.fetchall("SELECT id FROM federation_outbox ORDER BY id")
+    ids = {r["id"] for r in rows}
+    assert stale not in ids
+    assert {other_type, failed, other_peer} <= ids
+
+
+async def test_delete_pending_of_no_types_is_a_noop(env):
+    await env.outbox_repo.enqueue(
+        instance_id="gone",
+        event_type=FederationEventType.USER_UPDATED,
+        payload_json="{}",
+    )
+    assert await env.outbox_repo.delete_pending_of_types("gone", frozenset()) == 0

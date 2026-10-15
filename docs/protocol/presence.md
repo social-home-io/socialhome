@@ -221,9 +221,15 @@ back on over blocks kept from before) sends that household one ordinary
 `USER_OFFLINE` (when it is online), so nothing set before the block stays
 there; after that it hears nothing — not even repeated clears, which a real
 sender never sends and which would time-stamp each change. A block on a
-remote person this household has no `remote_users` row for yet places them
-nowhere, so it covers no household until that row lands (a status live at
-that moment isn't cleared there). Once the block is lifted or protection is
+remote person this household has no `remote_users` row for yet (or again,
+after an unpair and re-pair) places them nowhere, so it covers no household
+until that row lands — and when it lands, the block's hooks run then, as if
+it had just been added. Envelopes still queued in the outbox for that
+household (it was unreachable) were sealed before the block: adding the
+block drops the queued `USER_UPDATED` / `USERS_SYNC` / `USER_STATUS_UPDATED`
+and sends one fresh `USERS_SYNC` in their place, and drops queued
+`USER_ONLINE` / `USER_IDLE` and re-sends everyone else's current online
+state, so a late delivery can't undo it. Once the block is lifted or protection is
 off, that household gets the current status (when set) and online state
 (`USER_ONLINE`, or `USER_IDLE` when idle, when online) once, and the next
 change goes out as usual.
@@ -236,14 +242,27 @@ overwrites both columns with `null`, so a picture or bio it holds from
 before the block reads as gone; a current receiver also drops the cached
 picture bytes on an explicit `picture_hash: null` without bytes, so
 `GET /api/users/{id}/picture` there answers 404. Adding the block (or
-turning protection back on over kept blocks) sends one such name-only
-`USER_UPDATED` at once. Lifting it sends the full profile with the
-picture bytes, since the receiver may have dropped them. The admin
-re-publish of a hidden-then-visible member goes through the same sender.
-No protocol bump: the wire shape is unchanged, and a `null` picture hash
-has always meant "no picture". An older receiver keeps the old bytes in
-its own database, unlinked from the profile; a sender can't make it
-delete them. On the protected account's own
+turning protection back on over kept blocks) sends that household two
+`USER_UPDATED` at once: the first carries a plain grey 8×8 placeholder as
+`picture_webp_base64`, which overwrites the cached bytes on a receiver of
+any version (an older one keeps cached bytes after a `null` hash), the
+second the name only. Lifting the block sends the full profile with the
+picture bytes, since the receiver dropped them. The admin re-publish of a
+hidden-then-visible member goes through the same sender.
+
+No protocol bump: the wire shape is unchanged, every version reads a
+`null` picture hash as "no picture", and the placeholder overwrite works on
+every receiver, so the sender needs no per-peer gate. A pre-block copy can
+survive only outside the household's database — the browser cache of
+someone who already loaded the picture.
+
+Known limits: the placeholder followed by a `null` hash tells the
+household for certain that it was blocked (clearing picture, bio and status
+together already hinted at it); an envelope the outbox is delivering at the
+very moment of the block can't be recalled and may land after the
+name-only update (until the next profile edit); and if the household is
+unreachable at the time, the queued placeholder may land last and show as a
+grey square until the next edit — never the child's picture. On the protected account's own
 household, `user.status_changed` frames (and the profile / presence /
 online frames) are withheld from everyone a guardian block separates from
 the subject, either way round, matching `GET /api/friends` and

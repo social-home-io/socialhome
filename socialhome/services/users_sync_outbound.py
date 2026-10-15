@@ -59,6 +59,9 @@ log = logging.getLogger(__name__)
 class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
     """Send ``USERS_SYNC`` to a freshly-confirmed peer."""
 
+    # Narrow the mixin's ``FederationService | None`` slot — always wired.
+    _federation: "FederationService"
+
     __slots__ = (
         "_bus",
         "_child_protection",
@@ -92,7 +95,10 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
         self._bus.subscribe(PairingConfirmed, self._on_pair_confirmed)
 
     async def _on_pair_confirmed(self, event: PairingConfirmed) -> None:
-        peer_id = event.instance_id
+        await self.send_snapshot(event.instance_id)
+
+    async def send_snapshot(self, peer_id: str) -> None:
+        """Send ``peer_id`` one ``USERS_SYNC`` of every (visible) local user."""
         own = getattr(self._federation, "_own_instance_id", "")
         if not peer_id or peer_id == own:
             return

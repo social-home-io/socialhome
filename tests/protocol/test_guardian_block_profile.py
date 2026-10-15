@@ -20,6 +20,7 @@ routes), with only the transport recorded:
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 
@@ -30,10 +31,12 @@ from socialhome.app_keys import (
     db_key,
     event_bus_key,
     online_status_service_key,
+    outbox_repo_key,
     user_service_key,
 )
 from socialhome.domain.events import PairingConfirmed
 from socialhome.domain.federation import FederationEventType
+from socialhome.services.profile_federation_outbound import _BLANK_PICTURE_WEBP
 
 from .test_guardian_block_status import (  # noqa: F401 — the shared fixture
     ANN_HOME,
@@ -86,6 +89,14 @@ def _assert_name_only(tc, payload: dict) -> None:
     assert "dinosaurs" not in wire
 
 
+def _assert_blank(tc, payload: dict) -> None:
+    """The one placeholder that overwrites an older receiver's cached bytes:
+    plain grey, never the child's picture, hash or bio."""
+    blank = dict(payload)
+    assert base64.b64decode(blank.pop("picture_webp_base64")) == _BLANK_PICTURE_WEBP
+    _assert_name_only(tc, blank)
+
+
 def _assert_full(tc, payload: dict, *, with_bytes: bool) -> None:
     assert payload["bio"] == BIO
     assert payload["picture_hash"] == tc._picture_hash
@@ -108,9 +119,9 @@ async def test_both_households_get_the_full_profile_without_a_block(kid):
 async def test_block_sends_one_name_only_update_to_the_blocked_household(kid):
     kid._sent.clear()
     await _block(kid, REX)
-    sends = _profile_sends(kid, REX_HOME)
-    assert len(sends) == 1
-    _assert_name_only(kid, sends[0])
+    blank, name_only = _profile_sends(kid, REX_HOME)
+    _assert_blank(kid, blank)
+    _assert_name_only(kid, name_only)
     assert _profile_sends(kid, ANN_HOME) == []
 
 
@@ -189,9 +200,9 @@ async def test_protection_back_on_sends_the_name_only_again(kid):
     await kid._cp.enable_protection(
         minor_username="kid", declared_age=12, actor_user_id=kid._ids["admin"]
     )
-    sends = _profile_sends(kid, REX_HOME)
-    assert len(sends) == 1
-    _assert_name_only(kid, sends[0])
+    blank, name_only = _profile_sends(kid, REX_HOME)
+    _assert_blank(kid, blank)
+    _assert_name_only(kid, name_only)
 
 
 async def test_unblock_keeps_the_household_covered_while_another_block_stands(kid):
@@ -237,3 +248,32 @@ async def test_the_picture_is_not_served_to_anyone_without_a_local_session(kid):
     await _block(kid, REX)
     resp = await kid.get(f"/api/users/{KID}/picture?v={kid._picture_hash}")
     assert resp.status == 401
+
+
+async def test_block_drops_a_stale_queued_profile_and_sends_a_fresh_snapshot(kid):
+    """An envelope queued while the household was unreachable was sealed
+    with the full profile; delivered after the block it would put the
+    picture and bio back. The block drops it and sends a current snapshot."""
+    outbox = kid._app[outbox_repo_key]
+    await outbox.enqueue(
+        instance_id=REX_HOME,
+        event_type=FET.USER_UPDATED,
+        payload_json='{"sealed": "full profile from before the block"}',
+    )
+    kept = await outbox.enqueue(
+        instance_id=ANN_HOME,
+        event_type=FET.USER_UPDATED,
+        payload_json="{}",
+    )
+    kid._sent.clear()
+    await _block(kid, REX)
+    rows = await kid._app[db_key].fetchall(
+        "SELECT id, instance_id FROM federation_outbox WHERE event_type=?",
+        (FET.USER_UPDATED.value,),
+    )
+    assert [(r["id"], r["instance_id"]) for r in rows] == [(kept, ANN_HOME)]
+    syncs = [p for i, t, p in kid._sent if t == FET.USERS_SYNC and i == REX_HOME]
+    assert len(syncs) == 1
+    entry = next(u for u in syncs[0]["users"] if u["user_id"] == KID)
+    _assert_name_only(kid, entry)
+    assert entry["status"] is None

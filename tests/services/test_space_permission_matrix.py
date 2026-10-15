@@ -255,6 +255,7 @@ UNGATED_METHODS: frozenset[str] = frozenset(
         # either, no actor to authorize.
         "on_account_protected",
         "on_guardian_block",
+        "on_guardian_block_lifted",
     }
 )
 

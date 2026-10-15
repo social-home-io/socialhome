@@ -352,6 +352,15 @@ class InMemoryOutboxRepo:
     async def list_due(self, limit: int = 50):
         return []
 
+    async def delete_pending_of_types(self, instance_id, event_types) -> int:
+        before = len(self.enqueued)
+        self.enqueued = [
+            e
+            for e in self.enqueued
+            if not (e["instance_id"] == instance_id and e["event_type"] in event_types)
+        ]
+        return before - len(self.enqueued)
+
     async def mark_delivered(self, entry_id: str) -> None:
         pass
 
@@ -5383,3 +5392,24 @@ async def test_relay_approval_contact_after_a_cancel_is_a_no_op():
     await svc._on_relay_approval_contact(inst.id)
     assert await repo.get_instance(inst.id) is None
     assert confirmed == []
+
+
+async def test_drop_queued_drops_only_that_households_envelopes_of_those_types():
+    """§CP.F2: a queued envelope was sealed under the rules of its time —
+    a guardian block lets the caller drop it and re-send the current state."""
+    outbox = InMemoryOutboxRepo()
+    svc, _ = _make_service(outbox_repo=outbox)
+    for inst, et in (
+        ("peer-b", FederationEventType.USER_UPDATED),
+        ("peer-b", FederationEventType.SPACE_POST_CREATED),
+        ("peer-c", FederationEventType.USER_UPDATED),
+    ):
+        await outbox.enqueue(instance_id=inst, event_type=et, payload_json="{}")
+    dropped = await svc.drop_queued(
+        "peer-b", frozenset({FederationEventType.USER_UPDATED})
+    )
+    assert dropped == 1
+    assert [(e["instance_id"], e["event_type"]) for e in outbox.enqueued] == [
+        ("peer-b", FederationEventType.SPACE_POST_CREATED),
+        ("peer-c", FederationEventType.USER_UPDATED),
+    ]

@@ -5240,7 +5240,25 @@ class _RecordingPictureRepo:
         self.cleared.append(user_id)
 
 
-async def _user_updated_with(db, bus, extra: dict) -> _RecordingPictureRepo:
+class _PlacingChildProtection:
+    """Records ``on_remote_user_placed`` (§CP.F2)."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.placed: list[str] = []
+        self._fail = fail
+
+    def register_gate(self, gate) -> None:
+        pass
+
+    async def on_remote_user_placed(self, user_id: str) -> None:
+        self.placed.append(user_id)
+        if self._fail:
+            raise RuntimeError("db down")
+
+
+async def _user_updated_with(
+    db, bus, extra: dict, *, cp: _PlacingChildProtection | None = None
+) -> _RecordingPictureRepo:
     await _seed_peer(db, "peer-a", "ab" * 32)
     pics = _RecordingPictureRepo()
     service = FederationInboundService(
@@ -5252,26 +5270,37 @@ async def _user_updated_with(db, bus, extra: dict) -> _RecordingPictureRepo:
         profile_picture_repo=pics,
     )
     service._federation_service = _BindingFakeFederation({"peer-a": _PK_AB})
-    await service._on_user_updated(
-        _event(
-            FederationEventType.USER_UPDATED,
-            {
-                "user_id": derive_user_id(_PK_AB, "bob"),
-                "username": "bob",
-                "display_name": "Bob",
-                **extra,
-            },
-            from_instance="peer-a",
+    if cp is not None:
+        service.attach_child_protection(cp)  # type: ignore[arg-type]
+    for _ in range(2):  # first sight, then an update of the known row
+        await service._on_user_updated(
+            _event(
+                FederationEventType.USER_UPDATED,
+                {
+                    "user_id": derive_user_id(_PK_AB, "bob"),
+                    "username": "bob",
+                    "display_name": "Bob",
+                    **extra,
+                },
+                from_instance="peer-a",
+            )
         )
-    )
     return pics
+
+
+async def test_first_sight_of_a_remote_user_tells_child_protection(db, bus):
+    """§CP.F2: a guardian block on someone this household could not place
+    yet starts covering their household now — once, on first sight."""
+    cp = _PlacingChildProtection()
+    await _user_updated_with(db, bus, {}, cp=cp)
+    assert cp.placed == [derive_user_id(_PK_AB, "bob")]
 
 
 async def test_user_updated_explicit_null_picture_clears_cached_bytes(db, bus):
     """A name-only ``USER_UPDATED`` (``picture_hash: null``, no bytes) drops
     the cached picture so ``/api/users/{id}/picture`` can't keep serving it."""
     pics = await _user_updated_with(db, bus, {"bio": None, "picture_hash": None})
-    assert pics.cleared == [derive_user_id(_PK_AB, "bob")]
+    assert pics.cleared == [derive_user_id(_PK_AB, "bob")] * 2
     assert pics.stored == []
 
 
@@ -5294,5 +5323,18 @@ async def test_user_updated_with_bytes_stores_them_instead_of_clearing(db, bus):
             "picture_webp_base64": base64.b64encode(buf.getvalue()).decode(),
         },
     )
-    assert pics.stored == [derive_user_id(_PK_AB, "bob")]
+    assert pics.stored == [derive_user_id(_PK_AB, "bob")] * 2
     assert pics.cleared == []
+
+
+async def test_a_failing_placement_never_costs_the_upsert(db, bus):
+    """The §CP.F2 placement is best effort: the user row (and the rest of the
+    upsert) lands even when it raises."""
+    cp = _PlacingChildProtection(fail=True)
+    await _user_updated_with(db, bus, {"picture_hash": None}, cp=cp)
+    row = await db.fetchone(
+        "SELECT display_name FROM remote_users WHERE user_id=?",
+        (derive_user_id(_PK_AB, "bob"),),
+    )
+    assert row["display_name"] == "Bob"
+    assert cp.placed == [derive_user_id(_PK_AB, "bob")]

@@ -63,6 +63,16 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: Queued envelopes a guardian block (§CP.F2) supersedes on a household —
+#: all three, so a kept older one can't land after the current state.
+_ONLINE_TRANSITIONS: frozenset[FederationEventType] = frozenset(
+    {
+        FederationEventType.USER_ONLINE,
+        FederationEventType.USER_IDLE,
+        FederationEventType.USER_OFFLINE,
+    }
+)
+
 
 @dataclass(slots=True)
 class _RemoteEntry:
@@ -443,8 +453,6 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
     async def _offline_on_blocked_households(self, user_id: str) -> None:
         if self._federation is None or self._federation_repo is None:
             return
-        if not self.is_online(user_id):
-            return
         payload: dict = {"user_id": user_id}
         seen = self.last_seen(user_id)
         if seen is not None:
@@ -453,10 +461,38 @@ class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSend
             inst_id = getattr(inst, "id", None) or getattr(inst, "instance_id", None)
             if not inst_id or inst_id == self._own_instance_id:
                 continue
-            if await self._guardian_blocks_household(user_id, inst_id):
+            if not await self._guardian_blocks_household(user_id, inst_id):
+                continue
+            # A queued online transition (the household was unreachable) was
+            # sealed before the block and would undo the offline below.
+            if await self._federation.drop_queued(inst_id, _ONLINE_TRANSITIONS):
+                await self._resend_online_to(inst_id)
+            if self.is_online(user_id):
                 await self.send_to_instance(
                     inst_id, FederationEventType.USER_OFFLINE, payload
                 )
+
+    async def _resend_online_to(self, inst_id: str) -> None:
+        """Re-send the current online / idle / offline state of every local
+        user the household may see — the dropped envelopes may have carried
+        theirs. (The account a block covers there gets its offline from the
+        caller.)"""
+        hidden = await self.hidden_for_peer(inst_id)
+        for user in await self._user_repo.list_active():
+            uid = user.user_id
+            if uid in hidden or await self._guardian_blocks_household(uid, inst_id):
+                continue
+            payload: dict = {"user_id": uid}
+            if not self.is_online(uid):
+                event_type = FederationEventType.USER_OFFLINE
+                seen = self.last_seen(uid)
+                if seen is not None:
+                    payload["last_seen_at"] = seen.isoformat()
+            elif self.is_idle(uid):
+                event_type = FederationEventType.USER_IDLE
+            else:
+                event_type = FederationEventType.USER_ONLINE
+            await self.send_to_instance(inst_id, event_type, payload)
 
     async def apply_remote(
         self,

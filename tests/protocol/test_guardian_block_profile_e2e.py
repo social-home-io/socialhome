@@ -27,10 +27,11 @@ from socialhome.app_keys import (
     child_protection_service_key,
     db_key,
     federation_service_key,
+    profile_picture_repo_key,
     user_service_key,
 )
 from socialhome.auth import sha256_token_hash
-from socialhome.domain.federation import FederationEvent
+from socialhome.domain.federation import FederationEvent, FederationEventType
 
 from .test_users_sync_status_e2e import _add_member, _config, _identity, _pin
 
@@ -118,7 +119,7 @@ async def world(aiohttp_client, tmp_path, monkeypatch):
     await cp.add_guardian(
         minor_user_id=kid, guardian_user_id=admin, actor_user_id=admin
     )
-    return a, b, client_b, cp, admin, kid, rex
+    return a, b, client_b, cp, admin, kid, rex, a_id, b_id
 
 
 async def _b_holds(b, kid: str) -> tuple[str | None, str | None]:
@@ -134,14 +135,14 @@ async def _picture_status(client_b, kid: str) -> int:
 
 
 async def test_b_holds_the_full_profile_before_the_block(world):
-    _a, b, client_b, _cp, _admin, kid, _rex = world
+    _a, b, client_b, _cp, _admin, kid, _rex, *_ = world
     bio, picture_hash = await _b_holds(b, kid)
     assert bio == BIO and picture_hash
     assert await _picture_status(client_b, kid) == 200
 
 
 async def test_block_takes_picture_and_bio_off_the_blocked_household(world):
-    _a, b, client_b, cp, admin, kid, rex = world
+    _a, b, client_b, cp, admin, kid, rex, *_ = world
     await cp.block_user_for_minor(
         minor_user_id=kid, blocked_user_id=rex, guardian_user_id=admin
     )
@@ -155,7 +156,7 @@ async def test_block_takes_picture_and_bio_off_the_blocked_household(world):
 
 
 async def test_lifting_the_block_brings_picture_and_bio_back(world):
-    _a, b, client_b, cp, admin, kid, rex = world
+    _a, b, client_b, cp, admin, kid, rex, *_ = world
     await cp.block_user_for_minor(
         minor_user_id=kid, blocked_user_id=rex, guardian_user_id=admin
     )
@@ -168,7 +169,7 @@ async def test_lifting_the_block_brings_picture_and_bio_back(world):
 
 
 async def test_protection_off_brings_picture_and_bio_back(world):
-    _a, b, client_b, cp, admin, kid, rex = world
+    _a, b, client_b, cp, admin, kid, rex, *_ = world
     await cp.block_user_for_minor(
         minor_user_id=kid, blocked_user_id=rex, guardian_user_id=admin
     )
@@ -176,3 +177,58 @@ async def test_protection_off_brings_picture_and_bio_back(world):
     bio, picture_hash = await _b_holds(b, kid)
     assert bio == BIO and picture_hash
     assert await _picture_status(client_b, kid) == 200
+
+
+async def test_a_block_placed_after_a_re_pair_still_takes_them_off(world):
+    """After an unpair A has no row for Rex, so the block places him nowhere
+    and covers no household. Once B's roster names him again (the re-pair),
+    the block starts covering B — and B gets the name only right then."""
+    a, b, client_b, cp, admin, kid, rex, a_id, b_id = world
+    await a[db_key].enqueue("DELETE FROM remote_users WHERE user_id=?", (rex,))
+    await cp.block_user_for_minor(
+        minor_user_id=kid, blocked_user_id=rex, guardian_user_id=admin
+    )
+    # Nothing could be sent yet: B still holds everything.
+    assert (await _b_holds(b, kid))[0] == BIO
+    for handler in a[federation_service_key]._event_registry.handlers_for(
+        FederationEventType.USERS_SYNC
+    ):
+        await handler(
+            FederationEvent(
+                msg_id=uuid.uuid4().hex,
+                event_type=FederationEventType.USERS_SYNC,
+                from_instance=b_id,
+                to_instance=a_id,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                payload={
+                    "users": [
+                        {"user_id": rex, "username": "rex", "display_name": "Rex"}
+                    ]
+                },
+            )
+        )
+    assert await _b_holds(b, kid) == (None, None)
+    assert await _picture_status(client_b, kid) == 404
+
+
+async def test_an_older_receiver_keeps_only_a_grey_placeholder(world, monkeypatch):
+    """A receiver built before this rule keeps its cached bytes on a ``null``
+    hash. The block's placeholder overwrites them first, so what it can
+    still serve by URL is plain grey — never the child's picture."""
+    _a, b, client_b, cp, admin, kid, rex, *_ = world
+    before = await client_b.get(f"/api/users/{kid}/picture", headers=REX_AUTH)
+    child_bytes = await before.read()
+
+    async def _keep(self, user_id):  # the older receiver: no clear on null
+        return None
+
+    monkeypatch.setattr(type(b[profile_picture_repo_key]), "clear_user_picture", _keep)
+    await cp.block_user_for_minor(
+        minor_user_id=kid, blocked_user_id=rex, guardian_user_id=admin
+    )
+    assert await _b_holds(b, kid) == (None, None)
+    resp = await client_b.get(f"/api/users/{kid}/picture", headers=REX_AUTH)
+    assert resp.status == 200
+    grey = Image.open(io.BytesIO(await resp.read())).convert("RGB")
+    assert await resp.read() != child_bytes
+    assert set(grey.getdata()) == {(204, 204, 204)}

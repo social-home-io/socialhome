@@ -709,6 +709,22 @@ class ChildProtectionService:
             instance_id, minor_user_id=user_id
         )
 
+    async def on_remote_user_placed(self, user_id: str) -> None:
+        """A remote user just got a ``remote_users`` row (first seen, or
+        again after a re-pair). A guardian block on them only covers their
+        household from now on, so the blocks' hooks run as if just added —
+        the household gets the protected account's name only, its status
+        cleared and its online state offline (§CP.F2). Fail-soft."""
+        if not user_id:
+            return
+        for minor_user_id in sorted(await self._repo.list_block_counterparts(user_id)):
+            if not await self._repo.is_blocked_for_minor(minor_user_id, user_id):
+                continue
+            await self._run_gates(
+                "guardian_block",
+                lambda gate, m=minor_user_id: gate.on_guardian_block(m, user_id),
+            )
+
     async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
         """Everyone a guardian block separates from *user_id* (either way)."""
         if not user_id:
