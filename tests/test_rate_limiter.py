@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
+from socialhome.auth import SIGNED_URL_PRINCIPAL
 from socialhome.rate_limiter import (
     RateLimiter,
     build_rate_limit_middleware,
@@ -250,3 +253,122 @@ def test_prune_drops_keys_with_no_hit_in_the_window():
     rl.prune(window_s=60)
     assert rl.key_count == 1
     assert rl.is_allowed("b", limit=1, window_s=60) is False
+
+
+async def _hit_signed(mw, path: str, remote: str) -> int:
+    """A signed-URL ``<img>`` fetch: the principal is the constant
+    ``SIGNED_URL_PRINCIPAL`` whoever the browser belongs to."""
+    request = make_mocked_request("GET", path, transport=_FakeTransport(remote))
+    request["user"] = SimpleNamespace(user_id=SIGNED_URL_PRINCIPAL)
+
+    async def handler(_req):
+        return web.Response(status=200)
+
+    return (await mw(request, handler)).status
+
+
+class _FakeTransport:
+    def __init__(self, ip: str) -> None:
+        self._ip = ip
+
+    def get_extra_info(self, name: str, default=None):
+        return (self._ip, 1234) if name == "peername" else default
+
+    def is_closing(self) -> bool:
+        return False
+
+
+async def test_signed_media_rule_buckets_per_client_address():
+    """Regression (F2): signed picture URLs authenticate as one constant
+    principal, so every browser in the household shared a single bucket.
+    A rule in ``per_client_signed_rules`` buckets those per client."""
+    rule = "GET /api/users/*/picture"
+    mw = build_rate_limit_middleware(
+        RateLimiter(),
+        limits={rule: (3, 60)},
+        per_client_signed_rules=frozenset({rule}),
+    )
+    for _ in range(3):
+        assert await _hit_signed(mw, "/api/users/u1/picture", "10.0.0.1") == 200
+    assert await _hit_signed(mw, "/api/users/u2/picture", "10.0.0.1") == 429
+    # Another device in the house still loads its avatars.
+    assert await _hit_signed(mw, "/api/users/u1/picture", "10.0.0.2") == 200
+    # IPv6 clients bucket by /64, like every other per-address limiter.
+    for _ in range(3):
+        assert await _hit_signed(mw, "/api/users/u1/picture", "2001:db8::1") == 200
+    assert await _hit_signed(mw, "/api/users/u1/picture", "2001:db8::2") == 429
+
+
+async def test_signed_rule_not_listed_stays_household_wide():
+    """Upstream-capping rules (map tiles, GFS proxy) keep one shared
+    bucket for every signed request, whatever the client."""
+    rule = "/api/map/tiles"
+    mw = build_rate_limit_middleware(RateLimiter(), limits={rule: (2, 60)})
+    assert await _hit_signed(mw, rule, "10.0.0.1") == 200
+    assert await _hit_signed(mw, rule, "10.0.0.2") == 200
+    assert await _hit_signed(mw, rule, "10.0.0.3") == 429
+
+
+async def test_per_client_signed_rule_keeps_bearer_users_per_user():
+    """A bearer-authenticated caller on the same rule is still bucketed
+    per user, not per address."""
+    rule = "GET /api/users/*/picture"
+    mw = build_rate_limit_middleware(
+        RateLimiter(),
+        limits={rule: (2, 60)},
+        per_client_signed_rules=frozenset({rule}),
+    )
+    for _ in range(2):
+        assert await _hit(mw, "/api/users/x/picture", user="u1", method="GET") == 204
+    assert await _hit(mw, "/api/users/x/picture", user="u1", method="GET") == 429
+    assert await _hit(mw, "/api/users/x/picture", user="u2", method="GET") == 204
+
+
+async def test_idle_per_client_signed_keys_are_swept():
+    """Per-client keys are minted from any address a signed-URL holder
+    controls, so idle ones are swept once a window — but only that
+    prefix: other buckets on the shared limiter are left alone."""
+    clock = [0.0]
+    limiter = RateLimiter(monotonic=lambda: clock[0])
+    rule = "GET /api/users/*/picture"
+    mw = build_rate_limit_middleware(
+        limiter,
+        limits={rule: (5, 60)},
+        per_client_signed_rules=frozenset({rule}),
+    )
+    assert limiter.is_allowed("auth:1.2.3.4", limit=5, window_s=900)
+    for i in range(20):
+        assert await _hit_signed(mw, "/api/users/u/picture", f"10.0.0.{i}") == 200
+    assert limiter.key_count == 21
+    clock[0] = 61.0
+    assert await _hit_signed(mw, "/api/users/u/picture", "10.0.1.1") == 200
+    # The 20 idle client keys are gone; the auth bucket and the new one stay.
+    assert limiter.key_count == 2
+
+
+def test_per_client_signed_rule_must_name_a_limit():
+    with pytest.raises(ValueError):
+        build_rate_limit_middleware(
+            RateLimiter(),
+            limits={"GET /api/users/*/picture": (5, 60)},
+            per_client_signed_rules=frozenset({"GET /api/user/*/picture"}),
+        )
+
+
+async def test_signed_media_rule_leaves_the_default_bucket_alone():
+    """Picture GETs no longer spend the per-user default ``api/users``
+    bucket that ``GET /api/users/{id}`` and the list draw from."""
+    rule = "GET /api/users/*/picture"
+    mw = build_rate_limit_middleware(
+        RateLimiter(),
+        default_limit=3,
+        limits={rule: (100, 60)},
+        per_client_signed_rules=frozenset({rule}),
+    )
+    for _ in range(10):
+        assert await _hit(mw, "/api/users/x/picture", method="GET") == 204
+    for _ in range(3):
+        assert await _hit(mw, "/api/users/x", method="GET") == 204
+    assert await _hit(mw, "/api/users/x", method="GET") == 429
+    # Other methods on a matched path keep the default bucket too.
+    assert await _hit(mw, "/api/users/x/picture", method="HEAD") == 429

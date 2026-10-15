@@ -361,3 +361,46 @@ async def test_friends_personal_alias_does_not_leak_across_viewers(client):
     assert carol["personal_alias"] is None, (
         "alias leaked across viewers — resolver should key on viewer_user_id"
     )
+
+
+async def test_thirty_avatars_three_loads_never_429_and_urls_are_stable(client):
+    """Regression (F2, Friends/Profile review): avatars fell back to
+    initials on busy pages. Each ``/api/friends`` response signed
+    ``picture_url`` with ``exp=now+ttl`` — a fresh URL per response, so
+    the browser cache never hit — and every signed ``<img>`` fetch
+    landed in ONE household-wide 60/min ``api/users`` bucket (the signed
+    URL authenticates as a constant principal). 22 avatars per load
+    429'd on the 3rd load. Now the URLs are identical across responses
+    within an expiry bucket and signed picture GETs have their own,
+    higher per-client limit."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-busy"))
+    for i in range(30):
+        uid = f"ru-busy-{i:02d}"
+        await client._db.enqueue(
+            "INSERT INTO remote_users("
+            "  user_id, instance_id, remote_username, display_name, picture_hash"
+            ") VALUES(?,?,?,?,?)",
+            (uid, "peer-busy", f"busy{i}", f"Busy {i}", "deadbeefdeadbeef"),
+        )
+        await client._db.enqueue(
+            "INSERT INTO user_profile_pictures("
+            "  user_id, bytes_webp, hash, width, height) VALUES (?,?,?,?,?)",
+            (uid, b"RIFF....WEBP", "deadbeefdeadbeef", 1, 1),
+        )
+    seen: list[list[str]] = []
+    for _load in range(3):
+        r = await client.get("/api/friends", headers=_auth(client._tok))
+        assert r.status == 200
+        body = await r.json()
+        h = next(h for h in body["households"] if h["instance_id"] == "peer-busy")
+        urls = sorted(m["picture_url"] for m in h["members"])
+        assert len(urls) == 30
+        seen.append(urls)
+        # The browser fetches each avatar without an Authorization header —
+        # the signed query string is the only credential.
+        for url in urls:
+            pic = await client.get("/" + url)
+            assert pic.status == 200, (url, pic.status)
+    # Same URLs on every load → the browser's HTTP cache can serve them.
+    assert seen[0] == seen[1] == seen[2]

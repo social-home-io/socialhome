@@ -6,7 +6,7 @@ carry an ``Authorization: Bearer`` header. Routing those URLs through
 a query-string master token leaks the user's full account on
 right-click → "Copy image address". This module signs each media URL
 with a short-lived HMAC so a leaked URL only authorises **one
-resource for one hour**.
+resource for a few hours** (see "Expiry buckets" below).
 
 Scheme: HMAC-SHA256 over ``"<path>|<exp>"`` where ``<path>`` is the
 canonical request path (no query string) and ``<exp>`` is the Unix
@@ -14,6 +14,18 @@ expiry timestamp in seconds. The output URL is
 ``<path>?exp=<exp>&sig=<urlsafe-b64(hmac)>`` (existing query params
 like ``?v=<hash>`` on picture URLs are preserved as cache busters —
 they're outside the signed envelope).
+
+Expiry buckets: a default-lifetime signature does not expire at
+``now + ttl`` but at the next :data:`EXP_BUCKET_SECONDS` boundary at
+or after it. Every response inside one bucket therefore hands out the
+*same* URL for a resource, so the browser's HTTP cache (keyed on the
+full URL, query included) serves a re-visited avatar instead of
+refetching it. A signature minted per response used to make every page
+visit refetch every picture. The trade-off: a leaked default URL stays
+valid for at least :data:`DEFAULT_TTL_SECONDS` and at most
+``DEFAULT_TTL_SECONDS + EXP_BUCKET_SECONDS`` (7 h) instead of exactly
+1 h, still for that one resource only. Callers that pass an explicit
+``ttl`` (app bundles, map tiles) get exactly ``now + ttl``, unbucketed.
 
 The HMAC key is derived from the instance identity seed via
 HKDF-Expand with a fixed domain-separation prefix so it never reuses
@@ -39,6 +51,12 @@ _HKDF_LEN: int = 32
 #: Default URL lifetime. One hour is long enough for typical browse
 #: sessions, short enough that a leaked URL dies fast.
 DEFAULT_TTL_SECONDS: int = 3600
+
+#: Default-lifetime expiries round UP to a multiple of this (UTC-aligned
+#: six-hour boundaries), so a URL is byte-identical across responses
+#: inside one bucket and the browser cache hits. Worst-case validity of
+#: a leaked default URL is ``DEFAULT_TTL_SECONDS + EXP_BUCKET_SECONDS``.
+EXP_BUCKET_SECONDS: int = 6 * 3600
 
 
 def derive_signing_key(identity_seed: bytes) -> bytes:
@@ -69,10 +87,13 @@ class MediaUrlSigner:
             raise ValueError("HMAC key must be at least 16 bytes")
         self._key = key
 
-    def sign(
-        self, path: str, *, ttl: int = DEFAULT_TTL_SECONDS, now: int | None = None
-    ) -> str:
+    def sign(self, path: str, *, ttl: int | None = None, now: int | None = None) -> str:
         """Return ``path`` with ``?exp=<ts>&sig=<b64>`` appended.
+
+        With no ``ttl`` the expiry is the first :data:`EXP_BUCKET_SECONDS`
+        boundary at or after ``now + DEFAULT_TTL_SECONDS`` — stable across
+        calls inside a bucket so browsers can cache the URL. An explicit
+        ``ttl`` expires at exactly ``now + ttl``.
 
         Existing query params are preserved. ``path`` may already carry
         a query string (e.g. ``/api/users/{id}/picture?v=<hash>``); the
@@ -87,7 +108,10 @@ class MediaUrlSigner:
         """
         if now is None:
             now = int(time.time())
-        exp = now + int(ttl)
+        if ttl is None:
+            exp = _bucketed_exp(now + DEFAULT_TTL_SECONDS)
+        else:
+            exp = now + int(ttl)
         canonical = path.split("?", 1)[0]
         hmac_path = canonical if canonical.startswith("/") else "/" + canonical
         sig = self._compute(hmac_path, exp)
@@ -121,6 +145,11 @@ class MediaUrlSigner:
         message = f"{canonical_path}|{exp}".encode("utf-8")
         digest = hmac.new(self._key, message, hashlib.sha256).digest()
         return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _bucketed_exp(earliest: int) -> int:
+    """Round ``earliest`` up to the next :data:`EXP_BUCKET_SECONDS` multiple."""
+    return -(-earliest // EXP_BUCKET_SECONDS) * EXP_BUCKET_SECONDS
 
 
 #: Field names whose **string** values get signed when present in a
@@ -226,7 +255,7 @@ def sign_media_urls_in_markdown(text: str | None, signer: MediaUrlSigner) -> str
     """Re-sign every ``/api/media/{filename}`` URL in a markdown body.
 
     Page bodies are stored canonical (without ``?exp=…&sig=…``) and
-    signed on every read with a fresh 1h-TTL signature. Non-media URLs
+    signed on every read with a default-lifetime (bucketed) signature. Non-media URLs
     (``http://``, relative anchors, wikilinks) are left alone.
 
     ``None`` and empty strings round-trip unchanged.

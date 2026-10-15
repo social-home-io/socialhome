@@ -18,6 +18,7 @@ from collections.abc import Callable
 
 from aiohttp import web
 
+from .auth import SIGNED_URL_PRINCIPAL
 from .security import error_response
 
 #: Prefix length an IPv6 client is bucketed by. One subscriber (a home, a
@@ -122,12 +123,25 @@ class RateLimiter:
         remaining = times[0] + window_s - self._monotonic()
         return max(1, math.ceil(remaining))
 
-    def prune(self, *, window_s: int) -> None:
+    def prune(self, *, window_s: int, prefix: str = "") -> None:
         """Forget every key with no hit in the last ``window_s`` seconds —
-        for limiters keyed on client addresses, which never repeat."""
+        for limiters keyed on client addresses, which never repeat.
+
+        ``prefix`` limits the sweep to keys starting with it, so a shared
+        limiter can drop its short-window per-address keys without
+        forgetting a longer-window bucket that uses another prefix."""
         cutoff = self._monotonic() - window_s
-        for key in [k for k, t in self._windows.items() if not t or t[-1] <= cutoff]:
+        for key in [
+            k
+            for k, t in self._windows.items()
+            if k.startswith(prefix) and (not t or t[-1] <= cutoff)
+        ]:
             del self._windows[key]
+
+    @property
+    def now(self) -> float:
+        """The limiter's monotonic clock reading."""
+        return self._monotonic()
 
     @property
     def key_count(self) -> int:
@@ -155,6 +169,7 @@ def build_rate_limit_middleware(
     default_limit: int = 60,
     default_window_s: int = 60,
     limits: dict[str, tuple[int, int]] | None = None,
+    per_client_signed_rules: frozenset[str] = frozenset(),
 ):
     """Return an aiohttp middleware that enforces per-endpoint limits.
 
@@ -165,8 +180,30 @@ def build_rate_limit_middleware(
     methods it applies to (``"POST /api/spaces"``,
     ``"POST|DELETE /api/spaces/*/subscribe"``); such a rule matches the whole
     path only and wins over every path rule.
+
+    ``per_client_signed_rules`` names rules (keys of ``limits``) whose
+    signed-URL requests are bucketed per client address instead of per
+    principal. A signed media URL authenticates as the constant
+    :data:`~socialhome.auth.SIGNED_URL_PRINCIPAL`, so without this every
+    member of the household — and anyone holding a leaked URL — shares
+    one bucket: one busy page starves everyone's avatars, and a leaked
+    URL can drain the bucket for the whole household. Rules that cap
+    traffic the household makes *upstream* (map tiles, GFS proxies) stay
+    out of this set so the cap stays household-wide.
     """
     limits = limits or {}
+    unknown = per_client_signed_rules - limits.keys()
+    if unknown:
+        raise ValueError(f"per_client_signed_rules not in limits: {sorted(unknown)}")
+    # Per-client keys are minted by whoever holds a valid signed URL, from
+    # as many addresses as they control — sweep the idle ones so they can't
+    # pile up for the life of the process. Only this prefix is swept: the
+    # shared limiter also holds longer-window buckets (auth, federation).
+    per_client_prefix = f"{SIGNED_URL_PRINCIPAL}@"
+    per_client_window_s = max(
+        (limits[r][1] for r in per_client_signed_rules), default=0
+    )
+    last_sweep = [limiter.now]
     # Method rules — ``"POST /api/spaces"`` / ``"POST|DELETE /api/spaces/*/x"``:
     # match only those methods, and the WHOLE path (exact, or fnmatch with
     # ``*``). They come first, so a write that shares its path with a read
@@ -232,8 +269,17 @@ def build_rate_limit_middleware(
         # used to share one ``api/calls`` bucket. Unmatched paths keep the
         # per-first-two-segments default bucket.
         if rule is not None:
+            owner = user_id
+            if user_id == SIGNED_URL_PRINCIPAL and rule in per_client_signed_rules:
+                owner = f"{per_client_prefix}{client_bucket(request.remote)}"
+                now = limiter.now
+                if now - last_sweep[0] >= per_client_window_s:
+                    last_sweep[0] = now
+                    limiter.prune(
+                        window_s=per_client_window_s, prefix=per_client_prefix
+                    )
             allowed = limiter.is_allowed(
-                f"{user_id}:rule:{rule}", limit=limit, window_s=window_s
+                f"{owner}:rule:{rule}", limit=limit, window_s=window_s
             )
         else:
             allowed = await limiter.check(user_id, request.path, limit, window_s)
