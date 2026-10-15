@@ -305,6 +305,9 @@ async def test_users_html_directory_renders(client, author):
     # static JS bundle, not in the HTML response.
     assert "Public Momentum" in text
     assert "/static/users_directory.js" in text
+    # Fonts are self-hosted on the GFS, never Google Fonts.
+    assert "/static/fonts/fonts.css" in text
+    assert "fonts.googleapis.com" not in text
 
 
 async def test_users_html_directory_empty_state(client):

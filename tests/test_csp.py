@@ -105,10 +105,19 @@ def test_spa_csp_inline_styles_limited_to_attributes():
     assert d["style-src-attr"] == ["'unsafe-inline'"]
 
 
-def test_spa_csp_allows_google_fonts():
+def test_spa_csp_fonts_are_self_hosted():
+    """Every font is bundled: no font CDN (Google Fonts leaked each
+    viewer's IP to Google on every page load), and no ``data:`` fonts."""
     d = _parse(build_spa_csp())
-    assert "https://fonts.googleapis.com" in d["style-src"]
-    assert "https://fonts.gstatic.com" in d["font-src"]
+    assert d["style-src"] == ["'self'"]
+    assert d["font-src"] == ["'self'"]
+
+
+@pytest.mark.parametrize("header", [build_spa_csp(), build_public_page_csp()])
+def test_no_policy_admits_a_google_fonts_host(header):
+    assert "googleapis" not in header
+    assert "gstatic" not in header
+    assert "https:" not in header
 
 
 def test_spa_csp_media_and_previews():
@@ -275,8 +284,8 @@ def test_media_type_for_ignores_the_hosts_mime_database(monkeypatch, name, expec
 
 
 def test_public_page_csp_is_strict():
-    """No inline script, no plugins, no framing, no third-party images —
-    only Google Fonts as an external host."""
+    """No inline script, no plugins, no framing, no third-party host at
+    all — fonts included."""
     d = _parse(build_public_page_csp())
     assert d["default-src"] == ["'self'"]
     assert d["script-src"] == ["'self'"]
@@ -285,8 +294,8 @@ def test_public_page_csp_is_strict():
     assert d["base-uri"] == ["'self'"]
     assert d["form-action"] == ["'self'"]
     assert d["img-src"] == ["'self'", "data:", "blob:"]
-    assert d["style-src"] == ["'self'", "https://fonts.googleapis.com"]
-    assert d["font-src"] == ["https://fonts.gstatic.com"]
+    assert d["style-src"] == ["'self'"]
+    assert d["font-src"] == ["'self'"]
     header = build_public_page_csp()
     assert "'unsafe-inline'" not in header
     assert "'unsafe-eval'" not in header
@@ -304,7 +313,6 @@ def test_public_page_csp_admits_exactly_the_given_inline_styles():
     d = _parse(build_public_page_csp([a, b, a]))
     assert d["style-src"] == [
         "'self'",
-        "https://fonts.googleapis.com",
         style_hash(a),
         style_hash(b),
     ]

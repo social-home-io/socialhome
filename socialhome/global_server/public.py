@@ -545,6 +545,11 @@ def _render_qr_png_data_uri_sync(payload: str) -> str:
 #: ``script-src 'self'`` (``html_page.py``).
 _COPY_BUTTON_SCRIPT_TAG = '<script src="/static/copy_button.js"></script>'
 
+#: Manrope + Fraunces, served from the GFS's own ``static/fonts/`` — never
+#: from Google Fonts (an anonymous visitor's browser must not reach a
+#: third-party host; the public-page CSP is ``font-src 'self'``).
+_FONTS_STYLESHEET_TAG = '<link rel="stylesheet" href="/static/fonts/fonts.css" />'
+
 #: Styling for the "here is a code, here is a button that copies it" widget.
 #: ONE definition shared by the landing's pairing code and the invite page's
 #: ``socialhome://invite#…`` code — the two surfaces are the same affordance
@@ -758,12 +763,7 @@ def _render_landing(
   <title>{_escape(server_name)}</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <meta http-equiv="refresh" content="600" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
-  />
+  {_FONTS_STYLESHEET_TAG}
   <style>{css}</style>
 </head>
 <body>
@@ -955,12 +955,7 @@ def _render_space_page(
         _escape(space["space_id"])
     }" />
   <meta name="twitter:card"       content="summary_large_image" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
-  />
+  {_FONTS_STYLESHEET_TAG}
   <style>{css}</style>
 </head>
 <body>
@@ -1142,12 +1137,7 @@ def _invite_page_html(*, title: str, accent: str, body: str) -> tuple[str, str]:
   <meta charset="utf-8" />
   <title>{title}</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,0..100,0..1&display=swap"
-  />
+  {_FONTS_STYLESHEET_TAG}
   <style>{css}</style>
 </head>
 <body>

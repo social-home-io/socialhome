@@ -187,6 +187,17 @@ Remove the entries once the Weblate PR with the translations is merged.
 Unused `en.json` keys only print a warning, because some keys are built
 at runtime.
 
+### Self-hosted fonts check (`pnpm fonts:check`)
+
+`client/scripts/fonts-check.js` runs in the CI `frontend` job right after
+`pnpm build` and scans the built SPA (`socialhome/static/`), the GFS
+static files and the household dashboard. It fails when a font CDN host
+(`fonts.googleapis.com`, `fonts.gstatic.com`, …) appears anywhere, or when
+a built `@font-face` URL is absolute (it would skip the HA ingress
+`<base href>`), a `data:` URI (refused by `font-src 'self'`) or points at
+a missing file. `client/src/styles/fonts.test.ts` (Vitest) and
+`tests/test_no_third_party_fonts.py` guard the same rule in source.
+
 ## CI
 
 `.github/workflows/ci.yml` runs four jobs in parallel:
@@ -197,7 +208,7 @@ at runtime.
    again as the explicit release-blocker gate
 2. **`lint`** — `ruff check .` + `ruff format --check .`
 3. **`typecheck`** — `mypy socialhome/`
-4. **`frontend`** — `pnpm lint`, `pnpm typecheck`, `pnpm build`
+4. **`frontend`** — `pnpm build`, `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
 
 Pre-commit hooks (`.pre-commit-config.yaml`) run a strict subset of
 the same on every commit, plus `pnpm build` at pre-push. **Never

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -54,6 +55,37 @@ async def test_landing_renders_server_name(client):
     assert "My Global Server" in text
     # QR img tag in Connect section.
     assert 'src="data:image/png;base64,' in text
+
+
+async def test_landing_loads_self_hosted_fonts(client):
+    """Manrope + Fraunces come from the GFS's own /static/fonts/, never
+    Google Fonts — an anonymous visitor's browser reaches no third party."""
+    resp = await client.get("/")
+    text = await resp.text()
+    assert '<link rel="stylesheet" href="/static/fonts/fonts.css" />' in text
+    assert "fonts.googleapis.com" not in text
+    assert "fonts.gstatic.com" not in text
+    assert_strict_public_page(resp, text)
+
+
+async def test_static_fonts_are_served_with_font_types(client):
+    css_resp = await client.get("/static/fonts/fonts.css")
+    assert css_resp.status == 200
+    assert css_resp.content_type == "text/css"
+    css = await css_resp.text()
+    urls = re.findall(r"url\('([^']+)'\)", css)
+    assert any(u.startswith("manrope-latin-") for u in urls)
+    assert any(u.startswith("fraunces-latin-") for u in urls)
+    for url in urls:
+        # Relative to the stylesheet — no absolute path, no other origin.
+        assert re.fullmatch(r"[a-z0-9-]+\.woff2", url), url
+        resp = await client.get(f"/static/fonts/{url}")
+        assert resp.status == 200, url
+        assert resp.content_type == "font/woff2", url
+    for licence in ("Manrope-OFL.txt", "Fraunces-OFL.txt"):
+        resp = await client.get(f"/static/fonts/{licence}")
+        assert resp.status == 200
+        assert "SIL Open Font License" in await resp.text()
 
 
 async def test_landing_renders_updated_server_name_from_db(client):

@@ -109,6 +109,12 @@ jobs:
       - name: Build
         working-directory: client
         run: pnpm run build
+      - name: Self-hosted fonts check (no Google Fonts in the bundles)
+        working-directory: client
+        # Fails if a font CDN host appears anywhere in the built SPA / GFS /
+        # dashboard assets, or a built @font-face URL is absolute, data: or
+        # missing (docs/principles.md → "No third-party fetches").
+        run: pnpm run fonts:check
       - name: Typecheck
         working-directory: client
         run: pnpm run typecheck

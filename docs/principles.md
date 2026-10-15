@@ -776,6 +776,16 @@ content are blocked entirely.**
    `rel="noopener noreferrer"` — a click is the reader's own choice, and
    it sends no `Referer`.
 
+The same holds for the app's own assets: **fonts are self-hosted.** The
+SPA bundles Manrope, Fraunces, JetBrains Mono and Nunito
+(`client/src/styles/fonts.css`) and the GFS public pages serve Manrope +
+Fraunces from their own `/static/fonts/`; until 2026-10 they came from
+Google Fonts, which told Google every viewer's IP address and user agent
+on every page load and left LAN-only installs without their fonts. Both
+CSPs are `font-src 'self'` with no font host, and
+`client/scripts/fonts-check.js` (CI) fails if a font CDN shows up in a
+built bundle.
+
 Re-admitting any remote image source — a host in `img-src`, an external
 `<img>` in a renderer, a federated field that may carry a remote URL — is
 a §2-principle change requiring explicit sign-off. (The author-side link

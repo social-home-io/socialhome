@@ -23,14 +23,18 @@ Directive notes (what each allowance is for):
   The pre-paint theme bootstrap is the file ``assets/theme-boot.js``
   and the STT AudioWorklet is a Vite-emitted asset, so nothing needs a
   hash or nonce. The bundle has no ``eval`` / ``new Function``.
-* ``style-src 'self' https://fonts.googleapis.com`` — bundled CSS plus
-  the Google Fonts stylesheet ``client/src/styles/app.css`` @imports.
+* ``style-src 'self'`` — the bundled CSS only.
   ``style-src-attr 'unsafe-inline'`` allows ``style="…"`` attributes
   only: the Leaflet pin / popup HTML strings carry them
   (``LocationMap`` / ``FederationMap``). ``<style>`` elements stay
   blocked. (Preact's ``style={{…}}`` goes through the CSSOM, which CSP
   does not govern.)
-* ``font-src`` — bundled Nunito + ``fonts.gstatic.com`` (Google Fonts).
+* ``font-src 'self'`` — every font (Manrope, Fraunces, JetBrains Mono,
+  Nunito) is bundled with the SPA (``client/src/styles/fonts.css``); no
+  font CDN, ever — a third-party font request leaks each viewer's IP
+  address to the font host on every page load and breaks offline /
+  LAN-only installs. Vite never inlines a font as ``data:``
+  (``client/vite.config.ts``), so ``data:`` is not needed either.
 * ``img-src 'self' data: blob:`` — ``data:`` (QR codes, Leaflet CSS
   sprites, app catalog icons), ``blob:`` (local upload previews). **No
   third-party image host, ever** (owner decision 2026-10-05): an external
@@ -89,9 +93,9 @@ from collections.abc import Iterable, Mapping
 SPA_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
     "default-src": ("'self'",),
     "script-src": ("'self'",),
-    "style-src": ("'self'", "https://fonts.googleapis.com"),
+    "style-src": ("'self'",),
     "style-src-attr": ("'unsafe-inline'",),
-    "font-src": ("'self'", "https://fonts.gstatic.com"),
+    "font-src": ("'self'",),
     "img-src": ("'self'", "data:", "blob:"),
     "media-src": ("'self'", "blob:"),
     "connect-src": ("'self'",),
@@ -142,10 +146,12 @@ def build_spa_csp() -> str:
 #: * ``script-src 'self'`` — only ``/static/*.js`` files (the copy-button
 #:   shim, the viewer bundles). ``<script type="application/json">`` boot
 #:   blocks are inert data and need no allowance.
-#: * ``style-src`` — ``/static/*.css``, the Google Fonts stylesheet and,
-#:   per response, the sha256 of each inline ``<style>`` the page renders
+#: * ``style-src`` — ``/static/*.css`` and, per response, the sha256 of each inline ``<style>`` the page renders
 #:   (:func:`build_public_page_csp`). No ``'unsafe-inline'``, so
 #:   ``style="…"`` attributes are refused — the pages carry none.
+#: * ``font-src 'self'`` — Manrope + Fraunces from ``/static/fonts/``
+#:   (``global_server/static/fonts/fonts.css``). No font CDN: an
+#:   anonymous visitor's browser never reaches a third-party host.
 #: * ``img-src 'self' data: blob:`` — QR codes and the space cover / icon
 #:   are ``data:`` URIs (a household publishes them inline), avatars are
 #:   same-origin, the viewers render WebRTC-received bytes as ``blob:``.
@@ -157,8 +163,8 @@ def build_spa_csp() -> str:
 PUBLIC_PAGE_CSP_DIRECTIVES: Mapping[str, tuple[str, ...]] = {
     "default-src": ("'self'",),
     "script-src": ("'self'",),
-    "style-src": ("'self'", "https://fonts.googleapis.com"),
-    "font-src": ("https://fonts.gstatic.com",),
+    "style-src": ("'self'",),
+    "font-src": ("'self'",),
     "img-src": ("'self'", "data:", "blob:"),
     "media-src": ("'self'", "blob:"),
     "connect-src": ("'self'",),

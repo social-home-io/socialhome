@@ -122,9 +122,9 @@
   --sh-swatch-ring: rgba(26, 24, 20, 0.25);
 
   /* ── Typography — Manrope (geometric, free, warm-leaning) ─────
-     Loaded from fonts.googleapis.com via the @import in app.css.
-     Keep the system fallback chain so the first paint isn't
-     held back if the network is slow. */
+     Bundled with the SPA (styles/fonts.css), never fetched from a
+     font CDN. Keep the system fallback chain so the first paint
+     isn't held back while the WOFF2 loads (font-display: swap). */
   --sh-font-family:         'Manrope', -apple-system, BlinkMacSystemFont,
                             'Segoe UI', Roboto, sans-serif;
   /* Display = Fraunces serif. Matches the marketing site's editorial

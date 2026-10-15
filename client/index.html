@@ -18,8 +18,16 @@
   <!-- Theme colours match tokens.css: paper (light) / paper-deep dark (dark). -->
   <meta name="theme-color" content="#F4ECE0" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#161821" media="(prefers-color-scheme: dark)" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!--
+    Preload the body font's latin subset so the first paint uses Manrope
+    instead of swapping in from the fallback. Fonts are bundled
+    (src/styles/fonts.css) — never fetched from a font CDN. Vite rewrites
+    this to the fingerprinted ``./assets/…woff2``, a relative URL that
+    resolves against ``<base href>`` (ingress-safe). ``crossorigin`` is
+    required: font loads are CORS-mode, so a preload without it would be
+    fetched twice.
+  -->
+  <link rel="preload" href="/src/assets/fonts/manrope/manrope-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
   <!-- Relative href so the browser resolves it against ``<base href>`` — under
        HA Supervisor ingress the manifest comes from
        ``/api/hassio_ingress/<token>/manifest.json`` rather than HA Core's
