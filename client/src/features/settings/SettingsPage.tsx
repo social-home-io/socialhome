@@ -2,16 +2,14 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 import { useTitle } from '@/store/pageTitle'
 import { signal, useSignal } from '@preact/signals'
 import { currentUser } from '@/store/auth'
-import { api, ApiError } from '@/api'
-import { Avatar } from '@/components/Avatar'
+import { api } from '@/api'
 import type { User } from '@/types'
 import { Button } from '@/components/Button'
-import { ProtectedAccountSection } from './ProtectedAccountSection'
 import { showToast } from '@/components/Toast'
 import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { theme, type Theme } from '@/store/theme'
 import { HouseholdThemeStudio } from '@/components/HouseholdThemeStudio'
-import { isOne, locale, setLocale, t } from '@/i18n/i18n'
+import { locale, setLocale, t } from '@/i18n/i18n'
 import localeMeta from '@/i18n/locales/_meta.json'
 import {
   detectLocaleWeekStart, getWeekStartPref, type WeekStartPref,
@@ -36,8 +34,11 @@ import {
   currentPushSubscription, disableWebPush, enableWebPush, webPushSupported,
 } from '@/utils/webPush'
 import { UsernameEditor } from './UsernameEditor'
-import { HandleEditor } from './HandleEditor'
+import { ProfileTab, resetProfileDraft, useProfileLeaveGuard } from './ProfileTab'
 import { SecuritySettings } from '@/components/SecuritySettings'
+import {
+  useScrollActiveTabIntoView, useTabStripOverflow,
+} from '@/components/TabStripOverflow'
 
 interface SpaceLocationRow {
   space_id: string
@@ -66,10 +67,7 @@ const TAB_LABEL_KEYS: Record<SettingsTab, string> = {
 const errText = (err: unknown): string => String((err as Error)?.message ?? err)
 
 const activeTab = signal<SettingsTab>('profile')
-const displayName = signal('')
-const bio = signal('')
 const landingPath = signal<LandingPath>('/')
-const avatarUrl = signal<string | null>(null)
 // Per-user HA Companion-app notify service (§25.3). Only meaningful in
 // ha / haos mode; the field is hidden otherwise.
 const haNotifyService = signal('')
@@ -99,12 +97,16 @@ function syncOnlineStatusFromUser(): void {
 
 export default function SettingsPage() {
   useTitle(t('nav.settings'))
+  // Unsaved profile edits ask before Settings is left (in-app or reload).
+  useProfileLeaveGuard('/settings')
+  const stripRef = useRef<HTMLElement>(null)
+  // One scrollable row (P8): fade the edge that hides tabs, keep the
+  // active one in view — German labels no longer wrap to three rows.
+  useTabStripOverflow(stripRef, [locale.value])
+  useScrollActiveTabIntoView(stripRef, activeTab.value, [locale.value])
   useEffect(() => {
-    if (currentUser.value) {
-      displayName.value = currentUser.value.display_name
-      bio.value = currentUser.value.bio || ''
-      avatarUrl.value = currentUser.value.picture_url
-    }
+    // A fresh visit starts from the saved profile.
+    resetProfileDraft()
     landingPath.value = getLandingPath()
     haNotifyService.value = getPreferences().ha_notify_service ?? ''
     syncOnlineStatusFromUser()
@@ -142,7 +144,13 @@ export default function SettingsPage() {
 
   return (
     <div class="sh-settings">
-      <nav class="sh-settings-tabs" role="tablist" onKeyDown={onTabKeyDown}>
+      <nav
+        ref={stripRef}
+        class="sh-settings-tabs"
+        role="tablist"
+        aria-label={t('nav.settings')}
+        onKeyDown={onTabKeyDown}
+      >
         {SETTINGS_TABS.map(tab => (
           <button
             key={tab}
@@ -179,174 +187,6 @@ export default function SettingsPage() {
   )
 }
 
-function ProfileTab() {
-  const refresh = async () => {
-    try {
-      const me = await api.get('/api/me') as User
-      displayName.value = me.display_name
-      bio.value = me.bio ?? ''
-      avatarUrl.value = me.picture_url
-      // Mirror the fresh user onto the auth store so other surfaces
-      // (sidenav, profile card, post avatars built from currentUser)
-      // pick up the new ``picture_url`` immediately AND so leaving and
-      // returning to this page doesn't reset to a stale signed URL
-      // from the original ``loadCurrentUser`` fetch.
-      if (currentUser.value) {
-        currentUser.value = { ...currentUser.value, ...me }
-      }
-    } catch { /* noop */ }
-  }
-
-  const handleSave = async (e: Event) => {
-    e.preventDefault()
-    try {
-      await api.patch('/api/me', {
-        display_name: displayName.value,
-        bio: bio.value || null,
-      })
-      showToast(t('settings.saved'), 'success')
-    } catch (err: unknown) {
-      showToast(t('settings.profile.save_failed', { error: errText(err) }), 'error')
-    }
-  }
-
-  const handleAvatarUpload = async (e: Event) => {
-    const input = e.target as HTMLInputElement
-    const file = input.files?.[0]
-    if (!file) return
-    const fd = new FormData()
-    fd.append('file', file)
-    try {
-      await api.upload('/api/me/picture', fd)
-      await refresh()
-      showToast(t('settings.profile.avatar_updated'), 'success')
-    } catch (err: unknown) {
-      showToast(t('settings.profile.avatar_upload_failed', { error: errText(err) }), 'error')
-    }
-    input.value = ''
-  }
-
-  const handleAvatarClear = async () => {
-    if (!await confirmDialog(t('settings.profile.remove_confirm'), { destructive: true })) return
-    try {
-      await api.delete('/api/me/picture')
-      await refresh()
-      showToast(t('settings.profile.avatar_removed'), 'info')
-    } catch (err: unknown) {
-      showToast(t('settings.profile.clear_failed', { error: errText(err) }), 'error')
-    }
-  }
-
-  const handleUseHaPicture = async () => {
-    try {
-      await api.post('/api/me/picture/refresh-from-ha', {})
-      await refresh()
-      showToast(t('settings.profile.ha_synced'), 'success')
-    } catch (err: unknown) {
-      // 422 with the body the route returns when HA has no
-      // entity_picture for this person — the friendliest copy says
-      // "go set one in HA first", not the raw backend detail.
-      if (err instanceof ApiError && err.status === 422) {
-        showToast(t('settings.profile.ha_no_picture'), 'info')
-        return
-      }
-      // 501 — adapter doesn't expose HA pictures (standalone mode).
-      if (err instanceof ApiError && err.status === 501) {
-        showToast(t('settings.profile.ha_not_ha_mode'), 'info')
-        return
-      }
-      // Generic fallthrough — ``err.message`` now carries the
-      // backend's ``detail`` field (or a helpful network-error
-      // string), so the toast already reads cleanly without us
-      // prefixing "Could not fetch from HA:".
-      showToast((err as Error).message || t('settings.profile.ha_sync_failed'), 'error')
-    }
-  }
-
-  const isHaUser = currentUser.value?.source === 'ha'
-  const bioRemaining = 300 - bio.value.length
-
-  return (
-    <>
-    <ProtectedAccountSection />
-    <section class="sh-settings-section">
-      <h2>{t('settings.profile.title')}</h2>
-      <div class="sh-profile-card">
-        <label class="sh-profile-avatar-slot"
-               title={t('settings.profile.avatar_slot_title')}>
-          <Avatar name={displayName.value || '?'} src={avatarUrl.value}
-                  size={112} />
-          {/* Persistent corner badge — the avatar is clickable, but
-           *  on touch devices the previous hover-only overlay never
-           *  appeared, so users had no cue the photo could be changed.
-           *  The hover overlay below remains for quick desktop tap. */}
-          <span class="sh-profile-avatar-badge" aria-hidden="true">📷</span>
-          <span class="sh-profile-avatar-hint" aria-hidden="true">
-            📷 {t('settings.profile.change')}
-          </span>
-          <input type="file" accept="image/*"
-                 onChange={handleAvatarUpload} class="sr-only" />
-        </label>
-        <div class="sh-profile-card-meta">
-          <div class="sh-profile-identity">
-            <strong class="sh-profile-name">
-              {displayName.value || '—'}
-            </strong>
-            <span class="sh-muted">
-              @{currentUser.value?.handle ?? currentUser.value?.username}
-            </span>
-          </div>
-          {/* Source badge — informational only ("where this profile is
-           *  edited from"), not a button. The previous copy "✏️ Set
-           *  manually" parsed as an imperative call-to-action; "Edited
-           *  here" makes it clear this is just describing the source. */}
-          <span class={`sh-profile-source sh-profile-source--${isHaUser ? 'ha' : 'manual'}`}>
-            {isHaUser ? `🏠 ${t('settings.profile.source_ha')}` : `✏️ ${t('settings.profile.source_manual')}`}
-          </span>
-          <div class="sh-row" style={{ gap: 'var(--sh-space-xs)', flexWrap: 'wrap' }}>
-            {avatarUrl.value && (
-              <Button variant="secondary" onClick={handleAvatarClear}>
-                {t('settings.profile.remove_picture')}
-              </Button>
-            )}
-            {isHaUser && (
-              <Button variant="secondary" onClick={handleUseHaPicture}>
-                {t('settings.profile.use_ha_picture')}
-              </Button>
-            )}
-          </div>
-        </div>
-      </div>
-      <form class="sh-form" onSubmit={handleSave}>
-        <label>
-          {t('settings.profile.display_name')}
-          <input value={displayName.value} maxLength={64}
-                 onInput={(e) => displayName.value = (e.target as HTMLInputElement).value} />
-        </label>
-        <label>
-          {t('settings.profile.bio')}
-          <textarea value={bio.value} maxLength={300} rows={3}
-                    onInput={(e) => bio.value = (e.target as HTMLTextAreaElement).value} />
-          <span class="sh-char-count">
-            {t(isOne(bioRemaining) ? 'settings.profile.chars_left_one' : 'settings.profile.chars_left',
-              { n: String(bioRemaining) })}
-          </span>
-        </label>
-        <div class="sh-form-actions">
-          <Button type="submit">{t('settings.profile.save_profile')}</Button>
-        </div>
-      </form>
-
-      <HandleEditor />
-
-      <UsernameEditor />
-
-      <LandingPicker />
-    </section>
-    </>
-  )
-}
-
 function LandingPicker() {
   const handleChange = async (choice: LandingPath) => {
     const prev = landingPath.value
@@ -369,12 +209,12 @@ function LandingPicker() {
 
   return (
     <div class="sh-landing-picker">
-      <h3>{t('settings.landing.title')}</h3>
+      <h3 id="sh-landing-heading">{t('settings.landing.title')}</h3>
       <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
         {t('settings.landing.hint')}
       </p>
       <div class="sh-landing-picker-options" role="radiogroup"
-           aria-label={t('settings.landing.aria')}>
+           aria-labelledby="sh-landing-heading">
         <label class={`sh-landing-option ${landingPath.value === '/' ? 'sh-landing-option--active' : ''}`}>
           <input type="radio" name="landing" value="/"
                  checked={landingPath.value === '/'}
@@ -1024,10 +864,16 @@ function HaNotifyServiceRow() {
 
 function SecurityTab() {
   return (
-    <section class="sh-settings-section">
-      <h2>{t('settings.tab.security')}</h2>
-      <SecuritySettings />
-    </section>
+    <>
+      <section class="sh-settings-section" aria-labelledby="sh-signing-in-heading">
+        <h2 id="sh-signing-in-heading">{t('settings.security.signing_in')}</h2>
+        <p class="sh-muted sh-settings-panel-blurb">{t('settings.security.signing_in_hint')}</p>
+        <UsernameEditor />
+      </section>
+      <section class="sh-settings-section">
+        <SecuritySettings />
+      </section>
+    </>
   )
 }
 
@@ -1079,6 +925,7 @@ function AppearanceTab() {
         </p>
       </div>
       <WeekStartPicker />
+      <LandingPicker />
       {currentUser.value?.is_admin && <HouseholdThemeStudio />}
     </section>
   )

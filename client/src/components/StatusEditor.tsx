@@ -45,10 +45,146 @@ export function formatClearsAt(iso: string): string {
     : { weekday: 'short', hour: 'numeric', minute: '2-digit' })
 }
 
-function liveStatus(s: UserStatus | null | undefined): UserStatus | null {
+/** The status as others see it right now: ``null`` when unset or
+ *  already past its deadline. */
+export function liveStatus(s: UserStatus | null | undefined): UserStatus | null {
   if (!s || (!s.emoji && !s.text)) return null
   if (s.expires_at && Date.parse(s.expires_at) <= Date.now()) return null
   return s
+}
+
+/** What the status fields hold while being edited. */
+export interface StatusDraft {
+  emoji: string
+  text: string
+  clearAfter: ClearAfterChoice
+}
+
+/** The fields' starting point for *status* (the saved one). */
+export function statusDraftFrom(status: UserStatus | null | undefined): StatusDraft {
+  const live = liveStatus(status)
+  return {
+    emoji: live?.emoji ?? '',
+    text: live?.text ?? '',
+    clearAfter: live?.expires_at ? 'keep' : 'none',
+  }
+}
+
+/** Whether *draft* says the same as *saved* (whitespace aside). Two
+ *  empty statuses are equal whatever their "clear after". */
+export function sameStatus(draft: StatusDraft, saved: StatusDraft): boolean {
+  const de = draft.emoji.trim(), dt = draft.text.trim()
+  const se = saved.emoji.trim(), st = saved.text.trim()
+  if (!de && !dt && !se && !st) return true
+  return de === se && dt === st && draft.clearAfter === saved.clearAfter
+}
+
+/** The ``PATCH /api/me`` body that saves *draft*. ``keepUntil`` is the
+ *  saved deadline the "Until …" chip keeps. An empty draft clears. */
+export function statusPatchBody(
+  draft: StatusDraft,
+  keepUntil: string | null,
+): Record<string, string | null> {
+  const emoji = draft.emoji.trim()
+  const text = draft.text.trim()
+  if (!emoji && !text) return { status_emoji: null, status_text: null }
+  const clear_after = draft.clearAfter === 'keep'
+    ? keepUntil
+    : draft.clearAfter === 'none' ? null : draft.clearAfter
+  return {
+    status_emoji: emoji || null,
+    status_text: text || null,
+    status_clear_after: clear_after,
+  }
+}
+
+/**
+ * StatusFields — the emoji + text inputs and the "clear after" chips,
+ * controlled. ``StatusEditor`` wraps them with its own Save; Settings ›
+ * Profile embeds them in its one form (decision 8: one editor, two
+ * entry points).
+ */
+export function StatusFields({ value, keepUntil, onChange, onClear, disabled, invalid, describedBy }: {
+  value: StatusDraft
+  /** The saved deadline; offers the "Until …" chip while set. */
+  keepUntil: string | null
+  onChange: (next: StatusDraft) => void
+  /** Shown as "Clear status" while the fields hold something. */
+  onClear?: () => void
+  disabled?: boolean
+  invalid?: boolean
+  describedBy?: string
+}) {
+  const set = (patch: Partial<StatusDraft>) => onChange({ ...value, ...patch })
+  const hasValue = !!value.emoji.trim() || !!value.text.trim()
+  return (
+    <>
+      <div class="sh-status-row">
+        <input
+          class="sh-status-emoji"
+          aria-label={t('status.emoji_aria')}
+          value={value.emoji}
+          placeholder="😊"
+          maxLength={STATUS_EMOJI_MAX_UNITS}
+          disabled={disabled}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={describedBy}
+          onInput={(e) => set({ emoji: (e.target as HTMLInputElement).value })}
+        />
+        <input
+          class="sh-input sh-status-text"
+          aria-label={t('status.text_aria')}
+          value={value.text}
+          placeholder={t('status.placeholder_text')}
+          maxLength={STATUS_TEXT_MAX}
+          disabled={disabled}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={describedBy}
+          onInput={(e) => set({ text: (e.target as HTMLInputElement).value })}
+        />
+      </div>
+      <div class="sh-status-expiry" role="radiogroup" aria-label={t('status.clear_after_aria')}>
+        <span class="sh-status-expiry__label">{t('status.clear_after')}</span>
+        <div class="sh-expiry-options">
+          {keepUntil && (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={value.clearAfter === 'keep'}
+              class={value.clearAfter === 'keep' ? 'sh-chip sh-chip--active' : 'sh-chip'}
+              disabled={disabled}
+              onClick={() => set({ clearAfter: 'keep' })}
+            >
+              {t('status.until', { time: formatClearsAt(keepUntil) })}
+            </button>
+          )}
+          {CHOICES.map(c => (
+            <button
+              key={c.id}
+              type="button"
+              role="radio"
+              aria-checked={value.clearAfter === c.id}
+              class={value.clearAfter === c.id ? 'sh-chip sh-chip--active' : 'sh-chip'}
+              disabled={disabled}
+              onClick={() => set({ clearAfter: c.id })}
+            >
+              {t(c.labelKey)}
+            </button>
+          ))}
+        </div>
+      </div>
+      {onClear && hasValue && (
+        <button
+          type="button"
+          class="sh-status-clear"
+          disabled={disabled}
+          onClick={onClear}
+        >
+          {t('status.clear_status')}
+        </button>
+      )}
+    </>
+  )
 }
 
 export function StatusEditor({ onSave, onCancel }: {
@@ -56,13 +192,10 @@ export function StatusEditor({ onSave, onCancel }: {
   onCancel?: () => void
 }) {
   const initial = liveStatus(currentUser.value?.status)
-  const [emoji, setEmoji] = useState(initial?.emoji ?? '')
-  const [text, setText] = useState(initial?.text ?? '')
-  const [clearAfter, setClearAfter] = useState<ClearAfterChoice>(
-    initial?.expires_at ? 'keep' : 'none',
-  )
+  const [draft, setDraft] = useState<StatusDraft>(() => statusDraftFrom(initial))
   const [busy, setBusy] = useState(false)
-  const empty = !emoji.trim() && !text.trim()
+  const keepUntil = initial?.expires_at ?? null
+  const empty = !draft.emoji.trim() && !draft.text.trim()
 
   const submit = async (body: Record<string, string | null>, cleared: boolean) => {
     setBusy(true)
@@ -86,18 +219,11 @@ export function StatusEditor({ onSave, onCancel }: {
 
   const save = () => {
     if (empty) return
-    const clear_after = clearAfter === 'keep'
-      ? initial?.expires_at ?? null
-      : clearAfter === 'none' ? null : clearAfter
-    void submit({
-      status_emoji: emoji.trim() || null,
-      status_text: text.trim() || null,
-      status_clear_after: clear_after,
-    }, false)
+    void submit(statusPatchBody(draft, keepUntil), false)
   }
 
   const clear = () => {
-    setEmoji(''); setText(''); setClearAfter('none')
+    setDraft({ emoji: '', text: '', clearAfter: 'none' })
     void submit({ status_emoji: null, status_text: null }, true)
   }
 
@@ -106,52 +232,7 @@ export function StatusEditor({ onSave, onCancel }: {
       class="sh-status-editor"
       onSubmit={(e) => { e.preventDefault(); save() }}
     >
-      <div class="sh-status-row">
-        <input
-          class="sh-status-emoji"
-          aria-label={t('status.emoji_aria')}
-          value={emoji}
-          placeholder="😊"
-          maxLength={STATUS_EMOJI_MAX_UNITS}
-          onInput={(e) => setEmoji((e.target as HTMLInputElement).value)}
-        />
-        <input
-          class="sh-input sh-status-text"
-          aria-label={t('status.text_aria')}
-          value={text}
-          placeholder={t('status.placeholder_text')}
-          maxLength={STATUS_TEXT_MAX}
-          onInput={(e) => setText((e.target as HTMLInputElement).value)}
-        />
-      </div>
-      <div class="sh-status-expiry" role="radiogroup" aria-label={t('status.clear_after_aria')}>
-        <span class="sh-status-expiry__label">{t('status.clear_after')}</span>
-        <div class="sh-expiry-options">
-          {initial?.expires_at && (
-            <button
-              type="button"
-              role="radio"
-              aria-checked={clearAfter === 'keep'}
-              class={clearAfter === 'keep' ? 'sh-chip sh-chip--active' : 'sh-chip'}
-              onClick={() => setClearAfter('keep')}
-            >
-              {t('status.until', { time: formatClearsAt(initial.expires_at) })}
-            </button>
-          )}
-          {CHOICES.map(c => (
-            <button
-              key={c.id}
-              type="button"
-              role="radio"
-              aria-checked={clearAfter === c.id}
-              class={clearAfter === c.id ? 'sh-chip sh-chip--active' : 'sh-chip'}
-              onClick={() => setClearAfter(c.id)}
-            >
-              {t(c.labelKey)}
-            </button>
-          ))}
-        </div>
-      </div>
+      <StatusFields value={draft} keepUntil={keepUntil} onChange={setDraft} />
       <div class="sh-status-actions">
         {onCancel && (
           <Button type="button" variant="secondary" onClick={onCancel} disabled={busy}>

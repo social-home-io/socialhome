@@ -128,6 +128,58 @@ describe('SettingsPage', () => {
   })
 })
 
+describe('SettingsPage — where things live (decision 9, P8)', () => {
+  it('Profile holds the one form; no username, no start page, no "Edited here" chip', async () => {
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole, getByLabelText, queryByText, queryByLabelText } = render(<SettingsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Profile' }))
+    expect(getByRole('form', { name: 'Your profile' })).toBeTruthy()
+    expect(getByLabelText('Name')).toBeTruthy()
+    expect(getByLabelText('Public @handle')).toBeTruthy()
+    expect(queryByLabelText('Sign-in username')).toBeNull()
+    expect(queryByText('Home page')).toBeNull()
+    expect(queryByText(/Edited here/)).toBeNull()
+  })
+
+  it('the sign-in username lives on Security, next to the sign-ins', async () => {
+    mockGet.mockImplementation(async (path: string) =>
+      path === '/api/me/tokens' ? { base_url: null, tokens: [] } : { spaces: [] })
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole, getByLabelText } = render(<SettingsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Security' }))
+    expect(getByRole('heading', { level: 2, name: 'Signing in' })).toBeTruthy()
+    expect((getByLabelText('Sign-in username') as HTMLInputElement).value).toBe('admin')
+    fireEvent.click(getByRole('tab', { name: 'Profile' }))
+  })
+
+  it('the start page picker lives on Appearance', async () => {
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole } = render(<SettingsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Appearance' }))
+    expect(getByRole('radiogroup', { name: 'Home page' })).toBeTruthy()
+    fireEvent.click(getByRole('tab', { name: 'Profile' }))
+  })
+
+  it('the tabs are one labelled row', async () => {
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole } = render(<SettingsPage />)
+    const strip = getByRole('tablist', { name: 'Settings' })
+    expect(strip.querySelectorAll('[role="tab"]')).toHaveLength(5)
+  })
+
+  it('a hop to another tab keeps unsaved profile edits', async () => {
+    const { default: SettingsPage } = await import('./SettingsPage')
+    const { getByRole, getByLabelText } = render(<SettingsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Profile' }))
+    fireEvent.input(getByLabelText('Name'), { target: { value: 'Admin Two' } })
+    fireEvent.click(getByRole('tab', { name: 'Privacy' }))
+    fireEvent.click(getByRole('tab', { name: 'Profile' }))
+    expect((getByLabelText('Name') as HTMLInputElement).value).toBe('Admin Two')
+    expect(getByRole('region', { name: 'Unsaved changes' })).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Discard' }))
+  })
+})
+
 async function renderPrivacyTab() {
   const { default: SettingsPage } = await import('./SettingsPage')
   // The Privacy tab needs to be active to see the panel; simulate clicking

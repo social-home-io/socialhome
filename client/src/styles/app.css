@@ -9073,7 +9073,15 @@ button.sh-shopping-item__text:focus-visible {
  * shadow, and dashed dividers between rows. Sub-page panels under
  * `.sh-settings` follow the same surface so the whole settings tree
  * reads as a stack of pinned cards rather than a flat panel. */
-.sh-settings, .sh-settings-section {
+/* `.sh-settings` itself is just the column: the sections are the cards.
+ * It used to be a tape-card too, so every section (and the profile card
+ * inside it) nested two or three deep and left ~280 px of content on a
+ * phone (P8). */
+.sh-settings {
+  max-width: 760px;
+  margin: 0 auto;
+}
+.sh-settings-section {
   position: relative;
   background: var(--sh-bg-tertiary);
   border: 1px solid var(--sh-border);
@@ -9083,7 +9091,10 @@ button.sh-shopping-item__text:focus-visible {
   margin-top: 12px;
   box-shadow: var(--sh-shadow-pinned);
 }
-.sh-settings::before, .sh-settings-section::before {
+@media (max-width: 640px) {
+  .sh-settings-section { padding: var(--sh-space-md); }
+}
+.sh-settings-section::before {
   content: "";
   position: absolute;
   top: -10px;
@@ -9132,11 +9143,30 @@ button.sh-shopping-item__text:focus-visible {
   margin-bottom: var(--sh-space-lg);
   overflow-x: auto;
 }
-/* Five tabs don't fit a phone: wrap instead of scrolling the last ones
- * (Security) out of sight with no hint they exist. */
-@media (max-width: 640px) {
-  .sh-settings-tabs { flex-wrap: wrap; overflow-x: visible; row-gap: 0; }
-  .sh-settings-tabs .sh-tab { min-height: 40px; }
+/* Five tabs don't fit a phone. One scrollable row (P8 — wrapping took
+ * three rows in German): ``useTabStripOverflow`` fades the edge that
+ * still hides tabs and ``useScrollActiveTabIntoView`` keeps the active
+ * one readable, so Security is never out of sight without a cue. */
+.sh-settings-tabs { scrollbar-width: none; }
+.sh-settings-tabs::-webkit-scrollbar { display: none; }
+.sh-settings-tabs .sh-tab { flex: none; min-height: 44px; }
+.sh-settings-tabs[data-fade-right] {
+  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 16px), transparent 100%);
+          mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 16px), transparent 100%);
+}
+.sh-settings-tabs[data-fade-left] {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 100%);
+          mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 100%);
+}
+.sh-settings-tabs[data-fade-left][data-fade-right] {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+          mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+}
+/* An overflow container clips the global 2 px-offset ring; draw it inside. */
+.sh-settings-tabs .sh-tab:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: -2px;
+  border-radius: var(--sh-radius-sm);
 }
 
 /* Presence — outer page container is a vertical stack (controls + map +
@@ -10383,18 +10413,15 @@ hr {
 
 .sh-space-profile-dialog { display: flex; flex-direction: column; gap: var(--sh-space-md); }
 
+/* Lives on Appearance next to the theme / language / week pickers
+ * (decision 9), so it takes their rhythm: no rule above, same h3. */
 .sh-landing-picker {
-  margin-top: var(--sh-space-lg);
-  padding-top: var(--sh-space-md);
-  border-top: 1px solid var(--sh-border);
+  margin: var(--sh-space-lg) 0;
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-sm);
 }
-.sh-landing-picker h3 {
-  margin: 0;
-  font-size: var(--sh-font-size-base);
-}
+.sh-landing-picker h3 { margin-bottom: 0; }
 .sh-landing-picker-options {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -17917,32 +17944,296 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   display: inline-block;
   padding: var(--sh-space-xs) 0;
 }
-.sh-protected-account {
-  border: 1px solid color-mix(in srgb, var(--sh-primary) 28%, transparent);
-  border-radius: var(--sh-radius-md);
-  background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
-  padding: var(--sh-space-md);
-  margin-bottom: var(--sh-space-lg);
-}
-.sh-protected-account h2 { margin-top: 0; }
-/* Muted ink on this hearth-tinted panel (and on the chosen landing-page
- * option below it) is ~4.2:1 in dark; pull it toward the full ink. */
-.sh-protected-account .sh-muted,
+/* Muted ink on the chosen landing-page option's hearth tint is ~4.2:1
+ * in dark; pull it toward the full ink. */
 .sh-landing-option--active .sh-muted {
   color: color-mix(in srgb, var(--sh-text-muted) 60%, var(--sh-text));
 }
-.sh-protected-account__list,
-.sh-protected-account__guardians {
+.sh-protected-account__list {
   margin: 0 0 var(--sh-space-sm);
   padding-inline-start: 1.25rem;
 }
-.sh-protected-account__list li,
-.sh-protected-account__guardians li {
+.sh-protected-account__list li {
   margin-bottom: var(--sh-space-xs);
 }
-.sh-protected-account__guardians-heading {
-  margin: var(--sh-space-md) 0 var(--sh-space-xs);
+
+/* Settings › Profile — "Your profile, at a glance" (decisions 7–10).
+ * A slim "How others see you" card (the PersonSheet header anatomy), one
+ * flat form card, and a save bar that only exists while something
+ * changed. No tape, no nesting: the page column is not a card. */
+.sh-profile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-lg);
+  margin-top: var(--sh-space-sm);
+}
+.sh-profile-glance {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sh-space-md);
+  align-items: start;
+  padding: var(--sh-space-lg);
+  border-radius: var(--sh-radius-xl);
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  box-shadow: var(--sh-shadow-sm);
+}
+.sh-profile-glance__photo { position: relative; display: inline-flex; }
+.sh-profile-glance__photo-btn {
+  position: relative;
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.sh-profile-glance__photo-btn .sh-avatar { width: 72px; height: 72px; }
+.sh-profile-glance__cam {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid var(--sh-bg-tertiary);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--sh-shadow-sm);
+  transition: transform var(--sh-transition-fast);
+}
+.sh-profile-glance__cam .sh-conn-ico { width: 16px; height: 16px; }
+.sh-profile-glance__photo-btn:hover .sh-profile-glance__cam { transform: scale(1.08); }
+.sh-profile-glance__body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+.sh-profile-glance__name {
+  margin: 2px 0 0;
+  font-family: var(--sh-font-family-display);
+  font-size: 1.5rem;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+}
+.sh-profile-glance__handle {
+  margin: 0;
+  color: var(--sh-text-muted);
   font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-profile-glance__status { margin-top: 6px; }
+.sh-profile-glance__bio {
+  margin: 6px 0 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sh-profile-glance .sh-profile-source { margin-top: 6px; }
+.sh-profile-glance__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+  margin-top: var(--sh-space-sm);
+}
+.sh-profile-glance__actions .sh-btn { min-height: 36px; }
+/* Remove is the destructive one: a quiet text button, never the most
+ * prominent action under the photo (P6). */
+.sh-profile-glance__quiet {
+  background: none;
+  border: 0;
+  padding: 8px 4px;
+  min-height: 36px;
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.sh-profile-glance__quiet:hover { color: var(--sh-danger); }
+.sh-profile-glance__quiet:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}
+
+.sh-profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-lg);
+  padding: var(--sh-space-lg);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+}
+.sh-profile-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.sh-profile-field__label {
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  color: var(--sh-text);
+}
+.sh-profile-field__hint {
+  margin: 0;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+}
+.sh-profile-field .sh-form-error { margin: 0; }
+.sh-profile-field textarea { resize: vertical; min-height: 84px; }
+.sh-profile-status .sh-status-expiry { margin-top: 2px; }
+.sh-status-clear {
+  align-self: flex-start;
+  background: none;
+  border: 0;
+  padding: 6px 0;
+  min-height: 36px;
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-primary-text);
+  font-weight: 600;
+  cursor: pointer;
+}
+.sh-status-clear:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}
+/* "@" as a fixed prefix so nobody types it into the handle. */
+.sh-profile-handle { position: relative; }
+.sh-profile-handle__at {
+  position: absolute;
+  inset-inline-start: var(--sh-space-md);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  pointer-events: none;
+}
+/* Matches the global input rule's specificity (and comes later) so the
+ * padding actually clears the "@". */
+.sh-profile-handle input:not([type="checkbox"]):not([type="radio"]) {
+  padding-inline-start: calc(var(--sh-space-md) + 1.4ch);
+}
+
+/* Shown only while the form holds unsaved edits. Sticky so Save stays
+ * in reach on a long form; on phones it rides above the bottom tab bar. */
+.sh-savebar {
+  position: sticky;
+  bottom: var(--sh-space-sm);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sh-space-sm);
+  padding: 10px var(--sh-space-md);
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  box-shadow: var(--sh-shadow-lg);
+}
+.sh-savebar__text {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+.sh-savebar__actions { display: flex; gap: var(--sh-space-sm); margin-inline-start: auto; }
+.sh-savebar__actions .sh-btn { min-height: 40px; }
+@media (max-width: 768px) {
+  .sh-savebar {
+    bottom: calc(var(--sh-mobile-nav-height) + env(safe-area-inset-bottom, 0px) + var(--sh-space-sm));
+  }
+  .sh-savebar__actions .sh-btn { min-height: 44px; }
+}
+@media (max-width: 640px) {
+  .sh-profile-glance, .sh-profile-form { padding: var(--sh-space-md); }
+}
+
+/* Protected (child) account: one compact banner, the list behind
+ * "See what's limited" (decision 10 / P10). */
+.sh-protected-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px var(--sh-space-md);
+  border-radius: var(--sh-radius-lg);
+  background: color-mix(in srgb, var(--sh-success) 9%, var(--sh-bg-tertiary));
+  border: 1px solid color-mix(in srgb, var(--sh-success) 25%, var(--sh-border));
+}
+.sh-protected-banner__icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--sh-success) 16%, var(--sh-bg));
+  color: var(--sh-success);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sh-protected-banner__icon .sh-conn-ico { width: 18px; height: 18px; }
+.sh-protected-banner__body { min-width: 0; }
+.sh-protected-banner__title {
+  margin: 0;
+  font-family: var(--sh-font-family);
+  font-size: var(--sh-font-size-base);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.sh-protected-banner__who {
+  margin: 2px 0 0;
+  font-size: var(--sh-font-size-sm);
+  color: color-mix(in srgb, var(--sh-text-muted) 60%, var(--sh-text));
+}
+.sh-protected-banner__toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 4px 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  color: var(--sh-primary-text);
+  cursor: pointer;
+}
+.sh-protected-banner__toggle:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}
+.sh-protected-banner__details {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text);
+}
+.sh-protected-banner__details p { margin: 0 0 var(--sh-space-xs); }
+
+/* Settings › Security › Signing in (decision 9). */
+.sh-username-editor__label {
+  margin: var(--sh-space-sm) 0 0;
+  font: 600 var(--sh-font-size-sm) / 1.3 var(--sh-font-family);
+  color: var(--sh-text-muted);
+}
+.sh-username-editor__value {
+  margin: 2px 0 var(--sh-space-xs);
+  font-size: var(--sh-font-size-base);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 /* Scope chips — which kind of space is this? */
