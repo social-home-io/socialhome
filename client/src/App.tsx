@@ -37,7 +37,8 @@ import { HighlightPickerDialog } from '@/components/HighlightPickerDialog'
 import { CallTypePickerDialog } from '@/components/CallTypePickerDialog'
 import { CallEmbedBlockedDialog } from '@/features/calls/CallEmbedBlockedDialog'
 import { ConfirmDialogHost } from '@/components/confirm'
-import { UserActionsMenu } from '@/components/UserActionsMenu'
+import { PersonSheet } from '@/components/PersonSheet'
+import { AliasDialog } from '@/components/AliasDialog'
 import { HighlightPublishMenu } from '@/features/highlights/HighlightPublishMenu'
 import { RejectReasonDialog } from '@/components/RejectReasonDialog'
 import { ReportDialog } from '@/components/ReportDialog'
@@ -310,7 +311,8 @@ export function App() {
           <CallTypePickerDialog />
           <CallEmbedBlockedDialog />
           <ConfirmDialogHost />
-          <UserActionsMenu />
+          <PersonSheet />
+          <AliasDialog />
           <HighlightPublishMenu />
         </div>
       </LocationProvider>

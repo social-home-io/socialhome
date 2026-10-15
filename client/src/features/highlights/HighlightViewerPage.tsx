@@ -27,7 +27,7 @@ import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Highlight, HighlightFrame } from '@/types'
 import { confirmDialog } from '@/components/confirm'
 import { openReport } from '@/components/ReportDialog'
-import { openUserActions } from '@/components/UserActionsMenu'
+import { openPerson } from '@/components/PersonSheet'
 import { ws } from '@/ws'
 import { openPublishMenu } from './HighlightPublishMenu'
 import { t, isOne } from '@/i18n/i18n'
@@ -313,7 +313,12 @@ export default function HighlightViewerPage() {
             type="button"
             class="sh-highlight-viewer-overflow"
             aria-label={t('highlight.more_actions', { name: householdDisplayName(highlight.author_user_id) })}
-            onClick={() => openUserActions(highlight.author_user_id)}
+            onClick={() => openPerson(highlight.author_user_id, {
+              person: {
+                display_name: householdDisplayName(highlight.author_user_id),
+                picture_url: householdPictureUrl(highlight.author_user_id),
+              },
+            })}
           >
             ⋯
           </button>

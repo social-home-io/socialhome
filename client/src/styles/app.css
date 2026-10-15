@@ -2437,36 +2437,159 @@ button.sh-friends-member-chip:not(:disabled):hover {
   opacity: 0.95;
 }
 
-/* Friend action sheet — opens when a chip is tapped. Layout:
- *  avatar + identity column on top, two-button row below. */
-.sh-friend-actions {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-md);
+/* Person sheet (PersonSheet) — one surface for another person, opened
+ * from every avatar / name / ⋯. Composes on the shared Modal: a centred
+ * 480 px dialog on desktop, the bottom-sheet variant on phones (above the
+ * mobile nav, safe-area padded). The identity block replaces the Modal's
+ * title strip so the name shows once. */
+.sh-modal.sh-person-sheet { max-width: 480px; }
+.sh-person-sheet .sh-modal-header {
+  border-bottom: 0;
+  padding: var(--sh-space-lg) var(--sh-space-lg) 0;
+  position: static;
 }
-.sh-friend-actions__header {
+.sh-person-sheet .sh-modal-body { padding-top: var(--sh-space-md); }
+.sh-person-sheet__id {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--sh-space-md);
+  align-items: center;
+  width: 100%;
+}
+.sh-person-sheet__close { align-self: start; margin: -8px -8px 0 0; }
+.sh-person-sheet__photo { position: relative; display: inline-flex; flex: none; }
+.sh-person-sheet__photo .sh-avatar { width: 72px; height: 72px; }
+.sh-person-sheet__photo .sh-avatar-status-dot {
+  width: 16px; height: 16px; border-width: 3px; right: 2px; bottom: 2px;
+  border-color: var(--sh-bg-tertiary);
+}
+.sh-person-sheet__badge {
+  position: absolute;
+  inset-inline-start: -4px;
+  top: -4px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--sh-bg-tertiary);
+  box-shadow: 0 1px 3px rgba(26, 24, 20, 0.25);
   display: flex;
   align-items: center;
-  gap: var(--sh-space-md);
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
 }
-.sh-friend-actions__identity {
+.sh-person-sheet__names { min-width: 0; }
+.sh-modal-header h2.sh-person-sheet__name {
+  margin: 0;
+  font-family: var(--sh-font-family-display);
+  font-size: 1.5rem;
+  line-height: 1.15;
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+}
+.sh-person-sheet__you {
+  font-family: var(--sh-font-family);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 400;
+  color: var(--sh-text-muted);
+}
+.sh-person-sheet__sub {
+  margin: 4px 0 0;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  unicode-bidi: isolate;
+}
+.sh-person-sheet__body {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+  gap: var(--sh-space-lg);
 }
-.sh-friend-actions__identity strong {
-  font-size: var(--sh-font-size-md);
+.sh-person-sheet__about {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.sh-person-sheet__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: var(--sh-radius-full);
+  background: color-mix(in srgb, var(--sh-text) 6%, var(--sh-bg-tertiary));
+  font-size: var(--sh-font-size-sm);
+}
+.sh-person-sheet__status-text { overflow-wrap: anywhere; unicode-bidi: isolate; }
+.sh-person-sheet__until { color: var(--sh-text-muted); white-space: nowrap; }
+.sh-person-sheet__bio { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.sh-person-sheet__note { margin: 0; font-size: var(--sh-font-size-sm); }
+.sh-person-sheet__actions { display: flex; flex-wrap: wrap; gap: var(--sh-space-sm); }
+.sh-person-sheet__actions .sh-btn {
+  flex: 1 1 140px;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+}
+.sh-person-sheet__rows { border-top: 1px solid var(--sh-border); }
+.sh-person-sheet__row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 52px;
+  border-bottom: 1px solid var(--sh-border);
+}
+.sh-person-sheet__row > .sh-conn-ico { width: 18px; height: 18px; color: var(--sh-text-muted); }
+.sh-person-sheet__row-body { display: flex; flex-direction: column; min-width: 0; }
+.sh-person-sheet__row-label { font-size: var(--sh-font-size-xs); color: var(--sh-text-muted); }
+.sh-person-sheet__row-value {
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sh-friend-actions__real-name,
-.sh-friend-actions__household {
-  font-size: var(--sh-font-size-xs);
+.sh-person-sheet__row--btn {
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--sh-border);
+  font: inherit;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
 }
-.sh-friend-actions__buttons {
-  flex-wrap: wrap;
+.sh-person-sheet__row--btn .sh-person-sheet__row-value { color: var(--sh-primary-text); font-weight: 600; }
+.sh-person-sheet__row--btn:hover { background: color-mix(in srgb, var(--sh-text) 4%, transparent); }
+.sh-person-sheet__row--btn:focus-visible,
+.sh-person-sheet__quiet button:focus-visible {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+  border-radius: var(--sh-radius-sm);
+}
+.sh-person-sheet__chev { color: var(--sh-text-muted); display: inline-flex; }
+.sh-person-sheet__quiet { display: flex; flex-wrap: wrap; gap: var(--sh-space-lg); }
+.sh-person-sheet__quiet button {
+  min-height: 40px;
+  padding: 0 2px;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  cursor: pointer;
+}
+.sh-person-sheet__quiet button:hover { text-decoration: underline; }
+.sh-person-sheet__quiet .sh-person-sheet__danger { color: var(--sh-danger); }
+@media (max-width: 640px) {
+  .sh-person-sheet .sh-modal-header { padding: var(--sh-space-sm) var(--sh-space-md) 0; }
+  .sh-person-sheet .sh-modal-body {
+    padding-bottom: calc(var(--sh-space-lg) + env(safe-area-inset-bottom, 0px));
+  }
 }
 
 .sh-feed {
@@ -19208,13 +19331,6 @@ a.sh-btn--ghost:hover {
 }
 .sh-highlight-viewer-overflow:hover {
   background: var(--sh-bg-secondary);
-}
-
-/* User-actions popover (UserActionsMenu) */
-.sh-user-actions {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-sm);
 }
 
 /* Settings → Privacy → Blocked accounts */

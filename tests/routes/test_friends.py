@@ -14,6 +14,8 @@ Coverage:
   ``bio`` (or ``None``).
 * Guardian blocks (§CP.F2) hide the counterpart both ways, like a
   personal block; deprovisioned remote users never appear.
+* ``GET /api/friends/{user_id}`` returns one person with the same rules —
+  404 for everyone the overview would hide.
 """
 
 from __future__ import annotations
@@ -688,3 +690,150 @@ async def test_friends_remote_users_of_non_social_household_not_listed(client):
     assert [h["instance_id"] for h in body["households"]] == ["peer-a"]
     assert _member(body, "ru-p") is None
     assert body["totals"]["people"] == len(body["instance"]["members"]) + 1
+
+
+# ─── GET /api/friends/{user_id} — one person for the person sheet ────────
+
+
+async def _person(client, user_id: str, token: str | None = None):
+    return await client.get(
+        f"/api/friends/{user_id}", headers=_auth(token or client._tok)
+    )
+
+
+async def test_person_local_member_with_household_status_and_bio(client):
+    await _seed_local_user(
+        client,
+        user_id="uid-oma",
+        username="oma",
+        bio="Knits, bakes",
+        status_emoji="☕",
+        status_text="Coffee at 3",
+    )
+    r = await _person(client, "uid-oma")
+    assert r.status == 200
+    body = await r.json()
+    assert body["user_id"] == "uid-oma"
+    assert body["username"] == "oma"
+    assert body["is_local"] is True
+    assert body["household"]["is_own"] is True
+    assert body["household"]["display_name"]
+    assert body["bio"] == "Knits, bakes"
+    assert body["status"]["emoji"] == "☕"
+    assert body["status"]["text"] == "Coffee at 3"
+    assert body["is_online"] is False
+
+
+async def test_person_remote_member_carries_household_alias_and_signed_picture(
+    client,
+):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await _seed_remote_user(
+        client._db,
+        user_id="ru-chidi",
+        instance_id="peer-a",
+        name="Chidi",
+        bio="Loves hiking",
+        status_json=json.dumps({"emoji": "🌞", "text": "Holiday"}),
+    )
+    await client._db.enqueue(
+        "UPDATE remote_users SET picture_hash='deadbeefdeadbeef' WHERE user_id='ru-chidi'"
+    )
+    put = await client.put(
+        "/api/aliases/users/ru-chidi",
+        json={"alias": "Coach"},
+        headers=_auth(client._tok),
+    )
+    assert put.status in (200, 201)
+    r = await _person(client, "ru-chidi")
+    assert r.status == 200
+    body = await r.json()
+    assert body["is_local"] is False
+    assert body["instance_id"] == "peer-a"
+    assert body["remote_username"] == "chidi"
+    assert body["personal_alias"] == "Coach"
+    assert body["display_name"] == "Chidi"
+    assert body["household"] == {
+        "instance_id": "peer-a",
+        "display_name": "Peer-A Household",
+        "is_own": False,
+    }
+    assert body["status"]["emoji"] == "🌞"
+    assert body["bio"] == "Loves hiking"
+    assert "sig=" in body["picture_url"]
+    raw = json.dumps(body)
+    for leak in ("remote_inbox_url", "key_self_to_remote", "routing_secret"):
+        assert leak not in raw
+
+
+async def test_person_requires_auth(client):
+    r = await client.get("/api/friends/whoever")
+    assert r.status == 401
+
+
+async def test_person_unknown_is_404(client):
+    r = await _person(client, "nobody")
+    assert r.status == 404
+
+
+async def test_person_blocked_is_404_and_unblocked_again_200(client):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await _seed_remote_user(client._db, user_id="ru-x", instance_id="peer-a", name="X")
+    await _seed_local_user(client, user_id="uid-l", username="lisa")
+    for uid in ("ru-x", "uid-l"):
+        r = await client.post(
+            "/api/blocks", json={"user_id": uid}, headers=_auth(client._tok)
+        )
+        assert r.status == 201
+        assert (await _person(client, uid)).status == 404
+    r = await client.delete("/api/blocks/ru-x", headers=_auth(client._tok))
+    assert r.status in (200, 204)
+    assert (await _person(client, "ru-x")).status == 200
+
+
+async def test_person_guardian_block_is_404_both_ways(client):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await _seed_remote_user(
+        client._db, user_id="ru-bad", instance_id="peer-a", name="Bad"
+    )
+    await _seed_local_user(
+        client,
+        user_id="uid-kid",
+        username="kid",
+        token="kid-tok",
+        child_protection_enabled=1,
+        is_minor=1,
+    )
+    await _seed_local_user(client, user_id="uid-uncle", username="uncle", token="u-tok")
+    await _guardian_block(client, "uid-kid", "ru-bad")
+    await _guardian_block(client, "uid-kid", "uid-uncle")
+    assert (await _person(client, "ru-bad", "kid-tok")).status == 404
+    assert (await _person(client, "uid-uncle", "kid-tok")).status == 404
+    assert (await _person(client, "uid-kid", "u-tok")).status == 404
+    # Everyone else still sees both.
+    assert (await _person(client, "uid-kid")).status == 200
+    assert (await _person(client, "ru-bad")).status == 200
+
+
+async def test_person_deprovisioned_and_non_social_remote_are_404(client):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await fed_repo.save_instance(_peer("peer-p", status=PairingStatus.PENDING_SENT))
+    await _seed_remote_user(
+        client._db, user_id="ru-gone", instance_id="peer-a", name="Gone"
+    )
+    await _seed_remote_user(client._db, user_id="ru-p", instance_id="peer-p", name="P")
+    await client._db.enqueue(
+        "UPDATE remote_users SET deprovisioned_at=datetime('now') WHERE user_id=?",
+        ("ru-gone",),
+    )
+    assert (await _person(client, "ru-gone")).status == 404
+    assert (await _person(client, "ru-p")).status == 404
+
+
+async def test_person_inactive_local_user_is_404(client):
+    await _seed_local_user(client, user_id="uid-off", username="off", state="inactive")
+    assert (await _person(client, "uid-off")).status == 404

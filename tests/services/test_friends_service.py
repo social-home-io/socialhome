@@ -10,7 +10,9 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.user import RemoteUser, User, UserStatus
-from socialhome.services.friends_service import FriendsService
+import pytest
+
+from socialhome.services.friends_service import FriendNotFoundError, FriendsService
 
 _FUTURE = "2099-01-01T00:00:00+00:00"
 _PAST = "2000-01-01T00:00:00+00:00"
@@ -30,6 +32,14 @@ class _Users:
     async def list_all_known_remote(self):
         self.calls.append("list_all_known_remote")
         return list(self.remote)
+
+    async def get_by_user_id(self, user_id):
+        self.calls.append("get_by_user_id")
+        return next((u for u in self.local if u.user_id == user_id), None)
+
+    async def get_remote(self, user_id):
+        self.calls.append("get_remote")
+        return next((r for r in self.remote if r.user_id == user_id), None)
 
     async def list_blocked(self, user_id):
         self.calls.append("list_blocked")
@@ -228,3 +238,105 @@ async def test_instance_dict_never_leaks_keys():
     for key in ("remote_inbox_url", "key_self_to_remote", "remote_identity_pk"):
         assert key not in h
     assert payload["instance"]["display_name"] == "Us"
+
+
+# ─── person() — one row for the person sheet ─────────────────────────────
+
+
+def _svc(users, instances=(), *, local=None, cp=None, online=None, aliases=None):
+    return FriendsService(
+        users,
+        _Fed(list(instances), local=local),
+        child_protection=cp,
+        online_status=online,
+        alias_resolver=aliases,
+    )
+
+
+async def test_person_local_row_has_own_household():
+    users = _Users([_u("oma", bio="Knits", status=UserStatus(emoji="☕"))], [])
+    svc = _svc(
+        users,
+        local={"instance_id": "me-inst", "display_name": "Vizeli"},
+        online=_Online(online={"oma"}),
+        aliases=_Aliases({"oma": "Grandma"}),
+    )
+    row = await svc.person("viewer", "oma")
+    assert row["is_local"] is True
+    assert row["username"] == "oma"
+    assert row["personal_alias"] == "Grandma"
+    assert row["is_online"] is True
+    assert row["bio"] == "Knits"
+    assert row["status"]["emoji"] == "☕"
+    assert row["household"] == {
+        "instance_id": "me-inst",
+        "display_name": "Vizeli",
+        "is_own": True,
+    }
+    # Never touches the remote table for a local hit.
+    assert "get_remote" not in users.calls
+
+
+async def test_person_local_household_falls_back_to_home():
+    svc = _svc(_Users([_u("a")], []))
+    row = await svc.person("viewer", "a")
+    assert row["household"] == {
+        "instance_id": None,
+        "display_name": "Home",
+        "is_own": True,
+    }
+
+
+async def test_person_remote_row_has_paired_household():
+    svc = _svc(
+        _Users([], [_ru("r1", "peer", bio="Hi", status_json='{"text": "away"}')]),
+        [_inst("peer")],
+    )
+    row = await svc.person("viewer", "r1")
+    assert row["is_local"] is False
+    assert row["instance_id"] == "peer"
+    assert row["bio"] == "Hi"
+    assert row["status"]["text"] == "away"
+    assert row["household"] == {
+        "instance_id": "peer",
+        "display_name": "peer",
+        "is_own": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "unknown",
+        "blocked",
+        "guardian",
+        "inactive",
+        "deleted",
+        "deprovisioned",
+        "unpaired",
+    ],
+)
+async def test_person_hidden_people_raise_not_found(case):
+    local = [
+        _u("off", state="inactive"),
+        _u("gone", deleted_at=_PAST),
+        _u("blk"),
+        _u("grd"),
+    ]
+    remote = [_ru("dep", "peer", deprovisioned_at=_PAST), _ru("away", "other")]
+    target = {
+        "unknown": "nobody",
+        "blocked": "blk",
+        "guardian": "grd",
+        "inactive": "off",
+        "deleted": "gone",
+        "deprovisioned": "dep",
+        "unpaired": "away",
+    }[case]
+    svc = _svc(
+        _Users(local, remote, blocked=("blk",)),
+        [_inst("peer")],
+        cp=_CP({"viewer": {"grd"}}),
+    )
+    with pytest.raises(FriendNotFoundError):
+        await svc.person("viewer", target)

@@ -1,4 +1,4 @@
-"""Friends route — /api/friends.
+"""Friends routes — /api/friends and /api/friends/{user_id}.
 
 A non-admin, social-shape view of "everyone we're connected to": the
 local household members + every social remote household plus its
@@ -32,3 +32,23 @@ class FriendsView(BaseView):
         if signer is not None:
             sign_media_urls_in(payload, signer)
         return self._json(payload)
+
+
+class FriendView(BaseView):
+    """``GET /api/friends/{user_id}`` — one person, for the person sheet.
+
+    The same row ``GET /api/friends`` would list for them, plus
+    ``is_local`` and ``household``. 404 for anyone the Friends page
+    would not show the viewer (unknown, blocked, guardian-separated,
+    deprovisioned, or only met through a shared space).
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        person = await self.svc(friends_service_key).person(
+            ctx.user_id, self.match("user_id")
+        )
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(person, signer)
+        return self._json(person)

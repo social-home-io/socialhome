@@ -77,6 +77,7 @@ from ..services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictStaleError,
 )
+from ..services.friends_service import FriendNotFoundError
 from ..services.poll_service import PollNotFoundError
 from ..services.presence_service import UserNotFoundError as PresenceUserNotFoundError
 from ..services.space_zone_service import (
@@ -314,6 +315,7 @@ class BaseView(web.View):
             HighlightPublicationNotFoundError,
             MomentNotFoundError,
             PresenceUserNotFoundError,
+            FriendNotFoundError,
             CpUserNotFoundError,
             AppNotFoundError,
         ) as exc:

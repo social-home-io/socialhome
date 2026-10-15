@@ -49,6 +49,19 @@ if TYPE_CHECKING:
     from .online_status_service import OnlineStatusService
 
 
+#: Own-household label when the instance identity row has no name yet.
+_OWN_HOUSEHOLD_FALLBACK = "Home"
+
+
+class FriendNotFoundError(LookupError):
+    """``GET /api/friends/{user_id}`` — nobody the viewer may see.
+
+    One error for unknown, blocked, guardian-separated, deprovisioned and
+    not-socially-paired people alike, so the 404 never tells the viewer
+    *why* someone is out of reach.
+    """
+
+
 class FriendsService:
     """Builds the ``GET /api/friends`` payload for one viewer.
 
@@ -109,7 +122,8 @@ class FriendsService:
 
         local_block = {
             "instance_id": local_id["instance_id"] if local_id else None,
-            "display_name": (local_id or {}).get("display_name") or "Home",
+            "display_name": (local_id or {}).get("display_name")
+            or _OWN_HOUSEHOLD_FALLBACK,
             "home_lat": (local_id or {}).get("home_lat"),
             "home_lon": (local_id or {}).get("home_lon"),
             "members": [self._local_member(u, aliases, now) for u in local_users],
@@ -135,6 +149,68 @@ class FriendsService:
             "instance": local_block,
             "households": households,
             "totals": {"households": 1 + len(households), "people": people},
+        }
+
+    async def person(self, viewer_user_id: str, user_id: str) -> dict:
+        """One member row of :meth:`overview`, plus where they live.
+
+        Backs the SPA's person sheet when a surface only knows a user id
+        (a highlight author, a momentum row). The visible set is exactly
+        the one :meth:`overview` lists — active local users and the
+        non-deprovisioned people of socially paired households, minus
+        personal blocks and guardian-block counterparts — so this read
+        never reveals someone the Friends page would hide.
+
+        The row carries ``is_local`` and ``household`` —
+        ``{instance_id, display_name, is_own}`` — on top of the overview's
+        member keys (unsigned ``picture_url``; the route signs).
+
+        Raises :class:`FriendNotFoundError` for everyone else.
+        """
+        if user_id in await self._hidden_for(viewer_user_id):
+            raise FriendNotFoundError("person not found")
+        now = datetime.now(timezone.utc)
+        aliases: dict[str, str] = {}
+        if self._aliases is not None:
+            aliases = await self._aliases.resolve_users(viewer_user_id, [user_id])
+
+        user = await self._users.get_by_user_id(user_id)
+        if user is not None and user.state == "active" and user.deleted_at is None:
+            local_id = await self._federation.get_local_identity() or {}
+            return {
+                **self._local_member(user, aliases, now),
+                "is_local": True,
+                "household": {
+                    "instance_id": local_id.get("instance_id"),
+                    "display_name": local_id.get("display_name")
+                    or _OWN_HOUSEHOLD_FALLBACK,
+                    "is_own": True,
+                },
+            }
+
+        ru = await self._users.get_remote(user_id)
+        if ru is None or ru.deprovisioned_at is not None:
+            raise FriendNotFoundError("person not found")
+        # §D2b: a household we only share a space with is not a social
+        # peer — its people are not on the Friends page, so not here.
+        inst = next(
+            (
+                i
+                for i in await self._federation.list_social_instances()
+                if i.id == ru.instance_id
+            ),
+            None,
+        )
+        if inst is None:
+            raise FriendNotFoundError("person not found")
+        return {
+            **self._remote_member(ru, aliases, now),
+            "is_local": False,
+            "household": {
+                "instance_id": inst.id,
+                "display_name": inst.effective_display_name,
+                "is_own": False,
+            },
         }
 
     async def _hidden_for(self, viewer_user_id: str) -> set[str]:

@@ -22,7 +22,7 @@ import { Button } from '@/components/Button'
 import { openHighlightQuickShare } from '@/components/HighlightQuickShareDialog'
 import { showToast } from '@/components/Toast'
 import { currentUser } from '@/store/auth'
-import { openUserActions } from '@/components/UserActionsMenu'
+import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import {
   householdDisplayName,
@@ -131,7 +131,9 @@ export default function HighlightsInboxTab() {
             aria-label={t('highlight.more_actions', { name })}
             onClick={(ev) => {
               ev.stopPropagation()
-              openUserActions(item.highlight.author_user_id)
+              openPerson(item.highlight.author_user_id, {
+                person: { display_name: name, picture_url: picture },
+              })
             }}
           >
             ⋯

@@ -219,7 +219,7 @@ from .space_polls import (
     SpaceSchedulePollSlotResponseView,
     SpaceSchedulePollSummaryView,
 )
-from .friends import FriendsView
+from .friends import FriendView, FriendsView
 from .presence import PresenceCollectionView, PresenceLocationView
 from .peer_spaces import PeerSpaceCollectionView
 from .public_spaces import (
@@ -786,6 +786,7 @@ def setup_routes(app: web.Application) -> None:  # noqa: C901
 
     # ── Friends (connected-people dashboard, non-admin) ─────────────────
     app.router.add_view("/api/friends", FriendsView)
+    app.router.add_view("/api/friends/{user_id}", FriendView)
 
     # ── Shopping ────────────────────────────────────────────────────────
     app.router.add_view("/api/shopping", ShoppingCollectionView)

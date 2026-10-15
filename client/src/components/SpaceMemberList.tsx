@@ -17,7 +17,7 @@ import { Button } from './Button'
 import { t, isOne } from '@/i18n/i18n'
 import { openReport } from './ReportDialog'
 import { showToast } from './Toast'
-import { AliasDialog, openAliasDialog } from './AliasDialog'
+import { openAliasDialog } from './AliasDialog'
 import { openMemberActions, MemberActionSheet, roleLabel } from './MemberActionSheet'
 import { hasSettingsAuthority, type SpaceRole } from '@/features/spaces/spaceRoles'
 import {
@@ -432,7 +432,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
       </div>
       <MemberActionSheet onUpdate={reload} />
       <SpaceProfileDialog />
-      <AliasDialog />
+      {/* AliasDialog is mounted once in the app shell. */}
     </>
   )
 }
