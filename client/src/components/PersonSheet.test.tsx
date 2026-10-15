@@ -219,6 +219,38 @@ describe('PersonSheet', () => {
     expect(q(document, 'person-block')).not.toBeNull()
   })
 
+  it('a 404 never offers Message, even when the opener hinted how to address them', async () => {
+    // A space roster / chat hint may carry is_local + username (or a
+    // remote id); once the household says "not someone you're connected
+    // to" (guardian-separated, space-only), Message would only fail.
+    render(<PersonSheet />)
+    await act(async () => {
+      openPerson('u-kid', { person: { display_name: 'Kid', is_local: true, username: 'kid' } })
+    })
+    await waitFor(() => { expect(q(document, 'person-limited')).not.toBeNull() })
+    expect(q(document, 'person-message')).toBeNull()
+    expect(q(document, 'person-call')).toBeNull()
+    await act(async () => {
+      openPerson('ru-x', { person: { display_name: 'Remote', is_local: false } })
+    })
+    await waitFor(() => { expect(q(document, 'person-limited')).not.toBeNull() })
+    expect(q(document, 'person-message')).toBeNull()
+    // A space roster hint carries the household (never is_local) — it
+    // still shows after the 404: useful context for a stranger.
+    await act(async () => {
+      openPerson('ru-y', {
+        person: {
+          display_name: 'Spacey',
+          household: { instance_id: 'p-x', display_name: 'Far away', is_own: false },
+        },
+      })
+    })
+    await waitFor(() => { expect(q(document, 'person-limited')).not.toBeNull() })
+    expect(q(document, 'person-message')).toBeNull()
+    expect(q(document, 'person-household')?.textContent).toContain('Far away')
+    expect(q(document, 'person-report')).not.toBeNull()
+  })
+
   it('a stale fetch never paints over the person opened after it', async () => {
     let resolveFirst: (v: unknown) => void = () => {}
     apiMock.get.mockImplementation((path: string) => {

@@ -17,6 +17,8 @@ import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
+import { personHint } from '@/utils/personHint'
+import { PersonButton } from './PersonButton'
 import type { EventRsvp } from '@/types'
 
 export interface HostApprovalQueueProps {
@@ -164,7 +166,15 @@ function PendingRowItem({
           </span>
         )}
         <div class="sh-host-queue-meta">
-          <span class="sh-host-queue-name">{name}</span>
+          {/* Who's asking to come — their person sheet, before deciding. */}
+          <PersonButton
+            userId={row.user_id}
+            hint={() => personHint(spaceId, row.user_id)}
+            class="sh-person-btn--name sh-host-queue-name"
+            data-testid="host-queue-person"
+          >
+            {name}
+          </PersonButton>
           <span class="sh-host-queue-when">{requestedAgo}</span>
         </div>
       </div>

@@ -18,6 +18,11 @@ vi.mock('@/api', () => ({
 }))
 vi.mock('@/store/auth', () => ({ currentUser: { value: { user_id: 'u-me' } } }))
 
+const openPersonSpy = vi.hoisted(() => vi.fn())
+vi.mock('@/components/PersonSheet', () => ({
+  openPerson: (...args: unknown[]) => openPersonSpy(...args),
+}))
+
 const MEMBERS = [
   { user_id: 'u-me', username: 'me', display_name: 'Me', picture_url: null, is_self: true, instance_id: null },
   { user_id: 'u-ana', username: 'ana', display_name: 'Ana', picture_url: null, is_self: false, instance_id: null },
@@ -184,5 +189,36 @@ describe('GroupInfoDialog', () => {
     fireEvent.click(getByText('Unmute'))
     await waitFor(() => expect(onMuteChange).toHaveBeenCalledWith(null))
     expect(del).toHaveBeenCalledWith('/api/conversations/g1/mute')
+  })
+})
+
+describe('GroupInfoDialog — members open the person sheet', () => {
+  it('closes group info, then opens the member with the roster hint', async () => {
+    openPersonSpy.mockReset()
+    const order: string[] = []
+    const onClose = vi.fn(() => { order.push('close') })
+    openPersonSpy.mockImplementation(() => { order.push('open') })
+    const { GroupInfoDialog } = await import('./GroupInfoDialog')
+    const view = render(
+      <GroupInfoDialog open convId="g1" name="Crew" managedHere={false}
+        mutedUntil={null} onMuteChange={vi.fn()} members={MEMBERS}
+        onClose={onClose} onChanged={vi.fn()} onLeft={vi.fn()} />,
+    )
+    const people = view.getAllByTestId('groupinfo-person')
+    expect(people).toHaveLength(MEMBERS.length)
+    const bob = people.find(b => b.getAttribute('data-person-id') === 'u-bro')!
+    fireEvent.click(bob)
+    expect(order).toEqual(['close', 'open'])
+    expect(openPersonSpy).toHaveBeenCalledWith('u-bro', {
+      person: {
+        display_name: 'Bob',
+        household: { instance_id: 'inst-b', display_name: "Brother's house", is_own: false },
+      },
+    })
+    const ana = people.find(b => b.getAttribute('data-person-id') === 'u-ana')!
+    fireEvent.click(ana)
+    expect(openPersonSpy).toHaveBeenLastCalledWith('u-ana', {
+      person: { display_name: 'Ana', is_local: true, username: 'ana' },
+    })
   })
 })

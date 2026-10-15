@@ -16,6 +16,7 @@ import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Avatar } from '@/components/Avatar'
+import { PersonButton } from '@/components/PersonButton'
 import { StatusEditor, formatClearsAt } from '@/components/StatusEditor'
 import { Spinner } from '@/components/Spinner'
 import { Button } from '@/components/Button'
@@ -260,15 +261,30 @@ export default function PresencePage() {
         const online = p.is_online ? (p.is_idle ? 'idle' : 'online') : null
         const lastSeen = humanizeAgo(p.last_seen_at)
         return (
-          <div key={p.username}
-               class={`sh-presence-card sh-presence-card--${p.state}`}>
+          // The whole card opens the person's sheet (Message, Call,
+          // their status in full).
+          <PersonButton
+            key={p.username}
+            userId={p.user_id}
+            hint={() => ({
+              display_name: p.display_name,
+              picture_url: p.picture_url,
+              username: p.username,
+              is_local: true,
+              is_online: p.is_online,
+              is_idle: p.is_idle,
+              status: p.status ?? null,
+            })}
+            class={`sh-presence-card sh-presence-card--${p.state}`}
+            data-testid="presence-card"
+          >
             <span class={presenceDot(p.state)} />
             <Avatar
               name={p.display_name}
               src={p.picture_url}
               online={online}
             />
-            <div>
+            <span class="sh-presence-card-body">
               <strong>{p.display_name}</strong>
               {p.dnd && <span class="sh-badge sh-badge--dnd">{t('presence.dnd_badge')}</span>}
               <span class={`sh-presence-state sh-presence-state--${p.state}`}>
@@ -283,8 +299,8 @@ export default function PresencePage() {
               {statusLine(p.status) && (
                 <span class="sh-presence-status">{statusLine(p.status)}</span>
               )}
-            </div>
-          </div>
+            </span>
+          </PersonButton>
         )
       })}
       </div>

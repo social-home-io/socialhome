@@ -154,3 +154,48 @@ describe('renderMarkdown — no Referer to third parties', () => {
     expect(html).toContain('rel="noopener noreferrer"')
   })
 })
+
+describe('renderMarkdown — interactive @mentions (person sheet)', () => {
+  const tokens = new Set(['anna', 'bob@k3f9x2', 'here'])
+
+  test('a person mention becomes a typed button carrying its token', () => {
+    const out = renderMarkdown('hi @Anna!', { mentions: tokens, interactive: true })
+    expect(out).toBe(
+      'hi <button type="button" class="sh-mention" data-mention="anna">@Anna</button>!',
+    )
+    const self = renderMarkdown('@anna', { mentions: tokens, selfMention: 'anna', interactive: true })
+    expect(self).toContain('class="sh-mention sh-mention--self" data-mention="anna"')
+  })
+
+  test('@here stays a plain chip — it is not a person', () => {
+    const out = renderMarkdown('@here dinner', { mentions: tokens, interactive: true })
+    expect(out).toBe('<span class="sh-mention sh-mention--here">@here</span> dinner')
+  })
+
+  test('a mention inside link text stays a span (no control inside a link)', () => {
+    const out = renderMarkdown('[@anna rocks](https://example.com) @anna', {
+      mentions: tokens, interactive: true,
+    })
+    const doc = new DOMParser().parseFromString(out, 'text/html')
+    expect(doc.querySelectorAll('a button')).toHaveLength(0)
+    expect(doc.querySelectorAll('a span.sh-mention')).toHaveLength(1)
+    expect(doc.querySelectorAll('button[data-mention="anna"]')).toHaveLength(1)
+  })
+
+  test('never inside code', () => {
+    const out = renderMarkdown('`@anna` ```\n@anna\n```', { mentions: tokens, interactive: true })
+    expect(out).not.toContain('<button')
+  })
+
+  test('a hostile token cannot break out of data-mention', () => {
+    const evil = new Set(['x" onclick="alert(1)', '<b>', 'anna'])
+    const out = renderMarkdown('@x" onclick="alert(1) @<b> @anna', {
+      mentions: evil, interactive: true,
+    })
+    const doc = new DOMParser().parseFromString(out, 'text/html')
+    expect(doc.querySelectorAll('[onclick], b')).toHaveLength(0)
+    const buttons = [...doc.querySelectorAll('button')]
+    expect(buttons.map(b => b.getAttribute('data-mention'))).toEqual(['anna'])
+    expect(buttons[0].getAttributeNames().sort()).toEqual(['class', 'data-mention', 'type'])
+  })
+})

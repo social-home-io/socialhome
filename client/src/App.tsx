@@ -12,8 +12,6 @@ import { isGuardian, loadGuardian } from '@/store/guardian'
 import { loadDmUnread } from '@/store/dms'
 import { loadUserPreferences } from '@/store/userPreferences'
 import { loadHouseholdTheme } from '@/store/householdTheme'
-import { pageTitle, pageTitleAvatar } from '@/store/pageTitle'
-import { Avatar } from '@/components/Avatar'
 import { toggles, loadToggles } from '@/components/HouseholdToggles'
 import { SetupPage } from '@/features/setup/SetupPage'
 import { ForgotPasswordPage } from '@/features/auth/ForgotPasswordPage'
@@ -22,7 +20,7 @@ import { routes } from './router'
 import { Button } from '@/components/Button'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { NotificationBell, startNotificationPolling, stopNotificationPolling } from '@/components/NotificationBell'
-import { SearchBar } from '@/components/SearchBar'
+import { SearchBar, openSearchResult } from '@/components/SearchBar'
 import { QuickSwitcher } from '@/components/QuickSwitcher'
 import { KeyboardShortcutsDialog } from '@/components/KeyboardShortcutsDialog'
 import { installKeyboardShortcuts } from '@/lib/shortcuts'
@@ -38,6 +36,7 @@ import { CallTypePickerDialog } from '@/components/CallTypePickerDialog'
 import { CallEmbedBlockedDialog } from '@/features/calls/CallEmbedBlockedDialog'
 import { ConfirmDialogHost } from '@/components/confirm'
 import { PersonSheet } from '@/components/PersonSheet'
+import { TopBarHeading } from '@/components/TopBarHeading'
 import { AliasDialog } from '@/components/AliasDialog'
 import { HighlightPublishMenu } from '@/features/highlights/HighlightPublishMenu'
 import { RejectReasonDialog } from '@/components/RejectReasonDialog'
@@ -103,22 +102,10 @@ function IngressAuthFailed() {
 }
 
 function TopBar() {
-  const avatar = pageTitleAvatar.value
   return (
     <header class="sh-topbar" role="banner">
-      {pageTitle.value && (
-        <div class="sh-topbar-heading">
-          {avatar && (
-            <Avatar
-              src={avatar.src}
-              name={avatar.name || pageTitle.value}
-              size={28}
-            />
-          )}
-          <h1 class="sh-topbar-title">{pageTitle.value}</h1>
-        </div>
-      )}
-      <SearchBar />
+      <TopBarHeading />
+      <SearchBar onSelect={openSearchResult} />
       <NotificationBell />
     </header>
   )

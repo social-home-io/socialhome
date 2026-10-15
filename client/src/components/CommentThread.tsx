@@ -30,7 +30,9 @@ import {
 import { TypingIndicator, sendTyping } from './TypingIndicator'
 import { currentUser } from '@/store/auth'
 import { spaceMentionRender, viewerSpaceRole } from '@/store/spaceMembers'
-import { splitMentions } from '@/utils/mentions'
+import { MentionText } from './MentionText'
+import { PersonButton, openSpaceMention } from './PersonButton'
+import { personHint } from '@/utils/personHint'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import type { Comment } from '@/types'
 import { confirmDialog } from '@/components/confirm'
@@ -342,15 +344,26 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
   const canReport = !isMine
   const hasMenu = canEdit || canDelete || canReport
 
+  const hint = () => personHint(spaceId, comment.author)
   return (
     <div class={`sh-comment-item ${indent ? 'sh-comment--indent' : ''}`}>
-      <Avatar name={authorName} src={avatarUrl} size={28} />
+      <PersonButton userId={comment.author} hint={hint}
+        class="sh-person-btn--avatar" decorative>
+        <Avatar name={authorName} src={avatarUrl} size={28} />
+      </PersonButton>
       <div class="sh-comment-body">
         <div class="sh-comment-bubble">
-          <span class="sh-comment-author">{authorName}</span>
+          <PersonButton userId={comment.author} hint={hint}
+            class="sh-person-btn--name sh-comment-author"
+            data-testid="comment-author">
+            {authorName}
+          </PersonButton>
           <span class="sh-comment-text">
-            <MentionText text={comment.content ?? ''} spaceId={spaceId}
-              authorId={comment.author} />
+            <MentionText text={comment.content ?? ''}
+              {...spaceMentionRender(spaceId, comment.author)}
+              onMention={spaceId
+                ? (token) => openSpaceMention(spaceId, token)
+                : undefined} />
           </span>
         </div>
         <div class="sh-comment-actions">
@@ -434,31 +447,4 @@ function formatRelative(iso: string): string {
   if (hours < 24) return t('time.hours_ago_short', { n: String(hours) })
   const days = Math.floor(hours / 24)
   return t('time.days_ago', { n: String(days) })
-}
-
-/** Plain comment text with the space's known @-mentions highlighted.
- *  JSX all the way down — user text is never parsed as HTML. */
-function MentionText({ text, spaceId, authorId }: {
-  text: string
-  spaceId?: string | null
-  authorId?: string | null
-}) {
-  const { mentions, selfMention } = spaceMentionRender(spaceId, authorId)
-  const self = selfMention?.toLocaleLowerCase() ?? null
-  return (
-    <>
-      {splitMentions(text, mentions).map((p, i) => (
-        typeof p === 'string'
-          ? p
-          : (
-            <span key={i}
-              class={p.token === 'here'
-                ? 'sh-mention sh-mention--here'
-                : p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'}>
-              {p.raw}
-            </span>
-          )
-      ))}
-    </>
-  )
 }

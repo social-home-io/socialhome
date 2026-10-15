@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { SpaceMemberProfile } from '@/types'
 import {
+  findMentionMember,
   findMentionTrigger,
   mentionCandidates,
   mentionTokenSet,
@@ -114,5 +115,24 @@ describe('splitMentions', () => {
 
   test('no tokens → single text part', () => {
     expect(splitMentions('@anna', new Set())).toEqual(['@anna'])
+  })
+})
+
+describe('findMentionMember', () => {
+  const roster = [
+    member({ user_id: 'u-anna', mention: 'Anna' }),
+    member({ user_id: 'u-bob', mention: 'bob@k3f9x2' }),
+    member({ user_id: 'u-none', mention: null }),
+  ]
+
+  test('matches the rendered token case-insensitively', () => {
+    expect(findMentionMember(roster, 'anna')?.user_id).toBe('u-anna')
+    expect(findMentionMember(roster, 'BOB@k3f9x2')?.user_id).toBe('u-bob')
+  })
+
+  test('unknown, @here, or no roster → undefined', () => {
+    expect(findMentionMember(roster, 'nobody')).toBeUndefined()
+    expect(findMentionMember([member({ user_id: 'u-h', mention: 'here' })], 'here')).toBeUndefined()
+    expect(findMentionMember(undefined, 'anna')).toBeUndefined()
   })
 })

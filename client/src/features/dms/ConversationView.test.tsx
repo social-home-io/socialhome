@@ -26,6 +26,12 @@ vi.mock('@/api', () => ({
   },
 }))
 
+const openPersonSpy = vi.hoisted(() => vi.fn())
+vi.mock('@/components/PersonSheet', () => ({
+  openPerson: (...args: unknown[]) => openPersonSpy(...args),
+  PersonSheet: () => null,
+}))
+
 vi.mock('@/components/LocationMap', () => ({
   LocationMap: () => <div data-testid="map" />,
 }))
@@ -664,5 +670,87 @@ describe('ConversationView — typing on a phone', () => {
     fireEvent.click(send)
     await waitFor(() => { expect(apiPost).toHaveBeenCalled() })
     expect(document.activeElement).toBe(ta)
+  })
+})
+
+describe('ConversationView — people open the person sheet', () => {
+  beforeEach(() => { openPersonSpy.mockReset() })
+
+  it('a group chat sender name opens their sheet with the roster hint', async () => {
+    const { render, waitFor, fireEvent, ConversationView } = await setup()
+    const { container } = render(<ConversationView conversationId="conv-b" />)
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="message-sender"]')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    const sender = container.querySelector<HTMLButtonElement>('[data-testid="message-sender"]')!
+    expect(sender.tagName).toBe('BUTTON')
+    expect(sender.textContent).toBe('Bob')
+    fireEvent.click(sender)
+    expect(openPersonSpy).toHaveBeenCalledWith('u-bob', {
+      person: {
+        display_name: 'Bob', is_local: true, username: 'bob',
+        is_online: false, is_idle: false,
+      },
+    })
+  })
+
+  it('a sender who left the group is plain text — nobody to open', async () => {
+    const wired = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (
+      url === '/api/conversations/conv-b/members'
+        ? roster.filter(r => r.user_id !== 'u-bob')
+        : wired(url)
+    ))
+    const { render, waitFor, ConversationView } = await setup()
+    const { container } = render(<ConversationView conversationId="conv-b" />)
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('BOB-conv-b')
+    }, { timeout: RENDER_WAIT })
+    await waitFor(() => {
+      expect(container.querySelector('[data-msg-id="conv-b-bob"] strong')).not.toBeNull()
+    })
+    expect(container.querySelector('[data-testid="message-sender"]')).toBeNull()
+  })
+
+  it('an @mention in a bubble is a button that opens that member', async () => {
+    const wired = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/conversations/conv-b/members') {
+        return roster.map(r => ({ ...r, mention: r.username }))
+      }
+      if (url.startsWith('/api/conversations/conv-b/messages')) {
+        return [msgRow('conv-b-m', 'ask @cat about it')]
+      }
+      return wired(url)
+    })
+    const { render, waitFor, fireEvent, ConversationView } = await setup()
+    const { container } = render(<ConversationView conversationId="conv-b" />)
+    await waitFor(() => {
+      expect(container.querySelector('button[data-mention="cat"]')).not.toBeNull()
+    }, { timeout: RENDER_WAIT })
+    fireEvent.click(container.querySelector('button[data-mention="cat"]')!)
+    expect(openPersonSpy).toHaveBeenCalledWith('u-cat', {
+      person: expect.objectContaining({ display_name: 'Cat', username: 'cat', is_local: true }),
+    })
+  })
+
+  it('a 1:1 thread names its peer in the TopBar as a person link', async () => {
+    const { render, waitFor, ConversationView } = await setup()
+    const { pageTitleAvatar } = await import('@/store/pageTitle')
+    render(<ConversationView conversationId="conv-a" />)
+    await waitFor(() => {
+      expect(pageTitleAvatar.value?.personId).toBe('u-bob')
+    }, { timeout: RENDER_WAIT })
+    expect(pageTitleAvatar.value?.personHint).toEqual(expect.objectContaining({
+      display_name: 'Bob', username: 'bob', is_local: true,
+    }))
+  })
+
+  it('a group thread sets no person on the TopBar', async () => {
+    const { render, waitFor, ConversationView, pageTitle } = await setup()
+    const { pageTitleAvatar } = await import('@/store/pageTitle')
+    render(<ConversationView conversationId="conv-b" />)
+    await waitFor(() => { expect(pageTitle.value).toBe('Group conv-b') }, { timeout: RENDER_WAIT })
+    expect(pageTitleAvatar.value).toBeNull()
   })
 })

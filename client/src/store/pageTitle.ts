@@ -14,6 +14,7 @@
  */
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
+import type { PersonHint } from '@/utils/personHint'
 
 export const pageTitle = signal<string>('')
 
@@ -30,6 +31,11 @@ export interface PageAvatar {
   src: string | null
   /** Used for the initials fallback when ``src`` is null / errors. */
   name: string
+  /** The person this heading is about (a 1:1 DM's peer). Set → the
+   *  TopBar avatar + title open their person sheet. */
+  personId?: string
+  /** What the page knows about them, for an instant sheet. */
+  personHint?: PersonHint
 }
 export const pageTitleAvatar = signal<PageAvatar | null>(null)
 
@@ -74,8 +80,9 @@ export function useTitle(title: string): void {
 export function useTitleAvatar(avatar: PageAvatar | null): void {
   const src = avatar?.src ?? null
   const name = avatar?.name ?? ''
+  const personId = avatar?.personId ?? null
   useEffect(() => {
     pageTitleAvatar.value = avatar
     return () => { pageTitleAvatar.value = null }
-  }, [src, name])
+  }, [src, name, personId])
 }

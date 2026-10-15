@@ -45,6 +45,10 @@ import {
   mentionInputAria,
 } from '@/components/MentionAutocomplete'
 import { MentionText } from '@/components/MentionText'
+import { PersonButton } from '@/components/PersonButton'
+import { openPerson } from '@/components/PersonSheet'
+import { findMentionMember } from '@/utils/mentions'
+import { rosterPersonHint } from '@/utils/personHint'
 import {
   conversationMentionRender,
   setConversationMembers,
@@ -1970,6 +1974,30 @@ export function ConversationView({
     return m?.display_name ?? m?.username ?? t('dms.former_member')
   }
 
+  /** The bubble's sender eyebrow — a button that opens their person
+   *  sheet while they're on the roster; plain text for a former member
+   *  (nothing to look up). */
+  const senderLabel = (userId: string) => {
+    const member = threadMembers.value.find(x => x.user_id === userId)
+    if (!member) return <strong>{senderName(userId)}</strong>
+    return (
+      <PersonButton
+        userId={userId}
+        hint={() => rosterPersonHint(member)}
+        class="sh-person-btn--name sh-message-sender"
+        data-testid="message-sender"
+      >
+        <strong>{senderName(userId)}</strong>
+      </PersonButton>
+    )
+  }
+
+  /** An @-mention in a bubble → that member's person sheet. */
+  const openMentioned = (token: string) => {
+    const member = findMentionMember(threadMembers.value, token)
+    if (member) openPerson(member.user_id, { person: rosterPersonHint(member) })
+  }
+
   /** One-line preview of a message's content for the quoted-reply card.
    *  Strips newlines and truncates to keep the bubble compact. */
   const quotePreview = (m: Message): string => {
@@ -2201,7 +2229,13 @@ export function ConversationView({
     <ThreadPageTitle
       title={peerTitle}
       avatar={peers.length === 1 && !isGroupThread
-        ? { src: peers[0].picture_url, name: peers[0].display_name }
+        ? {
+            src: peers[0].picture_url,
+            name: peers[0].display_name,
+            // The peer's name in the TopBar opens their person sheet.
+            personId: peers[0].user_id,
+            personHint: rosterPersonHint(peers[0]),
+          }
         : null}
     />
   )
@@ -2513,7 +2547,7 @@ export function ConversationView({
               class={`sh-message ${mine ? 'sh-message--mine' : ''} ${m.deleted ? 'sh-message--deleted' : ''}${groupClass}`}
               onPointerDown={onBubblePointerDown(m)}
             >
-              {!mine && showHeader && <strong>{senderName(m.sender_user_id)}</strong>}
+              {!mine && showHeader && senderLabel(m.sender_user_id)}
               {m.reply_to_id && (
                 <button
                   type="button"
@@ -2698,7 +2732,8 @@ export function ConversationView({
                 <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
                   {m.deleted
                     ? t('dms.message_deleted')
-                    : <MentionText text={m.content} {...mentionRender} />}
+                    : <MentionText text={m.content} {...mentionRender}
+                        onMention={openMentioned} />}
                 </p>
               )}
               {showFooter && (

@@ -207,7 +207,9 @@ export function PersonSheet() {
 
   // Message needs to know how to address them: local by username,
   // remote by user id. Unknown → no Message rather than a failing one.
-  const canMessage = !isSelf && !blocked
+  // Nor when the lookup 404'd (someone only met through a shared space):
+  // the household can't vouch a DM would reach them, whatever the hint.
+  const canMessage = !isSelf && !blocked && s.load !== 'unavailable'
     && (p.is_local === true ? !!p.username : p.is_local === false)
   const canCall = canMessage && p.is_local === true
 

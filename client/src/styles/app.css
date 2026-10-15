@@ -2422,6 +2422,78 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 .sh-friends-error .sh-btn { margin-top: var(--sh-space-sm); min-height: 44px; }
 
 
+/* PersonButton — a name / avatar that opens the person sheet. Looks
+ * exactly like what it wraps; the underline on hover / focus is the
+ * affordance (the global :focus-visible ring marks keyboard focus). */
+.sh-person-btn {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  line-height: inherit;
+  cursor: pointer;
+  border-radius: var(--sh-radius-sm);
+}
+/* The TopBar title as a person button keeps the h1's ellipsis. */
+.sh-topbar-person {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* In a column of meta lines the name hugs its text, not the row. */
+.sh-post-meta > .sh-person-btn,
+.sh-comment-bubble > .sh-person-btn,
+.sh-host-queue-meta > .sh-person-btn {
+  align-self: flex-start;
+  max-width: 100%;
+}
+.sh-person-btn--name:hover,
+.sh-person-btn--name:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* An avatar button keeps the avatar's round shape for the focus ring
+ * and never shrinks in a flex row. */
+.sh-person-btn--avatar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+/* A whole row / card as one target (member list, presence cards). */
+.sh-person-btn--row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 36px;
+}
+.sh-person-btn--row:hover strong,
+.sh-person-btn--row:focus-visible strong,
+.sh-person-btn--row:hover .sh-member-name,
+.sh-person-btn--row:focus-visible .sh-member-name {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* A resolved @-mention that opens the person sheet (``.sh-mention``
+ * supplies the chip look). */
+button.sh-mention {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+  line-height: inherit;
+  cursor: pointer;
+}
+button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px; }
+
 /* Person sheet (PersonSheet) — one surface for another person, opened
  * from every avatar / name / ⋯. Composes on the shared Modal: a centred
  * 480 px dialog on desktop, the bottom-sheet variant on phones (above the
@@ -9100,6 +9172,22 @@ button.sh-shopping-item__text:focus-visible {
   box-shadow: var(--sh-shadow-pinned);
   margin-bottom: var(--sh-space-sm);
 }
+/* The card is a PersonButton (opens the person sheet). */
+button.sh-presence-card {
+  width: 100%;
+  text-align: start;
+  color: var(--sh-text);
+  cursor: pointer;
+  transition: border-color var(--sh-transition-fast);
+}
+/* Hover lights the frame but keeps the state-coloured left edge. */
+button.sh-presence-card:hover {
+  border-top-color: var(--sh-primary);
+  border-right-color: var(--sh-primary);
+  border-bottom-color: var(--sh-primary);
+}
+button.sh-presence-card:hover strong { text-decoration: underline; text-underline-offset: 2px; }
+.sh-presence-card-body { display: block; min-width: 0; }
 .sh-presence-card.sh-presence-card--home,
 .sh-presence-card.sh-presence-card--zone { border-left-color: var(--sh-success); }
 .sh-presence-card.sh-presence-card--away { border-left-color: var(--sh-warning); }
@@ -10153,6 +10241,8 @@ hr {
 .sh-member-info > .sh-badge,
 .sh-member-info > .sh-member-me-chip { align-self: flex-start; }
 .sh-member-name { font-weight: 600; }
+/* Avatar + info as one PersonButton — the row's own gap. */
+.sh-member-row-person { gap: var(--sh-space-md); }
 /* Joined date sits on its own line under the name + chips so a long
  * display name doesn't push the date off the row (or worse, collide
  * with the chips and wrap badly on a 360 px phone). */

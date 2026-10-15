@@ -32,6 +32,9 @@ import { showToast } from './Toast'
 import { t, isOne } from '@/i18n/i18n'
 import { posts as feedPosts } from '@/store/feed'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
+import { personHint } from '@/utils/personHint'
+import { PersonButton } from './PersonButton'
+import { isBotPost } from './PostCard'
 import type { Comment, FeedPost } from '@/types'
 
 interface OverlayState {
@@ -178,7 +181,9 @@ export function CommentOverlay() {
     })
 
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
+      // A dialog opened over the thread (the person sheet from an
+      // author, a report) owns Escape — it closes itself, not us.
+      if (ev.key === 'Escape' && !document.querySelector('.sh-modal-overlay')) {
         ev.preventDefault()
         closeCommentOverlay()
       }
@@ -282,10 +287,25 @@ export function CommentOverlay() {
           onClick={closeCommentOverlay}
         />
         <header class="sh-comment-overlay-header">
-          <Avatar name={authorName} src={avatarUrl} size={36} />
+          {isBotPost(post) ? (
+            <Avatar name={authorName} src={avatarUrl} size={36} />
+          ) : (
+            <PersonButton userId={post.author}
+              hint={() => personHint(spaceId, post.author)}
+              class="sh-person-btn--avatar" decorative>
+              <Avatar name={authorName} src={avatarUrl} size={36} />
+            </PersonButton>
+          )}
           <div class="sh-comment-overlay-header-meta">
             <div class="sh-comment-overlay-header-name">
-              <strong>{authorName}</strong>
+              {isBotPost(post) ? <strong>{authorName}</strong> : (
+                <PersonButton userId={post.author}
+                  hint={() => personHint(spaceId, post.author)}
+                  class="sh-person-btn--name"
+                  data-testid="overlay-author">
+                  <strong>{authorName}</strong>
+                </PersonButton>
+              )}
               <OnlinePill user_id={post.author} compact />
             </div>
             {previewLine(post) && (

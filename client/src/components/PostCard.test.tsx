@@ -2,6 +2,13 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 import { PostCard } from './PostCard'
 import type { FeedPost } from '@/types'
+import { spaceMembers } from '@/store/spaceMembers'
+import { householdUsers } from '@/store/householdUsers'
+
+const openPersonSpy = vi.fn()
+vi.mock('@/components/PersonSheet', () => ({
+  openPerson: (...args: unknown[]) => openPersonSpy(...args),
+}))
 
 const mockPost: FeedPost = {
   id: 'p1',
@@ -295,5 +302,62 @@ describe('PostCard link preview', () => {
   it('renders no card without a preview', () => {
     const { container } = render(<PostCard post={mockPost} />)
     expect(container.querySelector('.sh-link-preview')).toBeNull()
+  })
+
+  describe('people open the person sheet', () => {
+    it('the author name and avatar open their sheet with the cached hint', () => {
+      openPersonSpy.mockReset()
+      householdUsers.value = new Map([['anna', {
+        user_id: 'anna', username: 'anna', display_name: 'Anna', picture_url: 'api/u/anna',
+        is_admin: false, picture_hash: null, bio: null, is_new_member: false,
+      }]])
+      const { getByTestId, container } = render(<PostCard post={mockPost} />)
+      const name = getByTestId('post-author')
+      expect(name.tagName).toBe('BUTTON')
+      expect(name.textContent).toBe('Anna')
+      fireEvent.click(name)
+      expect(openPersonSpy).toHaveBeenCalledWith('anna', {
+        person: expect.objectContaining({
+          display_name: 'Anna', picture_url: 'api/u/anna', is_local: true, username: 'anna',
+        }),
+      })
+      // The avatar is the name's tappable twin — not a second tab stop.
+      const face = container.querySelector('.sh-person-btn--avatar') as HTMLElement
+      expect(face.getAttribute('tabindex')).toBe('-1')
+      fireEvent.click(face)
+      expect(openPersonSpy).toHaveBeenCalledTimes(2)
+      householdUsers.value = new Map()
+    })
+
+    it('a bot post has no person to open', () => {
+      const bot = { ...mockPost, author: 'system-integration' }
+      const { container } = render(<PostCard post={bot} />)
+      expect(container.querySelector('.sh-person-btn')).toBeNull()
+    })
+
+    it('an @mention in a space post is a button that opens that member', () => {
+      openPersonSpy.mockReset()
+      spaceMembers.value = {
+        s1: new Map([['ru-chidi', {
+          user_id: 'ru-chidi', role: 'member', joined_at: '', space_display_name: null,
+          picture_hash: null, picture_url: null, display_name: 'Chidi', mention: 'chidi',
+          instance_id: 'p-ok', household_name: 'Okafor family',
+        }]]),
+      }
+      const post = { ...mockPost, content: 'thanks @chidi <img src=x onerror=alert(1)>' }
+      const { container } = render(<PostCard post={post} spaceId="s1" surface="space" />)
+      expect(container.querySelector('.sh-post-body img')).toBeNull()
+      const mention = container.querySelector('button[data-mention="chidi"]') as HTMLButtonElement
+      expect(mention).toBeTruthy()
+      expect(mention.type).toBe('button')
+      fireEvent.click(mention)
+      expect(openPersonSpy).toHaveBeenCalledWith('ru-chidi', {
+        person: expect.objectContaining({
+          display_name: 'Chidi',
+          household: { instance_id: 'p-ok', display_name: 'Okafor family', is_own: false },
+        }),
+      })
+      spaceMembers.value = {}
+    })
   })
 })

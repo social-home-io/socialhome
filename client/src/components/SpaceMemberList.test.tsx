@@ -42,6 +42,11 @@ vi.mock('@/store/auth', () => ({
   currentUser: { value: { user_id: 'u-m', display_name: 'Mo', is_admin: false, picture_url: null } },
 }))
 
+const openPersonSpy = vi.hoisted(() => vi.fn())
+vi.mock('@/components/PersonSheet', () => ({
+  openPerson: (...args: unknown[]) => openPersonSpy(...args),
+}))
+
 describe('SpaceMemberList', () => {
   it('module exports exist', async () => {
     const mod = await import('./SpaceMemberList')
@@ -148,5 +153,62 @@ describe('SpaceMemberList — header count and language', () => {
     serve(4)
     const many = render(<SpaceMemberList spaceId="sp-1" viewerRole="member" />)
     await waitFor(() => expect(many.container.querySelector('h3')?.textContent).toBe('4 Mitglieder'))
+  })
+})
+
+describe('SpaceMemberList — tapping a member opens their person sheet', () => {
+  const rows = [
+    { user_id: 'u-m', display_name: 'Mo', role: 'moderator', joined_at: '2026-01-01' },
+    {
+      user_id: 'ru-chidi', display_name: 'Chidi Okafor', personal_alias: 'Coach',
+      role: 'member', joined_at: '2026-01-01', instance_id: 'p-ok',
+      household_name: 'Okafor family', picture_url: 'api/s/chidi',
+      is_online: true, is_idle: false,
+    },
+  ]
+
+  it('the row is one button; the hint carries name, alias, picture and household', async () => {
+    openPersonSpy.mockReset()
+    apiGet.mockImplementation(async (url: string) => url.endsWith('/members') ? rows : [])
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-9" viewerRole="admin" />)
+    await waitFor(() => expect(r.getAllByTestId('member-person')).toHaveLength(2))
+    const chidi = r.getAllByTestId('member-person')
+      .find(b => b.getAttribute('data-person-id') === 'ru-chidi')!
+    expect(chidi.tagName).toBe('BUTTON')
+    fireEvent.click(chidi)
+    expect(openPersonSpy).toHaveBeenCalledWith('ru-chidi', expect.objectContaining({
+      person: expect.objectContaining({
+        display_name: 'Chidi Okafor',
+        personal_alias: 'Coach',
+        household: { instance_id: 'p-ok', display_name: 'Okafor family', is_own: false },
+        is_online: true,
+      }),
+      onAliasChanged: expect.any(Function),
+    }))
+    // Never claims a remote member is reachable by DM — the sheet decides.
+    expect(openPersonSpy.mock.calls[0][1].person.is_local).toBeUndefined()
+  })
+
+  it('a nickname saved in the sheet patches the row in place', async () => {
+    openPersonSpy.mockReset()
+    apiGet.mockImplementation(async (url: string) => url.endsWith('/members') ? rows : [])
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-9" viewerRole="member" />)
+    await waitFor(() => expect(r.getByText('Coach')).toBeTruthy())
+    fireEvent.click(r.getAllByTestId('member-person')[1])
+    const { onAliasChanged } = openPersonSpy.mock.calls[0][1]
+    onAliasChanged('ru-chidi', 'Chidi (football)')
+    await waitFor(() => expect(r.getByText('Chidi (football)')).toBeTruthy())
+  })
+
+  it('nickname moved into the sheet; space report and admin ⋯ stay on the row', async () => {
+    apiGet.mockImplementation(async (url: string) => url.endsWith('/members') ? rows : [])
+    const { SpaceMemberList } = await import('./SpaceMemberList')
+    const r = render(<SpaceMemberList spaceId="sp-9" viewerRole="admin" />)
+    await waitFor(() => expect(r.getAllByTestId('member-person')).toHaveLength(2))
+    expect(r.container.querySelector('.sh-member-rename-btn:not(.sh-member-report-btn)')).toBeNull()
+    expect(r.container.querySelector('.sh-member-report-btn')).not.toBeNull()
+    expect(r.getByLabelText('Manage Coach')).toBeTruthy()
   })
 })

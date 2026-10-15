@@ -259,4 +259,26 @@ describe('PresencePage', () => {
       expect(view.getByText('Di', { selector: 'strong' })).toBeTruthy()
     })
   })
+
+  it('a member card is one button that opens their person sheet', async () => {
+    const openPerson = vi.fn()
+    vi.doMock('@/components/PersonSheet', () => ({ openPerson }))
+    vi.doMock('@/api', () => ({
+      api: { get: vi.fn(async () => [row({ emoji: '🌞', text: 'Holiday', expires_at: null })]) },
+    }))
+    const { default: PresencePage } = await import('./PresencePage')
+    const view = render(<PresencePage />)
+    await view.findByText('Bob', { selector: 'strong' })
+    const card = view.getByTestId('presence-card')
+    expect(card.tagName).toBe('BUTTON')
+    expect(card.getAttribute('type')).toBe('button')
+    fireEvent.click(card)
+    expect(openPerson).toHaveBeenCalledWith('u2', {
+      person: {
+        display_name: 'Bob', picture_url: null, username: 'bob', is_local: true,
+        is_online: true, is_idle: false,
+        status: { emoji: '🌞', text: 'Holiday', expires_at: null },
+      },
+    })
+  })
 })

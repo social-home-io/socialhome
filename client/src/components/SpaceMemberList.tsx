@@ -17,7 +17,8 @@ import { Button } from './Button'
 import { t, isOne } from '@/i18n/i18n'
 import { openReport } from './ReportDialog'
 import { showToast } from './Toast'
-import { openAliasDialog } from './AliasDialog'
+import { PersonButton } from './PersonButton'
+import { rosterPersonHint, type PersonHint } from '@/utils/personHint'
 import { openMemberActions, MemberActionSheet, roleLabel } from './MemberActionSheet'
 import { hasSettingsAuthority, type SpaceRole } from '@/features/spaces/spaceRoles'
 import {
@@ -73,6 +74,8 @@ interface Member {
    *  household" badge + suppresses admin-only gestures (kebab menu,
    *  rename) that don't apply over federation. */
   instance_id?: string | null
+  /** Remote rows: the peer household's display name. */
+  household_name?: string | null
   /** The space owner's seat — on a member household the owner is
    *  mirrored as a remote seat, so the server says so explicitly. No role
    *  change is ever offered on it. */
@@ -209,6 +212,18 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
     }
   }
 
+  // The sheet's nickname editor patches this row in place, so the new
+  // name shows before the next reload tick.
+  const onAliasChanged = (userId: string, alias: string | null) => {
+    members.value = members.value.map(row =>
+      row.user_id === userId ? { ...row, personal_alias: alias } : row,
+    )
+  }
+  const memberHint = (m: Member): PersonHint => ({
+    ...rosterPersonHint(m),
+    picture_url: resolveAvatar(spaceId, m.user_id, null),
+  })
+
   const me = currentUser.value?.user_id
   const myRow = me ? members.value.find(m => m.user_id === me) : null
   const myDisplayName = myRow?.space_display_name
@@ -290,6 +305,13 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                 isMe ? 'sh-member-row--me' : '',
               ].filter(Boolean).join(' ')}
             >
+              <PersonButton
+                userId={m.user_id}
+                hint={() => memberHint(m)}
+                onAliasChanged={onAliasChanged}
+                class="sh-person-btn--row sh-member-row-person"
+                data-testid="member-person"
+              >
               <Avatar
                 name={r.name}
                 // ``m.picture_url`` is the per-space override only —
@@ -303,7 +325,7 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                 size={32}
                 online={m.is_online ? (m.is_idle ? 'idle' : 'online') : null}
               />
-              <div class="sh-member-info">
+              <span class="sh-member-info">
                 <span class="sh-member-name">{r.name}</span>
                 {r.source === 'space' && r.name !== m.display_name && (
                   <span class="sh-member-original-name">
@@ -342,43 +364,11 @@ export function SpaceMemberList({ spaceId, viewerRole }: Props) {
                 >
                   {formatRelativeJoined(m.joined_at)}
                 </time>
-              </div>
-              {!isMe && (
-                <button
-                  class="sh-member-rename-btn"
-                  type="button"
-                  aria-label={
-                    m.personal_alias
-                      ? t('space.members.nickname_edit_aria', { name: r.fallback })
-                      : t('space.members.nickname_set_aria', { name: r.fallback })
-                  }
-                  // Viewer-private nickname applies to local and
-                  // remote members alike — ``personal_aliases`` is
-                  // keyed on ``(viewer, target_user_id)`` regardless
-                  // of which household ``target`` lives on. The
-                  // backend's ``GET /api/spaces/{id}/members`` now
-                  // surfaces the alias for remote rows too.
-                  title={t('space.members.nickname_title')}
-                  onClick={() =>
-                    openAliasDialog({
-                      targetUserId: m.user_id,
-                      globalDisplayName: m.display_name || m.user_id,
-                      currentAlias: m.personal_alias ?? null,
-                      onSave: (newAlias) => {
-                        // Optimistic update — patch the row in place so
-                        // the new name shows before the next reload tick.
-                        members.value = members.value.map(row =>
-                          row.user_id === m.user_id
-                            ? { ...row, personal_alias: newAlias }
-                            : row,
-                        )
-                      },
-                    })
-                  }
-                >
-                  ✏
-                </button>
-              )}
+              </span>
+              </PersonButton>
+              {/* Nickname moved into the person sheet (tap the row). The
+                  🚩 stays: it reports to THIS space's moderators, which
+                  the sheet's household-level Report does not. */}
               {!isMe && (
                 <button
                   class="sh-member-rename-btn sh-member-report-btn"
