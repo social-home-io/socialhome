@@ -10,6 +10,11 @@ vi.mock('@/store/auth', () => ({
   },
 }))
 
+const openPersonSpy = vi.hoisted(() => vi.fn())
+vi.mock('@/components/PersonSheet', () => ({
+  openPerson: (...args: unknown[]) => openPersonSpy(...args),
+}))
+
 import { spaceMembers } from '@/store/spaceMembers'
 import { CommentThread } from './CommentThread'
 
@@ -88,5 +93,44 @@ describe('CommentThread', () => {
       <CommentThread comments={[mine]} spaceId="sp-1" postId="p-1" onReply={vi.fn()} />,
     )
     expect(r.container.querySelector('.sh-comment-overflow')).toBeNull()
+  })
+
+  it('the comment author (name and avatar) opens their person sheet', () => {
+    openPersonSpy.mockReset()
+    spaceMembers.value = {
+      'sp-1': new Map([['u-other', {
+        user_id: 'u-other', role: 'member', display_name: 'Otto', picture_url: 'api/p/otto',
+      } as never]]),
+    }
+    const r = render(
+      <CommentThread comments={[others]} spaceId="sp-1" postId="p-1" onReply={vi.fn()} />,
+    )
+    const name = r.getByTestId('comment-author')
+    expect(name.tagName).toBe('BUTTON')
+    fireEvent.click(name)
+    expect(openPersonSpy).toHaveBeenCalledWith('u-other', {
+      person: expect.objectContaining({ display_name: 'Otto', picture_url: 'api/p/otto' }),
+    })
+    const face = r.container.querySelector('.sh-person-btn--avatar')!
+    expect(face.getAttribute('tabindex')).toBe('-1')
+  })
+
+  it('an @mention in a space comment opens that member; @here does not', () => {
+    openPersonSpy.mockReset()
+    spaceMembers.value = {
+      'sp-1': new Map([
+        ['u-other', { user_id: 'u-other', role: 'admin' } as never],
+        ['u-anna', { user_id: 'u-anna', role: 'member', mention: 'anna', display_name: 'Anna' } as never],
+      ]),
+    }
+    const c = { ...(others as object), content: 'hey @anna and @here' } as never
+    const r = render(
+      <CommentThread comments={[c]} spaceId="sp-1" postId="p-1" onReply={vi.fn()} />,
+    )
+    const btn = r.container.querySelector('button[data-mention="anna"]') as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    fireEvent.click(btn)
+    expect(openPersonSpy).toHaveBeenCalledWith('u-anna', expect.anything())
+    expect(r.container.querySelector('button[data-mention="here"]')).toBeNull()
   })
 })

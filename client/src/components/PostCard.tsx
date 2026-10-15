@@ -22,6 +22,8 @@ import { ScheduleUI } from './ScheduleUI'
 import { currentUser } from '@/store/auth'
 import { spaceMentionRender } from '@/store/spaceMembers'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
+import { personHint } from '@/utils/personHint'
+import { PersonButton, openSpaceMention } from './PersonButton'
 import { isOne, t } from '@/i18n/i18n'
 import { Button } from './Button'
 import type { FeedPost } from '@/types'
@@ -36,7 +38,8 @@ const reactionPickerFor = signal<string | null>(null)
 // socialhome.domain.user.SYSTEM_AUTHOR on the backend.
 const SYSTEM_AUTHOR = 'system-integration'
 
-function isBotPost(post: FeedPost): boolean {
+/** A post by the household's bot bridge — no person to open. */
+export function isBotPost(post: Pick<FeedPost, 'author'>): boolean {
   return post.author === SYSTEM_AUTHOR
 }
 
@@ -151,10 +154,28 @@ function PostContent({ post, timeAgo, onReact, onComment, onDelete, onEdit, spac
         {isBotPost(post) ? (
           <BotAvatar bot={bot} size={40} />
         ) : (
-          <Avatar name={authorName} src={avatarUrl} size={40} />
+          <PersonButton
+            userId={post.author}
+            hint={() => personHint(scopedSpaceId, post.author)}
+            class="sh-person-btn--avatar"
+            decorative
+          >
+            <Avatar name={authorName} src={avatarUrl} size={40} />
+          </PersonButton>
         )}
         <div class="sh-post-meta">
-          <span class="sh-post-author">{authorName}</span>
+          {isBotPost(post) ? (
+            <span class="sh-post-author">{authorName}</span>
+          ) : (
+            <PersonButton
+              userId={post.author}
+              hint={() => personHint(scopedSpaceId, post.author)}
+              class="sh-person-btn--name sh-post-author"
+              data-testid="post-author"
+            >
+              {authorName}
+            </PersonButton>
+          )}
           {/* Online-status pill — bots and system posts skip it. Zone
               name appears only on the household feed (showZone=true);
               space feeds suppress HA zones via showZone=false on the
@@ -534,18 +555,34 @@ function PostBody({ content, spaceId, authorId }: {
 }) {
   const [expanded, setExpanded] = useState(false)
   const isLong = content.length > SHOW_MORE_THRESHOLD
-  // Space posts highlight @-mentions of the space's members.
-  const html = renderMarkdown(content, spaceMentionRender(spaceId, authorId))
+  // Space posts highlight @-mentions of the space's members; each one
+  // is a button that opens that member's person sheet.
+  const html = renderMarkdown(content, {
+    ...spaceMentionRender(spaceId, authorId),
+    interactive: !!spaceId,
+  })
+  // One delegated listener for the mention buttons inside the HTML.
+  const onBodyClick = (e: MouseEvent) => {
+    const target = e.target as Element | null
+    const btn = target?.closest?.('button[data-mention]')
+    if (!btn) return
+    e.stopPropagation()
+    openSpaceMention(spaceId, btn.getAttribute('data-mention') ?? '')
+  }
   if (!isLong) {
     return (
       <div
         class="sh-post-body"
+        onClick={onBodyClick}
         dangerouslySetInnerHTML={{ __html: html }}
       />
     )
   }
   return (
-    <div class={`sh-post-body sh-post-body--clamp${expanded ? ' sh-post-body--expanded' : ''}`}>
+    <div
+      class={`sh-post-body sh-post-body--clamp${expanded ? ' sh-post-body--expanded' : ''}`}
+      onClick={onBodyClick}
+    >
       <div
         class="sh-post-body-inner"
         dangerouslySetInnerHTML={{ __html: html }}

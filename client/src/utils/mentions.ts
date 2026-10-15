@@ -141,6 +141,22 @@ export function mentionTokenSet(members: Iterable<MentionMember>): Set<string> {
   return out
 }
 
+/** The member a rendered ``@token`` refers to (case-insensitive, the way
+ *  :func:`splitMentions` matched it), or ``undefined``. ``@here`` is never
+ *  a person. */
+export function findMentionMember<M extends MentionMember>(
+  members: Iterable<M> | undefined,
+  token: string,
+): M | undefined {
+  if (!members) return undefined
+  const want = token.toLocaleLowerCase()
+  if (want === HERE_TOKEN) return undefined
+  for (const m of members) {
+    if (m.mention && m.mention.toLocaleLowerCase() === want) return m
+  }
+  return undefined
+}
+
 export interface MentionPart {
   /** Lower-cased token that matched the known set. */
   token: string

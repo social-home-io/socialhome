@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { render, waitFor, fireEvent } from '@testing-library/preact'
 
 vi.mock('@/api', () => {
   const m = { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }
@@ -25,6 +25,11 @@ vi.mock('@/utils/avatar', () => ({
 }))
 
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
+
+const openPersonSpy = vi.hoisted(() => vi.fn())
+vi.mock('@/components/PersonSheet', () => ({
+  openPerson: (...args: unknown[]) => openPersonSpy(...args),
+}))
 
 import { CommentOverlay, openCommentOverlay, closeCommentOverlay } from './CommentOverlay'
 import { api } from '@/api'
@@ -114,5 +119,44 @@ describe('CommentOverlay', () => {
     // The handlers are registered synchronously inside useEffect after
     // the first paint; we don't assert the call, just the wiring shape.
     expect(typeof wsHandlers).toBe('object')
+  })
+
+  it('the post author in the header opens their person sheet', async () => {
+    openPersonSpy.mockReset()
+    apiMock.get.mockResolvedValue([])
+    openCommentOverlay(fakePost(), null)
+    const { getByTestId } = render(<CommentOverlay />)
+    await waitFor(() => { expect(getByTestId('overlay-author')).toBeTruthy() })
+    fireEvent.click(getByTestId('overlay-author'))
+    expect(openPersonSpy).toHaveBeenCalledWith('u-anna', expect.anything())
+  })
+
+  it('a bot post header has no person button', async () => {
+    apiMock.get.mockResolvedValue([])
+    openCommentOverlay({ ...fakePost(), author: 'system-integration' }, null)
+    const { container } = render(<CommentOverlay />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-comment-overlay')).not.toBeNull()
+    })
+    expect(container.querySelector('.sh-person-btn')).toBeNull()
+  })
+
+  it('Escape leaves the thread open while a dialog sits on top of it', async () => {
+    apiMock.get.mockResolvedValue([])
+    openCommentOverlay(fakePost(), null)
+    const { container } = render(<CommentOverlay />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-comment-overlay')).not.toBeNull()
+    })
+    const sheet = document.createElement('div')
+    sheet.className = 'sh-modal-overlay'
+    document.body.appendChild(sheet)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(container.querySelector('.sh-comment-overlay')).not.toBeNull()
+    sheet.remove()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => {
+      expect(container.querySelector('.sh-comment-overlay')).toBeNull()
+    })
   })
 })

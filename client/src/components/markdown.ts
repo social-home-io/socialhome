@@ -27,6 +27,11 @@ export interface RenderOptions {
   mentions?: ReadonlySet<string>
   /** The viewer's own token — that mention gets ``sh-mention--self``. */
   selfMention?: string | null
+  /** Person mentions become ``<button type="button" data-mention="…">``
+   *  so the caller can open the person sheet from a delegated click
+   *  (keyboard-operable for free). ``@here`` and a mention inside a link
+   *  stay a ``<span>`` — never a control nested in another. */
+  interactive?: boolean
 }
 
 /** Wrap known @-mentions in the already-escaped HTML ``html``.
@@ -34,27 +39,35 @@ export interface RenderOptions {
  *  Runs last, over text between tags only: every ``<…>`` in ``html`` was
  *  produced by this module (user text was escaped first), so skipping tag
  *  strings keeps attribute values (``href``) intact, and ``<code>`` /
- *  ``<pre>`` bodies stay literal. The span carries no user-derived
- *  attribute — only the matched text, which is token chars by grammar. */
+ *  ``<pre>`` bodies stay literal. The wrapper carries no user-derived
+ *  attribute but ``data-mention`` — the matched token, which is word
+ *  chars / ``.`` / ``-`` / ``@`` by grammar AND one of the server-issued
+ *  member tokens, escaped once more anyway. */
 function _wrapMentions(
   html: string,
   tokens: ReadonlySet<string>,
   self: string | null,
+  interactive: boolean,
 ): string {
   let codeDepth = 0
+  let linkDepth = 0
   return html.split(/(<[^>]*>)/).map((part) => {
     if (part.startsWith('<')) {
       if (/^<(code|pre)\b/i.test(part)) codeDepth += 1
       else if (/^<\/(code|pre)>/i.test(part)) codeDepth = Math.max(0, codeDepth - 1)
+      else if (/^<a\b/i.test(part)) linkDepth += 1
+      else if (/^<\/a>/i.test(part)) linkDepth = Math.max(0, linkDepth - 1)
       return part
     }
     if (codeDepth > 0 || !part) return part
     return splitMentions(part, tokens).map((p) => {
       if (typeof p === 'string') return p
-      const cls = p.token === 'here'
-        ? 'sh-mention sh-mention--here'
-        : p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'
-      return `<span class="${cls}">${p.raw}</span>`
+      if (p.token === 'here') {
+        return `<span class="sh-mention sh-mention--here">${p.raw}</span>`
+      }
+      const cls = p.token === self ? 'sh-mention sh-mention--self' : 'sh-mention'
+      if (!interactive || linkDepth > 0) return `<span class="${cls}">${p.raw}</span>`
+      return `<button type="button" class="${cls}" data-mention="${_escape(p.token)}">${p.raw}</button>`
     }).join('')
   }).join('')
 }
@@ -117,6 +130,7 @@ export function renderMarkdown(input: string, opts: RenderOptions = {}): string 
   if (opts.mentions && opts.mentions.size > 0) {
     out = _wrapMentions(
       out, opts.mentions, opts.selfMention?.toLocaleLowerCase() ?? null,
+      opts.interactive === true,
     )
   }
   return out

@@ -19,6 +19,8 @@ import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { api } from '@/api'
 import { Avatar } from '@/components/Avatar'
+import { PersonButton } from '@/components/PersonButton'
+import { rosterPersonHint } from '@/utils/personHint'
 import { Button } from '@/components/Button'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Modal } from '@/components/Modal'
@@ -227,11 +229,22 @@ export function GroupInfoDialog({
           <ul class="sh-groupinfo-members">
             {members.map(m => (
               <li key={m.user_id} class="sh-groupinfo-member">
-                <Avatar name={m.display_name} src={m.picture_url} size={32} />
-                <div class="sh-newdm-row-meta">
-                  <strong>{m.display_name}{m.is_self ? ` ${t('dms.group.you')}` : ''}</strong>
-                  <span class="sh-muted">{householdLabel(m)}</span>
-                </div>
+                {/* The person opens their sheet. Group info closes
+                    first so the sheet's Message / Edit profile land on
+                    a clean stack. */}
+                <PersonButton
+                  userId={m.user_id}
+                  hint={() => rosterPersonHint(m)}
+                  class="sh-person-btn--row"
+                  onBeforeOpen={onClose}
+                  data-testid="groupinfo-person"
+                >
+                  <Avatar name={m.display_name} src={m.picture_url} size={32} />
+                  <span class="sh-newdm-row-meta">
+                    <strong>{m.display_name}{m.is_self ? ` ${t('dms.group.you')}` : ''}</strong>
+                    <span class="sh-muted">{householdLabel(m)}</span>
+                  </span>
+                </PersonButton>
                 {managedHere && !m.is_self && (
                   <Button
                     variant="ghost"
