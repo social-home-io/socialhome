@@ -368,14 +368,27 @@ class UserPictureView(BaseView):
 
 
 class UserCollectionView(BaseView):
-    """GET /api/users — list all active users."""
+    """GET /api/users — list all active users.
+
+    The household directory keeps everyone (mentions, the household chat),
+    but the status of someone a guardian block (§CP.F2) separates from the
+    caller, either way, reads as unset — as it does on ``/api/presence``
+    and ``/api/friends``.
+    """
 
     async def get(self) -> web.Response:
         svc = self.svc(user_service_key)
         users = await svc.list_active()
-        return web.json_response(
-            [_user_to_dict_signed(self.request, u) for u in users],
-        )
+        withheld: frozenset[str] = frozenset()
+        cp = self.request.app.get(child_protection_service_key)
+        ctx = self.user
+        if cp is not None and ctx is not None and ctx.user_id:
+            withheld = await cp.guardian_block_counterparts(ctx.user_id)
+        rows = [_user_to_dict_signed(self.request, u) for u in users]
+        for row in rows:
+            if row.get("user_id") in withheld and "status" in row:
+                row["status"] = dataclasses.asdict(UserStatus())
+        return web.json_response(rows)
 
 
 class UserDetailView(BaseView):

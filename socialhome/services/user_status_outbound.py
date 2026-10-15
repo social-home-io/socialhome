@@ -11,6 +11,15 @@ Only statuses of users homed here go out: the inbound handler re-publishes
 ``UserStatusChanged`` for a *remote* user's status, and echoing that back
 into the mesh would have us speak for another household's user (which the
 receivers refuse anyway, see ``docs/protocol/presence.md``).
+
+Guardian blocks (§CP.F2, via :class:`ProtectionGateMixin`): a protected
+account's status never reaches a household where someone its guardian
+blocked is homed, like a moment or highlight. The block never leaves this
+household, so the receiver can't filter it; the sender is the only place
+it holds. When a block is added (or protection is turned back on over
+existing blocks) the account's live status is cleared there once — an
+ordinary ``status_cleared`` — so a status set before the block doesn't
+linger; later changes send that household nothing.
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ from ..domain.events import UserStatusChanged
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
 from .peer_outbound import ConfirmedPeerBroadcaster, SingleTargetSender
+from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
@@ -37,6 +47,7 @@ log = logging.getLogger(__name__)
 
 class UserStatusOutbound(
     VisibilityMixin,
+    ProtectionGateMixin,
     ConfirmedPeerBroadcaster,
     SingleTargetSender,
 ):
@@ -46,6 +57,7 @@ class UserStatusOutbound(
 
     __slots__ = (
         "_bus",
+        "_child_protection",
         "_federation",
         "_federation_repo",
         "_user_repo",
@@ -65,6 +77,7 @@ class UserStatusOutbound(
         self._federation_repo = federation_repo
         self._user_repo = user_repo
         self._visibility_repo = visibility_repo
+        self._child_protection = None
 
     def wire(self) -> None:
         self._bus.subscribe(UserStatusChanged, self._on_changed)
@@ -90,8 +103,37 @@ class UserStatusOutbound(
             # peer never shows up there, status included.
             if event.user_id in await self.hidden_for_peer(instance_id):
                 continue
+            # §CP.F2: a guardian blocked someone homed there. Nothing goes
+            # out — not even a clear, which a real sender never repeats
+            # and so would time-stamp each change. The block's hook
+            # already cleared the status there once.
+            if await self._guardian_blocks_household(event.user_id, instance_id):
+                continue
             await self.send_to_instance(
                 instance_id,
                 FederationEventType.USER_STATUS_UPDATED,
                 payload,
             )
+
+    async def on_guardian_block(self, minor_user_id: str, blocked_user_id: str) -> None:
+        """§CP.F2: clear the account's live status on the households the
+        block now covers, so a status set before the block doesn't stay."""
+        await self._clear_on_blocked_households(minor_user_id)
+
+    async def on_account_protected(self, user_id: str) -> None:
+        """Blocks kept from an earlier protection count again — clear the
+        account's live status on the households they cover."""
+        await self._clear_on_blocked_households(user_id)
+
+    async def _clear_on_blocked_households(self, user_id: str) -> None:
+        user = await self._user_repo.get_by_user_id(user_id)
+        if user is None or not user.status.is_set:
+            return
+        cleared = {"user_id": user_id, "status_cleared": True}
+        for instance_id in await self.list_confirmed_peer_ids():
+            if await self._guardian_blocks_household(user_id, instance_id):
+                await self.send_to_instance(
+                    instance_id,
+                    FederationEventType.USER_STATUS_UPDATED,
+                    cleared,
+                )

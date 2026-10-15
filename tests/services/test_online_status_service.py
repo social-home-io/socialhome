@@ -503,3 +503,67 @@ async def test_presence_is_not_fanned_to_space_session_households():
     await svc.user_session_opened("alice", ws_id=1)
 
     assert {to for to, _evt, _payload in fed.sent} == {"inst-A"}
+
+
+# ─── §CP.F2 guardian blocks ──────────────────────────────────────────────
+
+
+class _FakeChildProtection:
+    """``kid`` is protected; its guardian blocked someone on inst-B."""
+
+    def register_gate(self, gate) -> None:
+        pass
+
+    async def guardian_blocks_household(self, user_id, instance_id) -> bool:
+        return user_id == "kid" and instance_id == "inst-B"
+
+
+def _gated():
+    svc, _bus, _repo, _captured = _make()
+    fed = _FakeFederationService()
+    svc.attach_federation(
+        federation_service=fed,
+        federation_repo=_FakeFederationRepo([_peer("inst-A"), _peer("inst-B")]),
+        own_instance_id="inst-self",
+    )
+    svc.attach_child_protection(_FakeChildProtection())  # type: ignore[arg-type]
+    return svc, fed
+
+
+async def test_protected_accounts_online_state_skips_a_blocked_household():
+    svc, fed = _gated()
+    await svc.user_session_opened("kid", ws_id=1)
+    await svc.user_session_closed("kid", ws_id=1)
+    await svc.user_session_opened("adult", ws_id=2)
+    assert {tid for tid, _t, p in fed.sent if p["user_id"] == "kid"} == {"inst-A"}
+    assert {tid for tid, _t, p in fed.sent if p["user_id"] == "adult"} == {
+        "inst-A",
+        "inst-B",
+    }
+
+
+async def test_block_shows_an_online_account_offline_on_the_blocked_household():
+    from socialhome.domain.federation import FederationEventType
+
+    svc, fed = _gated()
+    await svc.user_session_opened("kid", ws_id=1)
+    fed.sent.clear()
+    await svc.on_guardian_block("kid", "u-blocked")
+    await svc.on_account_protected("kid")
+    assert [(tid, t) for tid, t, _p in fed.sent] == [
+        ("inst-B", FederationEventType.USER_OFFLINE)
+    ] * 2
+    assert all("last_seen_at" in p for _tid, _t, p in fed.sent)
+
+
+async def test_block_sends_nothing_for_an_offline_account():
+    svc, fed = _gated()
+    await svc.on_guardian_block("kid", "u-blocked")
+    assert fed.sent == []
+
+
+async def test_block_hook_without_federation_is_a_noop():
+    svc, _bus, _repo, _captured = _make()
+    svc.attach_child_protection(_FakeChildProtection())  # type: ignore[arg-type]
+    await svc.user_session_opened("kid", ws_id=1)
+    await svc.on_guardian_block("kid", "u-blocked")

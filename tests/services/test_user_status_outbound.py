@@ -111,3 +111,90 @@ async def test_user_hidden_from_a_peer_is_skipped_for_that_peer():
     ).wire()
     await bus.publish(UserStatusChanged(user_id="u-local", status=UserStatus(text="x")))
     assert [p for p, _, _ in fed.sent] == ["peer-a"]
+
+
+# ─── §CP.F2 guardian blocks ──────────────────────────────────────────────
+
+
+class _FakeChildProtection:
+    """``u-local`` is protected; its guardian blocked someone on peer-b."""
+
+    def __init__(self) -> None:
+        self.gates: list = []
+
+    def register_gate(self, gate) -> None:
+        self.gates.append(gate)
+
+    async def guardian_blocks_household(self, user_id, instance_id) -> bool:
+        return user_id == "u-local" and instance_id == "peer-b"
+
+
+class _StatusUserRepo(_FakeUserRepo):
+    def __init__(self, status: UserStatus) -> None:
+        self.status = status
+
+    async def get_by_user_id(self, user_id: str):
+        user = await super().get_by_user_id(user_id)
+        if user is None:
+            return None
+        return User(
+            user_id=user.user_id,
+            username=user.username,
+            display_name=user.display_name,
+            status=self.status,
+        )
+
+
+def _gated(user_repo=None):
+    bus = EventBus()
+    fed = _FakeFederationService()
+    out = UserStatusOutbound(
+        bus=bus,
+        federation_service=fed,  # type: ignore[arg-type]
+        federation_repo=_FakeFedRepo(),  # type: ignore[arg-type]
+        user_repo=user_repo or _FakeUserRepo(),  # type: ignore[arg-type]
+    )
+    cp = _FakeChildProtection()
+    out.attach_child_protection(cp)  # type: ignore[arg-type]
+    out.wire()
+    return bus, fed, out, cp
+
+
+async def test_blocked_household_gets_nothing():
+    bus, fed, _out, cp = _gated()
+    assert cp.gates  # registered for the §CP hooks
+    await bus.publish(
+        UserStatusChanged(user_id="u-local", status=UserStatus(text="At school"))
+    )
+    assert [(p, payload["text"]) for p, _, payload in fed.sent] == [
+        ("peer-a", "At school")
+    ]
+
+
+@pytest.mark.parametrize("hook", ["on_guardian_block", "on_account_protected"])
+async def test_hooks_clear_a_live_status_on_blocked_households_only(hook):
+    _bus, fed, out, _cp = _gated(_StatusUserRepo(UserStatus(text="At school")))
+    if hook == "on_guardian_block":
+        await out.on_guardian_block("u-local", "u-blocked")
+    else:
+        await out.on_account_protected("u-local")
+    assert fed.sent == [
+        (
+            "peer-b",
+            FederationEventType.USER_STATUS_UPDATED,
+            {"user_id": "u-local", "status_cleared": True},
+        )
+    ]
+
+
+async def test_hooks_send_nothing_without_a_status():
+    _bus, fed, out, _cp = _gated(_StatusUserRepo(UserStatus()))
+    await out.on_guardian_block("u-local", "u-blocked")
+    await out.on_account_protected("u-local")
+    assert fed.sent == []
+
+
+async def test_hooks_ignore_an_unknown_user():
+    _bus, fed, out, _cp = _gated(_StatusUserRepo(UserStatus(text="x")))
+    await out.on_account_protected("u-remote")
+    assert fed.sent == []

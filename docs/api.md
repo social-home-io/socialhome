@@ -161,7 +161,7 @@ Admins also have:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/users` | List all users on this HFS. |
+| GET | `/api/users` | List all users on this HFS. The `status` of someone a guardian block (§CP.F2) separates from the caller, either way round, reads as unset (the directory itself keeps everyone). |
 | GET | `/api/users/{user_id}` | Fetch a user profile. |
 | PATCH | `/api/users/{user_id}` | Admin-only update (or self). |
 | GET | `/api/users/{user_id}/picture` | Fetch another user's avatar. |
@@ -826,7 +826,7 @@ bell for it reads "{sender} in Household chat" and opens `/?tab=chat`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST / DELETE | `/api/presence` | Own presence. `GET` rows now also carry session-presence fields `is_online`, `is_idle`, `last_seen_at` so the UI can render the green / amber dot without a separate fetch, `status` (`{emoji, text, expires_at}`, or `null` when unset or expired), `picture_url` (signed avatar URL, or `null` for initials) and `updated_at` (UTC time of the member's last presence update, `null` when unknown) for the map pins. |
+| GET / POST / DELETE | `/api/presence` | Own presence. `GET` rows now also carry session-presence fields `is_online`, `is_idle`, `last_seen_at` so the UI can render the green / amber dot without a separate fetch, `status` (`{emoji, text, expires_at}`, or `null` when unset or expired), `picture_url` (signed avatar URL, or `null` for initials) and `updated_at` (UTC time of the member's last presence update, `null` when unknown) for the map pins. Leaves out people the viewer blocked and everyone a guardian block (§CP.F2) separates from the viewer, either way round. |
 | POST | `/api/presence/location` | Location update (rate-limited 10/min). Body `{username, latitude?, longitude?, accuracy_m?, zone_name?}` — your own row, or any member's for an admin. Coordinates are stored at 4 decimals and dropped when `accuracy_m` > 500. A stated zone is kept as sent: the Home Assistant integration always sends the `zone_name` key (socialhome-client `post_location`), `null` for HA's not_home / unknown / unavailable — that `null` means "not in a zone" and stays `away`. **Only a body with neither the `zone_name` key nor a `state`** gets the server-side match: a usable GPS point is matched against the [household zones](#hfs--presence-notifications-search) (nearest centre within its radius): the Home zone gives `zone_name: "home"` / state `home`, another zone its name / state `zone`, none leaves state `away`; a point too inaccurate to store never guesses a zone. `204`. |
 | GET | `/api/spaces/{id}/presence` | Presence visible in this space. Carries GPS only — `zone_name` is stripped at the household boundary (§23.8.6). Each entry's `picture_url` is signed (or `null`); `updated_at` is when that member's location last changed (UTC ISO 8601, `null` when unknown) — a local member's presence row, another household's member's last stored pin. |
 | GET | `/api/spaces/{id}/members` | Roster for this space. Each row carries `is_online`, `is_idle`, `last_seen_at` alongside the member metadata so the SPA renders the same dot on space pages. |
@@ -993,7 +993,12 @@ account); typing indicators never cross; their moments and highlights are
 hidden from each other — and the account's own moments and highlights are
 not sent to a household where someone it has blocked lives (the moment
 3-hop relay mesh can still carry a moment there through a third household,
-which knows nothing of the block); and a blocked person's space posts,
+which knows nothing of the block); their statuses, whereabouts and online
+state are hidden from each other (`/api/friends`, `/api/presence`, the
+status in `/api/users`, and the matching `user.*` / `presence.updated`
+frames) — and the account's status and online state are not sent to a
+household where someone it has blocked lives (when the block is added, that
+household sees the status cleared and the account go offline, once); and a blocked person's space posts,
 household posts and comments, @mentions, @here, DMs, contact requests (not
 stored either), follows, moment replies and reactions never notify the
 account. Refusals are 403: the blocked person sees exactly a
