@@ -212,11 +212,15 @@ passed.
 
 ## USERS_SYNC
 
-`USERS_SYNC` is a periodic snapshot of the sending instance's known
-users — display names, avatar URLs, status strings. It lets a freshly
-paired peer populate its directory without waiting for each user to
-tick over organically. Rate: once every 24 h, plus on demand when a
-new pairing is confirmed.
+`USERS_SYNC` is a snapshot of the sending household's (visible) users —
+display names, bios, avatars, handles and each user's current status
+(`{emoji, text, expires_at}`, or `null` when unset or expired). It lets
+a freshly paired peer populate its directory, statuses included,
+without waiting for each user to tick over organically. It is sent
+once, when a pairing is confirmed; see
+[pairing.md](./pairing.md#roster-catch-up-on-pair-confirm--users_sync)
+for the payload and receiver rules (an entry without `status` leaves
+the cached one as is; `null` clears it).
 
 ## Receiver rules
 

@@ -406,18 +406,34 @@ a single `USERS_SYNC` envelope to the new peer:
 
 ```
 {"users": [
-  {"user_id", "username", "display_name", "bio", "picture_hash",
-   "picture_webp_base64": <optional bytes>},
+  {"user_id", "username", "display_name", "bio", "picture_hash", "handle",
+   "status": {"emoji", "text", "expires_at"} | null,
+   "picture_webp_base64": <optional bytes>,
+   <identity binding / identity_anchor fields, capability-gated>},
   ...
 ]}
 ```
 
 The receiver-side handler (`FederationInboundService._on_users_sync`)
 iterates the list and upserts each row through the same
-``_upsert_remote_user`` path ``USER_UPDATED`` uses, so the inbound
-code is unchanged. The per-pair user-visibility filter applies on
-the sender — admins who have hidden a user from a peer keep that
-user out of the snapshot.
+``_upsert_remote_user`` path ``USER_UPDATED`` uses. The per-pair
+user-visibility filter applies on the sender — admins who have hidden
+a user from a peer keep that user out of the snapshot.
+
+`status` is the user's current status — the shape
+`USER_STATUS_UPDATED` ships on a change — so a friend's status shows
+on the new peer right after pairing instead of only after their next
+status change. It is `null` when the user has none or it is past its
+`expires_at`. The receiver lands it only for an entry it accepted
+(the user is homed on the sender), with the same caps as
+`USER_STATUS_UPDATED`: an object is cached on
+`remote_users.status_json` (one already past its deadline is stored as
+a clear), `null` clears it, and a status that breaks the caps is
+refused with a WARNING while the rest of the entry still lands. An
+entry without the key — an older sender — leaves the cached status as
+is. Like every field of the entry it rides the pairwise-encrypted
+payload. No capability bump: an older receiver ignores the unknown
+key, and a newer receiver treats its absence as "unchanged".
 
 When every local user is hidden from the peer (or there are no
 local users at all), the envelope is suppressed entirely — no

@@ -11,6 +11,7 @@ profiles. The receiver-side handler already exists at
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -24,7 +25,7 @@ from socialhome.crypto import (
 )
 from socialhome.domain.events import PairingConfirmed
 from socialhome.domain.federation import FederationEventType
-from socialhome.domain.user import UserIdentityAssertion
+from socialhome.domain.user import UserIdentityAssertion, UserStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.users_sync_outbound import UsersSyncOutbound
 
@@ -73,7 +74,9 @@ class _FakeUser:
         bio: str | None = None,
         picture_hash: str | None = None,
         handle: str | None = None,
+        status: UserStatus | None = None,
     ) -> None:
+        self.status = status or UserStatus()
         self.user_id = user_id
         self.username = username
         self.display_name = display_name
@@ -164,6 +167,7 @@ async def test_fanout_on_pair_confirmed_sends_one_envelope(env):
         "bio": "hi",
         "picture_hash": None,
         "handle": None,
+        "status": None,
     }
 
 
@@ -383,9 +387,90 @@ async def test_v24_peer_gets_legacy_shape_without_binding():
         "bio": "hi",
         "picture_hash": None,
         "handle": None,
+        "status": None,
     }
     assert "user_identity_public_key" not in entry
     assert "user_sig_suite" not in entry
     assert "user_signature" not in entry
     assert "user_assertion_signature" not in entry
     assert "user_assertion_issued_at" not in entry
+
+
+# ─── status in the roster snapshot ──────────────────────────────────────
+
+
+async def _sync_payload(users, *, visibility=None, peer="peer-new") -> dict | None:
+    bus = EventBus()
+    fed = _FakeFederationService()
+    UsersSyncOutbound(
+        bus=bus,
+        federation_service=fed,
+        user_repo=_FakeUserRepo(users),
+        visibility_repo=visibility,
+    ).wire()
+    await bus.publish(PairingConfirmed(instance_id=peer))
+    return fed.sent[0][2] if fed.sent else None
+
+
+async def test_current_status_rides_the_snapshot():
+    """A user's current status ships as ``{emoji, text, expires_at}`` so
+    the peer shows it right after pairing."""
+    later = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    payload = await _sync_payload(
+        [
+            _FakeUser(
+                "u-alice",
+                "alice",
+                "Alice",
+                status=UserStatus(emoji="🌴", text="On holiday", expires_at=later),
+            ),
+            _FakeUser("u-maria", "maria", "Maria", status=UserStatus(text="Busy")),
+        ]
+    )
+    by_id = {u["user_id"]: u for u in payload["users"]}
+    assert by_id["u-alice"]["status"] == {
+        "emoji": "🌴",
+        "text": "On holiday",
+        "expires_at": later,
+    }
+    assert by_id["u-maria"]["status"] == {
+        "emoji": None,
+        "text": "Busy",
+        "expires_at": None,
+    }
+
+
+async def test_expired_status_ships_as_explicit_clear():
+    """A status past its deadline (not yet swept) goes out as ``null`` —
+    never resurrected on the peer — and so does no status at all."""
+    earlier = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    payload = await _sync_payload(
+        [
+            _FakeUser(
+                "u-alice",
+                "alice",
+                "Alice",
+                status=UserStatus(emoji="🤒", text="Sick", expires_at=earlier),
+            ),
+            _FakeUser("u-maria", "maria", "Maria"),
+        ]
+    )
+    for entry in payload["users"]:
+        assert "status" in entry
+        assert entry["status"] is None
+
+
+async def test_status_of_a_user_hidden_from_the_peer_never_ships():
+    """Same per-pair visibility filter as ``USER_STATUS_UPDATED``: a user
+    hidden from this peer is not in the snapshot, status included."""
+    vis = _FakeVisibilityRepo()
+    vis.hide("peer-new", "u-alice")
+    payload = await _sync_payload(
+        [
+            _FakeUser("u-alice", "alice", "Alice", status=UserStatus(text="Secret")),
+            _FakeUser("u-maria", "maria", "Maria", status=UserStatus(text="Here")),
+        ],
+        visibility=vis,
+    )
+    assert [u["user_id"] for u in payload["users"]] == ["u-maria"]
+    assert "Secret" not in repr(payload)

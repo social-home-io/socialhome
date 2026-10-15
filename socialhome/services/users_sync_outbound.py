@@ -11,10 +11,15 @@ happened to touch their profile) in :file:`/friends`.
 Payload mirrors what the existing ``USER_UPDATED`` outbound
 (:mod:`socialhome.services.profile_federation_outbound`) ships, just
 batched: ``{users: [{user_id, username, display_name, bio,
-picture_hash, handle, picture_webp_base64?}, ...]}``. The inbound handler
+picture_hash, handle, status, picture_webp_base64?}, ...]}``.
+``status`` is the user's current, non-expired ``{emoji, text,
+expires_at}`` (what ``USER_STATUS_UPDATED`` ships on a change) or
+``null`` when they have none, so a peer shows it right after pairing
+instead of only after the next status change. The inbound handler
 (:meth:`FederationInboundService._on_users_sync`) iterates the list
 and upserts each row via the same ``_upsert_remote_user`` path that
-``USER_UPDATED`` uses, so the receiver code is unchanged.
+``USER_UPDATED`` uses, then lands ``status`` (when present) on the
+accepted entry.
 
 Per-pair user-visibility filter applies — admins who have hidden a
 user from a peer via the existing peer-user-visibility surface keep
@@ -25,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..domain.events import PairingConfirmed
@@ -89,6 +95,7 @@ class UsersSyncOutbound(VisibilityMixin):
             return
 
         hidden = await self.hidden_for_peer(peer_id)
+        now = datetime.now(timezone.utc)
         payload_users: list[dict] = []
         for u in users:
             if u.user_id in hidden:
@@ -104,6 +111,10 @@ class UsersSyncOutbound(VisibilityMixin):
                 # the bootstrap sync at pairing lands the handle on the peer's
                 # remote_users row without waiting for a later profile edit.
                 "handle": u.handle,
+                # Current status, or ``None`` (explicit clear) when unset or
+                # past its deadline. Same per-pair visibility filter as
+                # ``USER_STATUS_UPDATED`` (the ``hidden`` skip above).
+                "status": u.status.visible_dict(now),
             }
             # Per-user identity binding (proto v_25) — present only for a
             # peer that can validate it; older peers keep the legacy shape.
