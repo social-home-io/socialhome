@@ -70,6 +70,10 @@ def assert_strict_public_page(resp, text: str) -> None:
     assert directives["frame-ancestors"] == ["'none'"]
     assert "'unsafe-inline'" not in header
     assert "'unsafe-eval'" not in header
+    # Fonts come from the GFS's own /static/fonts/ — never a font CDN.
+    assert directives["font-src"] == ["'self'"]
+    assert "fonts.googleapis.com" not in text
+    assert "fonts.gstatic.com" not in text
     for attrs, body in _SCRIPT_RE.findall(text):
         if "src=" in attrs:
             assert not body.strip(), f"script with src also has a body: {attrs}"

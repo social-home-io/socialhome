@@ -14,6 +14,7 @@
     "lint": "eslint \"src/**/*.{ts,tsx}\" \"gfs/**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
     "i18n:check": "node scripts/i18n-check.js",
+    "fonts:check": "node scripts/fonts-check.js",
     "i18n:status": "curl -sf \"$WEBLATE_URL/api/components/socialhome/ui/statistics/\" -H \"Authorization: Token $WEBLATE_TOKEN\"",
     "lint:circular": "madge --circular --ts-config tsconfig.json --extensions ts,tsx src gfs"
   },

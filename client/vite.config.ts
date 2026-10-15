@@ -13,10 +13,12 @@ export default defineConfig({
   build: {
     outDir:   '../socialhome/static',
     emptyOutDir: true,
-    // Never inline a script asset as a ``data:`` URL (the STT AudioWorklet
-    // is one): the SPA's CSP is ``script-src 'self'`` with no ``data:``
-    // (socialhome/csp.py). Other assets keep Vite's default limit.
-    assetsInlineLimit: (file) => (/\.[cm]?js$/.test(file) ? false : undefined),
+    // Never inline a script or font asset as a ``data:`` URL: the SPA's
+    // CSP is ``script-src 'self'`` / ``font-src 'self'`` with no ``data:``
+    // (socialhome/csp.py). The STT AudioWorklet is a script asset; the
+    // smallest bundled font subsets (styles/fonts.css) are under Vite's
+    // 4 KB inline limit. Other assets keep Vite's default limit.
+    assetsInlineLimit: (file) => (/\.([cm]?js|woff2?)$/.test(file) ? false : undefined),
   },
   server: {
     proxy: {

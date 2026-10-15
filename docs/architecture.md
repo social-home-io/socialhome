@@ -1292,9 +1292,11 @@ script.
   pixel for every viewer (owner decision 2026-10-05, see
   `docs/principles.md` → "No third-party fetches from user content");
   `style-src-attr 'unsafe-inline'` for the `style="…"`
-  attributes in Leaflet pin / popup HTML (`<style>` elements stay blocked);
-  `fonts.googleapis.com` / `fonts.gstatic.com` for the Google Fonts
-  stylesheet. Map tiles and link-preview images are proxied/stored locally,
+  attributes in Leaflet pin / popup HTML (`<style>` elements stay blocked).
+  `style-src` and `font-src` are `'self'` only: every font (Manrope,
+  Fraunces, JetBrains Mono, Nunito) is bundled with the SPA
+  (`client/src/styles/fonts.css`, never a font CDN, never inlined as
+  `data:`). Map tiles and link-preview images are proxied/stored locally,
   so no tile host is ever needed, whatever `map_tile_url` says.
 - **Same-origin framing in every mode:** the shell is
   `frame-ancestors 'self'`, and the global `X-Frame-Options: SAMEORIGIN`
@@ -1319,8 +1321,7 @@ script.
   go out through `global_server/html_page.py:html_response`, which sets
   `csp.build_public_page_csp()`:
   `default-src 'self'; script-src 'self'; style-src 'self'
-  https://fonts.googleapis.com 'sha256-…'; font-src
-  https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self'
+  'sha256-…'; font-src 'self'; img-src 'self' data: blob:; media-src 'self'
   blob:; connect-src 'self'; object-src 'none'; base-uri 'self';
   form-action 'self'; frame-ancestors 'none'`. No `'unsafe-inline'`
   anywhere: the copy-code button is the file
@@ -1334,7 +1335,10 @@ script.
   admits attacker CSS. `img-src` names no third-party host: space cover /
   icon are `data:` URIs the household publishes, the operator header image
   is a root-relative `/media/…`, and the viewers render WebRTC bytes as
-  `blob:`. `<script type="application/json">` boot blocks are inert data.
+  `blob:`. Fonts (Manrope + Fraunces) come from the GFS's own
+  `/static/fonts/fonts.css` (`global_server/static/fonts/`), so an
+  anonymous visitor's browser never reaches a font CDN.
+  `<script type="application/json">` boot blocks are inert data.
   `tests/global_server/conftest.py:assert_strict_public_page` checks every
   page and status for the header, no inline executable script, no
   `on*=` / `style=` attributes, and a hash for every `<style>`. Core
