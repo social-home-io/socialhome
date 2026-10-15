@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +16,8 @@ from socialhome.app_keys import db_key as _db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id, generate_identity_keypair
-from socialhome.domain.conversation import ConversationMessage
+from socialhome.domain.conversation import ConversationMessage, ConversationType
+from socialhome.routes.conversations import _conversation_row
 from socialhome.services.dm_service import DmService
 
 
@@ -1677,3 +1679,52 @@ async def test_opening_many_threads_in_a_minute_is_not_rate_limited(client):
         for _ in range(120)
     ]
     assert statuses.count(200) == 120
+
+
+async def test_conversation_row_shows_a_guardian_block_counterpart_by_name_only():
+    """§CP.F2: the inbox preview names a counterpart (either way) without
+    a picture — defence in depth, since the block steps the account out of
+    every conversation the two shared."""
+
+    class _Repo:
+        async def list_members(self, conv_id):
+            return [
+                NS(
+                    username="me",
+                    deleted_at=None,
+                    notif_level="all",
+                    muted_until=None,
+                    last_read_at=None,
+                ),
+                NS(username="kid", deleted_at=None),
+                NS(username="ann", deleted_at=None),
+            ]
+
+        async def list_remote_members(self, conv_id):
+            return []
+
+        async def count_unread(self, conv_id, username):
+            return 0
+
+    class _Users:
+        async def get(self, username):
+            return NS(
+                user_id=f"u-{username}",
+                username=username,
+                display_name=username.title(),
+                picture_hash="0123456789abcdef",
+            )
+
+    row = await _conversation_row(
+        NS(id="c1", type=ConversationType.GROUP_DM, name=None, last_message_at=None),
+        username="me",
+        svc=NS(groups=NS(is_authority_here=lambda _cid: True)),
+        repo=_Repo(),
+        user_repo=_Users(),
+        now=datetime.now(timezone.utc),
+        withheld=frozenset({"u-kid"}),
+    )
+    members = {m["user_id"]: m for m in row["members"]}
+    assert members["u-kid"]["display_name"] == "Kid"
+    assert members["u-kid"]["picture_url"] is None
+    assert members["u-ann"]["picture_url"]

@@ -71,3 +71,13 @@ def test_name_only_never_adds_keys_the_row_did_not_carry():
         "picture_url": None,
     }
     assert set(NAME_ONLY_WITHHELD_KEYS) == {"picture_hash", "picture_url", "bio"}
+
+
+def test_name_only_reads_session_presence_as_offline():
+    row = {"user_id": "u", "is_online": True, "is_idle": True, "last_seen_at": "x"}
+    assert name_only(row) == {
+        "user_id": "u",
+        "is_online": False,
+        "is_idle": False,
+        "last_seen_at": None,
+    }

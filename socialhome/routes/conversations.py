@@ -684,17 +684,7 @@ class ConversationMembersView(BaseView):
         # the roster, by name only — no picture, and no online state
         # (``/api/presence`` and ``/api/friends`` leave that out too).
         withheld = await self.guardian_block_counterparts()
-        rows = [
-            {
-                **name_only(r),
-                "is_online": False,
-                "is_idle": False,
-                "last_seen_at": None,
-            }
-            if r["user_id"] in withheld
-            else r
-            for r in rows
-        ]
+        rows = [name_only(r) if r["user_id"] in withheld else r for r in rows]
         return self._json(rows)
 
 

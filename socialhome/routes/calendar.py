@@ -140,6 +140,22 @@ async def _event_dicts_with_copies(svc, events) -> list[dict]:
     ]
 
 
+def _invitee_row(m) -> dict:
+    """One remote person in the ``GET /api/calendars/invitees`` picker."""
+    return {
+        "user_id": m.user_id,
+        "instance_id": m.instance_id,
+        "remote_username": m.remote_username,
+        "display_name": m.display_name,
+        "picture_hash": m.picture_hash,
+        "picture_url": (
+            f"api/users/{m.user_id}/picture?v={m.picture_hash}"
+            if m.picture_hash
+            else None
+        ),
+    }
+
+
 class CalendarInviteesView(BaseView):
     """``GET /api/calendars/invitees`` — list cross-household invitees.
 
@@ -173,22 +189,10 @@ class CalendarInviteesView(BaseView):
                     "instance_id": inst.id,
                     "instance_name": inst.display_name,
                     "members": [
-                        name_only(row) if m.user_id in withheld else row
+                        name_only(_invitee_row(m))
+                        if m.user_id in withheld
+                        else _invitee_row(m)
                         for m in members
-                        for row in (
-                            {
-                                "user_id": m.user_id,
-                                "instance_id": m.instance_id,
-                                "remote_username": m.remote_username,
-                                "display_name": m.display_name,
-                                "picture_hash": m.picture_hash,
-                                "picture_url": (
-                                    f"api/users/{m.user_id}/picture?v={m.picture_hash}"
-                                    if m.picture_hash
-                                    else None
-                                ),
-                            },
-                        )
                     ],
                 },
             )

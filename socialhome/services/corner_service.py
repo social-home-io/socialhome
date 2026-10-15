@@ -312,10 +312,11 @@ class CornerService(ProtectionGateMixin):
         try:
             rows = await self._presence.list_presence()
             hidden = {uid for uid, _ in await self._users.list_blocked(user_id)}
+            hidden |= await self._guardian_block_counterparts(user_id)
         except Exception as exc:  # pragma: no cover — defensive
+            # Fails closed: no whereabouts rather than unfiltered ones.
             log.debug("corner: presence failed: %s", exc)
             return ()
-        hidden |= await self._guardian_block_counterparts(user_id)
         return tuple(p for p in rows if p.user_id not in hidden)
 
     async def _tasks_due_today(self, user_id: str, now: datetime) -> tuple[Task, ...]:

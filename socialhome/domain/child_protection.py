@@ -64,15 +64,25 @@ PROTECTED_OWNER_TRANSFER_DETAIL = (
 #: only — and, like every other guardian-block rule, the other way round.
 NAME_ONLY_WITHHELD_KEYS: tuple[str, ...] = ("picture_hash", "picture_url", "bio")
 
+#: Session-presence keys a name-only row reads as offline with (#948 keeps
+#: online state from the other side of a guardian block).
+NAME_ONLY_OFFLINE: dict[str, object] = {
+    "is_online": False,
+    "is_idle": False,
+    "last_seen_at": None,
+}
+
 
 def name_only(row: dict) -> dict:
     """A copy of the person *row* with picture and bio withheld (§CP.F2).
 
-    Only keys the row already carries are blanked to ``None``, so the
-    payload shape a client parses never changes — the person just reads
-    as having no picture and no bio.
+    Only keys the row already carries change, so the payload shape a
+    client parses never does: picture and bio read ``None``, and any
+    session-presence keys read offline — the person just shows as a name.
     """
-    return {**row, **{k: None for k in NAME_ONLY_WITHHELD_KEYS if k in row}}
+    blanked = {k: None for k in NAME_ONLY_WITHHELD_KEYS if k in row}
+    offline = {k: v for k, v in NAME_ONLY_OFFLINE.items() if k in row}
+    return {**row, **blanked, **offline}
 
 
 class AccountProtectedError(PermissionError):

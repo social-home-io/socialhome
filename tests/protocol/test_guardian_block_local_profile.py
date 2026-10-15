@@ -209,6 +209,15 @@ async def test_directory_shows_the_counterpart_by_name_only(env, viewer, other):
     assert row["picture_hash"] is None
     assert row["picture_url"] is None
     assert row["bio"] is None
+    assert row["last_seen_at"] is None
+    assert row["status"]["text"] is None
+
+
+async def test_directory_carries_only_the_callers_own_preferences(env):
+    rows = _by_id(await _rows(env, "/api/users", "carol"))
+    assert "preferences_json" in rows["u-carol"]
+    assert "preferences_json" not in rows["u-kid"]
+    assert "preferences_json" not in rows["u-bob"]
 
 
 async def test_directory_is_unchanged_for_everyone_else(env):
@@ -241,6 +250,8 @@ async def test_shared_space_shows_the_counterpart_by_name_only(env, viewer, othe
     rows = _by_id(await _rows(env, f"/api/spaces/{sid}/members", viewer))
     assert rows[other]["picture_hash"] is None
     assert rows[other]["picture_url"] is None
+    assert rows[other]["is_online"] is False
+    assert rows[other]["last_seen_at"] is None
     carol_rows = _by_id(await _rows(env, f"/api/spaces/{sid}/members", "carol"))
     assert carol_rows[other]["picture_url"]
 

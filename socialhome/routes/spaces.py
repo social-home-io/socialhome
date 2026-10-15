@@ -861,7 +861,8 @@ class SpaceMembersView(BaseView):
             if is_owner:
                 row["role"] = SpaceRole.OWNER.value
         # §CP.F2: someone a guardian block separates from the viewer, either
-        # way, shows by name only — no per-space or household picture.
+        # way, shows by name only — no per-space or household picture, and
+        # offline.
         withheld = await self.guardian_block_counterparts()
         rows = [
             name_only(row) if row.get("user_id") in withheld else row

@@ -382,13 +382,15 @@ class UserCollectionView(BaseView):
     The household directory keeps everyone (mentions, the household chat),
     but someone a guardian block (§CP.F2) separates from the caller, either
     way, shows by name only: status unset (as on ``/api/presence`` and
-    ``/api/friends``), no picture and no bio.
+    ``/api/friends``), no picture, no bio, no last-seen time. Only the
+    caller's own row carries ``preferences_json``.
     """
 
     async def get(self) -> web.Response:
         svc = self.svc(user_service_key)
         users = await svc.list_active()
         withheld = await self.guardian_block_counterparts()
+        caller_id = self.user.user_id
         rows: list[dict] = []
         for u in users:
             if u.user_id in withheld:
@@ -396,6 +398,10 @@ class UserCollectionView(BaseView):
                 row["status"] = dataclasses.asdict(UserStatus())
             else:
                 row = _user_to_dict_signed(self.request, u)
+            if u.user_id != caller_id:
+                # Someone's own settings (pinned spaces, default audiences…)
+                # are theirs — ``GET /api/me`` carries the caller's.
+                row.pop("preferences_json", None)
             rows.append(row)
         return web.json_response(rows)
 

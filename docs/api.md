@@ -161,7 +161,7 @@ Admins also have:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/users` | List all users on this HFS. Someone a guardian block (§CP.F2) separates from the caller, either way round, shows by name only: `status` reads as unset and `picture_hash` / `picture_url` / `bio` as `null` (the directory itself keeps everyone). |
+| GET | `/api/users` | List all users on this HFS. Someone a guardian block (§CP.F2) separates from the caller, either way round, shows by name only: `status` reads as unset and `picture_hash` / `picture_url` / `bio` / `last_seen_at` as `null` (the directory itself keeps everyone). `preferences_json` is on the caller's own row only (`GET /api/me` carries it too). |
 | GET | `/api/users/{user_id}` | Fetch a user profile. |
 | PATCH | `/api/users/{user_id}` | Admin-only update (or self). |
 | GET | `/api/users/{user_id}/picture` | Fetch another user's avatar. 404 `NOT_FOUND` for a caller a guardian block (§CP.F2) separates from that user, either way — the same answer as no picture. |
@@ -253,7 +253,7 @@ events these routes fire.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET / POST | `/api/spaces/{id}/members` | List / invite. Each listed row (local and remote seats) carries `mention` — the exact @-token (without `@`) a composer inserts to mention that member, unique in the space (`handle`, or `handle@<user_id prefix>` when two members share a handle; `null` when the member has no token-safe handle) — and remote rows add `household_name` (the paired peer's display name, `null` if unknown). Every row has `is_owner`; on a member household the owner's mirrored seat is reported with `role: "owner"` once the host's roster named it. Someone a guardian block (§CP.F2) separates from the caller, either way, shows by name only (`picture_hash` / `picture_url` `null`). |
+| GET / POST | `/api/spaces/{id}/members` | List / invite. Each listed row (local and remote seats) carries `mention` — the exact @-token (without `@`) a composer inserts to mention that member, unique in the space (`handle`, or `handle@<user_id prefix>` when two members share a handle; `null` when the member has no token-safe handle) — and remote rows add `household_name` (the paired peer's display name, `null` if unknown). Every row has `is_owner`; on a member household the owner's mirrored seat is reported with `role: "owner"` once the host's roster named it. Someone a guardian block (§CP.F2) separates from the caller, either way, shows by name only (`picture_hash` / `picture_url` `null`, offline). |
 | GET / PATCH / DELETE | `/api/spaces/{id}/members/me` | Self member profile. |
 | POST / DELETE | `/api/spaces/{id}/members/me/picture` | Space-specific avatar. |
 | GET / PATCH / DELETE | `/api/spaces/{id}/members/{user_id}` | Admin-only ops. `PATCH {"role":"admin"\|"moderator"\|"member"}` changes a role: the owner sets any of them, an admin moves a member only between `member` and `moderator` (403 otherwise; 422 for any other role). On a member household the change is forwarded to the space's host (v_47): **202** `{"user_id","role","forwarded":true}` — the host re-checks it and the new role arrives with its roster update (a refused one never does); 409 `HOST_TOO_OLD` (`feature: "role_change"`) when the host is below v_47; 503 `HOST_UNREACHABLE` (`reason: "unreachable"` / `"unknown_host"`) when the forward reached nobody and was not queued (also for every other forwarded admin action). |
@@ -1007,7 +1007,9 @@ on this household the two see each other by name only, either way round —
 no picture and no bio in `/api/users`, a space or conversation roster, the
 follows list or the calendar invite picker, 404 on their picture, and no pin
 on a space map or the `/api/me/corner` presence slice, and no
-`space.member.profile_updated` frame about the other;
+`space.member.profile_updated` frame about the other (when the block is
+added each side's open session gets one name-only `user.profile_updated`
+about the other, and the full one when it is removed);
 and a blocked person's space posts,
 household posts and comments, @mentions, @here, DMs, contact requests (not
 stored either), follows, moment replies and reactions never notify the
