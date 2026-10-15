@@ -42,6 +42,7 @@ from ..app_keys import (
     peer_user_visibility_repo_key,
     peer_unpair_service_key,
     platform_adapter_key,
+    profile_federation_outbound_key,
     user_repo_key,
 )
 from ..domain.federation import (
@@ -58,7 +59,6 @@ from ..domain.federation import (
 from ..federation.pairing_gfs_reach import parse_reach
 from ..security import error_response
 from ..services.peer_home_sharing_service import UnknownInstanceError
-from ..services.user_identity_binding import user_identity_binding_fields
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -854,28 +854,12 @@ class PairingConnectionVisibleUsersView(BaseView):
                 # name / bio may have changed while the user was hidden.
                 u = local_by_id[uid]
                 try:
-                    # Same identity fields as every other user publication,
-                    # so the peer can bind the user to this household.
-                    binding = await user_identity_binding_fields(
-                        federation_service=federation,
-                        user_repo=users_repo,
-                        peer_instance_id=instance_id,
-                        user_id=u.user_id,
-                        username=u.username,
-                        display_name=u.display_name,
-                        picture_hash=getattr(u, "picture_hash", None),
-                    )
-                    await federation.send_event(
-                        to_instance_id=instance_id,
-                        event_type=FederationEventType.USER_UPDATED,
-                        payload={
-                            "user_id": u.user_id,
-                            "username": u.username,
-                            "display_name": u.display_name,
-                            "bio": getattr(u, "bio", None),
-                            "picture_hash": getattr(u, "picture_hash", None),
-                            **binding,
-                        },
+                    # The one USER_UPDATED builder: identity binding plus the
+                    # §CP.F2 rule (a protected account's name only, to a
+                    # household where someone its guardian blocked lives).
+                    # Bytes ride along — the peer may have dropped its copy.
+                    await self.svc(profile_federation_outbound_key).send_profile(
+                        instance_id, u, with_picture=True
                     )
                 except Exception:  # pragma: no cover — defensive
                     log.exception(

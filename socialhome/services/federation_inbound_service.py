@@ -4425,6 +4425,16 @@ class FederationInboundService(ProtectionGateMixin):
                     user_id,
                     exc,
                 )
+        elif (
+            "picture_hash" in payload
+            and payload["picture_hash"] is None
+            and self._profile_picture_repo is not None
+        ):
+            # An explicit ``picture_hash: null`` (no bytes) means "no
+            # picture" — the user removed it, or a guardian block (§CP.F2)
+            # sends this household the name only. Drop the cached bytes too,
+            # so ``GET /api/users/{id}/picture`` can't keep serving them.
+            await self._profile_picture_repo.clear_user_picture(user_id)
 
         # ``handle`` is unsigned public display metadata (like display_name /
         # picture) — older peers omit it. Pass None through when absent so the

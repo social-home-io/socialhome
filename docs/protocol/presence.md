@@ -224,7 +224,26 @@ sender never sends and which would time-stamp each change. A block on a
 remote person this household has no `remote_users` row for yet places them
 nowhere, so it covers no household until that row lands (a status live at
 that moment isn't cleared there). Once the block is lifted or protection is
-off, the next change goes out as usual. On the protected account's own
+off, that household gets the current status (when set) and online state
+(`USER_ONLINE`, or `USER_IDLE` when idle, when online) once, and the next
+change goes out as usual.
+
+The same households get the protected account's **name only**:
+`USER_UPDATED` and its `USERS_SYNC` entry carry `display_name` / `handle`
+but `bio: null`, `picture_hash: null` and no `picture_webp_base64` (the
+per-user identity binding signs that `null` hash). Every receiver already
+overwrites both columns with `null`, so a picture or bio it holds from
+before the block reads as gone; a current receiver also drops the cached
+picture bytes on an explicit `picture_hash: null` without bytes, so
+`GET /api/users/{id}/picture` there answers 404. Adding the block (or
+turning protection back on over kept blocks) sends one such name-only
+`USER_UPDATED` at once. Lifting it sends the full profile with the
+picture bytes, since the receiver may have dropped them. The admin
+re-publish of a hidden-then-visible member goes through the same sender.
+No protocol bump: the wire shape is unchanged, and a `null` picture hash
+has always meant "no picture". An older receiver keeps the old bytes in
+its own database, unlinked from the profile; a sender can't make it
+delete them. On the protected account's own
 household, `user.status_changed` frames (and the profile / presence /
 online frames) are withheld from everyone a guardian block separates from
 the subject, either way round, matching `GET /api/friends` and

@@ -112,6 +112,11 @@ async def test_hooks_default_to_no_ops():
     assert await svc.on_guardian_block("kid", "bob") is None
 
 
+async def test_block_lifted_hook_defaults_to_a_no_op():
+    svc = _Svc()
+    assert await svc.on_guardian_block_lifted("kid", frozenset({"peer-x"})) is None
+
+
 async def test_guardian_block_reads_delegate_to_the_service():
     svc = _Svc()
     svc.attach_child_protection(_BlockCp({"kid"}))

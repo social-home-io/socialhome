@@ -5223,3 +5223,76 @@ async def test_config_changed_ignores_an_owner_list_dated_far_ahead(db, bus, inb
         stored=stored,
     )
     assert got == stored
+
+
+# ─── USER_UPDATED picture clearing (§CP.F2 name-only) ───────────────────
+
+
+class _RecordingPictureRepo:
+    def __init__(self) -> None:
+        self.cleared: list[str] = []
+        self.stored: list[str] = []
+
+    async def set_user_picture(self, user_id, *, bytes_webp, hash, width, height):
+        self.stored.append(user_id)
+
+    async def clear_user_picture(self, user_id) -> None:
+        self.cleared.append(user_id)
+
+
+async def _user_updated_with(db, bus, extra: dict) -> _RecordingPictureRepo:
+    await _seed_peer(db, "peer-a", "ab" * 32)
+    pics = _RecordingPictureRepo()
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        profile_picture_repo=pics,
+    )
+    service._federation_service = _BindingFakeFederation({"peer-a": _PK_AB})
+    await service._on_user_updated(
+        _event(
+            FederationEventType.USER_UPDATED,
+            {
+                "user_id": derive_user_id(_PK_AB, "bob"),
+                "username": "bob",
+                "display_name": "Bob",
+                **extra,
+            },
+            from_instance="peer-a",
+        )
+    )
+    return pics
+
+
+async def test_user_updated_explicit_null_picture_clears_cached_bytes(db, bus):
+    """A name-only ``USER_UPDATED`` (``picture_hash: null``, no bytes) drops
+    the cached picture so ``/api/users/{id}/picture`` can't keep serving it."""
+    pics = await _user_updated_with(db, bus, {"bio": None, "picture_hash": None})
+    assert pics.cleared == [derive_user_id(_PK_AB, "bob")]
+    assert pics.stored == []
+
+
+async def test_user_updated_without_picture_hash_key_keeps_cached_bytes(db, bus):
+    """An older-shape payload that omits ``picture_hash`` says nothing about
+    the picture — the cached bytes stay."""
+    pics = await _user_updated_with(db, bus, {"bio": "hi"})
+    assert pics.cleared == []
+    assert pics.stored == []
+
+
+async def test_user_updated_with_bytes_stores_them_instead_of_clearing(db, bus):
+    buf = io.BytesIO()
+    PILImage.new("RGB", (16, 16), color="green").save(buf, format="PNG")
+    pics = await _user_updated_with(
+        db,
+        bus,
+        {
+            "picture_hash": None,
+            "picture_webp_base64": base64.b64encode(buf.getvalue()).decode(),
+        },
+    )
+    assert pics.stored == [derive_user_id(_PK_AB, "bob")]
+    assert pics.cleared == []

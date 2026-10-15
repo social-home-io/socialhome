@@ -198,3 +198,74 @@ async def test_hooks_ignore_an_unknown_user():
     _bus, fed, out, _cp = _gated(_StatusUserRepo(UserStatus(text="x")))
     await out.on_account_protected("u-remote")
     assert fed.sent == []
+
+
+# ─── §CP.F2 block lifted ─────────────────────────────────────────────────
+
+
+class _WiderFedRepo:
+    async def list_social_instances(self):
+        return [_Peer(p) for p in ("peer-a", "peer-b", "peer-c", "own-inst")]
+
+
+class _StillBlockingCp(_FakeChildProtection):
+    """Another block still names someone homed on peer-c."""
+
+    async def guardian_blocks_household(self, user_id, instance_id) -> bool:
+        return user_id == "u-local" and instance_id == "peer-c"
+
+
+def _lifted_env(status: UserStatus):
+    fed = _FakeFederationService()
+    out = UserStatusOutbound(
+        bus=EventBus(),
+        federation_service=fed,  # type: ignore[arg-type]
+        federation_repo=_WiderFedRepo(),  # type: ignore[arg-type]
+        user_repo=_StatusUserRepo(status),  # type: ignore[arg-type]
+        visibility_repo=_FakeVisibilityRepo(),  # type: ignore[arg-type]
+    )
+    out.attach_child_protection(_StillBlockingCp())  # type: ignore[arg-type]
+    return fed, out
+
+
+async def test_block_lifted_sends_the_current_status_to_lifted_peers_only():
+    fed, out = _lifted_env(
+        UserStatus(emoji="📚", text="At school", expires_at="2999-01-01T00:00:00+00:00")
+    )
+    # peer-a: lifted + confirmed → sent. peer-b: hidden. peer-c: still
+    # blocked. peer-z: not a confirmed peer.
+    await out.on_guardian_block_lifted(
+        "u-local", frozenset({"peer-a", "peer-b", "peer-c", "peer-z"})
+    )
+    assert fed.sent == [
+        (
+            "peer-a",
+            FederationEventType.USER_STATUS_UPDATED,
+            {
+                "user_id": "u-local",
+                "emoji": "📚",
+                "text": "At school",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            },
+        )
+    ]
+
+
+async def test_block_lifted_sends_nothing_without_a_status():
+    fed, out = _lifted_env(UserStatus())
+    await out.on_guardian_block_lifted("u-local", frozenset({"peer-a"}))
+    assert fed.sent == []
+
+
+async def test_block_lifted_sends_nothing_for_an_expired_status():
+    fed, out = _lifted_env(
+        UserStatus(text="Gone", expires_at="2000-01-01T00:00:00+00:00")
+    )
+    await out.on_guardian_block_lifted("u-local", frozenset({"peer-a"}))
+    assert fed.sent == []
+
+
+async def test_block_lifted_ignores_an_unknown_user():
+    fed, out = _lifted_env(UserStatus(text="x"))
+    await out.on_guardian_block_lifted("u-remote", frozenset({"peer-a"}))
+    assert fed.sent == []

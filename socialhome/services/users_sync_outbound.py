@@ -24,6 +24,11 @@ accepted entry.
 Per-pair user-visibility filter applies — admins who have hidden a
 user from a peer via the existing peer-user-visibility surface keep
 that user out of the snapshot.
+
+Guardian blocks (§CP.F2): a protected account goes to a household where
+someone its guardian blocked is homed with its name only — ``bio``,
+``picture_hash`` and ``status`` ``null``, no picture bytes — like
+``USER_UPDATED`` and ``USER_STATUS_UPDATED`` do.
 """
 
 from __future__ import annotations
@@ -103,13 +108,18 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
         for u in users:
             if u.user_id in hidden:
                 continue
+            # §CP.F2: a guardian of this account blocked someone homed on
+            # the peer — the name only. ``None`` bio / picture (and no
+            # bytes) read as "none", as on ``USER_UPDATED``; no status.
+            blocked = await self._guardian_blocks_household(u.user_id, peer_id)
+            picture_hash = None if blocked else u.picture_hash
 
             entry: dict = {
                 "user_id": u.user_id,
                 "username": u.username,
                 "display_name": u.display_name,
-                "bio": u.bio,
-                "picture_hash": u.picture_hash,
+                "bio": None if blocked else u.bio,
+                "picture_hash": picture_hash,
                 # Unsigned public @handle — same shape USER_UPDATED ships, so
                 # the bootstrap sync at pairing lands the handle on the peer's
                 # remote_users row without waiting for a later profile edit.
@@ -120,11 +130,7 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
                 # §CP.F2: never a protected account's status to a household
                 # where someone its guardian blocked is homed (as
                 # ``USER_STATUS_UPDATED``) — ``None`` reads as no status.
-                "status": (
-                    None
-                    if await self._guardian_blocks_household(u.user_id, peer_id)
-                    else u.status.visible_dict(now)
-                ),
+                "status": None if blocked else u.status.visible_dict(now),
             }
             # Per-user identity binding (proto v_25) — present only for a
             # peer that can validate it; older peers keep the legacy shape.
@@ -136,7 +142,7 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
                     user_id=u.user_id,
                     username=u.username,
                     display_name=u.display_name,
-                    picture_hash=u.picture_hash,
+                    picture_hash=picture_hash,
                 ),
             )
             # Attach the WebP bytes so the peer can render the avatar
@@ -144,7 +150,7 @@ class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
             # fails or no bytes exist — the receiver will still get
             # the hash and can lazy-load the avatar via the per-user
             # picture endpoint on first render.
-            if u.picture_hash and self._picture_repo is not None:
+            if picture_hash and self._picture_repo is not None:
                 try:
                     pic = await self._picture_repo.get_user_picture(u.user_id)
                 except Exception as exc:  # pragma: no cover — defensive

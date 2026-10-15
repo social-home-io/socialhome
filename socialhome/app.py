@@ -1815,8 +1815,15 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
         visibility_repo=peer_user_visibility_repo,
         user_repo=user_repo,
+        profile_picture_repo=profile_picture_repo,
+    )
+    # §CP.F2: a protected account's name only — no picture, no bio — to a
+    # blocked person's household; the full profile again once lifted.
+    profile_federation_outbound.attach_child_protection(
+        app[K.child_protection_service_key]
     )
     profile_federation_outbound.wire()
+    app[K.profile_federation_outbound_key] = profile_federation_outbound
 
     # USER_STATUS_UPDATED — a local user's status (set, changed, cleared or
     # expired) reaches paired households; the inbound half already exists.

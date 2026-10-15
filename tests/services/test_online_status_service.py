@@ -17,6 +17,7 @@ from socialhome.domain.events import (
     UserWentIdle,
     UserWentOffline,
 )
+from socialhome.domain.federation import FederationEventType as _Evt
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.services.online_status_service import OnlineStatusService
@@ -567,3 +568,60 @@ async def test_block_hook_without_federation_is_a_noop():
     svc.attach_child_protection(_FakeChildProtection())  # type: ignore[arg-type]
     await svc.user_session_opened("kid", ws_id=1)
     await svc.on_guardian_block("kid", "u-blocked")
+
+
+# ─── §CP.F2 block lifted ─────────────────────────────────────────────────
+
+
+def _lifted_env():
+    """inst-A: lifted. inst-B: still blocked. inst-hider: hid ``kid``."""
+    svc, _bus, _repo, _captured = _make()
+    fed = _FakeFederationService()
+    vis = _FakeVisibilityRepo()
+    vis.hide("inst-hider", "kid")
+    svc.attach_federation(
+        federation_service=fed,
+        federation_repo=_FakeFederationRepo(
+            [_peer("inst-A"), _peer("inst-B"), _peer("inst-hider"), _peer("inst-self")]
+        ),
+        own_instance_id="inst-self",
+        visibility_repo=vis,
+    )
+    svc.attach_child_protection(_FakeChildProtection())  # type: ignore[arg-type]
+    return svc, fed
+
+
+_ALL_LIFTED = frozenset({"inst-A", "inst-B", "inst-hider", "inst-self", "inst-Z"})
+
+
+async def test_block_lifted_shows_an_online_account_online_again():
+    svc, fed = _lifted_env()
+    await svc.user_session_opened("kid", ws_id=1)
+    fed.sent.clear()
+    await svc.on_guardian_block_lifted("kid", _ALL_LIFTED)
+    # Not inst-B (still blocked), inst-hider (hidden), inst-self (own),
+    # inst-Z (not a social peer).
+    assert fed.sent == [("inst-A", _Evt.USER_ONLINE, {"user_id": "kid"})]
+
+
+async def test_block_lifted_sends_idle_for_an_idle_account():
+    svc, fed = _lifted_env()
+    await svc.user_session_opened("kid", ws_id=1)
+    svc._sessions["kid"][1] = datetime.now(timezone.utc) - timedelta(minutes=10)
+    await svc._scan_once()
+    assert svc.is_idle("kid")
+    fed.sent.clear()
+    await svc.on_guardian_block_lifted("kid", _ALL_LIFTED)
+    assert fed.sent == [("inst-A", _Evt.USER_IDLE, {"user_id": "kid"})]
+
+
+async def test_block_lifted_sends_nothing_for_an_offline_account():
+    svc, fed = _lifted_env()
+    await svc.on_guardian_block_lifted("kid", _ALL_LIFTED)
+    assert fed.sent == []
+
+
+async def test_block_lifted_without_federation_is_a_noop():
+    svc, _bus, _repo, _captured = _make()
+    await svc.user_session_opened("kid", ws_id=1)
+    await svc.on_guardian_block_lifted("kid", frozenset({"inst-A"}))

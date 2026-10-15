@@ -435,6 +435,13 @@ is. Like every field of the entry it rides the pairwise-encrypted
 payload. No capability bump: an older receiver ignores the unknown
 key, and a newer receiver treats its absence as "unchanged".
 
+An entry (or a `USER_UPDATED`) with an explicit `picture_hash: null`
+and no bytes means "no picture": the receiver clears the hash and drops
+any picture bytes it cached for that user. A protected account goes to a
+household where someone its guardian blocked is homed with its name only
+(`bio`, `picture_hash` and `status` `null`, no bytes) — see
+[presence.md](./presence.md) (§CP.F2).
+
 When every local user is hidden from the peer (or there are no
 local users at all), the envelope is suppressed entirely — no
 empty-roster sync.

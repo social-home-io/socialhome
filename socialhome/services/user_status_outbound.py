@@ -19,12 +19,15 @@ household, so the receiver can't filter it; the sender is the only place
 it holds. When a block is added (or protection is turned back on over
 existing blocks) the account's live status is cleared there once — an
 ordinary ``status_cleared`` — so a status set before the block doesn't
-linger; later changes send that household nothing.
+linger; later changes send that household nothing. Once no block covers
+it any more (block removed, protection off) it gets the current status
+again.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..domain.events import UserStatusChanged
@@ -124,6 +127,30 @@ class UserStatusOutbound(
         """Blocks kept from an earlier protection count again — clear the
         account's live status on the households they cover."""
         await self._clear_on_blocked_households(user_id)
+
+    async def on_guardian_block_lifted(
+        self, minor_user_id: str, instance_ids: frozenset[str]
+    ) -> None:
+        """No block covers these households any more: send them the
+        account's current status (a clear was all they got before)."""
+        user = await self._user_repo.get_by_user_id(minor_user_id)
+        if user is None:
+            return
+        live = user.status.visible_dict(datetime.now(timezone.utc))
+        if live is None:
+            return
+        payload = {"user_id": minor_user_id, **live}
+        confirmed = set(await self.list_confirmed_peer_ids())
+        for instance_id in sorted(instance_ids & confirmed):
+            if minor_user_id in await self.hidden_for_peer(instance_id):
+                continue
+            if await self._guardian_blocks_household(minor_user_id, instance_id):
+                continue
+            await self.send_to_instance(
+                instance_id,
+                FederationEventType.USER_STATUS_UPDATED,
+                payload,
+            )
 
     async def _clear_on_blocked_households(self, user_id: str) -> None:
         user = await self._user_repo.get_by_user_id(user_id)

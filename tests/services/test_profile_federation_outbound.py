@@ -22,7 +22,7 @@ from socialhome.crypto import (
 )
 from socialhome.domain.events import UserProfileUpdated
 from socialhome.domain.federation import FederationEventType
-from socialhome.domain.user import UserIdentityAssertion
+from socialhome.domain.user import User, UserIdentityAssertion
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.profile_federation_outbound import (
     ProfileFederationOutbound,
@@ -380,3 +380,180 @@ async def test_binding_omitted_when_no_user_repo_wired():
     await bus.publish(_event())
     payload = fed.sent[0][2]
     assert "user_identity_public_key" not in payload
+
+
+# ─── §CP.F2 guardian blocks ──────────────────────────────────────────────
+
+
+class _FakeChildProtection:
+    """``u1`` is protected; its guardian blocked someone on ``blocked``."""
+
+    def __init__(self, blocked: set[str]) -> None:
+        self.blocked = blocked
+        self.gates: list = []
+
+    def register_gate(self, gate) -> None:
+        self.gates.append(gate)
+
+    async def guardian_blocks_household(self, user_id, instance_id) -> bool:
+        return user_id == "u1" and instance_id in self.blocked
+
+
+class _FakePictureRepo:
+    def __init__(self, pics: dict[str, bytes]) -> None:
+        self._pics = pics
+
+    async def get_user_picture(self, user_id: str):
+        b = self._pics.get(user_id)
+        return None if b is None else (b, f"hash-{user_id}")
+
+
+class _LocalUserRepo:
+    """``get_by_user_id`` returns full local rows."""
+
+    def __init__(self, users: list[User]) -> None:
+        self._users = {u.user_id: u for u in users}
+
+    async def get_user_identity_keypair(self, username: str):
+        return None
+
+    async def get_user_identity_anchor(self, username: str):
+        return None
+
+    async def get_by_user_id(self, user_id: str):
+        return self._users.get(user_id)
+
+
+_ALICE = User(
+    user_id="u1",
+    username="alice",
+    display_name="Alice",
+    bio="hello",
+    picture_hash="h1",
+    handle="ally",
+)
+_NAME_ONLY = {
+    "user_id": "u1",
+    "username": "alice",
+    "display_name": "Alice",
+    "bio": None,
+    "picture_hash": None,
+    "handle": "ally",
+}
+_FULL_WITH_BYTES = {
+    "user_id": "u1",
+    "username": "alice",
+    "display_name": "Alice",
+    "bio": "hello",
+    "picture_hash": "h1",
+    "handle": "ally",
+    "picture_webp_base64": "UElD",  # base64 of b"PIC"
+}
+
+
+def _gated(
+    peers=("peer-1", "peer-2"),
+    *,
+    blocked=("peer-2",),
+    hidden=(),
+    users=(_ALICE,),
+):
+    bus = EventBus()
+    fed = _FakeFederationService()
+    vis = _FakeVisibilityRepo()
+    for peer in hidden:
+        vis.hide(peer, "u1")
+    out = ProfileFederationOutbound(
+        bus=bus,
+        federation_service=fed,
+        federation_repo=_FakeFedRepo(list(peers)),
+        visibility_repo=vis,
+        user_repo=_LocalUserRepo(list(users)),
+        profile_picture_repo=_FakePictureRepo({"u1": b"PIC"}),
+    )
+    cp = _FakeChildProtection(set(blocked))
+    out.attach_child_protection(cp)
+    out.wire()
+    return bus, fed, out, cp
+
+
+async def test_attach_registers_the_outbound_as_a_gate():
+    _bus, _fed, out, cp = _gated()
+    assert cp.gates == [out]
+
+
+async def test_profile_update_is_name_only_to_a_blocked_household():
+    bus, fed, _out, _cp = _gated()
+    await bus.publish(_event(handle="ally", picture_webp=b"PIC"))
+    by_peer = {to: payload for to, _ev, payload in fed.sent}
+    assert by_peer["peer-2"] == _NAME_ONLY
+    assert by_peer["peer-1"] == _FULL_WITH_BYTES
+
+
+async def test_send_profile_attaches_picture_bytes_on_request():
+    _bus, fed, out, _cp = _gated(blocked=())
+    await out.send_profile("peer-1", _ALICE, with_picture=True)
+    await out.send_profile("peer-2", _ALICE)
+    assert fed.sent[0] == (
+        "peer-1",
+        FederationEventType.USER_UPDATED,
+        _FULL_WITH_BYTES,
+    )
+    assert "picture_webp_base64" not in fed.sent[1][2]
+    assert fed.sent[1][2]["picture_hash"] == "h1"
+
+
+async def test_send_profile_without_stored_bytes_sends_the_hash_only():
+    _bus, fed, out, _cp = _gated(blocked=())
+    user = User(user_id="u9", username="bob", display_name="Bob", picture_hash="h9")
+    await out.send_profile("peer-1", user, with_picture=True)
+    payload = fed.sent[0][2]
+    assert payload["picture_hash"] == "h9"
+    assert "picture_webp_base64" not in payload
+
+
+async def test_send_profile_to_a_blocked_household_is_name_only():
+    _bus, fed, out, _cp = _gated()
+    await out.send_profile("peer-2", _ALICE, with_picture=True)
+    assert fed.sent == [("peer-2", FederationEventType.USER_UPDATED, _NAME_ONLY)]
+
+
+@pytest.mark.parametrize("hook", ["on_guardian_block", "on_account_protected"])
+async def test_block_hooks_send_name_only_to_blocked_households_only(hook):
+    _bus, fed, out, _cp = _gated(peers=("peer-1", "peer-2", "peer-3"))
+    if hook == "on_guardian_block":
+        await out.on_guardian_block("u1", "u-blocked")
+    else:
+        await out.on_account_protected("u1")
+    assert fed.sent == [("peer-2", FederationEventType.USER_UPDATED, _NAME_ONLY)]
+
+
+async def test_block_hooks_skip_a_household_the_user_is_hidden_from():
+    _bus, fed, out, _cp = _gated(hidden=("peer-2",))
+    await out.on_guardian_block("u1", "u-blocked")
+    await out.on_account_protected("u1")
+    assert fed.sent == []
+
+
+async def test_block_hooks_ignore_an_unknown_user():
+    _bus, fed, out, _cp = _gated(users=())
+    await out.on_guardian_block("u1", "u-blocked")
+    await out.on_account_protected("u1")
+    await out.on_guardian_block_lifted("u1", frozenset({"peer-1"}))
+    assert fed.sent == []
+
+
+async def test_block_lifted_sends_full_profile_to_lifted_households_only():
+    _bus, fed, out, _cp = _gated(
+        peers=("peer-1", "peer-2", "peer-3", "peer-4"),
+        blocked=("peer-3",),
+        hidden=("peer-4",),
+    )
+    # peer-1 lifted → full. peer-2 not in the set. peer-3 still blocked.
+    # peer-4 hidden. peer-x not a confirmed peer.
+    await out.on_guardian_block_lifted(
+        "u1", frozenset({"peer-1", "peer-3", "peer-4", "peer-x"})
+    )
+    assert fed.sent == [
+        ("peer-1", FederationEventType.USER_UPDATED, _FULL_WITH_BYTES),
+    ]
