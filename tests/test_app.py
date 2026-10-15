@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 from socialhome._version import __version__
 from socialhome import app_keys as K
@@ -22,10 +22,15 @@ from socialhome.app import (
     _build_gfs_route_discovery,
     _build_gfs_route_resolver,
     MAP_TILE_USER_AGENT,
+    SIGNED_MEDIA_GET_LIMIT,
+    SIGNED_MEDIA_GET_RULES,
     _build_link_previews,
+    _build_middleware,
     create_app,
     dispatch_gfs_relay_frame,
 )
+from socialhome.auth import SIGNED_URL_PRINCIPAL
+from socialhome.rate_limiter import RateLimiter
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBER_KEY_HANDOFF,
@@ -788,3 +793,62 @@ async def test_busy_dashboard_port_does_not_stop_the_main_app(tmp_dir, caplog):
                 assert resp.status == 200
                 assert app[K.dashboard_server_key].running_port is None
     assert "household dashboard" in caplog.text
+
+
+class _PeerTransport:
+    def __init__(self, ip: str) -> None:
+        self._ip = ip
+
+    def get_extra_info(self, name: str, default=None):
+        return (self._ip, 1234) if name == "peername" else default
+
+    def is_closing(self) -> bool:
+        return False
+
+
+async def _signed_get(mw, path: str, ip: str) -> int:
+    request = make_mocked_request("GET", path, transport=_PeerTransport(ip))
+    request["user"] = type("Ctx", (), {"user_id": SIGNED_URL_PRINCIPAL})()
+
+    async def handler(_req):
+        return web.Response(status=200)
+
+    return (await mw(request, handler)).status
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/users/u1/picture",
+        "/api/media/abc.webp",
+        "/api/spaces/s1/members/u1/picture",
+        "/api/spaces/s1/cover",
+        "/api/spaces/s1/icon",
+    ],
+)
+async def test_signed_media_gets_have_their_own_per_client_limit(path, tmp_path):
+    """Regression (F2): signed ``<img>`` fetches shared one household-wide
+    60/min bucket per path family. Each signed media family now has its
+    own looser rule, per client address."""
+    assert SIGNED_MEDIA_GET_LIMIT == (600, 60)
+    assert len(SIGNED_MEDIA_GET_RULES) == 5
+    _, _, rate_mw = _build_middleware(
+        Config(data_dir=str(tmp_path), db_path=str(tmp_path / "x.db")), RateLimiter()
+    )
+    for _ in range(600):
+        assert await _signed_get(rate_mw, path, "10.0.0.1") == 200
+    assert await _signed_get(rate_mw, path, "10.0.0.1") == 429
+    # Another device in the house is unaffected.
+    assert await _signed_get(rate_mw, path, "10.0.0.2") == 200
+
+
+async def test_gfs_picture_proxy_limit_stays_household_wide(tmp_path):
+    """Every GFS-proxied avatar is an upstream fetch, so its signed-URL
+    bucket is shared across clients — a leaked URL can't multiply it."""
+    _, _, rate_mw = _build_middleware(
+        Config(data_dir=str(tmp_path), db_path=str(tmp_path / "x.db")), RateLimiter()
+    )
+    path = "/api/gfs/g1/moments/users/u1/picture"
+    for i in range(300):
+        assert await _signed_get(rate_mw, path, f"10.0.{i // 250}.{i % 250}") == 200
+    assert await _signed_get(rate_mw, path, "10.9.9.9") == 429

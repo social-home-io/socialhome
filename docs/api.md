@@ -397,7 +397,7 @@ is **404**. Writes (`POST`, `PATCH`, `DELETE`, `resolve-conflict`) are
 **Embedded media URLs.** Page `content` is a markdown body. Any
 `/api/media/{filename}` reference inside it (typically pasted from the
 gallery's "Copy reference" button) is **re-signed by the server on
-every read** with a fresh 1h-TTL signature, so the SPA's `<img src>`
+every read** with a default-lifetime media signature (see *Signed media URLs* under Rate limits), so the SPA's `<img src>`
 loads without an `Authorization` header. Storage stays canonical: the
 PATCH/POST handlers strip any `?exp=&sig=…` the editor might have
 echoed back before the body lands in the DB. Same treatment applies
@@ -1524,6 +1524,8 @@ These pages are server-rendered HTML and require no auth.
 | `POST /api/display/v1/pair/claim` (household dashboard port) | 10 / 10 min per client address (socket peer), a bucket of its own — code-pairing tries can't use up what a panel needs to spend its claim in time. Claims are 256-bit, so this only caps the work of a flood. 429 + `Retry-After`. |
 | `POST /api/admin/dashboard/displays` (wrong pairing codes) | 5 wrong codes / 15 min — one bucket for every admin (the code is what's guessed, not the account); counted before the check, cleared by a right code. Never feeds the dashboard's global login brake. 429 `DASHBOARD_PAIRING_THROTTLED`. |
 | `POST /login`, `POST /enter` (household dashboard port) | 5 failed attempts / 15 min per client address (socket peer, never `X-Forwarded-For`); `/login` also 30 failures / 15 min across all clients — the global brake (a valid setup token neither feeds nor obeys it). Counted in memory by `DashboardAuth` (survives a port change, not a restart); one password check at a time. Behind a reverse proxy every tablet shares one client bucket. |
+| `GET /api/media/{filename}`, `GET /api/users/{id}/picture`, `GET /api/spaces/{id}/members/{user_id}/picture`, `GET /api/spaces/{id}/cover`, `GET /api/spaces/{id}/icon` | 600 / min each — per **user** for a bearer caller, per **client address** (IPv6 by /64) for a signed-URL `<img>` fetch. A signed URL authenticates as one constant principal, so these used to share a single household-wide 60 / min bucket per path family and one Friends page of ~22 avatars 429'd on its third load. Behind the HA ingress proxy every browser has the proxy's address, so the bucket is household-wide there. |
+| `GET /api/gfs/{gfs_id}/moments/users/{user_id}/picture` | 300 / min — one shared bucket for signed-URL fetches (like map tiles): every hit is an upstream fetch from the GFS, so a leaked URL must not multiply it per client. |
 | `GET /api/map/tiles` | 1200 / min — one shared bucket: every Leaflet `<img>` authenticates as the signed-URL principal, and a desktop viewport is ~20 tiles. Still a ceiling, so a leaked signed URL can't drive unbounded upstream traffic from the household IP. |
 | `POST /cluster/sync` | 60 / min per **verified** peer node — counted only after the frame verified under the key this GFS holds for that node (its pin, or the GFS's own key for a shared-seed node), never on the `from` a request claims, so forged traffic naming a real peer cannot lock it out. Every request that proves no member — malformed body, unknown suite, stale timestamp, unknown or unapproved sender, key mismatch, bad signature, or a replay — spends a separate 30 / min per **source address** budget instead (wrong recipient included). Once that is spent the address is shed: its frames are still parsed and matched against the roster (no crypto), anything not naming an approved node gets 429, and a frame naming one is verified — accepted if it verifies, else it spends that node's 30 / min **failed-verify** budget, after which further such frames get 429 without a verify. Verify CPU on forgeries is therefore bounded per address, then per approved node, and the node's own budget is never spent by a forgery. Genuine peers never touch the address budget. Behind a shared reverse proxy configure `trusted_proxies` (below) so the budget keys on the real client. |
 | `POST /cluster/signaling-session{,/release}` (legacy) | 60 / min / paired instance |
@@ -1542,6 +1544,22 @@ These pages are server-rendered HTML and require no auth.
 | `POST /federation/inbox/{inbox_id}` (per remote IP) | 1000 / min — defends against unauthenticated floods that the per-user limiter would otherwise miss. The 429 carries `Retry-After` (whole seconds until the sliding window frees a slot); a sending household's outbox waits at least that long and retries — a 429 is never a drop. |
 
 Rate-limit responses return HTTP 429 with a `Retry-After` header.
+
+**Signed media URLs.** Browser-loaded media (`<img>`, `<video>`) carries no
+bearer header, so every `picture_url` / `media_url` / `cover_url` /
+`icon_url` / `thumbnail_url` / `image_urls` a response returns is signed as
+`?exp=<unix>&sig=<hmac>` (HMAC-SHA256 over path and `exp`, key derived from
+the instance identity). The default expiry is not `now + 1 h` but the first
+UTC six-hour boundary (00/06/12/18) at least one hour away, so every response
+inside that window hands out the **same** URL for a resource and the
+browser's HTTP cache (`Cache-Control: private, max-age=…`) serves a revisited
+avatar instead of refetching it. A leaked URL therefore opens one resource path
+for between 1 and 7 hours (it was exactly 1 h) — for a picture, cover or icon
+that includes a newer image uploaded at the same path, since `?v=` sits outside
+the signature. Bytes a browser already fetched were cacheable for a day or
+more anyway, so the signature lifetime was never a revocation guarantee. Signatures minted with an explicit
+lifetime — app bundle entry (5 min), map tile template (7 days) — expire at
+exactly that lifetime.
 
 **Which IP a GFS limiter counts** — and the same answer for the admin-login
 throttle, the `admin_ip` written to the admin audit log, and every route view's

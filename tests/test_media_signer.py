@@ -6,6 +6,7 @@ import pytest
 
 from socialhome.media_signer import (
     DEFAULT_TTL_SECONDS,
+    EXP_BUCKET_SECONDS,
     MediaUrlSigner,
     derive_signing_key,
     sign_media_urls_in,
@@ -31,12 +32,86 @@ def test_sign_round_trip(signer: MediaUrlSigner) -> None:
     assert signer.verify("/api/media/abc.webp", exp, sig, now=1_000_000)
 
 
-def test_sign_default_ttl_is_one_hour(signer: MediaUrlSigner) -> None:
-    """Default TTL is 3600 s; expiry = now + 3600."""
+def _exp(url: str) -> int:
+    return int(url.split("exp=")[1].split("&")[0])
+
+
+def _sig(url: str) -> str:
+    return url.split("sig=")[1]
+
+
+def test_default_expiry_is_the_next_bucket_boundary_after_one_hour(
+    signer: MediaUrlSigner,
+) -> None:
+    """Default-lifetime URLs live at least DEFAULT_TTL_SECONDS and expire
+    on the first EXP_BUCKET_SECONDS boundary at or after that."""
     assert DEFAULT_TTL_SECONDS == 3600
-    url = signer.sign("/api/media/x.webp", now=1_000_000)
-    exp = int(url.split("exp=")[1].split("&")[0])
-    assert exp == 1_000_000 + 3600
+    assert EXP_BUCKET_SECONDS == 6 * 3600
+    now = 1_000_000
+    exp = _exp(signer.sign("/api/media/x.webp", now=now))
+    assert exp % EXP_BUCKET_SECONDS == 0
+    assert now + DEFAULT_TTL_SECONDS <= exp
+    assert exp < now + DEFAULT_TTL_SECONDS + EXP_BUCKET_SECONDS
+
+
+def test_default_url_is_identical_across_calls_within_a_bucket(
+    signer: MediaUrlSigner,
+) -> None:
+    """Regression (F2): every response signed ``exp=now+ttl``, so a page
+    re-visit got new avatar URLs and missed the browser cache. Inside one
+    bucket the signed URL is now byte-identical."""
+    path = "api/users/u1/picture?v=abc"
+    boundary = 100 * EXP_BUCKET_SECONDS
+    first = boundary - EXP_BUCKET_SECONDS - DEFAULT_TTL_SECONDS + 1  # bucket opens
+    last = boundary - DEFAULT_TTL_SECONDS  # last second still in it
+    urls = {signer.sign(path, now=t) for t in (first, first + 1, first + 977, last)}
+    assert len(urls) == 1
+    assert _exp(urls.pop()) == boundary
+
+
+def test_default_url_changes_when_the_bucket_rolls_over(
+    signer: MediaUrlSigner,
+) -> None:
+    path = "/api/media/x.webp"
+    boundary = 100 * EXP_BUCKET_SECONDS
+    before = signer.sign(path, now=boundary - DEFAULT_TTL_SECONDS)
+    after = signer.sign(path, now=boundary - DEFAULT_TTL_SECONDS + 1)
+    assert before != after
+    assert _exp(after) == boundary + EXP_BUCKET_SECONDS
+    # The rolled-over URL still verifies; the old one does too until its exp.
+    assert signer.verify(path, str(_exp(after)), _sig(after), now=boundary)
+    assert signer.verify(path, str(_exp(before)), _sig(before), now=boundary)
+
+
+def test_bucketed_url_is_rejected_after_its_expiry(signer: MediaUrlSigner) -> None:
+    path = "/api/media/x.webp"
+    url = signer.sign(path, now=1_000_000)
+    exp = _exp(url)
+    assert signer.verify(path, str(exp), _sig(url), now=exp)
+    assert not signer.verify(path, str(exp), _sig(url), now=exp + 1)
+
+
+def test_bucketed_exp_cannot_be_moved_without_a_new_signature(
+    signer: MediaUrlSigner,
+) -> None:
+    """The bucket boundary is predictable, so the HMAC must still bind
+    exp: pushing exp to a later boundary invalidates the signature."""
+    path = "/api/users/u1/picture"
+    url = signer.sign(path, now=1_000_000)
+    later = _exp(url) + EXP_BUCKET_SECONDS
+    assert not signer.verify(path, str(later), _sig(url), now=1_000_000)
+    assert not signer.verify(path, str(_exp(url)), "", now=1_000_000)
+
+
+def test_explicit_ttl_is_exact_and_not_bucketed(signer: MediaUrlSigner) -> None:
+    """App bundles (300 s) and map tiles pick their own lifetime; they
+    must not be stretched to a bucket boundary."""
+    assert _exp(signer.sign("/api/apps/a/bundle/", ttl=300, now=1_000_000)) == (
+        1_000_300
+    )
+    assert _exp(signer.sign("/api/media/x.webp", ttl=3600, now=1_000_000)) == (
+        1_003_600
+    )
 
 
 def test_verify_expired_signature_fails(signer: MediaUrlSigner) -> None:
@@ -45,7 +120,7 @@ def test_verify_expired_signature_fails(signer: MediaUrlSigner) -> None:
     exp = url.split("exp=")[1].split("&")[0]
     sig = url.split("sig=")[1]
     # Time has advanced past expiry.
-    assert not signer.verify("/api/media/abc.webp", exp, sig, now=1_010_000)
+    assert not signer.verify("/api/media/abc.webp", exp, sig, now=1_100_000)
 
 
 def test_verify_expiry_boundary_inclusive(signer: MediaUrlSigner) -> None:

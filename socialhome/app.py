@@ -2311,6 +2311,25 @@ def _build_space_moderation(
     return moderation
 
 
+#: Browser-loaded media (``<img src>`` / ``<video src>``) served from this
+#: household's own storage. These GETs authenticate with a signed URL, i.e.
+#: as the constant ``SIGNED_URL_PRINCIPAL``, so they used to land in one
+#: household-wide bucket per first two path segments at the 60/min default:
+#: one Friends page (22+ avatars) 429'd on its third load and the avatars
+#: fell back to initials. Each gets its own looser rule, bucketed per
+#: client address (``per_client_signed_rules``) so one busy browser — or a
+#: leaked URL — can't drain everyone's budget. 600/min still caps what a
+#: single client can pull; the bytes are local, nothing goes upstream.
+SIGNED_MEDIA_GET_LIMIT: tuple[int, int] = (600, 60)
+SIGNED_MEDIA_GET_RULES: tuple[str, ...] = (
+    "GET /api/media/*",
+    "GET /api/users/*/picture",
+    "GET /api/spaces/*/members/*/picture",
+    "GET /api/spaces/*/cover",
+    "GET /api/spaces/*/icon",
+)
+
+
 def _build_middleware(config: Config, limiter: RateLimiter):
     """Compose the HTTP middleware stack.
 
@@ -2328,7 +2347,15 @@ def _build_middleware(config: Config, limiter: RateLimiter):
         default_window_s=60,
         # Order matters: the most-specific patterns must come first so
         # they short-circuit the broader prefix matches that follow.
+        per_client_signed_rules=frozenset(SIGNED_MEDIA_GET_RULES),
         limits={
+            **dict.fromkeys(SIGNED_MEDIA_GET_RULES, SIGNED_MEDIA_GET_LIMIT),
+            # Discover-tab avatars proxied from a GFS: every hit is an
+            # upstream fetch, so — like map tiles — the bucket stays
+            # household-wide (not in ``per_client_signed_rules``) to cap
+            # what a leaked URL can drive at the GFS. Its own rule so it
+            # no longer shares the 60/min ``api/gfs`` default bucket.
+            "GET /api/gfs/*/moments/users/*/picture": (300, 60),
             # Action endpoints (use ``*`` glob so the {id} segment matches).
             "/api/spaces/*/ban": (5, 60),  # moderation
             "/api/calls/*/decline": (10, 60),
