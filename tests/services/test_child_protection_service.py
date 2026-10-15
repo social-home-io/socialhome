@@ -1081,6 +1081,7 @@ class _Gate:
     def __init__(self, *, fail: bool = False):
         self.protected: list[str] = []
         self.blocks: list[tuple[str, str]] = []
+        self.lifted: list[tuple[str, frozenset[str]]] = []
         self._fail = fail
 
     async def on_account_protected(self, user_id):
@@ -1090,6 +1091,9 @@ class _Gate:
 
     async def on_guardian_block(self, minor_user_id, blocked_user_id):
         self.blocks.append((minor_user_id, blocked_user_id))
+
+    async def on_guardian_block_lifted(self, minor_user_id, instance_ids):
+        self.lifted.append((minor_user_id, instance_ids))
 
 
 class _OtherGate(_Gate):
@@ -1187,3 +1191,119 @@ async def test_guardian_blocks_household(env):
     assert await svc.guardian_blocks_household(None, "peer-x")
     assert not await svc.guardian_blocks_household("mom-id", "peer-x")
     assert not await svc.guardian_blocks_household("lila-id", "")
+
+
+# ─── Lifting a block (§CP.F2) ───────────────────────────────────────────
+
+
+async def _seed_remote_users(db) -> None:
+    """``u-x`` and ``u-x2`` are homed on peer-x, ``u-y`` on peer-y."""
+    for peer in ("peer-x", "peer-y"):
+        await db.enqueue(
+            "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+            " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+            " local_inbox_id, status, source) VALUES(?, 'X', ?, 'k1', 'k2',"
+            " 'https://x/wh', ?, 'confirmed', 'manual')",
+            (peer, "00" * 32, f"wh-{peer}"),
+        )
+    for uid, peer in (("u-x", "peer-x"), ("u-x2", "peer-x"), ("u-y", "peer-y")):
+        await db.enqueue(
+            "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+            " display_name) VALUES(?, ?, ?, 'X')",
+            (uid, peer, uid),
+        )
+
+
+async def _lift_env(env, *blocked: str) -> _Gate:
+    svc, db = env
+    await _seed_remote_users(db)
+    await _protect_lila(svc)
+    for uid in blocked:
+        await svc.block_user_for_minor(
+            minor_user_id="lila-id", blocked_user_id=uid, guardian_user_id="mom-id"
+        )
+    gate = _Gate()
+    svc.register_gate(gate)
+    return gate
+
+
+async def _unblock(svc, uid: str) -> None:
+    await svc.unblock_user_for_minor(
+        minor_user_id="lila-id", blocked_user_id=uid, guardian_user_id="mom-id"
+    )
+
+
+async def test_unblock_lifts_the_blocked_persons_household(env):
+    svc, _ = env
+    gate = await _lift_env(env, "u-x", "u-y")
+    await _unblock(svc, "u-x")
+    assert gate.lifted == [("lila-id", frozenset({"peer-x"}))]
+
+
+async def test_unblock_keeps_a_household_another_block_still_covers(env):
+    svc, _ = env
+    gate = await _lift_env(env, "u-x", "u-x2")
+    await _unblock(svc, "u-x")
+    assert gate.lifted == []
+    # The last block naming someone there lifts it.
+    await _unblock(svc, "u-x2")
+    assert gate.lifted == [("lila-id", frozenset({"peer-x"}))]
+
+
+async def test_unblock_of_a_local_person_lifts_nothing(env):
+    svc, _ = env
+    gate = await _lift_env(env, "admin-id")
+    await _unblock(svc, "admin-id")
+    assert gate.lifted == []
+
+
+async def test_unblock_while_not_protected_lifts_nothing(env):
+    svc, _ = env
+    gate = await _lift_env(env, "u-x")
+    await svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
+    gate.lifted.clear()
+    await _unblock(svc, "u-x")
+    assert gate.lifted == []
+
+
+async def test_disable_protection_lifts_every_covered_household(env):
+    svc, _ = env
+    gate = await _lift_env(env, "u-x", "u-x2", "u-y", "admin-id")
+    await svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
+    assert gate.lifted == [("lila-id", frozenset({"peer-x", "peer-y"}))]
+
+
+async def test_disable_protection_without_blocks_lifts_nothing(env):
+    svc, _ = env
+    gate = await _lift_env(env)
+    await svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
+    assert gate.lifted == []
+
+
+# ─── A blocked remote person placed later (§CP.F2) ─────────────────────
+
+
+async def test_remote_user_placed_runs_the_block_hooks_for_each_blocking_minor(env):
+    """A block on someone with no ``remote_users`` row yet (or again after a
+    re-pair) covers their household only once the row lands — the hooks run
+    then, as if the block was just added."""
+    svc, _db = env
+    gate = await _lift_env(env, "u-x")
+    await svc.on_remote_user_placed("u-x")
+    assert gate.blocks == [("lila-id", "u-x")]
+
+
+async def test_remote_user_placed_ignores_someone_nobody_blocked(env):
+    svc, _db = env
+    gate = await _lift_env(env, "u-x")
+    await svc.on_remote_user_placed("u-y")
+    await svc.on_remote_user_placed("")
+    assert gate.blocks == []
+
+
+async def test_remote_user_placed_ignores_a_block_while_not_protected(env):
+    svc, _db = env
+    gate = await _lift_env(env, "u-x")
+    await svc.disable_protection(minor_username="lila", actor_user_id="admin-id")
+    await svc.on_remote_user_placed("u-x")
+    assert gate.blocks == []

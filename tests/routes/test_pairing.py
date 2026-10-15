@@ -889,7 +889,7 @@ async def test_visible_users_patch_hides_user_and_sends_user_removed(client):
     assert captured[0]["payload"] == {"user_id": extra_uid}
 
 
-async def test_visible_users_patch_unhide_sends_user_updated(client):
+async def test_visible_users_patch_unhide_sends_user_updated(client, monkeypatch):
     fed_repo = client.app[federation_repo_key]
     await fed_repo.save_instance(_fake_instance("peer-vis-3"))
     extra_uid = await _seed_extra_user(client, "max")
@@ -911,17 +911,17 @@ async def test_visible_users_patch_unhide_sends_user_updated(client):
 
     captured: list[dict] = []
 
-    class _Recorder:
-        async def stop(self) -> None:
-            """App cleanup cancels deferred mesh re-sends; nothing to cancel."""
+    async def _send_event(self, *, to_instance_id, event_type, payload, **_kw):
+        captured.append({"type": event_type, "payload": payload})
 
-        async def send_event(self, *, to_instance_id, event_type, payload):
-            captured.append({"type": event_type, "payload": payload})
+    async def _peer_supports(self, instance_id, *, min_version):
+        return False
 
-        async def peer_supports(self, instance_id, *, min_version):
-            return False
-
-    client.app[federation_service_key] = _Recorder()
+    # The re-publish goes through the real ``ProfileFederationOutbound`` (its
+    # §CP.F2 gate), so record at the federation service it sends through.
+    fed_cls = type(client.app[federation_service_key])
+    monkeypatch.setattr(fed_cls, "send_event", _send_event)
+    monkeypatch.setattr(fed_cls, "peer_supports", _peer_supports)
 
     r = await client.patch(
         "/api/pairing/connections/peer-vis-3/visible-users",

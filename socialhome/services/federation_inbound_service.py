@@ -4425,6 +4425,16 @@ class FederationInboundService(ProtectionGateMixin):
                     user_id,
                     exc,
                 )
+        elif (
+            "picture_hash" in payload
+            and payload["picture_hash"] is None
+            and self._profile_picture_repo is not None
+        ):
+            # An explicit ``picture_hash: null`` (no bytes) means "no
+            # picture" — the user removed it, or a guardian block (§CP.F2)
+            # sends this household the name only. Drop the cached bytes too,
+            # so ``GET /api/users/{id}/picture`` can't keep serving them.
+            await self._profile_picture_repo.clear_user_picture(user_id)
 
         # ``handle`` is unsigned public display metadata (like display_name /
         # picture) — older peers omit it. Pass None through when absent so the
@@ -4444,6 +4454,14 @@ class FederationInboundService(ProtectionGateMixin):
             synced_at=_now_iso(),
         )
         await self._user_repo.upsert_remote(remote)
+        if home is None and self._child_protection is not None:
+            # §CP.F2: a guardian block on this user now places them — the
+            # blocks start covering their household here. Never at the cost
+            # of the rest of the upsert (held DMs, the identity binding).
+            try:
+                await self._child_protection.on_remote_user_placed(user_id)
+            except Exception as exc:
+                log.warning("§CP.F2 placement of %s failed: %s", user_id, exc)
         await self._release_held_dms(instance_id, user_id)
 
         # Per-user identity binding (independent user identity, proto v_25).

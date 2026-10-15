@@ -509,3 +509,51 @@ async def test_protected_status_never_ships_to_a_blocked_household(peer, shipped
     by_id = {u["user_id"]: u for u in fed.sent[0][2]["users"]}
     assert (by_id["u-kid"]["status"] or {}).get("text") == shipped
     assert by_id["u-mom"]["status"]["text"] == "y"
+
+
+@pytest.mark.parametrize("peer", ["peer-x", "peer-y"])
+async def test_protected_profile_is_name_only_to_a_blocked_household(peer):
+    """§CP.F2: to a household where someone the account's guardian blocked
+    is homed the entry carries the name only — ``null`` bio, picture hash
+    and status, and no picture bytes. An unblocked household, and an
+    adult's entry, keep the full profile."""
+    bus = EventBus()
+    fed = _FakeFederationService()
+    out = UsersSyncOutbound(
+        bus=bus,
+        federation_service=fed,
+        user_repo=_FakeUserRepo(
+            [
+                _FakeUser(
+                    "u-kid",
+                    "kid",
+                    "Kid",
+                    bio="I like horses",
+                    picture_hash="h-kid",
+                    status=UserStatus(text="x"),
+                ),
+                _FakeUser("u-mom", "mom", "Mom", bio="Mom", picture_hash="h-mom"),
+            ]
+        ),
+        profile_picture_repo=_FakePictureRepo({"u-kid": b"KID", "u-mom": b"MOM"}),
+    )
+    out.attach_child_protection(_FakeChildProtection())  # type: ignore[arg-type]
+    out.wire()
+    await bus.publish(PairingConfirmed(instance_id=peer))
+    by_id = {u["user_id"]: u for u in fed.sent[0][2]["users"]}
+    kid = by_id["u-kid"]
+    assert kid["display_name"] == "Kid"
+    if peer == "peer-x":
+        assert kid["bio"] is None
+        assert kid["picture_hash"] is None
+        assert kid["status"] is None
+        assert "picture_webp_base64" not in kid
+    else:
+        assert kid["bio"] == "I like horses"
+        assert kid["picture_hash"] == "h-kid"
+        assert kid["status"]["text"] == "x"
+        assert kid["picture_webp_base64"] == base64.b64encode(b"KID").decode()
+    mom = by_id["u-mom"]
+    assert mom["bio"] == "Mom"
+    assert mom["picture_hash"] == "h-mom"
+    assert mom["picture_webp_base64"] == base64.b64encode(b"MOM").decode()

@@ -77,6 +77,11 @@ class AbstractOutboxRepo(Protocol):
     async def count_failed_for(self, instance_id: str) -> int: ...
     async def evict_oldest_droppable(self, instance_id: str) -> bool: ...
     async def delete_for_instance(self, instance_id: str) -> None: ...
+    async def delete_pending_of_types(
+        self,
+        instance_id: str,
+        event_types: frozenset[FederationEventType],
+    ) -> int: ...
     async def purge_orphaned(self) -> int: ...
     async def expedite(
         self,
@@ -364,6 +369,28 @@ class SqliteOutboxRepo:
         await self._db.enqueue(
             "DELETE FROM federation_outbox WHERE instance_id=?",
             (instance_id,),
+        )
+
+    async def delete_pending_of_types(
+        self,
+        instance_id: str,
+        event_types: frozenset[FederationEventType],
+    ) -> int:
+        """Delete the PENDING rows of *event_types* addressed to
+        ``instance_id``; return how many.
+
+        For state a newer send supersedes: an envelope is sealed when it is
+        queued, so a queued one would otherwise land after — and undo — a
+        later send that was built under a stricter rule (§CP.F2).
+        """
+        if not event_types:
+            return 0
+        types = sorted(e.value for e in event_types)
+        placeholders = ",".join("?" * len(types))
+        return await self._db.enqueue_rowcount(
+            f"DELETE FROM federation_outbox WHERE instance_id=?"
+            f" AND status='pending' AND event_type IN ({placeholders})",
+            (instance_id, *types),
         )
 
     async def purge_orphaned(self) -> int:

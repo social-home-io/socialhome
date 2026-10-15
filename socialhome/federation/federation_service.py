@@ -565,6 +565,17 @@ class FederationService:
         log.info("auto-pair: %s confirmed the approved pairing", instance_id)
         await self._bus.publish(PairingConfirmed(instance_id=instance_id))
 
+    async def drop_queued(
+        self,
+        instance_id: str,
+        event_types: frozenset[FederationEventType],
+    ) -> int:
+        """Drop the not-yet-delivered envelopes of *event_types* queued for
+        ``instance_id``; return how many. The caller re-sends the current
+        state — a queued envelope was sealed under the rules of its time
+        (a guardian block, §CP.F2, may have come since)."""
+        return await self._outbox_repo.delete_pending_of_types(instance_id, event_types)
+
     async def _on_tombstone_contact(self, instance_id: str) -> bool:
         """An unpair tombstone just proved it is online — send our queued
         ``UNPAIR`` on the next outbox tick rather than after its backoff.

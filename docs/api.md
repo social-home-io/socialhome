@@ -998,7 +998,12 @@ state are hidden from each other (`/api/friends`, `/api/presence`, the
 status in `/api/users`, and the matching `user.*` / `presence.updated`
 frames) — and the account's status and online state are not sent to a
 household where someone it has blocked lives (when the block is added, that
-household sees the status cleared and the account go offline, once); and a blocked person's space posts,
+household sees the status cleared and the account go offline, once); that
+household also gets the account's name only — its picture and bio go out
+empty, at once when the block is added, and on every later profile update
+or pairing roster — and the full profile, the current status and the online
+state go back there when the block is removed or protection is turned off;
+and a blocked person's space posts,
 household posts and comments, @mentions, @here, DMs, contact requests (not
 stored either), follows, moment replies and reactions never notify the
 account. Refusals are 403: the blocked person sees exactly a

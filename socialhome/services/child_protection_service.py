@@ -250,14 +250,19 @@ class ChildProtectionService:
         actor_user_id: str,
     ) -> None:
         await self._require_admin(actor_user_id)
-        if await self._users.get(minor_username) is None:
+        minor = await self._users.get(minor_username)
+        if minor is None:
             raise UserNotFoundError(minor_username)
+        # Every household a block covers now — none of them is once the
+        # account is no longer protected.
+        covered = await self._covered_households(minor.user_id)
         await self._repo.disable_protection(minor_username)
         await self._bus.publish(
             CpProtectionDisabled(
                 minor_username=minor_username,
             )
         )
+        await self._lift(minor.user_id, covered)
 
     # ─── Guardians ───────────────────────────────────────────────────────
 
@@ -493,6 +498,12 @@ class ChildProtectionService:
         guardian_user_id: str,
     ) -> None:
         await self._require_guardian(guardian_user_id, minor_user_id)
+        home = await self._users.get_instance_for_user(blocked_user_id)
+        covered = (
+            frozenset({home})
+            if home and await self.guardian_blocks_household(minor_user_id, home)
+            else frozenset()
+        )
         await self._repo.unblock_user(
             minor_user_id=minor_user_id,
             blocked_user_id=blocked_user_id,
@@ -509,6 +520,15 @@ class ChildProtectionService:
                 blocked_user_id=blocked_user_id,
             )
         )
+        # Another block may still name someone homed there.
+        lifted = frozenset(
+            [
+                h
+                for h in covered
+                if not await self.guardian_blocks_household(minor_user_id, h)
+            ]
+        )
+        await self._lift(minor_user_id, lifted)
 
     # ─── Guardian-scoped space control (spec §CP) ────────────────────────
 
@@ -689,6 +709,22 @@ class ChildProtectionService:
             instance_id, minor_user_id=user_id
         )
 
+    async def on_remote_user_placed(self, user_id: str) -> None:
+        """A remote user just got a ``remote_users`` row (first seen, or
+        again after a re-pair). A guardian block on them only covers their
+        household from now on, so the blocks' hooks run as if just added —
+        the household gets the protected account's name only, its status
+        cleared and its online state offline (§CP.F2). Fail-soft."""
+        if not user_id:
+            return
+        for minor_user_id in sorted(await self._repo.list_block_counterparts(user_id)):
+            if not await self._repo.is_blocked_for_minor(minor_user_id, user_id):
+                continue
+            await self._run_gates(
+                "guardian_block",
+                lambda gate, m=minor_user_id: gate.on_guardian_block(m, user_id),
+            )
+
     async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
         """Everyone a guardian block separates from *user_id* (either way)."""
         if not user_id:
@@ -851,6 +887,28 @@ class ChildProtectionService:
         return info["status"] == "confirmed" and info["source"] == "manual"
 
     # ─── Internals ────────────────────────────────────────────────────────
+
+    async def _covered_households(self, minor_user_id: str) -> frozenset[str]:
+        """The households *minor_user_id*'s guardian blocks cover right now
+        (someone blocked is homed there, and the account is protected)."""
+        homes: set[str] = set()
+        for row in await self._repo.list_blocks_for_minor(minor_user_id):
+            home = await self._users.get_instance_for_user(str(row["blocked_user_id"]))
+            if home and home not in homes:
+                if await self.guardian_blocks_household(minor_user_id, home):
+                    homes.add(home)
+        return frozenset(homes)
+
+    async def _lift(self, minor_user_id: str, instance_ids: frozenset[str]) -> None:
+        """Tell every gate the blocks no longer cover *instance_ids*, so they
+        get back what was kept from them (§CP.F2). Failures are logged by
+        :meth:`_run_gates`; the unblock itself already stands."""
+        if not instance_ids:
+            return
+        await self._run_gates(
+            "guardian_block_lifted",
+            lambda gate: gate.on_guardian_block_lifted(minor_user_id, instance_ids),
+        )
 
     async def _run_gates(self, hook: str, call) -> list[str]:
         """Run one hook on every registered gate. A failing gate is logged

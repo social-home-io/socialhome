@@ -28,8 +28,11 @@ what was set up *before* a change reacts too:
   or close what it shared earlier (tokens, public links, listings…).
 * :meth:`on_guardian_block` — a guardian just blocked someone for the
   account: step out of what the two still share.
+* :meth:`on_guardian_block_lifted` — households a block kept things from
+  are no longer covered (the block was removed, or protection turned off):
+  send them what they were kept from.
 
-Both default to no-ops; a service overrides the ones it owns.
+All default to no-ops; a service overrides the ones it owns.
 """
 
 from __future__ import annotations
@@ -64,6 +67,12 @@ class ProtectionGateMixin:
 
     async def on_guardian_block(self, minor_user_id: str, blocked_user_id: str) -> None:
         """Hook: a guardian blocked *blocked_user_id* for *minor_user_id*."""
+
+    async def on_guardian_block_lifted(
+        self, minor_user_id: str, instance_ids: frozenset[str]
+    ) -> None:
+        """Hook: *minor_user_id*'s guardian blocks no longer cover the
+        households *instance_ids* (no-op here)."""
 
     async def _is_protected(self, user_id: str) -> bool:
         """Whether *user_id* is a protected account."""
