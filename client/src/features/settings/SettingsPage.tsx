@@ -113,6 +113,10 @@ export default function SettingsPage() {
     if (typeof window !== 'undefined' && window.location.hash === '#protection') {
       activeTab.value = 'profile'
     }
+    // Friends' "N people you blocked are hidden · Manage" links here.
+    if (typeof window !== 'undefined' && window.location.hash === '#privacy') {
+      activeTab.value = 'privacy'
+    }
   }, [])
 
   const panelId = (tab: SettingsTab) => `sh-settings-panel-${tab}`

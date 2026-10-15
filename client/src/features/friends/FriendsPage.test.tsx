@@ -1,41 +1,50 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, waitFor, fireEvent } from '@testing-library/preact'
+import { render, waitFor, fireEvent, within } from '@testing-library/preact'
 
 vi.mock('@/api', () => {
   const m = { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }
   return { api: m, _mock: m }
 })
 
-const routeSpy = vi.fn()
 vi.mock('preact-iso', () => ({
-  useLocation: () => ({ route: routeSpy }),
+  useLocation: () => ({ route: vi.fn() }),
 }))
 
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 
-vi.mock('@/store/auth', () => ({
-  currentUser: { value: { user_id: 'u-me', username: 'pascal', display_name: 'Pascal' } },
+const authUser = vi.hoisted(() => ({
+  value: { user_id: 'u-me', username: 'pascal', display_name: 'Pascal', is_admin: true } as
+    { user_id: string; username: string; display_name: string; is_admin: boolean },
 }))
+vi.mock('@/store/auth', () => ({ currentUser: authUser }))
 
 // LocationMap pulls in Leaflet which doesn't initialise cleanly in
-// jsdom — stub it to a deterministic placeholder so the tests assert
-// on layout, not map internals.
+// jsdom — stub it so the tests assert on the page, not map internals.
 vi.mock('@/components/LocationMap', () => ({
-  LocationMap: ({ markers }: { markers: { id: string, glyph?: string }[] }) => (
+  LocationMap: ({ markers }: { markers: { id: string; sub_label?: string }[] }) => (
     <div data-testid="map" data-markers={markers.length}>
-      {markers.map(m => (
-        <span key={m.id} class="map-marker" data-id={m.id} data-glyph={m.glyph} />
-      ))}
+      {markers.map((m) => <span key={m.id} class="map-marker" data-id={m.id}>{m.sub_label}</span>)}
     </div>
   ),
 }))
 
 vi.mock('@/components/Avatar', () => ({
-  Avatar: ({ name }: { name: string }) => <span class="avatar">{name}</span>,
+  Avatar: ({ name, online }: { name: string; online?: string | null }) =>
+    <span class="avatar" data-online={online ?? ''}>{name}</span>,
 }))
 
-vi.mock('@/components/OnlinePill', () => ({
-  OnlinePill: () => null,
+const openPairingSpy = vi.fn()
+vi.mock('@/components/PairingFlow', () => ({
+  openPairing: (...a: unknown[]) => openPairingSpy(...a),
+  PairingFlow: () => null,
+}))
+
+vi.mock('@/components/StatusEditor', () => ({
+  StatusEditor: ({ onSave }: { onSave: (u: unknown) => void }) => (
+    <button type="button" onClick={() => onSave({
+      user_id: 'u-me', status: { emoji: '🛠', text: 'Fixing the gate', expires_at: null },
+    })}>save-status</button>
+  ),
 }))
 
 const openPersonSpy = vi.fn()
@@ -45,358 +54,435 @@ vi.mock('@/components/PersonSheet', () => ({
 
 import FriendsPage from './FriendsPage'
 import { api } from '@/api'
-import { blockedUserIds, _resetBlocksForTest } from '@/store/blocks'
+import { blockedUserIds, blockedUsers, _resetBlocksForTest } from '@/store/blocks'
+import { householdAdmins } from '@/features/connections/connectionsData'
 
-const apiMock = api as unknown as {
-  get: ReturnType<typeof vi.fn>
+const apiGet = (api as unknown as { get: ReturnType<typeof vi.fn> }).get
+
+type Row = Record<string, unknown>
+
+function local(id: string, name: string, extra: Row = {}): Row {
+  return { user_id: id, username: id, display_name: name, picture_url: null, ...extra }
 }
-
-function payload(over: Partial<{
-  households: Record<string, unknown>[]
-  instance: Record<string, unknown>
-  totals: { households: number; people: number }
-}> = {}) {
+function remote(id: string, inst: string, name: string, extra: Row = {}): Row {
+  return { user_id: id, instance_id: inst, remote_username: id, display_name: name, picture_url: null, ...extra }
+}
+function hh(id: string, name: string, members: Row[], extra: Row = {}): Row {
   return {
-    instance: over.instance ?? {
-      instance_id: 'us',
-      display_name: 'Vizeli Home',
-      home_lat: 52.0907,
-      home_lon: 5.1214,
-      members: [
-        {
-          user_id: 'u-me', username: 'pascal', display_name: 'Pascal',
-          picture_url: null, is_online: true, is_idle: false,
-        },
-      ],
-      member_count: 1,
-    },
-    households: over.households ?? [],
-    totals: over.totals ?? { households: 1, people: 1 },
+    instance_id: id, display_name: name, home_lat: null, home_lon: null,
+    paired_at: '2025-08-01T10:00:00+00:00', reachable: true, unreachable_since: null,
+    members, member_count: members.length, ...extra,
   }
 }
 
-const apiPost = (api as unknown as { post: ReturnType<typeof vi.fn> }).post
+function payload(households: Row[] = [], members: Row[] = [local('u-me', 'Pascal')], instExtra: Row = {}) {
+  return {
+    instance: {
+      instance_id: 'us', display_name: 'Vizeli Home', home_lat: null, home_lon: null,
+      members, member_count: members.length, ...instExtra,
+    },
+    households,
+    totals: { households: 1 + households.length, people: 0 },
+  }
+}
+
+/** Route ``api.get`` by path; ``friends`` answers ``/api/friends``. */
+function serve(friends: unknown, extra: Record<string, unknown> = {}) {
+  apiGet.mockImplementation(async (path: string) => {
+    if (path === '/api/friends') {
+      if (friends instanceof Error) throw friends
+      return friends
+    }
+    if (path in extra) return extra[path]
+    if (path === '/api/blocks') return { blocks: [] }
+    if (path === '/api/users') return []
+    return {}
+  })
+}
+
+/** Names of the person rows inside *root*, in order. */
+function rowNames(root: ParentNode): string[] {
+  return [...root.querySelectorAll('.sh-friends-row .sh-friends-row__text')].map((n) => n.textContent ?? '')
+}
+
+function cards(container: ParentNode): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>('li.sh-friends-hh')]
+}
+
+const many = (inst: string, n: number) =>
+  Array.from({ length: n }, (_, i) => remote(`${inst}-${i}`, inst, `Person ${String.fromCharCode(65 + i)}`))
 
 describe('FriendsPage', () => {
   beforeEach(() => {
-    apiMock.get.mockReset()
-    apiPost.mockReset()
-    routeSpy.mockReset()
+    apiGet.mockReset()
     openPersonSpy.mockReset()
+    openPairingSpy.mockReset()
     _resetBlocksForTest()
+    householdAdmins.value = null
+    authUser.value = { user_id: 'u-me', username: 'pascal', display_name: 'Pascal', is_admin: true }
   })
 
+  // ── Load states ─────────────────────────────────────────────────────
+
   it('a failed load shows an error card with Try again instead of an endless spinner', async () => {
-    // Regression: the catch cleared ``loading`` but ``data`` stayed null,
-    // so ``loading || !data`` kept the spinner up forever.
-    apiMock.get.mockRejectedValueOnce(new Error('network down'))
+    serve(new Error('network down'))
     const { container, findByRole } = render(<FriendsPage />)
     const alert = await findByRole('alert')
     expect(alert.textContent).toContain('Couldn’t load your people')
-    expect(alert.textContent).toContain('Check your connection and try again.')
     expect(container.querySelector('.sh-spinner')).toBeNull()
     expect(container.querySelector('.sh-friends-hero')).toBeNull()
-    expect(alert.querySelector('button')?.textContent).toBe('Try again')
+    expect(within(alert).getByRole('button', { name: 'Try again' })).toBeTruthy()
   })
 
-  it('Try again re-fetches and renders the households on success', async () => {
-    apiMock.get
-      .mockRejectedValueOnce(new Error('network down'))
-      .mockResolvedValueOnce(payload({ households: [] }))
+  it('Try again re-fetches and renders the page on success', async () => {
+    serve(new Error('network down'))
     const { container, findByRole, queryByRole } = render(<FriendsPage />)
     const alert = await findByRole('alert')
-    fireEvent.click(alert.querySelector('button')!)
-    await waitFor(() => {
-      expect(container.querySelector('.sh-friends-hero')).not.toBeNull()
-    })
-    expect(apiMock.get).toHaveBeenCalledTimes(2)
-    expect(apiMock.get).toHaveBeenLastCalledWith('/api/friends')
+    serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]))
+    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(container.querySelector('.sh-friends-hero')).not.toBeNull())
     expect(queryByRole('alert')).toBeNull()
-    expect(container.textContent).toContain('Vizeli Home')
   })
 
   it('a retry that fails again keeps the error card up', async () => {
-    let reject!: (e: Error) => void
-    apiMock.get
-      .mockRejectedValueOnce(new Error('network down'))
-      .mockReturnValueOnce(new Promise((_, rej) => { reject = rej }))
+    serve(new Error('down'))
     const { findByRole } = render(<FriendsPage />)
     const alert = await findByRole('alert')
-    const btn = alert.querySelector('button') as HTMLButtonElement
+    const btn = within(alert).getByRole('button', { name: 'Try again' }) as HTMLButtonElement
     fireEvent.click(btn)
-    // While the retry is in flight the card stays and the button is busy.
-    await waitFor(() => expect(btn.disabled).toBe(true))
-    reject(new Error('still down'))
     await waitFor(() => expect(btn.disabled).toBe(false))
-    expect((await findByRole('alert')).textContent).toContain('Couldn’t load your people')
+    expect(alert.isConnected).toBe(true)
   })
 
-  it('renders the local household block + empty-state copy when no pairs', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({ households: [] }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('.sh-friends')).not.toBeNull()
-    })
-    expect(container.textContent).toContain('Vizeli Home')
-    expect(container.textContent).toContain('your household')
-    expect(container.textContent).toContain('No connected households yet')
-  })
+  // ── Hero ────────────────────────────────────────────────────────────
 
-  it('a non-admin empty state asks for an admin instead of offering pairing', async () => {
-    // The mocked viewer carries no is_admin, i.e. a regular member.
-    apiMock.get.mockResolvedValueOnce(payload({ households: [] }))
-    const { container, queryByText } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('.sh-friends')).not.toBeNull()
-    })
-    expect(queryByText(/Pair a household/)).toBeNull()
-    expect(container.textContent).toContain('Ask a household admin')
-    // No link into an admin-only page, and never an origin-absolute href
-    // that would skip the ingress prefix.
-    expect(container.querySelector('a[href="/connections"]')).toBeNull()
-  })
-
-  it('hides the map when no household has coords', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      instance: {
-        instance_id: 'us', display_name: 'No-coords Home',
-        home_lat: null, home_lon: null,
-        members: [], member_count: 0,
-      },
-      households: [],
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('.sh-friends')).not.toBeNull()
-    })
-    expect(container.querySelector('[data-testid="map"]')).toBeNull()
-  })
-
-  it('renders one map marker per household with coords', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      households: [
-        {
-          instance_id: 'p-a', display_name: 'A Home',
-          home_lat: 52.0, home_lon: 4.0,
-          paired_at: '2026-04-01T10:00:00Z', reachable: true,
-          members: [], member_count: 0,
-        },
-        {
-          instance_id: 'p-b', display_name: 'B Home',
-          home_lat: null, home_lon: null,  // skipped on the map
-          paired_at: '2026-04-15T12:00:00Z', reachable: false,
-          members: [], member_count: 0,
-        },
+  it('hero counts every visible person and every household, ours included', async () => {
+    serve(payload(
+      [
+        hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann'), remote('r2', 'p-a', 'Ben')]),
+        hh('p-q', 'Quiet', []),
       ],
-      totals: { households: 3, people: 1 },
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('[data-testid="map"]')).not.toBeNull()
-    })
-    // Local + one paired with coords = 2 markers (B has no coords).
-    const map = container.querySelector('[data-testid="map"]') as HTMLElement
-    expect(map.getAttribute('data-markers')).toBe('2')
-    // Households are places, not people: house pins with a name popup,
-    // never merged into a person bubble.
-    for (const pin of map.querySelectorAll('.map-marker')) {
-      expect(pin.getAttribute('data-glyph')).toBe('🏠')
-    }
+      [local('u-me', 'Pascal'), local('u-mel', 'Melanie')],
+    ))
+    const { findByRole } = render(<FriendsPage />)
+    const h = await findByRole('heading', { level: 2, name: /people in/ })
+    expect(h.textContent).toBe('4 people in 3 households')
+    expect(h.querySelector('em')?.textContent).toBe('3 households')
   })
 
-  it('renders one card per paired household with member chips', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      households: [
-        {
-          instance_id: 'p-a', display_name: 'A Home',
-          home_lat: 52.0, home_lon: 4.0,
-          paired_at: '2026-04-01T10:00:00Z', reachable: true,
-          members: [
-            { user_id: 'ru-1', instance_id: 'p-a', remote_username: 'bob',
-              display_name: 'Bob', picture_url: null },
-            { user_id: 'ru-2', instance_id: 'p-a', remote_username: 'carol',
-              display_name: 'Carol', picture_url: null },
-          ],
-          member_count: 2,
-        },
+  it('admins get one "Pair a household" CTA in the hero', async () => {
+    serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]))
+    const { findAllByRole } = render(<FriendsPage />)
+    const ctas = await findAllByRole('button', { name: 'Pair a household' })
+    expect(ctas).toHaveLength(1)
+    fireEvent.click(ctas[0])
+    expect(openPairingSpy).toHaveBeenCalledWith('household')
+  })
+
+  it('members get "Ask <admin>" instead of a pairing button', async () => {
+    authUser.value = { ...authUser.value, is_admin: false }
+    serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]), {
+      '/api/users': [{ user_id: 'u-me', display_name: 'Pascal', is_admin: true }],
+    })
+    const { container, queryByRole } = render(<FriendsPage />)
+    await waitFor(() =>
+      expect(container.querySelector('.sh-friends-hero')?.textContent).toContain('Ask Pascal'))
+    expect(queryByRole('button', { name: 'Pair a household' })).toBeNull()
+  })
+
+  it('the hero says how long we have been connected and who is newest', async () => {
+    serve(payload([
+      hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')], { paired_at: '2025-08-03T10:00:00Z' }),
+      hh('p-b', 'Beta', [remote('r2', 'p-b', 'Bo')], { paired_at: '2026-02-01T10:00:00Z' }),
+    ]))
+    const { container } = render(<FriendsPage />)
+    await waitFor(() => expect(container.querySelector('.sh-conn-hero__sub')).not.toBeNull())
+    const sub = container.querySelector('.sh-conn-hero__sub')!.textContent!
+    expect(sub).toContain('Together since August 2025')
+    expect(sub).toContain('newest: Beta')
+  })
+
+  // ── Empty ───────────────────────────────────────────────────────────
+
+  it('no paired household: the empty state replaces the hero with exactly one CTA', async () => {
+    serve(payload([]))
+    const { container, findByRole, getAllByRole, queryByRole } = render(<FriendsPage />)
+    await findByRole('heading', { name: 'Just your household, for now' })
+    expect(container.querySelector('.sh-friends-hero')).toBeNull()
+    expect(getAllByRole('button', { name: 'Pair a household' })).toHaveLength(1)
+    // Nothing to switch between yet.
+    expect(queryByRole('group', { name: 'View' })).toBeNull()
+    // Our household still shows, with the self nudge.
+    expect(container.textContent).toContain('At home')
+    expect(container.textContent).toContain('Add a status so your household knows')
+  })
+
+  it('empty state for a member: no pairing button, an ask line instead', async () => {
+    authUser.value = { ...authUser.value, is_admin: false }
+    serve(payload([]))
+    const { findByRole, queryByRole, container } = render(<FriendsPage />)
+    await findByRole('heading', { name: 'Just your household, for now' })
+    expect(queryByRole('button', { name: 'Pair a household' })).toBeNull()
+    expect(container.querySelector('.sh-friends-empty')?.textContent).toContain('Ask an admin')
+  })
+
+  // ── Ordering ────────────────────────────────────────────────────────
+
+  it('unreachable households come first, then A–Z (accent- and case-insensitive)', async () => {
+    serve(payload([
+      hh('p-z', 'zeta house', [remote('r1', 'p-z', 'Zed')]),
+      hh('p-o', 'Öberg', [remote('r2', 'p-o', 'Olle')]),
+      hh('p-b', "Brother's house", [remote('r3', 'p-b', 'Marco')],
+        { reachable: false, unreachable_since: '2026-01-07 09:00:00' }),
+      hh('p-a', 'Alpha', [remote('r4', 'p-a', 'Ann')]),
+    ]))
+    const { container } = render(<FriendsPage />)
+    await waitFor(() => expect(cards(container)).toHaveLength(4))
+    const names = cards(container).map((c) => c.querySelector('h3')?.textContent)
+    expect(names).toEqual(["Brother's house", 'Alpha', 'Öberg', 'zeta house'])
+    const down = cards(container)[0]
+    expect(down.classList.contains('sh-friends-hh--down')).toBe(true)
+    expect(down.textContent).toMatch(/Unreachable since/)
+    expect(down.querySelector('.sh-conn-av[data-s="down"]')).not.toBeNull()
+  })
+
+  it('people inside a household are A–Z; our own row comes first at home', async () => {
+    serve(payload(
+      [hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Zoe'), remote('r2', 'p-a', 'Ana'), remote('r3', 'p-a', 'Émile')])],
+      [local('u-lina', 'Lina'), local('u-me', 'Pascal'), local('u-ada', 'Ada')],
+    ))
+    const { container } = render(<FriendsPage />)
+    await waitFor(() => expect(cards(container)).toHaveLength(1))
+    expect(rowNames(container.querySelector('.sh-friends-hh--home')!)).toEqual(['Pascal', 'Ada', 'Lina'])
+    expect(rowNames(cards(container)[0])).toEqual(['Ana', 'Émile', 'Zoe'])
+  })
+
+  it('a household that shared nobody is a footer line, not a card', async () => {
+    serve(payload([
+      hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')]),
+      hh('p-r', 'Casa Rossi', []),
+    ]))
+    const { container } = render(<FriendsPage />)
+    await waitFor(() => expect(cards(container)).toHaveLength(1))
+    expect(container.textContent).toContain('Casa Rossi hasn’t shared their people yet.')
+  })
+
+  // ── Collapse ────────────────────────────────────────────────────────
+
+  it('more than 6 people collapse to 5 + "N more", which expands and folds back', async () => {
+    serve(payload([hh('p-big', 'Big', many('p-big', 12)), hh('p-six', 'Six', many('p-six', 6))]))
+    const { container } = render(<FriendsPage />)
+    await waitFor(() => expect(cards(container)).toHaveLength(2))
+    const [big, six] = cards(container)
+    expect(big.querySelectorAll('.sh-friends-row')).toHaveLength(5)
+    expect(six.querySelectorAll('.sh-friends-row')).toHaveLength(6)
+    expect(within(six).queryByRole('button', { name: /more/ })).toBeNull()
+    const more = within(big).getByRole('button', { name: '7 more' })
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(more)
+    expect(big.querySelectorAll('.sh-friends-row')).toHaveLength(12)
+    const fewer = within(big).getByRole('button', { name: 'Show fewer' })
+    expect(fewer.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(fewer)
+    expect(big.querySelectorAll('.sh-friends-row')).toHaveLength(5)
+  })
+
+  // ── Find ────────────────────────────────────────────────────────────
+
+  it('"Find someone" appears only past 8 people', async () => {
+    serve(payload([hh('p-a', 'Alpha', many('p-a', 7))]))
+    const first = render(<FriendsPage />)
+    await waitFor(() => expect(cards(first.container)).toHaveLength(1))
+    // 1 (us) + 7 = 8 → no find box.
+    expect(first.queryByRole('searchbox')).toBeNull()
+    first.unmount()
+
+    serve(payload([hh('p-a', 'Alpha', many('p-a', 8))]))
+    const second = render(<FriendsPage />)
+    await waitFor(() => expect(second.queryByRole('searchbox', { name: 'Find someone' })).not.toBeNull())
+  })
+
+  it('find filters by name, nickname or household, ignoring case and accents', async () => {
+    serve(payload([
+      hh('p-m', 'Familie Müller', [remote('r1', 'p-m', 'Klaus'), remote('r2', 'p-m', 'Jonas')]),
+      hh('p-o', 'Okafor family', [
+        remote('r3', 'p-o', 'Chidi', { personal_alias: 'Coach' }),
+        remote('r4', 'p-o', 'Ngozi'), remote('r5', 'p-o', 'Tobi'),
+      ]),
+      hh('p-t', 'Tanaka', [remote('r6', 'p-t', '田中 健'), remote('r7', 'p-t', 'Sora'), remote('r8', 'p-t', 'Émile')]),
+    ]))
+    const { container, findByRole, getByRole } = render(<FriendsPage />)
+    const box = await findByRole('searchbox', { name: 'Find someone' })
+
+    fireEvent.input(box, { target: { value: 'MULLER' } })
+    expect(rowNames(container)).toEqual(['Jonas', 'Klaus'])
+    expect(getByRole('status').textContent).toBe('2 people found')
+
+    fireEvent.input(box, { target: { value: 'coach' } })
+    expect(rowNames(container)).toEqual(['Coach'])
+
+    fireEvent.input(box, { target: { value: 'emile' } })
+    expect(rowNames(container)).toEqual(['Émile'])
+
+    fireEvent.input(box, { target: { value: '田中' } })
+    expect(rowNames(container)).toEqual(['田中 健'])
+
+    fireEvent.input(box, { target: { value: 'nobody-here' } })
+    expect(container.textContent).toContain('No one matches “nobody-here”.')
+    fireEvent.click(container.querySelector('.sh-friends-nomatch button') as HTMLElement)
+    expect(rowNames(container).length).toBe(9)
+  })
+
+  it('Escape clears the find box', async () => {
+    serve(payload([hh('p-a', 'Alpha', many('p-a', 9))]))
+    const { container, findByRole } = render(<FriendsPage />)
+    const box = await findByRole('searchbox') as HTMLInputElement
+    fireEvent.input(box, { target: { value: 'Person A' } })
+    expect(rowNames(container)).toEqual(['Person A'])
+    fireEvent.keyDown(box, { key: 'Escape' })
+    // Back to the browse list: us + Alpha collapsed to 5.
+    expect(box.value).toBe('')
+    expect(rowNames(container).length).toBe(6)
+  })
+
+  // ── Views ───────────────────────────────────────────────────────────
+
+  it('People view lists everyone A–Z with letter dividers, non-Latin under #', async () => {
+    serve(payload(
+      [
+        hh('p-o', 'Okafor family', [remote('r1', 'p-o', 'Amaka', {
+          status: { emoji: '🎸', text: 'Band practice', expires_at: null },
+        }), remote('r2', 'p-o', 'Chidi')]),
+        hh('p-h', 'عائلة الحسن', [remote('r3', 'p-h', 'ليلى الحسن')]),
+        hh('p-t', 'Tanaka', [remote('r4', 'p-t', '田中 健'), remote('r5', 'p-t', 'Ömer')]),
       ],
-      totals: { households: 2, people: 3 },
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.textContent).toContain('A Home')
-    })
-    const cards = container.querySelectorAll('.sh-friends-household')
-    // Local + one paired = 2 cards.
-    expect(cards.length).toBe(2)
-    expect(container.textContent).toContain('Bob')
-    expect(container.textContent).toContain('Carol')
+      [local('u-me', 'Pascal'), local('u-ada', 'Ada')],
+    ))
+    const { container, findByRole } = render(<FriendsPage />)
+    fireEvent.click(await findByRole('button', { name: 'People' }))
+    expect((await findByRole('button', { name: 'People' })).getAttribute('aria-pressed')).toBe('true')
+    const letters = [...container.querySelectorAll('.sh-friends-letter')].map((g) => g.getAttribute('aria-label'))
+    expect(letters).toEqual(['A', 'C', 'O', 'P', '#'])
+    const names = rowNames(container)
+    expect(names.slice(0, 5)).toEqual(['Ada', 'Amaka', 'Chidi', 'Ömer', 'Pascal'])
+    expect(new Set(names.slice(5))).toEqual(new Set(['ليلى الحسن', '田中 健']))
+    // Status and household on separate lines.
+    const amaka = container.querySelector('[data-user-id="r1"]')!
+    const metas = [...amaka.querySelectorAll('.sh-friends-row__meta')].map((m) => m.textContent)
+    expect(metas).toEqual(['🎸 Band practice', 'Okafor family'])
+    expect(container.querySelector('li.sh-friends-hh')).toBeNull()
   })
 
-  it('shows the totals headline', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      totals: { households: 4, people: 17 },
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.textContent).toContain('17')
-    })
-    expect(container.textContent).toContain('households')
-  })
-
-  // ── Quick DM affordance (PR C) ───────────────────────────────────────
-
-  it('local member chip opens the action sheet for everyone except the viewer', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      instance: {
-        instance_id: 'us', display_name: 'Vizeli Home',
-        home_lat: null, home_lon: null,
-        members: [
-          { user_id: 'u-me', username: 'pascal', display_name: 'Pascal',
-            picture_url: null, is_online: true, is_idle: false },
-          { user_id: 'u-mom', username: 'maria', display_name: 'Maria',
-            picture_url: null, is_online: false, is_idle: false },
-        ],
-        member_count: 2,
-      },
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('.sh-friends')).not.toBeNull()
-    })
-    // Pascal (viewer) is rendered as a passive ``--self`` card; only
-    // Maria becomes a click-to-actions button. Chip click now opens
-    // the action sheet (Message / Rename) rather than going straight
-    // to a DM.
-    expect(container.querySelector('.sh-friends-member-chip--self'))
-      .not.toBeNull()
-    const dmButtons = container.querySelectorAll(
-      'button.sh-friends-member-chip',
-    )
-    expect(dmButtons.length).toBe(1)
-    expect(
-      (dmButtons[0] as HTMLButtonElement).getAttribute('aria-label'),
-    ).toBe('Open actions for Maria')
-  })
-
-  it('a local member chip opens the person sheet with the full row — no refetch needed', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      instance: {
-        instance_id: 'us', display_name: 'Vizeli Home',
-        home_lat: null, home_lon: null,
-        members: [
-          { user_id: 'u-me', username: 'pascal', display_name: 'Pascal',
-            picture_url: null, is_online: true, is_idle: false },
-          { user_id: 'u-mom', username: 'maria', display_name: 'Maria',
-            picture_url: null, is_online: false, is_idle: false,
-            status: { emoji: '☕', text: 'Coffee', expires_at: null }, bio: 'Hi' },
-        ],
-        member_count: 2,
-      },
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('button.sh-friends-member-chip'))
-        .not.toBeNull()
-    })
-    fireEvent.click(
-      container.querySelector('button.sh-friends-member-chip') as HTMLElement,
-    )
-    expect(openPersonSpy).toHaveBeenCalledWith('u-mom', expect.objectContaining({
-      person: expect.objectContaining({
-        username: 'maria',
-        display_name: 'Maria',
-        is_local: true,
-        bio: 'Hi',
-        status: { emoji: '☕', text: 'Coffee', expires_at: null },
-        household: { instance_id: 'us', display_name: 'Vizeli Home', is_own: true },
-      }),
-      onAliasChanged: expect.any(Function),
-    }))
-  })
-
-  it('a remote member chip opens the person sheet as remote with its household', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      households: [
-        {
-          instance_id: 'p-bro', display_name: "Brother's house",
-          home_lat: null, home_lon: null,
-          paired_at: '2026-04-01T10:00:00Z', reachable: true,
-          members: [
-            { user_id: 'u-bro', instance_id: 'p-bro', remote_username: 'bob',
-              display_name: 'Bob', picture_url: null, is_online: true },
-          ],
-          member_count: 1,
-        },
+  it('Map view replaces the list; offered only when a household has a location', async () => {
+    serve(payload(
+      [
+        hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')], { home_lat: 47.1, home_lon: 8.5 }),
+        hh('p-b', 'Beta', [remote('r2', 'p-b', 'Bo')]),
       ],
-      totals: { households: 2, people: 2 },
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('.sh-friends-member-chip--button'))
-        .not.toBeNull()
-    })
-    fireEvent.click(
-      container.querySelector('.sh-friends-member-chip--button') as HTMLElement,
-    )
-    expect(openPersonSpy).toHaveBeenCalledWith('u-bro', expect.objectContaining({
-      person: expect.objectContaining({
-        display_name: 'Bob',
-        is_local: false,
-        is_online: true,
-        household: { instance_id: 'p-bro', display_name: "Brother's house", is_own: false },
-      }),
-    }))
+      [local('u-me', 'Pascal')],
+      { home_lat: 47.0, home_lon: 8.4 },
+    ))
+    const { container, findByRole, getByTestId } = render(<FriendsPage />)
+    fireEvent.click(await findByRole('button', { name: 'Map' }))
+    expect(getByTestId('map').getAttribute('data-markers')).toBe('2')
+    expect(container.querySelector('li.sh-friends-hh')).toBeNull()
+    expect(container.textContent).toContain('Not on the map (no location shared): Beta')
+    fireEvent.click(await findByRole('button', { name: 'Households' }))
+    expect(cards(container)).toHaveLength(2)
   })
 
-  it('saving a nickname from the sheet patches the chip in place', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      households: [
-        {
-          instance_id: 'p-bro', display_name: "Brother's house",
-          home_lat: null, home_lon: null,
-          paired_at: null, reachable: true,
-          members: [
-            { user_id: 'u-bro', instance_id: 'p-bro', remote_username: 'bob',
-              display_name: 'Bob', picture_url: null },
-          ],
-          member_count: 1,
-        },
-      ],
-      totals: { households: 2, people: 2 },
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('.sh-friends-member-chip--button')).not.toBeNull()
-    })
-    fireEvent.click(container.querySelector('.sh-friends-member-chip--button') as HTMLElement)
+  it('no coordinates anywhere: no Map option', async () => {
+    serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]))
+    const { findByRole, queryByRole } = render(<FriendsPage />)
+    await findByRole('button', { name: 'People' })
+    expect(queryByRole('button', { name: 'Map' })).toBeNull()
+  })
+
+  // ── Rows ────────────────────────────────────────────────────────────
+
+  it('rows carry presence (remote too), status and an accessible name; whole row opens the sheet', async () => {
+    serve(payload(
+      [hh('p-o', 'Okafor family', [
+        remote('r1', 'p-o', 'Amaka', {
+          is_online: true, status: { emoji: '🎸', text: 'Band practice', expires_at: null },
+        }),
+        remote('r2', 'p-o', 'Jonas', { status: { emoji: '🍝', text: null, expires_at: null } }),
+      ])],
+      [local('u-me', 'Pascal'), local('u-noah', 'Noah', { last_seen_at: new Date(Date.now() - 3 * 3600e3).toISOString() })],
+    ))
+    const { container, findByRole } = render(<FriendsPage />)
+    const amaka = await findByRole('button', { name: 'Amaka, online, 🎸 Band practice' })
+    expect(amaka.querySelector('.avatar')?.getAttribute('data-online')).toBe('online')
+    // Emoji-only status → avatar badge, no second line for a remote person.
+    const jonas = container.querySelector('[data-user-id="r2"]')!
+    expect(jonas.querySelector('.sh-friends-row__badge')?.textContent).toBe('🍝')
+    expect(jonas.querySelector('.sh-friends-row__meta')).toBeNull()
+    // Local and offline → "Seen …".
+    const noah = container.querySelector('[data-user-id="u-noah"]')!
+    expect(noah.querySelector('.sh-friends-row__meta')?.textContent).toMatch(/^Seen /)
+    // No chevrons; the row itself is the button.
+    expect(container.querySelector('.sh-conn-chev')).toBeNull()
+    fireEvent.click(amaka)
+    expect(openPersonSpy).toHaveBeenCalledTimes(1)
+    const [uid, ctx] = openPersonSpy.mock.calls[0]
+    expect(uid).toBe('r1')
+    expect(ctx.person.household).toEqual({ instance_id: 'p-o', display_name: 'Okafor family', is_own: false })
+    expect(ctx.person.is_local).toBe(false)
+  })
+
+  it('a nickname shows in place of the name and is patched after the sheet saves one', async () => {
+    serve(payload([hh('p-b', "Brother's house", [remote('u-bro', 'p-b', 'Bob')])]))
+    const { container, findByRole } = render(<FriendsPage />)
+    fireEvent.click(await findByRole('button', { name: /^Bob/ }))
     const ctx = openPersonSpy.mock.calls[0][1]
     ctx.onAliasChanged('u-bro', 'Brother')
-    await waitFor(() => {
-      expect(container.querySelector('.sh-friends-member-chip--button')?.textContent)
-        .toContain('Brother')
-    })
+    await waitFor(() => expect(rowNames(container)).toContain('Brother'))
+    expect(container.querySelector('[data-user-id="u-bro"]')?.getAttribute('aria-label'))
+      .toBe('Brother, your nickname for Bob')
   })
 
-  it('someone blocked from the sheet drops off the page at once', async () => {
-    apiMock.get.mockResolvedValueOnce(payload({
-      instance: {
-        instance_id: 'us', display_name: 'Vizeli Home',
-        home_lat: null, home_lon: null,
-        members: [
-          { user_id: 'u-me', username: 'pascal', display_name: 'Pascal', picture_url: null },
-          { user_id: 'u-mom', username: 'maria', display_name: 'Maria', picture_url: null },
-        ],
-        member_count: 2,
-      },
-    }))
-    const { container } = render(<FriendsPage />)
-    await waitFor(() => {
-      expect(container.querySelector('button.sh-friends-member-chip')).not.toBeNull()
+  it('our own row opens the status editor and shows the saved status', async () => {
+    serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]))
+    const { container, findByRole } = render(<FriendsPage />)
+    const self = await findByRole('button', { name: /^Pascal \(you\)/ })
+    expect(self.getAttribute('aria-label')).toContain('edit your status')
+    fireEvent.click(self)
+    expect(openPersonSpy).not.toHaveBeenCalled()
+    fireEvent.click(await findByRole('button', { name: 'save-status' }))
+    await waitFor(() =>
+      expect(container.querySelector('[data-user-id="u-me"] .sh-friends-row__meta')?.textContent)
+        .toBe('🛠 Fixing the gate'))
+  })
+
+  // ── Blocked ─────────────────────────────────────────────────────────
+
+  it('blocked people: a footer line with a Manage link to Settings › Privacy', async () => {
+    serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]), {
+      '/api/blocks': { blocks: [
+        { user_id: 'x1', blocked_at: '2026-01-01' }, { user_id: 'x2', blocked_at: '2026-01-01' },
+      ] },
     })
+    const { container, findByRole } = render(<FriendsPage />)
+    const manage = await findByRole('link', { name: 'Manage' })
+    expect(manage.getAttribute('href')).toMatch(/\/settings#privacy$/)
+    expect(container.querySelector('.sh-friends-foot--blocked')?.textContent)
+      .toBe('2 people you blocked are hidden. Manage')
+  })
+
+  it('no blocks: no blocked footer', async () => {
+    serve(payload([hh('p-a', 'Alpha', [remote('r1', 'p-a', 'Ann')])]))
+    const { container, findByRole } = render(<FriendsPage />)
+    await findByRole('button', { name: /^Ann/ })
+    expect(container.querySelector('.sh-friends-foot--blocked')).toBeNull()
+  })
+
+  it('someone blocked from the sheet drops off the page (and the counts) at once', async () => {
+    serve(payload([], [local('u-me', 'Pascal'), local('u-mom', 'Maria')]))
+    const { container, findByRole } = render(<FriendsPage />)
+    await findByRole('button', { name: /^Maria/ })
+    blockedUsers.value = [{ user_id: 'u-mom', blocked_at: '2026-01-01' }]
     blockedUserIds.value = new Set(['u-mom'])
-    await waitFor(() => {
-      expect(container.querySelector('button.sh-friends-member-chip')).toBeNull()
-    })
+    await waitFor(() => expect(container.querySelector('[data-user-id="u-mom"]')).toBeNull())
+    expect(container.textContent).toContain('1 person you blocked is hidden.')
   })
 })

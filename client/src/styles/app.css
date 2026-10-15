@@ -2216,59 +2216,169 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
  * effect is feed-scoped (``.sh-feed-item``) — PostCard usage outside
  * the household feed (search results, space feeds) keeps the flat
  * ``.sh-post`` chrome below. */
-/* ───── Friends dashboard ─────────────────────────────────────────────
+/* ───── Friends ("your people") ───────────────────────────────────────
  *
- * Connected-people view under Browse. Hero card with the headline
- * count, an optional map, then one card per household. Each card
- * uses the same cream-paper + dashed-border language as the rest of
- * the household OS, with member chips inline so the page reads at a
- * glance — no expandable sections. */
-.sh-friends {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-md);
-  padding-top: 12px;
+ * Built on the Connections anatomy: the page is a ``.sh-conn`` column, the
+ * hero is ``.sh-conn-hero`` without the constellation, households reuse
+ * ``.sh-conn-av`` / ``.sh-conn-card__*`` / ``.sh-conn-sect-head`` and the
+ * view switch is ``.sh-segmented``. Only what Connections has no class for
+ * lives here: person rows inside a household card, the find box, the
+ * collapse button, the footers and the empty / error states. */
+.sh-conn.sh-friends { max-width: 920px; width: 100%; margin: 0 auto; gap: var(--sh-space-xl); }
+
+/* Hero: text only, so the copy spans the full width. */
+.sh-conn-hero.sh-friends-hero { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "rest"; }
+.sh-friends-hero .sh-conn-hero__sub { max-width: 60ch; }
+
+/* Toolbar: find box (grows) + view switch. */
+.sh-friends-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sh-space-sm); }
+.sh-friends-find {
+  position: relative; flex: 1 1 240px; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  min-height: 44px; padding: 0 4px 0 14px;
+  border-radius: var(--sh-radius-full); border: 1px solid var(--sh-border-strong);
+  background: var(--sh-bg); color: var(--sh-text-muted);
 }
-.sh-friends-hero {
-  background: var(--sh-bg-tertiary);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-lg);
-  padding: var(--sh-space-md) var(--sh-space-lg);
-  box-shadow: var(--sh-shadow-pinned);
-  position: relative;
+.sh-friends-find:focus-within { outline: 2px solid var(--sh-primary); outline-offset: 1px; }
+/* Beat the global form-field chrome: the pill is the field. */
+.sh-friends .sh-friends-find input.sh-friends-find__input[type="search"],
+.sh-friends .sh-friends-find input.sh-friends-find__input[type="search"]:focus {
+  flex: 1; min-width: 0; width: auto; height: 42px; min-height: 0; margin: 0; padding: 0;
+  border: 0; border-radius: 0; background: transparent; box-shadow: none; outline: none;
+  font: inherit; font-size: var(--sh-font-size-sm); color: var(--sh-text);
 }
-.sh-friends-hero::before {
-  content: '';
-  position: absolute;
-  top: -8px;
-  left: 24px;
-  width: 64px;
-  height: 16px;
-  background: color-mix(in srgb, var(--sh-primary) 35%, transparent);
-  border-radius: 2px;
-  transform: rotate(-2deg);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+.sh-friends .sh-friends-find input.sh-friends-find__input[type="search"]::placeholder { color: var(--sh-text-muted); opacity: 1; }
+.sh-friends-find__input::-webkit-search-cancel-button { display: none; }
+.sh-friends-find__clear {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 36px; height: 36px; border-radius: var(--sh-radius-full);
+  border: 0; background: transparent; color: var(--sh-text-muted); cursor: pointer;
 }
-.sh-friends-hero-headline {
-  font-size: var(--sh-font-size-lg);
-  color: var(--sh-text);
+.sh-friends-find__clear:hover { background: var(--sh-bg-secondary); color: var(--sh-text); }
+.sh-friends-find__clear:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 1px; }
+.sh-friends .sh-segmented__opt .sh-conn-ico { width: 16px; height: 16px; }
+/* The switch stays at the right edge even when the find box is hidden. */
+.sh-friends-switch { margin-inline-start: auto; }
+
+/* Sections: tighter than Connections' sections — the card follows. */
+.sh-friends-sect { gap: var(--sh-space-sm); }
+
+/* Household card: Connections card surface, people inside. */
+.sh-friends-hh-list { display: flex; flex-direction: column; gap: var(--sh-space-sm); margin: 0; padding: 0; list-style: none; }
+.sh-friends-hh {
+  position: relative; display: flex; flex-direction: column;
+  border-radius: var(--sh-radius-lg); background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border); box-shadow: var(--sh-shadow-xs);
 }
-.sh-friends-hero-headline strong {
-  color: var(--sh-primary-text);
-  font-size: 1.4em;
-  font-weight: 700;
+.sh-friends-hh--home, .sh-friends-hh--az { padding-top: var(--sh-space-sm); }
+.sh-friends-hh--down { border-color: color-mix(in srgb, var(--sh-danger) 35%, var(--sh-border)); }
+.sh-friends-hh--down::before {
+  content: ""; position: absolute; left: -1px; top: 14px; bottom: 14px; width: 4px;
+  border-radius: 0 4px 4px 0; background: var(--sh-danger);
 }
-.sh-friends-hero-sub {
-  margin-top: 4px;
-  font-size: var(--sh-font-size-sm);
+.sh-friends-hh__head {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--sh-space-md);
+  align-items: center; padding: var(--sh-space-md);
 }
-/* Inline pairing CTA row inside the hero — admin-only. Sits below
- * the headline + sub-line with a comfortable gap so the stat reads
- * as a stat first, the CTA as a "you can grow this" follow-up. */
-.sh-friends-hero-actions {
-  display: flex;
-  gap: var(--sh-space-sm);
-  margin-top: var(--sh-space-sm);
+.sh-friends-hh__name { margin: 0; }
+.sh-friends-hh__line2 { margin: 0; }
+.sh-friends-people {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 2px var(--sh-space-sm); padding: 0 var(--sh-space-sm) var(--sh-space-sm);
+}
+.sh-friends-more {
+  align-self: flex-start; min-height: 44px; margin: calc(-1 * var(--sh-space-xs)) var(--sh-space-sm) var(--sh-space-xs);
+  padding: 0 var(--sh-space-sm); border: 0; border-radius: var(--sh-radius-md); background: none;
+  font: inherit; font-size: var(--sh-font-size-sm); font-weight: 600; color: var(--sh-primary-text); cursor: pointer;
+}
+.sh-friends-more:hover { text-decoration: underline; text-underline-offset: 2px; }
+.sh-friends-more:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 0; }
+
+/* Person row: avatar · name / status lines. The whole row is the button. */
+.sh-friends-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: center;
+  width: 100%; min-height: 60px; padding: 8px;
+  border: 0; border-radius: var(--sh-radius-md); background: none;
+  color: inherit; font: inherit; text-align: start; cursor: pointer;
+  transition: background-color var(--sh-transition-fast);
+}
+.sh-friends-row:hover { background: color-mix(in srgb, var(--sh-text) 5%, transparent); }
+.sh-friends-row:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 0; }
+.sh-friends-row__av { position: relative; display: inline-flex; flex: none; }
+.sh-friends-row__av .sh-avatar-status-dot { border-color: var(--sh-bg-tertiary); }
+.sh-friends-row__badge {
+  position: absolute; left: -5px; top: -5px; width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; background: var(--sh-bg); box-shadow: var(--sh-shadow-sm);
+  font-size: 11px; line-height: 1;
+}
+.sh-friends-row__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sh-friends-row__name { display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; }
+.sh-friends-row__text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; unicode-bidi: isolate; }
+.sh-friends-row__nick { display: inline-flex; flex: none; color: var(--sh-text-muted); }
+.sh-friends-row__nick .sh-conn-ico { width: 13px; height: 13px; }
+.sh-friends-row__you {
+  flex: none; padding: 1px 8px; border-radius: var(--sh-radius-full);
+  background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+  color: var(--sh-primary-text); font-size: var(--sh-font-size-xs); font-weight: 600;
+}
+.sh-friends-row__meta {
+  font-size: var(--sh-font-size-sm); color: var(--sh-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: isolate;
+}
+
+/* People view: letter dividers. */
+.sh-friends-letter__head.sh-conn-subgroup { margin: 10px var(--sh-space-md) 2px; }
+.sh-friends-letter:first-child .sh-friends-letter__head { margin-top: 2px; }
+
+/* Footer lines: households that shared nobody, people you blocked. */
+.sh-friends-foot { margin: 2px; font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); line-height: var(--sh-line-height-base); }
+.sh-friends-foot--blocked { margin-top: calc(-1 * var(--sh-space-sm)); }
+.sh-friends-link {
+  position: relative; padding: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; font-weight: 600; color: var(--sh-primary-text); text-decoration: none;
+}
+.sh-friends-link::after { content: ""; position: absolute; inset: -12px -6px; }
+.sh-friends-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.sh-friends-link:focus-visible { outline: 2px solid var(--sh-primary); outline-offset: 2px; border-radius: 2px; }
+.sh-friends-nomatch { margin: 0; color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+
+/* Map view: the map replaces the list; dark dims the tiles only. */
+.sh-friends-map {
+  border-radius: var(--sh-radius-lg); overflow: hidden; isolation: isolate;
+  border: 1px solid var(--sh-border); box-shadow: var(--sh-shadow-pinned);
+}
+.sh-theme-dark .sh-friends-map .leaflet-tile-pane { filter: brightness(.75) contrast(1.1) saturate(.8); }   /* dark */
+
+/* Empty state: no paired household yet — one CTA. */
+.sh-friends-empty {
+  display: flex; flex-direction: column; align-items: center; gap: var(--sh-space-sm);
+  padding: var(--sh-space-2xl) var(--sh-space-lg); text-align: center;
+  border-radius: var(--sh-radius-lg); background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border); box-shadow: var(--sh-shadow-xs);
+}
+.sh-friends-empty h2 { margin: var(--sh-space-sm) 0 0; font-family: var(--sh-font-family-display); font-size: var(--sh-font-size-xl); }
+.sh-friends-empty p { margin: 0; color: var(--sh-text-muted); max-width: 44ch; }
+.sh-friends-empty .sh-conn-hero__actions { justify-content: center; margin-top: var(--sh-space-md); }
+.sh-friends-empty .sh-conn-hero__note { text-align: start; max-width: 44ch; margin-top: var(--sh-space-sm); }
+.sh-friends-empty__art { width: 220px; height: 110px; }
+.sh-friends-empty__h { fill: var(--sh-bg-tertiary); stroke: var(--sh-text); stroke-width: 2; stroke-linejoin: round; }
+.sh-friends-empty__h2 { fill: none; stroke: var(--sh-text-muted); stroke-width: 2; stroke-dasharray: 3 5; stroke-linejoin: round; }
+.sh-friends-empty__door { fill: var(--sh-primary); }
+.sh-friends-empty__path { fill: none; stroke: var(--sh-primary); stroke-width: 2; stroke-dasharray: 2 6; stroke-linecap: round; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-friends-row { transition: none; }
+}
+@media (max-width: 600px) {
+  .sh-conn.sh-friends { gap: var(--sh-space-lg); }
+  .sh-conn-hero.sh-friends-hero { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "rest"; }
+  .sh-friends-people { grid-template-columns: minmax(0, 1fr); }
+  .sh-friends-row { min-height: 56px; padding: 6px 8px; }
+  .sh-friends-switch { width: 100%; }
+  .sh-friends-switch .sh-segmented__opt { flex: 1; justify-content: center; }
+  .sh-friends-empty { padding: var(--sh-space-xl) var(--sh-space-md); }
+  .sh-friends-empty .sh-conn-hero__actions { width: 100%; }
 }
 
 /* Load-error card — shown when ``GET /api/friends`` fails, in place of
@@ -2311,131 +2421,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 }
 .sh-friends-error .sh-btn { margin-top: var(--sh-space-sm); min-height: 44px; }
 
-.sh-friends-map {
-  border-radius: var(--sh-radius-lg);
-  overflow: hidden;
-  border: 1px solid var(--sh-border);
-  box-shadow: var(--sh-shadow-pinned);
-}
-
-.sh-friends-household {
-  background: var(--sh-bg);
-  border: 1px dashed var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  padding: var(--sh-space-md);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-sm);
-}
-.sh-friends-household--mine {
-  background: var(--sh-bg-tertiary);
-  border-style: solid;
-  border-color: color-mix(in srgb, var(--sh-primary) 30%, var(--sh-border));
-  box-shadow: var(--sh-shadow-pinned);
-}
-.sh-friends-household-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  font-size: var(--sh-font-size-base);
-}
-.sh-friends-household-head strong {
-  color: var(--sh-text);
-}
-.sh-friends-house-icon {
-  font-size: 1.2em;
-}
-.sh-friends-tag {
-  font-size: var(--sh-font-size-xs);
-  font-style: italic;
-}
-/* Household reachability indicator — rendered only when *unreachable*
- * so the green session-presence dot on the avatars stays the
- * unambiguous "good news" indicator on each row. Amber matches the
- * idle-state colour palette and reads as a warning without alarming. */
-.sh-friends-status-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  box-shadow: 0 0 0 2px var(--sh-bg);
-}
-.sh-friends-status-dot--unreachable { background: #fbbf24; }
-
-.sh-friends-members {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sh-space-xs);
-}
-.sh-friends-member-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 10px 2px 2px;
-  border-radius: var(--sh-radius-full);
-  background: var(--sh-bg);
-  border: 1px solid var(--sh-border);
-  text-decoration: none;
-  color: var(--sh-text);
-  font-size: var(--sh-font-size-sm);
-  transition: transform var(--sh-transition-fast),
-              box-shadow var(--sh-transition-fast);
-}
-a.sh-friends-member-chip:hover,
-button.sh-friends-member-chip:not(:disabled):hover {
-  transform: translateY(-1px);
-  box-shadow: var(--sh-shadow-xs);
-}
-.sh-friends-member-name {
-  white-space: nowrap;
-}
-.sh-friends-empty-members {
-  font-size: var(--sh-font-size-sm);
-  font-style: italic;
-}
-
-/* Member chip variants — every chip's whole-area click starts a 1:1
- * DM (local + remote, symmetric); the caller's own chip switches to
- * a non-interactive ``--self`` variant so a button leading nowhere
- * doesn't appear. */
-.sh-friends-member-chip--button {
-  cursor: pointer;
-  font: inherit;
-}
-.sh-friends-member-chip--button:disabled {
-  opacity: 0.5;
-  cursor: progress;
-}
-.sh-friends-member-chip--self {
-  cursor: default;
-}
-.sh-friends-member-chip--self .sh-friends-member-name {
-  font-weight: 600;
-}
-.sh-friends-member-chip__dm-hint {
-  font-size: 13px;
-  line-height: 1;
-  opacity: 0.55;
-  margin-left: 2px;
-}
-.sh-friends-member-chip--button:hover:not(:disabled) .sh-friends-member-chip__dm-hint {
-  opacity: 0.95;
-}
-/* Tiny ✏ marker on a chip whose display name has been overridden by
- * the viewer's personal_alias. Sits next to the name as a quiet hint
- * that "this is your nickname, not their real one". Hover (or focus
- * for a11y) reveals it more strongly to confirm the chip's state.
- * Title attribute carries the original display name. */
-.sh-friends-member-chip__alias-hint {
-  font-size: 11px;
-  line-height: 1;
-  opacity: 0.55;
-  margin-left: 2px;
-}
-.sh-friends-member-chip--button:hover:not(:disabled) .sh-friends-member-chip__alias-hint,
-.sh-friends-member-chip--button:focus-visible .sh-friends-member-chip__alias-hint {
-  opacity: 0.95;
-}
 
 /* Person sheet (PersonSheet) — one surface for another person, opened
  * from every avatar / name / ⋯. Composes on the shared Modal: a centred
