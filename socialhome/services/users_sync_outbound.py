@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 from ..domain.events import PairingConfirmed
 from ..domain.federation import FederationEventType
 from ..infrastructure.event_bus import EventBus
+from .protection_gate import ProtectionGateMixin
 from .user_identity_binding import user_identity_binding_fields
 from .visibility import VisibilityMixin
 
@@ -50,11 +51,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class UsersSyncOutbound(VisibilityMixin):
+class UsersSyncOutbound(VisibilityMixin, ProtectionGateMixin):
     """Send ``USERS_SYNC`` to a freshly-confirmed peer."""
 
     __slots__ = (
         "_bus",
+        "_child_protection",
         "_federation",
         "_user_repo",
         "_picture_repo",
@@ -79,6 +81,7 @@ class UsersSyncOutbound(VisibilityMixin):
         # Same optionality contract the existing profile_federation_outbound
         # uses: when unset, every local user fans to the new peer.
         self._visibility_repo = visibility_repo
+        self._child_protection = None
 
     def wire(self) -> None:
         self._bus.subscribe(PairingConfirmed, self._on_pair_confirmed)
@@ -114,7 +117,14 @@ class UsersSyncOutbound(VisibilityMixin):
                 # Current status, or ``None`` (explicit clear) when unset or
                 # past its deadline. Same per-pair visibility filter as
                 # ``USER_STATUS_UPDATED`` (the ``hidden`` skip above).
-                "status": u.status.visible_dict(now),
+                # §CP.F2: never a protected account's status to a household
+                # where someone its guardian blocked is homed (as
+                # ``USER_STATUS_UPDATED``) — ``None`` reads as no status.
+                "status": (
+                    None
+                    if await self._guardian_blocks_household(u.user_id, peer_id)
+                    else u.status.visible_dict(now)
+                ),
             }
             # Per-user identity binding (proto v_25) — present only for a
             # peer that can validate it; older peers keep the legacy shape.

@@ -474,3 +474,38 @@ async def test_status_of_a_user_hidden_from_the_peer_never_ships():
     )
     assert [u["user_id"] for u in payload["users"]] == ["u-maria"]
     assert "Secret" not in repr(payload)
+
+
+class _FakeChildProtection:
+    """``u-kid`` is protected; its guardian blocked someone on peer-x."""
+
+    def register_gate(self, gate) -> None:
+        pass
+
+    async def guardian_blocks_household(self, user_id, instance_id) -> bool:
+        return user_id == "u-kid" and instance_id == "peer-x"
+
+
+@pytest.mark.parametrize(("peer", "shipped"), [("peer-x", None), ("peer-y", "x")])
+async def test_protected_status_never_ships_to_a_blocked_household(peer, shipped):
+    """§CP.F2: the snapshot to a household where someone the account's
+    guardian blocked is homed carries no status for it (an adult's still
+    ships); the profile entry itself stays."""
+    bus = EventBus()
+    fed = _FakeFederationService()
+    out = UsersSyncOutbound(
+        bus=bus,
+        federation_service=fed,
+        user_repo=_FakeUserRepo(
+            [
+                _FakeUser("u-kid", "kid", "Kid", status=UserStatus(text="x")),
+                _FakeUser("u-mom", "mom", "Mom", status=UserStatus(text="y")),
+            ]
+        ),
+    )
+    out.attach_child_protection(_FakeChildProtection())  # type: ignore[arg-type]
+    out.wire()
+    await bus.publish(PairingConfirmed(instance_id=peer))
+    by_id = {u["user_id"]: u for u in fed.sent[0][2]["users"]}
+    assert (by_id["u-kid"]["status"] or {}).get("text") == shipped
+    assert by_id["u-mom"]["status"]["text"] == "y"

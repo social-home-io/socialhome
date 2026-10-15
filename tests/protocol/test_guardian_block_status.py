@@ -29,10 +29,12 @@ from socialhome.app import create_app
 from socialhome.app_keys import (
     child_protection_service_key,
     db_key,
+    event_bus_key,
     federation_service_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
+from socialhome.domain.events import PairingConfirmed
 from socialhome.domain.federation import FederationEvent, FederationEventType
 
 pytestmark = pytest.mark.security
@@ -287,3 +289,19 @@ async def test_blocked_remote_persons_status_never_reaches_the_account(env):
         members = [m for h in body["households"] for m in h["members"]]
         assert any(m["user_id"] == REX for m in members) is visible
         assert ("Gaming" in str(body)) is visible
+
+
+@pytest.mark.parametrize(
+    ("peer", "shipped"), [(REX_HOME, None), (ANN_HOME, "At school")]
+)
+async def test_users_sync_carries_no_status_to_the_blocked_household(
+    env, peer, shipped
+):
+    """The roster snapshot sent at pair-confirm follows the same rule."""
+    await _block(env, REX)
+    env._sent.clear()
+    await env._app[event_bus_key].publish(PairingConfirmed(instance_id=peer))
+    syncs = [p for i, t, p in env._sent if t == FET.USERS_SYNC and i == peer]
+    assert syncs
+    kid = next(u for u in syncs[-1]["users"] if u["user_id"] == "u-kid")
+    assert (kid["status"] or {}).get("text") == shipped

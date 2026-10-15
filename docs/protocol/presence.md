@@ -212,7 +212,8 @@ passed.
 
 **Guardian blocks (§CP.F2).** A protected account's `USER_STATUS_UPDATED`
 and `USER_ONLINE` / `USER_IDLE` / `USER_OFFLINE` never go to a household
-where someone its guardian blocked is homed — the block never leaves the
+where someone its guardian blocked is homed, and a `USERS_SYNC` snapshot
+to such a household carries `status: null` for it — the block never leaves the
 protected account's household, so the receiver can't filter it and the
 sender is the only place it holds. Adding the block (or turning protection
 back on over blocks kept from before) sends that household one ordinary
