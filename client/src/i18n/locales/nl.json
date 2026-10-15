@@ -4645,6 +4645,8 @@
   "friends.empty_ask_admin": "Vraag een beheerder van je huishouden om met een ander huishouden te koppelen.",
   "friends.unreachable": "Onbereikbaar",
   "friends.members_not_synced": "Hun leden zijn nog niet binnengekomen.",
+  "friends.load_failed_title": "Je mensen konden niet worden geladen",
+  "friends.load_failed_body": "Controleer je verbinding en probeer het opnieuw. Er is niets verloren gegaan.",
   "notifications.mark_all_failed": "Kon niet alles als gelezen markeren: {error}",
   "notifications.mark_failed": "Kon niet als gelezen markeren: {error}",
   "notifications.empty_title": "Je bent helemaal bij",

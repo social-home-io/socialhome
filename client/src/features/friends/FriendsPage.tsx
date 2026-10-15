@@ -119,6 +119,11 @@ export default function FriendsPage() {
   useTitle(t('nav.friends'))
   const [data, setData] = useState<FriendsPayload | null>(null)
   const [loading, setLoading] = useState(true)
+  /** The last ``GET /api/friends`` failed. Kept separate from
+   *  ``loading`` so a failed load renders the retry card instead of a
+   *  spinner that never stops; ``attempt`` bumps to re-run the load. */
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   /** Per-user "starting DM" tracking so a double-click can't spawn
    *  two POSTs. The DM service is idempotent server-side (returns the
    *  existing conversation), but a flashing spinner reassures the
@@ -160,14 +165,38 @@ export default function FriendsPage() {
 
   useEffect(() => {
     let cancelled = false
+    setLoading(true)
     api.get('/api/friends').then((rows) => {
       if (cancelled) return
       setData(rows as FriendsPayload)
+      setLoadFailed(false)
       setLoading(false)
-    }).catch(() => { if (!cancelled) setLoading(false) })
+    }).catch(() => {
+      if (cancelled) return
+      setLoadFailed(true)
+      setLoading(false)
+    })
     return () => { cancelled = true }
-  }, [])
+  }, [attempt])
 
+  // A failed load gets its own card with a retry — never an endless
+  // spinner. The card stays up while a retry is in flight (the button
+  // shows the spinner) so focus and the announcement don't jump.
+  if (!data && loadFailed) {
+    return (
+      <div class="sh-friends">
+        <section class="sh-friends-error" role="alert">
+          <span class="sh-friends-error__icon" aria-hidden="true">!</span>
+          <h2>{t('friends.load_failed_title')}</h2>
+          <p>{t('friends.load_failed_body')}</p>
+          <Button variant="secondary" loading={loading}
+                  onClick={() => setAttempt(n => n + 1)}>
+            {t('common.try_again')}
+          </Button>
+        </section>
+      </div>
+    )
+  }
   if (loading || !data) return <Spinner />
 
   const { instance, households, totals } = data
