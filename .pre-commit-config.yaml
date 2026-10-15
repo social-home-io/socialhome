@@ -14,7 +14,7 @@ default_language_version:
 repos:
   # ── Hygiene ────────────────────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: v6.0.0
     hooks:
       - id: check-yaml
       - id: check-toml
@@ -40,7 +40,7 @@ repos:
   # format violations slip through until they fail on the push. Bump
   # via ``pre-commit autoupdate --repo https://github.com/astral-sh/ruff-pre-commit``.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.11
+    rev: v0.15.22
     hooks:
       - id: ruff
         name: ruff (lint, socialhome/ + tests/)
