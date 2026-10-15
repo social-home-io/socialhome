@@ -271,6 +271,12 @@ def _mint_target_eph(node: _Node) -> str:
 # ── Tests ─────────────────────────────────────────────────────────────
 
 
+#: An invite token long enough that it can't turn up by chance inside the
+#: sealed blob's random base64 ciphertext. A 3-letter token ("tkn") did,
+#: now and then, which made the no-plaintext-leak check flaky.
+_PROBE_TOKEN = "invite-token-probe-not-in-ciphertext"
+
+
 async def test_send_relay_unwrap_dispatches_with_origin_attribution():
     """A SPACE_ROUTED envelope shipped from a along [a, b, c] is
     relayed by b (without seeing plaintext) and unwrapped at c — c's
@@ -280,7 +286,7 @@ async def test_send_relay_unwrap_dispatches_with_origin_attribution():
     """
     nodes = _build_chain(["a", "b", "c"])
     target_eph_pk = _mint_target_eph(nodes["c"])
-    inner_payload = {"redeem_nonce": "n1", "invite_token": "tkn"}
+    inner_payload = {"redeem_nonce": "n1", "invite_token": _PROBE_TOKEN}
     route_id = await nodes["a"].handler.send_routed(
         path=["a", "b", "c"],
         target_eph_pk_b64=target_eph_pk,
@@ -301,7 +307,7 @@ async def test_send_relay_unwrap_dispatches_with_origin_attribution():
     assert "inner_payload" not in a_payload  # no plaintext leak
     sealed_json = json.dumps(a_payload["sealed"], sort_keys=True)
     assert "redeem_nonce" not in sealed_json
-    assert "tkn" not in sealed_json
+    assert _PROBE_TOKEN not in sealed_json
     # b shipped to c (position bumped from 0 to 1), propagating the
     # sealed blob unchanged.
     fwds_from_b = [s for s in nodes["b"].fed.sent if s["to"] == "c"]
@@ -331,7 +337,7 @@ async def test_reply_leg_seals_back_to_origin():
         path=["a", "b", "c"],
         target_eph_pk_b64=target_eph_pk,
         inner_event_type=FederationEventType.SPACE_INVITE_TOKEN_REDEEM,
-        inner_payload={"redeem_nonce": "n1", "invite_token": "tkn"},
+        inner_payload={"redeem_nonce": "n1", "invite_token": _PROBE_TOKEN},
     )
     for _ in range(8):
         await asyncio.sleep(0)
