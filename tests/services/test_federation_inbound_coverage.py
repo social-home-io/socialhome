@@ -658,6 +658,8 @@ async def test_user_status_populated(svc):
     match = [e for e in svc.bus.events if isinstance(e, UserStatusChanged)]
     assert match and match[0].status is not None
     assert match[0].status.emoji == "🎉"
+    svc.user_repo.set_remote_status.assert_awaited_once()
+    assert svc.user_repo.set_remote_status.await_args.args[0] == "u"
 
 
 async def test_attach_to_registers_many_handlers(svc):

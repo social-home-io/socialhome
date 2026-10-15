@@ -160,6 +160,37 @@ def test_user_status_is_set_and_expired():
     assert UserStatus(text="hi", expires_at="soon").is_expired(now)
 
 
+def test_user_status_json_round_trip():
+    s = UserStatus(
+        emoji="🌴", text="On holiday", expires_at="2026-10-01T00:00:00+00:00"
+    )
+    assert UserStatus.from_json(s.to_json()) == s
+    # Unset serialises to None so the column stays NULL.
+    assert UserStatus().to_json() is None
+    assert UserStatus(text="hi").to_json() is not None
+
+
+@pytest.mark.parametrize(
+    "raw", [None, "", "not json", "[1, 2]", '"text"', '{"emoji": 5, "text": ""}']
+)
+def test_user_status_from_json_tolerates_garbage(raw):
+    assert UserStatus.from_json(raw) == UserStatus()
+
+
+def test_user_status_visible_dict_drops_unset_and_expired():
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    assert UserStatus().visible_dict(now) is None
+    assert (
+        UserStatus(text="hi", expires_at="2026-09-28T11:00:00+00:00").visible_dict(now)
+        is None
+    )
+    assert UserStatus(emoji="🎉").visible_dict(now) == {
+        "emoji": "🎉",
+        "text": None,
+        "expires_at": None,
+    }
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [(None, None), ("", None), ("   ", None), (" 👍🏽 ", "👍🏽"), ("1️⃣", "1️⃣")],

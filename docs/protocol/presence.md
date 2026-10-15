@@ -203,8 +203,12 @@ social peer the user is visible to, pairwise-encrypted, as
 Only users homed on the sending household are sent; a status received
 from a peer is never echoed back into the mesh. The receiver applies
 the same caps as the local route (text ≤ 80 characters on one line, a
-single emoji) and refuses an envelope that breaks them, then fans a
-`user.status_changed` frame to its household.
+single emoji) and refuses an envelope that breaks them, caches the
+status on the user's `remote_users.status_json` row (a clear sets it
+`NULL`) so `GET /api/friends` shows it after a reload, then fans a
+`user.status_changed` frame to its household. There is no expiry sweep
+for cached remote statuses: readers drop one whose `expires_at` has
+passed.
 
 ## USERS_SYNC
 

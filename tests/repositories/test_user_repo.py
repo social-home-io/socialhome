@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from socialhome.domain.user import RemoteUser, UserStatus
+
 
 @pytest.fixture
 async def env(tmp_dir):
@@ -358,6 +360,60 @@ async def test_get_remote_by_member_roundtrip(env):
     # the index is on the composite, not either half alone.
     assert await env.user_repo.get_remote_by_member("peer-x", "brother") is None
     assert await env.user_repo.get_remote_by_member("peer-b", "sister") is None
+
+
+async def _seed_peer(env, iid: str = "peer-b") -> None:
+    await env.db.enqueue(
+        """INSERT INTO remote_instances(
+               id, display_name, remote_identity_pk, key_self_to_remote,
+               key_remote_to_self, remote_inbox_url, local_inbox_id,
+               status, source
+           ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            iid,
+            "Peer",
+            "00" * 32,
+            "k1",
+            "k2",
+            "https://x/inbox",
+            "li",
+            "confirmed",
+            "manual",
+        ),
+    )
+
+
+async def test_set_remote_status_persists_and_survives_profile_upsert(env):
+    """``USER_STATUS_UPDATED`` caches the status on the row; a later
+    ``USER_UPDATED`` profile upsert (which carries no status) keeps it,
+    and ``None`` clears it."""
+    await _seed_peer(env)
+    ru = RemoteUser(
+        user_id="ru-1", instance_id="peer-b", remote_username="bob", display_name="Bob"
+    )
+    await env.user_repo.upsert_remote(ru)
+    blob = UserStatus(emoji="🌴", text="Away").to_json()
+    await env.user_repo.set_remote_status("ru-1", blob)
+    assert (await env.user_repo.get_remote("ru-1")).status_json == blob
+
+    await env.user_repo.upsert_remote(
+        RemoteUser(
+            user_id="ru-1",
+            instance_id="peer-b",
+            remote_username="bob",
+            display_name="Bobby",
+            bio="new bio",
+        )
+    )
+    got = await env.user_repo.get_remote("ru-1")
+    assert got.display_name == "Bobby"
+    assert got.bio == "new bio"
+    assert got.status_json == blob
+
+    await env.user_repo.set_remote_status("ru-1", None)
+    assert (await env.user_repo.get_remote("ru-1")).status_json is None
+    # Unknown user: silent no-op.
+    await env.user_repo.set_remote_status("nobody", blob)
 
 
 async def test_set_remote_user_identity_key_persists_verified_key(env):

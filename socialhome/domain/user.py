@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 import unicodedata
 
 from .picture_hash import clean_picture_hash
@@ -85,6 +86,44 @@ class UserStatus:
         if deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=timezone.utc)
         return deadline <= now
+
+    def to_json(self) -> str | None:
+        """Serialise to the ``remote_users.status_json`` shape
+        (``{emoji, text, expires_at}``); ``None`` when nothing is set."""
+        if not self.is_set:
+            return None
+        return json.dumps(
+            {"emoji": self.emoji, "text": self.text, "expires_at": self.expires_at}
+        )
+
+    @classmethod
+    def from_json(cls, raw: str | None) -> "UserStatus":
+        """Parse a stored ``status_json`` blob. Missing, malformed or
+        non-object JSON reads as an unset status (never raises) — the
+        column is cache data mirrored from a peer."""
+        if not raw:
+            return cls()
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return cls()
+        if not isinstance(data, dict):
+            return cls()
+
+        def _str(key: str) -> str | None:
+            value = data.get(key)
+            return value if isinstance(value, str) and value else None
+
+        return cls(
+            emoji=_str("emoji"), text=_str("text"), expires_at=_str("expires_at")
+        )
+
+    def visible_dict(self, now: datetime) -> dict | None:
+        """API shape ``{emoji, text, expires_at}``, or ``None`` when the
+        status is unset or past its ``expires_at`` (``now`` is tz-aware)."""
+        if not self.is_set or self.is_expired(now):
+            return None
+        return {"emoji": self.emoji, "text": self.text, "expires_at": self.expires_at}
 
 
 #: Longest status text (code points) — matches the SPA input's cap.

@@ -3438,6 +3438,11 @@ class FederationInboundService(ProtectionGateMixin):
                     text=text,
                     expires_at=str(p["expires_at"]) if p.get("expires_at") else None,
                 )
+        # Cache it on the ``remote_users`` row so ``GET /api/friends`` can
+        # show it after a reload, not just on the live WS frame.
+        await self._user_repo.set_remote_status(
+            user_id, status.to_json() if status is not None else None
+        )
         await self._bus.publish(UserStatusChanged(user_id=user_id, status=status))
 
     # ── Highlight handlers ─────────────────────────────────────────────────
