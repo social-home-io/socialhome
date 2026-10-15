@@ -4672,6 +4672,8 @@
   "friends.empty_ask_admin": "Pide a un administrador de tu hogar que lo conecte con otro hogar.",
   "friends.unreachable": "No disponible",
   "friends.members_not_synced": "Todavía no tenemos la lista de sus miembros.",
+  "friends.load_failed_title": "No se pudo cargar a tu gente",
+  "friends.load_failed_body": "Comprueba tu conexión e inténtalo de nuevo. No se ha perdido nada.",
   "notifications.mark_all_failed": "No se pudo marcar todo como leído: {error}",
   "notifications.mark_failed": "No se pudo marcar como leído: {error}",
   "notifications.empty_title": "Estás al día",

@@ -4645,6 +4645,8 @@
   "friends.empty_ask_admin": "Bitte einen Admin deines Haushalts, euch mit einem anderen Haushalt zu koppeln.",
   "friends.unreachable": "Nicht erreichbar",
   "friends.members_not_synced": "Ihre Mitglieder wurden noch nicht übertragen.",
+  "friends.load_failed_title": "Deine Leute konnten nicht geladen werden",
+  "friends.load_failed_body": "Prüfe deine Verbindung und versuche es erneut. Es ist nichts verloren gegangen.",
   "notifications.mark_all_failed": "Konnte nicht alles als gelesen markieren: {error}",
   "notifications.mark_failed": "Konnte nicht als gelesen markieren: {error}",
   "notifications.empty_title": "Du bist auf dem neuesten Stand",

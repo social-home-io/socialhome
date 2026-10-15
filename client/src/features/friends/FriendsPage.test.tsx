@@ -78,6 +78,51 @@ describe('FriendsPage', () => {
     routeSpy.mockReset()
   })
 
+  it('a failed load shows an error card with Try again instead of an endless spinner', async () => {
+    // Regression: the catch cleared ``loading`` but ``data`` stayed null,
+    // so ``loading || !data`` kept the spinner up forever.
+    apiMock.get.mockRejectedValueOnce(new Error('network down'))
+    const { container, findByRole } = render(<FriendsPage />)
+    const alert = await findByRole('alert')
+    expect(alert.textContent).toContain('Couldn’t load your people')
+    expect(alert.textContent).toContain('Check your connection and try again.')
+    expect(container.querySelector('.sh-spinner')).toBeNull()
+    expect(container.querySelector('.sh-friends-hero')).toBeNull()
+    expect(alert.querySelector('button')?.textContent).toBe('Try again')
+  })
+
+  it('Try again re-fetches and renders the households on success', async () => {
+    apiMock.get
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValueOnce(payload({ households: [] }))
+    const { container, findByRole, queryByRole } = render(<FriendsPage />)
+    const alert = await findByRole('alert')
+    fireEvent.click(alert.querySelector('button')!)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-friends-hero')).not.toBeNull()
+    })
+    expect(apiMock.get).toHaveBeenCalledTimes(2)
+    expect(apiMock.get).toHaveBeenLastCalledWith('/api/friends')
+    expect(queryByRole('alert')).toBeNull()
+    expect(container.textContent).toContain('Vizeli Home')
+  })
+
+  it('a retry that fails again keeps the error card up', async () => {
+    let reject!: (e: Error) => void
+    apiMock.get
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockReturnValueOnce(new Promise((_, rej) => { reject = rej }))
+    const { findByRole } = render(<FriendsPage />)
+    const alert = await findByRole('alert')
+    const btn = alert.querySelector('button') as HTMLButtonElement
+    fireEvent.click(btn)
+    // While the retry is in flight the card stays and the button is busy.
+    await waitFor(() => expect(btn.disabled).toBe(true))
+    reject(new Error('still down'))
+    await waitFor(() => expect(btn.disabled).toBe(false))
+    expect((await findByRole('alert')).textContent).toContain('Couldn’t load your people')
+  })
+
   it('renders the local household block + empty-state copy when no pairs', async () => {
     apiMock.get.mockResolvedValueOnce(payload({ households: [] }))
     const { container } = render(<FriendsPage />)

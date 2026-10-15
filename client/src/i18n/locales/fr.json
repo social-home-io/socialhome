@@ -4645,6 +4645,8 @@
   "friends.empty_ask_admin": "Demandez à un administrateur du foyer de vous associer à un autre foyer.",
   "friends.unreachable": "Injoignable",
   "friends.members_not_synced": "Leurs membres n'ont pas encore été synchronisés.",
+  "friends.load_failed_title": "Impossible de charger vos proches",
+  "friends.load_failed_body": "Vérifiez votre connexion et réessayez. Rien n'a été perdu.",
   "notifications.mark_all_failed": "Impossible de tout marquer comme lu : {error}",
   "notifications.mark_failed": "Impossible de marquer comme lu : {error}",
   "notifications.empty_title": "Vous êtes à jour",

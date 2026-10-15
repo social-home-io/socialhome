@@ -4681,6 +4681,8 @@
   "friends.empty_ask_admin": "Ask a household admin to pair with another household.",
   "friends.unreachable": "Unreachable",
   "friends.members_not_synced": "We haven't synced their members yet.",
+  "friends.load_failed_title": "Couldn’t load your people",
+  "friends.load_failed_body": "Check your connection and try again. Nothing was lost.",
   "notifications.mark_all_failed": "Couldn't mark all as read: {error}",
   "notifications.mark_failed": "Couldn't mark as read: {error}",
   "notifications.empty_title": "You're all caught up",
