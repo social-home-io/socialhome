@@ -38,8 +38,14 @@ vi.mock('@/components/OnlinePill', () => ({
   OnlinePill: () => null,
 }))
 
+const openPersonSpy = vi.fn()
+vi.mock('@/components/PersonSheet', () => ({
+  openPerson: (...args: unknown[]) => openPersonSpy(...args),
+}))
+
 import FriendsPage from './FriendsPage'
 import { api } from '@/api'
+import { blockedUserIds, _resetBlocksForTest } from '@/store/blocks'
 
 const apiMock = api as unknown as {
   get: ReturnType<typeof vi.fn>
@@ -76,6 +82,8 @@ describe('FriendsPage', () => {
     apiMock.get.mockReset()
     apiPost.mockReset()
     routeSpy.mockReset()
+    openPersonSpy.mockReset()
+    _resetBlocksForTest()
   })
 
   it('a failed load shows an error card with Try again instead of an endless spinner', async () => {
@@ -271,7 +279,7 @@ describe('FriendsPage', () => {
     ).toBe('Open actions for Maria')
   })
 
-  it('clicking a local member chip then Message POSTs /api/conversations/dm with {username}', async () => {
+  it('a local member chip opens the person sheet with the full row — no refetch needed', async () => {
     apiMock.get.mockResolvedValueOnce(payload({
       instance: {
         instance_id: 'us', display_name: 'Vizeli Home',
@@ -280,12 +288,12 @@ describe('FriendsPage', () => {
           { user_id: 'u-me', username: 'pascal', display_name: 'Pascal',
             picture_url: null, is_online: true, is_idle: false },
           { user_id: 'u-mom', username: 'maria', display_name: 'Maria',
-            picture_url: null, is_online: false, is_idle: false },
+            picture_url: null, is_online: false, is_idle: false,
+            status: { emoji: '☕', text: 'Coffee', expires_at: null }, bio: 'Hi' },
         ],
         member_count: 2,
       },
     }))
-    apiPost.mockResolvedValueOnce({ id: 'cdm-local' })
     const { container } = render(<FriendsPage />)
     await waitFor(() => {
       expect(container.querySelector('button.sh-friends-member-chip'))
@@ -294,31 +302,60 @@ describe('FriendsPage', () => {
     fireEvent.click(
       container.querySelector('button.sh-friends-member-chip') as HTMLElement,
     )
-    // Action sheet appears with Message + Rename. Click Message.
-    const messageBtn = await waitFor(() => {
-      const b = container.querySelector('[data-testid="friend-action-message"]')
-      if (!b) throw new Error('action sheet did not open')
-      return b as HTMLButtonElement
-    })
-    fireEvent.click(messageBtn)
-    await waitFor(() => {
-      expect(apiPost).toHaveBeenCalledWith(
-        '/api/conversations/dm',
-        { username: 'maria' },
-      )
-    })
-    await waitFor(() => {
-      expect(routeSpy).toHaveBeenCalledWith('/dms/cdm-local')
-    })
+    expect(openPersonSpy).toHaveBeenCalledWith('u-mom', expect.objectContaining({
+      person: expect.objectContaining({
+        username: 'maria',
+        display_name: 'Maria',
+        is_local: true,
+        bio: 'Hi',
+        status: { emoji: '☕', text: 'Coffee', expires_at: null },
+        household: { instance_id: 'us', display_name: 'Vizeli Home', is_own: true },
+      }),
+      onAliasChanged: expect.any(Function),
+    }))
   })
 
-  it('clicking a remote member chip then Message POSTs /api/conversations/dm with {user_id}', async () => {
+  it('a remote member chip opens the person sheet as remote with its household', async () => {
     apiMock.get.mockResolvedValueOnce(payload({
       households: [
         {
           instance_id: 'p-bro', display_name: "Brother's house",
           home_lat: null, home_lon: null,
           paired_at: '2026-04-01T10:00:00Z', reachable: true,
+          members: [
+            { user_id: 'u-bro', instance_id: 'p-bro', remote_username: 'bob',
+              display_name: 'Bob', picture_url: null, is_online: true },
+          ],
+          member_count: 1,
+        },
+      ],
+      totals: { households: 2, people: 2 },
+    }))
+    const { container } = render(<FriendsPage />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-friends-member-chip--button'))
+        .not.toBeNull()
+    })
+    fireEvent.click(
+      container.querySelector('.sh-friends-member-chip--button') as HTMLElement,
+    )
+    expect(openPersonSpy).toHaveBeenCalledWith('u-bro', expect.objectContaining({
+      person: expect.objectContaining({
+        display_name: 'Bob',
+        is_local: false,
+        is_online: true,
+        household: { instance_id: 'p-bro', display_name: "Brother's house", is_own: false },
+      }),
+    }))
+  })
+
+  it('saving a nickname from the sheet patches the chip in place', async () => {
+    apiMock.get.mockResolvedValueOnce(payload({
+      households: [
+        {
+          instance_id: 'p-bro', display_name: "Brother's house",
+          home_lat: null, home_lon: null,
+          paired_at: null, reachable: true,
           members: [
             { user_id: 'u-bro', instance_id: 'p-bro', remote_username: 'bob',
               display_name: 'Bob', picture_url: null },
@@ -328,29 +365,38 @@ describe('FriendsPage', () => {
       ],
       totals: { households: 2, people: 2 },
     }))
-    apiPost.mockResolvedValueOnce({ id: 'cdm-cross' })
     const { container } = render(<FriendsPage />)
     await waitFor(() => {
-      expect(container.querySelector('.sh-friends-member-chip--button'))
-        .not.toBeNull()
+      expect(container.querySelector('.sh-friends-member-chip--button')).not.toBeNull()
     })
-    fireEvent.click(
-      container.querySelector('.sh-friends-member-chip--button') as HTMLElement,
-    )
-    const messageBtn = await waitFor(() => {
-      const b = container.querySelector('[data-testid="friend-action-message"]')
-      if (!b) throw new Error('action sheet did not open')
-      return b as HTMLButtonElement
-    })
-    fireEvent.click(messageBtn)
+    fireEvent.click(container.querySelector('.sh-friends-member-chip--button') as HTMLElement)
+    const ctx = openPersonSpy.mock.calls[0][1]
+    ctx.onAliasChanged('u-bro', 'Brother')
     await waitFor(() => {
-      expect(apiPost).toHaveBeenCalledWith(
-        '/api/conversations/dm',
-        { user_id: 'u-bro' },
-      )
+      expect(container.querySelector('.sh-friends-member-chip--button')?.textContent)
+        .toContain('Brother')
     })
+  })
+
+  it('someone blocked from the sheet drops off the page at once', async () => {
+    apiMock.get.mockResolvedValueOnce(payload({
+      instance: {
+        instance_id: 'us', display_name: 'Vizeli Home',
+        home_lat: null, home_lon: null,
+        members: [
+          { user_id: 'u-me', username: 'pascal', display_name: 'Pascal', picture_url: null },
+          { user_id: 'u-mom', username: 'maria', display_name: 'Maria', picture_url: null },
+        ],
+        member_count: 2,
+      },
+    }))
+    const { container } = render(<FriendsPage />)
     await waitFor(() => {
-      expect(routeSpy).toHaveBeenCalledWith('/dms/cdm-cross')
+      expect(container.querySelector('button.sh-friends-member-chip')).not.toBeNull()
+    })
+    blockedUserIds.value = new Set(['u-mom'])
+    await waitFor(() => {
+      expect(container.querySelector('button.sh-friends-member-chip')).toBeNull()
     })
   })
 })

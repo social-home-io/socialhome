@@ -21,7 +21,7 @@ import { openMomentumComposer } from '@/components/MomentumComposerDialog'
 import { VideoMedia } from '@/components/VideoMedia'
 import { MomentumInboxSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
-import { openUserActions } from '@/components/UserActionsMenu'
+import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import {
   householdDisplayName,
@@ -220,7 +220,9 @@ function MomentRow({
               onClick={(ev) => {
                 ev.preventDefault()
                 ev.stopPropagation()
-                openUserActions(m.author_user_id)
+                openPerson(m.author_user_id, {
+                  person: { display_name: authorName, picture_url: authorPicture },
+                })
               }}
             >
               ⋯

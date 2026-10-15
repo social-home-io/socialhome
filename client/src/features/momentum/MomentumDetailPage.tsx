@@ -21,7 +21,7 @@ import { MomentumDetailSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
 import { openReport } from '@/components/ReportDialog'
-import { openUserActions } from '@/components/UserActionsMenu'
+import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import { currentUser } from '@/store/auth'
 import {
@@ -150,7 +150,12 @@ export default function MomentumDetailPage() {
                 onClick={(ev) => {
                   ev.preventDefault()
                   ev.stopPropagation()
-                  openUserActions(mm.author_user_id)
+                  openPerson(mm.author_user_id, {
+                    person: {
+                      display_name: householdDisplayName(mm.author_user_id),
+                      picture_url: householdPictureUrl(mm.author_user_id),
+                    },
+                  })
                 }}
               >
                 ⋯
@@ -226,7 +231,12 @@ export default function MomentumDetailPage() {
             type="button"
             class="sh-momentum-row-overflow"
             aria-label={t('highlight.more_actions', { name: householdDisplayName(m.author_user_id) })}
-            onClick={() => openUserActions(m.author_user_id)}
+            onClick={() => openPerson(m.author_user_id, {
+              person: {
+                display_name: householdDisplayName(m.author_user_id),
+                picture_url: householdPictureUrl(m.author_user_id),
+              },
+            })}
           >
             ⋯
           </button>

@@ -11,13 +11,13 @@
  *     unreachable peers fade. Hidden when no household has coords.
  *   • Cards: our household first, then one card per paired household,
  *     each carrying the member chips so a viewer can scan who's in
- *     each home.
+ *     each home. A chip opens the shared person sheet (``openPerson``)
+ *     with the row it already holds, so no extra fetch.
  *
  * Endpoint: ``GET /api/friends`` returns the whole tree in one shot
  * (no follow-up fetches per household).
  */
 import { useEffect, useState } from 'preact/hooks'
-import { useLocation } from 'preact-iso'
 import { t, formatLocale, isOne } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
@@ -26,9 +26,8 @@ import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { LocationMap, type LocationMarker } from '@/components/LocationMap'
 import { openPairing, PairingFlow } from '@/components/PairingFlow'
-import { showToast } from '@/components/Toast'
-import { AliasDialog } from '@/components/AliasDialog'
-import { FriendActionSheet, openFriendActions } from './FriendActionSheet'
+import { openPerson } from '@/components/PersonSheet'
+import { isBlocked } from '@/store/blocks'
 import { api } from '@/api'
 import type { UserStatus } from '@/types'
 
@@ -135,43 +134,21 @@ export default function FriendsPage() {
    *  spinner that never stops; ``attempt`` bumps to re-run the load. */
   const [loadFailed, setLoadFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
-  /** Per-user "starting DM" tracking so a double-click can't spawn
-   *  two POSTs. The DM service is idempotent server-side (returns the
-   *  existing conversation), but a flashing spinner reassures the
-   *  user that the click is in flight. */
-  const [dmBusy, setDmBusy] = useState<Set<string>>(new Set())
-  const location = useLocation()
-
-  /** Open (or create) a 1:1 DM with the chosen household member and
-   *  navigate straight into the thread. Local members route via
-   *  ``{username}``; remote members route via ``{user_id}`` so the
-   *  conversation rides the federation envelope path. The service
-   *  layer is idempotent — clicking the same chip again jumps back
-   *  to the same conversation. */
-  const startDmWith = async (target: {
-    user_id: string
-    username: string
-    is_local: boolean
-  }) => {
-    if (dmBusy.has(target.user_id)) return
-    setDmBusy(b => new Set(b).add(target.user_id))
-    try {
-      const body = target.is_local
-        ? { username: target.username }
-        : { user_id: target.user_id }
-      const conv = await api.post('/api/conversations/dm', body) as {
-        id: string
+  /** Patch the viewer's private nickname into the payload after the
+   *  person sheet saves one — local and remote rows share the shape. */
+  const onAliasChanged = (user_id: string, newAlias: string | null) => {
+    setData(prev => {
+      if (!prev) return prev
+      const patch = <T extends { user_id: string; personal_alias?: string | null }>(
+        rows: T[],
+      ): T[] =>
+        rows.map(r => (r.user_id === user_id ? { ...r, personal_alias: newAlias } : r))
+      return {
+        ...prev,
+        instance: { ...prev.instance, members: patch(prev.instance.members) },
+        households: prev.households.map(h => ({ ...h, members: patch(h.members) })),
       }
-      location.route(`/dms/${conv.id}`)
-    } catch (e: any) {
-      showToast(e?.message || t('friends.dm_failed'), 'error')
-    } finally {
-      setDmBusy(b => {
-        const n = new Set(b)
-        n.delete(target.user_id)
-        return n
-      })
-    }
+    })
   }
 
   useEffect(() => {
@@ -297,7 +274,7 @@ export default function FriendsPage() {
           <span class="sh-friends-tag sh-muted">{t('friends.your_household')}</span>
         </header>
         <div class="sh-friends-members">
-          {instance.members.map(m => {
+          {instance.members.filter(m => !isBlocked(m.user_id)).map(m => {
             const isSelf = currentUser.value?.user_id === m.user_id
             // Self: render a passive card — a button leading nowhere
             // would be worse UX than no button. Everyone else: whole
@@ -331,15 +308,17 @@ export default function FriendsPage() {
                 class="sh-friends-member-chip sh-friends-member-chip--button"
                 title={t('friends.open_actions', { name: shown })}
                 aria-label={t('friends.open_actions', { name: shown })}
-                disabled={dmBusy.has(m.user_id)}
-                onClick={() => openFriendActions({
-                  user_id: m.user_id,
-                  username: m.username,
-                  display_name: m.display_name,
-                  personal_alias: m.personal_alias ?? null,
-                  picture_url: m.picture_url,
-                  household: instance.display_name,
-                  is_local: true,
+                onClick={() => openPerson(m.user_id, {
+                  person: {
+                    ...m,
+                    is_local: true,
+                    household: {
+                      instance_id: instance.instance_id,
+                      display_name: instance.display_name,
+                      is_own: true,
+                    },
+                  },
+                  onAliasChanged,
                 })}
               >
                 <Avatar
@@ -413,7 +392,7 @@ export default function FriendsPage() {
                 </p>
               ) : (
                 <div class="sh-friends-members">
-                  {h.members.map(m => {
+                  {h.members.filter(m => !isBlocked(m.user_id)).map(m => {
                     const shown = m.personal_alias || m.display_name
                     const isAliased = !!m.personal_alias
                       && m.personal_alias !== m.display_name
@@ -424,15 +403,18 @@ export default function FriendsPage() {
                         class="sh-friends-member-chip sh-friends-member-chip--button"
                         title={t('friends.open_actions', { name: shown })}
                         aria-label={t('friends.open_actions', { name: shown })}
-                        disabled={dmBusy.has(m.user_id)}
-                        onClick={() => openFriendActions({
-                          user_id: m.user_id,
-                          username: m.remote_username,
-                          display_name: m.display_name,
-                          personal_alias: m.personal_alias ?? null,
-                          picture_url: m.picture_url,
-                          household: h.display_name,
-                          is_local: false,
+                        onClick={() => openPerson(m.user_id, {
+                          person: {
+                            ...m,
+                            username: null,
+                            is_local: false,
+                            household: {
+                              instance_id: h.instance_id,
+                              display_name: h.display_name,
+                              is_own: false,
+                            },
+                          },
+                          onAliasChanged,
                         })}
                       >
                         <Avatar
@@ -465,46 +447,6 @@ export default function FriendsPage() {
       {/* Mount the pairing dialog so the hero / empty-state CTAs can
        *  open it inline, rather than routing through ``/connections``. */}
       <PairingFlow />
-      {/* Friend chip click opens this action sheet (Message / Rename).
-       *  The alias dialog is its sibling so saving a new nickname
-       *  flips back into the main view without leaving a stale modal
-       *  z-stack. */}
-      <FriendActionSheet
-        onStartDm={async (t) => {
-          await startDmWith({
-            user_id: t.user_id,
-            username: t.username ?? '',
-            is_local: t.is_local,
-          })
-        }}
-        onAliasChanged={(user_id, newAlias) => {
-          // Optimistic patch — both local + remote member rows live in
-          // the same payload; just walk the structure once.
-          setData(prev => {
-            if (!prev) return prev
-            const patch = <T extends { user_id: string; personal_alias?: string | null }>(
-              rows: T[],
-            ): T[] =>
-              rows.map(r =>
-                r.user_id === user_id
-                  ? { ...r, personal_alias: newAlias }
-                  : r,
-              )
-            return {
-              ...prev,
-              instance: {
-                ...prev.instance,
-                members: patch(prev.instance.members),
-              },
-              households: prev.households.map(h => ({
-                ...h,
-                members: patch(h.members),
-              })),
-            }
-          })
-        }}
-      />
-      <AliasDialog />
     </div>
   )
 }
