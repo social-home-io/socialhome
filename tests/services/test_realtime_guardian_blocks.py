@@ -16,6 +16,7 @@ import pytest
 
 from socialhome.domain.events import (
     PresenceUpdated,
+    SpaceMemberProfileUpdated,
     UserCameOnline,
     UserProfileUpdated,
     UserStatusChanged,
@@ -46,7 +47,7 @@ class _FakeUserRepo:
 
 class _FakeSpaceRepo:
     async def list_local_member_user_ids(self, space_id):
-        return []
+        return [u.user_id for u in _USERS]
 
 
 class _FakeCpRepo:
@@ -128,6 +129,15 @@ _NOW = datetime.now(timezone.utc)
         (
             PresenceUpdated(username="kid", state="home", user_id="kid"),
             "presence.updated",
+        ),
+        (
+            SpaceMemberProfileUpdated(
+                space_id="sp",
+                user_id="kid",
+                space_display_name="K",
+                picture_hash="0123456789abcdef",
+            ),
+            "space.member.profile_updated",
         ),
         (UserCameOnline(user_id="kid"), "user.online"),
         (UserWentIdle(user_id="kid", last_active_at=_NOW), "user.idle"),

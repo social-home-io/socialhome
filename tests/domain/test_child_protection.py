@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from socialhome.domain.child_protection import (
     PROTECTED_ACCOUNT_RESTRICTIONS,
+    NAME_ONLY_WITHHELD_KEYS,
     AccountProtectedError,
     ProtectedCapability,
+    name_only,
 )
 from socialhome.security import SENSITIVE_FIELDS
 
@@ -41,3 +43,31 @@ def test_account_protected_error_carries_the_capability():
     assert "bazaar" in str(err)
     assert "minor" not in str(err).lower()
     assert "declared_age" not in str(err)
+
+
+def test_name_only_blanks_picture_and_bio_but_keeps_the_name():
+    row = {
+        "user_id": "u-kid",
+        "display_name": "Kid",
+        "picture_hash": "abc",
+        "picture_url": "api/users/u-kid/picture?v=abc",
+        "bio": "I like trains",
+    }
+    out = name_only(row)
+    assert out == {
+        "user_id": "u-kid",
+        "display_name": "Kid",
+        "picture_hash": None,
+        "picture_url": None,
+        "bio": None,
+    }
+    # The input row is untouched.
+    assert row["bio"] == "I like trains"
+
+
+def test_name_only_never_adds_keys_the_row_did_not_carry():
+    assert name_only({"user_id": "u", "picture_url": "x"}) == {
+        "user_id": "u",
+        "picture_url": None,
+    }
+    assert set(NAME_ONLY_WITHHELD_KEYS) == {"picture_hash", "picture_url", "bio"}

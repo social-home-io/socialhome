@@ -25,6 +25,7 @@ from ..domain.presence import PersonPresence
 from ..domain.task import Task
 from ..domain.timetable import Timetable, TodayTimetable
 from ..utils.timezones import DEFAULT_TZ, local_date, local_day_bounds
+from .protection_gate import ProtectionGateMixin
 from .user_preferences import parse_timetable_home_pins
 
 if TYPE_CHECKING:
@@ -107,10 +108,11 @@ class CornerBundle:
     today_events: tuple[CalendarEvent, ...] = ()
 
 
-class CornerService:
+class CornerService(ProtectionGateMixin):
     """Assemble a :class:`CornerBundle` for the caller."""
 
     __slots__ = (
+        "_child_protection",
         "_notifications",
         "_conversations",
         "_calendar",
@@ -153,6 +155,7 @@ class CornerService:
         self._timetables = timetable_service
         self._space_timetables = space_timetable_service
         self._preferences = preferences_service
+        self._child_protection = None
 
     async def build(
         self,
@@ -168,7 +171,7 @@ class CornerService:
         )
         unread_conversations = await self._count_unread_dms(username)
         upcoming_events = await self._upcoming_events(username, now)
-        presence = await self._presence_list()
+        presence = await self._presence_list(user_id)
         tasks_due = await self._tasks_due_today(user_id, now)
         bazaar_summary = await self._bazaar_summary(user_id)
         followed_ids, followed_feed = await self._followed_spaces_feed(
@@ -302,13 +305,18 @@ class CornerService:
         events.sort(key=lambda e: e.start)
         return tuple(events[:MAX_TODAY_EVENTS])
 
-    async def _presence_list(self) -> tuple[PersonPresence, ...]:
+    async def _presence_list(self, user_id: str) -> tuple[PersonPresence, ...]:
+        """The household's whereabouts, minus whoever ``GET /api/presence``
+        leaves out for this viewer: their personal blocks and everyone a
+        guardian block (§CP.F2) separates them from, either way."""
         try:
             rows = await self._presence.list_presence()
+            hidden = {uid for uid, _ in await self._users.list_blocked(user_id)}
         except Exception as exc:  # pragma: no cover — defensive
             log.debug("corner: presence failed: %s", exc)
             return ()
-        return tuple(rows)
+        hidden |= await self._guardian_block_counterparts(user_id)
+        return tuple(p for p in rows if p.user_id not in hidden)
 
     async def _tasks_due_today(self, user_id: str, now: datetime) -> tuple[Task, ...]:
         """Open tasks due on or before today in the household tz."""

@@ -652,6 +652,9 @@ class RealtimeService:
                 "picture_hash": event.picture_hash,
                 "picture_url": picture_url,
             },
+            # §CP.F2: a guardian-block counterpart sees this member by
+            # name only (``GET /api/spaces/{id}/members`` does the same).
+            withheld=await self._guardian_block_counterparts(event.user_id),
         )
 
     async def _on_pairing_accept_received(
@@ -1793,11 +1796,19 @@ class RealtimeService:
             return frozenset()
         return await self._cp_repo.list_block_counterparts(user_id)
 
-    async def _broadcast_space(self, space_id: str, payload: dict) -> int:
+    async def _broadcast_space(
+        self,
+        space_id: str,
+        payload: dict,
+        *,
+        withheld: frozenset[str] = frozenset(),
+    ) -> int:
         if self._media_signer is not None:
             sign_media_urls_in(payload, self._media_signer, extra_fields=("url",))
         ids = await self._space_repo.list_local_member_user_ids(space_id)
-        return await self._ws.broadcast_to_users(ids, payload)
+        return await self._ws.broadcast_to_users(
+            [uid for uid in ids if uid not in withheld], payload
+        )
 
     async def _broadcast_household_admins(self, payload: dict) -> int:
         """Household fan-out narrowed to admins — for frames about

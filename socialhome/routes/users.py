@@ -39,6 +39,7 @@ from ..app_keys import (
     user_service_key,
 )
 from ..csp import MEDIA_CSP
+from ..domain.child_protection import name_only
 from ..domain.errors import ImageTooLargeError
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.user import User, UserStatus, _picture_url
@@ -341,13 +342,21 @@ class MePictureRefreshFromHaView(BaseView):
 
 
 class UserPictureView(BaseView):
-    """GET /api/users/{user_id}/picture — stream the cached WebP."""
+    """GET /api/users/{user_id}/picture — stream the cached WebP.
+
+    Someone a guardian block (§CP.F2) separates from the caller, either
+    way, has no picture for them: the same 404 as an account that never
+    set one. (A signed URL is a capability, not a person — it carries no
+    caller; the directory simply never hands a counterpart one.)
+    """
 
     async def get(self) -> web.Response:
         self.user  # auth check
         user_id = self.match("user_id")
         repo = self.svc(profile_picture_repo_key)
         got = await repo.get_user_picture(user_id)
+        if got is not None and user_id in await self.guardian_block_counterparts():
+            got = None
         if got is None:
             return error_response(
                 404,
@@ -371,23 +380,23 @@ class UserCollectionView(BaseView):
     """GET /api/users — list all active users.
 
     The household directory keeps everyone (mentions, the household chat),
-    but the status of someone a guardian block (§CP.F2) separates from the
-    caller, either way, reads as unset — as it does on ``/api/presence``
-    and ``/api/friends``.
+    but someone a guardian block (§CP.F2) separates from the caller, either
+    way, shows by name only: status unset (as on ``/api/presence`` and
+    ``/api/friends``), no picture and no bio.
     """
 
     async def get(self) -> web.Response:
         svc = self.svc(user_service_key)
         users = await svc.list_active()
-        withheld: frozenset[str] = frozenset()
-        cp = self.request.app.get(child_protection_service_key)
-        ctx = self.user
-        if cp is not None and ctx is not None and ctx.user_id:
-            withheld = await cp.guardian_block_counterparts(ctx.user_id)
-        rows = [_user_to_dict_signed(self.request, u) for u in users]
-        for row in rows:
-            if row.get("user_id") in withheld and "status" in row:
+        withheld = await self.guardian_block_counterparts()
+        rows: list[dict] = []
+        for u in users:
+            if u.user_id in withheld:
+                row = name_only(_user_to_dict(u))
                 row["status"] = dataclasses.asdict(UserStatus())
+            else:
+                row = _user_to_dict_signed(self.request, u)
+            rows.append(row)
         return web.json_response(rows)
 
 

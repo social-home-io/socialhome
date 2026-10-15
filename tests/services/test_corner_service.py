@@ -56,6 +56,9 @@ class _Nothing:
     async def list_presence(self):
         return []
 
+    async def list_blocked(self, *a, **kw):
+        return []
+
     async def list_by_assignee(self, *a, **kw):
         return []
 
@@ -148,6 +151,9 @@ class _Users:
 
     async def get_by_user_id(self, user_id):
         return SimpleNamespace(user_id=user_id, preferences_json=self.preferences_json)
+
+    async def list_blocked(self, user_id):
+        return []
 
 
 class _SpaceTimetables:
@@ -504,3 +510,46 @@ async def test_tasks_due_today_east_of_utc_uses_the_household_day():
     svc, _ = _svc(tasks=_day_tasks(), prefs=_Prefs(tz="Pacific/Auckland"))
     bundle = await _build(svc, _utc(FAR_MON, 20))
     assert [t.id for t in bundle.tasks_due_today] == ["mon", "tue"]
+
+
+# ─── presence (§Privacy / §CP.F2) ───────────────────────────────────────
+
+
+class _Presence:
+    async def list_presence(self):
+        return [
+            SimpleNamespace(user_id=uid, username=uid)
+            for uid in ("u-ben", "u-kid", "u-carl", "u-dora")
+        ]
+
+
+class _BlockingUsers(_Users):
+    async def list_blocked(self, user_id):
+        assert user_id == "u-anna"
+        return [("u-carl", "2026-01-01")]
+
+
+class _Cp:
+    def register_gate(self, gate):
+        pass
+
+    async def guardian_block_counterparts(self, user_id):
+        assert user_id == "u-anna"
+        return frozenset({"u-kid"})
+
+
+async def test_presence_leaves_out_personal_and_guardian_blocks():
+    """The dashboard's whereabouts follow ``GET /api/presence``: no one the
+    viewer blocked, and no one a guardian block separates them from."""
+    svc, _ = _svc(users=_BlockingUsers())
+    svc._presence = _Presence()
+    svc.attach_child_protection(_Cp())
+    bundle = await _build(svc, _utc(MON, 5))
+    assert [p.user_id for p in bundle.presence] == ["u-ben", "u-dora"]
+
+
+async def test_presence_without_child_protection_drops_only_personal_blocks():
+    svc, _ = _svc(users=_BlockingUsers())
+    svc._presence = _Presence()
+    bundle = await _build(svc, _utc(MON, 5))
+    assert [p.user_id for p in bundle.presence] == ["u-ben", "u-kid", "u-dora"]

@@ -43,6 +43,7 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..csp import MEDIA_CSP
+from ..domain.child_protection import name_only
 from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.errors import ImageTooLargeError
 from ..domain.events import SpaceMemberLocationOptedIn
@@ -859,7 +860,14 @@ class SpaceMembersView(BaseView):
             row["is_owner"] = is_owner
             if is_owner:
                 row["role"] = SpaceRole.OWNER.value
-        return web.json_response(local_rows + remote_rows)
+        # §CP.F2: someone a guardian block separates from the viewer, either
+        # way, shows by name only — no per-space or household picture.
+        withheld = await self.guardian_block_counterparts()
+        rows = [
+            name_only(row) if row.get("user_id") in withheld else row
+            for row in local_rows + remote_rows
+        ]
+        return web.json_response(rows)
 
     async def post(self) -> web.Response:
         """Issue a pending invitation for a same-household user.
@@ -1078,6 +1086,9 @@ class SpaceMemberPictureView(BaseView):
         user_id = self.match("user_id")
         repo = self.svc(profile_picture_repo_key)
         got = await repo.get_member_picture(space_id, user_id)
+        # §CP.F2: none for someone a guardian block separates from the caller.
+        if got is not None and user_id in await self.guardian_block_counterparts():
+            got = None
         if got is None:
             return error_response(
                 404,
@@ -2275,7 +2286,14 @@ class SpacePresenceView(BaseView):
         members = await repo.list_members(space_id)
         opted_in = {m.user_id for m in members if m.location_share_enabled}
         presence_svc = self.svc(presence_service_key)
-        entries = await presence_svc.list_presence_for_members(opted_in)
+        # §CP.F2: no pin for anyone a guardian block separates from the
+        # viewer, either way (``GET /api/presence`` leaves them out too).
+        withheld = await self.guardian_block_counterparts()
+        entries = [
+            p
+            for p in await presence_svc.list_presence_for_members(opted_in)
+            if p.user_id not in withheld
+        ]
         mode = space.features.location_mode
         # SPA header reads "X sharing / Y members" — Y is the full
         # space roster including remote members from other households
@@ -2332,11 +2350,13 @@ class SpacePresenceView(BaseView):
             # before federating, so we trust the ``mode`` field on
             # the stored row.
             response_entries.extend(
-                await _remote_member_pin_entries(
+                e
+                for e in await _remote_member_pin_entries(
                     self.request,
                     space_id,
                     mode_filter="zone_only",
                 )
+                if e["user_id"] not in withheld
             )
             return web.json_response(
                 _signed(
@@ -2366,7 +2386,11 @@ class SpacePresenceView(BaseView):
             }
             for p in entries
         ]
-        remote_entries = await _remote_member_pin_entries(self.request, space_id)
+        remote_entries = [
+            e
+            for e in await _remote_member_pin_entries(self.request, space_id)
+            if e["user_id"] not in withheld
+        ]
         return web.json_response(
             _signed(
                 self.request,

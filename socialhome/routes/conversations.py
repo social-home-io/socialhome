@@ -18,6 +18,7 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.conversation import Conversation, ConversationType, mute_active
+from ..domain.child_protection import name_only
 from ..domain.user import _picture_url
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..repositories.conversation_repo import AbstractConversationRepo
@@ -37,12 +38,14 @@ async def _conversation_row(
     repo: AbstractConversationRepo,
     user_repo: AbstractUserRepo,
     now: datetime,
+    withheld: frozenset[str] = frozenset(),
 ) -> dict | None:
     """One ``GET /api/conversations`` row for *username*.
 
     Shared by the list and the single-conversation read so both ship
     the exact same shape. ``None`` when the caller's own seat is no
-    longer active (removed / left).
+    longer active (removed / left). Members in *withheld* — the caller's
+    guardian-block counterparts (§CP.F2) — show by name only.
     """
     members = await repo.list_members(c.id)
     # Cross-household DMs / group DMs may seat a federated peer
@@ -113,6 +116,7 @@ async def _conversation_row(
                 "picture_url": _picture_url(ru.user_id, ru.picture_hash),
             }
         )
+    preview = [name_only(p) if p["user_id"] in withheld else p for p in preview]
     if not own_seat_active:
         # The caller was removed (or left) after ``list_conversations``
         # took its snapshot — e.g. the group authority's roster update
@@ -168,6 +172,7 @@ class ConversationCollectionView(BaseView):
         user_repo = self.svc(user_repo_key)
         convos = await svc.list_conversations(ctx.username)
         now = datetime.now(timezone.utc)
+        withheld = await self.guardian_block_counterparts()
         rows: list[dict] = []
         for c in convos:
             row = await _conversation_row(
@@ -177,6 +182,7 @@ class ConversationCollectionView(BaseView):
                 repo=repo,
                 user_repo=user_repo,
                 now=now,
+                withheld=withheld,
             )
             if row is not None:
                 rows.append(row)
@@ -275,6 +281,7 @@ class ConversationItemView(BaseView):
             repo=self.svc(conversation_repo_key),
             user_repo=self.svc(user_repo_key),
             now=datetime.now(timezone.utc),
+            withheld=await self.guardian_block_counterparts(),
         )
         if row is None:
             raise PermissionError("not a member of this conversation")
@@ -673,6 +680,21 @@ class ConversationMembersView(BaseView):
                     "mention": tokens.get(ru.user_id),
                 }
             )
+        # §CP.F2: a guardian-block counterpart (either way) still sits in
+        # the roster, by name only — no picture, and no online state
+        # (``/api/presence`` and ``/api/friends`` leave that out too).
+        withheld = await self.guardian_block_counterparts()
+        rows = [
+            {
+                **name_only(r),
+                "is_online": False,
+                "is_idle": False,
+                "last_seen_at": None,
+            }
+            if r["user_id"] in withheld
+            else r
+            for r in rows
+        ]
         return self._json(rows)
 
 

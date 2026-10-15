@@ -59,6 +59,22 @@ PROTECTED_OWNER_TRANSFER_DETAIL = (
 )
 
 
+#: Profile keys withheld between the two sides of a guardian block (§CP.F2).
+#: Toward someone a guardian blocked, a protected account shows by name
+#: only — and, like every other guardian-block rule, the other way round.
+NAME_ONLY_WITHHELD_KEYS: tuple[str, ...] = ("picture_hash", "picture_url", "bio")
+
+
+def name_only(row: dict) -> dict:
+    """A copy of the person *row* with picture and bio withheld (§CP.F2).
+
+    Only keys the row already carries are blanked to ``None``, so the
+    payload shape a client parses never changes — the person just reads
+    as having no picture and no bio.
+    """
+    return {**row, **{k: None for k in NAME_ONLY_WITHHELD_KEYS if k in row}}
+
+
 class AccountProtectedError(PermissionError):
     """The caller's account is protected and may not use *capability*.
 

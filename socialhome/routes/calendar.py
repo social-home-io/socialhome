@@ -15,6 +15,7 @@ from ..app_keys import (
     user_repo_key,
 )
 from ..domain.calendar import CalendarEvent, CalendarEventCopy
+from ..domain.child_protection import name_only
 from ..domain.errors import CodedError
 from ..domain.space import CONTENT_AUTHORITY_ROLES, SpaceMember
 from ..media_signer import sign_media_urls_in, strip_signature_query
@@ -158,6 +159,8 @@ class CalendarInviteesView(BaseView):
         self.user  # auth check
         fed_repo = self.svc(federation_repo_key)
         user_repo = self.svc(user_repo_key)
+        # §CP.F2: a guardian-block counterpart shows by name only.
+        withheld = await self.guardian_block_counterparts()
         # §D2b: social surface — a ``space_session`` row (a household we
         # only share a space with, via an invite link) is not a social
         # peer, so read the social list, not every CONFIRMED row.
@@ -170,19 +173,22 @@ class CalendarInviteesView(BaseView):
                     "instance_id": inst.id,
                     "instance_name": inst.display_name,
                     "members": [
-                        {
-                            "user_id": m.user_id,
-                            "instance_id": m.instance_id,
-                            "remote_username": m.remote_username,
-                            "display_name": m.display_name,
-                            "picture_hash": m.picture_hash,
-                            "picture_url": (
-                                f"api/users/{m.user_id}/picture?v={m.picture_hash}"
-                                if m.picture_hash
-                                else None
-                            ),
-                        }
+                        name_only(row) if m.user_id in withheld else row
                         for m in members
+                        for row in (
+                            {
+                                "user_id": m.user_id,
+                                "instance_id": m.instance_id,
+                                "remote_username": m.remote_username,
+                                "display_name": m.display_name,
+                                "picture_hash": m.picture_hash,
+                                "picture_url": (
+                                    f"api/users/{m.user_id}/picture?v={m.picture_hash}"
+                                    if m.picture_hash
+                                    else None
+                                ),
+                            },
+                        )
                     ],
                 },
             )
