@@ -8,9 +8,9 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import type { PersonSummary } from '@/types'
 
-export interface BlockEntry {
-  user_id:    string
+export interface BlockEntry extends PersonSummary {
   blocked_at: string
 }
 

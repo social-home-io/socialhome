@@ -11,7 +11,7 @@ import { showToast } from '@/components/Toast'
 import { ChipRadioGroup } from '@/components/ChipRadioGroup'
 import { theme, type Theme } from '@/store/theme'
 import { HouseholdThemeStudio } from '@/components/HouseholdThemeStudio'
-import { formatLocale, isOne, locale, setLocale, t } from '@/i18n/i18n'
+import { isOne, locale, setLocale, t } from '@/i18n/i18n'
 import localeMeta from '@/i18n/locales/_meta.json'
 import {
   detectLocaleWeekStart, getWeekStartPref, type WeekStartPref,
@@ -23,14 +23,13 @@ import {
   type LandingPath,
 } from '@/utils/preferences'
 import { confirmDialog } from '@/components/confirm'
-import { blockedUsers, loadBlocks, unblockUser } from '@/store/blocks'
-import { followedUsers, loadFollows, unfollowUser } from '@/store/follows'
 import {
-  householdDisplayName,
-  householdPictureUrl,
-  loadHouseholdUsers,
-} from '@/store/householdUsers'
-import { relativeDocsTime } from '@/utils/relativeTime'
+  blockedUsers, loadBlocks, unblockUser, type BlockEntry,
+} from '@/store/blocks'
+import {
+  followedUsers, loadFollows, unfollowUser, type FollowEntry,
+} from '@/store/follows'
+import { PrivacyPersonRow, privacyPersonName } from './PrivacyPersonRow'
 import { userPreferences } from '@/store/userPreferences'
 import { isHomeAssistant } from '@/platform'
 import {
@@ -596,18 +595,17 @@ function SpaceLocationSharingPanel() {
 function FollowingPanel() {
   useEffect(() => {
     void loadFollows(true)
-    void loadHouseholdUsers()
   }, [])
   const rows = followedUsers.value
 
-  const onUnfollow = async (userId: string) => {
-    const name = householdDisplayName(userId)
+  const onUnfollow = async (f: FollowEntry) => {
+    const name = privacyPersonName(f)
     if (!await confirmDialog(
       t('settings.following.confirm', { name }),
       { confirmLabel: t('settings.following.unfollow') },
     )) return
     try {
-      await unfollowUser(userId)
+      await unfollowUser(f.user_id)
       showToast(t('settings.following.unfollowed'), 'success')
     } catch (e: unknown) {
       showToast(t('settings.following.unfollow_failed', { error: errText(e) }), 'error')
@@ -626,37 +624,18 @@ function FollowingPanel() {
         </p>
       )}
       {rows.length > 0 && (
-        <ul class="sh-following-list" aria-label={t('settings.following.title')}>
-          {rows.map(f => {
-            const name = householdDisplayName(f.user_id)
-            return (
-              <li key={f.user_id} class="sh-following-row">
-                <Avatar
-                  name={name}
-                  src={householdPictureUrl(f.user_id)}
-                  size={32}
-                />
-                <span class="sh-following-meta">
-                  <strong>{name}</strong>
-                  <span class="sh-muted">
-                    {t('settings.following.since')}{' '}
-                    <time
-                      dateTime={f.created_at}
-                      title={new Date(f.created_at).toLocaleString(formatLocale())}
-                    >
-                      {relativeDocsTime(f.created_at)}
-                    </time>
-                  </span>
-                </span>
-                <Button
-                  variant="secondary"
-                  onClick={() => void onUnfollow(f.user_id)}
-                >
-                  {t('settings.following.unfollow')}
-                </Button>
-              </li>
-            )
-          })}
+        <ul class="sh-person-list" aria-label={t('settings.following.title')}>
+          {rows.map(f => (
+            <PrivacyPersonRow key={f.user_id} person={f} since={f.created_at}>
+              <Button
+                variant="secondary"
+                aria-label={`${t('settings.following.unfollow')} ${privacyPersonName(f)}`}
+                onClick={() => void onUnfollow(f)}
+              >
+                {t('settings.following.unfollow')}
+              </Button>
+            </PrivacyPersonRow>
+          ))}
         </ul>
       )}
     </div>
@@ -667,18 +646,17 @@ function FollowingPanel() {
 function BlockedAccountsPanel() {
   useEffect(() => {
     void loadBlocks(true)
-    void loadHouseholdUsers()
   }, [])
   const rows = blockedUsers.value
 
-  const onUnblock = async (userId: string) => {
-    const name = householdDisplayName(userId)
+  const onUnblock = async (b: BlockEntry) => {
+    const name = privacyPersonName(b)
     if (!await confirmDialog(
       t('settings.blocked.confirm', { name }),
       { confirmLabel: t('settings.blocked.unblock') },
     )) return
     try {
-      await unblockUser(userId)
+      await unblockUser(b.user_id)
       showToast(t('settings.blocked.unblocked'), 'success')
     } catch (e: unknown) {
       showToast(t('settings.blocked.unblock_failed', { error: errText(e) }), 'error')
@@ -694,37 +672,18 @@ function BlockedAccountsPanel() {
         </p>
       )}
       {rows.length > 0 && (
-        <ul class="sh-blocked-accounts-list" aria-label={t('settings.blocked.title')}>
-          {rows.map(b => {
-            const name = householdDisplayName(b.user_id)
-            return (
-              <li key={b.user_id} class="sh-blocked-accounts-row">
-                <Avatar
-                  name={name}
-                  src={householdPictureUrl(b.user_id)}
-                  size={32}
-                />
-                <span class="sh-blocked-accounts-meta">
-                  <strong>{name}</strong>
-                  <span class="sh-muted">
-                    {t('settings.blocked.since')}{' '}
-                    <time
-                      dateTime={b.blocked_at}
-                      title={new Date(b.blocked_at).toLocaleString(formatLocale())}
-                    >
-                      {relativeDocsTime(b.blocked_at)}
-                    </time>
-                  </span>
-                </span>
-                <Button
-                  variant="secondary"
-                  onClick={() => void onUnblock(b.user_id)}
-                >
-                  {t('settings.blocked.unblock')}
-                </Button>
-              </li>
-            )
-          })}
+        <ul class="sh-person-list" aria-label={t('settings.blocked.title')}>
+          {rows.map(b => (
+            <PrivacyPersonRow key={b.user_id} person={b} since={b.blocked_at}>
+              <Button
+                variant="secondary"
+                aria-label={`${t('settings.blocked.unblock')} ${privacyPersonName(b)}`}
+                onClick={() => void onUnblock(b)}
+              >
+                {t('settings.blocked.unblock')}
+              </Button>
+            </PrivacyPersonRow>
+          ))}
         </ul>
       )}
     </div>

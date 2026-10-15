@@ -475,6 +475,36 @@ class DisplayableUser:
         )
 
 
+@dataclass(slots=True, frozen=True)
+class PersonSummary:
+    """Who a bare ``user_id`` is, for a viewer's private people lists.
+
+    Settings › Privacy lists (blocked, followed) store only user ids; this
+    is the row the SPA renders next to each one. :attr:`display_name` is
+    the person's own name and :attr:`personal_alias` the viewer's private
+    nickname, kept apart so the SPA can show "Oma" with "Grandma Ruth" in
+    the meta line. :attr:`household` is the household's shown name (the
+    peer's local alias wins), ``None`` for a remote person whose household
+    is no longer paired. An id nobody knows any more (a household that was
+    unpaired and forgotten) has ``display_name=None`` — the SPA renders a
+    localised "Unknown person", never the raw id.
+    """
+
+    user_id: str
+    display_name: str | None
+    personal_alias: str | None
+    picture_url: str | None
+    household: str | None
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "display_name": self.display_name,
+            "personal_alias": self.personal_alias,
+            "picture_url": self.picture_url,
+            "household": self.household,
+        }
+
+
 def _picture_url(user_id: str, picture_hash: str | None) -> str | None:
     """Build the cache-busting URL the frontend uses to fetch the WebP.
 

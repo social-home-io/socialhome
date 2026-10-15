@@ -325,8 +325,8 @@
 
   "capability.calendar_time_zones": "One of the 'Missing features' a household on an older Social Home version lacks (connection details, space banner). Every capability.* key is a short noun phrase, under ~50 characters, joined with ', ' in a list.",
   "settings.profile.change": "Hover hint on the profile picture, after a 📷 emoji. Very short.",
-  "settings.following.since": "Followed by a relative time like '3 days ago' in a separate element.",
-  "settings.blocked.since": "Followed by a relative time like '3 days ago' in a separate element.",
+  "settings.person.since": "Shown after a household name in a people list, e.g. 'Vizeli · since Oct 15'. {date} is a short localised date.",
+  "settings.person.no_longer_connected": "Stands where the household name would be, for a person whose household was unpaired.",
   "settings.momentum.hop_1": "How far a moment may travel through connected households to reach you. 1 step = straight from a household you're connected to.",
   "settings.ha_notify.help": "{code} is replaced by the literal code 'notify.mobile_app_…'. 'Developer Tools → Actions' are Home Assistant menu names — use HA's own translation of them.",
   "settings.language.help": "{link} is replaced by the link text from settings.language.contribute.",

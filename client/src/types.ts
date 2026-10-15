@@ -37,6 +37,19 @@ export interface User {
   status?: UserStatus | null
 }
 
+/** Who a bare user id is, as ``GET /api/blocks`` and
+ *  ``GET /api/moments/follows`` describe it. ``display_name`` is the
+ *  person's own name (``null`` when nobody knows the id any more — render
+ *  "Unknown person", never the id); ``personal_alias`` is the viewer's
+ *  nickname; ``household`` is ``null`` once that household is unpaired. */
+export interface PersonSummary {
+  user_id:         string
+  display_name?:   string | null
+  personal_alias?: string | null
+  picture_url?:    string | null
+  household?:      string | null
+}
+
 export interface UserStatus {
   emoji: string | null
   text: string | null
