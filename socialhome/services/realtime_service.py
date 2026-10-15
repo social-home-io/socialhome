@@ -617,6 +617,8 @@ class RealtimeService:
         # ``_broadcast_household`` signs ``picture_url`` automatically via
         # ``sign_media_urls_in()``, so the SPA can drop the value into
         # ``<img src>`` directly.
+        # §CP.F2: like ``GET /api/friends``, someone a guardian block
+        # separates from this user never hears about them.
         await self._broadcast_household(
             {
                 "type": "user.profile_updated",
@@ -626,7 +628,8 @@ class RealtimeService:
                 "bio": event.bio,
                 "picture_hash": event.picture_hash,
                 "picture_url": picture_url,
-            }
+            },
+            withheld=await self._guardian_block_counterparts(event.user_id),
         )
 
     async def _on_space_member_profile_updated(
@@ -1435,12 +1438,16 @@ class RealtimeService:
     # ─── User status ──────────────────────────────────────────────────────
 
     async def _on_user_status(self, event: UserStatusChanged) -> None:
+        # §CP.F2: withheld from everyone a guardian block separates from
+        # this user, either way (``/api/presence`` and ``/api/friends``
+        # leave the same people out).
         await self._broadcast_household(
             {
                 "type": "user.status_changed",
                 "user_id": event.user_id,
                 "status": _safe(event.status) if event.status else None,
-            }
+            },
+            withheld=await self._guardian_block_counterparts(event.user_id),
         )
 
     # ─── Household feature toggles (§18 / §23.13) ────────────────────────
@@ -1765,14 +1772,26 @@ class RealtimeService:
 
     # ─── Fan-out helpers ──────────────────────────────────────────────────
 
-    async def _broadcast_household(self, payload: dict) -> int:
+    async def _broadcast_household(
+        self,
+        payload: dict,
+        *,
+        withheld: frozenset[str] = frozenset(),
+    ) -> int:
         if self._media_signer is not None:
             sign_media_urls_in(payload, self._media_signer, extra_fields=("url",))
         users = await self._user_repo.list_active()
         return await self._ws.broadcast_to_users(
-            [u.user_id for u in users],
+            [u.user_id for u in users if u.user_id not in withheld],
             payload,
         )
+
+    async def _guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        """Everyone a guardian block (§CP.F2) separates from *user_id*,
+        either way — a frame about one of them never reaches the other."""
+        if self._cp_repo is None or not user_id:
+            return frozenset()
+        return await self._cp_repo.list_block_counterparts(user_id)
 
     async def _broadcast_space(self, space_id: str, payload: dict) -> int:
         if self._media_signer is not None:
@@ -1911,6 +1930,12 @@ class RealtimeService:
     # ─── Presence (§22) ──────────────────────────────────────────────────
 
     async def _on_presence_updated(self, event: PresenceUpdated) -> None:
+        # §CP.F2: no one a guardian block separates from this member gets
+        # their whereabouts (``GET /api/presence`` leaves them out too).
+        user_id = event.user_id
+        if user_id is None and self._cp_repo is not None:
+            user = await self._user_repo.get(event.username)
+            user_id = user.user_id if user is not None else ""
         await self._broadcast_household(
             {
                 "type": "presence.updated",
@@ -1919,7 +1944,8 @@ class RealtimeService:
                 "zone_name": event.zone_name,
                 "latitude": event.latitude,
                 "longitude": event.longitude,
-            }
+            },
+            withheld=await self._guardian_block_counterparts(user_id or ""),
         )
 
     # ─── Online status (session presence) ─────────────────────────────────
@@ -1971,8 +1997,14 @@ class RealtimeService:
             "user_id": user_id,
             "last_seen_at": last_seen_at,
         }
+        # §CP.F2: not to anyone a guardian block separates from the subject.
+        withheld = await self._guardian_block_counterparts(user_id)
         users = await self._user_repo.list_active()
-        recipients = [u.user_id for u in users if u.user_id != user_id]
+        recipients = [
+            u.user_id
+            for u in users
+            if u.user_id != user_id and u.user_id not in withheld
+        ]
         if recipients:
             await self._ws.broadcast_to_users(recipients, payload)
 

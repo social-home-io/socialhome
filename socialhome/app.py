@@ -1387,6 +1387,9 @@ def _wire_federation_stack(
         own_instance_id=identity.instance_id,
         visibility_repo=peer_user_visibility_repo,
     )
+    # §CP.F2: no online state of a protected account to a blocked person's
+    # household.
+    online_status_service.attach_child_protection(app[K.child_protection_service_key])
 
     # §Momentum outbound is constructed first so the inbound handler
     # can hand it off as the relay bridge — the inbound calls
@@ -1817,13 +1820,17 @@ def _wire_federation_stack(
 
     # USER_STATUS_UPDATED — a local user's status (set, changed, cleared or
     # expired) reaches paired households; the inbound half already exists.
-    UserStatusOutbound(
+    user_status_outbound = UserStatusOutbound(
         bus=bus,
         federation_service=federation_service,
         federation_repo=federation_repo,
         user_repo=user_repo,
         visibility_repo=peer_user_visibility_repo,
-    ).wire()
+    )
+    # §CP.F2: a protected account's status reads as cleared on a blocked
+    # person's household.
+    user_status_outbound.attach_child_protection(app[K.child_protection_service_key])
+    user_status_outbound.wire()
 
     # Roster catch-up — on PairingConfirmed, send the new peer a single
     # USERS_SYNC envelope carrying every (visible) local user so their

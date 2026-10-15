@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from aiohttp import web
 
 from ..app_keys import (
+    child_protection_service_key,
     media_signer_key,
     online_status_service_key,
     preferences_service_key,
@@ -75,10 +76,14 @@ class PresenceCollectionView(BaseView):
             }
         # §Privacy — drop blocked household members from the viewer's
         # presence list. The block is local to this viewer; other
-        # members still see the full roster.
+        # members still see the full roster. A guardian block (§CP.F2)
+        # counts either way round, as on ``/api/friends``.
         blocked: set[str] = set()
         if user_repo is not None and ctx is not None:
             blocked = {uid for uid, _ in await user_repo.list_blocked(ctx.user_id)}
+        cp = self.request.app.get(child_protection_service_key)
+        if cp is not None and ctx is not None:
+            blocked |= await cp.guardian_block_counterparts(ctx.user_id)
         if blocked:
             entries = [p for p in entries if p.user_id not in blocked]
         rows: list[dict] = []

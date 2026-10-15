@@ -210,6 +210,25 @@ status on the user's `remote_users.status_json` row (a clear sets it
 for cached remote statuses: readers drop one whose `expires_at` has
 passed.
 
+**Guardian blocks (§CP.F2).** A protected account's `USER_STATUS_UPDATED`
+and `USER_ONLINE` / `USER_IDLE` / `USER_OFFLINE` never go to a household
+where someone its guardian blocked is homed — the block never leaves the
+protected account's household, so the receiver can't filter it and the
+sender is the only place it holds. Adding the block (or turning protection
+back on over blocks kept from before) sends that household one ordinary
+`{user_id, status_cleared: true}` (when the account has a status) and one
+`USER_OFFLINE` (when it is online), so nothing set before the block stays
+there; after that it hears nothing — not even repeated clears, which a real
+sender never sends and which would time-stamp each change. A block on a
+remote person this household has no `remote_users` row for yet places them
+nowhere, so it covers no household until that row lands (a status live at
+that moment isn't cleared there). Once the block is lifted or protection is
+off, the next change goes out as usual. On the protected account's own
+household, `user.status_changed` frames (and the profile / presence /
+online frames) are withheld from everyone a guardian block separates from
+the subject, either way round, matching `GET /api/friends` and
+`GET /api/presence`.
+
 ## USERS_SYNC
 
 `USERS_SYNC` is a snapshot of the sending household's (visible) users —

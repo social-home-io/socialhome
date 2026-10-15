@@ -53,6 +53,7 @@ from ..infrastructure.event_bus import EventBus
 from ..infrastructure.ws_manager import WebSocketManager
 from ..repositories.user_repo import AbstractUserRepo
 from .peer_outbound import SingleTargetSender
+from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
 if TYPE_CHECKING:
@@ -74,7 +75,7 @@ class _RemoteEntry:
     last_seen_at: datetime | None
 
 
-class OnlineStatusService(VisibilityMixin, SingleTargetSender):
+class OnlineStatusService(VisibilityMixin, ProtectionGateMixin, SingleTargetSender):
     """Track WS-session presence and publish online/idle/offline events."""
 
     #: A user is *idle* when every open session has been silent for at
@@ -96,6 +97,7 @@ class OnlineStatusService(VisibilityMixin, SingleTargetSender):
         "_ws",
         "_user_repo",
         "_bus",
+        "_child_protection",
         "_federation",
         "_federation_repo",
         "_own_instance_id",
@@ -120,6 +122,7 @@ class OnlineStatusService(VisibilityMixin, SingleTargetSender):
         self._federation: FederationService | None = None
         self._federation_repo: AbstractFederationRepo | None = None
         self._own_instance_id: str = ""
+        self._child_protection = None
         self._visibility_repo: AbstractPeerUserVisibilityRepo | None = None
         # ``_sessions[user_id]`` = ``{ws_id: last_active_dt}``
         self._sessions: dict[str, dict[int, datetime]] = {}
@@ -393,7 +396,38 @@ class OnlineStatusService(VisibilityMixin, SingleTargetSender):
             hidden = await self.hidden_for_peer(inst_id)
             if user_id in hidden:
                 continue
+            # §CP.F2: nothing of a protected account's online state to a
+            # household where someone its guardian blocked is homed.
+            if await self._guardian_blocks_household(user_id, inst_id):
+                continue
             await self.send_to_instance(inst_id, event_type, payload)
+
+    async def on_guardian_block(self, minor_user_id: str, blocked_user_id: str) -> None:
+        """§CP.F2: the households the block now covers see the account go
+        offline once (an ordinary ``USER_OFFLINE``), then hear nothing."""
+        await self._offline_on_blocked_households(minor_user_id)
+
+    async def on_account_protected(self, user_id: str) -> None:
+        """Blocks kept from an earlier protection count again."""
+        await self._offline_on_blocked_households(user_id)
+
+    async def _offline_on_blocked_households(self, user_id: str) -> None:
+        if self._federation is None or self._federation_repo is None:
+            return
+        if not self.is_online(user_id):
+            return
+        payload: dict = {"user_id": user_id}
+        seen = self.last_seen(user_id)
+        if seen is not None:
+            payload["last_seen_at"] = seen.isoformat()
+        for inst in await self._federation_repo.list_social_instances():
+            inst_id = getattr(inst, "id", None) or getattr(inst, "instance_id", None)
+            if not inst_id or inst_id == self._own_instance_id:
+                continue
+            if await self._guardian_blocks_household(user_id, inst_id):
+                await self.send_to_instance(
+                    inst_id, FederationEventType.USER_OFFLINE, payload
+                )
 
     async def apply_remote(
         self,
