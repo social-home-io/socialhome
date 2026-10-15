@@ -30,8 +30,9 @@ import { showToast } from '@/components/Toast'
 import { AliasDialog } from '@/components/AliasDialog'
 import { FriendActionSheet, openFriendActions } from './FriendActionSheet'
 import { api } from '@/api'
+import type { UserStatus } from '@/types'
 
-interface LocalMember {
+export interface LocalMember {
   user_id: string
   username: string
   display_name: string
@@ -43,9 +44,14 @@ interface LocalMember {
   is_online?: boolean
   is_idle?: boolean
   last_seen_at?: string | null
+  /** Emoji + text status; null when unset or expired (the server drops
+   *  expired ones). */
+  status?: UserStatus | null
+  /** Profile bio; null when empty. */
+  bio?: string | null
 }
 
-interface RemoteMember {
+export interface RemoteMember {
   user_id: string
   instance_id: string
   remote_username: string
@@ -56,9 +62,14 @@ interface RemoteMember {
   is_online?: boolean
   is_idle?: boolean
   last_seen_at?: string | null
+  /** Emoji + text status; null when unset or expired (the server drops
+   *  expired ones). */
+  status?: UserStatus | null
+  /** Profile bio; null when empty. */
+  bio?: string | null
 }
 
-interface LocalInstance {
+export interface LocalInstance {
   instance_id: string | null
   display_name: string
   home_lat: number | null
@@ -67,7 +78,7 @@ interface LocalInstance {
   member_count: number
 }
 
-interface Household {
+export interface Household {
   instance_id: string
   display_name: string
   home_lat: number | null
@@ -78,7 +89,7 @@ interface Household {
   member_count: number
 }
 
-interface FriendsPayload {
+export interface FriendsPayload {
   instance: LocalInstance
   households: Household[]
   totals: { households: number; people: number }

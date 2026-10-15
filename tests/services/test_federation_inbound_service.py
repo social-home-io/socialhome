@@ -43,6 +43,7 @@ from socialhome.domain.post import (
     PostType,
 )
 from socialhome.domain.space import JoinMode, SpaceMember, SpaceType
+from socialhome.domain.user import UserStatus
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
@@ -881,6 +882,11 @@ async def test_user_status_updated_publishes_bus_event(db, bus, inbound):
     assert captured[0].user_id == "u-1"
     assert captured[0].status is not None
     assert captured[0].status.emoji == "🌴"
+    # Cached on the remote_users row so GET /api/friends shows it later.
+    row = await db.fetchone("SELECT status_json FROM remote_users WHERE user_id='u-1'")
+    assert UserStatus.from_json(row["status_json"]) == UserStatus(
+        emoji="🌴", text="On leave"
+    )
 
 
 async def test_user_status_cleared_publishes_none(db, bus, inbound):
@@ -888,6 +894,10 @@ async def test_user_status_cleared_publishes_none(db, bus, inbound):
     captured: list[UserStatusChanged] = []
     bus.subscribe(UserStatusChanged, captured.append)
 
+    await db.enqueue(
+        "UPDATE remote_users SET status_json=? WHERE user_id='u-1'",
+        (UserStatus(text="old").to_json(),),
+    )
     await inbound._on_user_status_updated(
         _event(
             FederationEventType.USER_STATUS_UPDATED,
@@ -895,6 +905,8 @@ async def test_user_status_cleared_publishes_none(db, bus, inbound):
         )
     )
     assert captured[0].status is None
+    row = await db.fetchone("SELECT status_json FROM remote_users WHERE user_id='u-1'")
+    assert row["status_json"] is None
 
 
 @pytest.mark.parametrize(

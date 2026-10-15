@@ -253,6 +253,7 @@ from .services.media_orphan_sweep_service import MediaOrphanSweepService
 from .services.space_media_sync_service import SpaceMediaSyncService
 from .services.dm_routing_service import DmRoutingService
 from .services.federation_inbound_service import FederationInboundService
+from .services.friends_service import FriendsService
 from .services.user_move_service import UserMoveService
 from .services.relay_policy import RelayPolicy
 from .repositories.instance_ban_repo import SqliteHouseholdInstanceBanRepo
@@ -2055,6 +2056,24 @@ def _build_timetables(repos: SimpleNamespace, bus: EventBus) -> TimetableService
     return TimetableService(repos.timetable, bus, user_repo=repos.user)
 
 
+def _build_friends(
+    repos: SimpleNamespace,
+    *,
+    child_protection: ChildProtectionService,
+    online_status: OnlineStatusService,
+    alias_resolver: AliasResolver,
+) -> FriendsService:
+    """The ``GET /api/friends`` overview — people, presence, status, bio,
+    with personal + guardian blocks applied."""
+    return FriendsService(
+        repos.user,
+        repos.federation,
+        child_protection=child_protection,
+        online_status=online_status,
+        alias_resolver=alias_resolver,
+    )
+
+
 def _build_space_timetables(
     repos: SimpleNamespace, bus: EventBus
 ) -> SpaceTimetableService:
@@ -3391,6 +3410,12 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.space_page_service_key] = space_page_service
     app[K.presence_service_key] = presence_service
     app[K.online_status_service_key] = online_status_service
+    app[K.friends_service_key] = _build_friends(
+        repos,
+        child_protection=child_protection_service,
+        online_status=online_status_service,
+        alias_resolver=alias_resolver,
+    )
     app[K.space_zone_service_key] = space_zone_service
     app[K.space_zone_repo_key] = repos.space_zone
     app[K.household_zone_service_key] = household_zone_service

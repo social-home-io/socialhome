@@ -9,12 +9,26 @@ Coverage:
   never appear in the JSON response.
 * Null coords: a remote_instance with NULL home_lat/home_lon doesn't
   crash and exposes ``None`` in the payload.
+* Status + bio: every member (local and remote) carries ``status``
+  (``{emoji, text, expires_at}`` or ``None``; expired ones dropped) and
+  ``bio`` (or ``None``).
+* Guardian blocks (§CP.F2) hide the counterpart both ways, like a
+  personal block; deprovisioned remote users never appear.
 """
 
 from __future__ import annotations
 
-from socialhome.app_keys import db_key, federation_repo_key
+import json
+
+from socialhome.app_keys import (
+    db_key,
+    federation_inbound_service_key,
+    federation_repo_key,
+)
+from socialhome.auth import sha256_token_hash
 from socialhome.domain.federation import (
+    FederationEvent,
+    FederationEventType,
     InstanceSource,
     PairingStatus,
     RemoteInstance,
@@ -51,12 +65,53 @@ async def _seed_remote_user(
     user_id: str,
     instance_id: str,
     name: str,
+    bio: str | None = None,
+    status_json: str | None = None,
 ) -> None:
     await db.enqueue(
         "INSERT INTO remote_users(user_id, instance_id, remote_username, "
-        " display_name) VALUES(?,?,?,?)",
-        (user_id, instance_id, name.lower(), name),
+        " display_name, bio, status_json) VALUES(?,?,?,?,?,?)",
+        (user_id, instance_id, name.lower(), name, bio, status_json),
     )
+
+
+async def _seed_local_user(
+    client,
+    *,
+    user_id: str,
+    username: str,
+    token: str | None = None,
+    **cols,
+) -> None:
+    """A local member, optionally with an API token so it can be the viewer."""
+    names = ["username", "user_id", "display_name", *cols]
+    await client._db.enqueue(
+        f"INSERT INTO users({', '.join(names)}) VALUES({', '.join('?' * len(names))})",
+        (username, user_id, username.title(), *cols.values()),
+    )
+    if token is not None:
+        await client._db.enqueue(
+            "INSERT INTO api_tokens(token_id, user_id, label, token_hash)"
+            " VALUES(?, ?, 't', ?)",
+            (f"tok-{user_id}", user_id, sha256_token_hash(token)),
+        )
+
+
+async def _friends(client, token: str | None = None) -> dict:
+    r = await client.get("/api/friends", headers=_auth(token or client._tok))
+    assert r.status == 200
+    return await r.json()
+
+
+def _member(body: dict, user_id: str) -> dict | None:
+    for m in body["instance"]["members"]:
+        if m["user_id"] == user_id:
+            return m
+    for h in body["households"]:
+        for m in h["members"]:
+            if m["user_id"] == user_id:
+                return m
+    return None
 
 
 # ─── Smoke ───────────────────────────────────────────────────────────────
@@ -404,3 +459,232 @@ async def test_thirty_avatars_three_loads_never_429_and_urls_are_stable(client):
             assert pic.status == 200, (url, pic.status)
     # Same URLs on every load → the browser's HTTP cache can serve them.
     assert seen[0] == seen[1] == seen[2]
+
+
+# ─── Status + bio ────────────────────────────────────────────────────────
+
+_FUTURE = "2099-01-01T00:00:00+00:00"
+_PAST = "2000-01-01T00:00:00+00:00"
+
+
+async def test_friends_local_member_carries_status_and_bio(client):
+    """Own status + bio (set through ``PATCH /api/me``) ride the local row."""
+    r = await client.patch(
+        "/api/me",
+        json={"status_emoji": "🌴", "status_text": "On holiday"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    r = await client.patch(
+        "/api/me", json={"bio": "Gardener."}, headers=_auth(client._tok)
+    )
+    assert r.status == 200
+
+    m = _member(await _friends(client), client._uid)
+    assert m["status"] == {"emoji": "🌴", "text": "On holiday", "expires_at": None}
+    assert m["bio"] == "Gardener."
+
+
+async def test_friends_local_status_with_expiry_and_expired_dropped(client):
+    await _seed_local_user(
+        client,
+        user_id="uid-fresh",
+        username="fresh",
+        status_text="Busy",
+        status_expires_at=_FUTURE,
+    )
+    # Past its "clear after" deadline, before the expiry sweep ran.
+    await _seed_local_user(
+        client,
+        user_id="uid-stale",
+        username="stale",
+        status_emoji="🤒",
+        status_text="Sick",
+        status_expires_at=_PAST,
+        bio="Still here",
+    )
+    body = await _friends(client)
+    assert _member(body, "uid-fresh")["status"] == {
+        "emoji": None,
+        "text": "Busy",
+        "expires_at": _FUTURE,
+    }
+    stale = _member(body, "uid-stale")
+    assert stale["status"] is None
+    assert stale["bio"] == "Still here"
+
+
+async def test_friends_member_without_status_or_bio_reads_null(client):
+    await _seed_local_user(client, user_id="uid-plain", username="plain")
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await _seed_remote_user(
+        client._db, user_id="ru-1", instance_id="peer-a", name="Bob"
+    )
+    body = await _friends(client)
+    for uid in ("uid-plain", "ru-1"):
+        m = _member(body, uid)
+        assert m["status"] is None
+        assert m["bio"] is None
+
+
+async def test_friends_remote_member_carries_status_and_bio(client):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await _seed_remote_user(
+        client._db,
+        user_id="ru-1",
+        instance_id="peer-a",
+        name="Bob",
+        bio="Bakes bread.",
+        status_json=json.dumps(
+            {"emoji": "🍞", "text": "Baking", "expires_at": _FUTURE}
+        ),
+    )
+    await _seed_remote_user(
+        client._db,
+        user_id="ru-2",
+        instance_id="peer-a",
+        name="Carol",
+        bio="",
+        status_json=json.dumps({"emoji": "🏖️", "text": "Away", "expires_at": _PAST}),
+    )
+    await _seed_remote_user(
+        client._db,
+        user_id="ru-3",
+        instance_id="peer-a",
+        name="Dan",
+        status_json="{not json",
+    )
+    body = await _friends(client)
+    bob = _member(body, "ru-1")
+    assert bob["status"] == {"emoji": "🍞", "text": "Baking", "expires_at": _FUTURE}
+    assert bob["bio"] == "Bakes bread."
+    carol = _member(body, "ru-2")
+    assert carol["status"] is None  # expired → dropped server-side
+    assert carol["bio"] is None  # blank → null
+    assert _member(body, "ru-3")["status"] is None  # unreadable → null
+
+
+async def test_friends_remote_status_from_federation_lands_after_reload(client):
+    """End to end over the inbound handler: a peer's ``USER_STATUS_UPDATED``
+    is cached, so the Friends payload shows it (and a clear removes it)."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await _seed_remote_user(
+        client._db, user_id="ru-1", instance_id="peer-a", name="Bob"
+    )
+    inbound = client.app[federation_inbound_service_key]
+
+    def _evt(payload: dict) -> FederationEvent:
+        return FederationEvent(
+            msg_id="m-1",
+            event_type=FederationEventType.USER_STATUS_UPDATED,
+            from_instance="peer-a",
+            to_instance="self",
+            timestamp="2026-01-01T00:00:00+00:00",
+            payload={"user_id": "ru-1", **payload},
+        )
+
+    await inbound._on_user_status_updated(_evt({"emoji": "🎉", "text": "Party"}))
+    assert _member(await _friends(client), "ru-1")["status"] == {
+        "emoji": "🎉",
+        "text": "Party",
+        "expires_at": None,
+    }
+    await inbound._on_user_status_updated(_evt({"status_cleared": True}))
+    assert _member(await _friends(client), "ru-1")["status"] is None
+
+
+# ─── Guardian blocks + deprovisioned ─────────────────────────────────────
+
+
+async def _guardian_block(client, minor_id: str, blocked_id: str) -> None:
+    await client._db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?, ?, ?)",
+        (minor_id, blocked_id, client._uid),
+    )
+
+
+async def test_friends_guardian_block_hides_both_ways(client):
+    """§CP.F2 — a guardian block is symmetric, like a personal block: the
+    protected kid doesn't see the blocked person (status, bio and all), and
+    the blocked person doesn't see the kid."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await _seed_remote_user(
+        client._db,
+        user_id="ru-bad",
+        instance_id="peer-a",
+        name="Bad",
+        bio="hi kids",
+        status_json=json.dumps({"text": "around"}),
+    )
+    await _seed_remote_user(
+        client._db, user_id="ru-ok", instance_id="peer-a", name="Ok"
+    )
+    await _seed_local_user(
+        client,
+        user_id="uid-kid",
+        username="kid",
+        token="kid-tok",
+        child_protection_enabled=1,
+        is_minor=1,
+    )
+    await _seed_local_user(client, user_id="uid-uncle", username="uncle", token="u-tok")
+    await _guardian_block(client, "uid-kid", "ru-bad")
+    await _guardian_block(client, "uid-kid", "uid-uncle")
+
+    kid_view = await _friends(client, "kid-tok")
+    assert _member(kid_view, "ru-bad") is None
+    assert _member(kid_view, "uid-uncle") is None
+    assert _member(kid_view, "ru-ok") is not None
+    assert kid_view["households"][0]["member_count"] == 1
+
+    # The blocked local member doesn't see the kid either …
+    uncle_view = await _friends(client, "u-tok")
+    assert _member(uncle_view, "uid-kid") is None
+    # … but everyone else (here: the admin) still sees everyone.
+    admin_view = await _friends(client)
+    assert _member(admin_view, "uid-kid") is not None
+    assert _member(admin_view, "ru-bad") is not None
+
+
+async def test_friends_guardian_block_lapses_when_protection_is_off(client):
+    await _seed_local_user(
+        client, user_id="uid-teen", username="teen", token="teen-tok"
+    )
+    await _seed_local_user(client, user_id="uid-other", username="other")
+    await _guardian_block(client, "uid-teen", "uid-other")
+    # Protection disabled → the stored block no longer counts.
+    assert _member(await _friends(client, "teen-tok"), "uid-other") is not None
+
+
+async def test_friends_omits_deprovisioned_remote_user(client):
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await _seed_remote_user(
+        client._db, user_id="ru-gone", instance_id="peer-a", name="Gone"
+    )
+    await client._db.enqueue(
+        "UPDATE remote_users SET deprovisioned_at=datetime('now') WHERE user_id=?",
+        ("ru-gone",),
+    )
+    body = await _friends(client)
+    assert _member(body, "ru-gone") is None
+    assert body["households"][0]["member_count"] == 0
+
+
+async def test_friends_remote_users_of_non_social_household_not_listed(client):
+    """Remote users cached for a household that isn't a social peer (here:
+    a pending pair) never leak into another household's card."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.save_instance(_peer("peer-a"))
+    await fed_repo.save_instance(_peer("peer-p", status=PairingStatus.PENDING_SENT))
+    await _seed_remote_user(client._db, user_id="ru-a", instance_id="peer-a", name="A")
+    await _seed_remote_user(client._db, user_id="ru-p", instance_id="peer-p", name="P")
+    body = await _friends(client)
+    assert [h["instance_id"] for h in body["households"]] == ["peer-a"]
+    assert _member(body, "ru-p") is None
+    assert body["totals"]["people"] == len(body["instance"]["members"]) + 1

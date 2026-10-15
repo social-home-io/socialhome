@@ -144,6 +144,11 @@ class AbstractUserRepo(Protocol):
         user_id: str,
         picture_hash: str | None,
     ) -> None: ...
+    async def set_remote_status(
+        self,
+        user_id: str,
+        status_json: str | None,
+    ) -> None: ...
 
 
 # ─── Concrete SQLite implementation ───────────────────────────────────────
@@ -566,6 +571,9 @@ class SqliteUserRepo:
         # is None and we must NOT clobber a previously-cached handle. The
         # ``COALESCE(excluded.handle, handle)`` keeps the stored value sticky
         # across a non-handle profile edit (bio/display_name/picture).
+        # ``status_json`` is sticky the same way: USER_UPDATED / USERS_SYNC
+        # carry no status, so a profile edit must not wipe the status that
+        # ``set_remote_status`` cached from USER_STATUS_UPDATED.
         await self._db.enqueue(
             """
             INSERT INTO remote_users(
@@ -581,7 +589,7 @@ class SqliteUserRepo:
                 visible_to=excluded.visible_to,
                 picture_hash=excluded.picture_hash,
                 bio=excluded.bio,
-                status_json=excluded.status_json,
+                status_json=COALESCE(excluded.status_json, status_json),
                 public_key=excluded.public_key,
                 public_key_version=excluded.public_key_version,
                 handle=COALESCE(excluded.handle, handle),
@@ -597,7 +605,7 @@ class SqliteUserRepo:
                 visible_to=excluded.visible_to,
                 picture_hash=excluded.picture_hash,
                 bio=excluded.bio,
-                status_json=excluded.status_json,
+                status_json=COALESCE(excluded.status_json, status_json),
                 public_key=excluded.public_key,
                 public_key_version=excluded.public_key_version,
                 handle=COALESCE(excluded.handle, handle),
@@ -1031,6 +1039,19 @@ class SqliteUserRepo:
         await self._db.enqueue(
             "UPDATE remote_users SET picture_hash=? WHERE user_id=?",
             (picture_hash, user_id),
+        )
+
+    async def set_remote_status(
+        self,
+        user_id: str,
+        status_json: str | None,
+    ) -> None:
+        """Cache a remote user's emoji/text status (``USER_STATUS_UPDATED``)
+        on their ``remote_users`` row; ``None`` clears it. A no-op for a
+        user we don't know."""
+        await self._db.enqueue(
+            "UPDATE remote_users SET status_json=? WHERE user_id=?",
+            (status_json, user_id),
         )
 
 
