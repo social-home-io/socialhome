@@ -19272,33 +19272,67 @@ a.sh-btn--ghost:hover {
   font: 600 var(--sh-font-size-lg) / 1.2 var(--sh-font-family-display);
   letter-spacing: -0.005em;
 }
-.sh-blocked-accounts-list {
+/* Settings › Privacy people lists (Blocked, Following) — the Friends
+ * person-row anatomy: one quiet card, 40 px avatar, name over a muted
+ * meta line ("Grandma Ruth · Vizeli · since Oct 15"), one action. */
+.sh-person-list {
   list-style: none;
   margin: var(--sh-space-sm) 0 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
-}
-.sh-blocked-accounts-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-xs) var(--sh-space-sm);
   border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-tertiary);
+  overflow: hidden;
 }
-.sh-blocked-accounts-meta {
+.sh-person-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 10px var(--sh-space-md);
+}
+.sh-person-row__body {
   display: flex;
   flex-direction: column;
-  flex: 1;
+  gap: 2px;
   min-width: 0;
 }
-.sh-blocked-accounts-meta strong {
-  white-space: nowrap;
+/* Two lines each before the ellipsis, so a long household name wraps
+ * instead of losing the date. */
+.sh-person-row__name,
+.sh-person-row__meta {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: break-word;
+}
+.sh-person-row__name {
+  font-weight: 600;
+}
+.sh-person-row__meta {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+/* Phone: the settings card leaves ~270 px for the list, too little for
+ * name + meta beside a pill button. The action drops under the text so
+ * the name gets the full width. */
+@media (max-width: 480px) {
+  .sh-person-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas: "avatar body" "avatar action";
+    align-items: start;
+    row-gap: 6px;
+    padding: 12px;
+  }
+  .sh-person-row > :first-child { grid-area: avatar; }
+  .sh-person-row__body { grid-area: body; }
+  .sh-person-row > .sh-btn {
+    grid-area: action;
+    justify-self: start;
+  }
 }
 
 .sh-highlight-list {
@@ -20431,37 +20465,9 @@ a.sh-btn--ghost:hover {
   text-decoration: underline;
 }
 
-/* Following panel — Settings → Privacy */
+/* Following panel — Settings → Privacy (rows: ``.sh-person-list``) */
 .sh-following {
   margin-top: var(--sh-space-md);
-}
-.sh-following-list {
-  list-style: none;
-  margin: var(--sh-space-sm) 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
-}
-.sh-following-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-xs) var(--sh-space-sm);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg);
-}
-.sh-following-meta {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-}
-.sh-following-meta strong {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* Skeleton compose-entry — matches the inline composer chip's height

@@ -183,7 +183,7 @@ Voluntary adult-to-adult block list — the viewer hides another user's highligh
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/blocks` | List the caller's blocks `[{user_id, blocked_at}]`, newest first. |
+| GET | `/api/blocks` | List the caller's blocks, newest first: `[{user_id, blocked_at, display_name, personal_alias, picture_url, household}]`. `display_name` is the person's own name and `personal_alias` the caller's nickname for them; `picture_url` is signed; `household` is the own household's name for a local user, the paired household's shown name (admin alias wins) for a remote one, `null` once that household is no longer paired. An id nobody knows any more (its household was unpaired) has `display_name: null` — clients show "Unknown person", never the id. |
 | POST | `/api/blocks` | Add a block. Body: `{user_id}`. Self-block → 422. |
 | DELETE | `/api/blocks/{user_id}` | Remove a block. Idempotent. |
 
@@ -202,7 +202,7 @@ Household-broadcast posts that fan to a 3-hop peer mesh. Replies are themselves 
 | PUT | `/api/moments/{id}/reaction` | Set / change reaction. Body: `{emoji}`. |
 | DELETE | `/api/moments/{id}/reaction` | Clear own reaction. |
 | POST | `/api/moments/{id}/report` | Report a moment. Body: `{category, notes?}`. |
-| GET | `/api/moments/follows` | List who I follow. |
+| GET | `/api/moments/follows` | List who I follow: `[{user_id, created_at, display_name, personal_alias, picture_url, household}]` — same person fields as `GET /api/blocks`. |
 | POST | `/api/moments/follows` | Follow a user. Body: `{user_id}`. |
 | DELETE | `/api/moments/follows/{user_id}` | Unfollow. |
 | POST | `/api/highlights/{id}/report` | Report a highlight (same `content_reports` queue). |

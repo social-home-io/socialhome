@@ -570,3 +570,57 @@ describe('SettingsPage — language is saved', () => {
     await setLocale('en')
   })
 })
+
+describe('SettingsPage — Privacy people lists name everyone (B1)', () => {
+  it('Blocked and Following show names, nicknames and households, never raw ids', async () => {
+    // Regression: the lists named people from the local roster only, so a
+    // remote person rendered as "ru-7ae1d43cad72" and nicknames were
+    // ignored. The rows now render what the API resolved.
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/blocks') {
+        return {
+          blocks: [
+            {
+              user_id: 'ru-7ae1d43cad72', blocked_at: '2026-10-15 09:00:00',
+              display_name: 'Annegret Müller-Lüdenscheidt', personal_alias: null,
+              picture_url: null, household: 'Familie Müller-Lüdenscheidt',
+            },
+            {
+              user_id: 'ru-gone0000000', blocked_at: '2026-10-15 09:00:00',
+              display_name: null, personal_alias: null,
+              picture_url: null, household: null,
+            },
+          ],
+        }
+      }
+      if (path === '/api/moments/follows') {
+        return {
+          follows: [{
+            user_id: 'ru-ruth', created_at: '2026-10-15 09:00:00',
+            display_name: 'Grandma Ruth', personal_alias: 'Oma',
+            picture_url: 'api/users/ru-ruth/picture?v=1&exp=1&sig=x',
+            household: 'Vizeli',
+          }],
+        }
+      }
+      return { spaces: [] }
+    })
+    const { _resetBlocksForTest } = await import('@/store/blocks')
+    const { _resetFollowsForTest } = await import('@/store/follows')
+    _resetBlocksForTest()
+    _resetFollowsForTest()
+    const result = await renderPrivacyTab()
+    await waitFor(() => {
+      expect(result.getByText('Annegret Müller-Lüdenscheidt')).toBeTruthy()
+    })
+    expect(result.getByText('Oma')).toBeTruthy()
+    expect(result.getByText('Unknown person')).toBeTruthy()
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('Grandma Ruth')
+    expect(text).toContain('Household no longer connected')
+    expect(text).not.toContain('ru-7ae1d43cad72')
+    expect(text).not.toContain('ru-gone0000000')
+    expect(result.getByRole('button', { name: 'Unfollow Oma' })).toBeTruthy()
+    expect(result.getByRole('button', { name: 'Unblock Unknown person' })).toBeTruthy()
+  })
+})

@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.domain.user import (
     DisplayableUser,
+    PersonSummary,
     MemberRef,
     RESERVED_USERNAMES,
     STATUS_TEXT_MAX_CHARS,
@@ -181,3 +182,19 @@ def test_clean_status_text_caps_and_single_line():
     for bad in ("x" * (STATUS_TEXT_MAX_CHARS + 1), "a\nb", "a\x00b", 3):
         with pytest.raises(ValueError):
             clean_status_text(bad)
+
+
+def test_person_summary_to_dict_carries_only_the_display_fields():
+    p = PersonSummary(
+        user_id="ru-ruth",
+        display_name="Grandma Ruth",
+        personal_alias="Oma",
+        picture_url=None,
+        household="Vizeli",
+    )
+    assert p.to_dict() == {
+        "display_name": "Grandma Ruth",
+        "personal_alias": "Oma",
+        "picture_url": None,
+        "household": "Vizeli",
+    }

@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from socialhome.app_keys import federation_repo_key
+from socialhome.domain.federation import (
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
+
 from .conftest import _auth
 
 
@@ -295,6 +302,77 @@ async def test_follow_unfollow_round_trip(client):
         )
     ).json()
     assert body["follows"] == []
+
+
+async def _follows_by_id(client) -> dict[str, dict]:
+    r = await client.get("/api/moments/follows", headers=_auth(client._tok))
+    assert r.status == 200
+    return {f["user_id"]: f for f in (await r.json())["follows"]}
+
+
+async def _follow(client, user_id: str) -> None:
+    r = await client.post(
+        "/api/moments/follows",
+        json={"user_id": user_id},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201, await r.text()
+
+
+async def test_follows_name_local_remote_and_unknown_people(client):
+    """Regression (B1, Friends/Profile review): Settings › Privacy named
+    followed people from the local roster only, so a remote person showed
+    as a raw id and the viewer's nickname was ignored. Each row now carries
+    name, signed picture, household and the viewer's nickname."""
+    fed_repo = client.app[federation_repo_key]
+    await fed_repo.set_instance_display_name("Vizeli")
+    await fed_repo.save_instance(
+        RemoteInstance(
+            id="peer-o",
+            display_name="Okafor family",
+            remote_identity_pk="aa" * 32,
+            key_self_to_remote="enc",
+            key_remote_to_self="enc",
+            remote_inbox_url="https://peer-o.example/wh",
+            local_inbox_id="wh-peer-o",
+            status=PairingStatus.CONFIRMED,
+            source=InstanceSource.MANUAL,
+        )
+    )
+    await client._db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username, "
+        " display_name, picture_hash) VALUES(?,?,?,?,?)",
+        ("ru-amaka", "peer-o", "amaka", "Amaka Okafor", "cafebabecafebabe"),
+    )
+    await _seed_target(client)
+    put = await client.put(
+        "/api/aliases/users/uid-bob",
+        json={"alias": "Brother"},
+        headers=_auth(client._tok),
+    )
+    assert put.status in (200, 201), await put.text()
+    for uid in ("uid-bob", "ru-amaka", "ru-forgotten"):
+        await _follow(client, uid)
+
+    rows = await _follows_by_id(client)
+    assert rows["uid-bob"]["display_name"] == "Bob"
+    assert rows["uid-bob"]["personal_alias"] == "Brother"
+    assert rows["uid-bob"]["household"] == "Vizeli"
+    assert rows["uid-bob"]["created_at"]
+
+    amaka = rows["ru-amaka"]
+    assert amaka["display_name"] == "Amaka Okafor"
+    assert amaka["household"] == "Okafor family"
+    assert amaka["personal_alias"] is None
+    assert amaka["picture_url"].startswith(
+        "api/users/ru-amaka/picture?v=cafebabecafebabe"
+    )
+    assert "sig=" in amaka["picture_url"]
+
+    gone = rows["ru-forgotten"]
+    assert gone["display_name"] is None
+    assert gone["household"] is None
+    assert gone["picture_url"] is None
 
 
 async def test_follow_self_rejected(client):

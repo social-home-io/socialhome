@@ -363,6 +363,7 @@ from .media.video_processor import VideoProcessor
 from .services.system_album_bridge import SystemAlbumBridge
 from .services.pairing_relay_queue import PairingRelayQueue
 from .services.alias_service import AliasResolver, AliasService
+from .services.person_summary_service import PersonSummaryService
 from .services.app_catalog_service import AppCatalogService
 from .services.app_federation_service import AppFederationService
 from .services.app_service import AppService
@@ -2806,6 +2807,9 @@ def create_app(config: Config | None = None) -> web.Application:
     # alias resolution. Aliases never federate.
     alias_service = AliasService(repos.alias, repos.user)
     alias_resolver = AliasResolver(repos.alias)
+    person_summary_service = PersonSummaryService(
+        repos.user, repos.federation, alias_resolver
+    )
 
     # ── Preferences service (household-wide + per-user toggles) ─────────
     preferences_service = PreferencesService(
@@ -3320,6 +3324,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.app_service_key] = app_service
     app[K.alias_service_key] = alias_service
     app[K.alias_resolver_key] = alias_resolver
+    app[K.person_summary_service_key] = person_summary_service
     app[K.data_export_service_key] = data_export_service
     app[K.i18n_key] = i18n
     app[K.platform_adapter_key] = platform_adapter

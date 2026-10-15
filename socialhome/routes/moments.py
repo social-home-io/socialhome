@@ -16,7 +16,8 @@ Routes:
 * ``PUT    /api/moments/{id}/reaction``       — set / change reaction
 * ``DELETE /api/moments/{id}/reaction``       — clear own reaction
 * ``POST   /api/moments/{id}/report``         — wrap content_reports
-* ``GET    /api/moments/follows``             — list of who I follow
+* ``GET    /api/moments/follows``             — list of who I follow (name,
+  signed picture, household and my nickname for each)
 * ``POST   /api/moments/follows``             — follow a user
 * ``DELETE /api/moments/follows/{user_id}``   — unfollow
 """
@@ -30,6 +31,7 @@ from ..app_keys import (
     media_transcode_repo_key,
     moment_repo_key,
     moment_service_key,
+    person_summary_service_key,
     report_service_key,
     user_service_key,
 )
@@ -388,7 +390,12 @@ class MomentFollowsCollectionView(BaseView):
             return error_response(401, "UNAUTHENTICATED", "Login required.")
         svc = self.svc(user_service_key)
         rows = await svc.list_following(ctx.username)
-        return self._json({"follows": rows})
+        people = self.svc(person_summary_service_key)
+        payload = {"follows": await people.enrich(ctx.user_id, rows)}
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            sign_media_urls_in(payload, signer)
+        return self._json(payload)
 
     async def post(self) -> web.Response:
         ctx = self.user

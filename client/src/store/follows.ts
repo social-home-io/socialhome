@@ -8,9 +8,9 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import type { PersonSummary } from '@/types'
 
-export interface FollowEntry {
-  user_id:    string
+export interface FollowEntry extends PersonSummary {
   created_at: string
 }
 
