@@ -789,7 +789,7 @@ async def test_header_image_upload_rejects_missing_file(client):
     import aiohttp
 
     form = aiohttp.FormData()
-    form.add_field("something_else", b"x")
+    form.add_field("something_else", b"x", filename="x.bin")
     resp = await client.post(
         "/admin/api/branding/header-image",
         data=form,

@@ -4,24 +4,31 @@ dynamic = ["version"]
 requires-python = ">=3.14"
 license = {text = "Mozilla Public License 2.0"}
 license-files = ["LICENSE"]
+# Every direct dependency (here and in every optional-dependencies group)
+# is pinned to an EXACT version so the wheel, the Docker images, CI and dev
+# envs all install the same tested set — Social Home is an application,
+# not a library, so nobody co-installs it with conflicting pins. Pins track
+# the newest release that is at least two weeks old and passes the full
+# suite; bump them deliberately in a PR. Transitive dependencies are still
+# resolved freely (no lock file / constraints file yet).
 dependencies = [
-    "aiohttp>=3.9",
-    "aiosqlite>=0.19",
-    "orjson>=3.9",
-    "cryptography>=41",
-    "aiofiles>=23",
-    "pillow>=10",
+    "aiohttp==3.14.3",
+    "aiosqlite==0.22.1",
+    "orjson==3.12.0",
+    "cryptography==50.0.2",
+    "aiofiles==25.1.0",
+    "pillow==12.3.0",
     # HEIC support — registers an ``Image.open`` handler for HEIC/HEIF
     # bytes so iPhone + modern-Android (Samsung One UI 6+, Pixel
     # HEIF-on) camera photos can be uploaded. Without this, the magic-
     # byte check accepts ``image/heic`` (it's in :data:`IMAGE_ACCEPTED_MIMES`)
     # but the ``Image.open`` call inside :class:`ImageProcessor` raises
     # ``cannot identify image file`` and the upload 422s.
-    "pillow-heif>=0.18",
-    "av>=13",
-    "python-multipart>=0.0.9",
-    "jinja2>=3.1",
-    "icalendar>=5.0",
+    "pillow-heif==1.8.0",
+    "av==19.0.0",
+    "python-multipart==0.0.32",
+    "jinja2==3.1.6",
+    "icalendar==7.3.0",
     # WebRTC DataChannel transport (§4.2.3, §24.12). Primary SH-to-SH
     # transport — inbox is only the fallback for peers that can't
     # open a direct peer connection. Also mandatory for GFS relay
@@ -30,9 +37,9 @@ dependencies = [
     # 2026.5.10 is the resumption of the ``YYYY.M.D`` CalVer pattern
     # after a one-off mistake: 2026.9.5 was tagged on 2026-05-09 (the
     # date was meant to be 2026.5.9). 2026.9.5 has been yanked on PyPI;
-    # any ``>=2026.5.10`` pin resolves to a non-yanked candidate, while
+    # a ``>=`` specifier resolves to a non-yanked candidate, while
     # 2026.9.5 itself remains reachable only via an explicit
-    # ``==2026.9.5`` pin (which we don't expect anyone to hold).
+    # ``==2026.9.5`` pin — never pin that one.
     # Per-Python-version wheels (cp312 / cp313 / cp314); pre-2026.5.10
     # ABI3 wheels segfaulted on first ``PeerConnection`` use under
     # CPython 3.14 (nanobind stable-ABI marshalling regression).
@@ -52,55 +59,56 @@ dependencies = [
     # "never block the loop" rule this project applies to its own code.
     # It also vendors libdatachannel v0.24.5
     # (social-home-io/aiolibdatachannel#21).
-    "aiolibdatachannel>=2026.9.8",
+    "aiolibdatachannel==2026.9.8",
     # mDNS announcement of the household dashboard to wall panels
     # (``socialhome/dashboard/advertiser.py``). LGPL-2.1-or-later, used as
     # an unmodified, dynamically imported library — compatible with
     # MPL-2.0. Pure ``asyncio`` API; cp314 wheels on every arch we ship.
-    "zeroconf>=0.151.5",
+    "zeroconf==0.151.5",
     # Interface scan for the addresses the dashboard announces (also a
     # zeroconf dependency; declared because we import it directly). MIT.
-    "ifaddr>=0.2",
+    "ifaddr==0.2.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.23",
-    "pytest-aiohttp>=1",    # provides ``aiohttp_server`` / ``aiohttp_client`` fixtures
-    "pytest-cov>=4",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-aiohttp==1.1.1",    # provides ``aiohttp_server`` / ``aiohttp_client`` fixtures
+    "pytest-cov==7.1.0",
     # ``pytest-xdist`` runs the suite across all available CPU cores
     # via ``-n auto``. The default addopts in ``[tool.pytest.ini_options]``
     # opt in, so ``pytest tests/`` is parallel without extra flags —
     # CI and local runs share the same speed.
-    "pytest-xdist>=3",
-    "aiohttp[speedups]",
-    "freezegun",
+    "pytest-xdist==3.8.0",
+    "aiohttp[speedups]==3.14.3",
+    "freezegun==1.5.5",
     # Validates the wall-panel API payloads against their published JSON
     # Schemas (``docs/display-api/v1/``).
-    "jsonschema>=4.18",
-    "mypy>=2.4",
-    "types-aiofiles>=23",
-    # Keep the floor aligned with ``.pre-commit-config.yaml``'s
-    # ``ruff-pre-commit`` rev — ruff format rules change between
-    # minors, so a dev env on an older ruff prints "would reformat"
-    # for files the pre-commit hook just accepted, and vice-versa.
-    # Capped for the same reason in the other direction: the LINT rule
-    # set grows between minors too, so an uncapped dev env reports
-    # thousands of findings the pinned hook and CI don't gate on.
-    "ruff>=0.15,<0.16",
-    "pre-commit>=3.8",
+    "jsonschema==4.26.0",
+    "mypy==2.4.0",
+    "types-aiofiles==25.1.0.20260518",
+    # Keep the pin identical to ``.pre-commit-config.yaml``'s
+    # ``ruff-pre-commit`` rev and CI's ``pip install ruff==`` — ruff
+    # format rules change between minors, so a dev env on a different
+    # ruff prints "would reformat" for files the pre-commit hook just
+    # accepted, and vice-versa; the LINT rule set grows between minors
+    # too, so a newer ruff reports thousands of findings the pinned hook
+    # and CI don't gate on. Bump all three together.
+    "ruff==0.15.22",
+    "pre-commit==4.6.2",
     # Pulled in so ``tests/global_server/*`` can import the GFS admin
     # modules without a separate ``pip install .[global-server]`` step.
-    "bcrypt>=4",
-    "qrcode[pil]>=7",
+    # Keep these two pins identical to the ``global-server`` group below.
+    "bcrypt==5.0.0",
+    "qrcode[pil]==8.2",
 ]
 # Global Federation Server (GFS) runtime deps — pulled by the
 # `socialhome-global-server` console script.
 # Install with: pip install 'socialhome[global-server]'
 global-server = [
-    "bcrypt>=4",                 # admin password hashing (spec §24.9)
-    "qrcode[pil]>=7",            # public-landing QR code rendering
+    "bcrypt==5.0.0",        # admin password hashing (spec §24.9)
+    "qrcode[pil]==8.2",     # public-landing QR code rendering
 ]
 
 [project.scripts]
