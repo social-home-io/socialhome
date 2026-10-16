@@ -32,6 +32,14 @@ describe('ViewerError', () => {
   })
 })
 
+describe('ViewerError class', () => {
+  it('puts the class prop on the alert', () => {
+    const retry = { manual: () => {}, auto: () => {}, nextAutoDelayMs: () => null }
+    render(<ViewerError class="moments-error" message="Gone" retry={retry} />)
+    expect(screen.getByRole('alert').className).toBe('moments-error')
+  })
+})
+
 describe('RetryHost auto-retry', () => {
   it('retries after 10 s, 30 s and 60 s, then stops', () => {
     expect(AUTO_RETRY_DELAYS_MS).toEqual([10_000, 30_000, 60_000])

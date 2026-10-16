@@ -45,11 +45,11 @@ export function RetryHost({
 export function ViewerError({
   message,
   retry,
-  className,
+  class: className,
 }: {
   message: string
   retry: RetryControl
-  className?: string
+  class?: string
 }) {
   const button = useRef<HTMLButtonElement | null>(null)
 

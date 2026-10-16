@@ -319,7 +319,7 @@ function PublicHighlightViewer({ boot, retry }: { boot: BootPayload; retry: Retr
   if (state.status === 'error') {
     return (
       <ViewerError
-        className="highlight-error"
+        class="highlight-error"
         message={state.message || 'Couldn’t connect.'}
         retry={retry}
       />
