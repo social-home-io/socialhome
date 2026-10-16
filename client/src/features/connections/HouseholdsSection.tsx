@@ -4,7 +4,8 @@
  * "met through a shared space" subgroups — or the map, the skeleton, the
  * LoadError, or (no households yet) PairingSteps.
  */
-import { lazy, Suspense, useMemo } from 'preact/compat'
+import { lazy, Suspense } from 'preact/compat'
+import { useMemo } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import type { Connection } from '@/store/connections'
 import type { CompatPeer } from '@/store/federationCompat'
