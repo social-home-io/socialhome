@@ -12,12 +12,12 @@
  * * ``Enter``  — accept the call
  * * ``Esc``    — decline
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
-import { incoming } from '@/store/calls'
+import { incoming, type IncomingCall } from '@/store/calls'
 import { acceptCall } from './callSession'
 import { showCallError } from './CallEmbedBlockedDialog'
 import { CallEmbedBlockedError } from './embedPolicy'
@@ -76,14 +76,63 @@ function startVibration(): () => void {
 }
 
 export default function IncomingCallDialog() {
+  const call = incoming.value
+  if (!call) return null
+  // Keyed on the call: the dialog stays mounted at the app root across
+  // calls, so busy state ("declining…") kept here would leak into the
+  // next ring and leave its buttons disabled. A fresh card per call
+  // starts idle.
+  return <IncomingCallCard key={call.call_id} call={call} />
+}
+
+/** Clear the ring only if it is still *call* — a newer call may have
+ *  started ringing while a request for this one was in flight. */
+function clearRing(call: IncomingCall): void {
+  if (incoming.value?.call_id === call.call_id) incoming.value = null
+}
+
+function IncomingCallCard({ call }: { call: IncomingCall }) {
   const loc = useLocation()
-  // Both accept and decline fire one POST. The dialog stays mounted
+  // Both accept and decline fire one POST. The card stays mounted
   // while the request flies; the spinner says "we heard your tap".
   const [accepting, setAccepting] = useState(false)
   const [declining, setDeclining] = useState(false)
+  // Synchronous guard: the keydown listener is bound once per card, so
+  // it can't read fresh state — a ref stops a double Enter/tap from
+  // firing two requests.
+  const busy = useRef(false)
+
+  const accept = async () => {
+    if (busy.current) return
+    busy.current = true
+    setAccepting(true)
+    try {
+      // Acquires the mic/camera, answers the caller's SDP offer and posts
+      // the answer; ICE trickles from there.
+      await acceptCall(call)
+      clearRing(call)
+      loc.route(`/calls/${call.call_id}`)
+    } catch (err) {
+      // Answering can't work in this frame: stop ringing here (another
+      // device of this user may still pick up — so no decline) and say
+      // where calls do work.
+      if (err instanceof CallEmbedBlockedError) clearRing(call)
+      showCallError(t('calls.answer_failed'), err)
+      busy.current = false
+      setAccepting(false)
+    }
+  }
+  const decline = async () => {
+    if (busy.current) return
+    busy.current = true
+    setDeclining(true)
+    try {
+      await api.post(`/api/calls/${call.call_id}/decline`, {})
+    } catch { /* best-effort: the ring stops here either way */ }
+    clearRing(call)
+  }
 
   useEffect(() => {
-    if (!incoming.value) return
     void loadHouseholdUsers()  // resolve "from" line + missed-call toast
     _ringStop = (() => {
       const stopSnd = startRingtone()
@@ -105,17 +154,17 @@ export default function IncomingCallDialog() {
     const focusTimer = setTimeout(() => findActions()[0]?.focus(), 10)
 
     const timer = setTimeout(() => {
-      if (incoming.value) {
-        const fromName = householdDisplayName(incoming.value.from_user)
+      if (incoming.value?.call_id === call.call_id) {
+        const fromName = householdDisplayName(call.from_user)
         showToast(t('calls.missed_from', { name: fromName }), 'info')
         incoming.value = null
       }
     }, RING_TTL_MS)
 
     const onKey = (e: KeyboardEvent) => {
-      if (!incoming.value) return
-      if (e.key === 'Enter') accept()
-      else if (e.key === 'Escape') decline()
+      if (incoming.value?.call_id !== call.call_id) return
+      if (e.key === 'Enter') void accept()
+      else if (e.key === 'Escape') void decline()
       else if (e.key === 'Tab') {
         // Trap focus between the two action buttons — Tab can't
         // wander into the dimmed page behind a ringing call.
@@ -137,38 +186,12 @@ export default function IncomingCallDialog() {
       if (_ringStop) { _ringStop(); _ringStop = null }
       previouslyFocused?.focus?.()
     }
-  }, [incoming.value?.call_id])
+    // Once per card — the card is keyed on the call id, and accept /
+    // decline guard on the ``busy`` ref, not on render state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  if (!incoming.value) return null
-  const call = incoming.value
   const fromName = householdDisplayName(call.from_user)
-
-  const accept = async () => {
-    if (accepting || declining) return
-    setAccepting(true)
-    try {
-      // Acquires the mic/camera, answers the caller's SDP offer and posts
-      // the answer; ICE trickles from there.
-      await acceptCall(call)
-      incoming.value = null
-      loc.route(`/calls/${call.call_id}`)
-    } catch (err) {
-      // Answering can't work in this frame: stop ringing here (another
-      // device of this user may still pick up — so no decline) and say
-      // where calls do work.
-      if (err instanceof CallEmbedBlockedError) incoming.value = null
-      showCallError(t('calls.answer_failed'), err)
-      setAccepting(false)
-    }
-  }
-  const decline = async () => {
-    if (accepting || declining) return
-    setDeclining(true)
-    try {
-      await api.post(`/api/calls/${call.call_id}/decline`, {})
-    } catch { /* best-effort */ }
-    incoming.value = null
-  }
 
   return (
     <div
