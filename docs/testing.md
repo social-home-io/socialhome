@@ -154,8 +154,12 @@ Frontend tests live in the client tree, not under `tests/`:
   `map.js` in a fresh jsdom window per test (no layout, so the map box
   size is stubbed). Their markup and security guards stay in
   `tests/dashboard/`.
-- **`tsc --noEmit`** for type checks.
-- **ESLint** for lint.
+- **`tsc --noEmit`** for type checks — TypeScript 7 (the native
+  compiler, installed as `@typescript/native`).
+- **ESLint** for lint. typescript-eslint and madge still need the
+  TypeScript 6 compiler API, which TypeScript 7 doesn't ship, so the
+  `typescript` package name is aliased to `@typescript/typescript6`
+  (its CLI is `tsc6`). Drop the alias once typescript-eslint supports 7.
 - **`vite build`** at pre-push.
 
 Run the full client suite:
