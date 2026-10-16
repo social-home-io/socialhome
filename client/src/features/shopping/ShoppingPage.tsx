@@ -504,7 +504,7 @@ export default function ShoppingPage() {
       <QuickAddBar
         class="sh-shopping-add"
         value={draft}
-        inputRef={inputRef}
+        ref={inputRef}
         placeholder={t('shopping.placeholder')}
         inputLabel={t('shopping.input_label')}
         submitLabel={t('shopping.add')}

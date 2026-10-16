@@ -348,7 +348,7 @@ export function TasksView() {
           {canWrite && <QuickAddBar
             class="sh-tasks-new-list"
             value={listDraft}
-            inputRef={newListRef}
+            ref={newListRef}
             placeholder={t('tasks.new_list_placeholder')}
             inputLabel={t('tasks.new_list')}
             submitLabel={t('tasks.add_list')}
@@ -384,7 +384,7 @@ export function TasksView() {
             {!boardView && canWrite && tasksLoad.state !== 'error' && <QuickAddBar
               class="sh-tasks-add"
               value={draft}
-              inputRef={addRef}
+              ref={addRef}
               placeholder={t('tasks.add_placeholder')}
               inputLabel={t('tasks.add_label', { name: activeList.name })}
               submitLabel={t('tasks.add')}
@@ -887,7 +887,7 @@ function ListPicker({
         <QuickAddBar
           class="sh-tasks-new-list"
           value={draft}
-          inputRef={newListRef}
+          ref={newListRef}
           placeholder={t('tasks.new_list_placeholder')}
           inputLabel={t('tasks.new_list')}
           submitLabel={t('tasks.add_list')}

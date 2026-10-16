@@ -19,7 +19,8 @@ interface QuickAddBarProps {
   inputLabel: string
   submitLabel: string
   placeholder?: string
-  inputRef?: Ref<HTMLInputElement>
+  /** Lands on the text input: Preact 11 passes ``ref`` through as a prop. */
+  ref?: Ref<HTMLInputElement>
   // The input is always ``type="text"``; ``type`` / ``role`` / ``list`` stay
   // out so Preact's ARIA-in-HTML input typings can check the element.
   inputProps?: Omit<
@@ -31,7 +32,7 @@ interface QuickAddBarProps {
 
 export function QuickAddBar({
   value, onValueChange, onSubmit, inputLabel, submitLabel, placeholder,
-  inputRef, inputProps, class: extra,
+  ref, inputProps, class: extra,
 }: QuickAddBarProps) {
   const blank = !value.trim()
   return (
@@ -46,7 +47,7 @@ export function QuickAddBar({
         type="text"
         autoComplete="off"
         {...inputProps}
-        ref={inputRef}
+        ref={ref}
         value={value}
         placeholder={placeholder}
         aria-label={inputLabel}
