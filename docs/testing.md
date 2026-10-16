@@ -202,9 +202,34 @@ a built `@font-face` URL is absolute (it would skip the HA ingress
 a missing file. `client/src/styles/fonts.test.ts` (Vitest) and
 `tests/test_no_third_party_fonts.py` guard the same rule in source.
 
+### End-to-end: Home Assistant ingress
+
+Unit tests (`client/src/baseUrl.test.ts`, `IngressLocationProvider.test.tsx`)
+pin the URL helpers; they can't see a call site that bypasses them. The
+`haos-ingress-ui` skill (`.claude/skills/haos-ingress-ui/`) runs the
+real thing: the built SPA in headless Chrome (puppeteer-core, pinned in
+`checks/package-lock.json`) behind a fake HA Supervisor + Core and an
+ingress look-alike proxy under `/api/hassio_ingress/<token>/`, against a
+real `SH_MODE=haos` backend. It walks the haos setup, every route in
+`router.ts` on desktop and mobile, the live WebSocket, router history,
+media upload, the iframe embed and the no-ingress-user 401 screen, then
+audits every request: anything outside the prefix, a foreign origin or an
+`Authorization` header fails the run.
+
+```sh
+python .claude/skills/haos-ingress-ui/harness.py verify --out /tmp/haos-ingress-ui
+```
+
+Exit 0 green, 1 a check failed, 2 setup failed; `report.md` and
+screenshots land in `--out`. The fakes' HA contracts and how to read a
+failure or add a check are in the skill's `SKILL.md`. Not part of
+`pytest` or the coverage gate — it's its own CI job.
+
 ## CI
 
-`.github/workflows/ci.yml` runs four jobs in parallel:
+`.github/workflows/ci.yml` runs seven jobs in parallel. `test` and
+`typecheck` install with `uv sync --locked --extra dev`, i.e. exactly the
+versions in `uv.lock` (see [Dependency lock](#dependency-lock)).
 
 1. **`test (3.14)`** — `pytest --cov=socialhome --cov-branch
    --cov-fail-under=90 --durations=25` (the whole suite, `tests/protocol/`
@@ -212,13 +237,83 @@ a missing file. `client/src/styles/fonts.test.ts` (Vitest) and
    again as the explicit release-blocker gate
 2. **`lint`** — `ruff check .` + `ruff format --check .`
 3. **`typecheck`** — `mypy socialhome/`
-4. **`frontend`** — `pnpm build`, `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
+4. **`lock`** — `scripts/lock.sh --check`: fails when `uv.lock` no
+   longer matches `pyproject.toml` (`uv lock --check`) or when
+   `requirements/constraints*.txt` differ from a fresh export of the lock
+5. **`images (amd64)` / `images (aarch64)`** — installs the locked set the
+   way every shipped image does, natively on both arches: builds
+   `Dockerfile.sh` and `Dockerfile.gfs` from a freshly built wheel and
+   imports the native deps, then runs the Home Assistant App's builder
+   step (`pip3 wheel --require-hashes -r requirements/constraints.txt`
+   on the App's Alpine/musl base image). A lock bump that loses a wheel
+   or hash for one of those platforms fails here, before a release
+6. **`frontend`** — `pnpm build`, `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
+7. **`haos-ingress-ui`** — builds the SPA, installs the locked runtime
+   set (`uv sync --locked`) and runs
+   `.claude/skills/haos-ingress-ui/harness.py verify` against the
+   runner's preinstalled Google Chrome (see
+   [End-to-end: Home Assistant ingress](#end-to-end-home-assistant-ingress)).
+   The report, request log and screenshots are uploaded as the
+   `haos-ingress-ui-report` artifact on every run. It runs on every PR,
+   not path-filtered: backend changes (auth middleware, `SpaIndexView`,
+   the platform adapter) can break the prefix as easily as SPA changes
 
 Pre-commit hooks (`.pre-commit-config.yaml`) run a strict subset of
 the same on every commit, plus `pnpm build` at pre-push. **Never
 pass `--no-verify`**: when a hook fails, fix the underlying issue —
 fixtures, factories, and shared utilities are designed so the gate
 is achievable.
+
+## Dependency lock
+
+Every Python package Social Home installs — direct and transitive, for
+every extra — is pinned in [`uv.lock`](../uv.lock), a universal
+resolution (any OS / arch, Python ≥ 3.14) made by
+[uv](https://docs.astral.sh/uv/). CI, the dev container, both Docker
+images and the Home Assistant App all install that one tested set, so a
+rebuild of a tag months later gets the same packages.
+
+| File | Contents | Installed by |
+|---|---|---|
+| `uv.lock` | everything, incl. `[dev]` + `[global-server]` | CI + dev container (`uv sync --locked --extra dev`) |
+| `requirements/constraints.txt` | core runtime: version + sha256 of every file | `Dockerfile.sh`; the Home Assistant App, fetched by tag from `raw.githubusercontent.com/social-home-io/socialhome/<tag>/requirements/constraints.txt` |
+| `requirements/constraints-gfs.txt` | core + `[global-server]` | `Dockerfile.gfs` |
+
+The two `requirements/` files are generated from `uv.lock` by
+`scripts/lock.sh` — never edit them by hand. The images install them
+with `uv pip install --require-hashes -r …` (every file hash-checked),
+then add the Social Home wheel with `--no-deps` and run `uv pip check`,
+so a lock that disagrees with the wheel's own requirements fails the
+image build. The App's builder runs the same two steps with `pip wheel`
+on Alpine (musl); everything there has a musllinux wheel except
+`aiolibdatachannel`, which it compiles from the locked, hashed sdist.
+The App fetches `requirements/constraints.txt` from the git tag equal to
+its `SOCIALHOME_VERSION` (the tag *is* the PyPI version, so the file at
+the tag is exactly the set that release was tested and imaged with);
+releases that predate the lock fall back to an unlocked
+build there, and any newer release without the file fails the App build.
+CI's `images` job runs that same musl step on every PR, so the lock can't
+reach a release with a platform the App can't install.
+
+How to change the set (run with [uv](https://docs.astral.sh/uv/) on
+`PATH`; the dev container has it):
+
+- **Bump a direct dependency:** edit its `==` pin in `pyproject.toml`,
+  then `scripts/lock.sh`.
+- **Bump one transitive dependency** (e.g. a security fix in `yarl`):
+  `scripts/lock.sh --upgrade-package yarl`.
+- **Refresh every transitive dependency** the pins allow:
+  `scripts/lock.sh --upgrade`.
+- **Check without changing anything:** `scripts/lock.sh --check` (what
+  CI's `lock` job and the release workflow run).
+
+Commit `uv.lock` and `requirements/` together with the `pyproject.toml`
+change, and run the full suite on the new set (`uv sync --locked
+--extra dev && pytest`). The `uv` version is pinned (`0.12.10`) in CI,
+`publish.yml` and both Dockerfiles — bump every occurrence together.
+Build-time tooling (`hatchling`/`hatch-vcs` for the wheel, the build
+backend `pip` fetches to compile `aiolibdatachannel` in the App) is not
+part of the lock.
 
 ## Keeping the suite fast
 

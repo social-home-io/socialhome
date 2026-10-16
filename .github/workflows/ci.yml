@@ -20,11 +20,19 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
 
-      - name: Install dependencies
-        run: pip install -e .[dev]
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.10"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies (exactly the locked set)
+        # ``--locked`` fails instead of re-resolving when uv.lock is out
+        # of date, so CI always tests the set the images ship.
+        run: |
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Run tests with branch coverage
         # §27.5 — branch coverage gate. Default ``--cov-precision=0``
@@ -86,12 +94,86 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install dependencies
-        run: pip install -e .[dev]
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.10"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies (exactly the locked set)
+        run: |
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: mypy
         run: mypy socialhome/
+
+  lock:
+    # uv.lock and the exported requirements/constraints*.txt must match
+    # pyproject.toml — the Docker images and the Home Assistant App install
+    # from the exports, so a stale export would ship a set CI never tested.
+    # Fix a failure with ``scripts/lock.sh`` (docs/testing.md, "Dependency
+    # lock").
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.10"
+      - name: uv.lock + constraints exports are up to date
+        run: scripts/lock.sh --check
+
+  images:
+    # Install the locked set exactly the way each shipped image does, on
+    # both arches we ship: ``Dockerfile.sh`` / ``Dockerfile.gfs`` (Debian,
+    # glibc) and the Home Assistant App's builder stage (Alpine, musl).
+    # ``--require-hashes`` fails if the lock has no file (or no hash) for a
+    # platform, so a lock bump that drops e.g. a musllinux/aarch64 wheel
+    # fails here, not at release time. The release itself builds the real
+    # images in publish.yml; the App's own CI builds against released tags.
+    name: images (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.10"
+      - name: Build the wheel
+        # No SPA bundle — only the dependency install is under test here.
+        # A fixed version keeps hatch-vcs off the shallow clone's history.
+        id: wheel
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
+        run: |
+          uv build --wheel --out-dir dist
+          echo "name=$(basename dist/socialhome-*.whl)" >> "$GITHUB_OUTPUT"
+      - name: Core image (Dockerfile.sh)
+        run: |
+          docker build -f Dockerfile.sh --build-arg WHEEL=${{ steps.wheel.outputs.name }} -t sh-core .
+          docker run --rm sh-core python -c "import socialhome.app, aiolibdatachannel, PIL, av"
+      - name: GFS image (Dockerfile.gfs)
+        run: |
+          docker build -f Dockerfile.gfs --build-arg WHEEL=${{ steps.wheel.outputs.name }} -t sh-gfs .
+          docker run --rm sh-gfs python -c "import socialhome.global_server, bcrypt, qrcode"
+      - name: Home Assistant App builder (Alpine / musl)
+        # Mirrors the builder stage of social-home-io/ha-app's Dockerfiles:
+        # same base image, same toolchain, same ``pip3 wheel
+        # --require-hashes -r requirements/constraints.txt``.
+        run: |
+          docker run --rm -v "$PWD/requirements:/req:ro" \
+            ghcr.io/home-assistant/${{ matrix.arch }}-base-python:3.14-alpine3.23 \
+            sh -euc 'apk add --no-cache build-base cmake git linux-headers openssl-dev pkgconf >/dev/null
+                     pip3 wheel --no-cache-dir --require-hashes --wheel-dir=/tmp/wheels -r /req/constraints.txt
+                     ls /tmp/wheels'
 
   frontend:
     runs-on: ubuntu-latest
@@ -132,3 +214,58 @@ jobs:
       - name: Vitest
         working-directory: client
         run: pnpm run test
+
+  haos-ingress-ui:
+    # The built SPA driven end-to-end in Chrome behind a simulated Home
+    # Assistant ingress (SH_MODE=haos): fake Supervisor + Core, an
+    # ingress look-alike proxy under /api/hassio_ingress/<token>/, the
+    # real backend. Fails when any request, WebSocket or navigation
+    # escapes the ingress prefix, when the haos setup hands out a token,
+    # or when ingress auth / the iframe embed / the 401 screen break.
+    # Runs on every PR rather than path-filtered: the prefix can break
+    # from backend changes too (auth middleware, SpaIndexView, the
+    # platform adapter), and a path-filtered job that is later made
+    # required would block every PR it skipped. See
+    # .claude/skills/haos-ingress-ui/SKILL.md and docs/testing.md.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.10"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install the backend (exactly the locked runtime set)
+        run: uv sync --locked
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - name: Build the SPA
+        working-directory: client
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec vite build
+      - name: Ingress checks (harness.py verify)
+        # Chrome is the runner's preinstalled Google Chrome — puppeteer-core
+        # drives it over CDP, no browser download. ``--build=never``: the
+        # step above just built the bundle.
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: |
+          .venv/bin/python .claude/skills/haos-ingress-ui/harness.py verify \
+            --build=never --out "$RUNNER_TEMP/haos-ingress-ui"
+      - name: Upload report + screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: haos-ingress-ui-report
+          path: ${{ runner.temp }}/haos-ingress-ui
+          retention-days: 14
+          if-no-files-found: ignore
