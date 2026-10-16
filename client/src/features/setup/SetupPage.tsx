@@ -169,7 +169,7 @@ function PasswordField({
       <span class="sh-setup-label">{label}</span>
       <span class="sh-setup-pw">
         <input
-          type={shown ? 'text' : 'password'}
+          {...(shown ? { type: 'text' as const } : { type: 'password' as const })}
           autoComplete={autoComplete}
           required
           value={value}

@@ -6,7 +6,7 @@
  * Long empty stretches collapse into a "⋯" band; the body scrolls
  * inside the component when the day is tall.
  */
-import type { JSX } from 'preact'
+import type { CSSProperties } from 'preact'
 import { useContext, useMemo } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import type { Timetable, TimetableEntry } from '@/types'
@@ -54,7 +54,7 @@ export function TimetableTimeline({
     [tt, daysKey, picture],
   )
   const headId = (d: number) => `sh-tt-${tt.id}-t-${d}`
-  const cols = { '--tt-cols': String(days.length) } as JSX.CSSProperties
+  const cols = { '--tt-cols': String(days.length) } as CSSProperties
 
   const onColumnClick = (weekday: number) => (ev: MouseEvent) => {
     // Brush mode paints; a past week-mode day can't take changes; a

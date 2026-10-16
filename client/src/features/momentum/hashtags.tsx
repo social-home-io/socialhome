@@ -9,7 +9,7 @@
  * sync means the chip a user sees and the chip the server stored
  * are the same.
  */
-import type { ComponentChildren, JSX } from 'preact'
+import type { ComponentChildren, MouseEventHandler } from 'preact'
 import { addBase } from '@/baseUrl'
 
 const HASHTAG_RE = /(?<!\w)#([A-Za-z0-9_]{1,32})/g
@@ -29,7 +29,7 @@ export function renderHashtagged(
     }
     const raw = match[1]
     const tag = raw.toLowerCase()
-    const onClickHandler: JSX.MouseEventHandler<HTMLAnchorElement> = (ev) => {
+    const onClickHandler: MouseEventHandler<HTMLAnchorElement> = (ev) => {
       onClick(tag, ev as unknown as MouseEvent)
     }
     out.push(

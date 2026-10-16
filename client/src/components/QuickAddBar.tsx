@@ -8,7 +8,7 @@
  * caret (Shopping's ``@ store`` autocomplete). Any other input
  * attribute or handler goes through ``inputProps``.
  */
-import type { JSX, Ref } from 'preact'
+import type { Ref, InputHTMLAttributes } from 'preact'
 import { Button } from '@/components/Button'
 
 interface QuickAddBarProps {
@@ -20,7 +20,12 @@ interface QuickAddBarProps {
   submitLabel: string
   placeholder?: string
   inputRef?: Ref<HTMLInputElement>
-  inputProps?: Omit<JSX.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onInput' | 'ref'>
+  // The input is always ``type="text"``; ``type`` / ``role`` / ``list`` stay
+  // out so Preact's ARIA-in-HTML input typings can check the element.
+  inputProps?: Omit<
+    InputHTMLAttributes<HTMLInputElement>,
+    'value' | 'onInput' | 'ref' | 'type' | 'role' | 'list'
+  >
   class?: string
 }
 

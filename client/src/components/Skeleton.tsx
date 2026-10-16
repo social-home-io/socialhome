@@ -12,7 +12,7 @@
  * proportions. A single ``.sh-skeleton`` rule in ``app.css`` provides
  * the shared shimmer animation.
  */
-import type { JSX } from 'preact'
+import type { CSSProperties } from 'preact'
 import { t } from '@/i18n/i18n'
 
 
@@ -28,7 +28,7 @@ interface SkeletonProps {
   /** Override the ARIA label that screen readers announce while the
    *  skeleton is on screen. Default: "Loading". */
   ariaLabel?: string
-  style?: JSX.CSSProperties
+  style?: CSSProperties
 }
 
 
@@ -42,7 +42,7 @@ export function Skeleton({
 }: SkeletonProps) {
   const cls =
     `sh-skeleton sh-skeleton--${shape}` + (className ? ` ${className}` : '')
-  const inline: JSX.CSSProperties = { ...style }
+  const inline: CSSProperties = { ...style }
   if (width != null) inline.width = typeof width === 'number' ? `${width}px` : width
   if (height != null) inline.height = typeof height === 'number' ? `${height}px` : height
   return (
@@ -471,7 +471,7 @@ function Bone({ class: cls = '', width, height }: {
   width?: string | number
   height?: number
 }) {
-  const style: JSX.CSSProperties = {}
+  const style: CSSProperties = {}
   if (width != null) style.width = typeof width === 'number' ? `${width}px` : width
   if (height != null) style.height = `${height}px`
   return <span class={`sh-skeleton sh-skeleton--line ${cls}`.trim()} style={style} />

@@ -390,7 +390,7 @@ function LessonFields({
 }: {
   f: LessonFieldState
   idp: string
-  titleRef: RefObject<HTMLInputElement>
+  titleRef: RefObject<HTMLInputElement | null>
   knownTitles: string[]
   openMore: boolean
   showKind?: boolean

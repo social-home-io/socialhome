@@ -25,7 +25,7 @@
  * ``data-tt-nav`` / ``data-day`` / ``data-start`` attributes and owns
  * their ``tabindex``.
  */
-import type { JSX } from 'preact'
+import type { CSSProperties } from 'preact'
 import { useContext } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import type { Timetable, TimetableEntry } from '@/types'
@@ -51,7 +51,7 @@ interface Props {
   hideMeta?: boolean
   /** A merged double lesson: show (and announce) the span to here. */
   spanEnd?: string
-  style?: JSX.CSSProperties
+  style?: CSSProperties
   /** A merged double lesson: every entry id it covers (brush, Delete,
    *  paste and week-mode actions apply to all). Defaults to ``entry``. */
   runIds?: string[]
