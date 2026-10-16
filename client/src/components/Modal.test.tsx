@@ -44,6 +44,28 @@ describe('Modal', () => {
     expect(container.querySelector('.sh-modal-close')).toBeNull()
   })
 
+  it('labels each open dialog by its own title, with ids from useId', () => {
+    const { getAllByRole } = render(
+      <>
+        <Modal open={true} title="First" onClose={() => {}}>A</Modal>
+        <Modal open={true} title="Second" onClose={() => {}}>B</Modal>
+      </>
+    )
+    const [a, b] = getAllByRole('dialog')
+    const idA = a.getAttribute('aria-labelledby')!
+    const idB = b.getAttribute('aria-labelledby')!
+    expect(idA).not.toBe(idB)
+    expect(document.getElementById(idA)!.textContent).toBe('First')
+    expect(document.getElementById(idB)!.textContent).toBe('Second')
+  })
+
+  it('keeps the same labelling id across re-renders', () => {
+    const { getByRole, rerender } = render(<Modal open={true} title="T" onClose={() => {}}>C</Modal>)
+    const before = getByRole('dialog').getAttribute('aria-labelledby')
+    rerender(<Modal open={true} title="T2" onClose={() => {}}>C</Modal>)
+    expect(getByRole('dialog').getAttribute('aria-labelledby')).toBe(before)
+  })
+
   it('calls onClose when X clicked', () => {
     const fn = vi.fn()
     const { container } = render(
