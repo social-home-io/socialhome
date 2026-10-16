@@ -328,7 +328,10 @@
   "welcome.card.catch_up": "Card heading on the home page with unread messages, alerts and new space posts.",
 
   "capability.calendar_time_zones": "One of the 'Missing features' a household on an older Social Home version lacks (connection details, space banner). Every capability.* key is a short noun phrase, under ~50 characters, joined with ', ' in a list.",
-  "settings.profile.change": "Hover hint on the profile picture, after a 📷 emoji. Very short.",
+  "protected.banner.guardians": "Second line of the protected-account banner, after 'Your account is protected'. {names} is a list of 2+ guardian names already joined for the language ('Melanie and Pascal'). 'it' = the account.",
+  "protected.banner.guardian_one": "Same as protected.banner.guardians for exactly one guardian. {name} is one person's name.",
+  "settings.profile.unsaved": "Short label on the bar that appears at the bottom of Settings › Profile while there are unsaved edits, next to Discard / Save. Keep it short (phones).",
+  "settings.security.username": "The username a person signs in with (not their public @handle and not their display name).",
   "settings.person.since": "Shown after a household name in a people list, e.g. 'Vizeli · since Oct 15'. {date} is a short localised date.",
   "settings.person.no_longer_connected": "Stands where the household name would be, for a person whose household was unpaired.",
   "settings.momentum.hop_1": "How far a moment may travel through connected households to reach you. 1 step = straight from a household you're connected to.",

@@ -1,7 +1,8 @@
 import type { ComponentChildren } from 'preact'
-import { useCallback, useEffect, useMemo, useState } from 'preact/hooks'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { LocationProvider } from 'preact-iso'
 import { addBase, basePath, stripBase } from '@/baseUrl'
+import { confirmLeave, shouldConfirmLeave } from './navigationGuard'
 
 /**
  * Drop-in replacement for ``preact-iso``'s ``<LocationProvider>`` that
@@ -50,7 +51,12 @@ export function IngressLocationProvider({
     () => stripBase(location.pathname) + location.search,
   )
 
-  const route = useCallback((target: string, replace?: boolean) => {
+  // The URL we're showing, readable from the popstate listener without
+  // re-binding it on every navigation.
+  const urlRef = useRef(url)
+  urlRef.current = url
+
+  const go = useCallback((target: string, replace?: boolean) => {
     // ``target`` arrives stripped from callers and from our own click
     // interceptor. Add the ingress prefix back for the browser URL.
     const prefixed = addBase(target)
@@ -58,6 +64,16 @@ export function IngressLocationProvider({
     else history.pushState(null, '', prefixed)
     setUrl(target)
   }, [])
+
+  // A page with unsaved changes (``navigationGuard``) gets to ask first;
+  // the move happens only once the user agrees to leave.
+  const route = useCallback((target: string, replace?: boolean) => {
+    if (!shouldConfirmLeave(target)) {
+      go(target, replace)
+      return
+    }
+    void confirmLeave().then((ok) => { if (ok) go(target, replace) })
+  }, [go])
 
   const value = useMemo(() => {
     const u = new URL(url, location.origin)
@@ -81,7 +97,21 @@ export function IngressLocationProvider({
 
   useEffect(() => {
     const onPopState = () => {
-      setUrl(stripBase(location.pathname) + location.search)
+      const target = stripBase(location.pathname) + location.search
+      if (!shouldConfirmLeave(target)) {
+        setUrl(target)
+        return
+      }
+      // Back / Forward already moved the address bar. Put the page we
+      // are leaving back, and only follow the user's choice once they
+      // agree to drop their changes.
+      const staying = urlRef.current
+      history.pushState(null, '', addBase(staying))
+      void confirmLeave().then((ok) => {
+        if (!ok) return
+        history.replaceState(null, '', addBase(target))
+        setUrl(target)
+      })
     }
 
     const onClick = (ev: MouseEvent) => {

@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useLocation } from 'preact-iso'
 
 import { IngressLocationProvider } from './IngressLocationProvider'
+import { setNavigationGuard } from './navigationGuard'
 
 interface LocationSnapshot {
   url: string
@@ -198,6 +199,81 @@ function suppressNativeLinkNavigation(): () => void {
   })
 })
 
+describe('IngressLocationProvider — unsaved-change guard', () => {
+  let sink: { current?: LocationSnapshot }
+  let release: () => void
+  let answer: (ok: boolean) => void
+  const confirm = vi.fn(() => new Promise<boolean>((resolve) => { answer = resolve }))
+
+  beforeEach(() => {
+    resetLocation('/settings')
+    sink = {}
+    confirm.mockClear()
+    release = setNavigationGuard({ path: '/settings', isDirty: () => true, confirm })
+  })
+
+  afterEach(() => {
+    release()
+    cleanup()
+  })
+
+  function mount() {
+    render(
+      <IngressLocationProvider>
+        <Probe sink={sink} />
+      </IngressLocationProvider>,
+    )
+  }
+
+  it('route() waits for the page to agree before leaving', async () => {
+    mount()
+    sink.current!.route('/feed')
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(sink.current?.path).toBe('/settings')
+    answer(true)
+    await vi.waitFor(() => expect(sink.current?.path).toBe('/feed'))
+    expect(location.pathname).toBe('/feed')
+  })
+
+  it('stays put when the user keeps editing', async () => {
+    mount()
+    fireEvent.click(document.querySelector('[data-testid="feed"]')!)
+    expect(confirm).toHaveBeenCalledTimes(1)
+    answer(false)
+    await Promise.resolve()
+    expect(sink.current?.path).toBe('/settings')
+    expect(location.pathname).toBe('/settings')
+  })
+
+  it('a hop within the same page (hash / query) never asks', async () => {
+    mount()
+    sink.current!.route('/settings?tab=privacy')
+    expect(confirm).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(sink.current?.url).toBe('/settings?tab=privacy'))
+  })
+
+  it('Back puts the page back in the address bar until the user agrees', async () => {
+    mount()
+    history.replaceState(null, '', '/feed')
+    fireEvent(window, new PopStateEvent('popstate'))
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(location.pathname).toBe('/settings')
+    expect(sink.current?.path).toBe('/settings')
+    answer(true)
+    await vi.waitFor(() => expect(sink.current?.path).toBe('/feed'))
+    expect(location.pathname).toBe('/feed')
+  })
+
+  it('a clean page leaves without asking', async () => {
+    release()
+    release = setNavigationGuard({ path: '/settings', isDirty: () => false, confirm })
+    mount()
+    sink.current!.route('/feed')
+    expect(confirm).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(sink.current?.path).toBe('/feed'))
+  })
+})
+
 describe('IngressLocationProvider (prefixed — simulated ingress)', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -272,5 +348,45 @@ describe('IngressLocationProvider (prefixed — simulated ingress)', () => {
     sink.current!.route('/spaces/abc')
     expect(pushSpy).toHaveBeenCalledWith(null, '', '/api/hassio_ingress/tok/spaces/abc')
     pushSpy.mockRestore()
+  })
+
+  it('unsaved-change guard: Back re-pushes the ingress-prefixed page, then follows once agreed', async () => {
+    resetLocation('/api/hassio_ingress/tok/settings')
+    vi.doMock('@/baseUrl', () => {
+      const PREFIX = '/api/hassio_ingress/tok/'
+      return {
+        basePath: PREFIX,
+        addBase: (p: string) => PREFIX.replace(/\/+$/, '') + (p.startsWith('/') ? p : '/' + p),
+        stripBase: (p: string) => {
+          const prefix = PREFIX.replace(/\/+$/, '')
+          if (p === prefix) return '/'
+          if (p.startsWith(prefix + '/')) return p.slice(prefix.length) || '/'
+          return p
+        },
+      }
+    })
+    const mod = await import('./IngressLocationProvider')
+    const guard = await import('./navigationGuard')
+    let answer: (ok: boolean) => void = () => {}
+    const release = guard.setNavigationGuard({
+      path: '/settings',
+      isDirty: () => true,
+      confirm: () => new Promise<boolean>((resolve) => { answer = resolve }),
+    })
+    const sink: { current?: LocationSnapshot } = {}
+    render(
+      <mod.IngressLocationProvider>
+        <Probe sink={sink} />
+      </mod.IngressLocationProvider>,
+    )
+    history.replaceState(null, '', '/api/hassio_ingress/tok/feed')
+    fireEvent(window, new PopStateEvent('popstate'))
+    // Never the bare '/settings' — that would bounce the iframe out of ingress.
+    expect(location.pathname).toBe('/api/hassio_ingress/tok/settings')
+    expect(sink.current?.path).toBe('/settings')
+    answer(true)
+    await vi.waitFor(() => expect(sink.current?.path).toBe('/feed'))
+    expect(location.pathname).toBe('/api/hassio_ingress/tok/feed')
+    release()
   })
 })

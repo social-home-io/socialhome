@@ -10,8 +10,9 @@ import { t } from '@/i18n/i18n'
 const ERROR_ID = 'sh-username-error'
 
 /**
- * UsernameEditor — change-your-username control for the Settings → Profile
- * tab. Mirrors the display-name editor's shape (labelled field, ``api`` call,
+ * UsernameEditor — change-your-sign-in-username control, under Settings ›
+ * Security › Signing in (decision 9: it's a sign-in secret-ish detail, not
+ * part of how others see you). Mirrors the display-name editor's shape (labelled field, ``api`` call,
  * inline error + toast success) but POSTs the dedicated
  * ``me/username`` endpoint so the server is the sole format/uniqueness
  * validator.
@@ -47,8 +48,8 @@ export function UsernameEditor() {
   if (isHaUser) {
     return (
       <div class="sh-username-editor">
-        <h3>{t('username.title')}</h3>
-        <p class="sh-profile-name" style={{ margin: 0 }}>{currentUsername}</p>
+        <h3 class="sh-username-editor__label">{t('settings.security.username')}</h3>
+        <p class="sh-username-editor__value">{currentUsername}</p>
         <p class="sh-muted" style={{ fontSize: 'var(--sh-font-size-sm)', margin: 0 }}>
           {t('username.ha_hint')}
         </p>
@@ -94,9 +95,8 @@ export function UsernameEditor() {
 
   return (
     <form class="sh-username-editor sh-form" onSubmit={handleSave}>
-      <h3>{t('username.title')}</h3>
       <label>
-        {t('username.label')}
+        {t('settings.security.username')}
         <input
           value={value.value}
           maxLength={32}
