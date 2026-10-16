@@ -80,3 +80,6 @@ docs/superpowers/
 # working-copy-only, never committed upstream.
 .claude/worktrees/
 .uxgate/
+
+# haos-ingress-ui skill: puppeteer-core install
+.claude/skills/haos-ingress-ui/checks/node_modules/

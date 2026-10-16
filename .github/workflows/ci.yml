@@ -214,3 +214,58 @@ jobs:
       - name: Vitest
         working-directory: client
         run: pnpm run test
+
+  haos-ingress-ui:
+    # The built SPA driven end-to-end in Chrome behind a simulated Home
+    # Assistant ingress (SH_MODE=haos): fake Supervisor + Core, an
+    # ingress look-alike proxy under /api/hassio_ingress/<token>/, the
+    # real backend. Fails when any request, WebSocket or navigation
+    # escapes the ingress prefix, when the haos setup hands out a token,
+    # or when ingress auth / the iframe embed / the 401 screen break.
+    # Runs on every PR rather than path-filtered: the prefix can break
+    # from backend changes too (auth middleware, SpaIndexView, the
+    # platform adapter), and a path-filtered job that is later made
+    # required would block every PR it skipped. See
+    # .claude/skills/haos-ingress-ui/SKILL.md and docs/testing.md.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.10"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install the backend (exactly the locked runtime set)
+        run: uv sync --locked
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - name: Build the SPA
+        working-directory: client
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec vite build
+      - name: Ingress checks (harness.py verify)
+        # Chrome is the runner's preinstalled Google Chrome — puppeteer-core
+        # drives it over CDP, no browser download. ``--build=never``: the
+        # step above just built the bundle.
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: |
+          .venv/bin/python .claude/skills/haos-ingress-ui/harness.py verify \
+            --build=never --out "$RUNNER_TEMP/haos-ingress-ui"
+      - name: Upload report + screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: haos-ingress-ui-report
+          path: ${{ runner.temp }}/haos-ingress-ui
+          retention-days: 14
+          if-no-files-found: ignore

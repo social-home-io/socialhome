@@ -202,9 +202,32 @@ a built `@font-face` URL is absolute (it would skip the HA ingress
 a missing file. `client/src/styles/fonts.test.ts` (Vitest) and
 `tests/test_no_third_party_fonts.py` guard the same rule in source.
 
+### End-to-end: Home Assistant ingress
+
+Unit tests (`client/src/baseUrl.test.ts`, `IngressLocationProvider.test.tsx`)
+pin the URL helpers; they can't see a call site that bypasses them. The
+`haos-ingress-ui` skill (`.claude/skills/haos-ingress-ui/`) runs the
+real thing: the built SPA in headless Chrome (puppeteer-core, pinned in
+`checks/package-lock.json`) behind a fake HA Supervisor + Core and an
+ingress look-alike proxy under `/api/hassio_ingress/<token>/`, against a
+real `SH_MODE=haos` backend. It walks the haos setup, every route in
+`router.ts` on desktop and mobile, the live WebSocket, router history,
+media upload, the iframe embed and the no-ingress-user 401 screen, then
+audits every request: anything outside the prefix, a foreign origin or an
+`Authorization` header fails the run.
+
+```sh
+python .claude/skills/haos-ingress-ui/harness.py verify --out /tmp/haos-ingress-ui
+```
+
+Exit 0 green, 1 a check failed, 2 setup failed; `report.md` and
+screenshots land in `--out`. The fakes' HA contracts and how to read a
+failure or add a check are in the skill's `SKILL.md`. Not part of
+`pytest` or the coverage gate — it's its own CI job.
+
 ## CI
 
-`.github/workflows/ci.yml` runs six jobs in parallel. `test` and
+`.github/workflows/ci.yml` runs seven jobs in parallel. `test` and
 `typecheck` install with `uv sync --locked --extra dev`, i.e. exactly the
 versions in `uv.lock` (see [Dependency lock](#dependency-lock)).
 
@@ -225,6 +248,15 @@ versions in `uv.lock` (see [Dependency lock](#dependency-lock)).
    on the App's Alpine/musl base image). A lock bump that loses a wheel
    or hash for one of those platforms fails here, before a release
 6. **`frontend`** — `pnpm build`, `pnpm fonts:check`, `pnpm typecheck`, `pnpm lint`, `pnpm lint:circular`, `pnpm i18n:check`, `pnpm test`
+7. **`haos-ingress-ui`** — builds the SPA, installs the locked runtime
+   set (`uv sync --locked`) and runs
+   `.claude/skills/haos-ingress-ui/harness.py verify` against the
+   runner's preinstalled Google Chrome (see
+   [End-to-end: Home Assistant ingress](#end-to-end-home-assistant-ingress)).
+   The report, request log and screenshots are uploaded as the
+   `haos-ingress-ui-report` artifact on every run. It runs on every PR,
+   not path-filtered: backend changes (auth middleware, `SpaIndexView`,
+   the platform adapter) can break the prefix as easily as SPA changes
 
 Pre-commit hooks (`.pre-commit-config.yaml`) run a strict subset of
 the same on every commit, plus `pnpm build` at pre-push. **Never
