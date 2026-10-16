@@ -20,11 +20,19 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
 
-      - name: Install dependencies
-        run: pip install -e .[dev]
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.10"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies (exactly the locked set)
+        # ``--locked`` fails instead of re-resolving when uv.lock is out
+        # of date, so CI always tests the set the images ship.
+        run: |
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Run tests with branch coverage
         # §27.5 — branch coverage gate. Default ``--cov-precision=0``
@@ -86,12 +94,35 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install dependencies
-        run: pip install -e .[dev]
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.10"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install dependencies (exactly the locked set)
+        run: |
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: mypy
         run: mypy socialhome/
+
+  lock:
+    # uv.lock and the exported requirements/constraints*.txt must match
+    # pyproject.toml — the Docker images and the Home Assistant App install
+    # from the exports, so a stale export would ship a set CI never tested.
+    # Fix a failure with ``scripts/lock.sh`` (docs/testing.md, "Dependency
+    # lock").
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.12.10"
+      - name: uv.lock + constraints exports are up to date
+        run: scripts/lock.sh --check
 
   frontend:
     runs-on: ubuntu-latest

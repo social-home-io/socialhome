@@ -9,8 +9,11 @@ license-files = ["LICENSE"]
 # envs all install the same tested set — Social Home is an application,
 # not a library, so nobody co-installs it with conflicting pins. Pins track
 # the newest release that is at least two weeks old and passes the full
-# suite; bump them deliberately in a PR. Transitive dependencies are still
-# resolved freely (no lock file / constraints file yet).
+# suite; bump them deliberately in a PR. Transitive dependencies are locked
+# too: ``uv.lock`` pins every package, and ``scripts/lock.sh`` exports it to
+# ``requirements/constraints*.txt`` (versions + hashes) for the Docker
+# images and the Home Assistant App. After editing a pin here, run
+# ``scripts/lock.sh`` (see docs/testing.md, "Dependency lock").
 dependencies = [
     "aiohttp==3.14.3",
     "aiosqlite==0.22.1",
@@ -255,3 +258,16 @@ ignore_missing_imports = true
 module = ["av", "av.*", "socialhome.media.video_processor"]
 ignore_missing_imports = true
 disable_error_code = ["union-attr", "attr-defined", "arg-type"]
+
+[tool.uv]
+# ``uv.lock`` is a universal resolution (every OS / arch / Python >= 3.14).
+# ``required-environments`` makes ``uv lock`` fail if any locked package has
+# no wheel for the Linux arches we ship: x86_64 + aarch64 (glibc). Markers
+# can't tell glibc from musl, so the Alpine-based Home Assistant App is
+# covered by its own CI build — today every runtime package ships a
+# musllinux cp314 wheel except ``aiolibdatachannel``, which the App's
+# builder stage compiles from the locked (hashed) sdist.
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]

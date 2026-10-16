@@ -17,10 +17,12 @@
 
 FROM python:3.14-slim AS base
 
-# uv replaces pip for the wheel install — ~10× faster, deterministic
-# resolution, and ships static via the official ``ghcr.io/astral-sh/uv``
-# image so we don't depend on an extra apt / pip-bootstrap layer.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# uv replaces pip for the wheel install — ~10× faster, and ships static
+# via the official ``ghcr.io/astral-sh/uv`` image so we don't depend on an
+# extra apt / pip-bootstrap layer. Pinned (not ``:latest``) so a rebuild of
+# the same tag uses the same installer — keep it equal to the
+# ``setup-uv`` version in .github/workflows/ci.yml.
+COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /uvx /usr/local/bin/
 
 # System deps for Pillow + ffmpeg.
 RUN apt-get update && \
@@ -42,12 +44,24 @@ WORKDIR /app
 # (``socialhome-{version}-py3-none-any.whl``) and passes it via
 # ``--build-arg WHEEL`` so we keep the version-bearing filename
 # uv requires. SPA bundle lives inside under ``socialhome/static/``.
+#
+# Dependencies come from the lock, not from a fresh resolve:
+# ``requirements/constraints.txt`` (exported from ``uv.lock`` by ``scripts/lock.sh``)
+# pins every package, transitive ones included, with the sha256 of each
+# published file. Step 1 installs exactly that set — ``--require-hashes``
+# refuses any file whose hash isn't listed. Step 2 adds the wheel itself
+# with ``--no-deps`` (it was built in the same workflow, so it has no
+# published hash), and ``uv pip check`` fails the build if the lock and
+# the wheel's own requirements ever disagree.
 # ``--system`` installs into the base image's site-packages directly
 # (no venv); ``--no-cache`` keeps the layer size down.
 ARG WHEEL
+COPY requirements/constraints.txt /tmp/constraints.txt
 COPY dist/${WHEEL} /tmp/${WHEEL}
-RUN uv pip install --system --no-cache /tmp/${WHEEL} && \
-    rm /tmp/${WHEEL}
+RUN uv pip install --system --no-cache --require-hashes -r /tmp/constraints.txt && \
+    uv pip install --system --no-cache --no-deps "/tmp/${WHEEL}" && \
+    uv pip check --system && \
+    rm /tmp/constraints.txt /tmp/${WHEEL}
 
 RUN mkdir -p /data && chown -R hsuser:hsuser /data
 
