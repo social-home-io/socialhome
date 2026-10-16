@@ -14,7 +14,7 @@
  * ``onLoaded``.
  */
 import { useEffect, useState } from 'preact/hooks'
-import type { JSX } from 'preact'
+import type { JSX, Ref } from 'preact'
 import { api } from '@/api'
 import { t } from '@/i18n/i18n'
 import { Button } from './Button'
@@ -76,6 +76,7 @@ export function PrivateChannelPicker({
   onLoaded,
   error = null,
   reloadKey = 0,
+  ref,
 }: {
   spaceId: string
   selected: string[] | null
@@ -84,6 +85,9 @@ export function PrivateChannelPicker({
   error?: string | null
   /** Bump to re-read the server's choice (after a save). */
   reloadKey?: number
+  /** Lands on the checklist's ``<fieldset>`` once the choices are shown
+   *  (``null`` while a status line stands in for it). */
+  ref?: Ref<HTMLFieldSetElement>
 }): JSX.Element {
   const [loaded, setLoaded] = useState<PrivateChannelChoices | null>(null)
   const [failed, setFailed] = useState(false)
@@ -121,6 +125,7 @@ export function PrivateChannelPicker({
   }
   return (
     <GfsChecklist
+      ref={ref}
       name="private-channel"
       legend={t('space.private_gfs.channels_legend')}
       icon="🛰️"
